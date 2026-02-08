@@ -387,6 +387,15 @@ pub async fn create_game(
                 .await
                 .wrap_err("Failed to create game")?;
 
+            tracing::info!(
+                event_type = "game_created",
+                game_id = %game_id,
+                board_size = flow.board_size.as_str(),
+                game_type = flow.game_type.as_str(),
+                source = "web_ui",
+                "game created via web UI"
+            );
+
             // Delete the flow
             GameCreationFlow::delete(&state.db, flow_id, user.user_id)
                 .await

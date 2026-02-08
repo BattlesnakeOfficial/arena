@@ -45,6 +45,15 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
         .await
         .wrap_err("Failed to get battlesnakes for game")?;
 
+    tracing::info!(
+        event_type = "game_started",
+        game_id = %game_id,
+        board_size = game.board_size.as_str(),
+        game_type = game.game_type.as_str(),
+        snake_count = battlesnakes.len(),
+        "game started"
+    );
+
     if battlesnakes.is_empty() {
         return Err(cja::color_eyre::eyre::eyre!("No battlesnakes in the game"));
     }
@@ -249,6 +258,15 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
 
     // Update status to finished
     update_game_status(pool, game_id, GameStatus::Finished).await?;
+
+    tracing::info!(
+        event_type = "game_completed",
+        game_id = %game_id,
+        final_turn = engine_game.turn,
+        total_ms = total_time_ms,
+        winner_battlesnake_id = ?placements.first(),
+        "game completed"
+    );
 
     // Clean up game channel (will be removed when no subscribers)
     game_channels.cleanup(game_id).await;
