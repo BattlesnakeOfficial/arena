@@ -10,6 +10,7 @@ use tower_http::cors::{Any, CorsLayer};
 use crate::{components::page_factory::PageFactory, errors::ServerResult, state::AppState};
 
 // Include route modules
+pub mod admin;
 pub mod api;
 pub mod auth;
 pub mod battlesnake;
@@ -40,6 +41,7 @@ pub fn routes(app_state: AppState) -> axum::Router {
         .route("/games", post(api::games::create_game))
         .route("/games", get(api::games::list_games))
         .route("/games/{id}/details", get(api::games::show_game))
+        .route("/admin/stats", get(admin::stats_json))
         .layer(cors);
 
     axum::Router::new()
@@ -100,6 +102,8 @@ pub fn routes(app_state: AppState) -> axum::Router {
             axum::routing::post(game::remove_battlesnake),
         )
         .route("/games/flow/{id}/search", get(game::search_battlesnakes))
+        // Admin routes
+        .route("/admin", get(admin::dashboard))
         // Game API routes for board viewer (with CORS)
         .nest("/api", api_routes)
         // Static files

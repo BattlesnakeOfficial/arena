@@ -196,6 +196,7 @@ pub async fn get_session_with_user(
             u.github_avatar_url as "github_avatar_url?",
             u.github_name as "github_name?",
             u.github_email as "github_email?",
+            u.is_admin as "is_admin?",
             u.created_at as "user_created_at?",
             u.updated_at as "user_updated_at?"
         FROM sessions s
@@ -246,6 +247,7 @@ pub async fn get_session_with_user(
                     github_avatar_url: row.github_avatar_url,
                     github_name: row.github_name,
                     github_email: row.github_email,
+                    is_admin: row.is_admin.unwrap_or(false),
                     created_at: user_created_at,
                     updated_at: user_updated_at,
                 })

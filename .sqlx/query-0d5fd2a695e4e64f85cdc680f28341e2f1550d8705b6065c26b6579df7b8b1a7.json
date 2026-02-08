@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT\n            s.session_id,\n            s.user_id,\n            s.github_oauth_state,\n            s.flash_message,\n            s.flash_type,\n            s.is_cli_auth,\n            s.created_at,\n            s.updated_at,\n            s.expires_at,\n            u.user_id as \"user_user_id?\",\n            u.external_github_id as \"external_github_id?\",\n            u.github_login as \"github_login?\",\n            u.github_avatar_url as \"github_avatar_url?\",\n            u.github_name as \"github_name?\",\n            u.github_email as \"github_email?\",\n            u.created_at as \"user_created_at?\",\n            u.updated_at as \"user_updated_at?\"\n        FROM sessions s\n        LEFT JOIN users u ON s.user_id = u.user_id\n        WHERE\n            s.session_id = $1\n            AND s.expires_at > NOW()\n        ",
+  "query": "\n        SELECT\n            s.session_id,\n            s.user_id,\n            s.github_oauth_state,\n            s.flash_message,\n            s.flash_type,\n            s.is_cli_auth,\n            s.created_at,\n            s.updated_at,\n            s.expires_at,\n            u.user_id as \"user_user_id?\",\n            u.external_github_id as \"external_github_id?\",\n            u.github_login as \"github_login?\",\n            u.github_avatar_url as \"github_avatar_url?\",\n            u.github_name as \"github_name?\",\n            u.github_email as \"github_email?\",\n            u.is_admin as \"is_admin?\",\n            u.created_at as \"user_created_at?\",\n            u.updated_at as \"user_updated_at?\"\n        FROM sessions s\n        LEFT JOIN users u ON s.user_id = u.user_id\n        WHERE\n            s.session_id = $1\n            AND s.expires_at > NOW()\n        ",
   "describe": {
     "columns": [
       {
@@ -80,11 +80,16 @@
       },
       {
         "ordinal": 15,
+        "name": "is_admin?",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 16,
         "name": "user_created_at?",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 16,
+        "ordinal": 17,
         "name": "user_updated_at?",
         "type_info": "Timestamptz"
       }
@@ -111,8 +116,9 @@
       true,
       true,
       false,
+      false,
       false
     ]
   },
-  "hash": "9ba795a0d710c4a7123ced88ff222cf659cb2b47b2fa3ff4fd0ec3d522ef1695"
+  "hash": "0d5fd2a695e4e64f85cdc680f28341e2f1550d8705b6065c26b6579df7b8b1a7"
 }

@@ -1,0 +1,38 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT\n                COUNT(*) FILTER (WHERE locked_at IS NULL AND run_at <= NOW()) as \"ready!: i64\",\n                COUNT(*) FILTER (WHERE locked_at IS NOT NULL) as \"running!: i64\",\n                COUNT(*) FILTER (WHERE locked_at IS NULL AND run_at > NOW()) as \"scheduled!: i64\",\n                COUNT(*) as \"total!: i64\"\n            FROM jobs\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "ready!: i64",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "running!: i64",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "scheduled!: i64",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "total!: i64",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "c660c37fffc7b371e82061ef3352a96b6d214d4e0695730f59e2b9dcfd48a533"
+}

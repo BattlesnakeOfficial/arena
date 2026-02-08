@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO Crons (cron_id, name, last_run_at, created_at, updated_at)\n                VALUES ($1, $2, $3, $4, $5)\n                ON CONFLICT (name)\n                DO UPDATE SET\n                last_run_at = $3",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Timestamptz",
+        "Timestamptz",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a08d62b532c9f19a0e5cc54e8387bb8335512dea2c5e0df7bad9d6b00bf5efa5"
+}

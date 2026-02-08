@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        INSERT INTO users (\n            external_github_id,\n            github_login,\n            github_avatar_url,\n            github_name,\n            github_email,\n            github_access_token,\n            github_refresh_token,\n            github_token_expires_at\n        )\n        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)\n        ON CONFLICT (external_github_id) DO UPDATE SET\n            github_login = $2,\n            github_avatar_url = $3,\n            github_name = $4,\n            github_email = $5,\n            github_access_token = $6,\n            github_refresh_token = $7,\n            github_token_expires_at = $8\n        RETURNING\n            user_id,\n            external_github_id,\n            github_login,\n            github_avatar_url,\n            github_name,\n            github_email,\n            created_at,\n            updated_at\n        ",
+  "query": "\n        INSERT INTO users (\n            external_github_id,\n            github_login,\n            github_avatar_url,\n            github_name,\n            github_email,\n            github_access_token,\n            github_refresh_token,\n            github_token_expires_at\n        )\n        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)\n        ON CONFLICT (external_github_id) DO UPDATE SET\n            github_login = $2,\n            github_avatar_url = $3,\n            github_name = $4,\n            github_email = $5,\n            github_access_token = $6,\n            github_refresh_token = $7,\n            github_token_expires_at = $8\n        RETURNING\n            user_id,\n            external_github_id,\n            github_login,\n            github_avatar_url,\n            github_name,\n            github_email,\n            is_admin,\n            created_at,\n            updated_at\n        ",
   "describe": {
     "columns": [
       {
@@ -35,11 +35,16 @@
       },
       {
         "ordinal": 6,
+        "name": "is_admin",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 7,
         "name": "created_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 7,
+        "ordinal": 8,
         "name": "updated_at",
         "type_info": "Timestamptz"
       }
@@ -64,8 +69,9 @@
       true,
       true,
       false,
+      false,
       false
     ]
   },
-  "hash": "b5819b9d9d4194cd801c2ac02da3030b417c42946db27940bbc98b5b5722e926"
+  "hash": "7e92cedfdec9269db542609f3b058e3a2ccb62fc7f4f81152f9fbea9a69b104d"
 }
