@@ -168,6 +168,14 @@ pub async fn github_auth_callback(
         .await
         .wrap_err("Failed to associate user with session")?;
 
+    tracing::info!(
+        event_type = "user_authenticated",
+        user_id = %user.user_id,
+        github_login = %user.github_login,
+        auth_type = if is_cli_auth { "cli" } else { "web" },
+        "user authenticated via GitHub OAuth"
+    );
+
     // If CLI auth, create an API token and redirect to the token display page
     if is_cli_auth {
         let new_token = api_token::create_api_token(&state.db, user.user_id, "arena-cli")

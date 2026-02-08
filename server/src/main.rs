@@ -25,6 +25,7 @@ mod routes;
 mod snake_client;
 mod state;
 mod static_assets;
+mod telemetry;
 
 /// Frontend UI components only - do not place backend logic here
 mod components {
@@ -60,7 +61,11 @@ fn main() -> color_eyre::Result<()> {
 
 async fn run_application() -> cja::Result<()> {
     // Initialize tracing (returns Eyes shutdown handle if configured)
-    let eyes_shutdown_handle = setup_tracing("arent")?;
+    let eyes_shutdown_handle = if std::env::var("GCP_LOGGING").is_ok() {
+        telemetry::setup_gcp_tracing()?
+    } else {
+        setup_tracing("arent")?
+    };
 
     let app_state = AppState::from_env().await?;
 
