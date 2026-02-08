@@ -387,3 +387,167 @@ pub async fn stats_json(
     })?;
     Ok(Json(metrics))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_duration_seconds() {
+        assert_eq!(format_duration(0.0), "0.0s");
+        assert_eq!(format_duration(1.5), "1.5s");
+        assert_eq!(format_duration(59.9), "59.9s");
+    }
+
+    #[test]
+    fn test_format_duration_minutes() {
+        assert_eq!(format_duration(60.0), "1.0m");
+        assert_eq!(format_duration(90.0), "1.5m");
+        assert_eq!(format_duration(3599.0), "60.0m");
+    }
+
+    #[test]
+    fn test_format_duration_hours() {
+        assert_eq!(format_duration(3600.0), "1.0h");
+        assert_eq!(format_duration(7200.0), "2.0h");
+    }
+
+    #[test]
+    fn test_admin_metrics_serialization() {
+        let metrics = AdminMetrics {
+            job_queue: JobQueueMetrics {
+                ready: 5,
+                running: 2,
+                scheduled: 10,
+                total: 17,
+            },
+            jobs_by_name: vec![
+                JobNameCount {
+                    name: "GameRunnerJob".to_string(),
+                    count: 12,
+                },
+                JobNameCount {
+                    name: "BackupJob".to_string(),
+                    count: 5,
+                },
+            ],
+            game_counts: GameCountMetrics {
+                waiting: 3,
+                running: 1,
+                finished: 100,
+                total: 104,
+            },
+            games_created: TimeWindowMetrics {
+                last_hour: 10,
+                last_24h: 50,
+                last_7d: 200,
+            },
+            games_finished: TimeWindowMetrics {
+                last_hour: 8,
+                last_24h: 45,
+                last_7d: 190,
+            },
+            avg_game_duration_secs: Some(12.5),
+            recent_errors: vec![],
+        };
+
+        let json = serde_json::to_value(&metrics).unwrap();
+
+        assert_eq!(json["job_queue"]["ready"], 5);
+        assert_eq!(json["job_queue"]["running"], 2);
+        assert_eq!(json["job_queue"]["scheduled"], 10);
+        assert_eq!(json["job_queue"]["total"], 17);
+
+        assert_eq!(json["jobs_by_name"][0]["name"], "GameRunnerJob");
+        assert_eq!(json["jobs_by_name"][0]["count"], 12);
+        assert_eq!(json["jobs_by_name"][1]["name"], "BackupJob");
+
+        assert_eq!(json["game_counts"]["waiting"], 3);
+        assert_eq!(json["game_counts"]["running"], 1);
+        assert_eq!(json["game_counts"]["finished"], 100);
+        assert_eq!(json["game_counts"]["total"], 104);
+
+        assert_eq!(json["games_created"]["last_hour"], 10);
+        assert_eq!(json["games_created"]["last_24h"], 50);
+        assert_eq!(json["games_created"]["last_7d"], 200);
+
+        assert_eq!(json["games_finished"]["last_hour"], 8);
+        assert_eq!(json["games_finished"]["last_24h"], 45);
+        assert_eq!(json["games_finished"]["last_7d"], 190);
+
+        assert_eq!(json["avg_game_duration_secs"], 12.5);
+
+        assert!(json["recent_errors"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_admin_metrics_serialization_null_duration() {
+        let metrics = AdminMetrics {
+            job_queue: JobQueueMetrics {
+                ready: 0,
+                running: 0,
+                scheduled: 0,
+                total: 0,
+            },
+            jobs_by_name: vec![],
+            game_counts: GameCountMetrics {
+                waiting: 0,
+                running: 0,
+                finished: 0,
+                total: 0,
+            },
+            games_created: TimeWindowMetrics {
+                last_hour: 0,
+                last_24h: 0,
+                last_7d: 0,
+            },
+            games_finished: TimeWindowMetrics {
+                last_hour: 0,
+                last_24h: 0,
+                last_7d: 0,
+            },
+            avg_game_duration_secs: None,
+            recent_errors: vec![],
+        };
+
+        let json = serde_json::to_value(&metrics).unwrap();
+        assert!(json["avg_game_duration_secs"].is_null());
+        assert!(json["jobs_by_name"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_job_error_serialization() {
+        let error = JobError {
+            name: "GameRunnerJob".to_string(),
+            error_count: 3,
+            last_error_message: Some("connection timeout".to_string()),
+            last_failed_at: Some(
+                chrono::DateTime::parse_from_rfc3339("2026-02-08T12:00:00Z")
+                    .unwrap()
+                    .with_timezone(&chrono::Utc),
+            ),
+        };
+
+        let json = serde_json::to_value(&error).unwrap();
+        assert_eq!(json["name"], "GameRunnerJob");
+        assert_eq!(json["error_count"], 3);
+        assert_eq!(json["last_error_message"], "connection timeout");
+        assert!(json["last_failed_at"].is_string());
+    }
+
+    #[test]
+    fn test_job_error_serialization_nulls() {
+        let error = JobError {
+            name: "SomeJob".to_string(),
+            error_count: 1,
+            last_error_message: None,
+            last_failed_at: None,
+        };
+
+        let json = serde_json::to_value(&error).unwrap();
+        assert_eq!(json["name"], "SomeJob");
+        assert_eq!(json["error_count"], 1);
+        assert!(json["last_error_message"].is_null());
+        assert!(json["last_failed_at"].is_null());
+    }
+}
