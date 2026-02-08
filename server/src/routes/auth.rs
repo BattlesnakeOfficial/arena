@@ -260,6 +260,46 @@ async fn try_bearer_auth(parts: &Parts, state: &AppState) -> BearerAuthResult {
     }
 }
 
+/// Extractor for requiring an authenticated admin user (session auth only)
+///
+/// Returns 401 if not authenticated, 403 if authenticated but not admin.
+pub struct AdminUser(pub User);
+
+impl FromRequestParts<AppState> for AdminUser {
+    type Rejection = axum::response::Response;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let CurrentUser(user) = CurrentUser::from_request_parts(parts, state).await?;
+        if !user.is_admin {
+            return Err((StatusCode::FORBIDDEN, "Admin access required").into_response());
+        }
+        Ok(AdminUser(user))
+    }
+}
+
+/// Extractor for requiring an authenticated admin user (Bearer token OR session auth)
+///
+/// Returns 401 if not authenticated, 403 if authenticated but not admin.
+pub struct AdminApiUser(pub User);
+
+impl FromRequestParts<AppState> for AdminApiUser {
+    type Rejection = axum::response::Response;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let ApiUser(user) = ApiUser::from_request_parts(parts, state).await?;
+        if !user.is_admin {
+            return Err((StatusCode::FORBIDDEN, "Admin access required").into_response());
+        }
+        Ok(AdminApiUser(user))
+    }
+}
+
 impl FromRequestParts<AppState> for ApiUser {
     type Rejection = axum::response::Response;
 

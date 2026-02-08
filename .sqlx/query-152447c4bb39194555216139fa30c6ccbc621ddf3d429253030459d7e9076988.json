@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT\n            user_id,\n            external_github_id,\n            github_login,\n            github_avatar_url,\n            github_name,\n            github_email,\n            created_at,\n            updated_at\n        FROM users\n        WHERE user_id = $1\n        ",
+  "query": "\n        SELECT\n            user_id,\n            external_github_id,\n            github_login,\n            github_avatar_url,\n            github_name,\n            github_email,\n            is_admin,\n            created_at,\n            updated_at\n        FROM users\n        WHERE user_id = $1\n        ",
   "describe": {
     "columns": [
       {
@@ -35,11 +35,16 @@
       },
       {
         "ordinal": 6,
+        "name": "is_admin",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 7,
         "name": "created_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 7,
+        "ordinal": 8,
         "name": "updated_at",
         "type_info": "Timestamptz"
       }
@@ -57,8 +62,9 @@
       true,
       true,
       false,
+      false,
       false
     ]
   },
-  "hash": "325ba849b046d64ac214a19b087289338db276c8d60b414f086d99c8147a9fe5"
+  "hash": "152447c4bb39194555216139fa30c6ccbc621ddf3d429253030459d7e9076988"
 }

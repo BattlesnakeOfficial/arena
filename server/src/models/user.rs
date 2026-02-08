@@ -14,6 +14,7 @@ pub struct User {
     pub github_avatar_url: Option<String>,
     pub github_name: Option<String>,
     pub github_email: Option<String>,
+    pub is_admin: bool,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
@@ -30,6 +31,7 @@ pub async fn get_user_by_id(pool: &PgPool, user_id: Uuid) -> cja::Result<Option<
             github_avatar_url,
             github_name,
             github_email,
+            is_admin,
             created_at,
             updated_at
         FROM users
@@ -82,6 +84,7 @@ pub async fn create_or_update_user(
             github_avatar_url,
             github_name,
             github_email,
+            is_admin,
             created_at,
             updated_at
         "#,

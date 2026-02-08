@@ -1,0 +1,38 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT\n                COUNT(*) FILTER (WHERE status = 'waiting') as \"waiting!: i64\",\n                COUNT(*) FILTER (WHERE status = 'running') as \"running!: i64\",\n                COUNT(*) FILTER (WHERE status = 'finished') as \"finished!: i64\",\n                COUNT(*) as \"total!: i64\"\n            FROM games\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "waiting!: i64",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "running!: i64",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "finished!: i64",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "total!: i64",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "bd62cddf8317fe72a9c70f782d404976afa52f83f47f6b199a307c08079c9b70"
+}
