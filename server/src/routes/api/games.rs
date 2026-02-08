@@ -95,6 +95,8 @@ pub struct GameListItem {
     pub board: String,
     pub game_type: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub enqueued_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Response for full game details (with frames)
@@ -139,6 +141,8 @@ fn build_game_list_item(game: &Game, battlesnakes: &[GameBattlesnakeWithDetails]
         board: game.board_size.as_str().to_string(),
         game_type: game.game_type.as_str().to_string(),
         created_at: game.created_at,
+        updated_at: game.updated_at,
+        enqueued_at: game.enqueued_at,
     }
 }
 
@@ -461,6 +465,77 @@ pub async fn show_game(
         game_type: game.game_type.as_str().to_string(),
         created_at: game.created_at,
     }))
+}
+
+/// Request body for batch game status lookup
+#[derive(Debug, Deserialize)]
+pub struct BatchGameStatusRequest {
+    pub game_ids: Vec<Uuid>,
+}
+
+/// Response item for batch game status
+#[derive(Debug, Serialize)]
+pub struct GameStatusItem {
+    pub id: Uuid,
+    pub status: String,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub enqueued_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// POST /api/games/status - Batch lookup game statuses
+pub async fn batch_game_status(
+    State(state): State<AppState>,
+    ApiUser(user): ApiUser,
+    Json(request): Json<BatchGameStatusRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    if request.game_ids.len() > 500 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Maximum of 500 game IDs allowed per request".to_string(),
+        ));
+    }
+
+    if request.game_ids.is_empty() {
+        return Ok(Json(Vec::<GameStatusItem>::new()));
+    }
+
+    let rows = sqlx::query!(
+        r#"
+        SELECT g.game_id, g.status, g.updated_at, g.enqueued_at, g.created_at
+        FROM games g
+        WHERE g.game_id = ANY($1)
+          AND g.game_id IN (
+            SELECT gb.game_id FROM game_battlesnakes gb
+            JOIN battlesnakes b ON gb.battlesnake_id = b.battlesnake_id
+            WHERE b.user_id = $2
+          )
+        "#,
+        &request.game_ids as &[Uuid],
+        user.user_id
+    )
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to fetch game statuses: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Internal server error".to_string(),
+        )
+    })?;
+
+    let items: Vec<GameStatusItem> = rows
+        .into_iter()
+        .map(|row| GameStatusItem {
+            id: row.game_id,
+            status: row.status,
+            updated_at: row.updated_at,
+            enqueued_at: row.enqueued_at,
+            created_at: row.created_at,
+        })
+        .collect();
+
+    Ok(Json(items))
 }
 
 // Import FromStr for parsing enums

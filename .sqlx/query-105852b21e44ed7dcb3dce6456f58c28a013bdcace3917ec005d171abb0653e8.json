@@ -1,0 +1,47 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT g.game_id, g.status, g.updated_at, g.enqueued_at, g.created_at\n        FROM games g\n        WHERE g.game_id = ANY($1)\n          AND g.game_id IN (\n            SELECT gb.game_id FROM game_battlesnakes gb\n            JOIN battlesnakes b ON gb.battlesnake_id = b.battlesnake_id\n            WHERE b.user_id = $2\n          )\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "game_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "status",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 3,
+        "name": "enqueued_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 4,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "105852b21e44ed7dcb3dce6456f58c28a013bdcace3917ec005d171abb0653e8"
+}
