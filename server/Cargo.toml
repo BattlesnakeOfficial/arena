@@ -50,7 +50,7 @@ sqlx = "0.8"
 uuid = { version = "1.6.1", features = ["v4"] }
 time = "0.3.9"
 futures = "0.3.30"
-chrono = { version = "0.4.23", default-features = false, features = ["serde"] }
+chrono = { version = "0.4.23", default-features = false, features = ["serde", "clock"] }
 base64 = "0.21"
 base64ct = { version = "1.6", features = ["alloc"] }
 ring = "0.17"
@@ -81,6 +81,7 @@ chrono-humanize = "0.2"
 
 battlesnake-game-types = { git = "https://github.com/fables-tales/battlesnake-game-types", branch = "main" }
 tokio-util = { version = "0.7.14", features = ["rt"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [lib]
 name = "arena"

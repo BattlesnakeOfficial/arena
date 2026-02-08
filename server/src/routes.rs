@@ -41,6 +41,7 @@ pub fn routes(app_state: AppState) -> axum::Router {
         .route("/games", post(api::games::create_game))
         .route("/games", get(api::games::list_games))
         .route("/games/{id}/details", get(api::games::show_game))
+        .route("/games/status", post(api::games::batch_game_status))
         .route("/admin/stats", get(admin::stats_json))
         .layer(cors);
 
