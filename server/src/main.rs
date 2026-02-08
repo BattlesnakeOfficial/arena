@@ -167,17 +167,28 @@ async fn spawn_application_tasks(app_state: AppState) -> cja::Result<Vec<NamedTa
             .unwrap_or(DEFAULT_MAX_RETRIES);
         info!("Job max retries: {}", job_max_retries);
 
-        tasks.push(NamedTask::spawn(
-            "jobs",
-            cja::jobs::worker::job_worker(
-                app_state.clone(),
-                jobs::Jobs,
-                std::time::Duration::from_millis(job_poll_interval_ms),
-                job_max_retries,
-                CancellationToken::new(),
-                std::time::Duration::from_secs(job_lock_timeout_secs),
-            ),
-        ));
+        // Number of concurrent job workers (default: 1)
+        let job_workers: usize = std::env::var("ARENA_JOB_WORKERS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1)
+            .max(1);
+        info!("Job workers: {}", job_workers);
+
+        for i in 0..job_workers {
+            let name: &'static str = Box::leak(format!("jobs-{i}").into_boxed_str());
+            tasks.push(NamedTask::spawn(
+                name,
+                cja::jobs::worker::job_worker(
+                    app_state.clone(),
+                    jobs::Jobs,
+                    std::time::Duration::from_millis(job_poll_interval_ms),
+                    job_max_retries,
+                    CancellationToken::new(),
+                    std::time::Duration::from_secs(job_lock_timeout_secs),
+                ),
+            ));
+        }
     } else {
         info!("Jobs Disabled");
     }
