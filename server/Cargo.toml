@@ -107,3 +107,6 @@ vergen = { version = "8.3.1", features = [
   "gitoxide",
   "rustc",
 ] }
+
+[dev-dependencies]
+proptest = "1"

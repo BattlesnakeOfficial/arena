@@ -400,6 +400,629 @@ fn eliminate_snakes(game: &mut Game) {
 mod tests {
     use super::*;
 
+    use proptest::collection::vec as prop_vec;
+    use proptest::prelude::*;
+
+    // --- Strategy functions ---
+
+    fn arb_position(width: u32, height: u32) -> impl Strategy<Value = Position> {
+        (0..width as i32, 0..height as i32).prop_map(|(x, y)| Position::new(x, y))
+    }
+
+    fn arb_snake(id: String, width: u32, height: u32) -> impl Strategy<Value = BattleSnake> {
+        (arb_position(width, height), 3..=8usize, 0..=100i32).prop_flat_map(
+            move |(head, body_len, health)| {
+                let id = id.clone();
+                prop_vec(0..4u8, body_len - 1).prop_map(move |directions| {
+                    let mut body = VecDeque::with_capacity(body_len);
+                    body.push_back(head);
+
+                    let deltas = [
+                        (0, 1),  // Up
+                        (0, -1), // Down
+                        (-1, 0), // Left
+                        (1, 0),  // Right
+                    ];
+
+                    let mut current = head;
+                    for dir_start in &directions {
+                        let mut placed = false;
+                        for offset in 0..4u8 {
+                            let idx = ((*dir_start + offset) % 4) as usize;
+                            let (dx, dy) = deltas[idx];
+                            let nx = current.x + dx;
+                            let ny = current.y + dy;
+                            if nx >= 0 && nx < width as i32 && ny >= 0 && ny < height as i32 {
+                                let next = Position::new(nx, ny);
+                                body.push_back(next);
+                                current = next;
+                                placed = true;
+                                break;
+                            }
+                        }
+                        if !placed {
+                            // Fallback: duplicate current position
+                            body.push_back(current);
+                        }
+                    }
+
+                    BattleSnake {
+                        id: id.clone(),
+                        name: id.clone(),
+                        head,
+                        body,
+                        health,
+                        shout: None,
+                        actual_length: None,
+                    }
+                })
+            },
+        )
+    }
+
+    fn arb_game() -> impl Strategy<Value = Game> {
+        (3..=19u32, 3..=19u32, 1..=4usize).prop_flat_map(|(width, height, snake_count)| {
+            let snakes: Vec<_> = (0..snake_count)
+                .map(|i| arb_snake(format!("snake-{}", i), width, height))
+                .collect();
+
+            (
+                snakes,
+                prop_vec(arb_position(width, height), 0..=5),
+                Just(width),
+                Just(height),
+            )
+                .prop_map(|(snakes, food, width, height)| {
+                    let you = snakes[0].clone();
+                    Game {
+                        you,
+                        board: Board {
+                            height,
+                            width,
+                            food,
+                            snakes,
+                            hazards: vec![],
+                        },
+                        turn: 0,
+                        game: NestedGame {
+                            id: "prop-test".to_string(),
+                            ruleset: Ruleset {
+                                name: "standard".to_string(),
+                                version: "v1.0.0".to_string(),
+                                settings: None,
+                            },
+                            timeout: 500,
+                            map: None,
+                            source: None,
+                        },
+                    }
+                })
+        })
+    }
+
+    fn arb_moves(alive_ids: Vec<String>) -> impl Strategy<Value = Vec<(String, Move)>> {
+        let strategies: Vec<_> = alive_ids
+            .into_iter()
+            .map(|id| {
+                prop::sample::select(&[Move::Up, Move::Down, Move::Left, Move::Right][..])
+                    .prop_map(move |m| (id.clone(), m))
+            })
+            .collect();
+        strategies
+    }
+
+    fn arb_game_and_moves() -> impl Strategy<Value = (Game, Vec<(String, Move)>)> {
+        arb_game().prop_flat_map(|game| {
+            let alive_ids: Vec<String> = game
+                .board
+                .snakes
+                .iter()
+                .filter(|s| s.health > 0)
+                .map(|s| s.id.clone())
+                .collect();
+            let moves = arb_moves(alive_ids);
+            (Just(game), moves)
+        })
+    }
+
+    /// Helper: determine if a snake "ate" this turn.
+    /// Snake ate = new head on old food position AND original health >= 2.
+    fn snake_ate(old_snake: &BattleSnake, new_snake: &BattleSnake, old_food: &[Position]) -> bool {
+        old_snake.health >= 2 && old_food.contains(&new_snake.head)
+    }
+
+    // --- Property tests ---
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+
+        // === Conservation ===
+
+        #[test]
+        fn test_snake_count_conserved((ref game, ref moves) in arb_game_and_moves()) {
+            let old_count = game.board.snakes.len();
+            let new_game = apply_turn(game.clone(), moves);
+            prop_assert_eq!(new_game.board.snakes.len(), old_count);
+        }
+
+        #[test]
+        fn test_non_eating_alive_snake_body_length_conserved(
+            (ref game, ref moves) in arb_game_and_moves()
+        ) {
+            let old_food = game.board.food.clone();
+            let new_game = apply_turn(game.clone(), moves);
+
+            for (old_snake, new_snake) in game.board.snakes.iter().zip(new_game.board.snakes.iter()) {
+                if old_snake.health <= 0 {
+                    continue;
+                }
+                if !snake_ate(old_snake, new_snake, &old_food) {
+                    prop_assert_eq!(
+                        new_snake.body.len(),
+                        old_snake.body.len(),
+                        "Non-eating alive snake {} body length changed: {} -> {}",
+                        old_snake.id,
+                        old_snake.body.len(),
+                        new_snake.body.len()
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn test_eating_snake_grows_by_one(
+            (ref game, ref moves) in arb_game_and_moves()
+        ) {
+            let old_food = game.board.food.clone();
+            let new_game = apply_turn(game.clone(), moves);
+
+            for (old_snake, new_snake) in game.board.snakes.iter().zip(new_game.board.snakes.iter()) {
+                if old_snake.health <= 0 {
+                    continue;
+                }
+                if snake_ate(old_snake, new_snake, &old_food) {
+                    prop_assert_eq!(
+                        new_snake.body.len(),
+                        old_snake.body.len() + 1,
+                        "Eating snake {} body length: {} -> {} (expected +1)",
+                        old_snake.id,
+                        old_snake.body.len(),
+                        new_snake.body.len()
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn test_food_only_disappears(
+            (ref game, ref moves) in arb_game_and_moves()
+        ) {
+            let new_game = apply_turn(game.clone(), moves);
+            for food_pos in &new_game.board.food {
+                prop_assert!(
+                    game.board.food.contains(food_pos),
+                    "New food {:?} appeared that wasn't in old food",
+                    food_pos
+                );
+            }
+        }
+
+        #[test]
+        fn test_food_disappears_only_from_alive_snake_head(
+            (ref game, ref moves) in arb_game_and_moves()
+        ) {
+            let new_game = apply_turn(game.clone(), moves);
+            let old_food = &game.board.food;
+
+            for food_pos in old_food {
+                if !new_game.board.food.contains(food_pos) {
+                    // This food was eaten — some alive snake's new head must be on it
+                    // with original health >= 2
+                    let eaten_by_someone = game.board.snakes.iter()
+                        .zip(new_game.board.snakes.iter())
+                        .any(|(old_s, new_s)| {
+                            old_s.health >= 2 && new_s.head == *food_pos
+                        });
+                    prop_assert!(
+                        eaten_by_someone,
+                        "Food at {:?} disappeared but no alive snake (health>=2) landed on it",
+                        food_pos
+                    );
+                }
+            }
+        }
+
+        // === Bounds ===
+
+        #[test]
+        fn test_health_in_valid_range(
+            (ref game, ref moves) in arb_game_and_moves()
+        ) {
+            let new_game = apply_turn(game.clone(), moves);
+            for snake in &new_game.board.snakes {
+                prop_assert!(
+                    snake.health >= 0 && snake.health <= 100,
+                    "Snake {} health {} out of range [0, 100]",
+                    snake.id,
+                    snake.health
+                );
+            }
+        }
+
+        #[test]
+        fn test_head_equals_body_zero(
+            (ref game, ref moves) in arb_game_and_moves()
+        ) {
+            let new_game = apply_turn(game.clone(), moves);
+            for snake in &new_game.board.snakes {
+                prop_assert_eq!(
+                    snake.head,
+                    snake.body[0],
+                    "Snake {} head {:?} != body[0] {:?}",
+                    snake.id,
+                    snake.head,
+                    snake.body[0]
+                );
+            }
+        }
+
+        // === Monotonicity ===
+
+        #[test]
+        fn test_dead_snake_stays_dead(
+            (ref game, ref moves) in arb_game_and_moves()
+        ) {
+            let new_game = apply_turn(game.clone(), moves);
+            for (old_snake, new_snake) in game.board.snakes.iter().zip(new_game.board.snakes.iter()) {
+                if old_snake.health == 0 {
+                    prop_assert_eq!(
+                        new_snake.health, 0,
+                        "Dead snake {} came back to life",
+                        old_snake.id
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn test_dead_snake_unchanged(
+            (ref game, ref moves) in arb_game_and_moves()
+        ) {
+            let new_game = apply_turn(game.clone(), moves);
+            for (old_snake, new_snake) in game.board.snakes.iter().zip(new_game.board.snakes.iter()) {
+                if old_snake.health == 0 {
+                    prop_assert_eq!(
+                        new_snake.head,
+                        old_snake.head,
+                        "Dead snake {} head changed",
+                        old_snake.id
+                    );
+                    prop_assert!(
+                        new_snake.body == old_snake.body,
+                        "Dead snake {} body changed",
+                        old_snake.id
+                    );
+                }
+            }
+        }
+
+        // === Movement ===
+
+        #[test]
+        fn test_alive_snake_head_moves_one_manhattan(
+            (ref game, ref moves) in arb_game_and_moves()
+        ) {
+            let new_game = apply_turn(game.clone(), moves);
+            for (old_snake, new_snake) in game.board.snakes.iter().zip(new_game.board.snakes.iter()) {
+                if old_snake.health <= 0 {
+                    continue;
+                }
+                let dx = (new_snake.head.x - old_snake.head.x).abs();
+                let dy = (new_snake.head.y - old_snake.head.y).abs();
+                prop_assert_eq!(
+                    dx + dy,
+                    1,
+                    "Alive snake {} head moved manhattan distance {} (expected 1): {:?} -> {:?}",
+                    old_snake.id,
+                    dx + dy,
+                    old_snake.head,
+                    new_snake.head
+                );
+            }
+        }
+
+        #[test]
+        fn test_body_follows_head_non_growing(
+            (ref game, ref moves) in arb_game_and_moves()
+        ) {
+            let old_food = game.board.food.clone();
+            let new_game = apply_turn(game.clone(), moves);
+
+            for (old_snake, new_snake) in game.board.snakes.iter().zip(new_game.board.snakes.iter()) {
+                if old_snake.health <= 0 {
+                    continue;
+                }
+                if snake_ate(old_snake, new_snake, &old_food) {
+                    continue;
+                }
+                // new_body[0] == new_head
+                prop_assert_eq!(
+                    new_snake.body[0],
+                    new_snake.head,
+                    "Snake {} body[0] != head",
+                    old_snake.id
+                );
+                // new_body[i] == old_body[i-1] for i in 1..len
+                for i in 1..new_snake.body.len() {
+                    prop_assert_eq!(
+                        new_snake.body[i],
+                        old_snake.body[i - 1],
+                        "Snake {} body[{}] = {:?}, expected old body[{}] = {:?}",
+                        old_snake.id,
+                        i,
+                        new_snake.body[i],
+                        i - 1,
+                        old_snake.body[i - 1]
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn test_body_follows_head_growing(
+            (ref game, ref moves) in arb_game_and_moves()
+        ) {
+            let old_food = game.board.food.clone();
+            let new_game = apply_turn(game.clone(), moves);
+
+            for (old_snake, new_snake) in game.board.snakes.iter().zip(new_game.board.snakes.iter()) {
+                if old_snake.health <= 0 {
+                    continue;
+                }
+                if !snake_ate(old_snake, new_snake, &old_food) {
+                    continue;
+                }
+                // new_body[0] == new_head
+                prop_assert_eq!(
+                    new_snake.body[0],
+                    new_snake.head,
+                    "Growing snake {} body[0] != head",
+                    old_snake.id
+                );
+                // new_body[i] == old_body[i-1] for i in 1..old_body.len()
+                for i in 1..old_snake.body.len() {
+                    prop_assert_eq!(
+                        new_snake.body[i],
+                        old_snake.body[i - 1],
+                        "Growing snake {} body[{}] = {:?}, expected old body[{}] = {:?}",
+                        old_snake.id,
+                        i,
+                        new_snake.body[i],
+                        i - 1,
+                        old_snake.body[i - 1]
+                    );
+                }
+                // Last two elements equal (tail duplication)
+                let len = new_snake.body.len();
+                prop_assert_eq!(
+                    new_snake.body[len - 1],
+                    new_snake.body[len - 2],
+                    "Growing snake {} tail not duplicated: body[{}]={:?} != body[{}]={:?}",
+                    old_snake.id,
+                    len - 1,
+                    new_snake.body[len - 1],
+                    len - 2,
+                    new_snake.body[len - 2]
+                );
+                // Length increased by exactly 1
+                prop_assert_eq!(
+                    new_snake.body.len(),
+                    old_snake.body.len() + 1,
+                    "Growing snake {} body length: {} -> {} (expected +1)",
+                    old_snake.id,
+                    old_snake.body.len(),
+                    new_snake.body.len()
+                );
+            }
+        }
+
+        // === Collision ===
+
+        #[test]
+        fn test_out_of_bounds_eliminated(
+            (ref game, ref moves) in arb_game_and_moves()
+        ) {
+            let width = game.board.width as i32;
+            let height = game.board.height as i32;
+            let new_game = apply_turn(game.clone(), moves);
+
+            for (old_snake, new_snake) in game.board.snakes.iter().zip(new_game.board.snakes.iter()) {
+                if old_snake.health <= 0 {
+                    continue;
+                }
+                let h = new_snake.head;
+                if h.x < 0 || h.x >= width || h.y < 0 || h.y >= height {
+                    prop_assert_eq!(
+                        new_snake.health, 0,
+                        "Snake {} out of bounds at {:?} but not eliminated",
+                        old_snake.id,
+                        h
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn test_self_collision_eliminated(
+            (ref game, ref moves) in arb_game_and_moves()
+        ) {
+            let new_game = apply_turn(game.clone(), moves);
+
+            for (old_snake, new_snake) in game.board.snakes.iter().zip(new_game.board.snakes.iter()) {
+                if old_snake.health <= 0 {
+                    continue;
+                }
+                let self_collision = new_snake.body.iter().skip(1).any(|p| *p == new_snake.head);
+                if self_collision {
+                    prop_assert_eq!(
+                        new_snake.health, 0,
+                        "Snake {} self-collided at {:?} but not eliminated",
+                        old_snake.id,
+                        new_snake.head
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn test_body_collision_with_other_snake_eliminated(
+            (ref game, ref moves) in arb_game_and_moves()
+        ) {
+            let new_game = apply_turn(game.clone(), moves);
+
+            for (idx, (old_snake, new_snake)) in game.board.snakes.iter()
+                .zip(new_game.board.snakes.iter())
+                .enumerate()
+            {
+                if old_snake.health <= 0 {
+                    continue;
+                }
+                // Check if new head is in any other snake's body[1..]
+                // where the other snake had original health >= 2
+                let body_collision = game.board.snakes.iter()
+                    .zip(new_game.board.snakes.iter())
+                    .enumerate()
+                    .any(|(other_idx, (old_other, new_other))| {
+                        other_idx != idx
+                            && old_other.health >= 2
+                            && new_other.body.iter().skip(1).any(|p| *p == new_snake.head)
+                    });
+                if body_collision {
+                    prop_assert_eq!(
+                        new_snake.health, 0,
+                        "Snake {} body-collided with another snake at {:?} but not eliminated",
+                        old_snake.id,
+                        new_snake.head
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn test_head_to_head_equal_both_die(
+            (ref game, ref moves) in arb_game_and_moves()
+        ) {
+            let new_game = apply_turn(game.clone(), moves);
+
+            for (i, (old_a, new_a)) in game.board.snakes.iter()
+                .zip(new_game.board.snakes.iter())
+                .enumerate()
+            {
+                if old_a.health <= 0 {
+                    continue;
+                }
+                for (j, (old_b, new_b)) in game.board.snakes.iter()
+                    .zip(new_game.board.snakes.iter())
+                    .enumerate()
+                {
+                    if j <= i || old_b.health <= 0 {
+                        continue;
+                    }
+                    if new_a.head == new_b.head && new_a.body.len() == new_b.body.len() {
+                        prop_assert_eq!(
+                            new_a.health, 0,
+                            "Snake {} equal head-to-head at {:?} but not eliminated",
+                            old_a.id,
+                            new_a.head
+                        );
+                        prop_assert_eq!(
+                            new_b.health, 0,
+                            "Snake {} equal head-to-head at {:?} but not eliminated",
+                            old_b.id,
+                            new_b.head
+                        );
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn test_head_to_head_smaller_dies(
+            (ref game, ref moves) in arb_game_and_moves()
+        ) {
+            let new_game = apply_turn(game.clone(), moves);
+
+            for (i, (old_a, new_a)) in game.board.snakes.iter()
+                .zip(new_game.board.snakes.iter())
+                .enumerate()
+            {
+                if old_a.health <= 0 {
+                    continue;
+                }
+                for (j, (old_b, new_b)) in game.board.snakes.iter()
+                    .zip(new_game.board.snakes.iter())
+                    .enumerate()
+                {
+                    if j == i || old_b.health <= 0 {
+                        continue;
+                    }
+                    if new_a.head == new_b.head && new_a.body.len() < new_b.body.len() {
+                        prop_assert_eq!(
+                            new_a.health, 0,
+                            "Snake {} (len {}) lost head-to-head against {} (len {}) at {:?} but not eliminated",
+                            old_a.id,
+                            new_a.body.len(),
+                            old_b.id,
+                            new_b.body.len(),
+                            new_a.head
+                        );
+                    }
+                }
+            }
+        }
+
+        // === Feeding ===
+
+        #[test]
+        fn test_starve_before_eat(
+            (ref game, ref moves) in arb_game_and_moves()
+        ) {
+            let new_game = apply_turn(game.clone(), moves);
+
+            for (old_snake, new_snake) in game.board.snakes.iter().zip(new_game.board.snakes.iter()) {
+                if old_snake.health == 1 && game.board.food.contains(&new_snake.head) {
+                    prop_assert_eq!(
+                        new_snake.health, 0,
+                        "Snake {} with health=1 landed on food but didn't starve",
+                        old_snake.id
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn test_eating_restores_max_health(
+            (ref game, ref moves) in arb_game_and_moves()
+        ) {
+            let old_food = game.board.food.clone();
+            let new_game = apply_turn(game.clone(), moves);
+
+            for (old_snake, new_snake) in game.board.snakes.iter().zip(new_game.board.snakes.iter()) {
+                if old_snake.health >= 2
+                    && old_food.contains(&new_snake.head)
+                    && new_snake.health > 0
+                {
+                    prop_assert_eq!(
+                        new_snake.health, 100,
+                        "Snake {} ate food but health is {} (expected 100)",
+                        old_snake.id,
+                        new_snake.health
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn test_generate_spawn_positions() {
         let positions = generate_spawn_positions(11, 11, 4);
