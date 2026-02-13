@@ -918,14 +918,14 @@ mod tests {
                 .zip(new_game.board.snakes.iter())
                 .enumerate()
             {
-                if old_a.health <= 0 {
+                if old_a.health < 2 {
                     continue;
                 }
                 for (j, (old_b, new_b)) in game.board.snakes.iter()
                     .zip(new_game.board.snakes.iter())
                     .enumerate()
                 {
-                    if j <= i || old_b.health <= 0 {
+                    if j <= i || old_b.health < 2 {
                         continue;
                     }
                     if new_a.head == new_b.head && new_a.body.len() == new_b.body.len() {
@@ -956,14 +956,14 @@ mod tests {
                 .zip(new_game.board.snakes.iter())
                 .enumerate()
             {
-                if old_a.health <= 0 {
+                if old_a.health < 2 {
                     continue;
                 }
                 for (j, (old_b, new_b)) in game.board.snakes.iter()
                     .zip(new_game.board.snakes.iter())
                     .enumerate()
                 {
-                    if j == i || old_b.health <= 0 {
+                    if j == i || old_b.health < 2 {
                         continue;
                     }
                     if new_a.head == new_b.head && new_a.body.len() < new_b.body.len() {
