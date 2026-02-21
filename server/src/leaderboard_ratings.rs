@@ -118,18 +118,15 @@ pub async fn update_ratings(app_state: &AppState, leaderboard_game_id: Uuid) -> 
     for gs in &game_snakes {
         let placement = gs.placement.unwrap_or(game_snakes.len() as i32);
 
-        let entry = leaderboard::get_entry_for_update(
-            &mut *tx,
-            lb_game.leaderboard_id,
-            gs.battlesnake_id,
-        )
-        .await
-        .wrap_err_with(|| {
-            format!(
-                "Failed to get leaderboard entry for snake {}",
-                gs.battlesnake_id
-            )
-        })?;
+        let entry =
+            leaderboard::get_entry_for_update(&mut *tx, lb_game.leaderboard_id, gs.battlesnake_id)
+                .await
+                .wrap_err_with(|| {
+                    format!(
+                        "Failed to get leaderboard entry for snake {}",
+                        gs.battlesnake_id
+                    )
+                })?;
 
         if let Some(entry) = entry {
             entries_with_placements.push((entry, placement));
@@ -312,10 +309,7 @@ mod tests {
 
     #[test]
     fn test_display_score_calculation() {
-        let entries = vec![
-            (make_entry(25.0, 8.333), 1),
-            (make_entry(25.0, 8.333), 2),
-        ];
+        let entries = vec![(make_entry(25.0, 8.333), 1), (make_entry(25.0, 8.333), 2)];
 
         let updates = calculate_rating_updates(&entries);
 
@@ -353,10 +347,7 @@ mod tests {
 
     #[test]
     fn test_preserves_entry_ids() {
-        let entries = vec![
-            (make_entry(25.0, 8.333), 1),
-            (make_entry(25.0, 8.333), 3),
-        ];
+        let entries = vec![(make_entry(25.0, 8.333), 1), (make_entry(25.0, 8.333), 3)];
 
         let updates = calculate_rating_updates(&entries);
 

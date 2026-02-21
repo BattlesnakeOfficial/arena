@@ -407,11 +407,15 @@ pub async fn get_user_entries(
 
 // --- Leaderboard game queries ---
 
-pub async fn create_leaderboard_game(
-    pool: &PgPool,
+/// Create a leaderboard game link. Accepts any sqlx executor (pool or transaction).
+pub async fn create_leaderboard_game<'e, E>(
+    executor: E,
     leaderboard_id: Uuid,
     game_id: Uuid,
-) -> cja::Result<LeaderboardGame> {
+) -> cja::Result<LeaderboardGame>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
     let game = sqlx::query_as::<_, LeaderboardGame>(
         "INSERT INTO leaderboard_games (leaderboard_id, game_id)
          VALUES ($1, $2)
@@ -419,7 +423,7 @@ pub async fn create_leaderboard_game(
     )
     .bind(leaderboard_id)
     .bind(game_id)
-    .fetch_one(pool)
+    .fetch_one(executor)
     .await
     .wrap_err("Failed to create leaderboard game")?;
 

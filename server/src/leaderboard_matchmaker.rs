@@ -74,13 +74,15 @@ async fn run_matchmaker_for_leaderboard(
 
         let battlesnake_ids: Vec<Uuid> = selected.iter().map(|e| e.battlesnake_id).collect();
 
-        // TODO: Wrap game creation, leaderboard_games insert, and job enqueue in a single
-        // transaction to prevent "zombie" leaderboard games if the job enqueue fails.
-        // Requires refactoring `create_game_with_snakes` to accept an executor.
+        // Use a transaction to atomically create the game, link it to the leaderboard,
+        // and set enqueued_at. This prevents "zombie" games without a leaderboard record.
+        let mut tx = pool
+            .begin()
+            .await
+            .wrap_err("Failed to start matchmaker transaction")?;
 
-        // Create the game
-        let game = game::create_game_with_snakes(
-            pool,
+        let game = game::create_game_with_snakes_tx(
+            &mut tx,
             CreateGameWithSnakes {
                 board_size: GameBoardSize::Medium, // 11x11
                 game_type: GameType::Standard,
@@ -90,17 +92,20 @@ async fn run_matchmaker_for_leaderboard(
         .await
         .wrap_err("Failed to create leaderboard game")?;
 
-        // Set enqueued timestamp
-        game::set_game_enqueued_at(pool, game.game_id, chrono::Utc::now())
+        game::set_game_enqueued_at_tx(&mut tx, game.game_id, chrono::Utc::now())
             .await
             .wrap_err("Failed to set enqueued_at")?;
 
-        // Link game to leaderboard
-        leaderboard::create_leaderboard_game(pool, leaderboard_id, game.game_id)
+        leaderboard::create_leaderboard_game(&mut *tx, leaderboard_id, game.game_id)
             .await
             .wrap_err("Failed to create leaderboard game record")?;
 
-        // Enqueue the game runner job
+        tx.commit()
+            .await
+            .wrap_err("Failed to commit matchmaker transaction")?;
+
+        // Enqueue outside the transaction — if this fails, the game + leaderboard record
+        // still exist (consistent state). The game can be retried or discovered by a poller.
         let job = GameRunnerJob {
             game_id: game.game_id,
         };
@@ -124,6 +129,10 @@ async fn run_matchmaker_for_leaderboard(
 
 /// Select snakes for a match using skill-band matching with jitter.
 /// Picks a random seed snake, then selects nearest neighbors by score.
+///
+/// TODO: Add recently-matched deprioritization to prevent the same group of snakes
+/// from being matched repeatedly in low-volume periods. This could check the last N
+/// leaderboard games and increase the jitter score for snakes that appeared together recently.
 fn select_match(entries: &[LeaderboardEntry], match_size: usize) -> Vec<LeaderboardEntry> {
     if entries.len() < match_size {
         return vec![];
