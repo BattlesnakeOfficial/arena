@@ -10,7 +10,8 @@ use crate::{
     state::AppState,
 };
 
-/// Number of cron runs per day (every 15 minutes = 96 runs/day)
+/// Number of cron runs per day.
+/// Must stay in sync with the cron interval in `cron.rs` (currently 15 minutes = 96 runs/day).
 const RUNS_PER_DAY: i32 = 96;
 
 /// Run the matchmaker for all active leaderboards
@@ -72,6 +73,10 @@ async fn run_matchmaker_for_leaderboard(
         }
 
         let battlesnake_ids: Vec<Uuid> = selected.iter().map(|e| e.battlesnake_id).collect();
+
+        // TODO: Wrap game creation, leaderboard_games insert, and job enqueue in a single
+        // transaction to prevent "zombie" leaderboard games if the job enqueue fails.
+        // Requires refactoring `create_game_with_snakes` to accept an executor.
 
         // Create the game
         let game = game::create_game_with_snakes(

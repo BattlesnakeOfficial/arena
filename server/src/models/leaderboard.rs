@@ -1,6 +1,6 @@
 use color_eyre::eyre::Context as _;
 use serde::{Deserialize, Serialize};
-use sqlx::{FromRow, PgPool};
+use sqlx::{FromRow, PgPool, Postgres};
 use uuid::Uuid;
 
 /// Application constants for leaderboard configuration
@@ -75,8 +75,9 @@ pub struct RankedEntry {
 }
 
 // --- Leaderboard queries ---
-// Note: Using sqlx::query_as (runtime) instead of sqlx::query_as! (compile-time)
-// because these tables are new and not yet in the offline query cache.
+// TODO: Switch to sqlx::query_as! (compile-time checked) macros once the migration
+// is merged and the .sqlx offline query cache is updated with `cargo sqlx prepare`.
+// Currently using sqlx::query_as (runtime) because these tables are new.
 
 pub async fn get_all_leaderboards(pool: &PgPool) -> cja::Result<Vec<Leaderboard>> {
     let rows = sqlx::query_as::<_, Leaderboard>(
@@ -262,6 +263,34 @@ pub async fn get_entry(
     Ok(entry)
 }
 
+/// Get a specific entry by leaderboard and battlesnake, locking the row for update.
+/// Use this within a transaction to prevent concurrent rating updates.
+pub async fn get_entry_for_update<'e, E>(
+    executor: E,
+    leaderboard_id: Uuid,
+    battlesnake_id: Uuid,
+) -> cja::Result<Option<LeaderboardEntry>>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
+    let entry = sqlx::query_as::<_, LeaderboardEntry>(
+        "SELECT
+            leaderboard_entry_id, leaderboard_id, battlesnake_id,
+            mu, sigma, display_score, games_played, wins, losses,
+            disabled_at, created_at, updated_at
+         FROM leaderboard_entries
+         WHERE leaderboard_id = $1 AND battlesnake_id = $2
+         FOR UPDATE",
+    )
+    .bind(leaderboard_id)
+    .bind(battlesnake_id)
+    .fetch_optional(executor)
+    .await
+    .wrap_err("Failed to fetch leaderboard entry for update")?;
+
+    Ok(entry)
+}
+
 /// Get entry by ID
 pub async fn get_entry_by_id(
     pool: &PgPool,
@@ -283,15 +312,19 @@ pub async fn get_entry_by_id(
     Ok(entry)
 }
 
-/// Update rating for an entry after a game
-pub async fn update_rating(
-    pool: &PgPool,
+/// Update rating for an entry after a game.
+/// Accepts any sqlx executor (pool or transaction).
+pub async fn update_rating<'e, E>(
+    executor: E,
     entry_id: Uuid,
     mu: f64,
     sigma: f64,
     display_score: f64,
     is_win: bool,
-) -> cja::Result<()> {
+) -> cja::Result<()>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
     if is_win {
         sqlx::query(
             "UPDATE leaderboard_entries
@@ -304,7 +337,7 @@ pub async fn update_rating(
         .bind(mu)
         .bind(sigma)
         .bind(display_score)
-        .execute(pool)
+        .execute(executor)
         .await
         .wrap_err("Failed to update rating (win)")?;
     } else {
@@ -319,7 +352,7 @@ pub async fn update_rating(
         .bind(mu)
         .bind(sigma)
         .bind(display_score)
-        .execute(pool)
+        .execute(executor)
         .await
         .wrap_err("Failed to update rating (loss)")?;
     }
@@ -423,10 +456,14 @@ pub struct CreateGameResult {
     pub display_score_change: f64,
 }
 
-pub async fn create_game_result(
-    pool: &PgPool,
+/// Record a game result for a snake. Accepts any sqlx executor (pool or transaction).
+pub async fn create_game_result<'e, E>(
+    executor: E,
     data: CreateGameResult,
-) -> cja::Result<LeaderboardGameResult> {
+) -> cja::Result<LeaderboardGameResult>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
     let result = sqlx::query_as::<_, LeaderboardGameResult>(
         "INSERT INTO leaderboard_game_results (
             leaderboard_game_id, leaderboard_entry_id, placement,
@@ -446,7 +483,7 @@ pub async fn create_game_result(
     .bind(data.sigma_before)
     .bind(data.sigma_after)
     .bind(data.display_score_change)
-    .fetch_one(pool)
+    .fetch_one(executor)
     .await
     .wrap_err("Failed to create leaderboard game result")?;
 
