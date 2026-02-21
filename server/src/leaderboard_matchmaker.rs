@@ -2,6 +2,7 @@ use color_eyre::eyre::Context as _;
 use uuid::Uuid;
 
 use crate::{
+    cron::MATCHMAKER_INTERVAL_SECS,
     jobs::GameRunnerJob,
     models::{
         game::{self, CreateGameWithSnakes, GameBoardSize, GameType},
@@ -9,10 +10,6 @@ use crate::{
     },
     state::AppState,
 };
-
-/// Number of cron runs per day.
-/// Must stay in sync with the cron interval in `cron.rs` (currently 15 minutes = 96 runs/day).
-const RUNS_PER_DAY: i32 = 96;
 
 /// Run the matchmaker for all active leaderboards
 pub async fn run_matchmaker(app_state: &AppState) -> cja::Result<()> {
@@ -57,7 +54,9 @@ async fn run_matchmaker_for_leaderboard(
     }
 
     // Calculate how many games to create this run
-    let games_per_run = (GAMES_PER_DAY / RUNS_PER_DAY).max(1);
+    // Derived from shared cron interval constant to avoid manual sync bugs
+    let runs_per_day = (24 * 60 * 60 / MATCHMAKER_INTERVAL_SECS) as i32;
+    let games_per_run = ((GAMES_PER_DAY + runs_per_day - 1) / runs_per_day).max(1);
 
     tracing::info!(
         leaderboard_id = %leaderboard_id,
@@ -67,7 +66,7 @@ async fn run_matchmaker_for_leaderboard(
     );
 
     for _ in 0..games_per_run {
-        let selected = select_match(&entries, MATCH_SIZE);
+        let selected = select_match(&mut rand::thread_rng(), &entries, MATCH_SIZE);
         if selected.len() < MATCH_SIZE {
             break;
         }
@@ -129,16 +128,18 @@ async fn run_matchmaker_for_leaderboard(
 
 /// Select snakes for a match using skill-band matching with jitter.
 /// Picks a random seed snake, then selects nearest neighbors by score.
+/// Accepts an RNG parameter for test determinism.
 ///
 /// TODO: Add recently-matched deprioritization to prevent the same group of snakes
-/// from being matched repeatedly in low-volume periods. This could check the last N
-/// leaderboard games and increase the jitter score for snakes that appeared together recently.
-fn select_match(entries: &[LeaderboardEntry], match_size: usize) -> Vec<LeaderboardEntry> {
+/// from being matched repeatedly in low-volume periods.
+fn select_match(
+    rng: &mut impl rand::Rng,
+    entries: &[LeaderboardEntry],
+    match_size: usize,
+) -> Vec<LeaderboardEntry> {
     if entries.len() < match_size {
         return vec![];
     }
-
-    let mut rng = rand::thread_rng();
 
     // Sort by display_score
     let mut sorted: Vec<&LeaderboardEntry> = entries.iter().collect();
@@ -149,7 +150,7 @@ fn select_match(entries: &[LeaderboardEntry], match_size: usize) -> Vec<Leaderbo
     });
 
     // Pick a random seed snake
-    let seed_idx = rand::Rng::gen_range(&mut rng, 0..sorted.len());
+    let seed_idx = rng.gen_range(0..sorted.len());
     let seed_score = sorted[seed_idx].display_score;
 
     // Score each snake by distance to seed, with jitter for variety
@@ -158,7 +159,7 @@ fn select_match(entries: &[LeaderboardEntry], match_size: usize) -> Vec<Leaderbo
         .enumerate()
         .map(|(i, entry)| {
             let distance = (entry.display_score - seed_score).abs();
-            let jitter: f64 = rand::Rng::gen_range(&mut rng, 0.0..5.0);
+            let jitter: f64 = rng.gen_range(0.0..5.0);
             (i, distance + jitter)
         })
         .collect();
@@ -177,6 +178,7 @@ fn select_match(entries: &[LeaderboardEntry], match_size: usize) -> Vec<Leaderbo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::SeedableRng;
     use uuid::Uuid;
 
     fn make_entry(display_score: f64) -> LeaderboardEntry {
@@ -188,39 +190,43 @@ mod tests {
             sigma: 8.333,
             display_score,
             games_played: 0,
-            wins: 0,
-            losses: 0,
+            first_place_finishes: 0,
+            non_first_finishes: 0,
             disabled_at: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }
     }
 
+    fn seeded_rng() -> rand::rngs::StdRng {
+        rand::rngs::StdRng::seed_from_u64(42)
+    }
+
     #[test]
     fn test_select_match_returns_correct_size() {
         let entries: Vec<LeaderboardEntry> = (0..10).map(|i| make_entry(i as f64 * 5.0)).collect();
-        let selected = select_match(&entries, 4);
+        let selected = select_match(&mut seeded_rng(), &entries, 4);
         assert_eq!(selected.len(), 4);
     }
 
     #[test]
     fn test_select_match_too_few_entries() {
         let entries: Vec<LeaderboardEntry> = (0..3).map(|i| make_entry(i as f64 * 5.0)).collect();
-        let selected = select_match(&entries, 4);
+        let selected = select_match(&mut seeded_rng(), &entries, 4);
         assert!(selected.is_empty());
     }
 
     #[test]
     fn test_select_match_exactly_enough() {
         let entries: Vec<LeaderboardEntry> = (0..4).map(|i| make_entry(i as f64 * 5.0)).collect();
-        let selected = select_match(&entries, 4);
+        let selected = select_match(&mut seeded_rng(), &entries, 4);
         assert_eq!(selected.len(), 4);
     }
 
     #[test]
     fn test_select_match_unique_snakes() {
         let entries: Vec<LeaderboardEntry> = (0..20).map(|i| make_entry(i as f64 * 2.0)).collect();
-        let selected = select_match(&entries, 4);
+        let selected = select_match(&mut seeded_rng(), &entries, 4);
         let ids: Vec<Uuid> = selected.iter().map(|e| e.battlesnake_id).collect();
         let unique: std::collections::HashSet<Uuid> = ids.iter().copied().collect();
         assert_eq!(ids.len(), unique.len(), "Selected snakes should be unique");

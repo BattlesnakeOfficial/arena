@@ -32,9 +32,9 @@ pub struct RankingEntry {
     pub owner: String,
     pub display_score: f64,
     pub games_played: i32,
-    pub wins: i32,
-    pub losses: i32,
-    pub win_rate: f64,
+    pub first_place_finishes: i32,
+    pub non_first_finishes: i32,
+    pub first_place_rate: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -57,8 +57,8 @@ pub struct EntryResponse {
     pub battlesnake_id: Uuid,
     pub display_score: f64,
     pub games_played: i32,
-    pub wins: i32,
-    pub losses: i32,
+    pub first_place_finishes: i32,
+    pub non_first_finishes: i32,
     pub active: bool,
 }
 
@@ -133,8 +133,8 @@ pub async fn get_rankings(
             .into_iter()
             .enumerate()
             .map(|(i, e)| {
-                let win_rate = if e.games_played > 0 {
-                    e.wins as f64 / e.games_played as f64
+                let first_place_rate = if e.games_played > 0 {
+                    e.first_place_finishes as f64 / e.games_played as f64
                 } else {
                     0.0
                 };
@@ -145,9 +145,9 @@ pub async fn get_rankings(
                     owner: e.owner_login,
                     display_score: e.display_score,
                     games_played: e.games_played,
-                    wins: e.wins,
-                    losses: e.losses,
-                    win_rate,
+                    first_place_finishes: e.first_place_finishes,
+                    non_first_finishes: e.non_first_finishes,
+                    first_place_rate,
                 }
             })
             .collect()
@@ -234,8 +234,8 @@ pub async fn create_entry(
             battlesnake_id: entry.battlesnake_id,
             display_score: entry.display_score,
             games_played: entry.games_played,
-            wins: entry.wins,
-            losses: entry.losses,
+            first_place_finishes: entry.first_place_finishes,
+            non_first_finishes: entry.non_first_finishes,
             active: entry.disabled_at.is_none(),
         }),
     ))

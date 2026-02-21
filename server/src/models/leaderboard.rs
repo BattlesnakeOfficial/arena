@@ -28,8 +28,8 @@ pub struct LeaderboardEntry {
     pub sigma: f64,
     pub display_score: f64,
     pub games_played: i32,
-    pub wins: i32,
-    pub losses: i32,
+    pub first_place_finishes: i32,
+    pub non_first_finishes: i32,
     pub disabled_at: Option<chrono::DateTime<chrono::Utc>>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
@@ -66,8 +66,8 @@ pub struct RankedEntry {
     pub battlesnake_id: Uuid,
     pub display_score: f64,
     pub games_played: i32,
-    pub wins: i32,
-    pub losses: i32,
+    pub first_place_finishes: i32,
+    pub non_first_finishes: i32,
     pub mu: f64,
     pub sigma: f64,
     pub snake_name: String,
@@ -138,7 +138,7 @@ pub async fn get_or_create_entry(
          DO UPDATE SET disabled_at = NULL
          RETURNING
             leaderboard_entry_id, leaderboard_id, battlesnake_id,
-            mu, sigma, display_score, games_played, wins, losses,
+            mu, sigma, display_score, games_played, first_place_finishes, non_first_finishes,
             disabled_at, created_at, updated_at",
     )
     .bind(leaderboard_id)
@@ -158,7 +158,7 @@ pub async fn get_active_entries(
     let entries = sqlx::query_as::<_, LeaderboardEntry>(
         "SELECT
             leaderboard_entry_id, leaderboard_id, battlesnake_id,
-            mu, sigma, display_score, games_played, wins, losses,
+            mu, sigma, display_score, games_played, first_place_finishes, non_first_finishes,
             disabled_at, created_at, updated_at
          FROM leaderboard_entries
          WHERE leaderboard_id = $1 AND disabled_at IS NULL
@@ -183,8 +183,8 @@ pub async fn get_ranked_entries(
             le.battlesnake_id,
             le.display_score,
             le.games_played,
-            le.wins,
-            le.losses,
+            le.first_place_finishes,
+            le.non_first_finishes,
             le.mu,
             le.sigma,
             b.name as snake_name,
@@ -195,7 +195,8 @@ pub async fn get_ranked_entries(
          WHERE le.leaderboard_id = $1
            AND le.disabled_at IS NULL
            AND le.games_played >= $2
-         ORDER BY le.display_score DESC",
+         ORDER BY le.display_score DESC
+         LIMIT 100",
     )
     .bind(leaderboard_id)
     .bind(MIN_GAMES_FOR_RANKING)
@@ -217,8 +218,8 @@ pub async fn get_placement_entries(
             le.battlesnake_id,
             le.display_score,
             le.games_played,
-            le.wins,
-            le.losses,
+            le.first_place_finishes,
+            le.non_first_finishes,
             le.mu,
             le.sigma,
             b.name as snake_name,
@@ -229,7 +230,8 @@ pub async fn get_placement_entries(
          WHERE le.leaderboard_id = $1
            AND le.disabled_at IS NULL
            AND le.games_played < $2
-         ORDER BY le.games_played DESC",
+         ORDER BY le.games_played DESC
+         LIMIT 100",
     )
     .bind(leaderboard_id)
     .bind(MIN_GAMES_FOR_RANKING)
@@ -249,7 +251,7 @@ pub async fn get_entry(
     let entry = sqlx::query_as::<_, LeaderboardEntry>(
         "SELECT
             leaderboard_entry_id, leaderboard_id, battlesnake_id,
-            mu, sigma, display_score, games_played, wins, losses,
+            mu, sigma, display_score, games_played, first_place_finishes, non_first_finishes,
             disabled_at, created_at, updated_at
          FROM leaderboard_entries
          WHERE leaderboard_id = $1 AND battlesnake_id = $2",
@@ -276,7 +278,7 @@ where
     let entry = sqlx::query_as::<_, LeaderboardEntry>(
         "SELECT
             leaderboard_entry_id, leaderboard_id, battlesnake_id,
-            mu, sigma, display_score, games_played, wins, losses,
+            mu, sigma, display_score, games_played, first_place_finishes, non_first_finishes,
             disabled_at, created_at, updated_at
          FROM leaderboard_entries
          WHERE leaderboard_id = $1 AND battlesnake_id = $2
@@ -299,7 +301,7 @@ pub async fn get_entry_by_id(
     let entry = sqlx::query_as::<_, LeaderboardEntry>(
         "SELECT
             leaderboard_entry_id, leaderboard_id, battlesnake_id,
-            mu, sigma, display_score, games_played, wins, losses,
+            mu, sigma, display_score, games_played, first_place_finishes, non_first_finishes,
             disabled_at, created_at, updated_at
          FROM leaderboard_entries
          WHERE leaderboard_entry_id = $1",
@@ -320,42 +322,27 @@ pub async fn update_rating<'e, E>(
     mu: f64,
     sigma: f64,
     display_score: f64,
-    is_win: bool,
+    is_first_place: bool,
 ) -> cja::Result<()>
 where
     E: sqlx::Executor<'e, Database = Postgres>,
 {
-    if is_win {
-        sqlx::query(
-            "UPDATE leaderboard_entries
-             SET mu = $2, sigma = $3, display_score = $4,
-                 games_played = games_played + 1,
-                 wins = wins + 1
-             WHERE leaderboard_entry_id = $1",
-        )
-        .bind(entry_id)
-        .bind(mu)
-        .bind(sigma)
-        .bind(display_score)
-        .execute(executor)
-        .await
-        .wrap_err("Failed to update rating (win)")?;
-    } else {
-        sqlx::query(
-            "UPDATE leaderboard_entries
-             SET mu = $2, sigma = $3, display_score = $4,
-                 games_played = games_played + 1,
-                 losses = losses + 1
-             WHERE leaderboard_entry_id = $1",
-        )
-        .bind(entry_id)
-        .bind(mu)
-        .bind(sigma)
-        .bind(display_score)
-        .execute(executor)
-        .await
-        .wrap_err("Failed to update rating (loss)")?;
-    }
+    sqlx::query(
+        "UPDATE leaderboard_entries
+         SET mu = $2, sigma = $3, display_score = $4,
+             games_played = games_played + 1,
+             first_place_finishes = first_place_finishes + CASE WHEN $5 THEN 1 ELSE 0 END,
+             non_first_finishes = non_first_finishes + CASE WHEN $5 THEN 0 ELSE 1 END
+         WHERE leaderboard_entry_id = $1",
+    )
+    .bind(entry_id)
+    .bind(mu)
+    .bind(sigma)
+    .bind(display_score)
+    .bind(is_first_place)
+    .execute(executor)
+    .await
+    .wrap_err("Failed to update rating")?;
 
     Ok(())
 }
@@ -389,7 +376,7 @@ pub async fn get_user_entries(
     let entries = sqlx::query_as::<_, LeaderboardEntry>(
         "SELECT
             le.leaderboard_entry_id, le.leaderboard_id, le.battlesnake_id,
-            le.mu, le.sigma, le.display_score, le.games_played, le.wins, le.losses,
+            le.mu, le.sigma, le.display_score, le.games_played, le.first_place_finishes, le.non_first_finishes,
             le.disabled_at, le.created_at, le.updated_at
          FROM leaderboard_entries le
          JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id
@@ -461,10 +448,11 @@ pub struct CreateGameResult {
 }
 
 /// Record a game result for a snake. Accepts any sqlx executor (pool or transaction).
+/// Uses ON CONFLICT DO NOTHING as a DB-level idempotency guard.
 pub async fn create_game_result<'e, E>(
     executor: E,
     data: CreateGameResult,
-) -> cja::Result<LeaderboardGameResult>
+) -> cja::Result<Option<LeaderboardGameResult>>
 where
     E: sqlx::Executor<'e, Database = Postgres>,
 {
@@ -474,6 +462,7 @@ where
             mu_before, mu_after, sigma_before, sigma_after, display_score_change
          )
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         ON CONFLICT (leaderboard_game_id, leaderboard_entry_id) DO NOTHING
          RETURNING
             leaderboard_game_result_id, leaderboard_game_id, leaderboard_entry_id,
             placement, mu_before, mu_after, sigma_before, sigma_after,
@@ -487,7 +476,7 @@ where
     .bind(data.sigma_before)
     .bind(data.sigma_after)
     .bind(data.display_score_change)
-    .fetch_one(executor)
+    .fetch_optional(executor)
     .await
     .wrap_err("Failed to create leaderboard game result")?;
 

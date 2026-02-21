@@ -24,7 +24,7 @@ pub struct RatingUpdate {
     pub new_sigma: f64,
     pub new_display_score: f64,
     pub display_score_change: f64,
-    pub is_win: bool,
+    pub is_first_place: bool,
 }
 
 /// Pure computation: calculate new ratings from entries and placements.
@@ -72,17 +72,35 @@ pub fn calculate_rating_updates(
                 new_sigma,
                 new_display_score,
                 display_score_change: new_display_score - old_display_score,
-                is_win: *placement == 1,
+                is_first_place: *placement == 1,
             }
         })
         .collect()
 }
 
 /// Update ratings for all snakes in a completed leaderboard game.
+/// Idempotent: safe to call multiple times (e.g. job retries).
 /// Uses a database transaction with row locking (FOR UPDATE) to prevent
 /// race conditions when concurrent games finish for the same snakes.
 pub async fn update_ratings(app_state: &AppState, leaderboard_game_id: Uuid) -> cja::Result<()> {
     let pool = &app_state.db;
+
+    // Idempotency check: bail if ratings were already applied for this game
+    let existing: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM leaderboard_game_results WHERE leaderboard_game_id = $1",
+    )
+    .bind(leaderboard_game_id)
+    .fetch_one(pool)
+    .await
+    .wrap_err("Failed to check existing game results")?;
+
+    if existing.0 > 0 {
+        tracing::info!(
+            leaderboard_game_id = %leaderboard_game_id,
+            "Ratings already applied for this game, skipping"
+        );
+        return Ok(());
+    }
 
     // Fetch the leaderboard game (outside transaction — immutable data)
     let lb_game = sqlx::query_as::<_, LeaderboardGame>(
@@ -152,8 +170,8 @@ pub async fn update_ratings(app_state: &AppState, leaderboard_game_id: Uuid) -> 
 
     // Apply all updates within the transaction
     for update in &updates {
-        // Record the result (audit trail)
-        leaderboard::create_game_result(
+        // Record the result (audit trail, ON CONFLICT DO NOTHING for idempotency)
+        let _result = leaderboard::create_game_result(
             &mut *tx,
             leaderboard::CreateGameResult {
                 leaderboard_game_id,
@@ -176,7 +194,7 @@ pub async fn update_ratings(app_state: &AppState, leaderboard_game_id: Uuid) -> 
             update.new_mu,
             update.new_sigma,
             update.new_display_score,
-            update.is_win,
+            update.is_first_place,
         )
         .await
         .wrap_err("Failed to update entry rating")?;
@@ -222,8 +240,8 @@ mod tests {
             sigma,
             display_score: mu - 3.0 * sigma,
             games_played: 5,
-            wins: 2,
-            losses: 3,
+            first_place_finishes: 2,
+            non_first_finishes: 3,
             disabled_at: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
@@ -261,8 +279,8 @@ mod tests {
             updates[0].old_mu,
             updates[0].new_mu
         );
-        assert!(updates[0].is_win);
-        assert!(!updates[1].is_win);
+        assert!(updates[0].is_first_place);
+        assert!(!updates[1].is_first_place);
     }
 
     #[test]

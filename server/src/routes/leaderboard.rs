@@ -95,7 +95,8 @@ pub async fn show_leaderboard(
     let user_snakes = if let Some(ref u) = user {
         battlesnake::get_battlesnakes_by_user_id(&state.db, u.user_id)
             .await
-            .unwrap_or_default()
+            .wrap_err("Failed to fetch user's battlesnakes")
+            .with_status(StatusCode::INTERNAL_SERVER_ERROR)?
     } else {
         vec![]
     };
@@ -104,7 +105,8 @@ pub async fn show_leaderboard(
     let user_entries = if let Some(ref u) = user {
         leaderboard::get_user_entries(&state.db, leaderboard_id, u.user_id)
             .await
-            .unwrap_or_default()
+            .wrap_err("Failed to fetch user's leaderboard entries")
+            .with_status(StatusCode::INTERNAL_SERVER_ERROR)?
     } else {
         vec![]
     };
@@ -179,7 +181,7 @@ pub async fn show_leaderboard(
                                 th { "Owner" }
                                 th { "Score" }
                                 th { "Games" }
-                                th { "Win Rate" }
+                                th { "1st Place %" }
                             }
                         }
                         tbody {
@@ -192,7 +194,7 @@ pub async fn show_leaderboard(
                                     td { (entry.games_played) }
                                     td {
                                         @if entry.games_played > 0 {
-                                            (format!("{:.0}%", (entry.wins as f64 / entry.games_played as f64) * 100.0))
+                                            (format!("{:.0}%", (entry.first_place_finishes as f64 / entry.games_played as f64) * 100.0))
                                         } @else {
                                             "N/A"
                                         }

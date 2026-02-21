@@ -6,6 +6,9 @@ use tokio_util::sync::CancellationToken;
 use crate::jobs::{GameBackupJob, LeaderboardMatchmakerJob};
 use crate::state::AppState;
 
+/// Matchmaker cron interval in seconds. Shared with the matchmaker to compute games_per_run.
+pub const MATCHMAKER_INTERVAL_SECS: u64 = 15 * 60;
+
 fn cron_registry() -> CronRegistry<AppState> {
     let mut registry = CronRegistry::new();
 
@@ -20,7 +23,7 @@ fn cron_registry() -> CronRegistry<AppState> {
     registry.register_job(
         LeaderboardMatchmakerJob,
         Some("Create leaderboard match games"),
-        Duration::from_secs(15 * 60),
+        Duration::from_secs(MATCHMAKER_INTERVAL_SECS),
     );
 
     registry
