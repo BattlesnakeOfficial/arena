@@ -3,7 +3,7 @@ use std::time::Duration;
 use cja::cron::{CronRegistry, Worker};
 use tokio_util::sync::CancellationToken;
 
-use crate::jobs::GameBackupJob;
+use crate::jobs::{GameBackupJob, LeaderboardMatchmakerJob};
 use crate::state::AppState;
 
 fn cron_registry() -> CronRegistry<AppState> {
@@ -14,6 +14,13 @@ fn cron_registry() -> CronRegistry<AppState> {
         GameBackupJob,
         Some("Enqueue backup jobs for games from the last 4 hours"),
         Duration::from_secs(60 * 60),
+    );
+
+    // Leaderboard matchmaker: runs every 15 minutes, creates match games
+    registry.register_job(
+        LeaderboardMatchmakerJob,
+        Some("Create leaderboard match games"),
+        Duration::from_secs(15 * 60),
     );
 
     registry

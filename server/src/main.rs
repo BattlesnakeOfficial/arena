@@ -20,6 +20,8 @@ mod game_channels;
 mod game_runner;
 mod github;
 mod jobs;
+mod leaderboard_matchmaker;
+mod leaderboard_ratings;
 mod models;
 mod routes;
 mod snake_client;

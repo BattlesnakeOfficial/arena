@@ -203,6 +203,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "simple_asn1",
+ "skillratings",
  "sqlx",
  "tabled",
  "tempfile",
@@ -4313,6 +4314,12 @@ name = "siphasher"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "56199f7ddabf13fe5074ce809e7d3f42b42ae711800501b5b16ea82ad029c39d"
+
+[[package]]
+name = "skillratings"
+version = "0.28.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1a6ee7559737c1adcd9184f168a04dc360c84878907c3ecc5c33c2320be1d47a"
 
 [[package]]
 name = "slab"

@@ -93,11 +93,44 @@ impl Job<AppState> for HistoricalBackupDiscoveryJob {
     }
 }
 
+/// Cron job to create leaderboard match games.
+/// Runs every 15 minutes, creating games for active leaderboards.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LeaderboardMatchmakerJob;
+
+#[async_trait::async_trait]
+impl Job<AppState> for LeaderboardMatchmakerJob {
+    const NAME: &'static str = "LeaderboardMatchmakerJob";
+
+    async fn run(&self, app_state: AppState) -> cja::Result<()> {
+        crate::leaderboard_matchmaker::run_matchmaker(&app_state).await?;
+        Ok(())
+    }
+}
+
+/// Job to update ratings after a leaderboard game completes.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LeaderboardRatingUpdateJob {
+    pub leaderboard_game_id: Uuid,
+}
+
+#[async_trait::async_trait]
+impl Job<AppState> for LeaderboardRatingUpdateJob {
+    const NAME: &'static str = "LeaderboardRatingUpdateJob";
+
+    async fn run(&self, app_state: AppState) -> cja::Result<()> {
+        crate::leaderboard_ratings::update_ratings(&app_state, self.leaderboard_game_id).await?;
+        Ok(())
+    }
+}
+
 cja::impl_job_registry!(
     AppState,
     NoopJob,
     GameRunnerJob,
     GameBackupJob,
     BackupSingleGameJob,
-    HistoricalBackupDiscoveryJob
+    HistoricalBackupDiscoveryJob,
+    LeaderboardMatchmakerJob,
+    LeaderboardRatingUpdateJob
 );
