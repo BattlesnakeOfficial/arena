@@ -53,7 +53,7 @@ test.describe('Leaderboard Pages', () => {
     await authenticatedPage.getByRole('button', { name: 'Join' }).click();
 
     // After joining, should see the snake listed as Active
-    await expect(authenticatedPage.getByText(snakeName)).toBeVisible();
+    await expect(authenticatedPage.getByRole('cell', { name: snakeName })).toBeVisible();
     await expect(authenticatedPage.getByText('Active')).toBeVisible();
   });
 
@@ -76,7 +76,7 @@ test.describe('Leaderboard Pages', () => {
     // Join the leaderboard
     await authenticatedPage.goto(`/leaderboards/${leaderboardId}`);
     await authenticatedPage.getByRole('button', { name: 'Join' }).click();
-    await expect(authenticatedPage.getByText(snakeName)).toBeVisible();
+    await expect(authenticatedPage.getByRole('cell', { name: snakeName })).toBeVisible();
 
     // Pause the snake
     await authenticatedPage.getByRole('button', { name: 'Pause' }).click();
@@ -139,7 +139,7 @@ test.describe('Leaderboard Pages', () => {
 
     // The snake should appear in the "In Placement" section (0 games played)
     await expect(authenticatedPage.getByRole('heading', { name: 'In Placement' })).toBeVisible();
-    await expect(authenticatedPage.getByText(snakeName)).toBeVisible();
+    await expect(authenticatedPage.getByRole('cell', { name: snakeName })).toBeVisible();
     // Games remaining should be 10 (MIN_GAMES_FOR_RANKING - 0 games played)
     await expect(authenticatedPage.getByText('10')).toBeVisible();
   });
