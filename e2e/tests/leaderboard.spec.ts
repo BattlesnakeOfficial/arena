@@ -141,7 +141,7 @@ test.describe('Leaderboard Pages', () => {
     await expect(authenticatedPage.getByRole('heading', { name: 'In Placement' })).toBeVisible();
     await expect(authenticatedPage.getByRole('cell', { name: snakeName })).toBeVisible();
     // Games remaining should be 10 (MIN_GAMES_FOR_RANKING - 0 games played)
-    await expect(authenticatedPage.getByText('10')).toBeVisible();
+    await expect(authenticatedPage.getByRole('cell', { name: '10', exact: true })).toBeVisible();
   });
 });
 
