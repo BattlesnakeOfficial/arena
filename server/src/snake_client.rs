@@ -283,6 +283,7 @@ pub async fn request_end_parallel(
 mod tests {
     use super::*;
     use battlesnake_game_types::wire_representation::{Board, NestedGame, Position, Ruleset};
+    use proptest::prelude::*;
     use std::collections::VecDeque;
 
     #[test]
@@ -467,5 +468,173 @@ mod tests {
         assert_eq!(response.direction, "LEFT");
         // parse_direction handles case normalization
         assert_eq!(parse_direction(&response.direction), Some(Move::Left));
+    }
+
+    // === Property-based tests ===
+
+    /// Strategy that generates a valid Move variant
+    fn arb_move() -> impl Strategy<Value = Move> {
+        prop_oneof![
+            Just(Move::Up),
+            Just(Move::Down),
+            Just(Move::Left),
+            Just(Move::Right),
+        ]
+    }
+
+    /// Strategy that generates a valid base URL with optional path and query params
+    fn arb_base_url() -> impl Strategy<Value = String> {
+        let scheme = prop_oneof![Just("http"), Just("https")];
+        let host = prop_oneof![
+            Just("example.com".to_string()),
+            Just("snake.io".to_string()),
+            Just("localhost:8080".to_string()),
+            Just("192.168.1.1:3000".to_string()),
+        ];
+        let path = prop_oneof![
+            Just("".to_string()),
+            Just("/".to_string()),
+            Just("/api".to_string()),
+            Just("/api/v1".to_string()),
+            Just("/api/v1/".to_string()),
+            Just("/snakes/my-snake".to_string()),
+        ];
+        let query = prop_oneof![
+            Just("".to_string()),
+            Just("?token=abc".to_string()),
+            Just("?token=abc&version=2".to_string()),
+            Just("?auth=secret123".to_string()),
+        ];
+        (scheme, host, path, query).prop_map(|(s, h, p, q)| format!("{}://{}{}{}", s, h, p, q))
+    }
+
+    /// Strategy for the three battlesnake endpoints
+    fn arb_endpoint() -> impl Strategy<Value = &'static str> {
+        prop_oneof![Just("move"), Just("start"), Just("end"),]
+    }
+
+    proptest! {
+        // -- build_endpoint_url properties --
+
+        #[test]
+        fn prop_endpoint_url_is_parseable(
+            base in arb_base_url(),
+            endpoint in arb_endpoint()
+        ) {
+            let result = build_endpoint_url(&base, endpoint);
+            prop_assert!(Url::parse(&result).is_ok(),
+                "Result '{}' should be a valid URL", result);
+        }
+
+        #[test]
+        fn prop_endpoint_url_preserves_scheme(
+            base in arb_base_url(),
+            endpoint in arb_endpoint()
+        ) {
+            let result = build_endpoint_url(&base, endpoint);
+            let base_parsed = Url::parse(&base).unwrap();
+            let result_parsed = Url::parse(&result).unwrap();
+            prop_assert_eq!(base_parsed.scheme(), result_parsed.scheme());
+        }
+
+        #[test]
+        fn prop_endpoint_url_preserves_host(
+            base in arb_base_url(),
+            endpoint in arb_endpoint()
+        ) {
+            let result = build_endpoint_url(&base, endpoint);
+            let base_parsed = Url::parse(&base).unwrap();
+            let result_parsed = Url::parse(&result).unwrap();
+            prop_assert_eq!(base_parsed.host_str(), result_parsed.host_str());
+        }
+
+        #[test]
+        fn prop_endpoint_url_preserves_query(
+            base in arb_base_url(),
+            endpoint in arb_endpoint()
+        ) {
+            let result = build_endpoint_url(&base, endpoint);
+            let base_parsed = Url::parse(&base).unwrap();
+            let result_parsed = Url::parse(&result).unwrap();
+            prop_assert_eq!(base_parsed.query(), result_parsed.query());
+        }
+
+        #[test]
+        fn prop_endpoint_url_contains_endpoint(
+            base in arb_base_url(),
+            endpoint in arb_endpoint()
+        ) {
+            let result = build_endpoint_url(&base, endpoint);
+            let result_parsed = Url::parse(&result).unwrap();
+            prop_assert!(result_parsed.path().ends_with(&format!("/{}", endpoint)),
+                "Path '{}' should end with '/{}'", result_parsed.path(), endpoint);
+        }
+
+        #[test]
+        fn prop_endpoint_url_no_double_slashes(
+            base in arb_base_url(),
+            endpoint in arb_endpoint()
+        ) {
+            let result = build_endpoint_url(&base, endpoint);
+            let result_parsed = Url::parse(&result).unwrap();
+            // Check path portion only (scheme has ://)
+            prop_assert!(!result_parsed.path().contains("//"),
+                "Path '{}' should not contain double slashes", result_parsed.path());
+        }
+
+        #[test]
+        fn prop_endpoint_url_preserves_port(
+            base in arb_base_url(),
+            endpoint in arb_endpoint()
+        ) {
+            let result = build_endpoint_url(&base, endpoint);
+            let base_parsed = Url::parse(&base).unwrap();
+            let result_parsed = Url::parse(&result).unwrap();
+            prop_assert_eq!(base_parsed.port(), result_parsed.port());
+        }
+
+        // -- parse_direction properties --
+
+        #[test]
+        fn prop_parse_direction_round_trip(m in arb_move()) {
+            // Display gives lowercase string, parse_direction should round-trip
+            let s = m.to_string();
+            prop_assert_eq!(parse_direction(&s), Some(m));
+        }
+
+        #[test]
+        fn prop_parse_direction_case_insensitive(m in arb_move()) {
+            let s = m.to_string();
+            // Lowercase
+            prop_assert_eq!(parse_direction(&s.to_lowercase()), Some(m));
+            // Uppercase
+            prop_assert_eq!(parse_direction(&s.to_uppercase()), Some(m));
+            // Title case
+            let title: String = s.chars().enumerate()
+                .map(|(i, c)| if i == 0 { c.to_uppercase().next().unwrap() } else { c })
+                .collect();
+            prop_assert_eq!(parse_direction(&title), Some(m));
+        }
+
+        #[test]
+        fn prop_parse_direction_rejects_non_directions(s in "[a-z]{1,10}") {
+            // Filter out the 4 valid directions
+            let lower = s.to_lowercase();
+            if lower != "up" && lower != "down" && lower != "left" && lower != "right" {
+                prop_assert_eq!(parse_direction(&s), None);
+            }
+        }
+
+        #[test]
+        fn prop_parse_direction_rejects_empty_and_whitespace(
+            padding in "\\s{0,5}"
+        ) {
+            // Direction strings with leading/trailing whitespace should fail
+            // (parse_direction does to_lowercase but not trim)
+            if !padding.is_empty() {
+                prop_assert_eq!(parse_direction(&format!("{}up", padding)), None);
+                prop_assert_eq!(parse_direction(&format!("up{}", padding)), None);
+            }
+        }
     }
 }
