@@ -16,6 +16,7 @@ pub mod auth;
 pub mod battlesnake;
 pub mod game;
 pub mod github_auth;
+pub mod leaderboard;
 
 pub fn routes(app_state: AppState) -> axum::Router {
     // CORS layer for API routes - allows board.battlesnake.com to access our API
@@ -43,6 +44,20 @@ pub fn routes(app_state: AppState) -> axum::Router {
         .route("/games/{id}/details", get(api::games::show_game))
         .route("/games/status", post(api::games::batch_game_status))
         .route("/admin/stats", get(admin::stats_json))
+        // Leaderboard API endpoints
+        .route("/leaderboards", get(api::leaderboards::list_leaderboards))
+        .route(
+            "/leaderboards/{id}/rankings",
+            get(api::leaderboards::get_rankings),
+        )
+        .route(
+            "/leaderboards/{id}/entries",
+            post(api::leaderboards::create_entry),
+        )
+        .route(
+            "/leaderboards/{id}/entries/{battlesnake_id}",
+            delete(api::leaderboards::delete_entry),
+        )
         .layer(cors);
 
     axum::Router::new()
@@ -103,6 +118,17 @@ pub fn routes(app_state: AppState) -> axum::Router {
             axum::routing::post(game::remove_battlesnake),
         )
         .route("/games/flow/{id}/search", get(game::search_battlesnakes))
+        // Leaderboard routes
+        .route("/leaderboards", get(leaderboard::list_leaderboards))
+        .route("/leaderboards/{id}", get(leaderboard::show_leaderboard))
+        .route(
+            "/leaderboards/{id}/join",
+            axum::routing::post(leaderboard::join_leaderboard),
+        )
+        .route(
+            "/leaderboards/{id}/leave",
+            axum::routing::post(leaderboard::leave_leaderboard),
+        )
         // Admin routes
         .route("/admin", get(admin::dashboard))
         // Game API routes for board viewer (with CORS)
@@ -137,6 +163,7 @@ async fn root_page(
                         div class="user-actions" style="margin-top: 10px;" {
                             a href="/me" class="btn btn-primary" { "Profile" }
                             a href="/battlesnakes" class="btn btn-primary" { "Battlesnakes" }
+                            a href="/leaderboards" class="btn btn-primary" { "Leaderboards" }
                             a href="/auth/logout" class="btn btn-secondary" { "Logout" }
                         }
                     }

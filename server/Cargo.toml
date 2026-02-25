@@ -79,6 +79,7 @@ tabled = "0.17"
 colored = "2"
 chrono-humanize = "0.2"
 
+skillratings = "0.28"
 battlesnake-game-types = { git = "https://github.com/fables-tales/battlesnake-game-types", branch = "main" }
 tokio-util = { version = "0.7.14", features = ["rt"] }
 rusqlite = { version = "0.32", features = ["bundled"] }

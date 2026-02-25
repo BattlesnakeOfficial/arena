@@ -268,6 +268,28 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
         "game completed"
     );
 
+    // Check if this is a leaderboard game and enqueue rating update
+    if let Some(lb_game) =
+        crate::models::leaderboard::find_leaderboard_game_by_game_id(pool, game_id).await?
+    {
+        let job = crate::jobs::LeaderboardRatingUpdateJob {
+            leaderboard_game_id: lb_game.leaderboard_game_id,
+        };
+        cja::jobs::Job::enqueue(
+            job,
+            app_state.clone(),
+            format!("Rate leaderboard game {game_id}"),
+        )
+        .await
+        .wrap_err("Failed to enqueue leaderboard rating update job")?;
+
+        tracing::info!(
+            game_id = %game_id,
+            leaderboard_game_id = %lb_game.leaderboard_game_id,
+            "Enqueued leaderboard rating update"
+        );
+    }
+
     // Clean up game channel (will be removed when no subscribers)
     game_channels.cleanup(game_id).await;
 

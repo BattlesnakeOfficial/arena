@@ -265,6 +265,26 @@ pub async fn create_game_with_snakes(
     pool: &PgPool,
     data: CreateGameWithSnakes,
 ) -> cja::Result<Game> {
+    let mut tx = pool
+        .begin()
+        .await
+        .wrap_err("Failed to start database transaction")?;
+
+    let game = create_game_with_snakes_tx(&mut tx, data).await?;
+
+    tx.commit()
+        .await
+        .wrap_err("Failed to commit database transaction")?;
+
+    Ok(game)
+}
+
+/// Create a game with battlesnakes using a mutable connection reference.
+/// Use this when you need to compose game creation with other operations in a single transaction.
+pub async fn create_game_with_snakes_tx(
+    conn: &mut sqlx::PgConnection,
+    data: CreateGameWithSnakes,
+) -> cja::Result<Game> {
     // Validate number of battlesnakes
     if data.battlesnake_ids.is_empty() {
         return Err(cja::color_eyre::eyre::eyre!(
@@ -278,75 +298,27 @@ pub async fn create_game_with_snakes(
         ));
     }
 
-    // Start a transaction
-    let mut tx = pool
-        .begin()
-        .await
-        .wrap_err("Failed to start database transaction")?;
-
     // Create the game
-    let board_size_str = data.board_size.as_str();
-    let game_type_str = data.game_type.as_str();
-    let status_str = GameStatus::Waiting.as_str();
-
-    let row = sqlx::query!(
-        r#"
-        INSERT INTO games (
-            board_size,
-            game_type,
-            status
-        )
-        VALUES ($1, $2, $3)
-        RETURNING
-            game_id,
-            board_size,
-            game_type,
-            status,
-            enqueued_at,
-            created_at,
-            updated_at
-        "#,
-        board_size_str,
-        game_type_str,
-        status_str
+    let game = create_game(
+        &mut *conn,
+        CreateGame {
+            board_size: data.board_size,
+            game_type: data.game_type,
+        },
     )
-    .fetch_one(&mut *tx) // Access the connection inside the transaction
     .await
     .wrap_err("Failed to create game in database")?;
 
-    let game = Game {
-        game_id: row.game_id,
-        board_size: data.board_size,
-        game_type: data.game_type,
-        status: GameStatus::from_str(&row.status)
-            .wrap_err_with(|| format!("Invalid game status: {}", row.status))?,
-        enqueued_at: row.enqueued_at,
-        created_at: row.created_at,
-        updated_at: row.updated_at,
-    };
-
     // Add each battlesnake to the game
     for battlesnake_id in data.battlesnake_ids {
-        sqlx::query!(
-            r#"
-            INSERT INTO game_battlesnakes (
-                game_id,
-                battlesnake_id
-            )
-            VALUES ($1, $2)
-            "#,
+        add_battlesnake_to_game(
+            &mut *conn,
             game.game_id,
-            battlesnake_id
+            AddBattlesnakeToGame { battlesnake_id },
         )
-        .execute(&mut *tx) // Access the connection inside the transaction
         .await
         .wrap_err_with(|| format!("Failed to add battlesnake {} to game", battlesnake_id))?;
     }
-
-    // Commit the transaction
-    tx.commit()
-        .await
-        .wrap_err("Failed to commit database transaction")?;
 
     Ok(game)
 }
@@ -487,6 +459,28 @@ pub async fn set_game_enqueued_at(
         enqueued_at
     )
     .execute(pool)
+    .await
+    .wrap_err_with(|| format!("Failed to set enqueued_at for game {}", game_id))?;
+
+    Ok(())
+}
+
+/// Set the enqueued_at timestamp using a mutable connection reference (for transaction composition).
+pub async fn set_game_enqueued_at_tx(
+    conn: &mut sqlx::PgConnection,
+    game_id: Uuid,
+    enqueued_at: chrono::DateTime<chrono::Utc>,
+) -> cja::Result<()> {
+    sqlx::query!(
+        r#"
+        UPDATE games
+        SET enqueued_at = $2
+        WHERE game_id = $1
+        "#,
+        game_id,
+        enqueued_at
+    )
+    .execute(&mut *conn)
     .await
     .wrap_err_with(|| format!("Failed to set enqueued_at for game {}", game_id))?;
 
