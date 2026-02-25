@@ -114,8 +114,7 @@ pub fn routes(app_state: AppState) -> axum::Router {
         )
         // Internal routes
         .route("/_/version", get(version_page))
-        // Add trace layer for debugging
-        .layer(tower_http::trace::TraceLayer::new_for_http())
+        .layer(axum::middleware::from_fn(inject_trace_context))
         .with_state(app_state)
 }
 
@@ -211,6 +210,21 @@ async fn profile_page(
             }
         }),
     ))
+}
+
+/// Middleware to extract GCP trace context from the `X-Cloud-Trace-Context` header
+/// and store it in the current span's extensions for the GCP JSON formatter.
+async fn inject_trace_context(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    if let Some(header) = request.headers().get("x-cloud-trace-context")
+        && let Ok(value) = header.to_str()
+        && let Some(trace_path) = crate::telemetry::extract_trace_context(value)
+    {
+        crate::telemetry::insert_trace_context_into_current_span(trace_path);
+    }
+    next.run(request).await
 }
 
 /// Version info page showing build metadata
