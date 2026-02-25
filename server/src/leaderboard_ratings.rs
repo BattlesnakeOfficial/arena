@@ -130,6 +130,25 @@ pub async fn update_ratings(app_state: &AppState, leaderboard_game_id: Uuid) -> 
         .await
         .wrap_err("Failed to start transaction for rating update")?;
 
+    // Authoritative idempotency check INSIDE the transaction.
+    // The early check above is a fast-path optimization; this is the real guard
+    // against concurrent job execution (e.g., timeout-triggered retry while original still runs).
+    let existing_in_tx: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM leaderboard_game_results WHERE leaderboard_game_id = $1",
+    )
+    .bind(leaderboard_game_id)
+    .fetch_one(&mut *tx)
+    .await
+    .wrap_err("Failed to check existing game results inside transaction")?;
+
+    if existing_in_tx.0 > 0 {
+        tracing::info!(
+            leaderboard_game_id = %leaderboard_game_id,
+            "Ratings already applied (detected inside transaction), skipping"
+        );
+        return Ok(());
+    }
+
     // Look up each snake's leaderboard entry with FOR UPDATE to lock the rows
     let mut entries_with_placements: Vec<(LeaderboardEntry, i32)> = Vec::new();
 

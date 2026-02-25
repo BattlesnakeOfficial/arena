@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::{
     components::page_factory::PageFactory,
-    errors::{ServerResult, WithRedirect, WithStatus},
+    errors::{ServerResult, WithRedirect},
     models::{
         battlesnake::{self, Visibility},
         leaderboard::{self, MIN_GAMES_FOR_RANKING},
@@ -27,8 +27,7 @@ pub async fn list_leaderboards(
 ) -> ServerResult<impl IntoResponse, StatusCode> {
     let leaderboards = leaderboard::get_all_leaderboards(&state.db)
         .await
-        .wrap_err("Failed to fetch leaderboards")
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)?;
+        .wrap_err("Failed to fetch leaderboards")?;
 
     Ok(page_factory.create_page(
         "Leaderboards".to_string(),
@@ -72,8 +71,7 @@ pub async fn show_leaderboard(
 ) -> ServerResult<impl IntoResponse, StatusCode> {
     let lb = leaderboard::get_leaderboard_by_id(&state.db, leaderboard_id)
         .await
-        .wrap_err("Failed to fetch leaderboard")
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)?
+        .wrap_err("Failed to fetch leaderboard")?
         .ok_or_else(|| {
             crate::errors::ServerError(
                 color_eyre::eyre::eyre!("Leaderboard not found"),
@@ -83,20 +81,17 @@ pub async fn show_leaderboard(
 
     let ranked = leaderboard::get_ranked_entries(&state.db, leaderboard_id)
         .await
-        .wrap_err("Failed to fetch ranked entries")
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)?;
+        .wrap_err("Failed to fetch ranked entries")?;
 
     let placement = leaderboard::get_placement_entries(&state.db, leaderboard_id)
         .await
-        .wrap_err("Failed to fetch placement entries")
-        .with_status(StatusCode::INTERNAL_SERVER_ERROR)?;
+        .wrap_err("Failed to fetch placement entries")?;
 
     // Get user's snakes for the join form
     let user_snakes = if let Some(ref u) = user {
         battlesnake::get_battlesnakes_by_user_id(&state.db, u.user_id)
             .await
-            .wrap_err("Failed to fetch user's battlesnakes")
-            .with_status(StatusCode::INTERNAL_SERVER_ERROR)?
+            .wrap_err("Failed to fetch user's battlesnakes")?
     } else {
         vec![]
     };
@@ -105,8 +100,7 @@ pub async fn show_leaderboard(
     let user_entries = if let Some(ref u) = user {
         leaderboard::get_user_entries(&state.db, leaderboard_id, u.user_id)
             .await
-            .wrap_err("Failed to fetch user's leaderboard entries")
-            .with_status(StatusCode::INTERNAL_SERVER_ERROR)?
+            .wrap_err("Failed to fetch user's leaderboard entries")?
     } else {
         vec![]
     };
