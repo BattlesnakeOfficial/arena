@@ -11,7 +11,7 @@ use super::game::{Game, GameBoardSize, GameStatus, GameType};
 pub struct GameBattlesnake {
     pub game_battlesnake_id: Uuid,
     pub game_id: Uuid,
-    pub battlesnake_id: Uuid,
+    pub battlesnake_id: Option<Uuid>,
     pub placement: Option<i32>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
@@ -30,7 +30,7 @@ pub struct SetGameResult {
 }
 
 // Extended GameBattlesnake with battlesnake details
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct GameBattlesnakeWithDetails {
     pub game_battlesnake_id: Uuid,
     pub game_id: Uuid,
@@ -42,35 +42,41 @@ pub struct GameBattlesnakeWithDetails {
     pub name: String,
     pub url: String,
     pub user_id: Uuid,
+    pub leaderboard_entry_id: Option<Uuid>,
 }
 
 // Database functions for game battlesnake management
 
 // Get all battlesnakes in a game
+// TODO: Switch to sqlx::query_as! once schema stabilizes and offline cache is updated.
+// Using runtime query_as here because COALESCE(gb.battlesnake_id, le.battlesnake_id)
+// requires a LEFT JOIN that makes SQLx macro type inference ambiguous.
 pub async fn get_battlesnakes_by_game_id(
     pool: &PgPool,
     game_id: Uuid,
 ) -> cja::Result<Vec<GameBattlesnakeWithDetails>> {
-    let game_battlesnakes = sqlx::query_as!(
-        GameBattlesnakeWithDetails,
+    let game_battlesnakes = sqlx::query_as::<_, GameBattlesnakeWithDetails>(
         r#"
         SELECT
             gb.game_battlesnake_id,
             gb.game_id,
-            gb.battlesnake_id,
+            COALESCE(gb.battlesnake_id, le.battlesnake_id) AS battlesnake_id,
             gb.placement,
             gb.created_at,
             gb.updated_at,
             b.name,
             b.url,
-            b.user_id
+            b.user_id,
+            gb.leaderboard_entry_id
         FROM game_battlesnakes gb
-        JOIN battlesnakes b ON gb.battlesnake_id = b.battlesnake_id
+        LEFT JOIN leaderboard_entries le ON gb.leaderboard_entry_id = le.leaderboard_entry_id
+        JOIN battlesnakes b
+            ON COALESCE(gb.battlesnake_id, le.battlesnake_id) = b.battlesnake_id
         WHERE gb.game_id = $1
         ORDER BY gb.placement NULLS LAST, gb.created_at ASC
         "#,
-        game_id
     )
+    .bind(game_id)
     .fetch_all(pool)
     .await
     .wrap_err("Failed to fetch battlesnakes for game from database")?;

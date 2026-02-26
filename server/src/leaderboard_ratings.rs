@@ -155,7 +155,15 @@ pub async fn update_ratings(app_state: &AppState, leaderboard_game_id: Uuid) -> 
     for gs in &game_snakes {
         let placement = gs.placement.unwrap_or(game_snakes.len() as i32);
 
-        let entry =
+        // Use leaderboard_entry_id if stored (deterministic lookup by PK).
+        // Fall back to battlesnake_id lookup for games created before this column was added.
+        let entry = if let Some(entry_id) = gs.leaderboard_entry_id {
+            leaderboard::get_entry_for_update_by_id(&mut *tx, entry_id)
+                .await
+                .wrap_err_with(|| {
+                    format!("Failed to get leaderboard entry {entry_id} for update")
+                })?
+        } else {
             leaderboard::get_entry_for_update(&mut *tx, lb_game.leaderboard_id, gs.battlesnake_id)
                 .await
                 .wrap_err_with(|| {
@@ -163,7 +171,8 @@ pub async fn update_ratings(app_state: &AppState, leaderboard_game_id: Uuid) -> 
                         "Failed to get leaderboard entry for snake {}",
                         gs.battlesnake_id
                     )
-                })?;
+                })?
+        };
 
         if let Some(entry) = entry {
             entries_with_placements.push((entry, placement));

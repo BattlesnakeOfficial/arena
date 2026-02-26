@@ -125,7 +125,8 @@ pub async fn get_leaderboard_by_id(
 
 // --- Leaderboard entry queries ---
 
-/// Opt-in a snake to a leaderboard. Returns existing entry if already joined.
+/// Opt-in a snake to a leaderboard. Always inserts a new entry.
+/// The unique constraint has been removed to allow duplicate entries for stress-testing.
 pub async fn get_or_create_entry(
     pool: &PgPool,
     leaderboard_id: Uuid,
@@ -134,8 +135,6 @@ pub async fn get_or_create_entry(
     let entry = sqlx::query_as::<_, LeaderboardEntry>(
         "INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id)
          VALUES ($1, $2)
-         ON CONFLICT (leaderboard_id, battlesnake_id)
-         DO UPDATE SET disabled_at = NULL
          RETURNING
             leaderboard_entry_id, leaderboard_id, battlesnake_id,
             mu, sigma, display_score, games_played, first_place_finishes, non_first_finishes,
@@ -289,6 +288,34 @@ where
     .fetch_optional(executor)
     .await
     .wrap_err("Failed to fetch leaderboard entry for update")?;
+
+    Ok(entry)
+}
+
+/// Get a specific entry by its primary key, locking the row for update.
+/// Use this within a transaction to prevent concurrent rating updates.
+/// Prefer this over get_entry_for_update when the leaderboard_entry_id is known —
+/// it is always deterministic, even when duplicate entries exist for the same battlesnake.
+pub async fn get_entry_for_update_by_id<'e, E>(
+    executor: E,
+    leaderboard_entry_id: Uuid,
+) -> cja::Result<Option<LeaderboardEntry>>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
+    let entry = sqlx::query_as::<_, LeaderboardEntry>(
+        "SELECT
+            leaderboard_entry_id, leaderboard_id, battlesnake_id,
+            mu, sigma, display_score, games_played, first_place_finishes, non_first_finishes,
+            disabled_at, created_at, updated_at
+         FROM leaderboard_entries
+         WHERE leaderboard_entry_id = $1
+         FOR UPDATE",
+    )
+    .bind(leaderboard_entry_id)
+    .fetch_optional(executor)
+    .await
+    .wrap_err("Failed to fetch leaderboard entry for update by ID")?;
 
     Ok(entry)
 }

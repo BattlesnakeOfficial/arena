@@ -396,6 +396,34 @@ where
     Ok(())
 }
 
+/// Add a leaderboard entry to a game without redundantly copying battlesnake_id.
+/// The effective battlesnake is resolved via JOIN with leaderboard_entries when needed.
+/// Use this instead of `add_battlesnake_to_game` when creating leaderboard games.
+pub async fn add_leaderboard_entry_to_game<'e, E>(
+    executor: E,
+    game_id: Uuid,
+    leaderboard_entry_id: Uuid,
+) -> cja::Result<()>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    sqlx::query!(
+        r#"
+        INSERT INTO game_battlesnakes (game_id, leaderboard_entry_id)
+        VALUES ($1, $2)
+        "#,
+        game_id,
+        leaderboard_entry_id
+    )
+    .execute(executor)
+    .await
+    .wrap_err_with(|| {
+        format!("Failed to add leaderboard entry {leaderboard_entry_id} to game {game_id}")
+    })?;
+
+    Ok(())
+}
+
 // Update the status of a game
 pub async fn update_game_status(
     pool: &PgPool,
