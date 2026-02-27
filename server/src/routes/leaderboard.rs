@@ -105,8 +105,6 @@ pub async fn show_leaderboard(
         vec![]
     };
 
-    let user_entry_snake_ids: Vec<Uuid> = user_entries.iter().map(|e| e.battlesnake_id).collect();
-
     Ok(page_factory.create_page(
         format!("Leaderboard: {}", lb.name),
         Box::new(html! {
@@ -132,7 +130,7 @@ pub async fn show_leaderboard(
                                     } @else {
                                         span class="badge bg-success text-white" { "Active" }
                                         form action={"/leaderboards/"(leaderboard_id)"/leave"} method="post" style="display: inline;" {
-                                            input type="hidden" name="battlesnake_id" value=(snake.battlesnake_id);
+                                            input type="hidden" name="leaderboard_entry_id" value=(entry.leaderboard_entry_id);
                                             button type="submit" class="btn btn-sm btn-warning" { "Pause" }
                                         }
                                     }
@@ -146,7 +144,7 @@ pub async fn show_leaderboard(
 
                         // Show joinable snakes (public, not already joined)
                         @let joinable: Vec<_> = user_snakes.iter()
-                            .filter(|s| s.visibility == Visibility::Public && !user_entry_snake_ids.contains(&s.battlesnake_id))
+                            .filter(|s| s.visibility == Visibility::Public)
                             .collect();
                         @if !joinable.is_empty() {
                             form action={"/leaderboards/"(leaderboard_id)"/join"} method="post" style="margin-top: 10px;" {
@@ -240,6 +238,11 @@ pub struct JoinLeaveForm {
     pub battlesnake_id: Uuid,
 }
 
+#[derive(serde::Deserialize)]
+pub struct LeaveForm {
+    pub leaderboard_entry_id: Uuid,
+}
+
 /// POST /leaderboards/:id/join — opt-in a snake
 pub async fn join_leaderboard(
     State(state): State<AppState>,
@@ -309,12 +312,32 @@ pub async fn leave_leaderboard(
     State(state): State<AppState>,
     CurrentUser(user): CurrentUser,
     Path(leaderboard_id): Path<Uuid>,
-    Form(form): Form<JoinLeaveForm>,
+    Form(form): Form<LeaveForm>,
 ) -> ServerResult<impl IntoResponse, Redirect> {
     let redirect = Redirect::to(&format!("/leaderboards/{leaderboard_id}"));
 
+    // Find the specific entry by ID
+    let entry = leaderboard::get_entry_by_id(&state.db, form.leaderboard_entry_id)
+        .await
+        .wrap_err("Failed to fetch entry")
+        .with_redirect(redirect.clone())?
+        .ok_or_else(|| {
+            crate::errors::ServerError(
+                color_eyre::eyre::eyre!("Leaderboard entry not found"),
+                redirect.clone(),
+            )
+        })?;
+
+    // Security: verify this entry belongs to the requested leaderboard
+    if entry.leaderboard_id != leaderboard_id {
+        return Err(crate::errors::ServerError(
+            color_eyre::eyre::eyre!("Entry does not belong to this leaderboard"),
+            redirect,
+        ));
+    }
+
     // Verify snake belongs to user
-    let snake = battlesnake::get_battlesnake_by_id(&state.db, form.battlesnake_id)
+    let snake = battlesnake::get_battlesnake_by_id(&state.db, entry.battlesnake_id)
         .await
         .wrap_err("Failed to fetch battlesnake")
         .with_redirect(redirect.clone())?
@@ -331,18 +354,6 @@ pub async fn leave_leaderboard(
             redirect,
         ));
     }
-
-    // Find the entry and pause it
-    let entry = leaderboard::get_entry(&state.db, leaderboard_id, form.battlesnake_id)
-        .await
-        .wrap_err("Failed to fetch entry")
-        .with_redirect(redirect.clone())?
-        .ok_or_else(|| {
-            crate::errors::ServerError(
-                color_eyre::eyre::eyre!("Snake is not in this leaderboard"),
-                redirect.clone(),
-            )
-        })?;
 
     leaderboard::set_disabled(
         &state.db,

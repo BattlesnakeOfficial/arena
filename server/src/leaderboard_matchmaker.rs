@@ -5,7 +5,7 @@ use crate::{
     cron::MATCHMAKER_INTERVAL_SECS,
     jobs::GameRunnerJob,
     models::{
-        game::{self, CreateGameWithSnakes, GameBoardSize, GameType},
+        game::{self, CreateGame, GameBoardSize, GameType},
         leaderboard::{self, GAMES_PER_DAY, LeaderboardEntry, MATCH_SIZE},
     },
     state::AppState,
@@ -71,8 +71,6 @@ async fn run_matchmaker_for_leaderboard(
             break;
         }
 
-        let battlesnake_ids: Vec<Uuid> = selected.iter().map(|e| e.battlesnake_id).collect();
-
         // Use a transaction to atomically create the game, link it to the leaderboard,
         // and set enqueued_at. This prevents "zombie" games without a leaderboard record.
         let mut tx = pool
@@ -80,16 +78,28 @@ async fn run_matchmaker_for_leaderboard(
             .await
             .wrap_err("Failed to start matchmaker transaction")?;
 
-        let game = game::create_game_with_snakes_tx(
-            &mut tx,
-            CreateGameWithSnakes {
+        let game = game::create_game(
+            &mut *tx,
+            CreateGame {
                 board_size: GameBoardSize::Medium, // 11x11
                 game_type: GameType::Standard,
-                battlesnake_ids,
             },
         )
         .await
-        .wrap_err("Failed to create leaderboard game")?;
+        .wrap_err("Failed to create game")?;
+
+        // Add each selected entry by leaderboard_entry_id only — no redundant battlesnake_id copy.
+        // The effective battlesnake is resolved via JOIN in get_battlesnakes_by_game_id when needed.
+        for entry in &selected {
+            game::add_leaderboard_entry_to_game(&mut *tx, game.game_id, entry.leaderboard_entry_id)
+                .await
+                .wrap_err_with(|| {
+                    format!(
+                        "Failed to add entry {} to game {}",
+                        entry.leaderboard_entry_id, game.game_id
+                    )
+                })?;
+        }
 
         game::set_game_enqueued_at_tx(&mut tx, game.game_id, chrono::Utc::now())
             .await

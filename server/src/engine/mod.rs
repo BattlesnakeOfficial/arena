@@ -1523,6 +1523,7 @@ mod tests {
                 name: "Duplicate Snake".to_string(),
                 url: "https://example.com/snake".to_string(),
                 user_id: Uuid::new_v4(),
+                leaderboard_entry_id: None,
             },
             GameBattlesnakeWithDetails {
                 game_battlesnake_id: Uuid::new_v4(),
@@ -1534,6 +1535,7 @@ mod tests {
                 name: "Duplicate Snake".to_string(),
                 url: "https://example.com/snake".to_string(),
                 user_id: Uuid::new_v4(),
+                leaderboard_entry_id: None,
             },
         ];
 
