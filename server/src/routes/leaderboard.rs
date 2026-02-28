@@ -92,13 +92,7 @@ pub async fn show_leaderboard(
             )
         })?;
 
-    let page = pagination.page.unwrap_or(0).max(0);
     let per_page: i64 = 50;
-
-    let ranked =
-        leaderboard::get_ranked_entries_paginated(&state.db, leaderboard_id, page, per_page)
-            .await
-            .wrap_err("Failed to fetch ranked entries")?;
 
     let total_ranked = leaderboard::count_ranked_entries(&state.db, leaderboard_id)
         .await
@@ -109,7 +103,12 @@ pub async fn show_leaderboard(
     } else {
         1
     };
-    let page = page.min(total_pages - 1);
+    let page = pagination.page.unwrap_or(0).clamp(0, total_pages - 1);
+
+    let ranked =
+        leaderboard::get_ranked_entries_paginated(&state.db, leaderboard_id, page, per_page)
+            .await
+            .wrap_err("Failed to fetch ranked entries")?;
 
     let placement = leaderboard::get_placement_entries(&state.db, leaderboard_id)
         .await
@@ -239,7 +238,7 @@ pub async fn show_leaderboard(
 
                 // Rankings table
                 h2 { "Rankings" }
-                @if ranked.is_empty() && page == 0 {
+                @if ranked.is_empty() {
                     p { "No snakes have completed enough games to be ranked yet. (Minimum: " (MIN_GAMES_FOR_RANKING) " games)" }
                 } @else {
                     p style="color: #666;" {

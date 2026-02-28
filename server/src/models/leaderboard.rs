@@ -660,14 +660,22 @@ pub async fn get_rating_history_for_entry(
     pool: &PgPool,
     leaderboard_entry_id: Uuid,
 ) -> cja::Result<Vec<RatingPoint>> {
+    // Cap at 500 most recent points to avoid unbounded result sets for
+    // snakes with thousands of games. We use a subquery so the outer
+    // ORDER is ascending (needed for the SVG polyline) while still
+    // keeping only the latest 500.
     let points = sqlx::query_as::<_, RatingPoint>(
-        "SELECT
-            (lgr.mu_after - 3.0 * lgr.sigma_after) as display_score_after,
-            lg.created_at as game_created_at
-         FROM leaderboard_game_results lgr
-         JOIN leaderboard_games lg ON lgr.leaderboard_game_id = lg.leaderboard_game_id
-         WHERE lgr.leaderboard_entry_id = $1
-         ORDER BY lg.created_at ASC",
+        "SELECT display_score_after, game_created_at FROM (
+            SELECT
+                (lgr.mu_after - 3.0 * lgr.sigma_after) as display_score_after,
+                lg.created_at as game_created_at
+            FROM leaderboard_game_results lgr
+            JOIN leaderboard_games lg ON lgr.leaderboard_game_id = lg.leaderboard_game_id
+            WHERE lgr.leaderboard_entry_id = $1
+            ORDER BY lg.created_at DESC
+            LIMIT 500
+         ) recent
+         ORDER BY game_created_at ASC",
     )
     .bind(leaderboard_entry_id)
     .fetch_all(pool)
