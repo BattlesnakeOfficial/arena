@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT display_score_after as \"display_score_after!\", game_created_at as \"game_created_at!\" FROM (\n            SELECT\n                (lgr.mu_after - 3.0 * lgr.sigma_after) as display_score_after,\n                lg.created_at as game_created_at\n            FROM leaderboard_game_results lgr\n            JOIN leaderboard_games lg ON lgr.leaderboard_game_id = lg.leaderboard_game_id\n            WHERE lgr.leaderboard_entry_id = $1\n            ORDER BY lg.created_at DESC\n            LIMIT 500\n         ) recent\n         ORDER BY game_created_at ASC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "display_score_after!",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 1,
+        "name": "game_created_at!",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null,
+      false
+    ]
+  },
+  "hash": "7814fc07dfc115b3f8987a997b3fdbe1d2e8e0c1cf84e59f9b30eb23a6e1dcc9"
+}

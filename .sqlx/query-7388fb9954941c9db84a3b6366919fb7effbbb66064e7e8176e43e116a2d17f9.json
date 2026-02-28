@@ -1,0 +1,83 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO leaderboard_game_results (\n            leaderboard_game_id, leaderboard_entry_id, placement,\n            mu_before, mu_after, sigma_before, sigma_after, display_score_change\n         )\n         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)\n         ON CONFLICT (leaderboard_game_id, leaderboard_entry_id) DO NOTHING\n         RETURNING\n            leaderboard_game_result_id, leaderboard_game_id, leaderboard_entry_id,\n            placement, mu_before, mu_after, sigma_before, sigma_after,\n            display_score_change, created_at",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "leaderboard_game_result_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "leaderboard_game_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "leaderboard_entry_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "placement",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 4,
+        "name": "mu_before",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 5,
+        "name": "mu_after",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 6,
+        "name": "sigma_before",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 7,
+        "name": "sigma_after",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 8,
+        "name": "display_score_change",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 9,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Int4",
+        "Float8",
+        "Float8",
+        "Float8",
+        "Float8",
+        "Float8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "7388fb9954941c9db84a3b6366919fb7effbbb66064e7e8176e43e116a2d17f9"
+}

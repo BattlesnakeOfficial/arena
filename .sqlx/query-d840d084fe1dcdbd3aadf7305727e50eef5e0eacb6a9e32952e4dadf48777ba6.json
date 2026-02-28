@@ -1,0 +1,72 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n            lgr.leaderboard_game_id,\n            lg.game_id,\n            lgr.placement,\n            lgr.display_score_change,\n            lgr.mu_before,\n            lgr.mu_after,\n            lgr.sigma_before,\n            lgr.sigma_after,\n            lg.created_at as game_created_at\n         FROM leaderboard_game_results lgr\n         JOIN leaderboard_games lg ON lgr.leaderboard_game_id = lg.leaderboard_game_id\n         WHERE lgr.leaderboard_entry_id = $1\n         ORDER BY lg.created_at DESC\n         LIMIT $2 OFFSET $3",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "leaderboard_game_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "game_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "placement",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 3,
+        "name": "display_score_change",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 4,
+        "name": "mu_before",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 5,
+        "name": "mu_after",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 6,
+        "name": "sigma_before",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 7,
+        "name": "sigma_after",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 8,
+        "name": "game_created_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "d840d084fe1dcdbd3aadf7305727e50eef5e0eacb6a9e32952e4dadf48777ba6"
+}

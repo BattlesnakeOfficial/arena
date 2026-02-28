@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT COUNT(*) as \"count!\"\n         FROM leaderboard_entries\n         WHERE leaderboard_id = $1 AND disabled_at IS NULL AND games_played >= $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "821080bb8659005f67458502a6edd3f8059bbc0d8c0afa7b13bb6290dbf0b5ca"
+}

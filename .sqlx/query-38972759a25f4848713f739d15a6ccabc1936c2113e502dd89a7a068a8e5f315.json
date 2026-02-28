@@ -1,0 +1,64 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n            le.leaderboard_entry_id,\n            le.leaderboard_id,\n            l.name as leaderboard_name,\n            le.display_score,\n            le.games_played,\n            le.first_place_finishes,\n            le.non_first_finishes,\n            le.disabled_at\n         FROM leaderboard_entries le\n         JOIN leaderboards l ON le.leaderboard_id = l.leaderboard_id\n         WHERE le.battlesnake_id = $1\n         ORDER BY le.display_score DESC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "leaderboard_entry_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "leaderboard_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "leaderboard_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "display_score",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 4,
+        "name": "games_played",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 5,
+        "name": "first_place_finishes",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 6,
+        "name": "non_first_finishes",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 7,
+        "name": "disabled_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "38972759a25f4848713f739d15a6ccabc1936c2113e502dd89a7a068a8e5f315"
+}

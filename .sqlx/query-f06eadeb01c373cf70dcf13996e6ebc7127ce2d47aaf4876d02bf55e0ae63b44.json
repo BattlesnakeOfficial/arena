@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE leaderboard_entries\n         SET disabled_at = $2\n         WHERE leaderboard_entry_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f06eadeb01c373cf70dcf13996e6ebc7127ce2d47aaf4876d02bf55e0ae63b44"
+}

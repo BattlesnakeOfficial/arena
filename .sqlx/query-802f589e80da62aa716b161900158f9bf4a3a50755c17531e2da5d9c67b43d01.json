@@ -1,0 +1,77 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n            le.leaderboard_entry_id,\n            le.battlesnake_id,\n            le.display_score,\n            le.games_played,\n            le.first_place_finishes,\n            le.non_first_finishes,\n            le.mu,\n            le.sigma,\n            b.name as snake_name,\n            u.github_login as owner_login\n         FROM leaderboard_entries le\n         JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id\n         JOIN users u ON b.user_id = u.user_id\n         WHERE le.leaderboard_id = $1\n           AND le.disabled_at IS NULL\n           AND le.games_played >= $2\n         ORDER BY le.display_score DESC\n         LIMIT 100",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "leaderboard_entry_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "battlesnake_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "display_score",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 3,
+        "name": "games_played",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 4,
+        "name": "first_place_finishes",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 5,
+        "name": "non_first_finishes",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 6,
+        "name": "mu",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 7,
+        "name": "sigma",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 8,
+        "name": "snake_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "owner_login",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "802f589e80da62aa716b161900158f9bf4a3a50755c17531e2da5d9c67b43d01"
+}

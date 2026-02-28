@@ -1,0 +1,88 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n            leaderboard_entry_id, leaderboard_id, battlesnake_id,\n            mu, sigma, display_score, games_played, first_place_finishes, non_first_finishes,\n            disabled_at, created_at, updated_at\n         FROM leaderboard_entries\n         WHERE leaderboard_entry_id = $1\n         FOR UPDATE",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "leaderboard_entry_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "leaderboard_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "battlesnake_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "mu",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 4,
+        "name": "sigma",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 5,
+        "name": "display_score",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 6,
+        "name": "games_played",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 7,
+        "name": "first_place_finishes",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 8,
+        "name": "non_first_finishes",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 9,
+        "name": "disabled_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 10,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 11,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "c817610ec5e9282d091d43bc574604f72a2a9c2c0dd3cd394dbbd0469e051e3a"
+}
