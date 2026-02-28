@@ -13,6 +13,7 @@ use crate::{
     errors::{ServerResult, WithStatus},
     models::battlesnake::{self, CreateBattlesnake, UpdateBattlesnake, Visibility},
     models::game_battlesnake,
+    models::leaderboard,
     models::session,
     models::user::get_user_by_id,
     routes::auth::{CurrentUser, CurrentUserWithSession},
@@ -464,6 +465,11 @@ pub async fn view_battlesnake_profile(
         .await
         .wrap_err("Failed to get game history")?;
 
+    // Fetch leaderboard entries
+    let leaderboard_entries = leaderboard::get_entries_for_battlesnake(&state.db, battlesnake_id)
+        .await
+        .wrap_err("Failed to get leaderboard entries")?;
+
     let flash = page_factory.flash.clone();
 
     // Compute stats
@@ -579,6 +585,49 @@ pub async fn view_battlesnake_profile(
                                 span { "🥈 2nd: " (stats.second_places) }
                                 span { "🥉 3rd: " (stats.third_places) }
                                 span { "4th: " (stats.fourth_places) }
+                            }
+                        }
+                    }
+                }
+
+                // Leaderboard Participation
+                @if !leaderboard_entries.is_empty() {
+                    h2 { "Leaderboard Participation" }
+                    table class="table" {
+                        thead {
+                            tr {
+                                th { "Leaderboard" }
+                                th { "Rating" }
+                                th { "Games" }
+                                th { "1st Place %" }
+                                th { "Status" }
+                                th { "" }
+                            }
+                        }
+                        tbody {
+                            @for entry in &leaderboard_entries {
+                                tr {
+                                    td { (entry.leaderboard_name) }
+                                    td { (format!("{:.1}", entry.display_score)) }
+                                    td { (entry.games_played) }
+                                    td {
+                                        @if entry.games_played > 0 {
+                                            (format!("{:.0}%", (entry.first_place_finishes as f64 / entry.games_played as f64) * 100.0))
+                                        } @else {
+                                            "N/A"
+                                        }
+                                    }
+                                    td {
+                                        @if entry.disabled_at.is_some() {
+                                            span class="badge bg-secondary text-white" { "Paused" }
+                                        } @else {
+                                            span class="badge bg-success text-white" { "Active" }
+                                        }
+                                    }
+                                    td {
+                                        a href={"/leaderboards/"(entry.leaderboard_id)"/entries/"(entry.leaderboard_entry_id)} class="btn btn-sm btn-info" { "Details" }
+                                    }
+                                }
                             }
                         }
                     }

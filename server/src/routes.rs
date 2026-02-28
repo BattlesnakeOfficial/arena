@@ -129,6 +129,10 @@ pub fn routes(app_state: AppState) -> axum::Router {
             "/leaderboards/{id}/leave",
             axum::routing::post(leaderboard::leave_leaderboard),
         )
+        .route(
+            "/leaderboards/{id}/entries/{entry_id}",
+            get(leaderboard::show_leaderboard_entry),
+        )
         // Admin routes
         .route("/admin", get(admin::dashboard))
         // Game API routes for board viewer (with CORS)
