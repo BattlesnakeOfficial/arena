@@ -26,3 +26,47 @@
   from { opacity: 1; }
   to { opacity: 0; visibility: hidden; }
 }
+
+/* Rating chart */
+.rating-chart-container {
+    margin: 16px 0;
+    padding: 8px;
+}
+
+/* Pagination */
+.pagination {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin: 16px 0;
+}
+.pagination a,
+.pagination span {
+    padding: 6px 12px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    text-decoration: none;
+    color: #333;
+}
+.pagination a:hover { background-color: #f0f0f0; }
+.pagination .current { background-color: #4a90d9; color: white; border-color: #4a90d9; }
+.pagination .disabled { color: #ccc; pointer-events: none; }
+
+/* Rating change colors */
+.rating-positive { color: #28a745; font-weight: bold; }
+.rating-negative { color: #dc3545; font-weight: bold; }
+.rating-neutral { color: #666; }
+
+/* Activity feed */
+.activity-feed {
+    max-height: 300px;
+    overflow-y: auto;
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    padding: 12px;
+}
+.activity-feed-item {
+    padding: 6px 0;
+    border-bottom: 1px solid #eee;
+}
+.activity-feed-item:last-child { border-bottom: none; }

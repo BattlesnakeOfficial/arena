@@ -1,0 +1,89 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n            le.leaderboard_entry_id, le.leaderboard_id, le.battlesnake_id,\n            le.mu, le.sigma, le.display_score, le.games_played, le.first_place_finishes, le.non_first_finishes,\n            le.disabled_at, le.created_at, le.updated_at\n         FROM leaderboard_entries le\n         JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id\n         WHERE le.leaderboard_id = $1 AND b.user_id = $2\n         ORDER BY le.display_score DESC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "leaderboard_entry_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "leaderboard_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "battlesnake_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "mu",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 4,
+        "name": "sigma",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 5,
+        "name": "display_score",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 6,
+        "name": "games_played",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 7,
+        "name": "first_place_finishes",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 8,
+        "name": "non_first_finishes",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 9,
+        "name": "disabled_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 10,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 11,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "89ae9cb739b3eefaea4d58427d009b7350fa67768b0faf6912cb36da3dc1648b"
+}

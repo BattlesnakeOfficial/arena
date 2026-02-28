@@ -1,0 +1,41 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n            gb.game_id,\n            b.name as \"snake_name!\",\n            gb.placement,\n            gb.leaderboard_entry_id\n         FROM game_battlesnakes gb\n         LEFT JOIN leaderboard_entries le ON gb.leaderboard_entry_id = le.leaderboard_entry_id\n         JOIN battlesnakes b ON COALESCE(gb.battlesnake_id, le.battlesnake_id) = b.battlesnake_id\n         WHERE gb.game_id = ANY($1)\n           AND (gb.leaderboard_entry_id IS NULL OR gb.leaderboard_entry_id != $2)\n           AND (gb.battlesnake_id IS NULL OR gb.battlesnake_id != (\n               SELECT battlesnake_id FROM leaderboard_entries WHERE leaderboard_entry_id = $2\n           ))",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "game_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "snake_name!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "placement",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 3,
+        "name": "leaderboard_entry_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "6a06751ebffbf83a257e1d838c84c3d6eabe9c559f3cb84bc6b8e4893abdb0f6"
+}

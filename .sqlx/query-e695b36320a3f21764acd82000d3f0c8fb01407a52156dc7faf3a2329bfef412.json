@@ -1,0 +1,41 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO leaderboard_games (leaderboard_id, game_id)\n         VALUES ($1, $2)\n         RETURNING leaderboard_game_id, leaderboard_id, game_id, created_at",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "leaderboard_game_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "leaderboard_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "game_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "e695b36320a3f21764acd82000d3f0c8fb01407a52156dc7faf3a2329bfef412"
+}

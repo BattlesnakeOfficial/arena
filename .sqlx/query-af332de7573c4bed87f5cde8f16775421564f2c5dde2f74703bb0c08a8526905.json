@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT leaderboard_game_id, leaderboard_id, game_id, created_at\n         FROM leaderboard_games\n         WHERE game_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "leaderboard_game_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "leaderboard_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "game_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "af332de7573c4bed87f5cde8f16775421564f2c5dde2f74703bb0c08a8526905"
+}
