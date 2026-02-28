@@ -418,17 +418,9 @@ pub async fn show_leaderboard_entry(
         .as_ref()
         .map(|o| o.github_login.clone())
         .unwrap_or_else(|| "Unknown".to_string());
-    let owner_avatar = owner
-        .as_ref()
-        .and_then(|o| o.github_avatar_url.clone())
-        .unwrap_or_default();
+    let owner_avatar = owner.as_ref().and_then(|o| o.github_avatar_url.clone());
 
-    let page = pagination.page.unwrap_or(0).max(0);
     let per_page: i64 = 20;
-
-    let history = leaderboard::get_game_history_for_entry(&state.db, entry_id, page, per_page)
-        .await
-        .wrap_err("Failed to fetch game history")?;
 
     let total_games = leaderboard::count_game_results_for_entry(&state.db, entry_id)
         .await
@@ -439,7 +431,11 @@ pub async fn show_leaderboard_entry(
     } else {
         1
     };
-    let page = page.min(total_pages - 1);
+    let page = pagination.page.unwrap_or(0).max(0).min(total_pages - 1);
+
+    let history = leaderboard::get_game_history_for_entry(&state.db, entry_id, page, per_page)
+        .await
+        .wrap_err("Failed to fetch game history")?;
 
     let game_ids: Vec<Uuid> = history.iter().map(|h| h.game_id).collect();
     let opponents_list = if !game_ids.is_empty() {
@@ -523,8 +519,11 @@ pub async fn show_leaderboard_entry(
         (String::new(), vec![], vec![])
     };
 
-    // Recent form: last 5 games
-    let recent_form: Vec<i32> = history.iter().take(5).map(|h| h.placement).collect();
+    // Recent form: always the 5 most recent games (independent of current page)
+    let recent_games = leaderboard::get_game_history_for_entry(&state.db, entry_id, 0, 5)
+        .await
+        .wrap_err("Failed to fetch recent form")?;
+    let recent_form: Vec<i32> = recent_games.iter().map(|h| h.placement).collect();
 
     Ok(page_factory.create_page(
         format!("{} - {}", snake.name, lb.name),
@@ -534,7 +533,9 @@ pub async fn show_leaderboard_entry(
                 div class="card mb-4" {
                     div class="card-body" {
                         div class="d-flex align-items-center" style="gap: 16px;" {
-                            img src=(owner_avatar) alt="Avatar" style="width: 48px; height: 48px; border-radius: 50%;" {}
+                            @if let Some(ref avatar_url) = owner_avatar {
+                                img src=(avatar_url) alt="Avatar" style="width: 48px; height: 48px; border-radius: 50%;" {}
+                            }
                             div {
                                 h1 class="mb-1" { (snake.name) }
                                 span style="color: #666;" { (owner_login) }
