@@ -698,7 +698,6 @@ pub async fn view_battlesnake_profile(
 
                 // Navigation Links
                 div class="mt-4" {
-                    a href="/games" class="btn btn-primary" { "All Games" }
                     @if is_owner {
                         a href="/battlesnakes" class="btn btn-secondary ms-2" { "Your Battlesnakes" }
                     }

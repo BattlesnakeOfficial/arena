@@ -138,65 +138,7 @@ pub struct CreateGameWithSnakes {
     pub battlesnake_ids: Vec<Uuid>,
 }
 
-// Struct to hold the game with winner query result
-#[derive(Debug)]
-struct GameWithWinnerRow {
-    game_id: Uuid,
-    board_size: String,
-    game_type: String,
-    status: String,
-    enqueued_at: Option<chrono::DateTime<chrono::Utc>>,
-    created_at: chrono::DateTime<chrono::Utc>,
-    updated_at: chrono::DateTime<chrono::Utc>,
-    winner_name: Option<String>,
-}
-
 // Database functions for game management
-
-// Get all games
-pub async fn get_all_games(pool: &PgPool) -> cja::Result<Vec<Game>> {
-    let rows = sqlx::query!(
-        r#"
-        SELECT
-            game_id,
-            board_size,
-            game_type,
-            status,
-            enqueued_at,
-            created_at,
-            updated_at
-        FROM games
-        ORDER BY created_at DESC
-        "#
-    )
-    .fetch_all(pool)
-    .await
-    .wrap_err("Failed to fetch games from database")?;
-
-    let games = rows
-        .into_iter()
-        .map(|row| {
-            let board_size = GameBoardSize::from_str(&row.board_size)
-                .wrap_err_with(|| format!("Invalid board size: {}", row.board_size))?;
-            let game_type = GameType::from_str(&row.game_type)
-                .wrap_err_with(|| format!("Invalid game type: {}", row.game_type))?;
-            let status = GameStatus::from_str(&row.status)
-                .wrap_err_with(|| format!("Invalid game status: {}", row.status))?;
-
-            Ok(Game {
-                game_id: row.game_id,
-                board_size,
-                game_type,
-                status,
-                enqueued_at: row.enqueued_at,
-                created_at: row.created_at,
-                updated_at: row.updated_at,
-            })
-        })
-        .collect::<cja::Result<Vec<_>>>()?;
-
-    Ok(games)
-}
 
 // Get a single game by ID
 pub async fn get_game_by_id(pool: &PgPool, game_id: Uuid) -> cja::Result<Option<Game>> {
@@ -513,57 +455,6 @@ pub async fn set_game_enqueued_at_tx(
     .wrap_err_with(|| format!("Failed to set enqueued_at for game {}", game_id))?;
 
     Ok(())
-}
-
-// Get all games with their winners (if available)
-pub async fn get_all_games_with_winners(pool: &PgPool) -> cja::Result<Vec<(Game, Option<String>)>> {
-    let rows = sqlx::query_as!(
-        GameWithWinnerRow,
-        r#"
-        SELECT
-            g.game_id,
-            g.board_size,
-            g.game_type,
-            g.status,
-            g.enqueued_at,
-            g.created_at,
-            g.updated_at,
-            b.name as "winner_name?"
-        FROM games g
-        LEFT JOIN game_battlesnakes gb ON g.game_id = gb.game_id AND gb.placement = 1
-        LEFT JOIN battlesnakes b ON gb.battlesnake_id = b.battlesnake_id
-        ORDER BY g.created_at DESC
-        "#
-    )
-    .fetch_all(pool)
-    .await
-    .wrap_err("Failed to fetch games with winners from database")?;
-
-    let games_with_winners = rows
-        .into_iter()
-        .map(|row| {
-            let board_size = GameBoardSize::from_str(&row.board_size)
-                .wrap_err_with(|| format!("Invalid board size: {}", row.board_size))?;
-            let game_type = GameType::from_str(&row.game_type)
-                .wrap_err_with(|| format!("Invalid game type: {}", row.game_type))?;
-            let status = GameStatus::from_str(&row.status)
-                .wrap_err_with(|| format!("Invalid game status: {}", row.status))?;
-
-            let game = Game {
-                game_id: row.game_id,
-                board_size,
-                game_type,
-                status,
-                enqueued_at: row.enqueued_at,
-                created_at: row.created_at,
-                updated_at: row.updated_at,
-            };
-
-            Ok((game, row.winner_name))
-        })
-        .collect::<cja::Result<Vec<_>>>()?;
-
-    Ok(games_with_winners)
 }
 
 #[cfg(test)]

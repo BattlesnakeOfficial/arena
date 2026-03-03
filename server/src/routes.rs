@@ -97,7 +97,6 @@ pub fn routes(app_state: AppState) -> axum::Router {
             get(battlesnake::view_battlesnake_profile),
         )
         // Game routes
-        .route("/games", get(game::list_games))
         .route("/games/new", get(game::new_game))
         .route("/games/{id}", get(game::view_game))
         .route("/games/flow/{id}", get(game::show_game_flow))
@@ -228,7 +227,6 @@ async fn profile_page(
                         p { "Create and view games with your Battlesnakes." }
                         div {
                             a href="/games/new" class="btn btn-primary" { "Create New Game" }
-                            a href="/games" class="btn btn-secondary ms-2" { "View All Games" }
                         }
                     }
                 }
