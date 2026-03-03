@@ -95,7 +95,6 @@ pub async fn view_game(
                                 th { "Place" }
                                 th { "Snake Name" }
                                 th { "Owner" }
-                                th { "URL" }
                             }
                         }
                         tbody {
@@ -115,9 +114,6 @@ pub async fn view_game(
                                     }
                                     td { (battlesnake.name) }
                                     td { "User " (battlesnake.user_id) }
-                                    td {
-                                        a href=(battlesnake.url) target="_blank" { (battlesnake.url) }
-                                    }
                                 }
                             }
                         }

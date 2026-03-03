@@ -164,9 +164,6 @@ pub async fn show_game_flow(
                                                 span class="badge bg-primary" { "×" (count) }
                                             }
                                         }
-                                        p class="card-text" {
-                                            a href=(snake.url) target="_blank" { (snake.url) }
-                                        }
                                     }
                                     div class="card-footer d-flex gap-2" {
                                         // Always show Add button if under 4 total snakes
@@ -460,9 +457,6 @@ async fn render_search_results(flow: &GameCreationFlow, db: &sqlx::PgPool) -> ma
                                         " "
                                         span class="badge bg-primary" { "×" (count) }
                                     }
-                                }
-                                p class="card-text" {
-                                    a href=(snake.url) target="_blank" { (snake.url) }
                                 }
                             }
                             div class="card-footer d-flex gap-2" {

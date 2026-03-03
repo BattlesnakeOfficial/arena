@@ -72,7 +72,6 @@ pub struct CreateGameResponse {
 pub struct SnakeInfo {
     pub id: Uuid,
     pub name: String,
-    pub url: String,
 }
 
 impl From<&GameBattlesnakeWithDetails> for SnakeInfo {
@@ -80,7 +79,6 @@ impl From<&GameBattlesnakeWithDetails> for SnakeInfo {
         Self {
             id: snake.battlesnake_id,
             name: snake.name.clone(),
-            url: snake.url.clone(),
         }
     }
 }
@@ -633,13 +631,12 @@ mod tests {
         let snake = SnakeInfo {
             id: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap(),
             name: "Test Snake".to_string(),
-            url: "http://example.com".to_string(),
         };
 
         let json = serde_json::to_string(&snake).unwrap();
         assert!(json.contains("\"id\":"));
         assert!(json.contains("\"name\":\"Test Snake\""));
-        assert!(json.contains("\"url\":\"http://example.com\""));
+        assert!(!json.contains("\"url\":"));
     }
 
     #[test]
