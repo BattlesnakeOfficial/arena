@@ -513,9 +513,11 @@ pub async fn view_battlesnake_profile(
                                 } @else {
                                     span class="badge bg-secondary text-white" { "Private" }
                                 }
-                                p class="mt-2" {
-                                    "URL: "
-                                    a href=(snake.url) target="_blank" { (snake.url) }
+                                @if is_owner {
+                                    p class="mt-2" {
+                                        "URL: "
+                                        a href=(snake.url) target="_blank" { (snake.url) }
+                                    }
                                 }
                                 p { "Created: " (snake.created_at.format("%Y-%m-%d %H:%M")) }
                             }
