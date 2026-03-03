@@ -70,11 +70,11 @@ impl FromStr for GameType {
     type Err = color_eyre::eyre::Report;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "Standard" => Ok(GameType::Standard),
-            "Royale" => Ok(GameType::Royale),
-            "Constrictor" => Ok(GameType::Constrictor),
-            "Snail Mode" => Ok(GameType::SnailMode),
+        match s.to_lowercase().as_str() {
+            "standard" => Ok(GameType::Standard),
+            "royale" => Ok(GameType::Royale),
+            "constrictor" => Ok(GameType::Constrictor),
+            "snail mode" => Ok(GameType::SnailMode),
             _ => Err(color_eyre::eyre::eyre!("Invalid game type: {}", s)),
         }
     }
@@ -564,4 +564,36 @@ pub async fn get_all_games_with_winners(pool: &PgPool) -> cja::Result<Vec<(Game,
         .collect::<cja::Result<Vec<_>>>()?;
 
     Ok(games_with_winners)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn game_type_from_str_case_insensitive() {
+        assert_eq!(GameType::from_str("Standard").unwrap(), GameType::Standard);
+        assert_eq!(GameType::from_str("standard").unwrap(), GameType::Standard);
+        assert_eq!(GameType::from_str("STANDARD").unwrap(), GameType::Standard);
+        assert_eq!(GameType::from_str("royale").unwrap(), GameType::Royale);
+        assert_eq!(GameType::from_str("Royale").unwrap(), GameType::Royale);
+        assert_eq!(
+            GameType::from_str("constrictor").unwrap(),
+            GameType::Constrictor
+        );
+        assert_eq!(
+            GameType::from_str("snail mode").unwrap(),
+            GameType::SnailMode
+        );
+        assert_eq!(
+            GameType::from_str("Snail Mode").unwrap(),
+            GameType::SnailMode
+        );
+    }
+
+    #[test]
+    fn game_type_from_str_invalid() {
+        assert!(GameType::from_str("invalid").is_err());
+        assert!(GameType::from_str("").is_err());
+    }
 }
