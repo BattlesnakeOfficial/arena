@@ -209,8 +209,8 @@ impl GameCreationFlow {
         self.validate()?;
 
         Ok(CreateGameWithSnakes {
-            board_size: self.board_size,
-            game_type: self.game_type,
+            board_size: self.board_size.clone(),
+            game_type: self.game_type.clone(),
             battlesnake_ids: self.selected_battlesnake_ids.clone(),
         })
     }

@@ -1,0 +1,1 @@
+-- Cannot reverse data normalization; original engine values are not recoverable.

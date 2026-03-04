@@ -260,8 +260,8 @@ pub async fn create_game(
     tracing::info!(
         event_type = "game_created",
         game_id = %game.game_id,
-        board_size = board_size.as_str(),
-        game_type = game_type.as_str(),
+        board_size = game.board_size.as_str(),
+        game_type = game.game_type.as_str(),
         snake_count = snake_count,
         user_id = %user.user_id,
         source = "api",

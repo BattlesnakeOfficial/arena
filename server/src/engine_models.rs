@@ -69,6 +69,18 @@ where
     deserializer.deserialize_any(StringOrInt)
 }
 
+/// Normalize an engine game type string to its canonical form.
+/// Known types are mapped to PascalCase; unknown types are passed through as-is.
+fn normalize_game_type(engine_type: &str) -> String {
+    match engine_type.to_lowercase().as_str() {
+        "standard" => "Standard".to_string(),
+        "royale" => "Royale".to_string(),
+        "constrictor" => "Constrictor".to_string(),
+        "snail_mode" | "snail mode" => "Snail Mode".to_string(),
+        _ => engine_type.to_string(),
+    }
+}
+
 /// Game metadata from the Engine's `games` table `value` column.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct EngineGame {
@@ -114,11 +126,10 @@ impl EngineGame {
         format!("{}x{}", self.width, self.height)
     }
 
-    /// Get the game type from the ruleset name
+    /// Get the game type from the ruleset name, normalized to canonical form
     pub fn game_type(&self) -> String {
-        self.ruleset_name
-            .clone()
-            .unwrap_or_else(|| "standard".to_string())
+        let raw = self.ruleset_name.as_deref().unwrap_or("standard");
+        normalize_game_type(raw)
     }
 }
 
@@ -240,4 +251,25 @@ pub struct GameExport {
     pub game: EngineGame,
     pub frames: Vec<EngineGameFrame>,
     pub exported_at: DateTime<Utc>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_game_type_known_values() {
+        assert_eq!(normalize_game_type("standard"), "Standard");
+        assert_eq!(normalize_game_type("royale"), "Royale");
+        assert_eq!(normalize_game_type("constrictor"), "Constrictor");
+        assert_eq!(normalize_game_type("snail_mode"), "Snail Mode");
+        assert_eq!(normalize_game_type("STANDARD"), "Standard");
+    }
+
+    #[test]
+    fn normalize_game_type_unknown_preserved() {
+        assert_eq!(normalize_game_type("solo"), "solo");
+        assert_eq!(normalize_game_type("wrapped"), "wrapped");
+        assert_eq!(normalize_game_type("custom_ruleset"), "custom_ruleset");
+    }
 }
