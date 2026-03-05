@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE win_rate_stats SET games_played = games_played + 1, wins = wins + CASE WHEN $2 THEN 1 ELSE 0 END, losses = losses + CASE WHEN $2 THEN 0 ELSE 1 END, score = CASE WHEN games_played + 1 > 0 THEN (wins + CASE WHEN $2 THEN 1 ELSE 0 END)::double precision / (games_played + 1)::double precision * 100.0 ELSE 0.0 END, updated_at = NOW() WHERE leaderboard_entry_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "cfecf394f42a73ed5b56e68e7c00007a47694b63d798e33371c0cb047a2396ef"
+}

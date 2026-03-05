@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT leaderboard_entry_id, display_score, mu, sigma FROM weng_lin_ratings WHERE leaderboard_entry_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "leaderboard_entry_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "display_score",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 2,
+        "name": "mu",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 3,
+        "name": "sigma",
+        "type_info": "Float8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "e403cb95ce04a97605371619c722729246515391c9c030b2fe1370ada1b6a8c5"
+}

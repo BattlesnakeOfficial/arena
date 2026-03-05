@@ -1,0 +1,46 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT leaderboard_entry_id, score, wins, losses, games_played FROM win_rate_stats WHERE leaderboard_entry_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "leaderboard_entry_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "score",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 2,
+        "name": "wins",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 3,
+        "name": "losses",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 4,
+        "name": "games_played",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "dc343be84887d36164efa98c3de2d17c16d8d0dd0efdaea8d50c37cbede45d57"
+}

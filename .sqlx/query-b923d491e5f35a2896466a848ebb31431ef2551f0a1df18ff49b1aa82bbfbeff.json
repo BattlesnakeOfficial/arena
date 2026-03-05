@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT leaderboard_entry_id, mu, sigma FROM weng_lin_ratings WHERE leaderboard_entry_id = ANY($1) FOR UPDATE",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "leaderboard_entry_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "mu",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 2,
+        "name": "sigma",
+        "type_info": "Float8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "b923d491e5f35a2896466a848ebb31431ef2551f0a1df18ff49b1aa82bbfbeff"
+}

@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO weng_lin_ratings (leaderboard_entry_id, mu, sigma, display_score) VALUES ($1, $2, $3, $4) ON CONFLICT (leaderboard_entry_id) DO UPDATE SET mu = $2, sigma = $3, display_score = $4, updated_at = NOW()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Float8",
+        "Float8",
+        "Float8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "11f9b0e7e035abd1fe8baeca8a19420e9337fb4ab0c7d8cc2cbc1b75b2df52f9"
+}
