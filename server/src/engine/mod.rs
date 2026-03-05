@@ -37,17 +37,15 @@ pub fn create_initial_game(
     game_type: GameType,
     battlesnakes: &[GameBattlesnakeWithDetails],
 ) -> Game {
-    let (width, height) = match board_size {
-        GameBoardSize::Small => (7, 7),
-        GameBoardSize::Medium => (11, 11),
-        GameBoardSize::Large => (19, 19),
-    };
+    let (w, h) = board_size.dimensions();
+    let (width, height) = (w as i32, h as i32);
 
-    let ruleset_name = match game_type {
+    let ruleset_name = match &game_type {
         GameType::Standard => "standard",
         GameType::Royale => "royale",
         GameType::Constrictor => "constrictor",
         GameType::SnailMode => "snail_mode",
+        GameType::Other(s) => s.as_str(),
     };
 
     // Generate spawn positions

@@ -7,19 +7,21 @@ use uuid::Uuid;
 use super::game_battlesnake::AddBattlesnakeToGame;
 
 // Game board size enum
-#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub enum GameBoardSize {
     Small,  // 7x7
     Medium, // 11x11
     Large,  // 19x19
+    Custom(String),
 }
 
 impl GameBoardSize {
-    pub fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &str {
         match self {
             GameBoardSize::Small => "7x7",
             GameBoardSize::Medium => "11x11",
             GameBoardSize::Large => "19x19",
+            GameBoardSize::Custom(s) => s,
         }
     }
 
@@ -29,6 +31,15 @@ impl GameBoardSize {
             GameBoardSize::Small => (7, 7),
             GameBoardSize::Medium => (11, 11),
             GameBoardSize::Large => (19, 19),
+            GameBoardSize::Custom(s) => {
+                let parts: Vec<&str> = s.split('x').collect();
+                if parts.len() == 2
+                    && let (Ok(w), Ok(h)) = (parts[0].parse(), parts[1].parse())
+                {
+                    return (w, h);
+                }
+                (11, 11) // Fallback for malformed custom sizes
+            }
         }
     }
 }
@@ -41,27 +52,29 @@ impl FromStr for GameBoardSize {
             "7x7" => Ok(GameBoardSize::Small),
             "11x11" => Ok(GameBoardSize::Medium),
             "19x19" => Ok(GameBoardSize::Large),
-            _ => Err(color_eyre::eyre::eyre!("Invalid board size: {}", s)),
+            _ => Ok(GameBoardSize::Custom(s.to_string())),
         }
     }
 }
 
 // Game type enum
-#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub enum GameType {
     Standard,
     Royale,
     Constrictor,
     SnailMode,
+    Other(String),
 }
 
 impl GameType {
-    pub fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &str {
         match self {
             GameType::Standard => "Standard",
             GameType::Royale => "Royale",
             GameType::Constrictor => "Constrictor",
             GameType::SnailMode => "Snail Mode",
+            GameType::Other(s) => s,
         }
     }
 }
@@ -74,8 +87,8 @@ impl FromStr for GameType {
             "standard" => Ok(GameType::Standard),
             "royale" => Ok(GameType::Royale),
             "constrictor" => Ok(GameType::Constrictor),
-            "snail mode" => Ok(GameType::SnailMode),
-            _ => Err(color_eyre::eyre::eyre!("Invalid game type: {}", s)),
+            "snail mode" | "snail_mode" => Ok(GameType::SnailMode),
+            _ => Ok(GameType::Other(s.to_string())),
         }
     }
 }
@@ -589,11 +602,46 @@ mod tests {
             GameType::from_str("Snail Mode").unwrap(),
             GameType::SnailMode
         );
+        assert_eq!(
+            GameType::from_str("snail_mode").unwrap(),
+            GameType::SnailMode
+        );
+        assert_eq!(
+            GameType::from_str("SNAIL_MODE").unwrap(),
+            GameType::SnailMode
+        );
     }
 
     #[test]
-    fn game_type_from_str_invalid() {
-        assert!(GameType::from_str("invalid").is_err());
-        assert!(GameType::from_str("").is_err());
+    fn game_type_from_str_unknown_returns_other() {
+        assert_eq!(
+            GameType::from_str("solo").unwrap(),
+            GameType::Other("solo".to_string())
+        );
+        assert_eq!(
+            GameType::from_str("wrapped").unwrap(),
+            GameType::Other("wrapped".to_string())
+        );
+        assert_eq!(
+            GameType::from_str("").unwrap(),
+            GameType::Other("".to_string())
+        );
+    }
+
+    #[test]
+    fn board_size_from_str_custom() {
+        assert_eq!(
+            GameBoardSize::from_str("13x13").unwrap(),
+            GameBoardSize::Custom("13x13".to_string())
+        );
+        assert_eq!(
+            GameBoardSize::from_str("25x25").unwrap(),
+            GameBoardSize::Custom("25x25".to_string())
+        );
+        assert_eq!(
+            GameBoardSize::Custom("13x13".to_string()).dimensions(),
+            (13, 13)
+        );
+        assert_eq!(GameBoardSize::Custom("13x13".to_string()).as_str(), "13x13");
     }
 }
