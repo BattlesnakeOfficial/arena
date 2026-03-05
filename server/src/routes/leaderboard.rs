@@ -21,6 +21,7 @@ use crate::{
         user,
     },
     routes::auth::{CurrentUser, OptionalUser},
+    scoring::EntryScore,
     state::AppState,
 };
 
@@ -148,6 +149,20 @@ pub async fn show_leaderboard(
 
     let rank_start = page * per_page;
 
+    // Fetch per-algorithm scores
+    let mut algo_scores: Vec<(&str, &str, HashMap<Uuid, EntryScore>)> = vec![];
+    for algo in state.scoring.algorithms() {
+        let scores = algo
+            .get_scores(&state.db, leaderboard_id)
+            .await
+            .wrap_err_with(|| format!("Failed to fetch {} scores", algo.key()))?;
+        let map: HashMap<Uuid, EntryScore> = scores
+            .into_iter()
+            .map(|s| (s.leaderboard_entry_id, s))
+            .collect();
+        algo_scores.push((algo.key(), algo.score_column_name(), map));
+    }
+
     Ok(page_factory.create_page(
         format!("Leaderboard: {}", lb.name),
         Box::new(html! {
@@ -250,7 +265,9 @@ pub async fn show_leaderboard(
                                 th { "Rank" }
                                 th { "Snake" }
                                 th { "Owner" }
-                                th { "Score" }
+                                @for (_key, col_name, _map) in &algo_scores {
+                                    th { (col_name) }
+                                }
                                 th { "Games" }
                                 th { "1st Place %" }
                             }
@@ -263,7 +280,15 @@ pub async fn show_leaderboard(
                                         a href={"/leaderboards/"(leaderboard_id)"/entries/"(entry.leaderboard_entry_id)} { (entry.snake_name) }
                                     }
                                     td { (entry.owner_login) }
-                                    td { (format!("{:.1}", entry.display_score)) }
+                                    @for (_key, _col_name, map) in &algo_scores {
+                                        td {
+                                            @if let Some(score) = map.get(&entry.leaderboard_entry_id) {
+                                                (format!("{:.1}", score.score))
+                                            } @else {
+                                                "-"
+                                            }
+                                        }
+                                    }
                                     td { (entry.games_played) }
                                     td {
                                         @if entry.games_played > 0 {
@@ -525,6 +550,16 @@ pub async fn show_leaderboard_entry(
         .wrap_err("Failed to fetch recent form")?;
     let recent_form: Vec<i32> = recent_games.iter().map(|h| h.placement).collect();
 
+    // Fetch per-algorithm scores for this entry
+    let mut algo_entry_scores: Vec<(&str, &str, Option<EntryScore>)> = vec![];
+    for algo in state.scoring.algorithms() {
+        let score = algo
+            .get_entry_score(&state.db, entry_id)
+            .await
+            .wrap_err_with(|| format!("Failed to fetch {} entry score", algo.key()))?;
+        algo_entry_scores.push((algo.key(), algo.display_name(), score));
+    }
+
     Ok(page_factory.create_page(
         format!("{} - {}", snake.name, lb.name),
         Box::new(html! {
@@ -613,6 +648,28 @@ pub async fn show_leaderboard_entry(
                                 }
                                 @if recent_form.is_empty() {
                                     span style="color: #999;" { "-" }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Scores by Algorithm
+                h2 { "Scores by Algorithm" }
+                div class="d-flex" style="gap: 16px; flex-wrap: wrap; margin-bottom: 20px;" {
+                    @for (_key, display_name, score) in &algo_entry_scores {
+                        div class="card" style="flex: 1; min-width: 200px;" {
+                            div class="card-body" {
+                                h5 { (display_name) }
+                                @if let Some(s) = score {
+                                    p style="font-size: 2em; margin: 0;" { (format!("{:.1}", s.score)) }
+                                    @for (detail_name, detail_value) in &s.details {
+                                        p style="margin: 2px 0; color: #666; font-size: 0.9em;" {
+                                            (detail_name) ": " (detail_value)
+                                        }
+                                    }
+                                } @else {
+                                    p style="color: #999;" { "No data" }
                                 }
                             }
                         }
@@ -791,10 +848,18 @@ pub async fn join_leaderboard(
     }
 
     // Opt-in (or resume if paused)
-    leaderboard::get_or_create_entry(&state.db, leaderboard_id, form.battlesnake_id)
+    let entry = leaderboard::get_or_create_entry(&state.db, leaderboard_id, form.battlesnake_id)
         .await
         .wrap_err("Failed to join leaderboard")
         .with_redirect(redirect.clone())?;
+
+    // Initialize scoring algorithm entries
+    for algo in state.scoring.algorithms() {
+        algo.initialize_entry(&state.db, entry.leaderboard_entry_id)
+            .await
+            .wrap_err("Failed to initialize scoring")
+            .with_redirect(redirect.clone())?;
+    }
 
     Ok(redirect)
 }

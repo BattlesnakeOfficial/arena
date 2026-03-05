@@ -1,25 +1,207 @@
-// WinRateScoring implementation placeholder.
-// The implementation agent will:
-// 1. Implement the ScoringAlgorithm trait for WinRateScoring
-// 2. Un-ignore the trait-dependent tests below
+use async_trait::async_trait;
+use color_eyre::eyre::Context as _;
+use sqlx::PgPool;
+use uuid::Uuid;
 
-/// Marker struct for the Win Rate scoring algorithm.
-/// Will implement ScoringAlgorithm trait.
+use crate::models::leaderboard;
+
+use super::{EntryScore, GameResultEvent, ScoringAlgorithm};
+
+/// Win Rate scoring algorithm implementation.
 pub struct WinRateScoring;
+
+#[async_trait]
+impl ScoringAlgorithm for WinRateScoring {
+    fn key(&self) -> &'static str {
+        "win_rate"
+    }
+
+    fn display_name(&self) -> &'static str {
+        "Win Rate"
+    }
+
+    fn score_column_name(&self) -> &'static str {
+        "Win %"
+    }
+
+    async fn initialize_entry(&self, pool: &PgPool, leaderboard_entry_id: Uuid) -> cja::Result<()> {
+        sqlx::query(
+            "INSERT INTO win_rate_stats (leaderboard_entry_id) \
+             VALUES ($1) \
+             ON CONFLICT (leaderboard_entry_id) DO NOTHING",
+        )
+        .bind(leaderboard_entry_id)
+        .execute(pool)
+        .await
+        .wrap_err("Failed to initialize win_rate_stats entry")?;
+
+        Ok(())
+    }
+
+    async fn process_game_result(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        event: &GameResultEvent,
+    ) -> cja::Result<()> {
+        for result in &event.results {
+            let is_win = result.placement == 1;
+
+            // Try UPDATE first
+            let rows_affected = sqlx::query(
+                "UPDATE win_rate_stats SET \
+                    games_played = games_played + 1, \
+                    wins = wins + CASE WHEN $2 THEN 1 ELSE 0 END, \
+                    losses = losses + CASE WHEN $2 THEN 0 ELSE 1 END, \
+                    score = CASE WHEN games_played + 1 > 0 \
+                        THEN (wins + CASE WHEN $2 THEN 1 ELSE 0 END)::double precision \
+                             / (games_played + 1)::double precision * 100.0 \
+                        ELSE 0.0 END, \
+                    updated_at = NOW() \
+                 WHERE leaderboard_entry_id = $1",
+            )
+            .bind(result.leaderboard_entry_id)
+            .bind(is_win)
+            .execute(&mut *conn)
+            .await
+            .wrap_err("Failed to update win_rate_stats")?
+            .rows_affected();
+
+            // If no row existed, lazily insert then retry
+            if rows_affected == 0 {
+                sqlx::query(
+                    "INSERT INTO win_rate_stats (leaderboard_entry_id) \
+                     VALUES ($1) \
+                     ON CONFLICT (leaderboard_entry_id) DO NOTHING",
+                )
+                .bind(result.leaderboard_entry_id)
+                .execute(&mut *conn)
+                .await
+                .wrap_err("Failed to lazy-insert win_rate_stats")?;
+
+                sqlx::query(
+                    "UPDATE win_rate_stats SET \
+                        games_played = games_played + 1, \
+                        wins = wins + CASE WHEN $2 THEN 1 ELSE 0 END, \
+                        losses = losses + CASE WHEN $2 THEN 0 ELSE 1 END, \
+                        score = CASE WHEN games_played + 1 > 0 \
+                            THEN (wins + CASE WHEN $2 THEN 1 ELSE 0 END)::double precision \
+                                 / (games_played + 1)::double precision * 100.0 \
+                            ELSE 0.0 END, \
+                        updated_at = NOW() \
+                     WHERE leaderboard_entry_id = $1",
+                )
+                .bind(result.leaderboard_entry_id)
+                .bind(is_win)
+                .execute(&mut *conn)
+                .await
+                .wrap_err("Failed to retry update win_rate_stats")?;
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn get_scores(
+        &self,
+        pool: &PgPool,
+        leaderboard_id: Uuid,
+    ) -> cja::Result<Vec<EntryScore>> {
+        let rows = sqlx::query_as::<_, WinRateRow>(
+            "SELECT wrs.leaderboard_entry_id, wrs.score, wrs.wins, wrs.losses, wrs.games_played \
+             FROM win_rate_stats wrs \
+             JOIN leaderboard_entries le ON wrs.leaderboard_entry_id = le.leaderboard_entry_id \
+             WHERE le.leaderboard_id = $1 \
+               AND le.disabled_at IS NULL \
+               AND le.games_played >= $2 \
+             ORDER BY wrs.score DESC",
+        )
+        .bind(leaderboard_id)
+        .bind(leaderboard::MIN_GAMES_FOR_RANKING)
+        .fetch_all(pool)
+        .await
+        .wrap_err("Failed to fetch win-rate scores")?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| EntryScore {
+                leaderboard_entry_id: r.leaderboard_entry_id,
+                score: r.score,
+                details: vec![
+                    ("wins".to_string(), r.wins.to_string()),
+                    ("losses".to_string(), r.losses.to_string()),
+                    ("games_played".to_string(), r.games_played.to_string()),
+                ],
+            })
+            .collect())
+    }
+
+    async fn get_entry_score(
+        &self,
+        pool: &PgPool,
+        leaderboard_entry_id: Uuid,
+    ) -> cja::Result<Option<EntryScore>> {
+        let row = sqlx::query_as::<_, WinRateRow>(
+            "SELECT leaderboard_entry_id, score, wins, losses, games_played \
+             FROM win_rate_stats \
+             WHERE leaderboard_entry_id = $1",
+        )
+        .bind(leaderboard_entry_id)
+        .fetch_optional(pool)
+        .await
+        .wrap_err("Failed to fetch win-rate entry score")?;
+
+        Ok(row.map(|r| EntryScore {
+            leaderboard_entry_id: r.leaderboard_entry_id,
+            score: r.score,
+            details: vec![
+                ("wins".to_string(), r.wins.to_string()),
+                ("losses".to_string(), r.losses.to_string()),
+                ("games_played".to_string(), r.games_played.to_string()),
+            ],
+        }))
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct WinRateRow {
+    leaderboard_entry_id: Uuid,
+    score: f64,
+    wins: i32,
+    losses: i32,
+    games_played: i32,
+}
+
+/// Win rate = wins / games_played * 100.0
+fn compute_win_rate(wins: i32, games_played: i32) -> f64 {
+    if games_played > 0 {
+        wins as f64 / games_played as f64 * 100.0
+    } else {
+        0.0
+    }
+}
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::scoring::ScoringAlgorithm;
     use uuid::Uuid;
 
-    // --- Pure win rate computation tests (no DB, no trait needed) ---
+    #[test]
+    fn test_win_rate_key() {
+        let algo = WinRateScoring;
+        assert_eq!(algo.key(), "win_rate");
+    }
 
-    /// Win rate = wins / games_played * 100.0
-    fn compute_win_rate(wins: i32, games_played: i32) -> f64 {
-        if games_played > 0 {
-            wins as f64 / games_played as f64 * 100.0
-        } else {
-            0.0
-        }
+    #[test]
+    fn test_win_rate_display_name() {
+        let algo = WinRateScoring;
+        assert_eq!(algo.display_name(), "Win Rate");
+    }
+
+    #[test]
+    fn test_win_rate_score_column_name() {
+        let algo = WinRateScoring;
+        assert_eq!(algo.score_column_name(), "Win %");
     }
 
     #[test]
@@ -64,7 +246,6 @@ mod tests {
 
     #[test]
     fn test_placement_1_is_win() {
-        // In battlesnake, placement == 1 means winner
         let placement = 1;
         let is_win = placement == 1;
         assert!(is_win, "Placement 1 should count as a win");
@@ -72,27 +253,17 @@ mod tests {
 
     #[test]
     fn test_placement_not_1_is_loss() {
-        // Any placement != 1 is a loss for win rate purposes
         for placement in [2, 3, 4] {
             let is_win = placement == 1;
-            assert!(
-                !is_win,
-                "Placement {} should not count as a win",
-                placement
-            );
+            assert!(!is_win, "Placement {} should not count as a win", placement);
         }
     }
 
     #[test]
     fn test_win_rate_incremental_update() {
-        // Simulate the UPDATE logic from the plan:
-        // After each game, games_played increments by 1,
-        // wins increments by 1 if placement == 1.
-        // Score = wins / games_played * 100.0
         let mut wins = 3;
         let mut games_played = 10;
 
-        // Snake wins a game (placement 1)
         let placement = 1;
         games_played += 1;
         if placement == 1 {
@@ -106,7 +277,6 @@ mod tests {
             rate
         );
 
-        // Snake loses a game (placement 3)
         let placement = 3;
         games_played += 1;
         if placement == 1 {
@@ -123,12 +293,11 @@ mod tests {
 
     #[test]
     fn test_win_rate_entry_score_details() {
-        // EntryScore.details from WinRateScoring should include wins, losses, games_played
         use crate::scoring::EntryScore;
 
         let score = EntryScore {
             leaderboard_entry_id: Uuid::new_v4(),
-            score: 50.0, // 50% win rate
+            score: 50.0,
             details: vec![
                 ("wins".to_string(), "5".to_string()),
                 ("losses".to_string(), "5".to_string()),
@@ -136,50 +305,13 @@ mod tests {
             ],
         };
 
-        assert_eq!(score.details.len(), 3, "WinRate should provide wins, losses, games_played");
+        assert_eq!(
+            score.details.len(),
+            3,
+            "WinRate should provide wins, losses, games_played"
+        );
         assert_eq!(score.details[0].0, "wins");
         assert_eq!(score.details[1].0, "losses");
         assert_eq!(score.details[2].0, "games_played");
-    }
-
-    // --- Trait implementation tests (require WinRateScoring to implement ScoringAlgorithm) ---
-
-    #[test]
-    #[ignore = "Requires WinRateScoring to implement ScoringAlgorithm"]
-    fn test_win_rate_key() {
-        let algo = super::WinRateScoring;
-        // After implementing ScoringAlgorithm:
-        // use crate::scoring::ScoringAlgorithm;
-        // assert_eq!(algo.key(), "win_rate");
-        let _ = algo;
-        todo!("WinRateScoring must implement ScoringAlgorithm with key() returning \"win_rate\"");
-    }
-
-    #[test]
-    #[ignore = "Requires WinRateScoring to implement ScoringAlgorithm"]
-    fn test_win_rate_display_name() {
-        let algo = super::WinRateScoring;
-        let _ = algo;
-        todo!(
-            "WinRateScoring must implement ScoringAlgorithm with display_name() returning \"Win Rate\""
-        );
-    }
-
-    #[test]
-    #[ignore = "Requires WinRateScoring to implement ScoringAlgorithm"]
-    fn test_win_rate_score_column_name() {
-        let algo = super::WinRateScoring;
-        let _ = algo;
-        todo!(
-            "WinRateScoring must implement ScoringAlgorithm with score_column_name() returning \"Win %\""
-        );
-    }
-
-    #[test]
-    #[ignore = "Requires WinRateScoring to implement ScoringAlgorithm and DB setup"]
-    fn test_win_rate_initialize_entry_is_idempotent() {
-        // Calling initialize_entry twice for the same leaderboard_entry_id
-        // should not error (ON CONFLICT DO NOTHING).
-        todo!("Verify initialize_entry uses ON CONFLICT DO NOTHING");
     }
 }

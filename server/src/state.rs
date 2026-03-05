@@ -17,6 +17,8 @@ pub struct AppState {
     pub game_channels: GameChannels,
     /// HTTP client for calling snake APIs
     pub http_client: reqwest::Client,
+    /// Scoring algorithm registry
+    pub scoring: std::sync::Arc<crate::scoring::ScoringRegistry>,
 }
 
 impl AppState {
@@ -108,6 +110,10 @@ impl AppState {
             .wrap_err("Failed to create HTTP client")?;
         tracing::info!("HTTP client initialized for snake API calls");
 
+        let mut scoring_registry = crate::scoring::ScoringRegistry::new();
+        scoring_registry.register(Box::new(crate::scoring::weng_lin::WengLinScoring));
+        scoring_registry.register(Box::new(crate::scoring::win_rate::WinRateScoring));
+
         Ok(Self {
             db: pool,
             cookie_key,
@@ -116,6 +122,7 @@ impl AppState {
             gcs_bucket,
             game_channels: GameChannels::new(),
             http_client,
+            scoring: std::sync::Arc::new(scoring_registry),
         })
     }
 }

@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use axum::{
     Json,
     extract::{Path, State},
@@ -35,6 +37,7 @@ pub struct RankingEntry {
     pub first_place_finishes: i32,
     pub non_first_finishes: i32,
     pub first_place_rate: f64,
+    pub scores: HashMap<String, f64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -125,9 +128,30 @@ pub async fn get_rankings(
             )
         })?;
 
+    // Fetch per-algorithm scores
+    let mut algo_maps: Vec<(String, HashMap<Uuid, f64>)> = vec![];
+    for algo in state.scoring.algorithms() {
+        let scores = algo
+            .get_scores(&state.db, leaderboard_id)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to fetch {} scores: {}", algo.key(), e);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal server error".to_string(),
+                )
+            })?;
+        let map: HashMap<Uuid, f64> = scores
+            .into_iter()
+            .map(|s| (s.leaderboard_entry_id, s.score))
+            .collect();
+        algo_maps.push((algo.key().to_string(), map));
+    }
+
     fn to_ranking_entries(
         entries: Vec<leaderboard::RankedEntry>,
         start_rank: usize,
+        algo_maps: &[(String, HashMap<Uuid, f64>)],
     ) -> Vec<RankingEntry> {
         entries
             .into_iter()
@@ -138,6 +162,12 @@ pub async fn get_rankings(
                 } else {
                     0.0
                 };
+                let mut scores = HashMap::new();
+                for (key, map) in algo_maps {
+                    if let Some(&score) = map.get(&e.leaderboard_entry_id) {
+                        scores.insert(key.clone(), score);
+                    }
+                }
                 RankingEntry {
                     rank: start_rank + i,
                     battlesnake_id: e.battlesnake_id,
@@ -148,13 +178,14 @@ pub async fn get_rankings(
                     first_place_finishes: e.first_place_finishes,
                     non_first_finishes: e.non_first_finishes,
                     first_place_rate,
+                    scores,
                 }
             })
             .collect()
     }
 
-    let ranked_entries = to_ranking_entries(ranked, 1);
-    let placement_entries = to_ranking_entries(placement, 0);
+    let ranked_entries = to_ranking_entries(ranked, 1, &algo_maps);
+    let placement_entries = to_ranking_entries(placement, 0, &algo_maps);
 
     Ok(Json(RankingsResponse {
         leaderboard_id: lb.leaderboard_id,
@@ -226,6 +257,19 @@ pub async fn create_entry(
                 "Internal server error".to_string(),
             )
         })?;
+
+    // Initialize scoring algorithm entries
+    for algo in state.scoring.algorithms() {
+        algo.initialize_entry(&state.db, entry.leaderboard_entry_id)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to initialize scoring: {}", e);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal server error".to_string(),
+                )
+            })?;
+    }
 
     Ok((
         StatusCode::CREATED,

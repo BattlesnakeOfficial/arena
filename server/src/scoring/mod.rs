@@ -52,7 +52,7 @@ pub trait ScoringAlgorithm: Send + Sync {
 
     /// Batch fetch scores for all active entries on a leaderboard, ordered by score DESC.
     async fn get_scores(&self, pool: &PgPool, leaderboard_id: Uuid)
-        -> cja::Result<Vec<EntryScore>>;
+    -> cja::Result<Vec<EntryScore>>;
 
     /// Fetch score for a single entry.
     async fn get_entry_score(
@@ -69,9 +69,7 @@ pub struct ScoringRegistry {
 
 impl ScoringRegistry {
     pub fn new() -> Self {
-        Self {
-            algorithms: vec![],
-        }
+        Self { algorithms: vec![] }
     }
 
     pub fn register(&mut self, algo: Box<dyn ScoringAlgorithm>) {
@@ -213,24 +211,25 @@ mod tests {
         );
     }
 
-    // NOTE: test_registry_with_real_algorithms is intentionally not included here
-    // because WengLinScoring and WinRateScoring do not yet implement ScoringAlgorithm,
-    // and #[ignore] does not prevent compilation errors from trait bound violations.
-    // The implementation agent should add this test after implementing the trait:
-    //
-    // #[test]
-    // fn test_registry_with_real_algorithms() {
-    //     let mut registry = ScoringRegistry::new();
-    //     registry.register(Box::new(weng_lin::WengLinScoring));
-    //     registry.register(Box::new(win_rate::WinRateScoring));
-    //     assert_eq!(registry.algorithms().len(), 2);
-    //     assert_eq!(registry.get("weng_lin").unwrap().key(), "weng_lin");
-    //     assert_eq!(registry.get("weng_lin").unwrap().display_name(), "Weng-Lin");
-    //     assert_eq!(registry.get("weng_lin").unwrap().score_column_name(), "Rating");
-    //     assert_eq!(registry.get("win_rate").unwrap().key(), "win_rate");
-    //     assert_eq!(registry.get("win_rate").unwrap().display_name(), "Win Rate");
-    //     assert_eq!(registry.get("win_rate").unwrap().score_column_name(), "Win %");
-    // }
+    #[test]
+    fn test_registry_with_real_algorithms() {
+        let mut registry = ScoringRegistry::new();
+        registry.register(Box::new(weng_lin::WengLinScoring));
+        registry.register(Box::new(win_rate::WinRateScoring));
+        assert_eq!(registry.algorithms().len(), 2);
+        assert_eq!(registry.get("weng_lin").unwrap().key(), "weng_lin");
+        assert_eq!(registry.get("weng_lin").unwrap().display_name(), "Weng-Lin");
+        assert_eq!(
+            registry.get("weng_lin").unwrap().score_column_name(),
+            "Rating"
+        );
+        assert_eq!(registry.get("win_rate").unwrap().key(), "win_rate");
+        assert_eq!(registry.get("win_rate").unwrap().display_name(), "Win Rate");
+        assert_eq!(
+            registry.get("win_rate").unwrap().score_column_name(),
+            "Win %"
+        );
+    }
 
     #[test]
     fn test_game_result_event_construction() {
@@ -253,8 +252,14 @@ mod tests {
         };
 
         assert_eq!(event.results.len(), 2);
-        assert_eq!(event.results[0].placement, 1, "First entry should be winner");
-        assert_eq!(event.results[1].placement, 2, "Second entry should be runner-up");
+        assert_eq!(
+            event.results[0].placement, 1,
+            "First entry should be winner"
+        );
+        assert_eq!(
+            event.results[1].placement, 2,
+            "Second entry should be runner-up"
+        );
     }
 
     #[test]

@@ -1,82 +1,18 @@
 use color_eyre::eyre::Context as _;
-use skillratings::MultiTeamOutcome;
-use skillratings::weng_lin::{WengLinConfig, WengLinRating, weng_lin_multi_team};
 use uuid::Uuid;
 
 use crate::{
     models::{
         game_battlesnake,
-        leaderboard::{self, LeaderboardEntry, LeaderboardGame},
+        leaderboard::{self, LeaderboardGame},
     },
+    scoring::{GameResultEntry, GameResultEvent},
     state::AppState,
 };
 
-/// Computed rating update for a single snake in a game.
-/// Separated from DB logic for testability.
-#[derive(Debug)]
-pub struct RatingUpdate {
-    pub leaderboard_entry_id: Uuid,
-    pub battlesnake_id: Uuid,
-    pub placement: i32,
-    pub old_mu: f64,
-    pub old_sigma: f64,
-    pub new_mu: f64,
-    pub new_sigma: f64,
-    pub new_display_score: f64,
-    pub display_score_change: f64,
-    pub is_first_place: bool,
-}
-
-/// Pure computation: calculate new ratings from entries and placements.
-/// No DB access — fully testable.
-pub fn calculate_rating_updates(
-    entries_with_placements: &[(LeaderboardEntry, i32)],
-) -> Vec<RatingUpdate> {
-    let config = WengLinConfig::new();
-
-    let ratings: Vec<Vec<WengLinRating>> = entries_with_placements
-        .iter()
-        .map(|(entry, _)| {
-            vec![WengLinRating {
-                rating: entry.mu,
-                uncertainty: entry.sigma,
-            }]
-        })
-        .collect();
-
-    let teams_and_ranks: Vec<(&[WengLinRating], MultiTeamOutcome)> = ratings
-        .iter()
-        .zip(entries_with_placements.iter())
-        .map(|(team, (_, placement))| (team.as_slice(), MultiTeamOutcome::new(*placement as usize)))
-        .collect();
-
-    let new_ratings = weng_lin_multi_team(&teams_and_ranks, &config);
-
-    entries_with_placements
-        .iter()
-        .enumerate()
-        .map(|(i, (entry, placement))| {
-            let new_rating = &new_ratings[i][0];
-            let new_mu = new_rating.rating;
-            let new_sigma = new_rating.uncertainty;
-            let new_display_score = new_mu - 3.0 * new_sigma;
-            let old_display_score = entry.mu - 3.0 * entry.sigma;
-
-            RatingUpdate {
-                leaderboard_entry_id: entry.leaderboard_entry_id,
-                battlesnake_id: entry.battlesnake_id,
-                placement: *placement,
-                old_mu: entry.mu,
-                old_sigma: entry.sigma,
-                new_mu,
-                new_sigma,
-                new_display_score,
-                display_score_change: new_display_score - old_display_score,
-                is_first_place: *placement == 1,
-            }
-        })
-        .collect()
-}
+// Re-export for backward compatibility
+#[cfg(test)]
+pub(crate) use crate::scoring::weng_lin::calculate_rating_updates;
 
 /// Update ratings for all snakes in a completed leaderboard game.
 /// Idempotent: safe to call multiple times (e.g. job retries).
@@ -150,7 +86,7 @@ pub async fn update_ratings(app_state: &AppState, leaderboard_game_id: Uuid) -> 
     }
 
     // Look up each snake's leaderboard entry with FOR UPDATE to lock the rows
-    let mut entries_with_placements: Vec<(LeaderboardEntry, i32)> = Vec::new();
+    let mut entries_with_placements: Vec<(leaderboard::LeaderboardEntry, i32)> = Vec::new();
 
     for gs in &game_snakes {
         let placement = gs.placement.unwrap_or(game_snakes.len() as i32);
@@ -193,49 +129,24 @@ pub async fn update_ratings(app_state: &AppState, leaderboard_game_id: Uuid) -> 
         return Ok(());
     }
 
-    // Calculate new ratings (pure computation, no DB)
-    let updates = calculate_rating_updates(&entries_with_placements);
+    // Build a GameResultEvent for the scoring algorithms
+    let event = GameResultEvent {
+        leaderboard_game_id,
+        leaderboard_id: lb_game.leaderboard_id,
+        game_id: lb_game.game_id,
+        results: entries_with_placements
+            .iter()
+            .map(|(entry, placement)| GameResultEntry {
+                leaderboard_entry_id: entry.leaderboard_entry_id,
+                battlesnake_id: entry.battlesnake_id,
+                placement: *placement,
+            })
+            .collect(),
+    };
 
-    // Apply all updates within the transaction
-    for update in &updates {
-        // Record the result (audit trail, ON CONFLICT DO NOTHING for idempotency)
-        let _result = leaderboard::create_game_result(
-            &mut *tx,
-            leaderboard::CreateGameResult {
-                leaderboard_game_id,
-                leaderboard_entry_id: update.leaderboard_entry_id,
-                placement: update.placement,
-                mu_before: update.old_mu,
-                mu_after: update.new_mu,
-                sigma_before: update.old_sigma,
-                sigma_after: update.new_sigma,
-                display_score_change: update.display_score_change,
-            },
-        )
-        .await
-        .wrap_err("Failed to create game result record")?;
-
-        // Update the entry's rating
-        leaderboard::update_rating(
-            &mut *tx,
-            update.leaderboard_entry_id,
-            update.new_mu,
-            update.new_sigma,
-            update.new_display_score,
-            update.is_first_place,
-        )
-        .await
-        .wrap_err("Failed to update entry rating")?;
-
-        tracing::debug!(
-            entry_id = %update.leaderboard_entry_id,
-            battlesnake_id = %update.battlesnake_id,
-            placement = update.placement,
-            mu = format!("{:.2} -> {:.2}", update.old_mu, update.new_mu),
-            sigma = format!("{:.2} -> {:.2}", update.old_sigma, update.new_sigma),
-            score_change = format!("{:+.2}", update.display_score_change),
-            "Updated rating"
-        );
+    // Run all scoring algorithms
+    for algo in app_state.scoring.algorithms() {
+        algo.process_game_result(&mut tx, &event).await?;
     }
 
     // Commit the transaction — all rating updates are atomic
@@ -246,7 +157,7 @@ pub async fn update_ratings(app_state: &AppState, leaderboard_game_id: Uuid) -> 
     tracing::info!(
         leaderboard_game_id = %leaderboard_game_id,
         game_id = %lb_game.game_id,
-        snakes_updated = updates.len(),
+        snakes_updated = entries_with_placements.len(),
         "Ratings updated for leaderboard game"
     );
 
