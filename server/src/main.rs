@@ -23,6 +23,7 @@ mod jobs;
 mod leaderboard_matchmaker;
 mod leaderboard_ratings;
 mod models;
+mod scoring;
 mod routes;
 mod snake_client;
 mod state;
