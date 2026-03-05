@@ -9,6 +9,7 @@ use crate::engine::frame::{DeathInfo, game_to_frame};
 use crate::models::game::{GameStatus, get_game_by_id, update_game_status};
 use crate::snake_client::{request_end_parallel, request_moves_parallel, request_start_parallel};
 use crate::state::AppState;
+use crate::wire;
 
 /// Run a game with turn-by-turn DB persistence and WebSocket notifications
 ///
@@ -72,13 +73,21 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
     // Get timeout from game settings (default 500ms)
     let timeout = std::time::Duration::from_millis(engine_game.game.timeout as u64);
 
-    // Call /start for all snakes in parallel (fire and forget)
-    tracing::info!(game_id = %game_id, "Calling /start for all snakes");
-    request_start_parallel(http_client, &engine_game, &snake_urls, timeout).await;
-
     let mut death_info: Vec<DeathInfo> = Vec::new();
     let mut elimination_order: Vec<String> = Vec::new();
     let mut last_moves: HashMap<String, Move> = HashMap::new();
+    let mut snake_contexts: HashMap<String, wire::SnakeContext> = HashMap::new();
+
+    // Call /start for all snakes in parallel (fire and forget)
+    tracing::info!(game_id = %game_id, "Calling /start for all snakes");
+    request_start_parallel(
+        http_client,
+        &engine_game,
+        &snake_urls,
+        timeout,
+        &snake_contexts,
+    )
+    .await;
 
     // Helper to check if game is over
     let is_game_over = |g: &battlesnake_game_types::wire_representation::Game| {
@@ -101,9 +110,15 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
     // Run the game turn by turn
     while !is_game_over(&engine_game) && engine_game.turn < MAX_TURNS {
         // Request moves from all alive snakes in parallel
-        let move_results =
-            request_moves_parallel(http_client, &engine_game, &snake_urls, timeout, &last_moves)
-                .await;
+        let move_results = request_moves_parallel(
+            http_client,
+            &engine_game,
+            &snake_urls,
+            timeout,
+            &last_moves,
+            &snake_contexts,
+        )
+        .await;
 
         // Accumulate snake wait time from latency measurements
         for result in &move_results {
@@ -121,6 +136,18 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
         // Store last moves for timeout fallback on next turn
         for result in &move_results {
             last_moves.insert(result.snake_id.clone(), result.direction);
+        }
+
+        // Update snake_contexts for NEXT turn
+        snake_contexts.clear();
+        for result in &move_results {
+            snake_contexts.insert(
+                result.snake_id.clone(),
+                wire::SnakeContext {
+                    latency_ms: result.latency_ms,
+                    shout: result.shout.clone(),
+                },
+            );
         }
 
         // Apply the moves using the engine
@@ -211,7 +238,14 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
 
     // Call /end for all snakes in parallel (fire and forget)
     tracing::info!(game_id = %game_id, "Calling /end for all snakes");
-    request_end_parallel(http_client, &engine_game, &snake_urls, timeout).await;
+    request_end_parallel(
+        http_client,
+        &engine_game,
+        &snake_urls,
+        timeout,
+        &snake_contexts,
+    )
+    .await;
 
     tracing::info!(
         game_id = %game_id,
