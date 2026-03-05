@@ -1,6 +1,6 @@
 CREATE TABLE win_rate_stats (
     win_rate_stat_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    leaderboard_entry_id UUID NOT NULL REFERENCES leaderboard_entries(leaderboard_entry_id),
+    leaderboard_entry_id UUID NOT NULL REFERENCES leaderboard_entries(leaderboard_entry_id) ON DELETE CASCADE,
     wins INT NOT NULL DEFAULT 0,
     losses INT NOT NULL DEFAULT 0,
     games_played INT NOT NULL DEFAULT 0,
