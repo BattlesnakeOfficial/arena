@@ -25,12 +25,12 @@ impl ScoringAlgorithm for WinRateScoring {
     }
 
     async fn initialize_entry(&self, pool: &PgPool, leaderboard_entry_id: Uuid) -> cja::Result<()> {
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO win_rate_stats (leaderboard_entry_id) \
              VALUES ($1) \
              ON CONFLICT (leaderboard_entry_id) DO NOTHING",
+            leaderboard_entry_id,
         )
-        .bind(leaderboard_entry_id)
         .execute(pool)
         .await
         .wrap_err("Failed to initialize win_rate_stats entry")?;
@@ -47,7 +47,7 @@ impl ScoringAlgorithm for WinRateScoring {
             let is_win = result.placement == 1;
 
             // Try UPDATE first
-            let rows_affected = sqlx::query(
+            let rows_affected = sqlx::query!(
                 "UPDATE win_rate_stats SET \
                     games_played = games_played + 1, \
                     wins = wins + CASE WHEN $2 THEN 1 ELSE 0 END, \
@@ -58,9 +58,9 @@ impl ScoringAlgorithm for WinRateScoring {
                         ELSE 0.0 END, \
                     updated_at = NOW() \
                  WHERE leaderboard_entry_id = $1",
+                result.leaderboard_entry_id,
+                is_win,
             )
-            .bind(result.leaderboard_entry_id)
-            .bind(is_win)
             .execute(&mut *conn)
             .await
             .wrap_err("Failed to update win_rate_stats")?
@@ -68,17 +68,17 @@ impl ScoringAlgorithm for WinRateScoring {
 
             // If no row existed, lazily insert then retry
             if rows_affected == 0 {
-                sqlx::query(
+                sqlx::query!(
                     "INSERT INTO win_rate_stats (leaderboard_entry_id) \
                      VALUES ($1) \
                      ON CONFLICT (leaderboard_entry_id) DO NOTHING",
+                    result.leaderboard_entry_id,
                 )
-                .bind(result.leaderboard_entry_id)
                 .execute(&mut *conn)
                 .await
                 .wrap_err("Failed to lazy-insert win_rate_stats")?;
 
-                sqlx::query(
+                sqlx::query!(
                     "UPDATE win_rate_stats SET \
                         games_played = games_played + 1, \
                         wins = wins + CASE WHEN $2 THEN 1 ELSE 0 END, \
@@ -89,9 +89,9 @@ impl ScoringAlgorithm for WinRateScoring {
                             ELSE 0.0 END, \
                         updated_at = NOW() \
                      WHERE leaderboard_entry_id = $1",
+                    result.leaderboard_entry_id,
+                    is_win,
                 )
-                .bind(result.leaderboard_entry_id)
-                .bind(is_win)
                 .execute(&mut *conn)
                 .await
                 .wrap_err("Failed to retry update win_rate_stats")?;
@@ -106,7 +106,7 @@ impl ScoringAlgorithm for WinRateScoring {
         pool: &PgPool,
         leaderboard_id: Uuid,
     ) -> cja::Result<Vec<EntryScore>> {
-        let rows = sqlx::query_as::<_, WinRateRow>(
+        let rows = sqlx::query!(
             "SELECT wrs.leaderboard_entry_id, wrs.score, wrs.wins, wrs.losses, wrs.games_played \
              FROM win_rate_stats wrs \
              JOIN leaderboard_entries le ON wrs.leaderboard_entry_id = le.leaderboard_entry_id \
@@ -114,9 +114,9 @@ impl ScoringAlgorithm for WinRateScoring {
                AND le.disabled_at IS NULL \
                AND le.games_played >= $2 \
              ORDER BY wrs.score DESC",
+            leaderboard_id,
+            leaderboard::MIN_GAMES_FOR_RANKING,
         )
-        .bind(leaderboard_id)
-        .bind(leaderboard::MIN_GAMES_FOR_RANKING)
         .fetch_all(pool)
         .await
         .wrap_err("Failed to fetch win-rate scores")?;
@@ -140,12 +140,12 @@ impl ScoringAlgorithm for WinRateScoring {
         pool: &PgPool,
         leaderboard_entry_id: Uuid,
     ) -> cja::Result<Option<EntryScore>> {
-        let row = sqlx::query_as::<_, WinRateRow>(
+        let row = sqlx::query!(
             "SELECT leaderboard_entry_id, score, wins, losses, games_played \
              FROM win_rate_stats \
              WHERE leaderboard_entry_id = $1",
+            leaderboard_entry_id,
         )
-        .bind(leaderboard_entry_id)
         .fetch_optional(pool)
         .await
         .wrap_err("Failed to fetch win-rate entry score")?;
@@ -162,29 +162,20 @@ impl ScoringAlgorithm for WinRateScoring {
     }
 }
 
-#[derive(sqlx::FromRow)]
-struct WinRateRow {
-    leaderboard_entry_id: Uuid,
-    score: f64,
-    wins: i32,
-    losses: i32,
-    games_played: i32,
-}
-
-/// Win rate = wins / games_played * 100.0
-fn compute_win_rate(wins: i32, games_played: i32) -> f64 {
-    if games_played > 0 {
-        wins as f64 / games_played as f64 * 100.0
-    } else {
-        0.0
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::scoring::ScoringAlgorithm;
     use uuid::Uuid;
+
+    /// Win rate = wins / games_played * 100.0
+    fn compute_win_rate(wins: i32, games_played: i32) -> f64 {
+        if games_played > 0 {
+            wins as f64 / games_played as f64 * 100.0
+        } else {
+            0.0
+        }
+    }
 
     #[test]
     fn test_win_rate_key() {

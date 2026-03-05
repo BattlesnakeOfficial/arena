@@ -94,12 +94,12 @@ impl ScoringAlgorithm for WengLinScoring {
     }
 
     async fn initialize_entry(&self, pool: &PgPool, leaderboard_entry_id: Uuid) -> cja::Result<()> {
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO weng_lin_ratings (leaderboard_entry_id) \
              VALUES ($1) \
              ON CONFLICT (leaderboard_entry_id) DO NOTHING",
+            leaderboard_entry_id,
         )
-        .bind(leaderboard_entry_id)
         .execute(pool)
         .await
         .wrap_err("Failed to initialize weng_lin_ratings entry")?;
@@ -120,11 +120,11 @@ impl ScoringAlgorithm for WengLinScoring {
             .collect();
 
         // Fetch existing weng_lin_ratings rows with FOR UPDATE
-        let wl_rows = sqlx::query_as::<_, WengLinRow>(
+        let wl_rows = sqlx::query!(
             "SELECT leaderboard_entry_id, mu, sigma FROM weng_lin_ratings \
              WHERE leaderboard_entry_id = ANY($1) FOR UPDATE",
+            &entry_ids,
         )
-        .bind(&entry_ids)
         .fetch_all(&mut *conn)
         .await
         .wrap_err("Failed to lock weng_lin_ratings rows")?;
@@ -135,13 +135,14 @@ impl ScoringAlgorithm for WengLinScoring {
             .collect();
 
         // Also fetch leaderboard_entries for fallback mu/sigma and for write-through
-        let le_rows = sqlx::query_as::<_, LeaderboardEntry>(
+        let le_rows = sqlx::query_as!(
+            LeaderboardEntry,
             "SELECT leaderboard_entry_id, leaderboard_id, battlesnake_id, \
              mu, sigma, display_score, games_played, first_place_finishes, non_first_finishes, \
              disabled_at, created_at, updated_at \
              FROM leaderboard_entries WHERE leaderboard_entry_id = ANY($1) FOR UPDATE",
+            &entry_ids,
         )
-        .bind(&entry_ids)
         .fetch_all(&mut *conn)
         .await
         .wrap_err("Failed to fetch leaderboard entries for weng-lin")?;
@@ -173,16 +174,16 @@ impl ScoringAlgorithm for WengLinScoring {
 
         for update in &updates {
             // Upsert weng_lin_ratings
-            sqlx::query(
+            sqlx::query!(
                 "INSERT INTO weng_lin_ratings (leaderboard_entry_id, mu, sigma, display_score) \
                  VALUES ($1, $2, $3, $4) \
                  ON CONFLICT (leaderboard_entry_id) DO UPDATE SET \
                    mu = $2, sigma = $3, display_score = $4, updated_at = NOW()",
+                update.leaderboard_entry_id,
+                update.new_mu,
+                update.new_sigma,
+                update.new_display_score,
             )
-            .bind(update.leaderboard_entry_id)
-            .bind(update.new_mu)
-            .bind(update.new_sigma)
-            .bind(update.new_display_score)
             .execute(&mut *conn)
             .await
             .wrap_err("Failed to update weng_lin_ratings")?;
@@ -225,7 +226,7 @@ impl ScoringAlgorithm for WengLinScoring {
         pool: &PgPool,
         leaderboard_id: Uuid,
     ) -> cja::Result<Vec<EntryScore>> {
-        let rows = sqlx::query_as::<_, WengLinScoreRow>(
+        let rows = sqlx::query!(
             "SELECT wlr.leaderboard_entry_id, wlr.display_score, wlr.mu, wlr.sigma \
              FROM weng_lin_ratings wlr \
              JOIN leaderboard_entries le ON wlr.leaderboard_entry_id = le.leaderboard_entry_id \
@@ -233,9 +234,9 @@ impl ScoringAlgorithm for WengLinScoring {
                AND le.disabled_at IS NULL \
                AND le.games_played >= $2 \
              ORDER BY wlr.display_score DESC",
+            leaderboard_id,
+            leaderboard::MIN_GAMES_FOR_RANKING,
         )
-        .bind(leaderboard_id)
-        .bind(leaderboard::MIN_GAMES_FOR_RANKING)
         .fetch_all(pool)
         .await
         .wrap_err("Failed to fetch weng-lin scores")?;
@@ -258,12 +259,12 @@ impl ScoringAlgorithm for WengLinScoring {
         pool: &PgPool,
         leaderboard_entry_id: Uuid,
     ) -> cja::Result<Option<EntryScore>> {
-        let row = sqlx::query_as::<_, WengLinScoreRow>(
+        let row = sqlx::query!(
             "SELECT leaderboard_entry_id, display_score, mu, sigma \
              FROM weng_lin_ratings \
              WHERE leaderboard_entry_id = $1",
+            leaderboard_entry_id,
         )
-        .bind(leaderboard_entry_id)
         .fetch_optional(pool)
         .await
         .wrap_err("Failed to fetch weng-lin entry score")?;
@@ -277,21 +278,6 @@ impl ScoringAlgorithm for WengLinScoring {
             ],
         }))
     }
-}
-
-#[derive(sqlx::FromRow)]
-struct WengLinRow {
-    leaderboard_entry_id: Uuid,
-    mu: f64,
-    sigma: f64,
-}
-
-#[derive(sqlx::FromRow)]
-struct WengLinScoreRow {
-    leaderboard_entry_id: Uuid,
-    display_score: f64,
-    mu: f64,
-    sigma: f64,
 }
 
 #[cfg(test)]
