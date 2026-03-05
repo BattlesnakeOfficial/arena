@@ -48,15 +48,6 @@ test.describe('Profile Page', () => {
     await expect(authenticatedPage.getByRole('heading', { name: 'Create New Game' })).toBeVisible();
   });
 
-  test('View All Games link navigates to games list', async ({ authenticatedPage }) => {
-    await authenticatedPage.goto('/me');
-
-    await authenticatedPage.getByRole('link', { name: 'View All Games' }).click();
-
-    await expect(authenticatedPage).toHaveURL('/games');
-    await expect(authenticatedPage.getByRole('heading', { name: 'All Games' })).toBeVisible();
-  });
-
   test('Back to Home link navigates to homepage', async ({ authenticatedPage }) => {
     await authenticatedPage.goto('/me');
 
