@@ -11,6 +11,8 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use url::Url;
 
+use crate::wire;
+
 /// Response from a snake's /move endpoint
 #[derive(Debug, Deserialize)]
 pub struct MoveResponse {
@@ -33,13 +35,12 @@ pub struct MoveResult {
 ///
 /// The Battlesnake API expects the `you` field to be set to the snake
 /// that the request is being sent to.
-fn build_request_for_snake(game: &Game, snake: &BattleSnake) -> Game {
-    Game {
-        you: snake.clone(),
-        board: game.board.clone(),
-        turn: game.turn,
-        game: game.game.clone(),
-    }
+fn build_request_for_snake(
+    game: &Game,
+    snake: &BattleSnake,
+    snake_contexts: &HashMap<String, wire::SnakeContext>,
+) -> wire::Game {
+    wire::Game::from_engine_game(game, snake, snake_contexts)
 }
 
 /// Parse a direction string into a Move enum
@@ -81,8 +82,9 @@ pub async fn request_move(
     snake: &BattleSnake,
     timeout: Duration,
     last_direction: Option<Move>,
+    snake_contexts: &HashMap<String, wire::SnakeContext>,
 ) -> MoveResult {
-    let request_body = build_request_for_snake(game, snake);
+    let request_body = build_request_for_snake(game, snake, snake_contexts);
     let move_url = build_endpoint_url(url, "move");
 
     let start = Instant::now();
@@ -163,8 +165,9 @@ pub async fn request_start(
     game: &Game,
     snake: &BattleSnake,
     timeout: Duration,
+    snake_contexts: &HashMap<String, wire::SnakeContext>,
 ) {
-    let request_body = build_request_for_snake(game, snake);
+    let request_body = build_request_for_snake(game, snake, snake_contexts);
     let start_url = build_endpoint_url(url, "start");
 
     // Fire and forget - ignore result but log errors
@@ -188,8 +191,9 @@ pub async fn request_end(
     game: &Game,
     snake: &BattleSnake,
     timeout: Duration,
+    snake_contexts: &HashMap<String, wire::SnakeContext>,
 ) {
-    let request_body = build_request_for_snake(game, snake);
+    let request_body = build_request_for_snake(game, snake, snake_contexts);
     let end_url = build_endpoint_url(url, "end");
 
     // Fire and forget - ignore result but log errors
@@ -215,6 +219,7 @@ pub async fn request_moves_parallel(
     snake_urls: &[(String, String)], // (snake_id, url)
     timeout: Duration,
     last_moves: &HashMap<String, Move>,
+    snake_contexts: &HashMap<String, wire::SnakeContext>,
 ) -> Vec<MoveResult> {
     let futures: Vec<_> = game
         .board
@@ -227,7 +232,15 @@ pub async fn request_moves_parallel(
                 .find(|(id, _)| id == &snake.id)
                 .map(|(_, url)| {
                     let last_direction = last_moves.get(&snake.id).copied();
-                    request_move(client, url, game, snake, timeout, last_direction)
+                    request_move(
+                        client,
+                        url,
+                        game,
+                        snake,
+                        timeout,
+                        last_direction,
+                        snake_contexts,
+                    )
                 })
         })
         .collect();
@@ -241,6 +254,7 @@ pub async fn request_start_parallel(
     game: &Game,
     snake_urls: &[(String, String)],
     timeout: Duration,
+    snake_contexts: &HashMap<String, wire::SnakeContext>,
 ) {
     let futures: Vec<_> = game
         .board
@@ -250,7 +264,7 @@ pub async fn request_start_parallel(
             snake_urls
                 .iter()
                 .find(|(id, _)| id == &snake.id)
-                .map(|(_, url)| request_start(client, url, game, snake, timeout))
+                .map(|(_, url)| request_start(client, url, game, snake, timeout, snake_contexts))
         })
         .collect();
 
@@ -263,6 +277,7 @@ pub async fn request_end_parallel(
     game: &Game,
     snake_urls: &[(String, String)],
     timeout: Duration,
+    snake_contexts: &HashMap<String, wire::SnakeContext>,
 ) {
     let futures: Vec<_> = game
         .board
@@ -272,7 +287,7 @@ pub async fn request_end_parallel(
             snake_urls
                 .iter()
                 .find(|(id, _)| id == &snake.id)
-                .map(|(_, url)| request_end(client, url, game, snake, timeout))
+                .map(|(_, url)| request_end(client, url, game, snake, timeout, snake_contexts))
         })
         .collect();
 
@@ -282,6 +297,7 @@ pub async fn request_end_parallel(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wire;
     use battlesnake_game_types::wire_representation::{Board, NestedGame, Position, Ruleset};
     use proptest::prelude::*;
     use std::collections::VecDeque;
@@ -417,9 +433,10 @@ mod tests {
         let snake1 = create_test_snake("snake-1");
         let snake2 = create_test_snake("snake-2");
         let game = create_test_game_with_snakes(vec![snake1.clone(), snake2.clone()]);
+        let contexts = HashMap::<String, wire::SnakeContext>::new();
 
         // Build request for snake2 - the `you` field should be snake2
-        let request = build_request_for_snake(&game, &snake2);
+        let request = build_request_for_snake(&game, &snake2, &contexts);
 
         assert_eq!(request.you.id, "snake-2");
         assert_eq!(request.you.name, "Snake snake-2");
@@ -433,8 +450,9 @@ mod tests {
     fn test_build_request_for_snake_preserves_board() {
         let snake1 = create_test_snake("snake-1");
         let game = create_test_game_with_snakes(vec![snake1.clone()]);
+        let contexts = HashMap::<String, wire::SnakeContext>::new();
 
-        let request = build_request_for_snake(&game, &snake1);
+        let request = build_request_for_snake(&game, &snake1, &contexts);
 
         // All board properties should be preserved
         assert_eq!(request.board.height, 11);

@@ -28,6 +28,7 @@ mod snake_client;
 mod state;
 mod static_assets;
 mod telemetry;
+mod wire;
 
 /// Frontend UI components only - do not place backend logic here
 mod components {
