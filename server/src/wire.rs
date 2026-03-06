@@ -73,8 +73,7 @@ pub struct SquadSettings {
 pub struct Ruleset {
     pub name: String,
     pub version: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub settings: Option<RulesetSettings>,
+    pub settings: RulesetSettings,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -82,10 +81,8 @@ pub struct NestedGame {
     pub id: String,
     pub ruleset: Ruleset,
     pub timeout: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub map: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub source: Option<String>,
+    pub map: String,
+    pub source: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -148,6 +145,27 @@ impl BattleSnake {
     }
 }
 
+impl Default for RulesetSettings {
+    fn default() -> Self {
+        RulesetSettings {
+            food_spawn_chance: 0,
+            minimum_food: 0,
+            hazard_damage_per_turn: 0,
+            hazard_map: None,
+            hazard_map_author: None,
+            royale: RoyaleSettings {
+                shrink_every_n_turns: 0,
+            },
+            squad: SquadSettings {
+                allow_body_collisions: false,
+                shared_elimination: false,
+                shared_health: false,
+                shared_length: false,
+            },
+        }
+    }
+}
+
 impl RulesetSettings {
     fn from_engine_settings(settings: &wire_representation::Settings) -> Self {
         RulesetSettings {
@@ -195,11 +213,12 @@ impl Game {
                         .ruleset
                         .settings
                         .as_ref()
-                        .map(RulesetSettings::from_engine_settings),
+                        .map(RulesetSettings::from_engine_settings)
+                        .unwrap_or_default(),
                 },
                 timeout: game.game.timeout,
-                map: game.game.map.clone(),
-                source: game.game.source.clone(),
+                map: game.game.map.clone().unwrap_or_default(),
+                source: game.game.source.clone().unwrap_or_default(),
             },
             turn: game.turn,
             board: Board {
@@ -227,11 +246,11 @@ mod tests {
                 ruleset: Ruleset {
                     name: "standard".to_string(),
                     version: "v1.0.0".to_string(),
-                    settings: None,
+                    settings: RulesetSettings::default(),
                 },
                 timeout: 500,
-                map: None,
-                source: None,
+                map: String::new(),
+                source: String::new(),
             },
             turn: 3,
             board: Board {
@@ -496,6 +515,65 @@ mod tests {
         assert!(
             settings.get("squad").is_some(),
             "squad field must be present even in royale games"
+        );
+    }
+
+    /// When engine has no settings, map, or source, the wire output must still
+    /// include these fields with sensible defaults (not omit them).
+    #[test]
+    fn test_missing_engine_fields_produce_defaults() {
+        use battlesnake_game_types::wire_representation as engine;
+        use std::collections::VecDeque;
+
+        let snake = engine::BattleSnake {
+            id: "s1".to_string(),
+            name: "Snake 1".to_string(),
+            head: engine::Position::new(0, 0),
+            body: VecDeque::from([engine::Position::new(0, 0)]),
+            health: 100,
+            shout: None,
+            actual_length: None,
+        };
+
+        let engine_game = engine::Game {
+            you: snake.clone(),
+            board: engine::Board {
+                height: 11,
+                width: 11,
+                food: vec![],
+                snakes: vec![snake.clone()],
+                hazards: vec![],
+            },
+            turn: 0,
+            game: engine::NestedGame {
+                id: "g1".to_string(),
+                ruleset: engine::Ruleset {
+                    name: "standard".to_string(),
+                    version: "v1.0.0".to_string(),
+                    settings: None, // no settings
+                },
+                timeout: 500,
+                map: None,    // no map
+                source: None, // no source
+            },
+        };
+
+        let contexts = HashMap::new();
+        let wire = Game::from_engine_game(&engine_game, &snake, &contexts);
+        let json: Value = serde_json::to_value(&wire).unwrap();
+
+        let game = &json["game"];
+        assert!(
+            game.get("map").is_some(),
+            "map must always be present in serialized JSON"
+        );
+        assert!(
+            game.get("source").is_some(),
+            "source must always be present in serialized JSON"
+        );
+        assert!(
+            game["ruleset"].get("settings").is_some(),
+            "settings must always be present in serialized JSON"
         );
     }
 
