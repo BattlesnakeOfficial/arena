@@ -46,6 +46,9 @@ pub struct Battlesnake {
     pub name: String,
     pub url: String,
     pub visibility: Visibility,
+    pub color: String,
+    pub head: String,
+    pub tail: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
@@ -82,6 +85,9 @@ pub async fn get_battlesnakes_by_user_id(
             name,
             url,
             visibility as "visibility: Visibility",
+            color,
+            head,
+            tail,
             created_at,
             updated_at
         FROM battlesnakes
@@ -111,6 +117,9 @@ pub async fn get_battlesnake_by_id(
             name,
             url,
             visibility as "visibility: Visibility",
+            color,
+            head,
+            tail,
             created_at,
             updated_at
         FROM battlesnakes
@@ -149,6 +158,9 @@ pub async fn create_battlesnake(
             name,
             url,
             visibility as "visibility: Visibility",
+            color,
+            head,
+            tail,
             created_at,
             updated_at
         "#,
@@ -206,6 +218,9 @@ pub async fn update_battlesnake(
             name,
             url,
             visibility as "visibility: Visibility",
+            color,
+            head,
+            tail,
             created_at,
             updated_at
         "#,
@@ -298,6 +313,9 @@ pub async fn get_public_battlesnakes(pool: &PgPool) -> cja::Result<Vec<Battlesna
             name,
             url,
             visibility as "visibility: Visibility",
+            color,
+            head,
+            tail,
             created_at,
             updated_at
         FROM battlesnakes
@@ -326,6 +344,9 @@ pub async fn get_available_battlesnakes(
             name,
             url,
             visibility as "visibility: Visibility",
+            color,
+            head,
+            tail,
             created_at,
             updated_at
         FROM battlesnakes
@@ -339,4 +360,28 @@ pub async fn get_available_battlesnakes(
     .wrap_err("Failed to fetch available battlesnakes from database")?;
 
     Ok(battlesnakes)
+}
+
+pub async fn update_battlesnake_customizations(
+    pool: &PgPool,
+    battlesnake_id: Uuid,
+    color: &str,
+    head: &str,
+    tail: &str,
+) -> cja::Result<()> {
+    sqlx::query!(
+        r#"
+        UPDATE battlesnakes
+        SET color = $2, head = $3, tail = $4
+        WHERE battlesnake_id = $1
+        "#,
+        battlesnake_id,
+        color,
+        head,
+        tail,
+    )
+    .execute(pool)
+    .await
+    .wrap_err("Failed to update battlesnake customizations")?;
+    Ok(())
 }

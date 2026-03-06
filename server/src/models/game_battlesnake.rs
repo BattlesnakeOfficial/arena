@@ -43,6 +43,9 @@ pub struct GameBattlesnakeWithDetails {
     pub url: String,
     pub user_id: Uuid,
     pub leaderboard_entry_id: Option<Uuid>,
+    pub color: String,
+    pub head: String,
+    pub tail: String,
 }
 
 // Database functions for game battlesnake management
@@ -67,7 +70,10 @@ pub async fn get_battlesnakes_by_game_id(
             b.name,
             b.url,
             b.user_id,
-            gb.leaderboard_entry_id
+            gb.leaderboard_entry_id,
+            b.color,
+            b.head,
+            b.tail
         FROM game_battlesnakes gb
         LEFT JOIN leaderboard_entries le ON gb.leaderboard_entry_id = le.leaderboard_entry_id
         JOIN battlesnakes b

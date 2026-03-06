@@ -81,6 +81,12 @@ impl From<Position> for FrameCoord {
     }
 }
 
+pub struct SnakeCustomizations {
+    pub color: String,
+    pub head: String,
+    pub tail: String,
+}
+
 use crate::snake_client::MoveResult;
 
 /// Convert a Game state to a frame for the board viewer
@@ -90,6 +96,7 @@ pub fn game_to_frame(
     game: &Game,
     death_info: &[DeathInfo],
     move_results: &[MoveResult],
+    customizations: &std::collections::HashMap<String, SnakeCustomizations>,
 ) -> EngineGameFrame {
     EngineGameFrame {
         turn: game.turn,
@@ -145,9 +152,21 @@ pub fn game_to_frame(
                     name: s.name.clone(),
                     body: body_to_coords(&s.body),
                     health: s.health,
-                    color: generate_snake_color(&s.id),
-                    head_type: "default".to_string(),
-                    tail_type: "default".to_string(),
+                    color: customizations
+                        .get(&s.id)
+                        .map(|c| c.color.clone())
+                        .filter(|c| !c.is_empty())
+                        .unwrap_or_else(|| generate_snake_color(&s.id)),
+                    head_type: customizations
+                        .get(&s.id)
+                        .map(|c| c.head.clone())
+                        .filter(|h| !h.is_empty())
+                        .unwrap_or_else(|| "default".to_string()),
+                    tail_type: customizations
+                        .get(&s.id)
+                        .map(|c| c.tail.clone())
+                        .filter(|t| !t.is_empty())
+                        .unwrap_or_else(|| "default".to_string()),
                     latency,
                     shout,
                     squad: "".to_string(),
@@ -264,7 +283,7 @@ mod tests {
         let game = create_test_game();
         let death_info: Vec<DeathInfo> = vec![];
 
-        let frame = game_to_frame(&game, &death_info, &[]);
+        let frame = game_to_frame(&game, &death_info, &[], &std::collections::HashMap::new());
 
         assert_eq!(frame.turn, 0);
         assert_eq!(frame.snakes.len(), 1);
@@ -288,7 +307,7 @@ mod tests {
             eliminated_by: "".to_string(),
         }];
 
-        let frame = game_to_frame(&game, &death_info, &[]);
+        let frame = game_to_frame(&game, &death_info, &[], &std::collections::HashMap::new());
 
         assert_eq!(frame.snakes.len(), 1);
         assert!(frame.snakes[0].death.is_some());
@@ -310,7 +329,7 @@ mod tests {
             eliminated_by: "snake-2".to_string(),
         }];
 
-        let frame = game_to_frame(&game, &death_info, &[]);
+        let frame = game_to_frame(&game, &death_info, &[], &std::collections::HashMap::new());
 
         let death = frame.snakes[0].death.as_ref().unwrap();
         assert_eq!(death.eliminated_by, "snake-2");
@@ -336,7 +355,7 @@ mod tests {
         });
 
         let death_info: Vec<DeathInfo> = vec![];
-        let frame = game_to_frame(&game, &death_info, &[]);
+        let frame = game_to_frame(&game, &death_info, &[], &std::collections::HashMap::new());
 
         assert_eq!(frame.snakes.len(), 2);
         assert_eq!(frame.snakes[0].id, "snake-1");
@@ -349,7 +368,7 @@ mod tests {
         let mut game = create_test_game();
         game.board.food = vec![Position::new(5, 5), Position::new(7, 7)];
 
-        let frame = game_to_frame(&game, &[], &[]);
+        let frame = game_to_frame(&game, &[], &[], &std::collections::HashMap::new());
 
         assert_eq!(frame.food.len(), 2);
         assert_eq!(frame.food[0].x, 5);
@@ -363,7 +382,7 @@ mod tests {
         let mut game = create_test_game();
         game.board.hazards = vec![Position::new(0, 0), Position::new(10, 10)];
 
-        let frame = game_to_frame(&game, &[], &[]);
+        let frame = game_to_frame(&game, &[], &[], &std::collections::HashMap::new());
 
         assert_eq!(frame.hazards.len(), 2);
         assert_eq!(frame.hazards[0].x, 0);
@@ -373,7 +392,7 @@ mod tests {
     #[test]
     fn test_game_to_frame_snake_body_coords() {
         let game = create_test_game();
-        let frame = game_to_frame(&game, &[], &[]);
+        let frame = game_to_frame(&game, &[], &[], &std::collections::HashMap::new());
 
         // Snake body should be converted to FrameCoords
         assert_eq!(frame.snakes[0].body.len(), 3);
@@ -392,7 +411,7 @@ mod tests {
             eliminated_by: "".to_string(),
         }];
 
-        let frame = game_to_frame(&game, &death_info, &[]);
+        let frame = game_to_frame(&game, &death_info, &[], &std::collections::HashMap::new());
 
         // Death info is still attached (for replay purposes)
         assert!(frame.snakes[0].death.is_some());
@@ -404,7 +423,7 @@ mod tests {
     #[test]
     fn test_frame_snake_serialization() {
         let game = create_test_game();
-        let frame = game_to_frame(&game, &[], &[]);
+        let frame = game_to_frame(&game, &[], &[], &std::collections::HashMap::new());
 
         let json = serde_json::to_string(&frame).unwrap();
 
@@ -449,7 +468,12 @@ mod tests {
             shout: None,
         }];
 
-        let frame = game_to_frame(&game, &death_info, &move_results);
+        let frame = game_to_frame(
+            &game,
+            &death_info,
+            &move_results,
+            &std::collections::HashMap::new(),
+        );
 
         assert_eq!(frame.snakes[0].latency, "42");
     }
@@ -469,7 +493,12 @@ mod tests {
             shout: None,
         }];
 
-        let frame = game_to_frame(&game, &death_info, &move_results);
+        let frame = game_to_frame(
+            &game,
+            &death_info,
+            &move_results,
+            &std::collections::HashMap::new(),
+        );
 
         assert_eq!(frame.snakes[0].latency, "timeout");
     }
@@ -489,7 +518,12 @@ mod tests {
             shout: Some("Hello from move!".to_string()),
         }];
 
-        let frame = game_to_frame(&game, &death_info, &move_results);
+        let frame = game_to_frame(
+            &game,
+            &death_info,
+            &move_results,
+            &std::collections::HashMap::new(),
+        );
 
         // Shout from move result should be used
         assert_eq!(frame.snakes[0].shout, "Hello from move!");
@@ -510,7 +544,12 @@ mod tests {
             shout: None, // No shout in move result
         }];
 
-        let frame = game_to_frame(&game, &death_info, &move_results);
+        let frame = game_to_frame(
+            &game,
+            &death_info,
+            &move_results,
+            &std::collections::HashMap::new(),
+        );
 
         // Should fall back to snake's existing shout
         assert_eq!(frame.snakes[0].shout, "Hello!");
@@ -532,7 +571,12 @@ mod tests {
             shout: None,
         }];
 
-        let frame = game_to_frame(&game, &death_info, &move_results);
+        let frame = game_to_frame(
+            &game,
+            &death_info,
+            &move_results,
+            &std::collections::HashMap::new(),
+        );
 
         // Should default to "0" when no matching result
         assert_eq!(frame.snakes[0].latency, "0");
@@ -575,5 +619,139 @@ mod tests {
                 source: None,
             },
         }
+    }
+
+    // === Test scaffold for BS-d6da131bea2c4868: Snake customization support ===
+
+    #[test]
+    fn test_game_to_frame_uses_customizations() {
+        use std::collections::HashMap;
+        let game = create_test_game();
+        let mut custom = HashMap::new();
+        custom.insert(
+            "snake-1".to_string(),
+            SnakeCustomizations {
+                color: "#ff0000".to_string(),
+                head: "bendr".to_string(),
+                tail: "fat-rattle".to_string(),
+            },
+        );
+        let frame = game_to_frame(&game, &[], &[], &custom);
+        assert_eq!(frame.snakes[0].color, "#ff0000", "should use custom color");
+        assert_eq!(frame.snakes[0].head_type, "bendr", "should use custom head");
+        assert_eq!(
+            frame.snakes[0].tail_type, "fat-rattle",
+            "should use custom tail"
+        );
+    }
+
+    #[test]
+    fn test_game_to_frame_falls_back_when_no_customizations() {
+        use std::collections::HashMap;
+        let game = create_test_game();
+        let frame = game_to_frame(&game, &[], &[], &HashMap::new());
+        assert!(
+            !frame.snakes[0].color.is_empty(),
+            "fallback color should not be empty"
+        );
+        assert!(
+            frame.snakes[0].color.starts_with('#'),
+            "fallback color should be a hex color"
+        );
+        assert_eq!(
+            frame.snakes[0].head_type, "default",
+            "fallback head should be 'default'"
+        );
+        assert_eq!(
+            frame.snakes[0].tail_type, "default",
+            "fallback tail should be 'default'"
+        );
+    }
+
+    #[test]
+    fn test_game_to_frame_empty_customization_fields_use_defaults() {
+        use std::collections::HashMap;
+        let game = create_test_game();
+        let mut custom = HashMap::new();
+        custom.insert(
+            "snake-1".to_string(),
+            SnakeCustomizations {
+                color: "".to_string(),
+                head: "".to_string(),
+                tail: "".to_string(),
+            },
+        );
+        let frame = game_to_frame(&game, &[], &[], &custom);
+        assert!(
+            !frame.snakes[0].color.is_empty(),
+            "empty color should fall back to generated color"
+        );
+        assert!(
+            frame.snakes[0].color.starts_with('#'),
+            "fallback color should be a hex color"
+        );
+        assert_eq!(
+            frame.snakes[0].head_type, "default",
+            "empty head should fall back to 'default'"
+        );
+        assert_eq!(
+            frame.snakes[0].tail_type, "default",
+            "empty tail should fall back to 'default'"
+        );
+    }
+
+    #[test]
+    fn test_game_to_frame_partial_customization() {
+        use std::collections::HashMap;
+        let game = create_test_game();
+        let mut custom = HashMap::new();
+        custom.insert(
+            "snake-1".to_string(),
+            SnakeCustomizations {
+                color: "#00ff00".to_string(),
+                head: "".to_string(),
+                tail: "curled".to_string(),
+            },
+        );
+        let frame = game_to_frame(&game, &[], &[], &custom);
+        assert_eq!(
+            frame.snakes[0].color, "#00ff00",
+            "non-empty color should be used"
+        );
+        assert_eq!(
+            frame.snakes[0].head_type, "default",
+            "empty head should fall back to 'default'"
+        );
+        assert_eq!(
+            frame.snakes[0].tail_type, "curled",
+            "non-empty tail should be used"
+        );
+    }
+
+    #[test]
+    fn test_game_to_frame_customizations_dont_affect_other_fields() {
+        use std::collections::HashMap;
+        let game = create_test_game();
+        let mut custom = HashMap::new();
+        custom.insert(
+            "snake-1".to_string(),
+            SnakeCustomizations {
+                color: "#ff0000".to_string(),
+                head: "bendr".to_string(),
+                tail: "fat-rattle".to_string(),
+            },
+        );
+        let frame = game_to_frame(&game, &[], &[], &custom);
+        assert_eq!(frame.snakes[0].id, "snake-1", "id should be preserved");
+        assert_eq!(
+            frame.snakes[0].name, "Test Snake",
+            "name should be preserved"
+        );
+        assert_eq!(frame.snakes[0].health, 100, "health should be preserved");
+        assert_eq!(
+            frame.snakes[0].body.len(),
+            3,
+            "body length should be preserved"
+        );
     }
 }

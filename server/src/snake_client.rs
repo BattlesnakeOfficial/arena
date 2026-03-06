@@ -294,6 +294,72 @@ pub async fn request_end_parallel(
     futures::future::join_all(futures).await;
 }
 
+#[derive(Debug, Deserialize, Default)]
+pub struct InfoCustomizations {
+    #[serde(default)]
+    pub color: String,
+    #[serde(default)]
+    pub head: String,
+    #[serde(default)]
+    pub tail: String,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct SnakeInfoResponse {
+    #[serde(default)]
+    pub color: Option<String>,
+    #[serde(default)]
+    pub customizations: Option<InfoCustomizations>,
+}
+
+pub async fn request_info(
+    client: &Client,
+    url: &str,
+    timeout: Duration,
+) -> Option<SnakeInfoResponse> {
+    match tokio::time::timeout(timeout, client.get(url).send()).await {
+        Ok(Ok(response)) => match response.json::<SnakeInfoResponse>().await {
+            Ok(info) => Some(info),
+            Err(e) => {
+                tracing::warn!(url = %url, error = %e, "Failed to parse snake info response");
+                None
+            }
+        },
+        Ok(Err(e)) => {
+            tracing::warn!(url = %url, error = %e, "Network error fetching snake info");
+            None
+        }
+        Err(_) => {
+            tracing::warn!(url = %url, "Timeout fetching snake info");
+            None
+        }
+    }
+}
+
+pub async fn request_info_parallel(
+    client: &Client,
+    snake_urls: &[(String, String)], // (snake_id, url)
+    timeout: Duration,
+) -> HashMap<String, SnakeInfoResponse> {
+    let futures: Vec<_> = snake_urls
+        .iter()
+        .map(|(id, url)| {
+            let id = id.clone();
+            let url = url.clone();
+            async move {
+                let info = request_info(client, &url, timeout).await;
+                (id, info)
+            }
+        })
+        .collect();
+
+    let results = futures::future::join_all(futures).await;
+    results
+        .into_iter()
+        .filter_map(|(id, info)| info.map(|i| (id, i)))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -654,5 +720,90 @@ mod tests {
                 prop_assert_eq!(parse_direction(&format!("up{}", padding)), None);
             }
         }
+    }
+
+    // === Test scaffold for BS-d6da131bea2c4868: Snake customization support ===
+
+    #[test]
+    fn test_snake_info_response_full_customizations() {
+        let json =
+            r##"{"customizations": {"color": "#ff0000", "head": "bendr", "tail": "fat-rattle"}}"##;
+        let info: SnakeInfoResponse = serde_json::from_str(json).unwrap();
+        let c = info.customizations.unwrap();
+        assert_eq!(
+            c.color, "#ff0000",
+            "color should be parsed from customizations object"
+        );
+        assert_eq!(
+            c.head, "bendr",
+            "head style should be parsed from customizations object"
+        );
+        assert_eq!(
+            c.tail, "fat-rattle",
+            "tail style should be parsed from customizations object"
+        );
+    }
+
+    #[test]
+    fn test_snake_info_response_empty() {
+        let json = r#"{}"#;
+        let info: SnakeInfoResponse = serde_json::from_str(json).unwrap();
+        assert!(
+            info.customizations.is_none(),
+            "missing customizations should deserialize as None"
+        );
+        assert!(
+            info.color.is_none(),
+            "missing top-level color should deserialize as None"
+        );
+    }
+
+    #[test]
+    fn test_snake_info_response_top_level_color() {
+        let json = r##"{"color": "#00ff00"}"##;
+        let info: SnakeInfoResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            info.color,
+            Some("#00ff00".to_string()),
+            "top-level color should be captured"
+        );
+        assert!(
+            info.customizations.is_none(),
+            "customizations should be None when not present"
+        );
+    }
+
+    #[test]
+    fn test_snake_info_response_partial_customizations() {
+        let json = r##"{"customizations": {"color": "#abcdef"}}"##;
+        let info: SnakeInfoResponse = serde_json::from_str(json).unwrap();
+        let c = info.customizations.unwrap();
+        assert_eq!(c.color, "#abcdef", "color should be parsed");
+        assert_eq!(c.head, "", "missing head should default to empty string");
+        assert_eq!(c.tail, "", "missing tail should default to empty string");
+    }
+
+    #[test]
+    fn test_snake_info_response_both_top_level_and_customizations_color() {
+        let json = r##"{"color": "#111111", "customizations": {"color": "#222222", "head": "default", "tail": "default"}}"##;
+        let info: SnakeInfoResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            info.color,
+            Some("#111111".to_string()),
+            "top-level color should be captured"
+        );
+        let c = info.customizations.unwrap();
+        assert_eq!(
+            c.color, "#222222",
+            "customizations color should be captured separately"
+        );
+    }
+
+    #[test]
+    fn test_info_customizations_defaults() {
+        let c = InfoCustomizations::default();
+        assert_eq!(c.color, "", "default color should be empty");
+        assert_eq!(c.head, "", "default head should be empty");
+        assert_eq!(c.tail, "", "default tail should be empty");
     }
 }
