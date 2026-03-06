@@ -86,11 +86,13 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
                 .customizations
                 .as_ref()
                 .map(|c| c.head.clone())
+                .or_else(|| info.head.clone())
                 .unwrap_or_default();
             let tail = info
                 .customizations
                 .as_ref()
                 .map(|c| c.tail.clone())
+                .or_else(|| info.tail.clone())
                 .unwrap_or_default();
 
             if let Err(e) = crate::models::battlesnake::update_battlesnake_customizations(

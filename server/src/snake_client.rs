@@ -309,6 +309,10 @@ pub struct SnakeInfoResponse {
     #[serde(default)]
     pub color: Option<String>,
     #[serde(default)]
+    pub head: Option<String>,
+    #[serde(default)]
+    pub tail: Option<String>,
+    #[serde(default)]
     pub customizations: Option<InfoCustomizations>,
 }
 
@@ -805,5 +809,39 @@ mod tests {
         assert_eq!(c.color, "", "default color should be empty");
         assert_eq!(c.head, "", "default head should be empty");
         assert_eq!(c.tail, "", "default tail should be empty");
+    }
+
+    #[test]
+    fn test_snake_info_response_top_level_head_and_tail() {
+        let json = r##"{"apiversion":"1","author":"coreyja","color":"#AA66CC","head":"trans-rights-scarf","tail":"bolt","version":null}"##;
+        let info: SnakeInfoResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            info.color,
+            Some("#AA66CC".to_string()),
+            "top-level color should be captured"
+        );
+        assert_eq!(
+            info.head,
+            Some("trans-rights-scarf".to_string()),
+            "top-level head should be captured"
+        );
+        assert_eq!(
+            info.tail,
+            Some("bolt".to_string()),
+            "top-level tail should be captured"
+        );
+        assert!(
+            info.customizations.is_none(),
+            "customizations should be None when not present"
+        );
+    }
+
+    #[test]
+    fn test_snake_info_response_top_level_head_null_tail() {
+        let json =
+            r##"{"apiversion":"1","color":"#AA66CC","head":"trans-rights-scarf","tail":null}"##;
+        let info: SnakeInfoResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(info.head, Some("trans-rights-scarf".to_string()));
+        assert_eq!(info.tail, None, "null tail should deserialize as None");
     }
 }
