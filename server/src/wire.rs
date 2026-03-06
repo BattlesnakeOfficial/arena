@@ -214,7 +214,7 @@ impl Game {
                         .settings
                         .as_ref()
                         .map(RulesetSettings::from_engine_settings)
-                        .unwrap_or_else(RulesetSettings::default),
+                        .unwrap_or_default(),
                 },
                 timeout: game.game.timeout,
                 map: game.game.map.clone().unwrap_or_default(),
