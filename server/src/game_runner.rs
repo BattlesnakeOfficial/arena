@@ -5,7 +5,7 @@ use uuid::Uuid;
 use battlesnake_game_types::types::Move;
 
 use crate::engine::MAX_TURNS;
-use crate::engine::frame::{DeathInfo, game_to_frame};
+use crate::engine::frame::{DeathInfo, SnakeCustomizations, game_to_frame};
 use crate::models::game::{GameStatus, get_game_by_id, update_game_status};
 use crate::snake_client::{request_end_parallel, request_moves_parallel, request_start_parallel};
 use crate::state::AppState;
@@ -66,6 +66,53 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
         .map(|bs| (bs.game_battlesnake_id.to_string(), bs.url.clone()))
         .collect();
 
+    // Fetch snake customizations from all root endpoints in parallel (1s timeout)
+    let info_timeout = std::time::Duration::from_millis(1000);
+    let info_results =
+        crate::snake_client::request_info_parallel(http_client, &snake_urls, info_timeout).await;
+
+    // Build customization map and update DB records
+    let mut customizations: HashMap<String, SnakeCustomizations> = HashMap::new();
+    for bs in &battlesnakes {
+        let snake_id = bs.game_battlesnake_id.to_string();
+        if let Some(info) = info_results.get(&snake_id) {
+            let color = info
+                .customizations
+                .as_ref()
+                .map(|c| c.color.clone())
+                .or_else(|| info.color.clone())
+                .unwrap_or_default();
+            let head = info
+                .customizations
+                .as_ref()
+                .map(|c| c.head.clone())
+                .unwrap_or_default();
+            let tail = info
+                .customizations
+                .as_ref()
+                .map(|c| c.tail.clone())
+                .unwrap_or_default();
+
+            if let Err(e) = crate::models::battlesnake::update_battlesnake_customizations(
+                pool,
+                bs.battlesnake_id,
+                &color,
+                &head,
+                &tail,
+            )
+            .await
+            {
+                tracing::warn!(
+                    battlesnake_id = %bs.battlesnake_id,
+                    error = %e,
+                    "Failed to persist battlesnake customizations"
+                );
+            }
+
+            customizations.insert(snake_id, SnakeCustomizations { color, head, tail });
+        }
+    }
+
     // Create the initial game state
     let mut engine_game =
         crate::engine::create_initial_game(game_id, game.board_size, game.game_type, &battlesnakes);
@@ -95,7 +142,7 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
     };
 
     // Store turn 0 (initial state, no moves yet)
-    let frame_0 = game_to_frame(&engine_game, &death_info, &[]);
+    let frame_0 = game_to_frame(&engine_game, &death_info, &[], &customizations);
     let frame_0_json =
         serde_json::to_value(&frame_0).wrap_err("Failed to serialize initial frame")?;
 
@@ -168,7 +215,7 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
         }
 
         // Store the turn frame with latency info and notify subscribers
-        let frame = game_to_frame(&engine_game, &death_info, &move_results);
+        let frame = game_to_frame(&engine_game, &death_info, &move_results, &customizations);
         let frame_json = serde_json::to_value(&frame)
             .wrap_err_with(|| format!("Failed to serialize frame {}", engine_game.turn))?;
 

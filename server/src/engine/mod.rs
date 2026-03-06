@@ -1524,6 +1524,9 @@ mod tests {
                 url: "https://example.com/snake".to_string(),
                 user_id: Uuid::new_v4(),
                 leaderboard_entry_id: None,
+                color: String::new(),
+                head: String::new(),
+                tail: String::new(),
             },
             GameBattlesnakeWithDetails {
                 game_battlesnake_id: Uuid::new_v4(),
@@ -1536,6 +1539,9 @@ mod tests {
                 url: "https://example.com/snake".to_string(),
                 user_id: Uuid::new_v4(),
                 leaderboard_entry_id: None,
+                color: String::new(),
+                head: String::new(),
+                tail: String::new(),
             },
         ];
 

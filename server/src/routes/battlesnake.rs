@@ -513,6 +513,20 @@ pub async fn view_battlesnake_profile(
                                 } @else {
                                     span class="badge bg-secondary text-white" { "Private" }
                                 }
+                                div class="d-flex align-items-center mt-2" {
+                                    @let display_color = if snake.color.is_empty() { "#888888" } else { snake.color.as_str() };
+                                    div style={
+                                        "width:32px;height:32px;border-radius:6px;background-color:"
+                                        (display_color)
+                                        ";border:1px solid #ccc;margin-right:8px;flex-shrink:0;"
+                                    } {}
+                                    span class="text-muted small" {
+                                        "Head: "
+                                        (if snake.head.is_empty() { "default" } else { snake.head.as_str() })
+                                        " · Tail: "
+                                        (if snake.tail.is_empty() { "default" } else { snake.tail.as_str() })
+                                    }
+                                }
                                 @if is_owner {
                                     p class="mt-2" {
                                         "URL: "

@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE battlesnakes\n        SET color = $2, head = $3, tail = $4\n        WHERE battlesnake_id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "9f9d5cc001507d735f79b1059d654749eba026dc4e467db9a455febaabbe2b4b"
+}

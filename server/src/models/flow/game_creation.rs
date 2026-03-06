@@ -269,10 +269,13 @@ impl GameCreationFlow {
                     name,
                     url,
                     visibility as "visibility: _",
+                    color,
+                    head,
+                    tail,
                     created_at,
                     updated_at
                 FROM battlesnakes
-                WHERE 
+                WHERE
                     visibility = 'public'
                     AND user_id != $1
                     AND name ILIKE $2
@@ -309,6 +312,9 @@ impl GameCreationFlow {
                 name,
                 url,
                 visibility as "visibility: _",
+                color,
+                head,
+                tail,
                 created_at,
                 updated_at
             FROM battlesnakes
