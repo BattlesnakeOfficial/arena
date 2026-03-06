@@ -57,11 +57,11 @@ pub async fn view_game(
                     }
                     div class="card-body" {
                         // Board viewer iframe - always show, it handles waiting/empty games gracefully
-                        div class="board-viewer-container mb-4" style="width: 100%; max-width: 600px; aspect-ratio: 1;" {
+                        div class="board-viewer-container mb-4" style="width: 100%; max-width: 600px;" {
                             iframe
                                 id="board-viewer"
                                 src={ "https://board.battlesnake.com/?engine=" (format!("{}/api", std::env::var("BASE_URL").unwrap_or_else(|_| "http://localhost:3000".to_string()))) "&game=" (game_id) }
-                                style="width: 100%; height: 100%; border: 1px solid #ccc; border-radius: 8px;"
+                                style="width: 100%; border: 1px solid #ccc; border-radius: 8px;"
                                 title="Battlesnake Board Viewer"
                                 allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
                                 allowfullscreen {}
