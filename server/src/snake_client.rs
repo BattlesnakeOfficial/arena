@@ -813,8 +813,7 @@ mod tests {
 
     #[test]
     fn test_snake_info_response_top_level_head_and_tail() {
-        let json =
-            r##"{"apiversion":"1","author":"coreyja","color":"#AA66CC","head":"trans-rights-scarf","tail":"bolt","version":null}"##;
+        let json = r##"{"apiversion":"1","author":"coreyja","color":"#AA66CC","head":"trans-rights-scarf","tail":"bolt","version":null}"##;
         let info: SnakeInfoResponse = serde_json::from_str(json).unwrap();
         assert_eq!(
             info.color,
