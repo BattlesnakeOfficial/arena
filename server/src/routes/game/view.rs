@@ -61,7 +61,7 @@ pub async fn view_game(
                             iframe
                                 id="board-viewer"
                                 src={ "https://board.battlesnake.com/?engine=" (format!("{}/api", std::env::var("BASE_URL").unwrap_or_else(|_| "http://localhost:3000".to_string()))) "&game=" (game_id) }
-                                style="width: 100%; aspect-ratio: 6 / 7; border: 1px solid #ccc; border-radius: 8px;"
+                                style="width: 100%; aspect-ratio: 1 / 1; border: 1px solid #ccc; border-radius: 8px;"
                                 title="Battlesnake Board Viewer"
                                 allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
                                 allowfullscreen {}
