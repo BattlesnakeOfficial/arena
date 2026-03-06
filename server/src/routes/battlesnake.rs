@@ -513,18 +513,19 @@ pub async fn view_battlesnake_profile(
                                 } @else {
                                     span class="badge bg-secondary text-white" { "Private" }
                                 }
-                                div class="d-flex align-items-center mt-2" {
-                                    @let display_color = if snake.color.is_empty() { "#888888" } else { snake.color.as_str() };
-                                    div style={
-                                        "width:32px;height:32px;border-radius:6px;background-color:"
-                                        (display_color)
-                                        ";border:1px solid #ccc;margin-right:8px;flex-shrink:0;"
-                                    } {}
+                                div class="mt-2" {
+                                    @let display_head = if snake.head.is_empty() { "default" } else { snake.head.as_str() };
+                                    @let display_tail = if snake.tail.is_empty() { "default" } else { snake.tail.as_str() };
+                                    @let raw_color = if snake.color.is_empty() { "#888888" } else { snake.color.as_str() };
+                                    @let url_color = if let Some(hex) = raw_color.strip_prefix('#') { format!("%23{hex}") } else { raw_color.to_string() };
+                                    @let avatar_url = format!(
+                                        "https://exporter.battlesnake.com/avatars/head:{}/tail:{}/color:{}/320x100.svg",
+                                        display_head, display_tail, url_color
+                                    );
+                                    img src=(avatar_url) alt=(format!("{} snake preview", snake.name))
+                                        style="max-width:320px;height:auto;display:block;margin-bottom:4px;" {}
                                     span class="text-muted small" {
-                                        "Head: "
-                                        (if snake.head.is_empty() { "default" } else { snake.head.as_str() })
-                                        " · Tail: "
-                                        (if snake.tail.is_empty() { "default" } else { snake.tail.as_str() })
+                                        "Head: " (display_head) " · Tail: " (display_tail) " · Color: " (raw_color)
                                     }
                                 }
                                 @if is_owner {
