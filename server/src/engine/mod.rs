@@ -7,7 +7,7 @@ pub mod frame;
 
 use battlesnake_game_types::types::{Move, RandomReasonableMovesGame};
 use battlesnake_game_types::wire_representation::{
-    BattleSnake, Board, Game, NestedGame, Position, Ruleset, Settings,
+    BattleSnake, Board, Game, NestedGame, Position, RoyaleSettings, Ruleset, Settings,
 };
 use rand::Rng;
 use rand::seq::SliceRandom;
@@ -108,7 +108,9 @@ pub fn create_initial_game(
                     hazard_damage_per_turn: 15,
                     hazard_map: None,
                     hazard_map_author: None,
-                    royale: None,
+                    royale: Some(RoyaleSettings {
+                        shrink_every_n_turns: 0,
+                    }),
                 }),
             },
             timeout: 500,

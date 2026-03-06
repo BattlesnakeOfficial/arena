@@ -47,14 +47,26 @@ pub struct RulesetSettings {
     pub hazard_map: Option<String>,
     #[serde(rename = "hazardMapAuthor", skip_serializing_if = "Option::is_none")]
     pub hazard_map_author: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub royale: Option<RoyaleSettings>,
+    pub royale: RoyaleSettings,
+    pub squad: SquadSettings,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RoyaleSettings {
     #[serde(rename = "shrinkEveryNTurns")]
     pub shrink_every_n_turns: i32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SquadSettings {
+    #[serde(rename = "allowBodyCollisions")]
+    pub allow_body_collisions: bool,
+    #[serde(rename = "sharedElimination")]
+    pub shared_elimination: bool,
+    #[serde(rename = "sharedHealth")]
+    pub shared_health: bool,
+    #[serde(rename = "sharedLength")]
+    pub shared_length: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -144,9 +156,20 @@ impl RulesetSettings {
             hazard_damage_per_turn: settings.hazard_damage_per_turn,
             hazard_map: settings.hazard_map.clone(),
             hazard_map_author: settings.hazard_map_author.clone(),
-            royale: settings.royale.map(|r| RoyaleSettings {
-                shrink_every_n_turns: r.shrink_every_n_turns,
-            }),
+            royale: settings
+                .royale
+                .map(|r| RoyaleSettings {
+                    shrink_every_n_turns: r.shrink_every_n_turns,
+                })
+                .unwrap_or(RoyaleSettings {
+                    shrink_every_n_turns: 0,
+                }),
+            squad: SquadSettings {
+                allow_body_collisions: false,
+                shared_elimination: false,
+                shared_health: false,
+                shared_length: false,
+            },
         }
     }
 }
@@ -476,44 +499,47 @@ mod tests {
         );
     }
 
-    // NOTE: The following tests are commented out because they reference types
-    // that don't exist yet (SquadSettings) or struct fields that have different
-    // types (royale is currently Option<RoyaleSettings>). The implementation agent
-    // should uncomment these after creating the types.
-    //
-    // #[test]
-    // fn test_squad_settings_struct_exists() {
-    //     let squad = SquadSettings {
-    //         allow_body_collisions: true,
-    //         shared_elimination: true,
-    //         shared_health: false,
-    //         shared_length: false,
-    //     };
-    //     let json: Value = serde_json::to_value(&squad).unwrap();
-    //     assert_eq!(json["allowBodyCollisions"], true);
-    //     assert_eq!(json["sharedElimination"], true);
-    //     assert_eq!(json["sharedHealth"], false);
-    //     assert_eq!(json["sharedLength"], false);
-    // }
-    //
-    // #[test]
-    // fn test_ruleset_settings_royale_is_non_optional() {
-    //     let settings = RulesetSettings {
-    //         food_spawn_chance: 15,
-    //         minimum_food: 1,
-    //         hazard_damage_per_turn: 15,
-    //         hazard_map: None,
-    //         hazard_map_author: None,
-    //         royale: RoyaleSettings { shrink_every_n_turns: 0 },
-    //         squad: SquadSettings {
-    //             allow_body_collisions: false,
-    //             shared_elimination: false,
-    //             shared_health: false,
-    //             shared_length: false,
-    //         },
-    //     };
-    //     let json: Value = serde_json::to_value(&settings).unwrap();
-    //     assert!(json.get("royale").is_some(), "royale must always be serialized");
-    //     assert!(json.get("squad").is_some(), "squad must always be serialized");
-    // }
+    #[test]
+    fn test_squad_settings_struct_exists() {
+        let squad = SquadSettings {
+            allow_body_collisions: true,
+            shared_elimination: true,
+            shared_health: false,
+            shared_length: false,
+        };
+        let json: Value = serde_json::to_value(&squad).unwrap();
+        assert_eq!(json["allowBodyCollisions"], true);
+        assert_eq!(json["sharedElimination"], true);
+        assert_eq!(json["sharedHealth"], false);
+        assert_eq!(json["sharedLength"], false);
+    }
+
+    #[test]
+    fn test_ruleset_settings_royale_is_non_optional() {
+        let settings = RulesetSettings {
+            food_spawn_chance: 15,
+            minimum_food: 1,
+            hazard_damage_per_turn: 15,
+            hazard_map: None,
+            hazard_map_author: None,
+            royale: RoyaleSettings {
+                shrink_every_n_turns: 0,
+            },
+            squad: SquadSettings {
+                allow_body_collisions: false,
+                shared_elimination: false,
+                shared_health: false,
+                shared_length: false,
+            },
+        };
+        let json: Value = serde_json::to_value(&settings).unwrap();
+        assert!(
+            json.get("royale").is_some(),
+            "royale must always be serialized"
+        );
+        assert!(
+            json.get("squad").is_some(),
+            "squad must always be serialized"
+        );
+    }
 }
