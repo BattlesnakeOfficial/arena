@@ -78,6 +78,26 @@ pub async fn game_events_websocket(
     ws.on_upgrade(move |socket| handle_game_websocket(socket, state, game_id))
 }
 
+/// Send a WebSocket close frame and wait for the client to acknowledge.
+///
+/// The board viewer uses ReconnectingWebSocket which auto-reconnects on any
+/// server-initiated close. If we just drop the socket (by returning), the TCP
+/// connection resets before the client processes buffered messages like game_end.
+/// By sending a proper Close frame and waiting for the client's response, we give
+/// the client time to process all messages and close its side first.
+async fn graceful_close(
+    sender: &mut futures::stream::SplitSink<WebSocket, Message>,
+    receiver: &mut futures::stream::SplitStream<WebSocket>,
+) {
+    let _ = sender.send(Message::Close(None)).await;
+    // Drain until the client sends Close back or the connection drops
+    while let Some(msg) = receiver.next().await {
+        if matches!(msg, Ok(Message::Close(_)) | Err(_)) {
+            break;
+        }
+    }
+}
+
 async fn handle_game_websocket(socket: WebSocket, state: AppState, game_id: Uuid) {
     let (mut sender, mut receiver) = socket.split();
 
@@ -156,7 +176,7 @@ async fn handle_game_websocket(socket: WebSocket, state: AppState, game_id: Uuid
         }
     }
 
-    // If game is finished, send game_end and close
+    // If game is finished, send game_end and do a proper close handshake
     if game.status == GameStatus::Finished {
         let end_msg = WebSocketMessage {
             message_type: "game_end".to_string(),
@@ -167,6 +187,7 @@ async fn handle_game_websocket(socket: WebSocket, state: AppState, game_id: Uuid
                 serde_json::to_string(&end_msg).unwrap().into(),
             ))
             .await;
+        graceful_close(&mut sender, &mut receiver).await;
         return;
     }
 
@@ -240,6 +261,7 @@ async fn handle_game_websocket(socket: WebSocket, state: AppState, game_id: Uuid
                                 let _ = sender
                                     .send(Message::Text(serde_json::to_string(&end_msg).unwrap().into()))
                                     .await;
+                                graceful_close(&mut sender, &mut receiver).await;
                                 return;
                             }
                     }
@@ -268,6 +290,7 @@ async fn handle_game_websocket(socket: WebSocket, state: AppState, game_id: Uuid
                                     .send(Message::Text(serde_json::to_string(&end_msg).unwrap().into()))
                                     .await;
                             }
+                        graceful_close(&mut sender, &mut receiver).await;
                         return;
                     }
                 }
