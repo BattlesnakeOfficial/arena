@@ -57,14 +57,26 @@ pub async fn view_game(
                     }
                     div class="card-body" {
                         // Board viewer iframe - always show, it handles waiting/empty games gracefully
-                        div class="board-viewer-container mb-4" style="width: 100%; max-width: 600px;" {
+                        // Default aspect-ratio is 16/9; the board sends a RESIZE postMessage with its actual dimensions
+                        div #board-viewer-container class="board-viewer-container mb-4" style="width: 100%; max-width: 600px; aspect-ratio: 16 / 9;" {
                             iframe
                                 id="board-viewer"
                                 src={ "https://board.battlesnake.com/?engine=" (format!("{}/api", std::env::var("BASE_URL").unwrap_or_else(|_| "http://localhost:3000".to_string()))) "&game=" (game_id) }
-                                style="width: 100%; border: 1px solid #ccc; border-radius: 8px;"
+                                style="width: 100%; height: 100%; border: 1px solid #ccc; border-radius: 8px;"
                                 title="Battlesnake Board Viewer"
                                 allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
                                 allowfullscreen {}
+                        }
+
+                        script {
+                            "window.addEventListener('message', function(e) {"
+                                "if (e.origin !== 'https://board.battlesnake.com') return;"
+                                "var evt = e.data;"
+                                "if (evt.event === 'RESIZE') {"
+                                    "document.getElementById('board-viewer-container').style"
+                                        ".setProperty('aspect-ratio', evt.data.width + ' / ' + evt.data.height);"
+                                "}"
+                            "});"
                         }
 
                         div class="game-info" {
