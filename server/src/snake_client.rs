@@ -655,4 +655,83 @@ mod tests {
             }
         }
     }
+
+    // === Test scaffold for BS-d6da131bea2c4868: Snake customization support ===
+    // These tests verify deserialization of the SnakeInfoResponse type that will
+    // be returned from a snake's root GET / endpoint.
+    // The implementation agent should:
+    // 1. Add SnakeInfoResponse and InfoCustomizations types to this file
+    // 2. Remove #[ignore] from these tests
+    // 3. Replace todo!() with the commented-out test body
+
+    #[test]
+    #[ignore = "Requires SnakeInfoResponse and InfoCustomizations types to be implemented"]
+    fn test_snake_info_response_full_customizations() {
+        // Snake API returns customizations nested under a "customizations" key
+        // let json = r#"{"customizations": {"color": "#ff0000", "head": "bendr", "tail": "fat-rattle"}}"#;
+        // let info: SnakeInfoResponse = serde_json::from_str(json).unwrap();
+        // let c = info.customizations.unwrap();
+        // assert_eq!(c.color, "#ff0000", "color should be parsed from customizations object");
+        // assert_eq!(c.head, "bendr", "head style should be parsed from customizations object");
+        // assert_eq!(c.tail, "fat-rattle", "tail style should be parsed from customizations object");
+        todo!("uncomment after SnakeInfoResponse is implemented");
+    }
+
+    #[test]
+    #[ignore = "Requires SnakeInfoResponse type to be implemented"]
+    fn test_snake_info_response_empty() {
+        // Snake API may return an empty object — all fields should gracefully default
+        // let json = r#"{}"#;
+        // let info: SnakeInfoResponse = serde_json::from_str(json).unwrap();
+        // assert!(info.customizations.is_none(), "missing customizations should deserialize as None");
+        // assert!(info.color.is_none(), "missing top-level color should deserialize as None");
+        todo!("uncomment after SnakeInfoResponse is implemented");
+    }
+
+    #[test]
+    #[ignore = "Requires SnakeInfoResponse type to be implemented"]
+    fn test_snake_info_response_top_level_color() {
+        // Some snakes return color at the top level instead of in customizations
+        // let json = r#"{"color": "#00ff00"}"#;
+        // let info: SnakeInfoResponse = serde_json::from_str(json).unwrap();
+        // assert_eq!(info.color, Some("#00ff00".to_string()), "top-level color should be captured");
+        // assert!(info.customizations.is_none(), "customizations should be None when not present");
+        todo!("uncomment after SnakeInfoResponse is implemented");
+    }
+
+    #[test]
+    #[ignore = "Requires SnakeInfoResponse and InfoCustomizations types to be implemented"]
+    fn test_snake_info_response_partial_customizations() {
+        // Snake API returns customizations with only some fields set
+        // let json = r#"{"customizations": {"color": "#abcdef"}}"#;
+        // let info: SnakeInfoResponse = serde_json::from_str(json).unwrap();
+        // let c = info.customizations.unwrap();
+        // assert_eq!(c.color, "#abcdef", "color should be parsed");
+        // assert_eq!(c.head, "", "missing head should default to empty string");
+        // assert_eq!(c.tail, "", "missing tail should default to empty string");
+        todo!("uncomment after SnakeInfoResponse is implemented");
+    }
+
+    #[test]
+    #[ignore = "Requires SnakeInfoResponse and InfoCustomizations types to be implemented"]
+    fn test_snake_info_response_both_top_level_and_customizations_color() {
+        // When both top-level color and customizations.color exist, both are captured
+        // let json = r#"{"color": "#111111", "customizations": {"color": "#222222", "head": "default", "tail": "default"}}"#;
+        // let info: SnakeInfoResponse = serde_json::from_str(json).unwrap();
+        // assert_eq!(info.color, Some("#111111".to_string()), "top-level color should be captured");
+        // let c = info.customizations.unwrap();
+        // assert_eq!(c.color, "#222222", "customizations color should be captured separately");
+        todo!("uncomment after SnakeInfoResponse is implemented");
+    }
+
+    #[test]
+    #[ignore = "Requires InfoCustomizations type to be implemented"]
+    fn test_info_customizations_defaults() {
+        // InfoCustomizations with all defaults should have empty strings
+        // let c = InfoCustomizations::default();
+        // assert_eq!(c.color, "", "default color should be empty");
+        // assert_eq!(c.head, "", "default head should be empty");
+        // assert_eq!(c.tail, "", "default tail should be empty");
+        todo!("uncomment after InfoCustomizations is implemented");
+    }
 }

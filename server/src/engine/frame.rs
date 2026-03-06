@@ -576,4 +576,96 @@ mod tests {
             },
         }
     }
+
+    // === Test scaffold for BS-d6da131bea2c4868: Snake customization support ===
+    // These tests verify that game_to_frame uses SnakeCustomizations when provided,
+    // and falls back to defaults (generated color, "default" head/tail) when not.
+    // The implementation agent should:
+    // 1. Add SnakeCustomizations struct to this file
+    // 2. Update game_to_frame to accept &HashMap<String, SnakeCustomizations> as 4th param
+    // 3. Remove #[ignore] and replace todo!() with the commented-out test body
+
+    #[test]
+    #[ignore = "Requires SnakeCustomizations struct and updated game_to_frame signature"]
+    fn test_game_to_frame_uses_customizations() {
+        // use std::collections::HashMap;
+        // let game = create_test_game();
+        // let mut custom = HashMap::new();
+        // custom.insert("snake-1".to_string(), SnakeCustomizations {
+        //     color: "#ff0000".to_string(),
+        //     head: "bendr".to_string(),
+        //     tail: "fat-rattle".to_string(),
+        // });
+        // let frame = game_to_frame(&game, &[], &[], &custom);
+        // assert_eq!(frame.snakes[0].color, "#ff0000", "should use custom color");
+        // assert_eq!(frame.snakes[0].head_type, "bendr", "should use custom head");
+        // assert_eq!(frame.snakes[0].tail_type, "fat-rattle", "should use custom tail");
+        todo!("uncomment after SnakeCustomizations and updated game_to_frame are implemented");
+    }
+
+    #[test]
+    #[ignore = "Requires SnakeCustomizations struct and updated game_to_frame signature"]
+    fn test_game_to_frame_falls_back_when_no_customizations() {
+        // use std::collections::HashMap;
+        // let game = create_test_game();
+        // let frame = game_to_frame(&game, &[], &[], &HashMap::new());
+        // assert!(!frame.snakes[0].color.is_empty(), "fallback color should not be empty");
+        // assert!(frame.snakes[0].color.starts_with('#'), "fallback color should be a hex color");
+        // assert_eq!(frame.snakes[0].head_type, "default", "fallback head should be 'default'");
+        // assert_eq!(frame.snakes[0].tail_type, "default", "fallback tail should be 'default'");
+        todo!("uncomment after SnakeCustomizations and updated game_to_frame are implemented");
+    }
+
+    #[test]
+    #[ignore = "Requires SnakeCustomizations struct and updated game_to_frame signature"]
+    fn test_game_to_frame_empty_customization_fields_use_defaults() {
+        // When customization exists but fields are empty strings, should fall back
+        // use std::collections::HashMap;
+        // let game = create_test_game();
+        // let mut custom = HashMap::new();
+        // custom.insert("snake-1".to_string(), SnakeCustomizations {
+        //     color: "".to_string(), head: "".to_string(), tail: "".to_string(),
+        // });
+        // let frame = game_to_frame(&game, &[], &[], &custom);
+        // assert!(!frame.snakes[0].color.is_empty(), "empty color should fall back to generated color");
+        // assert!(frame.snakes[0].color.starts_with('#'), "fallback color should be a hex color");
+        // assert_eq!(frame.snakes[0].head_type, "default", "empty head should fall back to 'default'");
+        // assert_eq!(frame.snakes[0].tail_type, "default", "empty tail should fall back to 'default'");
+        todo!("uncomment after SnakeCustomizations and updated game_to_frame are implemented");
+    }
+
+    #[test]
+    #[ignore = "Requires SnakeCustomizations struct and updated game_to_frame signature"]
+    fn test_game_to_frame_partial_customization() {
+        // Only color and tail set, head should default
+        // use std::collections::HashMap;
+        // let game = create_test_game();
+        // let mut custom = HashMap::new();
+        // custom.insert("snake-1".to_string(), SnakeCustomizations {
+        //     color: "#00ff00".to_string(), head: "".to_string(), tail: "curled".to_string(),
+        // });
+        // let frame = game_to_frame(&game, &[], &[], &custom);
+        // assert_eq!(frame.snakes[0].color, "#00ff00", "non-empty color should be used");
+        // assert_eq!(frame.snakes[0].head_type, "default", "empty head should fall back to 'default'");
+        // assert_eq!(frame.snakes[0].tail_type, "curled", "non-empty tail should be used");
+        todo!("uncomment after SnakeCustomizations and updated game_to_frame are implemented");
+    }
+
+    #[test]
+    #[ignore = "Requires SnakeCustomizations struct and updated game_to_frame signature"]
+    fn test_game_to_frame_customizations_dont_affect_other_fields() {
+        // Verify that adding customizations doesn't break existing frame fields
+        // use std::collections::HashMap;
+        // let game = create_test_game();
+        // let mut custom = HashMap::new();
+        // custom.insert("snake-1".to_string(), SnakeCustomizations {
+        //     color: "#ff0000".to_string(), head: "bendr".to_string(), tail: "fat-rattle".to_string(),
+        // });
+        // let frame = game_to_frame(&game, &[], &[], &custom);
+        // assert_eq!(frame.snakes[0].id, "snake-1", "id should be preserved");
+        // assert_eq!(frame.snakes[0].name, "Test Snake", "name should be preserved");
+        // assert_eq!(frame.snakes[0].health, 100, "health should be preserved");
+        // assert_eq!(frame.snakes[0].body.len(), 3, "body length should be preserved");
+        todo!("uncomment after SnakeCustomizations and updated game_to_frame are implemented");
+    }
 }
