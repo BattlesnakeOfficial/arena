@@ -168,13 +168,32 @@ mod tests {
     use crate::scoring::ScoringAlgorithm;
     use uuid::Uuid;
 
-    /// Win rate = wins / games_played * 100.0
+    /// Mirrors the SQL score computation in `process_game_result`:
+    ///   score = CASE WHEN games_played > 0
+    ///     THEN wins::double precision / games_played::double precision * 100.0
+    ///     ELSE 0.0 END
+    ///
+    /// Note: These unit tests validate the formula conceptually but cannot verify
+    /// the actual SQL expression. The SQL uses post-increment values
+    /// (e.g. `games_played + 1`, `wins + CASE WHEN $2 THEN 1 ELSE 0 END`) inline
+    /// in the UPDATE, so the real score computation happens entirely in PostgreSQL.
+    /// Integration tests with a live database are needed to fully validate the SQL path.
     fn compute_win_rate(wins: i32, games_played: i32) -> f64 {
         if games_played > 0 {
             wins as f64 / games_played as f64 * 100.0
         } else {
             0.0
         }
+    }
+
+    /// Simulates the SQL UPDATE's post-increment score calculation.
+    /// In the SQL: after incrementing games_played by 1 and conditionally
+    /// incrementing wins, the score is recomputed using the new values.
+    /// This function mirrors that post-increment logic for test validation.
+    fn compute_win_rate_post_increment(current_wins: i32, current_games: i32, is_win: bool) -> f64 {
+        let new_wins = current_wins + if is_win { 1 } else { 0 };
+        let new_games = current_games + 1;
+        compute_win_rate(new_wins, new_games)
     }
 
     #[test]
@@ -278,6 +297,54 @@ mod tests {
             (rate - (4.0 / 12.0 * 100.0)).abs() < 1e-10,
             "After losing: 4/12 * 100 = {:.4}, got {:.4}",
             4.0 / 12.0 * 100.0,
+            rate
+        );
+    }
+
+    #[test]
+    fn test_post_increment_win() {
+        // Simulates the SQL: starting with 3 wins / 10 games, then winning
+        // SQL computes: (3 + 1) / (10 + 1) * 100.0
+        let rate = compute_win_rate_post_increment(3, 10, true);
+        let expected = 4.0 / 11.0 * 100.0;
+        assert!(
+            (rate - expected).abs() < 1e-10,
+            "Post-increment win: expected {:.6}, got {:.6}",
+            expected,
+            rate
+        );
+    }
+
+    #[test]
+    fn test_post_increment_loss() {
+        // Simulates the SQL: starting with 3 wins / 10 games, then losing
+        // SQL computes: (3 + 0) / (10 + 1) * 100.0
+        let rate = compute_win_rate_post_increment(3, 10, false);
+        let expected = 3.0 / 11.0 * 100.0;
+        assert!(
+            (rate - expected).abs() < 1e-10,
+            "Post-increment loss: expected {:.6}, got {:.6}",
+            expected,
+            rate
+        );
+    }
+
+    #[test]
+    fn test_post_increment_from_zero() {
+        // Simulates the SQL: starting with 0 wins / 0 games, first game is a win
+        // SQL computes: (0 + 1) / (0 + 1) * 100.0 = 100.0
+        let rate = compute_win_rate_post_increment(0, 0, true);
+        assert!(
+            (rate - 100.0).abs() < f64::EPSILON,
+            "First game win should be 100%, got {}",
+            rate
+        );
+
+        // First game is a loss: (0 + 0) / (0 + 1) * 100.0 = 0.0
+        let rate = compute_win_rate_post_increment(0, 0, false);
+        assert!(
+            rate.abs() < f64::EPSILON,
+            "First game loss should be 0%, got {}",
             rate
         );
     }
