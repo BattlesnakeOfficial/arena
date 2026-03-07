@@ -24,6 +24,7 @@ mod leaderboard_matchmaker;
 mod leaderboard_ratings;
 mod models;
 mod routes;
+mod scoring;
 mod snake_client;
 mod state;
 mod static_assets;

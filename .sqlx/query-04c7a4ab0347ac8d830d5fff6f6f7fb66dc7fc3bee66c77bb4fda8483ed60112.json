@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO weng_lin_ratings (leaderboard_entry_id) VALUES ($1) ON CONFLICT (leaderboard_entry_id) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "04c7a4ab0347ac8d830d5fff6f6f7fb66dc7fc3bee66c77bb4fda8483ed60112"
+}
