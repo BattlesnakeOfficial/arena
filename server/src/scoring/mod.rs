@@ -16,6 +16,11 @@ pub struct GameResultEntry {
     pub leaderboard_entry_id: Uuid,
     pub battlesnake_id: Uuid,
     pub placement: i32,
+    /// Current mu from the locked leaderboard_entries row.
+    /// Algorithms can use this as a fallback instead of re-querying.
+    pub mu: f64,
+    /// Current sigma from the locked leaderboard_entries row.
+    pub sigma: f64,
 }
 
 /// A score for a single leaderboard entry, as computed by a scoring algorithm.
@@ -50,9 +55,10 @@ pub trait ScoringAlgorithm: Send + Sync {
         event: &GameResultEvent,
     ) -> cja::Result<()>;
 
-    /// Batch fetch scores for all active entries on a leaderboard, ordered by score DESC.
-    async fn get_scores(&self, pool: &PgPool, leaderboard_id: Uuid)
-    -> cja::Result<Vec<EntryScore>>;
+    /// Batch fetch scores for the given entry IDs.
+    /// Callers are responsible for pagination/filtering — this just looks up scores
+    /// for the provided IDs. Returns results in no guaranteed order.
+    async fn get_scores(&self, pool: &PgPool, entry_ids: &[Uuid]) -> cja::Result<Vec<EntryScore>>;
 
     /// Fetch score for a single entry.
     async fn get_entry_score(
@@ -134,7 +140,7 @@ mod tests {
         async fn get_scores(
             &self,
             _pool: &PgPool,
-            _leaderboard_id: Uuid,
+            _entry_ids: &[Uuid],
         ) -> cja::Result<Vec<EntryScore>> {
             Ok(vec![])
         }
@@ -242,11 +248,15 @@ mod tests {
                     leaderboard_entry_id: Uuid::new_v4(),
                     battlesnake_id: Uuid::new_v4(),
                     placement: 1,
+                    mu: 25.0,
+                    sigma: 8.333,
                 },
                 GameResultEntry {
                     leaderboard_entry_id: Uuid::new_v4(),
                     battlesnake_id: Uuid::new_v4(),
                     placement: 2,
+                    mu: 25.0,
+                    sigma: 8.333,
                 },
             ],
         };

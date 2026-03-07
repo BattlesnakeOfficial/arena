@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT wlr.leaderboard_entry_id, wlr.display_score, wlr.mu, wlr.sigma FROM weng_lin_ratings wlr JOIN leaderboard_entries le ON wlr.leaderboard_entry_id = le.leaderboard_entry_id WHERE le.leaderboard_id = $1 AND le.disabled_at IS NULL AND le.games_played >= $2 ORDER BY wlr.display_score DESC",
+  "query": "SELECT leaderboard_entry_id, display_score, mu, sigma FROM weng_lin_ratings WHERE leaderboard_entry_id = ANY($1)",
   "describe": {
     "columns": [
       {
@@ -26,8 +26,7 @@
     ],
     "parameters": {
       "Left": [
-        "Uuid",
-        "Int4"
+        "UuidArray"
       ]
     },
     "nullable": [
@@ -37,5 +36,5 @@
       false
     ]
   },
-  "hash": "6af2ce7f574a79d29620207ef2923d8e0623e9e7116cf5e096eb39c382b40c1d"
+  "hash": "1d0ece8d162644b8a05a8829b972e6384ee366b988f8f055b73f32a91f55e706"
 }

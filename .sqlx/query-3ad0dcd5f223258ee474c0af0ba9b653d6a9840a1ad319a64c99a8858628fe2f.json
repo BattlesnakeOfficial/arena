@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT wrs.leaderboard_entry_id, wrs.score, wrs.wins, wrs.losses, wrs.games_played FROM win_rate_stats wrs JOIN leaderboard_entries le ON wrs.leaderboard_entry_id = le.leaderboard_entry_id WHERE le.leaderboard_id = $1 AND le.disabled_at IS NULL AND le.games_played >= $2 ORDER BY wrs.score DESC",
+  "query": "SELECT leaderboard_entry_id, score, wins, losses, games_played FROM win_rate_stats WHERE leaderboard_entry_id = ANY($1)",
   "describe": {
     "columns": [
       {
@@ -31,8 +31,7 @@
     ],
     "parameters": {
       "Left": [
-        "Uuid",
-        "Int4"
+        "UuidArray"
       ]
     },
     "nullable": [
@@ -43,5 +42,5 @@
       false
     ]
   },
-  "hash": "c4b5d181b53b705433b2a8fa9a63049fc37743d06d34220138bc30bf07edc393"
+  "hash": "3ad0dcd5f223258ee474c0af0ba9b653d6a9840a1ad319a64c99a8858628fe2f"
 }

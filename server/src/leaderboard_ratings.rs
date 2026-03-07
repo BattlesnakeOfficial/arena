@@ -136,6 +136,8 @@ pub async fn update_ratings(app_state: &AppState, leaderboard_game_id: Uuid) -> 
                 leaderboard_entry_id: entry.leaderboard_entry_id,
                 battlesnake_id: entry.battlesnake_id,
                 placement: *placement,
+                mu: entry.mu,
+                sigma: entry.sigma,
             })
             .collect(),
     };

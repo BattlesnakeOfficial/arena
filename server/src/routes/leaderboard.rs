@@ -149,11 +149,18 @@ pub async fn show_leaderboard(
 
     let rank_start = page * per_page;
 
-    // Fetch per-algorithm scores
+    // Collect entry IDs from the current page for scoring lookups
+    let entry_ids: Vec<Uuid> = ranked
+        .iter()
+        .chain(placement.iter())
+        .map(|e| e.leaderboard_entry_id)
+        .collect();
+
+    // Fetch per-algorithm scores for only the visible entries
     let mut algo_scores: Vec<(&str, &str, HashMap<Uuid, EntryScore>)> = vec![];
     for algo in state.scoring.algorithms() {
         let scores = algo
-            .get_scores(&state.db, leaderboard_id)
+            .get_scores(&state.db, &entry_ids)
             .await
             .wrap_err_with(|| format!("Failed to fetch {} scores", algo.key()))?;
         let map: HashMap<Uuid, EntryScore> = scores

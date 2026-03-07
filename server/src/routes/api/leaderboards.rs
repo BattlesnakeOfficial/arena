@@ -128,19 +128,23 @@ pub async fn get_rankings(
             )
         })?;
 
-    // Fetch per-algorithm scores
+    // Collect entry IDs from both ranked and placement entries for scoring lookups
+    let entry_ids: Vec<Uuid> = ranked
+        .iter()
+        .chain(placement.iter())
+        .map(|e| e.leaderboard_entry_id)
+        .collect();
+
+    // Fetch per-algorithm scores for only the relevant entries
     let mut algo_maps: Vec<(String, HashMap<Uuid, f64>)> = vec![];
     for algo in state.scoring.algorithms() {
-        let scores = algo
-            .get_scores(&state.db, leaderboard_id)
-            .await
-            .map_err(|e| {
-                tracing::error!("Failed to fetch {} scores: {}", algo.key(), e);
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Internal server error".to_string(),
-                )
-            })?;
+        let scores = algo.get_scores(&state.db, &entry_ids).await.map_err(|e| {
+            tracing::error!("Failed to fetch {} scores: {}", algo.key(), e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal server error".to_string(),
+            )
+        })?;
         let map: HashMap<Uuid, f64> = scores
             .into_iter()
             .map(|s| (s.leaderboard_entry_id, s.score))

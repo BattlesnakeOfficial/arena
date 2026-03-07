@@ -134,36 +134,31 @@ impl ScoringAlgorithm for WengLinScoring {
             .map(|r| (r.leaderboard_entry_id, (r.mu, r.sigma)))
             .collect();
 
-        // Also fetch leaderboard_entries for fallback mu/sigma and for write-through
-        let le_rows = sqlx::query_as!(
-            LeaderboardEntry,
-            "SELECT leaderboard_entry_id, leaderboard_id, battlesnake_id, \
-             mu, sigma, display_score, games_played, first_place_finishes, non_first_finishes, \
-             disabled_at, created_at, updated_at \
-             FROM leaderboard_entries WHERE leaderboard_entry_id = ANY($1) FOR UPDATE",
-            &entry_ids,
-        )
-        .fetch_all(&mut *conn)
-        .await
-        .wrap_err("Failed to fetch leaderboard entries for weng-lin")?;
-
-        let le_map: std::collections::HashMap<Uuid, LeaderboardEntry> = le_rows
-            .into_iter()
-            .map(|e| (e.leaderboard_entry_id, e))
-            .collect();
-
-        // Build entries_with_placements using weng_lin_ratings mu/sigma (fallback to leaderboard_entries)
+        // Build entries_with_placements using weng_lin_ratings mu/sigma,
+        // falling back to the mu/sigma from the event (already locked by the orchestrator).
         let mut entries_with_placements: Vec<(LeaderboardEntry, i32)> = Vec::new();
         for result in &event.results {
-            if let Some(le) = le_map.get(&result.leaderboard_entry_id) {
-                let mut entry = le.clone();
-                // Override mu/sigma from weng_lin_ratings if available
-                if let Some((mu, sigma)) = wl_map.get(&result.leaderboard_entry_id) {
-                    entry.mu = *mu;
-                    entry.sigma = *sigma;
-                }
-                entries_with_placements.push((entry, result.placement));
-            }
+            let (mu, sigma) = wl_map
+                .get(&result.leaderboard_entry_id)
+                .copied()
+                .unwrap_or((result.mu, result.sigma));
+
+            let entry = LeaderboardEntry {
+                leaderboard_entry_id: result.leaderboard_entry_id,
+                leaderboard_id: event.leaderboard_id,
+                battlesnake_id: result.battlesnake_id,
+                mu,
+                sigma,
+                display_score: mu - 3.0 * sigma,
+                // These fields are not used by calculate_rating_updates
+                games_played: 0,
+                first_place_finishes: 0,
+                non_first_finishes: 0,
+                disabled_at: None,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            };
+            entries_with_placements.push((entry, result.placement));
         }
 
         if entries_with_placements.len() < 2 {
@@ -221,21 +216,12 @@ impl ScoringAlgorithm for WengLinScoring {
         Ok(())
     }
 
-    async fn get_scores(
-        &self,
-        pool: &PgPool,
-        leaderboard_id: Uuid,
-    ) -> cja::Result<Vec<EntryScore>> {
+    async fn get_scores(&self, pool: &PgPool, entry_ids: &[Uuid]) -> cja::Result<Vec<EntryScore>> {
         let rows = sqlx::query!(
-            "SELECT wlr.leaderboard_entry_id, wlr.display_score, wlr.mu, wlr.sigma \
-             FROM weng_lin_ratings wlr \
-             JOIN leaderboard_entries le ON wlr.leaderboard_entry_id = le.leaderboard_entry_id \
-             WHERE le.leaderboard_id = $1 \
-               AND le.disabled_at IS NULL \
-               AND le.games_played >= $2 \
-             ORDER BY wlr.display_score DESC",
-            leaderboard_id,
-            leaderboard::MIN_GAMES_FOR_RANKING,
+            "SELECT leaderboard_entry_id, display_score, mu, sigma \
+             FROM weng_lin_ratings \
+             WHERE leaderboard_entry_id = ANY($1)",
+            entry_ids as &[Uuid],
         )
         .fetch_all(pool)
         .await

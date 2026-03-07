@@ -3,8 +3,6 @@ use color_eyre::eyre::Context as _;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::models::leaderboard;
-
 use super::{EntryScore, GameResultEvent, ScoringAlgorithm};
 
 /// Win Rate scoring algorithm implementation.
@@ -101,21 +99,12 @@ impl ScoringAlgorithm for WinRateScoring {
         Ok(())
     }
 
-    async fn get_scores(
-        &self,
-        pool: &PgPool,
-        leaderboard_id: Uuid,
-    ) -> cja::Result<Vec<EntryScore>> {
+    async fn get_scores(&self, pool: &PgPool, entry_ids: &[Uuid]) -> cja::Result<Vec<EntryScore>> {
         let rows = sqlx::query!(
-            "SELECT wrs.leaderboard_entry_id, wrs.score, wrs.wins, wrs.losses, wrs.games_played \
-             FROM win_rate_stats wrs \
-             JOIN leaderboard_entries le ON wrs.leaderboard_entry_id = le.leaderboard_entry_id \
-             WHERE le.leaderboard_id = $1 \
-               AND le.disabled_at IS NULL \
-               AND le.games_played >= $2 \
-             ORDER BY wrs.score DESC",
-            leaderboard_id,
-            leaderboard::MIN_GAMES_FOR_RANKING,
+            "SELECT leaderboard_entry_id, score, wins, losses, games_played \
+             FROM win_rate_stats \
+             WHERE leaderboard_entry_id = ANY($1)",
+            entry_ids as &[Uuid],
         )
         .fetch_all(pool)
         .await
