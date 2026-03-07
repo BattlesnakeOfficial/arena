@@ -175,6 +175,9 @@ async fn root_page(
                         p { "You are not logged in." }
                         a href="/auth/github" { "Login with GitHub" }
                     }
+                    div style="margin-top: 10px;" {
+                        a href="/leaderboards" class="btn btn-primary" { "Leaderboards" }
+                    }
                 }
                 div class="content" style="margin-top: 20px;" {
                     h1 { "Hello, world!" }
