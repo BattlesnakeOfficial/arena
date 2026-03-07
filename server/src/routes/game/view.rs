@@ -14,7 +14,7 @@ use crate::{
     errors::{ServerResult, WithStatus},
     models::game::GameStatus,
     models::game_battlesnake,
-    routes::auth::CurrentUser,
+    routes::auth::OptionalUser,
     state::AppState,
 };
 
@@ -22,7 +22,7 @@ use crate::{
 #[debug_handler]
 pub async fn view_game(
     State(state): State<AppState>,
-    CurrentUser(_): CurrentUser,
+    OptionalUser(user): OptionalUser,
     Path(game_id): Path<Uuid>,
     page_factory: PageFactory,
     flash: Flash,
@@ -133,8 +133,13 @@ pub async fn view_game(
                 }
 
                 div class="mt-4" {
-                    a href="/games/new" class="btn btn-primary" { "Create Another Game" }
-                    a href="/me" class="btn btn-secondary ms-2" { "Back to Profile" }
+                    @if user.is_some() {
+                        a href="/games/new" class="btn btn-primary" { "Create Another Game" }
+                        a href="/me" class="btn btn-secondary ms-2" { "Back to Profile" }
+                    } @else {
+                        a href="/leaderboards" class="btn btn-primary" { "View Leaderboards" }
+                        a href="/" class="btn btn-secondary ms-2" { "Back to Home" }
+                    }
                 }
             }
         }),
