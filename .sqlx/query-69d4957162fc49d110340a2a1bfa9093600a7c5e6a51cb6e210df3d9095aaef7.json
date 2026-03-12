@@ -1,0 +1,93 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO leaderboards (name, creator_user_id, description, visibility, board_size, game_type)\n         VALUES ($1, $2, $3, $4, $5, $6)\n         RETURNING leaderboard_id, name,\n                   creator_user_id, description,\n                   visibility as \"visibility: Visibility\",\n                   board_size, game_type,\n                   matchmaking_enabled, games_per_day,\n                   disabled_at, created_at, updated_at",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "leaderboard_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "creator_user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "description",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "visibility: Visibility",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "board_size",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "game_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "matchmaking_enabled",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 8,
+        "name": "games_per_day",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 9,
+        "name": "disabled_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 10,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 11,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "69d4957162fc49d110340a2a1bfa9093600a7c5e6a51cb6e210df3d9095aaef7"
+}
