@@ -249,6 +249,10 @@ pub async fn show_leaderboard(
                     div style="margin-bottom: 20px; padding: 16px; border: 1px solid #ddd; border-radius: 8px; background: #fff3cd;" {
                         p { "This is a private leaderboard. Contact the creator to join." }
                     }
+                } @else if lb.visibility == Visibility::Private && user.as_ref().is_some_and(|u| lb.creator_user_id == Some(u.user_id)) {
+                    div style="margin-bottom: 20px; padding: 16px; border: 1px solid #ddd; border-radius: 8px;" {
+                        p { "You are the creator of this private leaderboard. Use the " a href={"/leaderboards/"(leaderboard_id)"/manage"} { "management page" } " to add snakes." }
+                    }
                 } @else if user.is_some() {
                     div style="margin-bottom: 20px; padding: 16px; border: 1px solid #ddd; border-radius: 8px;" {
                         h3 { "Your Snakes" }
