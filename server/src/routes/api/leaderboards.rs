@@ -686,12 +686,4 @@ mod custom_leaderboard_api_tests {
         assert!(enable.enabled);
         assert!(!disable.enabled);
     }
-
-    #[test]
-    fn test_api_create_entry_rejects_private_leaderboards() {
-        // create_entry in the API returns StatusCode::FORBIDDEN with message:
-        // "Cannot join private leaderboards via API. Contact the leaderboard creator."
-        // when lb.visibility == Visibility::Private
-        // Verified via code inspection.
-    }
 }
