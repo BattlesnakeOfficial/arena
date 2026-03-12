@@ -906,6 +906,17 @@ pub async fn join_leaderboard(
         ));
     }
 
+    // Check if already enrolled to avoid duplicate entries (no unique constraint on leaderboard_entries)
+    let already_enrolled =
+        leaderboard::has_active_entry(&state.db, leaderboard_id, form.battlesnake_id)
+            .await
+            .wrap_err("Failed to check existing entry")
+            .with_redirect(redirect.clone())?;
+
+    if already_enrolled {
+        return Ok(redirect);
+    }
+
     // Opt-in (or resume if paused)
     let entry = leaderboard::get_or_create_entry(&state.db, leaderboard_id, form.battlesnake_id)
         .await
@@ -1299,10 +1310,27 @@ pub async fn manage_leaderboard(
 /// GET /leaderboards/:id/manage/search-snakes — HTMX snake search fragment
 pub async fn search_snakes_for_leaderboard(
     State(state): State<AppState>,
-    CurrentUser(_user): CurrentUser,
+    CurrentUser(user): CurrentUser,
     Path(leaderboard_id): Path<Uuid>,
     Query(query): Query<SearchQuery>,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
+    let lb = leaderboard::get_leaderboard_by_id(&state.db, leaderboard_id)
+        .await
+        .wrap_err("Failed to fetch leaderboard")?
+        .ok_or_else(|| {
+            crate::errors::ServerError(
+                color_eyre::eyre::eyre!("Leaderboard not found"),
+                StatusCode::NOT_FOUND,
+            )
+        })?;
+
+    if lb.creator_user_id != Some(user.user_id) {
+        return Err(crate::errors::ServerError(
+            color_eyre::eyre::eyre!("Only the leaderboard creator can manage this leaderboard"),
+            StatusCode::FORBIDDEN,
+        ));
+    }
+
     if query.q.trim().is_empty() {
         return Ok(html! {}.into_response());
     }
