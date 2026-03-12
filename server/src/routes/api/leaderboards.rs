@@ -344,3 +344,97 @@ pub async fn delete_entry(
 
     Ok(StatusCode::NO_CONTENT)
 }
+
+// --- BS-37342921850a4fc2: Custom leaderboard API tests ---
+
+#[cfg(test)]
+mod custom_leaderboard_api_tests {
+    #[test]
+    fn test_visibility_is_importable_for_api() {
+        // Visibility is already imported at crate level in this module.
+        // This test documents that the API module has access to Visibility for
+        // the private-leaderboard join guard in create_entry.
+        use crate::models::battlesnake::Visibility;
+        let _public = Visibility::Public;
+        let _private = Visibility::Private;
+    }
+
+    #[test]
+    #[ignore = "Requires LeaderboardResponse to include description, visibility, board_size, game_type, matchmaking_enabled fields (BS-37342921850a4fc2)"]
+    fn test_leaderboard_response_has_config_fields() {
+        // Implementation agent: after updating LeaderboardResponse struct, un-ignore and uncomment:
+        //
+        // use super::LeaderboardResponse;
+        // let response = LeaderboardResponse {
+        //     id: uuid::Uuid::new_v4(), name: "Test".to_string(),
+        //     description: "Test description".to_string(),
+        //     visibility: "public".to_string(), board_size: "11x11".to_string(),
+        //     game_type: "Standard".to_string(), matchmaking_enabled: false,
+        //     active: true, created_at: chrono::Utc::now(),
+        // };
+        // assert_eq!(response.visibility, "public");
+        // assert_eq!(response.board_size, "11x11");
+        // assert_eq!(response.game_type, "Standard");
+        // assert!(!response.matchmaking_enabled);
+        // assert_eq!(response.description, "Test description");
+    }
+
+    #[test]
+    #[ignore = "Requires create_leaderboard_api handler (POST /api/leaderboards) (BS-37342921850a4fc2)"]
+    fn test_create_leaderboard_api_handler_exists() {
+        // Implementation agent: after adding create_leaderboard_api, un-ignore and uncomment:
+        // let _ = super::create_leaderboard_api;
+    }
+
+    #[test]
+    #[ignore = "Requires update_leaderboard_api handler (PUT /api/leaderboards/:id) that returns 403 for non-creators (BS-37342921850a4fc2)"]
+    fn test_update_leaderboard_api_handler_exists() {
+        // Implementation agent: after adding update_leaderboard_api, un-ignore and uncomment:
+        // let _ = super::update_leaderboard_api;
+        // Returns 403 if the authenticated user is not the leaderboard creator
+    }
+
+    #[test]
+    #[ignore = "Requires toggle_matchmaking_api handler (POST /api/leaderboards/:id/matchmaking) (BS-37342921850a4fc2)"]
+    fn test_toggle_matchmaking_api_handler_exists() {
+        // Implementation agent: after adding toggle_matchmaking_api, un-ignore and uncomment:
+        // let _ = super::toggle_matchmaking_api;
+    }
+
+    #[test]
+    #[ignore = "Requires CreateLeaderboardRequest struct with optional board_size, game_type, visibility, description (BS-37342921850a4fc2)"]
+    fn test_create_leaderboard_request_struct_optional_fields() {
+        // Implementation agent: after adding CreateLeaderboardRequest, un-ignore and uncomment:
+        //
+        // use super::CreateLeaderboardRequest;
+        // let req = CreateLeaderboardRequest {
+        //     name: "My League".to_string(),
+        //     description: None, board_size: None, game_type: None, visibility: None,
+        // };
+        // assert!(!req.name.is_empty(), "name is required");
+        // assert!(req.board_size.is_none(), "board_size is optional, defaults to 11x11");
+        // assert!(req.game_type.is_none(), "game_type is optional, defaults to Standard");
+        // assert!(req.visibility.is_none(), "visibility is optional, defaults to public");
+    }
+
+    #[test]
+    #[ignore = "Requires ToggleMatchmakingRequest struct with enabled: bool field (BS-37342921850a4fc2)"]
+    fn test_toggle_matchmaking_request_struct() {
+        // Implementation agent: after adding ToggleMatchmakingRequest, un-ignore and uncomment:
+        //
+        // use super::ToggleMatchmakingRequest;
+        // let enable = ToggleMatchmakingRequest { enabled: true };
+        // let disable = ToggleMatchmakingRequest { enabled: false };
+        // assert!(enable.enabled);
+        // assert!(!disable.enabled);
+    }
+
+    #[test]
+    #[ignore = "Requires create_entry to reject private leaderboards via API (BS-37342921850a4fc2)"]
+    fn test_api_create_entry_rejects_private_leaderboards() {
+        // After implementation, create_entry in the API should return
+        // StatusCode::FORBIDDEN with message:
+        // "Cannot join private leaderboards via API. Contact the leaderboard creator."
+        // when lb.visibility == Visibility::Private
+    }
+}

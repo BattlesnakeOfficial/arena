@@ -930,3 +930,191 @@ pub async fn leave_leaderboard(
 
     Ok(redirect)
 }
+
+// --- BS-37342921850a4fc2: Custom leaderboard tests ---
+
+#[cfg(test)]
+mod custom_leaderboard_tests {
+    // Helper: mirrors the validation logic the create/update leaderboard handlers must implement.
+    fn is_valid_board_size(s: &str) -> bool {
+        matches!(s, "7x7" | "11x11" | "19x19")
+    }
+
+    fn is_valid_game_type(s: &str) -> bool {
+        matches!(s, "Standard" | "Royale" | "Constrictor" | "Snail Mode")
+    }
+
+    #[test]
+    fn test_valid_board_sizes_accepted() {
+        assert!(is_valid_board_size("7x7"), "7x7 should be a valid board size");
+        assert!(is_valid_board_size("11x11"), "11x11 should be a valid board size");
+        assert!(is_valid_board_size("19x19"), "19x19 should be a valid board size");
+    }
+
+    #[test]
+    fn test_invalid_board_sizes_rejected() {
+        assert!(!is_valid_board_size("5x5"), "5x5 is not a supported board size");
+        assert!(!is_valid_board_size(""), "empty string is not a valid board size");
+        assert!(!is_valid_board_size("large"), "text aliases are not valid");
+        assert!(!is_valid_board_size("11x11x11"), "3D board is not valid");
+        assert!(!is_valid_board_size("0x0"), "zero board is not valid");
+    }
+
+    #[test]
+    fn test_valid_game_types_accepted() {
+        assert!(is_valid_game_type("Standard"), "Standard should be a valid game type");
+        assert!(is_valid_game_type("Royale"), "Royale should be a valid game type");
+        assert!(is_valid_game_type("Constrictor"), "Constrictor should be a valid game type");
+        assert!(is_valid_game_type("Snail Mode"), "Snail Mode should be a valid game type");
+    }
+
+    #[test]
+    fn test_invalid_game_types_rejected() {
+        assert!(!is_valid_game_type("standard"), "lowercase is not valid");
+        assert!(!is_valid_game_type(""), "empty string is not a valid game type");
+        assert!(!is_valid_game_type("Unknown"), "unknown game type should be rejected");
+        assert!(!is_valid_game_type("snail mode"), "wrong case should be rejected");
+    }
+
+    #[test]
+    fn test_visibility_parsing_for_form() {
+        use std::str::FromStr;
+        use crate::models::battlesnake::Visibility;
+
+        // create_leaderboard_handler validates visibility via Visibility::from_str
+        assert!(Visibility::from_str("public").is_ok(), "public visibility is valid");
+        assert!(Visibility::from_str("private").is_ok(), "private visibility is valid");
+        assert!(Visibility::from_str("unlisted").is_err(), "unlisted is not a valid visibility");
+        assert!(Visibility::from_str("").is_err(), "empty string is not a valid visibility");
+    }
+
+    #[test]
+    #[ignore = "Requires CreateLeaderboardForm struct with name, description, board_size, game_type, visibility fields (BS-37342921850a4fc2)"]
+    fn test_create_leaderboard_form_struct_exists() {
+        // Implementation agent: after adding CreateLeaderboardForm, un-ignore and uncomment:
+        //
+        // use super::CreateLeaderboardForm;
+        // let form = CreateLeaderboardForm {
+        //     name: "My League".to_string(), description: "A fun league".to_string(),
+        //     board_size: "11x11".to_string(), game_type: "Standard".to_string(),
+        //     visibility: "public".to_string(),
+        // };
+        // assert!(!form.name.is_empty());
+        // assert!(is_valid_board_size(&form.board_size));
+        // assert!(is_valid_game_type(&form.game_type));
+    }
+
+    #[test]
+    #[ignore = "Requires new_leaderboard handler (GET /leaderboards/new) (BS-37342921850a4fc2)"]
+    fn test_new_leaderboard_handler_exists() {
+        // Implementation agent: after adding new_leaderboard handler, un-ignore and uncomment:
+        // let _ = super::new_leaderboard;
+    }
+
+    #[test]
+    #[ignore = "Requires create_leaderboard_handler (POST /leaderboards) that validates name, board_size, game_type, visibility (BS-37342921850a4fc2)"]
+    fn test_create_leaderboard_handler_exists() {
+        // Implementation agent: after adding create_leaderboard_handler, un-ignore and uncomment:
+        // let _ = super::create_leaderboard_handler;
+        //
+        // Validation requirements:
+        // - name must be non-empty
+        // - board_size must be one of: "7x7", "11x11", "19x19"
+        // - game_type must be one of: "Standard", "Royale", "Constrictor", "Snail Mode"
+        // - visibility must parse via Visibility::from_str
+    }
+
+    #[test]
+    #[ignore = "Requires manage_leaderboard handler (GET /leaderboards/:id/manage) that returns 403 for non-creators and system leaderboards (BS-37342921850a4fc2)"]
+    fn test_manage_leaderboard_handler_exists() {
+        // Implementation agent: after adding manage_leaderboard handler, un-ignore and uncomment:
+        // let _ = super::manage_leaderboard;
+        //
+        // Authorization requirements:
+        // - Return 403 if user is not the leaderboard creator
+        // - Return 403 for system leaderboards (creator_user_id = None)
+        // Shows: settings form, enrolled snakes, pending requests, matchmaking toggle, snake search
+    }
+
+    #[test]
+    #[ignore = "Requires toggle_matchmaking handler (POST /leaderboards/:id/matchmaking) (BS-37342921850a4fc2)"]
+    fn test_toggle_matchmaking_handler_exists() {
+        // Implementation agent: after adding toggle_matchmaking, un-ignore and uncomment:
+        // let _ = super::toggle_matchmaking;
+        //
+        // Uses ToggleMatchmakingForm { enabled: Option<String> }
+        // HTML checkbox: present="on" means enabled, absent means disabled
+    }
+
+    #[test]
+    #[ignore = "Requires creator_add_snake handler (POST /leaderboards/:id/add-snake) (BS-37342921850a4fc2)"]
+    fn test_creator_add_snake_handler_exists() {
+        // Implementation agent: after adding creator_add_snake, un-ignore and uncomment:
+        // let _ = super::creator_add_snake;
+        //
+        // Behavior:
+        // - Public snake: check has_active_entry() first, then get_or_create_entry() + initialize scoring
+        // - Private snake: create_enrollment_request() instead
+        // CRITICAL: always call has_active_entry() before get_or_create_entry() (no unique constraint)
+    }
+
+    #[test]
+    #[ignore = "Requires accept_enrollment_request handler (POST /enrollment-requests/:id/accept) (BS-37342921850a4fc2)"]
+    fn test_accept_enrollment_request_handler_exists() {
+        // Implementation agent: after adding accept_enrollment_request, un-ignore and uncomment:
+        // let _ = super::accept_enrollment_request;
+        //
+        // Requirements:
+        // 1. Fetch request. Return error if not found.
+        // 2. Verify status is "pending".
+        // 3. Verify snake.user_id == current_user.user_id (403 if not).
+        // 4. Update status to "accepted".
+        // 5. Check has_active_entry(). If false, get_or_create_entry() + initialize scoring.
+        // 6. Redirect to /me.
+    }
+
+    #[test]
+    #[ignore = "Requires decline_enrollment_request handler (POST /enrollment-requests/:id/decline) (BS-37342921850a4fc2)"]
+    fn test_decline_enrollment_request_handler_exists() {
+        // Implementation agent: after adding decline_enrollment_request, un-ignore and uncomment:
+        // let _ = super::decline_enrollment_request;
+        //
+        // Requirements:
+        // 1. Fetch request. Return error if not found.
+        // 2. Verify status is "pending".
+        // 3. Verify snake.user_id == current_user.user_id (403 if not).
+        // 4. Update status to "declined".
+        // 5. Redirect to /me. Do NOT create a leaderboard entry.
+    }
+
+    #[test]
+    #[ignore = "Requires join_leaderboard to check lb.visibility and reject private leaderboards (BS-37342921850a4fc2)"]
+    fn test_join_leaderboard_rejects_private_leaderboards() {
+        // Implementation agent: after updating join_leaderboard to check visibility,
+        // write an integration test that:
+        // 1. Creates a private leaderboard
+        // 2. Attempts to join it as a non-creator
+        // 3. Verifies the response is an error with message:
+        //    "Private leaderboards don't accept direct joins. Contact the leaderboard creator."
+    }
+
+    #[test]
+    #[ignore = "Requires search_snakes_for_leaderboard handler (GET /leaderboards/:id/manage/search-snakes) (BS-37342921850a4fc2)"]
+    fn test_search_snakes_handler_exists() {
+        // Implementation agent: after adding search_snakes_for_leaderboard, un-ignore and uncomment:
+        // let _ = super::search_snakes_for_leaderboard;
+        //
+        // Returns HTMX partial HTML with matching PUBLIC snakes and "Add" buttons.
+        // Uses search_public_battlesnakes(pool, query, limit).
+    }
+
+    #[test]
+    #[ignore = "Requires update_leaderboard_handler (POST /leaderboards/:id/update) (BS-37342921850a4fc2)"]
+    fn test_update_leaderboard_handler_exists() {
+        // Implementation agent: after adding update_leaderboard_handler, un-ignore and uncomment:
+        // let _ = super::update_leaderboard_handler;
+        //
+        // Same validation as create: name non-empty, board_size/game_type/visibility validated.
+        // Returns 403 if user is not the creator.
+    }
+}
