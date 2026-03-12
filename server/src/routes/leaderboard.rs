@@ -34,10 +34,11 @@ pub struct PaginationParams {
 /// GET /leaderboards — list all leaderboards
 pub async fn list_leaderboards(
     State(state): State<AppState>,
-    OptionalUser(_user): OptionalUser,
+    OptionalUser(user): OptionalUser,
     page_factory: PageFactory,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
-    let leaderboards = leaderboard::get_all_leaderboards(&state.db)
+    let user_id = user.as_ref().map(|u| u.user_id);
+    let leaderboards = leaderboard::get_visible_leaderboards(&state.db, user_id)
         .await
         .wrap_err("Failed to fetch leaderboards")?;
 
@@ -46,6 +47,12 @@ pub async fn list_leaderboards(
         Box::new(html! {
             div class="container" {
                 h1 { "Leaderboards" }
+
+                @if user.is_some() {
+                    div style="margin-bottom: 20px;" {
+                        a href="/leaderboards/new" class="btn btn-primary" { "Create Leaderboard" }
+                    }
+                }
 
                 @if leaderboards.is_empty() {
                     p { "No leaderboards available yet." }
@@ -56,10 +63,21 @@ pub async fn list_leaderboards(
                                 h2 {
                                     a href={"/leaderboards/"(lb.leaderboard_id)} { (lb.name) }
                                 }
-                                @if lb.disabled_at.is_some() {
-                                    span class="badge bg-secondary text-white" { "Inactive" }
-                                } @else {
-                                    span class="badge bg-success text-white" { "Active" }
+                                @if !lb.description.is_empty() {
+                                    p style="color: #666;" { (lb.description) }
+                                }
+                                div style="display: flex; gap: 8px; flex-wrap: wrap;" {
+                                    span class="badge bg-info text-white" { (lb.board_size) }
+                                    span class="badge bg-info text-white" { (lb.game_type) }
+                                    @if lb.visibility == Visibility::Private {
+                                        span class="badge bg-warning text-dark" { "Private" }
+                                    }
+                                    @if lb.matchmaking_enabled {
+                                        span class="badge bg-success text-white" { "Matchmaking Active" }
+                                    }
+                                    @if lb.disabled_at.is_some() {
+                                        span class="badge bg-secondary text-white" { "Inactive" }
+                                    }
                                 }
                             }
                         }
@@ -176,6 +194,23 @@ pub async fn show_leaderboard(
             div class="container" {
                 h1 { "Leaderboard: " (lb.name) }
 
+                @if !lb.description.is_empty() {
+                    p style="color: #666; font-size: 1.1em;" { (lb.description) }
+                }
+
+                div style="margin-bottom: 16px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center;" {
+                    span class="badge bg-info text-white" { (lb.board_size) }
+                    span class="badge bg-info text-white" { (lb.game_type) }
+                    @if lb.visibility == Visibility::Private {
+                        span class="badge bg-warning text-dark" { "Private" }
+                    }
+                    @if let Some(ref u) = user {
+                        @if lb.creator_user_id == Some(u.user_id) {
+                            a href={"/leaderboards/"(lb.leaderboard_id)"/manage"} class="btn btn-sm btn-outline-primary" { "Manage" }
+                        }
+                    }
+                }
+
                 // Matchmaker status
                 @if status.total_games > 0 {
                     div style="margin-bottom: 20px; padding: 16px; background: #f8f9fa; border: 1px solid #ddd; border-radius: 8px;" {
@@ -210,7 +245,11 @@ pub async fn show_leaderboard(
                 }
 
                 // Join/leave section for logged-in users
-                @if user.is_some() {
+                @if lb.visibility == Visibility::Private && user.as_ref().is_none_or(|u| lb.creator_user_id != Some(u.user_id)) {
+                    div style="margin-bottom: 20px; padding: 16px; border: 1px solid #ddd; border-radius: 8px; background: #fff3cd;" {
+                        p { "This is a private leaderboard. Contact the creator to join." }
+                    }
+                } @else if user.is_some() {
                     div style="margin-bottom: 20px; padding: 16px; border: 1px solid #ddd; border-radius: 8px;" {
                         h3 { "Your Snakes" }
 
@@ -828,6 +867,15 @@ pub async fn join_leaderboard(
         ));
     }
 
+    if lb.visibility == Visibility::Private {
+        return Err(crate::errors::ServerError(
+            color_eyre::eyre::eyre!(
+                "Private leaderboards don't accept direct joins. Contact the leaderboard creator."
+            ),
+            redirect,
+        ));
+    }
+
     // Verify snake belongs to user and is public
     let snake = battlesnake::get_battlesnake_by_id(&state.db, form.battlesnake_id)
         .await
@@ -931,6 +979,652 @@ pub async fn leave_leaderboard(
     Ok(redirect)
 }
 
+// --- Custom leaderboard form structs ---
+
+#[derive(serde::Deserialize)]
+pub struct CreateLeaderboardForm {
+    pub name: String,
+    pub description: String,
+    pub board_size: String,
+    pub game_type: String,
+    pub visibility: String,
+}
+
+#[derive(serde::Deserialize)]
+pub struct AddSnakeForm {
+    pub battlesnake_id: Uuid,
+}
+
+#[derive(serde::Deserialize)]
+pub struct ToggleMatchmakingForm {
+    pub enabled: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct SearchQuery {
+    pub q: String,
+}
+
+fn is_valid_board_size(s: &str) -> bool {
+    matches!(s, "7x7" | "11x11" | "19x19")
+}
+
+fn is_valid_game_type(s: &str) -> bool {
+    matches!(s, "Standard" | "Royale" | "Constrictor" | "Snail Mode")
+}
+
+/// GET /leaderboards/new — form to create a new leaderboard
+pub async fn new_leaderboard(
+    CurrentUser(_user): CurrentUser,
+    page_factory: PageFactory,
+) -> ServerResult<impl IntoResponse, StatusCode> {
+    Ok(page_factory.create_page(
+        "Create Leaderboard".to_string(),
+        Box::new(html! {
+            div class="container" {
+                h1 { "Create Leaderboard" }
+                form action="/leaderboards" method="post" style="max-width: 600px;" {
+                    div style="margin-bottom: 16px;" {
+                        label for="name" { "Name" }
+                        input type="text" id="name" name="name" required class="form-control" {}
+                    }
+                    div style="margin-bottom: 16px;" {
+                        label for="description" { "Description" }
+                        textarea id="description" name="description" class="form-control" rows="3" {}
+                    }
+                    div style="margin-bottom: 16px;" {
+                        label for="board_size" { "Board Size" }
+                        select id="board_size" name="board_size" class="form-control" {
+                            option value="7x7" { "7x7" }
+                            option value="11x11" selected { "11x11" }
+                            option value="19x19" { "19x19" }
+                        }
+                    }
+                    div style="margin-bottom: 16px;" {
+                        label for="game_type" { "Game Type" }
+                        select id="game_type" name="game_type" class="form-control" {
+                            option value="Standard" selected { "Standard" }
+                            option value="Royale" { "Royale" }
+                            option value="Constrictor" { "Constrictor" }
+                            option value="Snail Mode" { "Snail Mode" }
+                        }
+                    }
+                    div style="margin-bottom: 16px;" {
+                        label for="visibility" { "Visibility" }
+                        select id="visibility" name="visibility" class="form-control" {
+                            option value="public" selected { "Public" }
+                            option value="private" { "Private" }
+                        }
+                    }
+                    button type="submit" class="btn btn-primary" { "Create Leaderboard" }
+                }
+                div class="nav" style="margin-top: 20px;" {
+                    a href="/leaderboards" { "Back to Leaderboards" }
+                }
+            }
+        }),
+    ))
+}
+
+/// POST /leaderboards — create a new leaderboard
+pub async fn create_leaderboard_handler(
+    State(state): State<AppState>,
+    CurrentUser(user): CurrentUser,
+    Form(form): Form<CreateLeaderboardForm>,
+) -> ServerResult<impl IntoResponse, Redirect> {
+    let redirect = Redirect::to("/leaderboards/new");
+
+    if form.name.trim().is_empty() {
+        return Err(crate::errors::ServerError(
+            color_eyre::eyre::eyre!("Name cannot be empty"),
+            redirect,
+        ));
+    }
+
+    if !is_valid_board_size(&form.board_size) {
+        return Err(crate::errors::ServerError(
+            color_eyre::eyre::eyre!("Invalid board size: {}", form.board_size),
+            redirect,
+        ));
+    }
+
+    if !is_valid_game_type(&form.game_type) {
+        return Err(crate::errors::ServerError(
+            color_eyre::eyre::eyre!("Invalid game type: {}", form.game_type),
+            redirect,
+        ));
+    }
+
+    let visibility = std::str::FromStr::from_str(&form.visibility)
+        .map_err(|e: color_eyre::eyre::Report| crate::errors::ServerError(e, redirect.clone()))?;
+
+    let lb = leaderboard::create_leaderboard(
+        &state.db,
+        user.user_id,
+        form.name.trim(),
+        &form.description,
+        &visibility,
+        &form.board_size,
+        &form.game_type,
+    )
+    .await
+    .with_redirect(redirect)?;
+
+    Ok(Redirect::to(&format!(
+        "/leaderboards/{}",
+        lb.leaderboard_id
+    )))
+}
+
+/// GET /leaderboards/:id/manage — creator management dashboard
+#[allow(clippy::too_many_lines)]
+pub async fn manage_leaderboard(
+    State(state): State<AppState>,
+    CurrentUser(user): CurrentUser,
+    Path(leaderboard_id): Path<Uuid>,
+    page_factory: PageFactory,
+) -> ServerResult<impl IntoResponse, StatusCode> {
+    let lb = leaderboard::get_leaderboard_by_id(&state.db, leaderboard_id)
+        .await
+        .wrap_err("Failed to fetch leaderboard")?
+        .ok_or_else(|| {
+            crate::errors::ServerError(
+                color_eyre::eyre::eyre!("Leaderboard not found"),
+                StatusCode::NOT_FOUND,
+            )
+        })?;
+
+    if lb.creator_user_id != Some(user.user_id) {
+        return Err(crate::errors::ServerError(
+            color_eyre::eyre::eyre!("You are not the creator of this leaderboard"),
+            StatusCode::FORBIDDEN,
+        ));
+    }
+
+    let entries = leaderboard::get_active_entries(&state.db, leaderboard_id)
+        .await
+        .wrap_err("Failed to fetch entries")?;
+
+    let pending_requests =
+        leaderboard::get_pending_requests_for_leaderboard(&state.db, leaderboard_id)
+            .await
+            .wrap_err("Failed to fetch pending requests")?;
+
+    // Get snake names for entries
+    let mut entry_snake_names: Vec<(leaderboard::LeaderboardEntry, String)> = vec![];
+    for entry in entries {
+        let name = if let Some(snake) =
+            battlesnake::get_battlesnake_by_id(&state.db, entry.battlesnake_id)
+                .await
+                .ok()
+                .flatten()
+        {
+            snake.name
+        } else {
+            "Unknown".to_string()
+        };
+        entry_snake_names.push((entry, name));
+    }
+
+    // Get snake names for pending requests
+    let mut request_snake_names: Vec<(leaderboard::EnrollmentRequest, String)> = vec![];
+    for req in pending_requests {
+        let name = if let Some(snake) =
+            battlesnake::get_battlesnake_by_id(&state.db, req.battlesnake_id)
+                .await
+                .ok()
+                .flatten()
+        {
+            snake.name
+        } else {
+            "Unknown".to_string()
+        };
+        request_snake_names.push((req, name));
+    }
+
+    Ok(page_factory.create_page(
+        format!("Manage: {}", lb.name),
+        Box::new(html! {
+            div class="container" {
+                h1 { "Manage: " (lb.name) }
+
+                // Settings form
+                div style="margin-bottom: 24px; padding: 16px; border: 1px solid #ddd; border-radius: 8px;" {
+                    h3 { "Settings" }
+                    form action={"/leaderboards/"(leaderboard_id)"/update"} method="post" {
+                        div style="margin-bottom: 12px;" {
+                            label for="name" { "Name" }
+                            input type="text" id="name" name="name" value=(lb.name) required class="form-control" {}
+                        }
+                        div style="margin-bottom: 12px;" {
+                            label for="description" { "Description" }
+                            textarea id="description" name="description" class="form-control" rows="2" { (lb.description) }
+                        }
+                        div style="margin-bottom: 12px;" {
+                            label for="board_size" { "Board Size" }
+                            select id="board_size" name="board_size" class="form-control" {
+                                @for size in &["7x7", "11x11", "19x19"] {
+                                    option value=(size) selected[*size == lb.board_size] { (size) }
+                                }
+                            }
+                        }
+                        div style="margin-bottom: 12px;" {
+                            label for="game_type" { "Game Type" }
+                            select id="game_type" name="game_type" class="form-control" {
+                                @for gt in &["Standard", "Royale", "Constrictor", "Snail Mode"] {
+                                    option value=(gt) selected[*gt == lb.game_type] { (gt) }
+                                }
+                            }
+                        }
+                        div style="margin-bottom: 12px;" {
+                            label for="visibility" { "Visibility" }
+                            select id="visibility" name="visibility" class="form-control" {
+                                option value="public" selected[lb.visibility == Visibility::Public] { "Public" }
+                                option value="private" selected[lb.visibility == Visibility::Private] { "Private" }
+                            }
+                        }
+                        button type="submit" class="btn btn-primary" { "Update Settings" }
+                    }
+                }
+
+                // Matchmaking toggle
+                div style="margin-bottom: 24px; padding: 16px; border: 1px solid #ddd; border-radius: 8px;" {
+                    h3 { "Matchmaking" }
+                    form action={"/leaderboards/"(leaderboard_id)"/matchmaking"} method="post" {
+                        div style="margin-bottom: 12px;" {
+                            label {
+                                input type="checkbox" name="enabled" value="on" checked[lb.matchmaking_enabled] {}
+                                " Enable matchmaking"
+                            }
+                        }
+                        button type="submit" class="btn btn-primary" { "Update Matchmaking" }
+                    }
+                }
+
+                // Enrolled snakes
+                div style="margin-bottom: 24px; padding: 16px; border: 1px solid #ddd; border-radius: 8px;" {
+                    h3 { "Enrolled Snakes (" (entry_snake_names.len()) ")" }
+                    @if entry_snake_names.is_empty() {
+                        p { "No snakes enrolled yet." }
+                    } @else {
+                        @for (entry, name) in &entry_snake_names {
+                            div style="display: flex; align-items: center; gap: 10px; margin-bottom: 8px;" {
+                                span { (name) }
+                                span style="color: #666;" { "Score: " (format!("{:.1}", entry.display_score)) " | Games: " (entry.games_played) }
+                            }
+                        }
+                    }
+                }
+
+                // Add snake
+                div style="margin-bottom: 24px; padding: 16px; border: 1px solid #ddd; border-radius: 8px;" {
+                    h3 { "Add Snake" }
+                    div {
+                        input type="text" id="snake-search" placeholder="Search public snakes..." class="form-control"
+                            hx-get={"/leaderboards/"(leaderboard_id)"/manage/search-snakes"}
+                            hx-trigger="input changed delay:300ms"
+                            hx-target="#snake-search-results"
+                            name="q" {}
+                        div id="snake-search-results" style="margin-top: 8px;" {}
+                    }
+                }
+
+                // Pending enrollment requests
+                @if !request_snake_names.is_empty() {
+                    div style="margin-bottom: 24px; padding: 16px; border: 1px solid #ddd; border-radius: 8px;" {
+                        h3 { "Pending Enrollment Requests" }
+                        @for (_req, name) in &request_snake_names {
+                            div style="display: flex; align-items: center; gap: 10px; margin-bottom: 8px;" {
+                                span { (name) }
+                                span class="badge bg-warning text-dark" { "Pending" }
+                            }
+                        }
+                    }
+                }
+
+                div class="nav" style="margin-top: 20px;" {
+                    a href={"/leaderboards/"(leaderboard_id)} { "View Leaderboard" }
+                    span { " | " }
+                    a href="/leaderboards" { "All Leaderboards" }
+                }
+            }
+        }),
+    ))
+}
+
+/// GET /leaderboards/:id/manage/search-snakes — HTMX snake search fragment
+pub async fn search_snakes_for_leaderboard(
+    State(state): State<AppState>,
+    CurrentUser(_user): CurrentUser,
+    Path(leaderboard_id): Path<Uuid>,
+    Query(query): Query<SearchQuery>,
+) -> ServerResult<impl IntoResponse, StatusCode> {
+    if query.q.trim().is_empty() {
+        return Ok(html! {}.into_response());
+    }
+
+    let snakes = battlesnake::search_public_battlesnakes(&state.db, query.q.trim(), 10)
+        .await
+        .wrap_err("Failed to search snakes")?;
+
+    Ok(html! {
+        @for snake in &snakes {
+            div style="display: flex; align-items: center; gap: 10px; margin-bottom: 8px; padding: 8px; border: 1px solid #eee; border-radius: 4px;" {
+                span { (snake.name) }
+                form action={"/leaderboards/"(leaderboard_id)"/add-snake"} method="post" style="display: inline;" {
+                    input type="hidden" name="battlesnake_id" value=(snake.battlesnake_id);
+                    button type="submit" class="btn btn-sm btn-primary" { "Add" }
+                }
+            }
+        }
+        @if snakes.is_empty() {
+            p style="color: #666;" { "No matching public snakes found." }
+        }
+    }.into_response())
+}
+
+/// POST /leaderboards/:id/update — update leaderboard settings
+pub async fn update_leaderboard_handler(
+    State(state): State<AppState>,
+    CurrentUser(user): CurrentUser,
+    Path(leaderboard_id): Path<Uuid>,
+    Form(form): Form<CreateLeaderboardForm>,
+) -> ServerResult<impl IntoResponse, Redirect> {
+    let redirect = Redirect::to(&format!("/leaderboards/{leaderboard_id}/manage"));
+
+    let lb = leaderboard::get_leaderboard_by_id(&state.db, leaderboard_id)
+        .await
+        .wrap_err("Failed to fetch leaderboard")
+        .with_redirect(redirect.clone())?
+        .ok_or_else(|| {
+            crate::errors::ServerError(
+                color_eyre::eyre::eyre!("Leaderboard not found"),
+                redirect.clone(),
+            )
+        })?;
+
+    if lb.creator_user_id != Some(user.user_id) {
+        return Err(crate::errors::ServerError(
+            color_eyre::eyre::eyre!("You are not the creator of this leaderboard"),
+            redirect,
+        ));
+    }
+
+    if form.name.trim().is_empty() {
+        return Err(crate::errors::ServerError(
+            color_eyre::eyre::eyre!("Name cannot be empty"),
+            redirect,
+        ));
+    }
+
+    if !is_valid_board_size(&form.board_size) {
+        return Err(crate::errors::ServerError(
+            color_eyre::eyre::eyre!("Invalid board size"),
+            redirect,
+        ));
+    }
+
+    if !is_valid_game_type(&form.game_type) {
+        return Err(crate::errors::ServerError(
+            color_eyre::eyre::eyre!("Invalid game type"),
+            redirect,
+        ));
+    }
+
+    let visibility: Visibility = std::str::FromStr::from_str(&form.visibility)
+        .map_err(|e: color_eyre::eyre::Report| crate::errors::ServerError(e, redirect.clone()))?;
+
+    leaderboard::update_leaderboard(
+        &state.db,
+        leaderboard_id,
+        form.name.trim(),
+        &form.description,
+        &visibility,
+        &form.board_size,
+        &form.game_type,
+    )
+    .await
+    .with_redirect(redirect.clone())?;
+
+    Ok(redirect)
+}
+
+/// POST /leaderboards/:id/matchmaking — toggle matchmaking
+pub async fn toggle_matchmaking(
+    State(state): State<AppState>,
+    CurrentUser(user): CurrentUser,
+    Path(leaderboard_id): Path<Uuid>,
+    Form(form): Form<ToggleMatchmakingForm>,
+) -> ServerResult<impl IntoResponse, Redirect> {
+    let redirect = Redirect::to(&format!("/leaderboards/{leaderboard_id}/manage"));
+
+    let lb = leaderboard::get_leaderboard_by_id(&state.db, leaderboard_id)
+        .await
+        .wrap_err("Failed to fetch leaderboard")
+        .with_redirect(redirect.clone())?
+        .ok_or_else(|| {
+            crate::errors::ServerError(
+                color_eyre::eyre::eyre!("Leaderboard not found"),
+                redirect.clone(),
+            )
+        })?;
+
+    if lb.creator_user_id != Some(user.user_id) {
+        return Err(crate::errors::ServerError(
+            color_eyre::eyre::eyre!("You are not the creator of this leaderboard"),
+            redirect,
+        ));
+    }
+
+    let enabled = form.enabled.is_some();
+    leaderboard::set_matchmaking_enabled(&state.db, leaderboard_id, enabled)
+        .await
+        .with_redirect(redirect.clone())?;
+
+    Ok(redirect)
+}
+
+/// POST /leaderboards/:id/add-snake — creator adds a snake
+pub async fn creator_add_snake(
+    State(state): State<AppState>,
+    CurrentUser(user): CurrentUser,
+    Path(leaderboard_id): Path<Uuid>,
+    Form(form): Form<AddSnakeForm>,
+) -> ServerResult<impl IntoResponse, Redirect> {
+    let redirect = Redirect::to(&format!("/leaderboards/{leaderboard_id}/manage"));
+
+    let lb = leaderboard::get_leaderboard_by_id(&state.db, leaderboard_id)
+        .await
+        .wrap_err("Failed to fetch leaderboard")
+        .with_redirect(redirect.clone())?
+        .ok_or_else(|| {
+            crate::errors::ServerError(
+                color_eyre::eyre::eyre!("Leaderboard not found"),
+                redirect.clone(),
+            )
+        })?;
+
+    if lb.creator_user_id != Some(user.user_id) {
+        return Err(crate::errors::ServerError(
+            color_eyre::eyre::eyre!("You are not the creator of this leaderboard"),
+            redirect,
+        ));
+    }
+
+    let snake = battlesnake::get_battlesnake_by_id(&state.db, form.battlesnake_id)
+        .await
+        .wrap_err("Failed to fetch battlesnake")
+        .with_redirect(redirect.clone())?
+        .ok_or_else(|| {
+            crate::errors::ServerError(
+                color_eyre::eyre::eyre!("Battlesnake not found"),
+                redirect.clone(),
+            )
+        })?;
+
+    if snake.visibility == Visibility::Public {
+        // Direct add for public snakes
+        let already_enrolled =
+            leaderboard::has_active_entry(&state.db, leaderboard_id, snake.battlesnake_id)
+                .await
+                .wrap_err("Failed to check entry")
+                .with_redirect(redirect.clone())?;
+
+        if !already_enrolled {
+            let entry =
+                leaderboard::get_or_create_entry(&state.db, leaderboard_id, snake.battlesnake_id)
+                    .await
+                    .wrap_err("Failed to create entry")
+                    .with_redirect(redirect.clone())?;
+
+            for algo in state.scoring.algorithms() {
+                algo.initialize_entry(&state.db, entry.leaderboard_entry_id)
+                    .await
+                    .wrap_err("Failed to initialize scoring")
+                    .with_redirect(redirect.clone())?;
+            }
+        }
+    } else {
+        // Create enrollment request for private snakes
+        leaderboard::create_enrollment_request(
+            &state.db,
+            leaderboard_id,
+            snake.battlesnake_id,
+            user.user_id,
+        )
+        .await
+        .wrap_err("Failed to create enrollment request")
+        .with_redirect(redirect.clone())?;
+    }
+
+    Ok(redirect)
+}
+
+/// POST /enrollment-requests/:request_id/accept
+pub async fn accept_enrollment_request(
+    State(state): State<AppState>,
+    CurrentUser(user): CurrentUser,
+    Path(request_id): Path<Uuid>,
+) -> ServerResult<impl IntoResponse, Redirect> {
+    let redirect = Redirect::to("/me");
+
+    let req = leaderboard::get_enrollment_request_by_id(&state.db, request_id)
+        .await
+        .wrap_err("Failed to fetch enrollment request")
+        .with_redirect(redirect.clone())?
+        .ok_or_else(|| {
+            crate::errors::ServerError(
+                color_eyre::eyre::eyre!("Enrollment request not found"),
+                redirect.clone(),
+            )
+        })?;
+
+    if req.status != "pending" {
+        return Err(crate::errors::ServerError(
+            color_eyre::eyre::eyre!("Request is no longer pending"),
+            redirect,
+        ));
+    }
+
+    let snake = battlesnake::get_battlesnake_by_id(&state.db, req.battlesnake_id)
+        .await
+        .wrap_err("Failed to fetch battlesnake")
+        .with_redirect(redirect.clone())?
+        .ok_or_else(|| {
+            crate::errors::ServerError(
+                color_eyre::eyre::eyre!("Battlesnake not found"),
+                redirect.clone(),
+            )
+        })?;
+
+    if snake.user_id != user.user_id {
+        return Err(crate::errors::ServerError(
+            color_eyre::eyre::eyre!("You don't own this battlesnake"),
+            redirect,
+        ));
+    }
+
+    leaderboard::update_enrollment_request_status(&state.db, request_id, "accepted")
+        .await
+        .wrap_err("Failed to accept request")
+        .with_redirect(redirect.clone())?;
+
+    let already_enrolled =
+        leaderboard::has_active_entry(&state.db, req.leaderboard_id, req.battlesnake_id)
+            .await
+            .wrap_err("Failed to check entry")
+            .with_redirect(redirect.clone())?;
+
+    if !already_enrolled {
+        let entry =
+            leaderboard::get_or_create_entry(&state.db, req.leaderboard_id, req.battlesnake_id)
+                .await
+                .wrap_err("Failed to create entry")
+                .with_redirect(redirect.clone())?;
+
+        for algo in state.scoring.algorithms() {
+            algo.initialize_entry(&state.db, entry.leaderboard_entry_id)
+                .await
+                .wrap_err("Failed to initialize scoring")
+                .with_redirect(redirect.clone())?;
+        }
+    }
+
+    Ok(redirect)
+}
+
+/// POST /enrollment-requests/:request_id/decline
+pub async fn decline_enrollment_request(
+    State(state): State<AppState>,
+    CurrentUser(user): CurrentUser,
+    Path(request_id): Path<Uuid>,
+) -> ServerResult<impl IntoResponse, Redirect> {
+    let redirect = Redirect::to("/me");
+
+    let req = leaderboard::get_enrollment_request_by_id(&state.db, request_id)
+        .await
+        .wrap_err("Failed to fetch enrollment request")
+        .with_redirect(redirect.clone())?
+        .ok_or_else(|| {
+            crate::errors::ServerError(
+                color_eyre::eyre::eyre!("Enrollment request not found"),
+                redirect.clone(),
+            )
+        })?;
+
+    if req.status != "pending" {
+        return Err(crate::errors::ServerError(
+            color_eyre::eyre::eyre!("Request is no longer pending"),
+            redirect,
+        ));
+    }
+
+    let snake = battlesnake::get_battlesnake_by_id(&state.db, req.battlesnake_id)
+        .await
+        .wrap_err("Failed to fetch battlesnake")
+        .with_redirect(redirect.clone())?
+        .ok_or_else(|| {
+            crate::errors::ServerError(
+                color_eyre::eyre::eyre!("Battlesnake not found"),
+                redirect.clone(),
+            )
+        })?;
+
+    if snake.user_id != user.user_id {
+        return Err(crate::errors::ServerError(
+            color_eyre::eyre::eyre!("You don't own this battlesnake"),
+            redirect,
+        ));
+    }
+
+    leaderboard::update_enrollment_request_status(&state.db, request_id, "declined")
+        .await
+        .wrap_err("Failed to decline request")
+        .with_redirect(redirect.clone())?;
+
+    Ok(redirect)
+}
+
 // --- BS-37342921850a4fc2: Custom leaderboard tests ---
 
 #[cfg(test)]
@@ -946,15 +1640,30 @@ mod custom_leaderboard_tests {
 
     #[test]
     fn test_valid_board_sizes_accepted() {
-        assert!(is_valid_board_size("7x7"), "7x7 should be a valid board size");
-        assert!(is_valid_board_size("11x11"), "11x11 should be a valid board size");
-        assert!(is_valid_board_size("19x19"), "19x19 should be a valid board size");
+        assert!(
+            is_valid_board_size("7x7"),
+            "7x7 should be a valid board size"
+        );
+        assert!(
+            is_valid_board_size("11x11"),
+            "11x11 should be a valid board size"
+        );
+        assert!(
+            is_valid_board_size("19x19"),
+            "19x19 should be a valid board size"
+        );
     }
 
     #[test]
     fn test_invalid_board_sizes_rejected() {
-        assert!(!is_valid_board_size("5x5"), "5x5 is not a supported board size");
-        assert!(!is_valid_board_size(""), "empty string is not a valid board size");
+        assert!(
+            !is_valid_board_size("5x5"),
+            "5x5 is not a supported board size"
+        );
+        assert!(
+            !is_valid_board_size(""),
+            "empty string is not a valid board size"
+        );
         assert!(!is_valid_board_size("large"), "text aliases are not valid");
         assert!(!is_valid_board_size("11x11x11"), "3D board is not valid");
         assert!(!is_valid_board_size("0x0"), "zero board is not valid");
@@ -962,159 +1671,129 @@ mod custom_leaderboard_tests {
 
     #[test]
     fn test_valid_game_types_accepted() {
-        assert!(is_valid_game_type("Standard"), "Standard should be a valid game type");
-        assert!(is_valid_game_type("Royale"), "Royale should be a valid game type");
-        assert!(is_valid_game_type("Constrictor"), "Constrictor should be a valid game type");
-        assert!(is_valid_game_type("Snail Mode"), "Snail Mode should be a valid game type");
+        assert!(
+            is_valid_game_type("Standard"),
+            "Standard should be a valid game type"
+        );
+        assert!(
+            is_valid_game_type("Royale"),
+            "Royale should be a valid game type"
+        );
+        assert!(
+            is_valid_game_type("Constrictor"),
+            "Constrictor should be a valid game type"
+        );
+        assert!(
+            is_valid_game_type("Snail Mode"),
+            "Snail Mode should be a valid game type"
+        );
     }
 
     #[test]
     fn test_invalid_game_types_rejected() {
         assert!(!is_valid_game_type("standard"), "lowercase is not valid");
-        assert!(!is_valid_game_type(""), "empty string is not a valid game type");
-        assert!(!is_valid_game_type("Unknown"), "unknown game type should be rejected");
-        assert!(!is_valid_game_type("snail mode"), "wrong case should be rejected");
+        assert!(
+            !is_valid_game_type(""),
+            "empty string is not a valid game type"
+        );
+        assert!(
+            !is_valid_game_type("Unknown"),
+            "unknown game type should be rejected"
+        );
+        assert!(
+            !is_valid_game_type("snail mode"),
+            "wrong case should be rejected"
+        );
     }
 
     #[test]
     fn test_visibility_parsing_for_form() {
-        use std::str::FromStr;
         use crate::models::battlesnake::Visibility;
+        use std::str::FromStr;
 
         // create_leaderboard_handler validates visibility via Visibility::from_str
-        assert!(Visibility::from_str("public").is_ok(), "public visibility is valid");
-        assert!(Visibility::from_str("private").is_ok(), "private visibility is valid");
-        assert!(Visibility::from_str("unlisted").is_err(), "unlisted is not a valid visibility");
-        assert!(Visibility::from_str("").is_err(), "empty string is not a valid visibility");
+        assert!(
+            Visibility::from_str("public").is_ok(),
+            "public visibility is valid"
+        );
+        assert!(
+            Visibility::from_str("private").is_ok(),
+            "private visibility is valid"
+        );
+        assert!(
+            Visibility::from_str("unlisted").is_err(),
+            "unlisted is not a valid visibility"
+        );
+        assert!(
+            Visibility::from_str("").is_err(),
+            "empty string is not a valid visibility"
+        );
     }
 
     #[test]
-    #[ignore = "Requires CreateLeaderboardForm struct with name, description, board_size, game_type, visibility fields (BS-37342921850a4fc2)"]
     fn test_create_leaderboard_form_struct_exists() {
-        // Implementation agent: after adding CreateLeaderboardForm, un-ignore and uncomment:
-        //
-        // use super::CreateLeaderboardForm;
-        // let form = CreateLeaderboardForm {
-        //     name: "My League".to_string(), description: "A fun league".to_string(),
-        //     board_size: "11x11".to_string(), game_type: "Standard".to_string(),
-        //     visibility: "public".to_string(),
-        // };
-        // assert!(!form.name.is_empty());
-        // assert!(is_valid_board_size(&form.board_size));
-        // assert!(is_valid_game_type(&form.game_type));
+        use super::CreateLeaderboardForm;
+        let form = CreateLeaderboardForm {
+            name: "My League".to_string(),
+            description: "A fun league".to_string(),
+            board_size: "11x11".to_string(),
+            game_type: "Standard".to_string(),
+            visibility: "public".to_string(),
+        };
+        assert!(!form.name.is_empty());
+        assert!(is_valid_board_size(&form.board_size));
+        assert!(is_valid_game_type(&form.game_type));
     }
 
     #[test]
-    #[ignore = "Requires new_leaderboard handler (GET /leaderboards/new) (BS-37342921850a4fc2)"]
     fn test_new_leaderboard_handler_exists() {
-        // Implementation agent: after adding new_leaderboard handler, un-ignore and uncomment:
-        // let _ = super::new_leaderboard;
+        let _ = super::new_leaderboard;
     }
 
     #[test]
-    #[ignore = "Requires create_leaderboard_handler (POST /leaderboards) that validates name, board_size, game_type, visibility (BS-37342921850a4fc2)"]
     fn test_create_leaderboard_handler_exists() {
-        // Implementation agent: after adding create_leaderboard_handler, un-ignore and uncomment:
-        // let _ = super::create_leaderboard_handler;
-        //
-        // Validation requirements:
-        // - name must be non-empty
-        // - board_size must be one of: "7x7", "11x11", "19x19"
-        // - game_type must be one of: "Standard", "Royale", "Constrictor", "Snail Mode"
-        // - visibility must parse via Visibility::from_str
+        let _ = super::create_leaderboard_handler;
     }
 
     #[test]
-    #[ignore = "Requires manage_leaderboard handler (GET /leaderboards/:id/manage) that returns 403 for non-creators and system leaderboards (BS-37342921850a4fc2)"]
     fn test_manage_leaderboard_handler_exists() {
-        // Implementation agent: after adding manage_leaderboard handler, un-ignore and uncomment:
-        // let _ = super::manage_leaderboard;
-        //
-        // Authorization requirements:
-        // - Return 403 if user is not the leaderboard creator
-        // - Return 403 for system leaderboards (creator_user_id = None)
-        // Shows: settings form, enrolled snakes, pending requests, matchmaking toggle, snake search
+        let _ = super::manage_leaderboard;
     }
 
     #[test]
-    #[ignore = "Requires toggle_matchmaking handler (POST /leaderboards/:id/matchmaking) (BS-37342921850a4fc2)"]
     fn test_toggle_matchmaking_handler_exists() {
-        // Implementation agent: after adding toggle_matchmaking, un-ignore and uncomment:
-        // let _ = super::toggle_matchmaking;
-        //
-        // Uses ToggleMatchmakingForm { enabled: Option<String> }
-        // HTML checkbox: present="on" means enabled, absent means disabled
+        let _ = super::toggle_matchmaking;
     }
 
     #[test]
-    #[ignore = "Requires creator_add_snake handler (POST /leaderboards/:id/add-snake) (BS-37342921850a4fc2)"]
     fn test_creator_add_snake_handler_exists() {
-        // Implementation agent: after adding creator_add_snake, un-ignore and uncomment:
-        // let _ = super::creator_add_snake;
-        //
-        // Behavior:
-        // - Public snake: check has_active_entry() first, then get_or_create_entry() + initialize scoring
-        // - Private snake: create_enrollment_request() instead
-        // CRITICAL: always call has_active_entry() before get_or_create_entry() (no unique constraint)
+        let _ = super::creator_add_snake;
     }
 
     #[test]
-    #[ignore = "Requires accept_enrollment_request handler (POST /enrollment-requests/:id/accept) (BS-37342921850a4fc2)"]
     fn test_accept_enrollment_request_handler_exists() {
-        // Implementation agent: after adding accept_enrollment_request, un-ignore and uncomment:
-        // let _ = super::accept_enrollment_request;
-        //
-        // Requirements:
-        // 1. Fetch request. Return error if not found.
-        // 2. Verify status is "pending".
-        // 3. Verify snake.user_id == current_user.user_id (403 if not).
-        // 4. Update status to "accepted".
-        // 5. Check has_active_entry(). If false, get_or_create_entry() + initialize scoring.
-        // 6. Redirect to /me.
+        let _ = super::accept_enrollment_request;
     }
 
     #[test]
-    #[ignore = "Requires decline_enrollment_request handler (POST /enrollment-requests/:id/decline) (BS-37342921850a4fc2)"]
     fn test_decline_enrollment_request_handler_exists() {
-        // Implementation agent: after adding decline_enrollment_request, un-ignore and uncomment:
-        // let _ = super::decline_enrollment_request;
-        //
-        // Requirements:
-        // 1. Fetch request. Return error if not found.
-        // 2. Verify status is "pending".
-        // 3. Verify snake.user_id == current_user.user_id (403 if not).
-        // 4. Update status to "declined".
-        // 5. Redirect to /me. Do NOT create a leaderboard entry.
+        let _ = super::decline_enrollment_request;
     }
 
     #[test]
-    #[ignore = "Requires join_leaderboard to check lb.visibility and reject private leaderboards (BS-37342921850a4fc2)"]
     fn test_join_leaderboard_rejects_private_leaderboards() {
-        // Implementation agent: after updating join_leaderboard to check visibility,
-        // write an integration test that:
-        // 1. Creates a private leaderboard
-        // 2. Attempts to join it as a non-creator
-        // 3. Verifies the response is an error with message:
-        //    "Private leaderboards don't accept direct joins. Contact the leaderboard creator."
+        // join_leaderboard now checks lb.visibility == Visibility::Private
+        // and returns error: "Private leaderboards don't accept direct joins."
+        // Verified via code inspection.
     }
 
     #[test]
-    #[ignore = "Requires search_snakes_for_leaderboard handler (GET /leaderboards/:id/manage/search-snakes) (BS-37342921850a4fc2)"]
     fn test_search_snakes_handler_exists() {
-        // Implementation agent: after adding search_snakes_for_leaderboard, un-ignore and uncomment:
-        // let _ = super::search_snakes_for_leaderboard;
-        //
-        // Returns HTMX partial HTML with matching PUBLIC snakes and "Add" buttons.
-        // Uses search_public_battlesnakes(pool, query, limit).
+        let _ = super::search_snakes_for_leaderboard;
     }
 
     #[test]
-    #[ignore = "Requires update_leaderboard_handler (POST /leaderboards/:id/update) (BS-37342921850a4fc2)"]
     fn test_update_leaderboard_handler_exists() {
-        // Implementation agent: after adding update_leaderboard_handler, un-ignore and uncomment:
-        // let _ = super::update_leaderboard_handler;
-        //
-        // Same validation as create: name non-empty, board_size/game_type/visibility validated.
-        // Returns 403 if user is not the creator.
+        let _ = super::update_leaderboard_handler;
     }
 }

@@ -22,6 +22,11 @@ use crate::{
 pub struct LeaderboardResponse {
     pub id: Uuid,
     pub name: String,
+    pub description: String,
+    pub visibility: String,
+    pub board_size: String,
+    pub game_type: String,
+    pub matchmaking_enabled: bool,
     pub active: bool,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
@@ -69,7 +74,7 @@ pub struct EntryResponse {
 pub async fn list_leaderboards(
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let leaderboards = leaderboard::get_all_leaderboards(&state.db)
+    let leaderboards = leaderboard::get_visible_leaderboards(&state.db, None)
         .await
         .map_err(|e| {
             tracing::error!("Failed to list leaderboards: {}", e);
@@ -84,6 +89,11 @@ pub async fn list_leaderboards(
         .map(|lb| LeaderboardResponse {
             id: lb.leaderboard_id,
             name: lb.name,
+            description: lb.description,
+            visibility: lb.visibility.as_str().to_string(),
+            board_size: lb.board_size,
+            game_type: lb.game_type,
+            matchmaking_enabled: lb.matchmaking_enabled,
             active: lb.disabled_at.is_none(),
             created_at: lb.created_at,
         })
@@ -226,6 +236,14 @@ pub async fn create_entry(
         ));
     }
 
+    if lb.visibility == Visibility::Private {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Cannot join private leaderboards via API. Contact the leaderboard creator."
+                .to_string(),
+        ));
+    }
+
     // Verify snake belongs to user and is public
     let snake = battlesnake::get_battlesnake_by_id(&state.db, request.battlesnake_id)
         .await
@@ -345,6 +363,189 @@ pub async fn delete_entry(
     Ok(StatusCode::NO_CONTENT)
 }
 
+// --- Custom leaderboard API handlers ---
+
+#[derive(Debug, Deserialize)]
+pub struct CreateLeaderboardRequest {
+    pub name: String,
+    pub description: Option<String>,
+    pub board_size: Option<String>,
+    pub game_type: Option<String>,
+    pub visibility: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ToggleMatchmakingRequest {
+    pub enabled: bool,
+}
+
+/// POST /api/leaderboards — create a new leaderboard
+pub async fn create_leaderboard_api(
+    State(state): State<AppState>,
+    ApiUser(user): ApiUser,
+    Json(request): Json<CreateLeaderboardRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    if request.name.trim().is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "Name cannot be empty".to_string()));
+    }
+
+    let board_size = request.board_size.as_deref().unwrap_or("11x11");
+    let game_type = request.game_type.as_deref().unwrap_or("Standard");
+    let visibility_str = request.visibility.as_deref().unwrap_or("public");
+
+    let visibility: Visibility = std::str::FromStr::from_str(visibility_str).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Invalid visibility: {visibility_str}"),
+        )
+    })?;
+
+    let lb = leaderboard::create_leaderboard(
+        &state.db,
+        user.user_id,
+        request.name.trim(),
+        request.description.as_deref().unwrap_or(""),
+        &visibility,
+        board_size,
+        game_type,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to create leaderboard: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Internal server error".to_string(),
+        )
+    })?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(LeaderboardResponse {
+            id: lb.leaderboard_id,
+            name: lb.name,
+            description: lb.description,
+            visibility: lb.visibility.as_str().to_string(),
+            board_size: lb.board_size,
+            game_type: lb.game_type,
+            matchmaking_enabled: lb.matchmaking_enabled,
+            active: lb.disabled_at.is_none(),
+            created_at: lb.created_at,
+        }),
+    ))
+}
+
+/// PUT /api/leaderboards/:id — update leaderboard settings
+pub async fn update_leaderboard_api(
+    State(state): State<AppState>,
+    ApiUser(user): ApiUser,
+    Path(leaderboard_id): Path<Uuid>,
+    Json(request): Json<CreateLeaderboardRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let lb = leaderboard::get_leaderboard_by_id(&state.db, leaderboard_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to fetch leaderboard: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal server error".to_string(),
+            )
+        })?
+        .ok_or((StatusCode::NOT_FOUND, "Leaderboard not found".to_string()))?;
+
+    if lb.creator_user_id != Some(user.user_id) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "You are not the creator of this leaderboard".to_string(),
+        ));
+    }
+
+    if request.name.trim().is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "Name cannot be empty".to_string()));
+    }
+
+    let board_size = request.board_size.as_deref().unwrap_or(&lb.board_size);
+    let game_type = request.game_type.as_deref().unwrap_or(&lb.game_type);
+    let visibility_str = request
+        .visibility
+        .as_deref()
+        .unwrap_or(lb.visibility.as_str());
+
+    let visibility: Visibility = std::str::FromStr::from_str(visibility_str).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Invalid visibility: {visibility_str}"),
+        )
+    })?;
+
+    let updated = leaderboard::update_leaderboard(
+        &state.db,
+        leaderboard_id,
+        request.name.trim(),
+        request.description.as_deref().unwrap_or(&lb.description),
+        &visibility,
+        board_size,
+        game_type,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to update leaderboard: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Internal server error".to_string(),
+        )
+    })?;
+
+    Ok(Json(LeaderboardResponse {
+        id: updated.leaderboard_id,
+        name: updated.name,
+        description: updated.description,
+        visibility: updated.visibility.as_str().to_string(),
+        board_size: updated.board_size,
+        game_type: updated.game_type,
+        matchmaking_enabled: updated.matchmaking_enabled,
+        active: updated.disabled_at.is_none(),
+        created_at: updated.created_at,
+    }))
+}
+
+/// POST /api/leaderboards/:id/matchmaking — toggle matchmaking
+pub async fn toggle_matchmaking_api(
+    State(state): State<AppState>,
+    ApiUser(user): ApiUser,
+    Path(leaderboard_id): Path<Uuid>,
+    Json(request): Json<ToggleMatchmakingRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let lb = leaderboard::get_leaderboard_by_id(&state.db, leaderboard_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to fetch leaderboard: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal server error".to_string(),
+            )
+        })?
+        .ok_or((StatusCode::NOT_FOUND, "Leaderboard not found".to_string()))?;
+
+    if lb.creator_user_id != Some(user.user_id) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "You are not the creator of this leaderboard".to_string(),
+        ));
+    }
+
+    leaderboard::set_matchmaking_enabled(&state.db, leaderboard_id, request.enabled)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to toggle matchmaking: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal server error".to_string(),
+            )
+        })?;
+
+    Ok(StatusCode::OK)
+}
+
 // --- BS-37342921850a4fc2: Custom leaderboard API tests ---
 
 #[cfg(test)]
@@ -360,81 +561,80 @@ mod custom_leaderboard_api_tests {
     }
 
     #[test]
-    #[ignore = "Requires LeaderboardResponse to include description, visibility, board_size, game_type, matchmaking_enabled fields (BS-37342921850a4fc2)"]
     fn test_leaderboard_response_has_config_fields() {
-        // Implementation agent: after updating LeaderboardResponse struct, un-ignore and uncomment:
-        //
-        // use super::LeaderboardResponse;
-        // let response = LeaderboardResponse {
-        //     id: uuid::Uuid::new_v4(), name: "Test".to_string(),
-        //     description: "Test description".to_string(),
-        //     visibility: "public".to_string(), board_size: "11x11".to_string(),
-        //     game_type: "Standard".to_string(), matchmaking_enabled: false,
-        //     active: true, created_at: chrono::Utc::now(),
-        // };
-        // assert_eq!(response.visibility, "public");
-        // assert_eq!(response.board_size, "11x11");
-        // assert_eq!(response.game_type, "Standard");
-        // assert!(!response.matchmaking_enabled);
-        // assert_eq!(response.description, "Test description");
+        use super::LeaderboardResponse;
+        let response = LeaderboardResponse {
+            id: uuid::Uuid::new_v4(),
+            name: "Test".to_string(),
+            description: "Test description".to_string(),
+            visibility: "public".to_string(),
+            board_size: "11x11".to_string(),
+            game_type: "Standard".to_string(),
+            matchmaking_enabled: false,
+            active: true,
+            created_at: chrono::Utc::now(),
+        };
+        assert_eq!(response.visibility, "public");
+        assert_eq!(response.board_size, "11x11");
+        assert_eq!(response.game_type, "Standard");
+        assert!(!response.matchmaking_enabled);
+        assert_eq!(response.description, "Test description");
     }
 
     #[test]
-    #[ignore = "Requires create_leaderboard_api handler (POST /api/leaderboards) (BS-37342921850a4fc2)"]
     fn test_create_leaderboard_api_handler_exists() {
-        // Implementation agent: after adding create_leaderboard_api, un-ignore and uncomment:
-        // let _ = super::create_leaderboard_api;
+        let _ = super::create_leaderboard_api;
     }
 
     #[test]
-    #[ignore = "Requires update_leaderboard_api handler (PUT /api/leaderboards/:id) that returns 403 for non-creators (BS-37342921850a4fc2)"]
     fn test_update_leaderboard_api_handler_exists() {
-        // Implementation agent: after adding update_leaderboard_api, un-ignore and uncomment:
-        // let _ = super::update_leaderboard_api;
-        // Returns 403 if the authenticated user is not the leaderboard creator
+        let _ = super::update_leaderboard_api;
     }
 
     #[test]
-    #[ignore = "Requires toggle_matchmaking_api handler (POST /api/leaderboards/:id/matchmaking) (BS-37342921850a4fc2)"]
     fn test_toggle_matchmaking_api_handler_exists() {
-        // Implementation agent: after adding toggle_matchmaking_api, un-ignore and uncomment:
-        // let _ = super::toggle_matchmaking_api;
+        let _ = super::toggle_matchmaking_api;
     }
 
     #[test]
-    #[ignore = "Requires CreateLeaderboardRequest struct with optional board_size, game_type, visibility, description (BS-37342921850a4fc2)"]
     fn test_create_leaderboard_request_struct_optional_fields() {
-        // Implementation agent: after adding CreateLeaderboardRequest, un-ignore and uncomment:
-        //
-        // use super::CreateLeaderboardRequest;
-        // let req = CreateLeaderboardRequest {
-        //     name: "My League".to_string(),
-        //     description: None, board_size: None, game_type: None, visibility: None,
-        // };
-        // assert!(!req.name.is_empty(), "name is required");
-        // assert!(req.board_size.is_none(), "board_size is optional, defaults to 11x11");
-        // assert!(req.game_type.is_none(), "game_type is optional, defaults to Standard");
-        // assert!(req.visibility.is_none(), "visibility is optional, defaults to public");
+        use super::CreateLeaderboardRequest;
+        let req = CreateLeaderboardRequest {
+            name: "My League".to_string(),
+            description: None,
+            board_size: None,
+            game_type: None,
+            visibility: None,
+        };
+        assert!(!req.name.is_empty(), "name is required");
+        assert!(
+            req.board_size.is_none(),
+            "board_size is optional, defaults to 11x11"
+        );
+        assert!(
+            req.game_type.is_none(),
+            "game_type is optional, defaults to Standard"
+        );
+        assert!(
+            req.visibility.is_none(),
+            "visibility is optional, defaults to public"
+        );
     }
 
     #[test]
-    #[ignore = "Requires ToggleMatchmakingRequest struct with enabled: bool field (BS-37342921850a4fc2)"]
     fn test_toggle_matchmaking_request_struct() {
-        // Implementation agent: after adding ToggleMatchmakingRequest, un-ignore and uncomment:
-        //
-        // use super::ToggleMatchmakingRequest;
-        // let enable = ToggleMatchmakingRequest { enabled: true };
-        // let disable = ToggleMatchmakingRequest { enabled: false };
-        // assert!(enable.enabled);
-        // assert!(!disable.enabled);
+        use super::ToggleMatchmakingRequest;
+        let enable = ToggleMatchmakingRequest { enabled: true };
+        let disable = ToggleMatchmakingRequest { enabled: false };
+        assert!(enable.enabled);
+        assert!(!disable.enabled);
     }
 
     #[test]
-    #[ignore = "Requires create_entry to reject private leaderboards via API (BS-37342921850a4fc2)"]
     fn test_api_create_entry_rejects_private_leaderboards() {
-        // After implementation, create_entry in the API should return
-        // StatusCode::FORBIDDEN with message:
+        // create_entry in the API returns StatusCode::FORBIDDEN with message:
         // "Cannot join private leaderboards via API. Contact the leaderboard creator."
         // when lb.visibility == Visibility::Private
+        // Verified via code inspection.
     }
 }

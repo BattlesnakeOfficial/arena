@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT EXISTS(\n            SELECT 1 FROM leaderboard_entries\n            WHERE leaderboard_id = $1 AND battlesnake_id = $2 AND disabled_at IS NULL\n        ) as \"exists!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "exists!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "196118954b017e4c7ffdb3fbf2e44e5ee9d1f7840fc017078c639d236fd4841d"
+}
