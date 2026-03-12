@@ -367,6 +367,11 @@ pub async fn search_public_battlesnakes(
     query: &str,
     limit: i64,
 ) -> cja::Result<Vec<Battlesnake>> {
+    // Escape ILIKE wildcards so literal '%' and '_' in search terms don't match as wildcards
+    let escaped = query
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
     let battlesnakes = sqlx::query_as!(
         Battlesnake,
         r#"
@@ -382,11 +387,11 @@ pub async fn search_public_battlesnakes(
             created_at,
             updated_at
         FROM battlesnakes
-        WHERE visibility = 'public' AND name ILIKE '%' || $1 || '%'
+        WHERE visibility = 'public' AND name ILIKE '%' || $1 || '%' ESCAPE '\'
         ORDER BY name
         LIMIT $2
         "#,
-        query,
+        escaped,
         limit
     )
     .fetch_all(pool)

@@ -1156,46 +1156,14 @@ pub async fn manage_leaderboard(
         ));
     }
 
-    let entries = leaderboard::get_active_entries(&state.db, leaderboard_id)
+    let entry_snake_names = leaderboard::get_active_entries_with_names(&state.db, leaderboard_id)
         .await
         .wrap_err("Failed to fetch entries")?;
 
-    let pending_requests =
-        leaderboard::get_pending_requests_for_leaderboard(&state.db, leaderboard_id)
+    let request_snake_names =
+        leaderboard::get_pending_requests_with_names(&state.db, leaderboard_id)
             .await
             .wrap_err("Failed to fetch pending requests")?;
-
-    // Get snake names for entries
-    let mut entry_snake_names: Vec<(leaderboard::LeaderboardEntry, String)> = vec![];
-    for entry in entries {
-        let name = if let Some(snake) =
-            battlesnake::get_battlesnake_by_id(&state.db, entry.battlesnake_id)
-                .await
-                .ok()
-                .flatten()
-        {
-            snake.name
-        } else {
-            "Unknown".to_string()
-        };
-        entry_snake_names.push((entry, name));
-    }
-
-    // Get snake names for pending requests
-    let mut request_snake_names: Vec<(leaderboard::EnrollmentRequest, String)> = vec![];
-    for req in pending_requests {
-        let name = if let Some(snake) =
-            battlesnake::get_battlesnake_by_id(&state.db, req.battlesnake_id)
-                .await
-                .ok()
-                .flatten()
-        {
-            snake.name
-        } else {
-            "Unknown".to_string()
-        };
-        request_snake_names.push((req, name));
-    }
 
     Ok(page_factory.create_page(
         format!("Manage: {}", lb.name),
@@ -1262,9 +1230,9 @@ pub async fn manage_leaderboard(
                     @if entry_snake_names.is_empty() {
                         p { "No snakes enrolled yet." }
                     } @else {
-                        @for (entry, name) in &entry_snake_names {
+                        @for entry in &entry_snake_names {
                             div style="display: flex; align-items: center; gap: 10px; margin-bottom: 8px;" {
-                                span { (name) }
+                                span { (entry.snake_name) }
                                 span style="color: #666;" { "Score: " (format!("{:.1}", entry.display_score)) " | Games: " (entry.games_played) }
                             }
                         }
@@ -1288,9 +1256,9 @@ pub async fn manage_leaderboard(
                 @if !request_snake_names.is_empty() {
                     div style="margin-bottom: 24px; padding: 16px; border: 1px solid #ddd; border-radius: 8px;" {
                         h3 { "Pending Enrollment Requests" }
-                        @for (_req, name) in &request_snake_names {
+                        @for req in &request_snake_names {
                             div style="display: flex; align-items: center; gap: 10px; margin-bottom: 8px;" {
-                                span { (name) }
+                                span { (req.snake_name) }
                                 span class="badge bg-warning text-dark" { "Pending" }
                             }
                         }
@@ -1479,6 +1447,15 @@ pub async fn creator_add_snake(
     if lb.creator_user_id != Some(user.user_id) {
         return Err(crate::errors::ServerError(
             color_eyre::eyre::eyre!("You are not the creator of this leaderboard"),
+            redirect,
+        ));
+    }
+
+    if lb.visibility != Visibility::Private {
+        return Err(crate::errors::ServerError(
+            color_eyre::eyre::eyre!(
+                "Creator-managed snake additions are only available for private leaderboards. For public leaderboards, snake owners can join directly."
+            ),
             redirect,
         ));
     }

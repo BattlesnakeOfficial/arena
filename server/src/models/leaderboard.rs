@@ -8,6 +8,8 @@ use crate::models::battlesnake::Visibility;
 /// Application constants for leaderboard configuration
 pub const MATCH_SIZE: usize = 4;
 pub const MIN_GAMES_FOR_RANKING: i32 = 10;
+/// Default games per day for new leaderboards (matches the migration default)
+pub const GAMES_PER_DAY: i32 = 100;
 
 // Leaderboard model
 #[derive(Debug, Serialize, Deserialize, FromRow)]
@@ -194,6 +196,74 @@ pub async fn get_active_entries(
     .wrap_err("Failed to fetch active leaderboard entries")?;
 
     Ok(entries)
+}
+
+/// Entry with snake name, for the management UI (avoids N+1 queries)
+#[derive(Debug, Serialize, Deserialize, FromRow)]
+pub struct EntryWithSnakeName {
+    pub leaderboard_entry_id: Uuid,
+    pub battlesnake_id: Uuid,
+    pub display_score: f64,
+    pub games_played: i32,
+    pub snake_name: String,
+}
+
+/// Get active entries with snake names in a single JOIN query
+pub async fn get_active_entries_with_names(
+    pool: &PgPool,
+    leaderboard_id: Uuid,
+) -> cja::Result<Vec<EntryWithSnakeName>> {
+    let entries = sqlx::query_as!(
+        EntryWithSnakeName,
+        r#"SELECT
+            le.leaderboard_entry_id,
+            le.battlesnake_id,
+            le.display_score,
+            le.games_played,
+            b.name as snake_name
+         FROM leaderboard_entries le
+         JOIN battlesnakes b ON b.battlesnake_id = le.battlesnake_id
+         WHERE le.leaderboard_id = $1 AND le.disabled_at IS NULL
+         ORDER BY le.display_score DESC"#,
+        leaderboard_id
+    )
+    .fetch_all(pool)
+    .await
+    .wrap_err("Failed to fetch active entries with names")?;
+
+    Ok(entries)
+}
+
+/// Pending enrollment request with snake name, for the management UI
+#[derive(Debug, Serialize, Deserialize, FromRow)]
+pub struct PendingRequestWithSnakeName {
+    pub enrollment_request_id: Uuid,
+    pub battlesnake_id: Uuid,
+    pub snake_name: String,
+}
+
+/// Get pending enrollment requests with snake names in a single JOIN query
+pub async fn get_pending_requests_with_names(
+    pool: &PgPool,
+    leaderboard_id: Uuid,
+) -> cja::Result<Vec<PendingRequestWithSnakeName>> {
+    let reqs = sqlx::query_as!(
+        PendingRequestWithSnakeName,
+        r#"SELECT
+            er.enrollment_request_id,
+            er.battlesnake_id,
+            b.name as snake_name
+         FROM leaderboard_enrollment_requests er
+         JOIN battlesnakes b ON b.battlesnake_id = er.battlesnake_id
+         WHERE er.leaderboard_id = $1 AND er.status = 'pending'
+         ORDER BY er.created_at DESC"#,
+        leaderboard_id
+    )
+    .fetch_all(pool)
+    .await
+    .wrap_err("Failed to fetch pending requests with names")?;
+
+    Ok(reqs)
 }
 
 /// Get ranked entries (only snakes with enough games) with snake/owner info
@@ -1118,7 +1188,11 @@ pub async fn create_enrollment_request(
         EnrollmentRequest,
         r#"INSERT INTO leaderboard_enrollment_requests (leaderboard_id, battlesnake_id, initiated_by_user_id)
          VALUES ($1, $2, $3)
-         ON CONFLICT (leaderboard_id, battlesnake_id) DO NOTHING
+         ON CONFLICT (leaderboard_id, battlesnake_id) DO UPDATE
+           SET status = 'pending',
+               initiated_by_user_id = $3,
+               updated_at = NOW()
+           WHERE leaderboard_enrollment_requests.status = 'declined'
          RETURNING enrollment_request_id, leaderboard_id, battlesnake_id,
                    initiated_by_user_id, status, created_at, updated_at"#,
         leaderboard_id,

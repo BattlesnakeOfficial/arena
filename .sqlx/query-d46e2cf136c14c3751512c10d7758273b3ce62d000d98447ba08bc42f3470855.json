@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n            er.enrollment_request_id,\n            er.battlesnake_id,\n            b.name as snake_name\n         FROM leaderboard_enrollment_requests er\n         JOIN battlesnakes b ON b.battlesnake_id = er.battlesnake_id\n         WHERE er.leaderboard_id = $1 AND er.status = 'pending'\n         ORDER BY er.created_at DESC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "enrollment_request_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "battlesnake_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "snake_name",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "d46e2cf136c14c3751512c10d7758273b3ce62d000d98447ba08bc42f3470855"
+}

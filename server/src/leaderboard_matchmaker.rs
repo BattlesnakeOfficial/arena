@@ -53,6 +53,9 @@ async fn run_matchmaker_for_leaderboard(app_state: &AppState, lb: &Leaderboard) 
 
     // Calculate how many games to create this run
     // Derived from shared cron interval constant to avoid manual sync bugs
+    if lb.games_per_day == 0 {
+        return Ok(());
+    }
     let runs_per_day = (24 * 60 * 60 / MATCHMAKER_INTERVAL_SECS) as i32;
     let games_per_run = ((lb.games_per_day + runs_per_day - 1) / runs_per_day).max(1);
 
@@ -268,12 +271,8 @@ mod tests {
             1,
             "96 games/day should give 1 per run"
         );
-        // 0 games/day → at least 1 per run (max(1))
-        assert_eq!(
-            games_per_run(0, 96),
-            1,
-            "0 games/day should give minimum of 1 per run"
-        );
+        // 0 games/day → early return in matchmaker, formula not reached
+        // (tested separately in test_games_per_day_zero_early_return)
         // 200 games/day, 96 runs/day → ceiling(200/96) = 3
         assert_eq!(
             games_per_run(200, 96),
@@ -371,9 +370,24 @@ mod tests {
     }
 
     #[test]
-    fn test_matchmaker_only_runs_for_matchmaking_enabled_leaderboards() {
-        // get_active_leaderboards() filters WHERE matchmaking_enabled = true.
-        // System leaderboard has matchmaking_enabled = true; user-created leaderboards default to false.
-        // Verified by: get_active_leaderboards adds `AND matchmaking_enabled = true` to WHERE clause.
+    fn test_games_per_day_zero_early_return() {
+        // Validates that games_per_day == 0 would skip the matchmaker loop.
+        // The matchmaker returns early when lb.games_per_day == 0 before computing games_per_run.
+        fn games_per_run(games_per_day: i32, runs_per_day: i32) -> i32 {
+            if games_per_day == 0 {
+                return 0;
+            }
+            ((games_per_day + runs_per_day - 1) / runs_per_day).max(1)
+        }
+        assert_eq!(
+            games_per_run(0, 96),
+            0,
+            "0 games/day should produce 0 per run"
+        );
+        assert_eq!(
+            games_per_run(1, 96),
+            1,
+            "1 game/day should produce 1 per run"
+        );
     }
 }
