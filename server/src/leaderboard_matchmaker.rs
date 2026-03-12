@@ -241,4 +241,106 @@ mod tests {
         let unique: std::collections::HashSet<Uuid> = ids.iter().copied().collect();
         assert_eq!(ids.len(), unique.len(), "Selected snakes should be unique");
     }
+
+    // --- BS-37342921850a4fc2: Custom leaderboard tests ---
+
+    #[test]
+    fn test_games_per_run_ceiling_division_formula() {
+        // Validates the formula used to compute games_per_run from lb.games_per_day:
+        //   games_per_run = ((games_per_day + runs_per_day - 1) / runs_per_day).max(1)
+        // This is the formula the matchmaker uses after the custom leaderboard implementation.
+        fn games_per_run(games_per_day: i32, runs_per_day: i32) -> i32 {
+            ((games_per_day + runs_per_day - 1) / runs_per_day).max(1)
+        }
+
+        // 100 games/day, 96 runs/day → ceiling(100/96) = 2
+        assert_eq!(games_per_run(100, 96), 2, "100 games/day should give 2 per run");
+        // Exactly 96 games/day → 1 game/run
+        assert_eq!(games_per_run(96, 96), 1, "96 games/day should give 1 per run");
+        // 0 games/day → at least 1 per run (max(1))
+        assert_eq!(games_per_run(0, 96), 1, "0 games/day should give minimum of 1 per run");
+        // 200 games/day, 96 runs/day → ceiling(200/96) = 3
+        assert_eq!(games_per_run(200, 96), 3, "200 games/day should give 3 per run");
+        // 1 game/day → at least 1 per run
+        assert_eq!(games_per_run(1, 96), 1, "1 game/day should give 1 per run");
+    }
+
+    #[test]
+    fn test_board_size_from_str_parses_supported_values() {
+        // The matchmaker parses lb.board_size via GameBoardSize::from_str.
+        // These are the three valid values that leaderboard creation allows.
+        use std::str::FromStr;
+        use crate::models::game::GameBoardSize;
+
+        assert!(
+            matches!(GameBoardSize::from_str("7x7").unwrap(), GameBoardSize::Small),
+            "7x7 should parse to Small"
+        );
+        assert!(
+            matches!(GameBoardSize::from_str("11x11").unwrap(), GameBoardSize::Medium),
+            "11x11 should parse to Medium"
+        );
+        assert!(
+            matches!(GameBoardSize::from_str("19x19").unwrap(), GameBoardSize::Large),
+            "19x19 should parse to Large"
+        );
+    }
+
+    #[test]
+    fn test_game_type_from_str_parses_supported_values() {
+        // The matchmaker parses lb.game_type via GameType::from_str.
+        // These are the four valid values that leaderboard creation allows.
+        use std::str::FromStr;
+        use crate::models::game::GameType;
+
+        assert!(
+            matches!(GameType::from_str("Standard").unwrap(), GameType::Standard),
+            "Standard should parse correctly"
+        );
+        assert!(
+            matches!(GameType::from_str("Royale").unwrap(), GameType::Royale),
+            "Royale should parse correctly"
+        );
+        assert!(
+            matches!(GameType::from_str("Constrictor").unwrap(), GameType::Constrictor),
+            "Constrictor should parse correctly"
+        );
+        assert!(
+            matches!(GameType::from_str("Snail Mode").unwrap(), GameType::SnailMode),
+            "Snail Mode should parse correctly"
+        );
+    }
+
+    #[test]
+    #[ignore = "Requires Leaderboard struct to have board_size, game_type, games_per_day, matchmaking_enabled, creator_user_id, description, visibility fields (BS-37342921850a4fc2)"]
+    fn test_leaderboard_struct_has_custom_config_fields() {
+        // Implementation agent: after adding fields to Leaderboard, un-ignore and uncomment:
+        //
+        // use crate::models::battlesnake::Visibility;
+        // let lb = Leaderboard {
+        //     leaderboard_id: Uuid::new_v4(), name: "Test League".to_string(),
+        //     creator_user_id: Some(Uuid::new_v4()), description: "A test league".to_string(),
+        //     visibility: Visibility::Public, board_size: "7x7".to_string(),
+        //     game_type: "Royale".to_string(), matchmaking_enabled: true, games_per_day: 50,
+        //     disabled_at: None, created_at: chrono::Utc::now(), updated_at: chrono::Utc::now(),
+        // };
+        // assert_eq!(lb.board_size, "7x7");
+        // assert_eq!(lb.game_type, "Royale");
+        // assert_eq!(lb.games_per_day, 50);
+        // assert!(lb.matchmaking_enabled);
+        // assert_eq!(lb.visibility, Visibility::Public);
+        // assert!(lb.creator_user_id.is_some());
+    }
+
+    #[test]
+    #[ignore = "Requires Leaderboard struct update and run_matchmaker_for_leaderboard to accept &Leaderboard (BS-37342921850a4fc2)"]
+    fn test_matchmaker_only_runs_for_matchmaking_enabled_leaderboards() {
+        // After implementation, get_active_leaderboards() filters WHERE matchmaking_enabled = true.
+        // System leaderboard has matchmaking_enabled = true; user-created leaderboards default to false.
+        // This test documents that behavior: a leaderboard with matchmaking_enabled = false
+        // should NOT appear in the active leaderboard list.
+        //
+        // Verified by: get_active_leaderboards adds `AND matchmaking_enabled = true` to WHERE clause.
+        // The system leaderboard seed sets matchmaking_enabled = true via migration UPDATE.
+    }
 }

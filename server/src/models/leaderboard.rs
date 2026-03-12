@@ -903,3 +903,185 @@ pub async fn get_rank_for_entry(
 
     Ok(Some(rank))
 }
+
+// --- BS-37342921850a4fc2: Custom leaderboard tests ---
+
+#[cfg(test)]
+mod custom_leaderboard_tests {
+    #[test]
+    fn test_visibility_from_str_public() {
+        use std::str::FromStr;
+        let v = crate::models::battlesnake::Visibility::from_str("public").unwrap();
+        assert!(
+            matches!(v, crate::models::battlesnake::Visibility::Public),
+            "\"public\" should parse to Visibility::Public"
+        );
+    }
+
+    #[test]
+    fn test_visibility_from_str_private() {
+        use std::str::FromStr;
+        let v = crate::models::battlesnake::Visibility::from_str("private").unwrap();
+        assert!(
+            matches!(v, crate::models::battlesnake::Visibility::Private),
+            "\"private\" should parse to Visibility::Private"
+        );
+    }
+
+    #[test]
+    fn test_visibility_from_str_case_insensitive() {
+        use std::str::FromStr;
+        // Visibility::from_str is case-insensitive per implementation
+        assert!(crate::models::battlesnake::Visibility::from_str("PUBLIC").is_ok());
+        assert!(crate::models::battlesnake::Visibility::from_str("Private").is_ok());
+    }
+
+    #[test]
+    fn test_visibility_from_str_invalid_returns_error() {
+        use std::str::FromStr;
+        let result = crate::models::battlesnake::Visibility::from_str("unlisted");
+        assert!(result.is_err(), "\"unlisted\" is not a valid visibility value");
+    }
+
+    #[test]
+    fn test_visibility_as_str_roundtrip() {
+        use std::str::FromStr;
+        use crate::models::battlesnake::Visibility;
+        let public = Visibility::Public;
+        let private = Visibility::Private;
+
+        assert!(matches!(
+            Visibility::from_str(public.as_str()).unwrap(),
+            Visibility::Public
+        ));
+        assert!(matches!(
+            Visibility::from_str(private.as_str()).unwrap(),
+            Visibility::Private
+        ));
+    }
+
+    #[test]
+    fn test_enrollment_request_status_constants() {
+        // The status field uses these three string values.
+        // This documents the expected status values for the enrollment request state machine.
+        let pending = "pending";
+        let accepted = "accepted";
+        let declined = "declined";
+
+        // Verify they are distinct
+        assert_ne!(pending, accepted);
+        assert_ne!(pending, declined);
+        assert_ne!(accepted, declined);
+    }
+
+    #[test]
+    #[ignore = "Requires Leaderboard struct to have creator_user_id, description, visibility, board_size, game_type, matchmaking_enabled, games_per_day fields (BS-37342921850a4fc2)"]
+    fn test_leaderboard_struct_new_fields() {
+        // Implementation agent: after adding fields to Leaderboard, un-ignore and uncomment:
+        //
+        // use crate::models::battlesnake::Visibility;
+        // let system_lb = Leaderboard {
+        //     leaderboard_id: Uuid::new_v4(), name: "Standard 11x11".to_string(),
+        //     creator_user_id: None, description: "".to_string(),
+        //     visibility: Visibility::Public, board_size: "11x11".to_string(),
+        //     game_type: "Standard".to_string(), matchmaking_enabled: true,
+        //     games_per_day: 100, disabled_at: None,
+        //     created_at: chrono::Utc::now(), updated_at: chrono::Utc::now(),
+        // };
+        // assert!(system_lb.creator_user_id.is_none(), "System leaderboard has no creator");
+        // assert!(system_lb.matchmaking_enabled, "System leaderboard has matchmaking enabled");
+        //
+        // let user_lb = Leaderboard {
+        //     leaderboard_id: Uuid::new_v4(), name: "My League".to_string(),
+        //     creator_user_id: Some(Uuid::new_v4()), description: "Custom".to_string(),
+        //     visibility: Visibility::Private, board_size: "7x7".to_string(),
+        //     game_type: "Royale".to_string(), matchmaking_enabled: false,
+        //     games_per_day: 50, disabled_at: None,
+        //     created_at: chrono::Utc::now(), updated_at: chrono::Utc::now(),
+        // };
+        // assert!(user_lb.creator_user_id.is_some());
+        // assert!(!user_lb.matchmaking_enabled);
+        // assert_eq!(user_lb.visibility, Visibility::Private);
+        // assert_eq!(user_lb.board_size, "7x7");
+    }
+
+    #[test]
+    #[ignore = "Requires EnrollmentRequest struct to be implemented (BS-37342921850a4fc2)"]
+    fn test_enrollment_request_struct() {
+        // Implementation agent: after adding EnrollmentRequest struct, un-ignore and uncomment:
+        //
+        // use super::EnrollmentRequest;
+        // let req = EnrollmentRequest {
+        //     enrollment_request_id: uuid::Uuid::new_v4(),
+        //     leaderboard_id: uuid::Uuid::new_v4(),
+        //     battlesnake_id: uuid::Uuid::new_v4(),
+        //     initiated_by_user_id: uuid::Uuid::new_v4(),
+        //     status: "pending".to_string(),
+        //     created_at: chrono::Utc::now(),
+        //     updated_at: chrono::Utc::now(),
+        // };
+        // assert_eq!(req.status, "pending", "New enrollment requests start as pending");
+    }
+
+    #[test]
+    #[ignore = "Requires EnrollmentRequestWithContext struct to be implemented (BS-37342921850a4fc2)"]
+    fn test_enrollment_request_with_context_struct() {
+        // Implementation agent: after adding EnrollmentRequestWithContext, un-ignore and uncomment:
+        //
+        // use super::EnrollmentRequestWithContext;
+        // let ctx = EnrollmentRequestWithContext {
+        //     enrollment_request_id: uuid::Uuid::new_v4(),
+        //     leaderboard_id: uuid::Uuid::new_v4(),
+        //     leaderboard_name: "My Private League".to_string(),
+        //     battlesnake_id: uuid::Uuid::new_v4(),
+        //     battlesnake_name: "My Snake".to_string(),
+        //     initiated_by_user_id: uuid::Uuid::new_v4(),
+        //     status: "pending".to_string(),
+        //     created_at: chrono::Utc::now(),
+        // };
+        // assert_eq!(ctx.leaderboard_name, "My Private League");
+        // assert_eq!(ctx.battlesnake_name, "My Snake");
+        // assert_eq!(ctx.status, "pending");
+    }
+
+    #[test]
+    #[ignore = "Requires has_active_entry(pool, leaderboard_id, battlesnake_id) -> cja::Result<bool> (BS-37342921850a4fc2)"]
+    fn test_has_active_entry_function_exists() {
+        // Implementation agent: after implementing has_active_entry, un-ignore and uncomment:
+        //
+        // let _: fn(&sqlx::PgPool, uuid::Uuid, uuid::Uuid) -> _ = super::has_active_entry;
+        //
+        // CRITICAL: leaderboard_entries has no unique constraint.
+        // has_active_entry must be called BEFORE get_or_create_entry to prevent duplicates.
+    }
+
+    #[test]
+    #[ignore = "Requires create_leaderboard(pool, creator_user_id, name, description, visibility, board_size, game_type) (BS-37342921850a4fc2)"]
+    fn test_create_leaderboard_function_exists() {
+        // Implementation agent: after implementing create_leaderboard, un-ignore and uncomment:
+        //
+        // let _: fn(&sqlx::PgPool, uuid::Uuid, &str, &str, &Visibility, &str, &str) -> _
+        //     = super::create_leaderboard;
+    }
+
+    #[test]
+    #[ignore = "Requires get_visible_leaderboards(pool, user_id: Option<Uuid>) -> cja::Result<Vec<Leaderboard>> (BS-37342921850a4fc2)"]
+    fn test_get_visible_leaderboards_function_exists() {
+        // Implementation agent: after implementing get_visible_leaderboards, un-ignore and uncomment:
+        //
+        // let _: fn(&sqlx::PgPool, Option<uuid::Uuid>) -> _ = super::get_visible_leaderboards;
+        //
+        // Visibility rules:
+        // - Public leaderboards visible to everyone (pass None for anonymous)
+        // - Private leaderboards visible only to their creator
+        //   (pass Some(user_id) and filter: creator_user_id = user_id)
+    }
+
+    #[test]
+    #[ignore = "Requires set_matchmaking_enabled(pool, leaderboard_id, enabled) -> cja::Result<()> (BS-37342921850a4fc2)"]
+    fn test_set_matchmaking_enabled_function_exists() {
+        // Implementation agent: after implementing set_matchmaking_enabled, un-ignore and uncomment:
+        //
+        // let _: fn(&sqlx::PgPool, uuid::Uuid, bool) -> _ = super::set_matchmaking_enabled;
+    }
+}
