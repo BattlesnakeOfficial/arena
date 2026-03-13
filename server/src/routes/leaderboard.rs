@@ -1242,13 +1242,24 @@ pub async fn manage_leaderboard(
                 // Add snake
                 div style="margin-bottom: 24px; padding: 16px; border: 1px solid #ddd; border-radius: 8px;" {
                     h3 { "Add Snake" }
-                    div {
-                        input type="text" id="snake-search" placeholder="Search public snakes..." class="form-control"
+                    div style="margin-bottom: 16px;" {
+                        h4 style="font-size: 14px; margin-bottom: 8px;" { "Search Public Snakes" }
+                        input type="text" id="snake-search" placeholder="Search public snakes by name..." class="form-control"
                             hx-get={"/leaderboards/"(leaderboard_id)"/manage/search-snakes"}
                             hx-trigger="input changed delay:300ms"
                             hx-target="#snake-search-results"
                             name="q" {}
                         div id="snake-search-results" style="margin-top: 8px;" {}
+                    }
+                    div {
+                        h4 style="font-size: 14px; margin-bottom: 8px;" { "Add by Snake ID" }
+                        p style="font-size: 12px; color: #666; margin-bottom: 8px;" {
+                            "To add a private snake, enter its ID directly. The snake owner will receive an enrollment request to accept or decline."
+                        }
+                        form action={"/leaderboards/"(leaderboard_id)"/add-snake"} method="post" style="display: flex; gap: 8px;" {
+                            input type="text" name="battlesnake_id" placeholder="Snake ID (UUID)" class="form-control" style="flex: 1;" {}
+                            button type="submit" class="btn btn-primary" { "Add" }
+                        }
                     }
                 }
 
@@ -1318,7 +1329,7 @@ pub async fn search_snakes_for_leaderboard(
             }
         }
         @if snakes.is_empty() {
-            p style="color: #666;" { "No matching public snakes found." }
+            p style="color: #666;" { "No matching public snakes found. To add a private snake, use the \"Add by Snake ID\" form below." }
         }
     }.into_response())
 }
