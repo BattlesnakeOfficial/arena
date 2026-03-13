@@ -1,0 +1,58 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT enrollment_request_id, leaderboard_id, battlesnake_id,\n                  initiated_by_user_id, status, created_at, updated_at\n         FROM leaderboard_enrollment_requests\n         WHERE leaderboard_id = $1 AND status = 'pending'\n         ORDER BY created_at DESC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "enrollment_request_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "leaderboard_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "battlesnake_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "initiated_by_user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 4,
+        "name": "status",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 6,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "cd0c7c8488b80c3ae91ad32150c0ff972960fa78aaf6e7ded48a7542ee492056"
+}
