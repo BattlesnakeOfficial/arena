@@ -1501,19 +1501,25 @@ pub async fn creator_add_snake(
             leaderboard::EnrollmentResult::Created(_) => {}
             leaderboard::EnrollmentResult::AlreadyPending => {
                 return Err(crate::errors::ServerError(
-                    color_eyre::eyre::eyre!("An enrollment request is already pending for this snake"),
+                    color_eyre::eyre::eyre!(
+                        "An enrollment request is already pending for this snake"
+                    ),
                     redirect,
                 ));
             }
             leaderboard::EnrollmentResult::AlreadyAccepted => {
                 return Err(crate::errors::ServerError(
-                    color_eyre::eyre::eyre!("This snake has already been accepted to this leaderboard"),
+                    color_eyre::eyre::eyre!(
+                        "This snake has already been accepted to this leaderboard"
+                    ),
                     redirect,
                 ));
             }
             leaderboard::EnrollmentResult::PreviouslyDeclined => {
                 return Err(crate::errors::ServerError(
-                    color_eyre::eyre::eyre!("The owner of this snake has declined the enrollment request"),
+                    color_eyre::eyre::eyre!(
+                        "The owner of this snake has declined the enrollment request"
+                    ),
                     redirect,
                 ));
             }
@@ -1573,11 +1579,10 @@ pub async fn accept_enrollment_request(
         .with_redirect(redirect.clone())?;
 
     // Upsert: creates entry or re-enables if previously disabled
-    let entry =
-        leaderboard::get_or_create_entry(&state.db, req.leaderboard_id, req.battlesnake_id)
-            .await
-            .wrap_err("Failed to create entry")
-            .with_redirect(redirect.clone())?;
+    let entry = leaderboard::get_or_create_entry(&state.db, req.leaderboard_id, req.battlesnake_id)
+        .await
+        .wrap_err("Failed to create entry")
+        .with_redirect(redirect.clone())?;
 
     for algo in state.scoring.algorithms() {
         algo.initialize_entry(&state.db, entry.leaderboard_entry_id)
