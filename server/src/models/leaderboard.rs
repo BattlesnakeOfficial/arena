@@ -1134,25 +1134,6 @@ pub async fn get_leaderboards_by_creator(
     Ok(rows)
 }
 
-pub async fn has_active_entry(
-    pool: &PgPool,
-    leaderboard_id: Uuid,
-    battlesnake_id: Uuid,
-) -> cja::Result<bool> {
-    let result = sqlx::query!(
-        r#"SELECT EXISTS(
-            SELECT 1 FROM leaderboard_entries
-            WHERE leaderboard_id = $1 AND battlesnake_id = $2 AND disabled_at IS NULL
-        ) as "exists!""#,
-        leaderboard_id,
-        battlesnake_id
-    )
-    .fetch_one(pool)
-    .await
-    .wrap_err("Failed to check for active entry")?;
-
-    Ok(result.exists)
-}
 
 // --- Enrollment request types and queries ---
 
@@ -1448,11 +1429,6 @@ mod custom_leaderboard_tests {
         assert_eq!(ctx.leaderboard_name, "My Private League");
         assert_eq!(ctx.battlesnake_name, "My Snake");
         assert_eq!(ctx.status, "pending");
-    }
-
-    #[test]
-    fn test_has_active_entry_function_exists() {
-        let _ = super::has_active_entry;
     }
 
     #[test]
