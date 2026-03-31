@@ -150,8 +150,9 @@ pub async fn get_leaderboard_by_id(
 
 // --- Leaderboard entry queries ---
 
-/// Opt-in a snake to a leaderboard. Always inserts a new entry.
-/// The unique constraint has been removed to allow duplicate entries for stress-testing.
+/// Opt-in a snake to a leaderboard. Inserts a new entry or re-enables an existing
+/// disabled entry. The unique constraint on (leaderboard_id, battlesnake_id) prevents
+/// duplicates; ON CONFLICT re-activates the row if it was disabled.
 pub async fn get_or_create_entry(
     pool: &PgPool,
     leaderboard_id: Uuid,
@@ -161,6 +162,8 @@ pub async fn get_or_create_entry(
         LeaderboardEntry,
         r#"INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id)
          VALUES ($1, $2)
+         ON CONFLICT (leaderboard_id, battlesnake_id) DO UPDATE
+           SET disabled_at = NULL, updated_at = NOW()
          RETURNING
             leaderboard_entry_id, leaderboard_id, battlesnake_id,
             mu, sigma, display_score, games_played, first_place_finishes, non_first_finishes,
@@ -1178,32 +1181,55 @@ pub struct EnrollmentRequestWithContext {
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
+pub enum EnrollmentResult {
+    Created(EnrollmentRequest),
+    AlreadyPending,
+    AlreadyAccepted,
+    PreviouslyDeclined,
+}
+
 pub async fn create_enrollment_request(
     pool: &PgPool,
     leaderboard_id: Uuid,
     battlesnake_id: Uuid,
     initiated_by_user_id: Uuid,
-) -> cja::Result<Option<EnrollmentRequest>> {
+) -> cja::Result<EnrollmentResult> {
+    let existing = sqlx::query_as!(
+        EnrollmentRequest,
+        r#"SELECT enrollment_request_id, leaderboard_id, battlesnake_id,
+                  initiated_by_user_id, status, created_at, updated_at
+         FROM leaderboard_enrollment_requests
+         WHERE leaderboard_id = $1 AND battlesnake_id = $2"#,
+        leaderboard_id,
+        battlesnake_id
+    )
+    .fetch_optional(pool)
+    .await
+    .wrap_err("Failed to check existing enrollment request")?;
+
+    if let Some(req) = existing {
+        return Ok(match req.status.as_str() {
+            "pending" => EnrollmentResult::AlreadyPending,
+            "accepted" => EnrollmentResult::AlreadyAccepted,
+            _ => EnrollmentResult::PreviouslyDeclined,
+        });
+    }
+
     let req = sqlx::query_as!(
         EnrollmentRequest,
         r#"INSERT INTO leaderboard_enrollment_requests (leaderboard_id, battlesnake_id, initiated_by_user_id)
          VALUES ($1, $2, $3)
-         ON CONFLICT (leaderboard_id, battlesnake_id) DO UPDATE
-           SET status = 'pending',
-               initiated_by_user_id = $3,
-               updated_at = NOW()
-           WHERE leaderboard_enrollment_requests.status = 'declined'
          RETURNING enrollment_request_id, leaderboard_id, battlesnake_id,
                    initiated_by_user_id, status, created_at, updated_at"#,
         leaderboard_id,
         battlesnake_id,
         initiated_by_user_id
     )
-    .fetch_optional(pool)
+    .fetch_one(pool)
     .await
     .wrap_err("Failed to create enrollment request")?;
 
-    Ok(req)
+    Ok(EnrollmentResult::Created(req))
 }
 
 pub async fn get_pending_requests_for_leaderboard(

@@ -906,18 +906,7 @@ pub async fn join_leaderboard(
         ));
     }
 
-    // Check if already enrolled to avoid duplicate entries (no unique constraint on leaderboard_entries)
-    let already_enrolled =
-        leaderboard::has_active_entry(&state.db, leaderboard_id, form.battlesnake_id)
-            .await
-            .wrap_err("Failed to check existing entry")
-            .with_redirect(redirect.clone())?;
-
-    if already_enrolled {
-        return Ok(redirect);
-    }
-
-    // Opt-in (or resume if paused)
+    // Upsert: creates entry or re-enables if previously disabled
     let entry = leaderboard::get_or_create_entry(&state.db, leaderboard_id, form.battlesnake_id)
         .await
         .wrap_err("Failed to join leaderboard")
@@ -1483,30 +1472,22 @@ pub async fn creator_add_snake(
         })?;
 
     if snake.visibility == Visibility::Public {
-        // Direct add for public snakes
-        let already_enrolled =
-            leaderboard::has_active_entry(&state.db, leaderboard_id, snake.battlesnake_id)
+        // Direct add for public snakes (upsert handles duplicates atomically)
+        let entry =
+            leaderboard::get_or_create_entry(&state.db, leaderboard_id, snake.battlesnake_id)
                 .await
-                .wrap_err("Failed to check entry")
+                .wrap_err("Failed to create entry")
                 .with_redirect(redirect.clone())?;
 
-        if !already_enrolled {
-            let entry =
-                leaderboard::get_or_create_entry(&state.db, leaderboard_id, snake.battlesnake_id)
-                    .await
-                    .wrap_err("Failed to create entry")
-                    .with_redirect(redirect.clone())?;
-
-            for algo in state.scoring.algorithms() {
-                algo.initialize_entry(&state.db, entry.leaderboard_entry_id)
-                    .await
-                    .wrap_err("Failed to initialize scoring")
-                    .with_redirect(redirect.clone())?;
-            }
+        for algo in state.scoring.algorithms() {
+            algo.initialize_entry(&state.db, entry.leaderboard_entry_id)
+                .await
+                .wrap_err("Failed to initialize scoring")
+                .with_redirect(redirect.clone())?;
         }
     } else {
         // Create enrollment request for private snakes
-        leaderboard::create_enrollment_request(
+        let result = leaderboard::create_enrollment_request(
             &state.db,
             leaderboard_id,
             snake.battlesnake_id,
@@ -1515,6 +1496,28 @@ pub async fn creator_add_snake(
         .await
         .wrap_err("Failed to create enrollment request")
         .with_redirect(redirect.clone())?;
+
+        match result {
+            leaderboard::EnrollmentResult::Created(_) => {}
+            leaderboard::EnrollmentResult::AlreadyPending => {
+                return Err(crate::errors::ServerError(
+                    color_eyre::eyre::eyre!("An enrollment request is already pending for this snake"),
+                    redirect,
+                ));
+            }
+            leaderboard::EnrollmentResult::AlreadyAccepted => {
+                return Err(crate::errors::ServerError(
+                    color_eyre::eyre::eyre!("This snake has already been accepted to this leaderboard"),
+                    redirect,
+                ));
+            }
+            leaderboard::EnrollmentResult::PreviouslyDeclined => {
+                return Err(crate::errors::ServerError(
+                    color_eyre::eyre::eyre!("The owner of this snake has declined the enrollment request"),
+                    redirect,
+                ));
+            }
+        }
     }
 
     Ok(redirect)
@@ -1569,25 +1572,18 @@ pub async fn accept_enrollment_request(
         .wrap_err("Failed to accept request")
         .with_redirect(redirect.clone())?;
 
-    let already_enrolled =
-        leaderboard::has_active_entry(&state.db, req.leaderboard_id, req.battlesnake_id)
+    // Upsert: creates entry or re-enables if previously disabled
+    let entry =
+        leaderboard::get_or_create_entry(&state.db, req.leaderboard_id, req.battlesnake_id)
             .await
-            .wrap_err("Failed to check entry")
+            .wrap_err("Failed to create entry")
             .with_redirect(redirect.clone())?;
 
-    if !already_enrolled {
-        let entry =
-            leaderboard::get_or_create_entry(&state.db, req.leaderboard_id, req.battlesnake_id)
-                .await
-                .wrap_err("Failed to create entry")
-                .with_redirect(redirect.clone())?;
-
-        for algo in state.scoring.algorithms() {
-            algo.initialize_entry(&state.db, entry.leaderboard_entry_id)
-                .await
-                .wrap_err("Failed to initialize scoring")
-                .with_redirect(redirect.clone())?;
-        }
+    for algo in state.scoring.algorithms() {
+        algo.initialize_entry(&state.db, entry.leaderboard_entry_id)
+            .await
+            .wrap_err("Failed to initialize scoring")
+            .with_redirect(redirect.clone())?;
     }
 
     Ok(redirect)

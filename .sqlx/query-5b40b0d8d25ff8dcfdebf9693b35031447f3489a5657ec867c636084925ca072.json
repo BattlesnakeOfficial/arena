@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO leaderboard_enrollment_requests (leaderboard_id, battlesnake_id, initiated_by_user_id)\n         VALUES ($1, $2, $3)\n         ON CONFLICT (leaderboard_id, battlesnake_id) DO UPDATE\n           SET status = 'pending',\n               initiated_by_user_id = $3,\n               updated_at = NOW()\n           WHERE leaderboard_enrollment_requests.status = 'declined'\n         RETURNING enrollment_request_id, leaderboard_id, battlesnake_id,\n                   initiated_by_user_id, status, created_at, updated_at",
+  "query": "SELECT enrollment_request_id, leaderboard_id, battlesnake_id,\n                  initiated_by_user_id, status, created_at, updated_at\n         FROM leaderboard_enrollment_requests\n         WHERE leaderboard_id = $1 AND battlesnake_id = $2",
   "describe": {
     "columns": [
       {
@@ -42,7 +42,6 @@
     "parameters": {
       "Left": [
         "Uuid",
-        "Uuid",
         "Uuid"
       ]
     },
@@ -56,5 +55,5 @@
       false
     ]
   },
-  "hash": "97db2b030edeae3b35b6dda0e007ea5e83a3bbebf779b67cba4dad0eec501f21"
+  "hash": "5b40b0d8d25ff8dcfdebf9693b35031447f3489a5657ec867c636084925ca072"
 }

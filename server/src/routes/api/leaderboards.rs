@@ -270,23 +270,7 @@ pub async fn create_entry(
         ));
     }
 
-    let already_enrolled =
-        leaderboard::has_active_entry(&state.db, leaderboard_id, request.battlesnake_id)
-            .await
-            .map_err(|e| {
-                tracing::error!("Failed to check existing entry: {}", e);
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Internal server error".to_string(),
-                )
-            })?;
-    if already_enrolled {
-        return Err((
-            StatusCode::CONFLICT,
-            "Snake is already enrolled in this leaderboard".to_string(),
-        ));
-    }
-
+    // Upsert: creates entry or re-enables if previously disabled
     let entry = leaderboard::get_or_create_entry(&state.db, leaderboard_id, request.battlesnake_id)
         .await
         .map_err(|e| {
