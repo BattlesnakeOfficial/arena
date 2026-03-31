@@ -4,6 +4,7 @@ use axum::{
     response::IntoResponse,
     routing::{delete, get, post, put},
 };
+use color_eyre::eyre::Context as _;
 use maud::html;
 use tower_http::cors::{Any, CorsLayer};
 
@@ -47,6 +48,10 @@ pub fn routes(app_state: AppState) -> axum::Router {
         // Leaderboard API endpoints
         .route("/leaderboards", get(api::leaderboards::list_leaderboards))
         .route(
+            "/leaderboards",
+            post(api::leaderboards::create_leaderboard_api),
+        )
+        .route(
             "/leaderboards/{id}/rankings",
             get(api::leaderboards::get_rankings),
         )
@@ -57,6 +62,14 @@ pub fn routes(app_state: AppState) -> axum::Router {
         .route(
             "/leaderboards/{id}/entries/{battlesnake_id}",
             delete(api::leaderboards::delete_entry),
+        )
+        .route(
+            "/leaderboards/{id}",
+            put(api::leaderboards::update_leaderboard_api),
+        )
+        .route(
+            "/leaderboards/{id}/matchmaking",
+            post(api::leaderboards::toggle_matchmaking_api),
         )
         .layer(cors);
 
@@ -119,6 +132,11 @@ pub fn routes(app_state: AppState) -> axum::Router {
         .route("/games/flow/{id}/search", get(game::search_battlesnakes))
         // Leaderboard routes
         .route("/leaderboards", get(leaderboard::list_leaderboards))
+        .route(
+            "/leaderboards",
+            axum::routing::post(leaderboard::create_leaderboard_handler),
+        )
+        .route("/leaderboards/new", get(leaderboard::new_leaderboard))
         .route("/leaderboards/{id}", get(leaderboard::show_leaderboard))
         .route(
             "/leaderboards/{id}/join",
@@ -131,6 +149,34 @@ pub fn routes(app_state: AppState) -> axum::Router {
         .route(
             "/leaderboards/{id}/entries/{entry_id}",
             get(leaderboard::show_leaderboard_entry),
+        )
+        .route(
+            "/leaderboards/{id}/manage",
+            get(leaderboard::manage_leaderboard),
+        )
+        .route(
+            "/leaderboards/{id}/manage/search-snakes",
+            get(leaderboard::search_snakes_for_leaderboard),
+        )
+        .route(
+            "/leaderboards/{id}/update",
+            axum::routing::post(leaderboard::update_leaderboard_handler),
+        )
+        .route(
+            "/leaderboards/{id}/matchmaking",
+            axum::routing::post(leaderboard::toggle_matchmaking),
+        )
+        .route(
+            "/leaderboards/{id}/add-snake",
+            axum::routing::post(leaderboard::creator_add_snake),
+        )
+        .route(
+            "/enrollment-requests/{request_id}/accept",
+            axum::routing::post(leaderboard::accept_enrollment_request),
+        )
+        .route(
+            "/enrollment-requests/{request_id}/decline",
+            axum::routing::post(leaderboard::decline_enrollment_request),
         )
         // Admin routes
         .route("/admin", get(admin::dashboard))
@@ -190,9 +236,17 @@ async fn root_page(
 
 /// Profile page that requires authentication
 async fn profile_page(
+    State(state): State<AppState>,
     auth::CurrentUser(user): auth::CurrentUser,
     page_factory: PageFactory,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
+    use crate::models::leaderboard;
+
+    let pending_requests =
+        leaderboard::get_pending_requests_for_snake_owner(&state.db, user.user_id)
+            .await
+            .wrap_err("Failed to fetch pending enrollment requests")?;
+
     Ok(page_factory.create_page(
         "My Profile".to_string(),
         Box::new(html! {
@@ -219,6 +273,27 @@ async fn profile_page(
                         p { "GitHub ID: " (user.external_github_id) }
                         p { "Account created: " (user.created_at.format("%Y-%m-%d %H:%M:%S")) }
                         p { "Last updated: " (user.updated_at.format("%Y-%m-%d %H:%M:%S")) }
+                    }
+
+                    @if !pending_requests.is_empty() {
+                        div style="margin-top: 20px;" {
+                            h3 { "Pending Enrollment Requests" }
+                            @for req in &pending_requests {
+                                div style="display: flex; align-items: center; gap: 10px; margin-bottom: 8px; padding: 12px; border: 1px solid #ddd; border-radius: 4px;" {
+                                    div {
+                                        strong { (req.battlesnake_name) }
+                                        span style="color: #666;" { " invited to " }
+                                        strong { (req.leaderboard_name) }
+                                    }
+                                    form action={"/enrollment-requests/"(req.enrollment_request_id)"/accept"} method="post" style="display: inline;" {
+                                        button type="submit" class="btn btn-sm btn-success" { "Accept" }
+                                    }
+                                    form action={"/enrollment-requests/"(req.enrollment_request_id)"/decline"} method="post" style="display: inline;" {
+                                        button type="submit" class="btn btn-sm btn-danger" { "Decline" }
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     div class="profile-actions" style="margin-top: 20px;" {

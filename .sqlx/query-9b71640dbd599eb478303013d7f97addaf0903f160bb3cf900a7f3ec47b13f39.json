@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE leaderboards SET matchmaking_enabled = $2, updated_at = NOW() WHERE leaderboard_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "9b71640dbd599eb478303013d7f97addaf0903f160bb3cf900a7f3ec47b13f39"
+}

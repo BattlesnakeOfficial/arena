@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE leaderboard_enrollment_requests SET status = $2 WHERE enrollment_request_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "1911b8f383126890ff543baf84038e49f253ce1c2ffdfe99ded82c0040120edf"
+}

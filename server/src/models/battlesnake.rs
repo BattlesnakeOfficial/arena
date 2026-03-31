@@ -362,6 +362,45 @@ pub async fn get_available_battlesnakes(
     Ok(battlesnakes)
 }
 
+pub async fn search_public_battlesnakes(
+    pool: &PgPool,
+    query: &str,
+    limit: i64,
+) -> cja::Result<Vec<Battlesnake>> {
+    // Escape ILIKE wildcards so literal '%' and '_' in search terms don't match as wildcards
+    let escaped = query
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    let battlesnakes = sqlx::query_as!(
+        Battlesnake,
+        r#"
+        SELECT
+            battlesnake_id,
+            user_id,
+            name,
+            url,
+            visibility as "visibility: Visibility",
+            color,
+            head,
+            tail,
+            created_at,
+            updated_at
+        FROM battlesnakes
+        WHERE visibility = 'public' AND name ILIKE '%' || $1 || '%' ESCAPE '\'
+        ORDER BY name
+        LIMIT $2
+        "#,
+        escaped,
+        limit
+    )
+    .fetch_all(pool)
+    .await
+    .wrap_err("Failed to search public battlesnakes")?;
+
+    Ok(battlesnakes)
+}
+
 pub async fn update_battlesnake_customizations(
     pool: &PgPool,
     battlesnake_id: Uuid,
