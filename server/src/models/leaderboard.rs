@@ -1134,7 +1134,6 @@ pub async fn get_leaderboards_by_creator(
     Ok(rows)
 }
 
-
 // --- Enrollment request types and queries ---
 
 #[derive(Debug, Serialize, Deserialize, FromRow)]

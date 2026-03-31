@@ -1569,25 +1569,18 @@ pub async fn accept_enrollment_request(
         .wrap_err("Failed to accept request")
         .with_redirect(redirect.clone())?;
 
-    let already_enrolled =
-        leaderboard::has_active_entry(&state.db, req.leaderboard_id, req.battlesnake_id)
+    // Upsert: creates entry or re-enables if previously disabled
+    let entry =
+        leaderboard::get_or_create_entry(&state.db, req.leaderboard_id, req.battlesnake_id)
             .await
-            .wrap_err("Failed to check entry")
+            .wrap_err("Failed to create entry")
             .with_redirect(redirect.clone())?;
 
-    if !already_enrolled {
-        let entry =
-            leaderboard::get_or_create_entry(&state.db, req.leaderboard_id, req.battlesnake_id)
-                .await
-                .wrap_err("Failed to create entry")
-                .with_redirect(redirect.clone())?;
-
-        for algo in state.scoring.algorithms() {
-            algo.initialize_entry(&state.db, entry.leaderboard_entry_id)
-                .await
-                .wrap_err("Failed to initialize scoring")
-                .with_redirect(redirect.clone())?;
-        }
+    for algo in state.scoring.algorithms() {
+        algo.initialize_entry(&state.db, entry.leaderboard_entry_id)
+            .await
+            .wrap_err("Failed to initialize scoring")
+            .with_redirect(redirect.clone())?;
     }
 
     Ok(redirect)
