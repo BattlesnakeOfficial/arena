@@ -406,8 +406,24 @@ pub async fn create_leaderboard_api(
         return Err((StatusCode::BAD_REQUEST, "Name cannot be empty".to_string()));
     }
 
+    if request.name.len() > 100 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Name must be at most 100 characters".to_string(),
+        ));
+    }
+
+    if let Some(ref desc) = request.description
+        && desc.len() > 2000
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Description must be at most 2000 characters".to_string(),
+        ));
+    }
+
     let board_size = request.board_size.as_deref().unwrap_or("11x11");
-    if !is_valid_board_size(board_size) {
+    if !leaderboard::is_valid_board_size(board_size) {
         return Err((
             StatusCode::BAD_REQUEST,
             format!("Invalid board size: {board_size}. Must be one of: 7x7, 11x11, 19x19"),
@@ -415,7 +431,7 @@ pub async fn create_leaderboard_api(
     }
 
     let game_type = request.game_type.as_deref().unwrap_or("Standard");
-    if !is_valid_game_type(game_type) {
+    if !leaderboard::is_valid_game_type(game_type) {
         return Err((
             StatusCode::BAD_REQUEST,
             format!(
@@ -496,8 +512,24 @@ pub async fn update_leaderboard_api(
         return Err((StatusCode::BAD_REQUEST, "Name cannot be empty".to_string()));
     }
 
+    if request.name.len() > 100 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Name must be at most 100 characters".to_string(),
+        ));
+    }
+
+    if let Some(ref desc) = request.description
+        && desc.len() > 2000
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Description must be at most 2000 characters".to_string(),
+        ));
+    }
+
     let board_size = request.board_size.as_deref().unwrap_or(&lb.board_size);
-    if !is_valid_board_size(board_size) {
+    if !leaderboard::is_valid_board_size(board_size) {
         return Err((
             StatusCode::BAD_REQUEST,
             format!("Invalid board size: {board_size}. Must be one of: 7x7, 11x11, 19x19"),
@@ -505,7 +537,7 @@ pub async fn update_leaderboard_api(
     }
 
     let game_type = request.game_type.as_deref().unwrap_or(&lb.game_type);
-    if !is_valid_game_type(game_type) {
+    if !leaderboard::is_valid_game_type(game_type) {
         return Err((
             StatusCode::BAD_REQUEST,
             format!(
@@ -593,14 +625,6 @@ pub async fn toggle_matchmaking_api(
         })?;
 
     Ok(StatusCode::OK)
-}
-
-fn is_valid_board_size(s: &str) -> bool {
-    matches!(s, "7x7" | "11x11" | "19x19")
-}
-
-fn is_valid_game_type(s: &str) -> bool {
-    matches!(s, "Standard" | "Royale" | "Constrictor" | "Snail Mode")
 }
 
 // --- BS-37342921850a4fc2: Custom leaderboard API tests ---

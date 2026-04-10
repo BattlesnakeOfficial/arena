@@ -176,6 +176,27 @@ pub async fn get_or_create_entry(
     Ok(entry)
 }
 
+/// Check if a snake already has an active (non-disabled) entry in a leaderboard.
+pub async fn has_active_entry(
+    pool: &PgPool,
+    leaderboard_id: Uuid,
+    battlesnake_id: Uuid,
+) -> cja::Result<bool> {
+    let exists = sqlx::query_scalar!(
+        r#"SELECT EXISTS(
+            SELECT 1 FROM leaderboard_entries
+            WHERE leaderboard_id = $1 AND battlesnake_id = $2 AND disabled_at IS NULL
+        ) as "exists!: bool""#,
+        leaderboard_id,
+        battlesnake_id
+    )
+    .fetch_one(pool)
+    .await
+    .wrap_err("Failed to check active entry")?;
+
+    Ok(exists)
+}
+
 /// Get all active entries for a leaderboard (not disabled)
 pub async fn get_active_entries(
     pool: &PgPool,
@@ -1134,6 +1155,16 @@ pub async fn get_leaderboards_by_creator(
     Ok(rows)
 }
 
+// --- Validation helpers ---
+
+pub fn is_valid_board_size(s: &str) -> bool {
+    matches!(s, "7x7" | "11x11" | "19x19")
+}
+
+pub fn is_valid_game_type(s: &str) -> bool {
+    matches!(s, "Standard" | "Royale" | "Constrictor" | "Snail Mode")
+}
+
 // --- Enrollment request types and queries ---
 
 #[derive(Debug, Serialize, Deserialize, FromRow)]
@@ -1229,12 +1260,13 @@ pub async fn get_enrollment_request_by_id(
 pub async fn update_enrollment_request_status(
     pool: &PgPool,
     enrollment_request_id: Uuid,
-    status: &str,
+    status: EnrollmentRequestStatus,
 ) -> cja::Result<()> {
+    let status_str = status.as_str();
     sqlx::query!(
         r#"UPDATE leaderboard_enrollment_requests SET status = $2 WHERE enrollment_request_id = $1"#,
         enrollment_request_id,
-        status
+        status_str
     )
     .execute(pool)
     .await

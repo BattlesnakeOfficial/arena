@@ -1020,14 +1020,6 @@ pub struct SearchQuery {
     pub q: String,
 }
 
-fn is_valid_board_size(s: &str) -> bool {
-    matches!(s, "7x7" | "11x11" | "19x19")
-}
-
-fn is_valid_game_type(s: &str) -> bool {
-    matches!(s, "Standard" | "Royale" | "Constrictor" | "Snail Mode")
-}
-
 /// GET /leaderboards/new — form to create a new leaderboard
 pub async fn new_leaderboard(
     CurrentUser(_user): CurrentUser,
@@ -1096,14 +1088,28 @@ pub async fn create_leaderboard_handler(
         ));
     }
 
-    if !is_valid_board_size(&form.board_size) {
+    if form.name.len() > 100 {
+        return Err(crate::errors::ServerError(
+            color_eyre::eyre::eyre!("Name must be at most 100 characters"),
+            redirect,
+        ));
+    }
+
+    if form.description.len() > 2000 {
+        return Err(crate::errors::ServerError(
+            color_eyre::eyre::eyre!("Description must be at most 2000 characters"),
+            redirect,
+        ));
+    }
+
+    if !leaderboard::is_valid_board_size(&form.board_size) {
         return Err(crate::errors::ServerError(
             color_eyre::eyre::eyre!("Invalid board size: {}", form.board_size),
             redirect,
         ));
     }
 
-    if !is_valid_game_type(&form.game_type) {
+    if !leaderboard::is_valid_game_type(&form.game_type) {
         return Err(crate::errors::ServerError(
             color_eyre::eyre::eyre!("Invalid game type: {}", form.game_type),
             redirect,
@@ -1368,14 +1374,28 @@ pub async fn update_leaderboard_handler(
         ));
     }
 
-    if !is_valid_board_size(&form.board_size) {
+    if form.name.len() > 100 {
+        return Err(crate::errors::ServerError(
+            color_eyre::eyre::eyre!("Name must be at most 100 characters"),
+            redirect,
+        ));
+    }
+
+    if form.description.len() > 2000 {
+        return Err(crate::errors::ServerError(
+            color_eyre::eyre::eyre!("Description must be at most 2000 characters"),
+            redirect,
+        ));
+    }
+
+    if !leaderboard::is_valid_board_size(&form.board_size) {
         return Err(crate::errors::ServerError(
             color_eyre::eyre::eyre!("Invalid board size"),
             redirect,
         ));
     }
 
-    if !is_valid_game_type(&form.game_type) {
+    if !leaderboard::is_valid_game_type(&form.game_type) {
         return Err(crate::errors::ServerError(
             color_eyre::eyre::eyre!("Invalid game type"),
             redirect,
@@ -1564,10 +1584,14 @@ pub async fn accept_enrollment_request(
         ));
     }
 
-    leaderboard::update_enrollment_request_status(&state.db, request_id, "accepted")
-        .await
-        .wrap_err("Failed to accept request")
-        .with_redirect(redirect.clone())?;
+    leaderboard::update_enrollment_request_status(
+        &state.db,
+        request_id,
+        leaderboard::EnrollmentRequestStatus::Accepted,
+    )
+    .await
+    .wrap_err("Failed to accept request")
+    .with_redirect(redirect.clone())?;
 
     // Upsert: creates entry or re-enables if previously disabled
     let entry =
@@ -1630,10 +1654,14 @@ pub async fn decline_enrollment_request(
         ));
     }
 
-    leaderboard::update_enrollment_request_status(&state.db, request_id, "declined")
-        .await
-        .wrap_err("Failed to decline request")
-        .with_redirect(redirect.clone())?;
+    leaderboard::update_enrollment_request_status(
+        &state.db,
+        request_id,
+        leaderboard::EnrollmentRequestStatus::Declined,
+    )
+    .await
+    .wrap_err("Failed to decline request")
+    .with_redirect(redirect.clone())?;
 
     Ok(redirect)
 }
@@ -1642,14 +1670,7 @@ pub async fn decline_enrollment_request(
 
 #[cfg(test)]
 mod custom_leaderboard_tests {
-    // Helper: mirrors the validation logic the create/update leaderboard handlers must implement.
-    fn is_valid_board_size(s: &str) -> bool {
-        matches!(s, "7x7" | "11x11" | "19x19")
-    }
-
-    fn is_valid_game_type(s: &str) -> bool {
-        matches!(s, "Standard" | "Royale" | "Constrictor" | "Snail Mode")
-    }
+    use crate::models::leaderboard::{is_valid_board_size, is_valid_game_type};
 
     #[test]
     fn test_valid_board_sizes_accepted() {
