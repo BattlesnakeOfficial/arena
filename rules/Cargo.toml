@@ -1,0 +1,15 @@
+[package]
+name = "rules"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = []
+wire-types = ["battlesnake-game-types"]
+
+[dependencies]
+rand = "0.8"
+battlesnake-game-types = { git = "https://github.com/fables-tales/battlesnake-game-types", branch = "main", optional = true }
+
+[dev-dependencies]
+proptest = "1"
