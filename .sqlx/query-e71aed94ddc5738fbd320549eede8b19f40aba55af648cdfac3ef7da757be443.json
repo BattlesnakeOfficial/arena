@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO leaderboards (name, creator_user_id, description, visibility, board_size, game_type)\n         VALUES ($1, $2, $3, $4, $5, $6)\n         RETURNING leaderboard_id, name,\n                   creator_user_id, description,\n                   visibility as \"visibility: Visibility\",\n                   board_size, game_type,\n                   matchmaking_enabled, games_per_day,\n                   disabled_at, created_at, updated_at",
+  "query": "INSERT INTO leaderboards (name, creator_user_id, description, visibility, board_height, board_width, game_type)\n         VALUES ($1, $2, $3, $4, $5, $6, $7)\n         RETURNING leaderboard_id, name,\n                   creator_user_id, description,\n                   visibility as \"visibility: Visibility\",\n                   board_height, board_width, game_type,\n                   matchmaking_enabled, games_per_day,\n                   disabled_at, created_at, updated_at",
   "describe": {
     "columns": [
       {
@@ -30,36 +30,41 @@
       },
       {
         "ordinal": 5,
-        "name": "board_size",
-        "type_info": "Text"
+        "name": "board_height",
+        "type_info": "Int4"
       },
       {
         "ordinal": 6,
+        "name": "board_width",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 7,
         "name": "game_type",
         "type_info": "Text"
       },
       {
-        "ordinal": 7,
+        "ordinal": 8,
         "name": "matchmaking_enabled",
         "type_info": "Bool"
       },
       {
-        "ordinal": 8,
+        "ordinal": 9,
         "name": "games_per_day",
         "type_info": "Int4"
       },
       {
-        "ordinal": 9,
+        "ordinal": 10,
         "name": "disabled_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 10,
+        "ordinal": 11,
         "name": "created_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 11,
+        "ordinal": 12,
         "name": "updated_at",
         "type_info": "Timestamptz"
       }
@@ -70,7 +75,8 @@
         "Uuid",
         "Text",
         "Text",
-        "Text",
+        "Int4",
+        "Int4",
         "Text"
       ]
     },
@@ -84,10 +90,11 @@
       false,
       false,
       false,
+      false,
       true,
       false,
       false
     ]
   },
-  "hash": "69d4957162fc49d110340a2a1bfa9093600a7c5e6a51cb6e210df3d9095aaef7"
+  "hash": "e71aed94ddc5738fbd320549eede8b19f40aba55af648cdfac3ef7da757be443"
 }

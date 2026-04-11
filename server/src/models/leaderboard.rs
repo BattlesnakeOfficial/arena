@@ -19,7 +19,8 @@ pub struct Leaderboard {
     pub creator_user_id: Option<Uuid>,
     pub description: String,
     pub visibility: Visibility,
-    pub board_size: String,
+    pub board_height: i32,
+    pub board_width: i32,
     pub game_type: String,
     pub matchmaking_enabled: bool,
     pub games_per_day: i32,
@@ -92,7 +93,7 @@ pub async fn get_all_leaderboards(pool: &PgPool) -> cja::Result<Vec<Leaderboard>
         r#"SELECT leaderboard_id, name,
                   creator_user_id, description,
                   visibility as "visibility: Visibility",
-                  board_size, game_type,
+                  board_height, board_width, game_type,
                   matchmaking_enabled, games_per_day,
                   disabled_at, created_at, updated_at
          FROM leaderboards
@@ -111,7 +112,7 @@ pub async fn get_active_leaderboards(pool: &PgPool) -> cja::Result<Vec<Leaderboa
         r#"SELECT leaderboard_id, name,
                   creator_user_id, description,
                   visibility as "visibility: Visibility",
-                  board_size, game_type,
+                  board_height, board_width, game_type,
                   matchmaking_enabled, games_per_day,
                   disabled_at, created_at, updated_at
          FROM leaderboards
@@ -134,7 +135,7 @@ pub async fn get_leaderboard_by_id(
         r#"SELECT leaderboard_id, name,
                   creator_user_id, description,
                   visibility as "visibility: Visibility",
-                  board_size, game_type,
+                  board_height, board_width, game_type,
                   matchmaking_enabled, games_per_day,
                   disabled_at, created_at, updated_at
          FROM leaderboards
@@ -1029,7 +1030,7 @@ pub async fn get_visible_leaderboards(
         r#"SELECT leaderboard_id, name,
                   creator_user_id, description,
                   visibility as "visibility: Visibility",
-                  board_size, game_type,
+                  board_height, board_width, game_type,
                   matchmaking_enabled, games_per_day,
                   disabled_at, created_at, updated_at
          FROM leaderboards
@@ -1045,31 +1046,34 @@ pub async fn get_visible_leaderboards(
     Ok(rows)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn create_leaderboard(
     pool: &PgPool,
     creator_user_id: Uuid,
     name: &str,
     description: &str,
     visibility: &Visibility,
-    board_size: &str,
+    board_height: i32,
+    board_width: i32,
     game_type: &str,
 ) -> cja::Result<Leaderboard> {
     let visibility_str = visibility.as_str();
     let lb = sqlx::query_as!(
         Leaderboard,
-        r#"INSERT INTO leaderboards (name, creator_user_id, description, visibility, board_size, game_type)
-         VALUES ($1, $2, $3, $4, $5, $6)
+        r#"INSERT INTO leaderboards (name, creator_user_id, description, visibility, board_height, board_width, game_type)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
          RETURNING leaderboard_id, name,
                    creator_user_id, description,
                    visibility as "visibility: Visibility",
-                   board_size, game_type,
+                   board_height, board_width, game_type,
                    matchmaking_enabled, games_per_day,
                    disabled_at, created_at, updated_at"#,
         name,
         creator_user_id,
         description,
         visibility_str,
-        board_size,
+        board_height,
+        board_width,
         game_type
     )
     .fetch_one(pool)
@@ -1079,32 +1083,35 @@ pub async fn create_leaderboard(
     Ok(lb)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn update_leaderboard(
     pool: &PgPool,
     leaderboard_id: Uuid,
     name: &str,
     description: &str,
     visibility: &Visibility,
-    board_size: &str,
+    board_height: i32,
+    board_width: i32,
     game_type: &str,
 ) -> cja::Result<Leaderboard> {
     let visibility_str = visibility.as_str();
     let lb = sqlx::query_as!(
         Leaderboard,
         r#"UPDATE leaderboards
-         SET name = $2, description = $3, visibility = $4, board_size = $5, game_type = $6, updated_at = NOW()
+         SET name = $2, description = $3, visibility = $4, board_height = $5, board_width = $6, game_type = $7, updated_at = NOW()
          WHERE leaderboard_id = $1
          RETURNING leaderboard_id, name,
                    creator_user_id, description,
                    visibility as "visibility: Visibility",
-                   board_size, game_type,
+                   board_height, board_width, game_type,
                    matchmaking_enabled, games_per_day,
                    disabled_at, created_at, updated_at"#,
         leaderboard_id,
         name,
         description,
         visibility_str,
-        board_size,
+        board_height,
+        board_width,
         game_type
     )
     .fetch_one(pool)
@@ -1140,7 +1147,7 @@ pub async fn get_leaderboards_by_creator(
         r#"SELECT leaderboard_id, name,
                   creator_user_id, description,
                   visibility as "visibility: Visibility",
-                  board_size, game_type,
+                  board_height, board_width, game_type,
                   matchmaking_enabled, games_per_day,
                   disabled_at, created_at, updated_at
          FROM leaderboards
@@ -1157,8 +1164,13 @@ pub async fn get_leaderboards_by_creator(
 
 // --- Validation helpers ---
 
-pub fn is_valid_board_size(s: &str) -> bool {
-    matches!(s, "7x7" | "11x11" | "19x19")
+pub fn is_valid_board_dimension(d: i32) -> bool {
+    matches!(d, 7 | 11 | 19)
+}
+
+/// Helper to format board dimensions for display
+pub fn format_board_size(width: i32, height: i32) -> String {
+    format!("{width}x{height}")
 }
 
 pub fn is_valid_game_type(s: &str) -> bool {
@@ -1389,7 +1401,8 @@ mod custom_leaderboard_tests {
             creator_user_id: None,
             description: "".to_string(),
             visibility: Visibility::Public,
-            board_size: "11x11".to_string(),
+            board_height: 11,
+            board_width: 11,
             game_type: "Standard".to_string(),
             matchmaking_enabled: true,
             games_per_day: 100,
@@ -1412,7 +1425,8 @@ mod custom_leaderboard_tests {
             creator_user_id: Some(Uuid::new_v4()),
             description: "Custom".to_string(),
             visibility: Visibility::Private,
-            board_size: "7x7".to_string(),
+            board_height: 7,
+            board_width: 7,
             game_type: "Royale".to_string(),
             matchmaking_enabled: false,
             games_per_day: 50,
@@ -1423,7 +1437,8 @@ mod custom_leaderboard_tests {
         assert!(user_lb.creator_user_id.is_some());
         assert!(!user_lb.matchmaking_enabled);
         assert_eq!(user_lb.visibility, Visibility::Private);
-        assert_eq!(user_lb.board_size, "7x7");
+        assert_eq!(user_lb.board_height, 7);
+        assert_eq!(user_lb.board_width, 7);
     }
 
     #[test]

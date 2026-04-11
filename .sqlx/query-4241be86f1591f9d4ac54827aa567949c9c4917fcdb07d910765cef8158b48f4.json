@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT leaderboard_id, name,\n                  creator_user_id, description,\n                  visibility as \"visibility: Visibility\",\n                  board_size, game_type,\n                  matchmaking_enabled, games_per_day,\n                  disabled_at, created_at, updated_at\n         FROM leaderboards\n         ORDER BY created_at ASC",
+  "query": "UPDATE leaderboards\n         SET name = $2, description = $3, visibility = $4, board_height = $5, board_width = $6, game_type = $7, updated_at = NOW()\n         WHERE leaderboard_id = $1\n         RETURNING leaderboard_id, name,\n                   creator_user_id, description,\n                   visibility as \"visibility: Visibility\",\n                   board_height, board_width, game_type,\n                   matchmaking_enabled, games_per_day,\n                   disabled_at, created_at, updated_at",
   "describe": {
     "columns": [
       {
@@ -30,42 +30,55 @@
       },
       {
         "ordinal": 5,
-        "name": "board_size",
-        "type_info": "Text"
+        "name": "board_height",
+        "type_info": "Int4"
       },
       {
         "ordinal": 6,
+        "name": "board_width",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 7,
         "name": "game_type",
         "type_info": "Text"
       },
       {
-        "ordinal": 7,
+        "ordinal": 8,
         "name": "matchmaking_enabled",
         "type_info": "Bool"
       },
       {
-        "ordinal": 8,
+        "ordinal": 9,
         "name": "games_per_day",
         "type_info": "Int4"
       },
       {
-        "ordinal": 9,
+        "ordinal": 10,
         "name": "disabled_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 10,
+        "ordinal": 11,
         "name": "created_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 11,
+        "ordinal": 12,
         "name": "updated_at",
         "type_info": "Timestamptz"
       }
     ],
     "parameters": {
-      "Left": []
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Int4",
+        "Int4",
+        "Text"
+      ]
     },
     "nullable": [
       false,
@@ -77,10 +90,11 @@
       false,
       false,
       false,
+      false,
       true,
       false,
       false
     ]
   },
-  "hash": "f30e7a6b5758cb863bc8855705b70fac91b08d2c7925a90b2e7c6a7e8e10e897"
+  "hash": "4241be86f1591f9d4ac54827aa567949c9c4917fcdb07d910765cef8158b48f4"
 }

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT leaderboard_id, name,\n                  creator_user_id, description,\n                  visibility as \"visibility: Visibility\",\n                  board_size, game_type,\n                  matchmaking_enabled, games_per_day,\n                  disabled_at, created_at, updated_at\n         FROM leaderboards\n         WHERE creator_user_id = $1\n         ORDER BY created_at DESC",
+  "query": "SELECT leaderboard_id, name,\n                  creator_user_id, description,\n                  visibility as \"visibility: Visibility\",\n                  board_height, board_width, game_type,\n                  matchmaking_enabled, games_per_day,\n                  disabled_at, created_at, updated_at\n         FROM leaderboards\n         WHERE disabled_at IS NULL AND matchmaking_enabled = true\n         ORDER BY created_at ASC",
   "describe": {
     "columns": [
       {
@@ -30,44 +30,47 @@
       },
       {
         "ordinal": 5,
-        "name": "board_size",
-        "type_info": "Text"
+        "name": "board_height",
+        "type_info": "Int4"
       },
       {
         "ordinal": 6,
+        "name": "board_width",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 7,
         "name": "game_type",
         "type_info": "Text"
       },
       {
-        "ordinal": 7,
+        "ordinal": 8,
         "name": "matchmaking_enabled",
         "type_info": "Bool"
       },
       {
-        "ordinal": 8,
+        "ordinal": 9,
         "name": "games_per_day",
         "type_info": "Int4"
       },
       {
-        "ordinal": 9,
+        "ordinal": 10,
         "name": "disabled_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 10,
+        "ordinal": 11,
         "name": "created_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 11,
+        "ordinal": 12,
         "name": "updated_at",
         "type_info": "Timestamptz"
       }
     ],
     "parameters": {
-      "Left": [
-        "Uuid"
-      ]
+      "Left": []
     },
     "nullable": [
       false,
@@ -79,10 +82,11 @@
       false,
       false,
       false,
+      false,
       true,
       false,
       false
     ]
   },
-  "hash": "37ab572a636644bf0db88ec643e4834335846ff3d714a705f9801c381abc826c"
+  "hash": "6d5d83943ae1d2b72f894d4aafcc22780f6facf8dec2197b9d8d747065f3dcb7"
 }

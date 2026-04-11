@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "UPDATE leaderboards\n         SET name = $2, description = $3, visibility = $4, board_size = $5, game_type = $6, updated_at = NOW()\n         WHERE leaderboard_id = $1\n         RETURNING leaderboard_id, name,\n                   creator_user_id, description,\n                   visibility as \"visibility: Visibility\",\n                   board_size, game_type,\n                   matchmaking_enabled, games_per_day,\n                   disabled_at, created_at, updated_at",
+  "query": "SELECT leaderboard_id, name,\n                  creator_user_id, description,\n                  visibility as \"visibility: Visibility\",\n                  board_height, board_width, game_type,\n                  matchmaking_enabled, games_per_day,\n                  disabled_at, created_at, updated_at\n         FROM leaderboards\n         WHERE leaderboard_id = $1",
   "describe": {
     "columns": [
       {
@@ -30,48 +30,48 @@
       },
       {
         "ordinal": 5,
-        "name": "board_size",
-        "type_info": "Text"
+        "name": "board_height",
+        "type_info": "Int4"
       },
       {
         "ordinal": 6,
+        "name": "board_width",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 7,
         "name": "game_type",
         "type_info": "Text"
       },
       {
-        "ordinal": 7,
+        "ordinal": 8,
         "name": "matchmaking_enabled",
         "type_info": "Bool"
       },
       {
-        "ordinal": 8,
+        "ordinal": 9,
         "name": "games_per_day",
         "type_info": "Int4"
       },
       {
-        "ordinal": 9,
+        "ordinal": 10,
         "name": "disabled_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 10,
+        "ordinal": 11,
         "name": "created_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 11,
+        "ordinal": 12,
         "name": "updated_at",
         "type_info": "Timestamptz"
       }
     ],
     "parameters": {
       "Left": [
-        "Uuid",
-        "Text",
-        "Text",
-        "Text",
-        "Text",
-        "Text"
+        "Uuid"
       ]
     },
     "nullable": [
@@ -84,10 +84,11 @@
       false,
       false,
       false,
+      false,
       true,
       false,
       false
     ]
   },
-  "hash": "15e06a7dee8e50fd0632dcd98b2f27b430268512a9b41d785d8c18454e8ffccc"
+  "hash": "62efdf2c709925dab6b11be6e96d070eb1aa1fea5753a71a9fc20beb6ae06b77"
 }

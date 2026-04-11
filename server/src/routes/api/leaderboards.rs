@@ -24,7 +24,8 @@ pub struct LeaderboardResponse {
     pub name: String,
     pub description: String,
     pub visibility: String,
-    pub board_size: String,
+    pub board_height: i32,
+    pub board_width: i32,
     pub game_type: String,
     pub matchmaking_enabled: bool,
     pub active: bool,
@@ -91,7 +92,8 @@ pub async fn list_leaderboards(
             name: lb.name,
             description: lb.description,
             visibility: lb.visibility.as_str().to_string(),
-            board_size: lb.board_size,
+            board_height: lb.board_height,
+            board_width: lb.board_width,
             game_type: lb.game_type,
             matchmaking_enabled: lb.matchmaking_enabled,
             active: lb.disabled_at.is_none(),
@@ -386,7 +388,8 @@ pub async fn delete_entry(
 pub struct CreateLeaderboardRequest {
     pub name: String,
     pub description: Option<String>,
-    pub board_size: Option<String>,
+    pub board_height: Option<i32>,
+    pub board_width: Option<i32>,
     pub game_type: Option<String>,
     pub visibility: Option<String>,
 }
@@ -422,11 +425,18 @@ pub async fn create_leaderboard_api(
         ));
     }
 
-    let board_size = request.board_size.as_deref().unwrap_or("11x11");
-    if !leaderboard::is_valid_board_size(board_size) {
+    let board_height = request.board_height.unwrap_or(11);
+    let board_width = request.board_width.unwrap_or(11);
+    if !leaderboard::is_valid_board_dimension(board_height) {
         return Err((
             StatusCode::BAD_REQUEST,
-            format!("Invalid board size: {board_size}. Must be one of: 7x7, 11x11, 19x19"),
+            format!("Invalid board height: {board_height}. Must be one of: 7, 11, 19"),
+        ));
+    }
+    if !leaderboard::is_valid_board_dimension(board_width) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("Invalid board width: {board_width}. Must be one of: 7, 11, 19"),
         ));
     }
 
@@ -455,7 +465,8 @@ pub async fn create_leaderboard_api(
         request.name.trim(),
         request.description.as_deref().unwrap_or(""),
         &visibility,
-        board_size,
+        board_height,
+        board_width,
         game_type,
     )
     .await
@@ -474,7 +485,8 @@ pub async fn create_leaderboard_api(
             name: lb.name,
             description: lb.description,
             visibility: lb.visibility.as_str().to_string(),
-            board_size: lb.board_size,
+            board_height: lb.board_height,
+            board_width: lb.board_width,
             game_type: lb.game_type,
             matchmaking_enabled: lb.matchmaking_enabled,
             active: lb.disabled_at.is_none(),
@@ -528,11 +540,18 @@ pub async fn update_leaderboard_api(
         ));
     }
 
-    let board_size = request.board_size.as_deref().unwrap_or(&lb.board_size);
-    if !leaderboard::is_valid_board_size(board_size) {
+    let board_height = request.board_height.unwrap_or(lb.board_height);
+    let board_width = request.board_width.unwrap_or(lb.board_width);
+    if !leaderboard::is_valid_board_dimension(board_height) {
         return Err((
             StatusCode::BAD_REQUEST,
-            format!("Invalid board size: {board_size}. Must be one of: 7x7, 11x11, 19x19"),
+            format!("Invalid board height: {board_height}. Must be one of: 7, 11, 19"),
+        ));
+    }
+    if !leaderboard::is_valid_board_dimension(board_width) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("Invalid board width: {board_width}. Must be one of: 7, 11, 19"),
         ));
     }
 
@@ -564,7 +583,8 @@ pub async fn update_leaderboard_api(
         request.name.trim(),
         request.description.as_deref().unwrap_or(&lb.description),
         &visibility,
-        board_size,
+        board_height,
+        board_width,
         game_type,
     )
     .await
@@ -581,7 +601,8 @@ pub async fn update_leaderboard_api(
         name: updated.name,
         description: updated.description,
         visibility: updated.visibility.as_str().to_string(),
-        board_size: updated.board_size,
+        board_height: updated.board_height,
+        board_width: updated.board_width,
         game_type: updated.game_type,
         matchmaking_enabled: updated.matchmaking_enabled,
         active: updated.disabled_at.is_none(),
@@ -649,14 +670,16 @@ mod custom_leaderboard_api_tests {
             name: "Test".to_string(),
             description: "Test description".to_string(),
             visibility: "public".to_string(),
-            board_size: "11x11".to_string(),
+            board_height: 11,
+            board_width: 11,
             game_type: "Standard".to_string(),
             matchmaking_enabled: false,
             active: true,
             created_at: chrono::Utc::now(),
         };
         assert_eq!(response.visibility, "public");
-        assert_eq!(response.board_size, "11x11");
+        assert_eq!(response.board_height, 11);
+        assert_eq!(response.board_width, 11);
         assert_eq!(response.game_type, "Standard");
         assert!(!response.matchmaking_enabled);
         assert_eq!(response.description, "Test description");
@@ -683,14 +706,19 @@ mod custom_leaderboard_api_tests {
         let req = CreateLeaderboardRequest {
             name: "My League".to_string(),
             description: None,
-            board_size: None,
+            board_height: None,
+            board_width: None,
             game_type: None,
             visibility: None,
         };
         assert!(!req.name.is_empty(), "name is required");
         assert!(
-            req.board_size.is_none(),
-            "board_size is optional, defaults to 11x11"
+            req.board_height.is_none(),
+            "board_height is optional, defaults to 11"
+        );
+        assert!(
+            req.board_width.is_none(),
+            "board_width is optional, defaults to 11"
         );
         assert!(
             req.game_type.is_none(),

@@ -7,7 +7,7 @@ use crate::{
     jobs::GameRunnerJob,
     models::{
         game::{self, CreateGame, GameBoardSize, GameType},
-        leaderboard::{self, Leaderboard, LeaderboardEntry, MATCH_SIZE},
+        leaderboard::{self, Leaderboard, LeaderboardEntry, MATCH_SIZE, format_board_size},
     },
     state::AppState,
 };
@@ -66,8 +66,9 @@ async fn run_matchmaker_for_leaderboard(app_state: &AppState, lb: &Leaderboard) 
         "Running matchmaker"
     );
 
-    let board_size = GameBoardSize::from_str(&lb.board_size)
-        .wrap_err_with(|| format!("Invalid board size: {}", lb.board_size))?;
+    let board_size_str = format_board_size(lb.board_width, lb.board_height);
+    let board_size = GameBoardSize::from_str(&board_size_str)
+        .wrap_err_with(|| format!("Invalid board size: {}", board_size_str))?;
     let game_type_val = GameType::from_str(&lb.game_type)
         .wrap_err_with(|| format!("Invalid game type: {}", lb.game_type))?;
 
@@ -353,7 +354,8 @@ mod tests {
             creator_user_id: Some(Uuid::new_v4()),
             description: "A test league".to_string(),
             visibility: Visibility::Public,
-            board_size: "7x7".to_string(),
+            board_height: 7,
+            board_width: 7,
             game_type: "Royale".to_string(),
             matchmaking_enabled: true,
             games_per_day: 50,
@@ -361,7 +363,8 @@ mod tests {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
-        assert_eq!(lb.board_size, "7x7");
+        assert_eq!(lb.board_height, 7);
+        assert_eq!(lb.board_width, 7);
         assert_eq!(lb.game_type, "Royale");
         assert_eq!(lb.games_per_day, 50);
         assert!(lb.matchmaking_enabled);

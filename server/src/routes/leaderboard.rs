@@ -67,7 +67,7 @@ pub async fn list_leaderboards(
                                     p style="color: #666;" { (lb.description) }
                                 }
                                 div style="display: flex; gap: 8px; flex-wrap: wrap;" {
-                                    span class="badge bg-info text-white" { (lb.board_size) }
+                                    span class="badge bg-info text-white" { (leaderboard::format_board_size(lb.board_width, lb.board_height)) }
                                     span class="badge bg-info text-white" { (lb.game_type) }
                                     @if lb.visibility == Visibility::Private {
                                         span class="badge bg-warning text-dark" { "Private" }
@@ -199,7 +199,7 @@ pub async fn show_leaderboard(
                 }
 
                 div style="margin-bottom: 16px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center;" {
-                    span class="badge bg-info text-white" { (lb.board_size) }
+                    span class="badge bg-info text-white" { (leaderboard::format_board_size(lb.board_width, lb.board_height)) }
                     span class="badge bg-info text-white" { (lb.game_type) }
                     @if lb.visibility == Visibility::Private {
                         span class="badge bg-warning text-dark" { "Private" }
@@ -1000,7 +1000,8 @@ pub async fn leave_leaderboard(
 pub struct CreateLeaderboardForm {
     pub name: String,
     pub description: String,
-    pub board_size: String,
+    pub board_height: i32,
+    pub board_width: i32,
     pub game_type: String,
     pub visibility: String,
 }
@@ -1040,11 +1041,19 @@ pub async fn new_leaderboard(
                         textarea id="description" name="description" class="form-control" rows="3" {}
                     }
                     div style="margin-bottom: 16px;" {
-                        label for="board_size" { "Board Size" }
-                        select id="board_size" name="board_size" class="form-control" {
-                            option value="7x7" { "7x7" }
-                            option value="11x11" selected { "11x11" }
-                            option value="19x19" { "19x19" }
+                        label for="board_height" { "Board Height" }
+                        select id="board_height" name="board_height" class="form-control" {
+                            option value="7" { "7" }
+                            option value="11" selected { "11" }
+                            option value="19" { "19" }
+                        }
+                    }
+                    div style="margin-bottom: 16px;" {
+                        label for="board_width" { "Board Width" }
+                        select id="board_width" name="board_width" class="form-control" {
+                            option value="7" { "7" }
+                            option value="11" selected { "11" }
+                            option value="19" { "19" }
                         }
                     }
                     div style="margin-bottom: 16px;" {
@@ -1102,9 +1111,22 @@ pub async fn create_leaderboard_handler(
         ));
     }
 
-    if !leaderboard::is_valid_board_size(&form.board_size) {
+    if !leaderboard::is_valid_board_dimension(form.board_height) {
         return Err(crate::errors::ServerError(
-            color_eyre::eyre::eyre!("Invalid board size: {}", form.board_size),
+            color_eyre::eyre::eyre!(
+                "Invalid board height: {}. Must be 7, 11, or 19",
+                form.board_height
+            ),
+            redirect,
+        ));
+    }
+
+    if !leaderboard::is_valid_board_dimension(form.board_width) {
+        return Err(crate::errors::ServerError(
+            color_eyre::eyre::eyre!(
+                "Invalid board width: {}. Must be 7, 11, or 19",
+                form.board_width
+            ),
             redirect,
         ));
     }
@@ -1125,7 +1147,8 @@ pub async fn create_leaderboard_handler(
         form.name.trim(),
         &form.description,
         &visibility,
-        &form.board_size,
+        form.board_height,
+        form.board_width,
         &form.game_type,
     )
     .await
@@ -1190,10 +1213,18 @@ pub async fn manage_leaderboard(
                             textarea id="description" name="description" class="form-control" rows="2" { (lb.description) }
                         }
                         div style="margin-bottom: 12px;" {
-                            label for="board_size" { "Board Size" }
-                            select id="board_size" name="board_size" class="form-control" {
-                                @for size in &["7x7", "11x11", "19x19"] {
-                                    option value=(size) selected[*size == lb.board_size] { (size) }
+                            label for="board_height" { "Board Height" }
+                            select id="board_height" name="board_height" class="form-control" {
+                                @for dim in &[7, 11, 19] {
+                                    option value=(dim) selected[*dim == lb.board_height] { (dim) }
+                                }
+                            }
+                        }
+                        div style="margin-bottom: 12px;" {
+                            label for="board_width" { "Board Width" }
+                            select id="board_width" name="board_width" class="form-control" {
+                                @for dim in &[7, 11, 19] {
+                                    option value=(dim) selected[*dim == lb.board_width] { (dim) }
                                 }
                             }
                         }
@@ -1388,9 +1419,16 @@ pub async fn update_leaderboard_handler(
         ));
     }
 
-    if !leaderboard::is_valid_board_size(&form.board_size) {
+    if !leaderboard::is_valid_board_dimension(form.board_height) {
         return Err(crate::errors::ServerError(
-            color_eyre::eyre::eyre!("Invalid board size"),
+            color_eyre::eyre::eyre!("Invalid board height"),
+            redirect,
+        ));
+    }
+
+    if !leaderboard::is_valid_board_dimension(form.board_width) {
+        return Err(crate::errors::ServerError(
+            color_eyre::eyre::eyre!("Invalid board width"),
             redirect,
         ));
     }
@@ -1411,7 +1449,8 @@ pub async fn update_leaderboard_handler(
         form.name.trim(),
         &form.description,
         &visibility,
-        &form.board_size,
+        form.board_height,
+        form.board_width,
         &form.game_type,
     )
     .await
@@ -1670,37 +1709,36 @@ pub async fn decline_enrollment_request(
 
 #[cfg(test)]
 mod custom_leaderboard_tests {
-    use crate::models::leaderboard::{is_valid_board_size, is_valid_game_type};
+    use crate::models::leaderboard::{is_valid_board_dimension, is_valid_game_type};
 
     #[test]
-    fn test_valid_board_sizes_accepted() {
+    fn test_valid_board_dimensions_accepted() {
         assert!(
-            is_valid_board_size("7x7"),
-            "7x7 should be a valid board size"
+            is_valid_board_dimension(7),
+            "7 should be a valid board dimension"
         );
         assert!(
-            is_valid_board_size("11x11"),
-            "11x11 should be a valid board size"
+            is_valid_board_dimension(11),
+            "11 should be a valid board dimension"
         );
         assert!(
-            is_valid_board_size("19x19"),
-            "19x19 should be a valid board size"
+            is_valid_board_dimension(19),
+            "19 should be a valid board dimension"
         );
     }
 
     #[test]
-    fn test_invalid_board_sizes_rejected() {
+    fn test_invalid_board_dimensions_rejected() {
         assert!(
-            !is_valid_board_size("5x5"),
-            "5x5 is not a supported board size"
+            !is_valid_board_dimension(5),
+            "5 is not a supported board dimension"
         );
         assert!(
-            !is_valid_board_size(""),
-            "empty string is not a valid board size"
+            !is_valid_board_dimension(0),
+            "0 is not a valid board dimension"
         );
-        assert!(!is_valid_board_size("large"), "text aliases are not valid");
-        assert!(!is_valid_board_size("11x11x11"), "3D board is not valid");
-        assert!(!is_valid_board_size("0x0"), "zero board is not valid");
+        assert!(!is_valid_board_dimension(13), "13 is not a valid dimension");
+        assert!(!is_valid_board_dimension(-1), "negative is not valid");
     }
 
     #[test]
@@ -1770,12 +1808,14 @@ mod custom_leaderboard_tests {
         let form = CreateLeaderboardForm {
             name: "My League".to_string(),
             description: "A fun league".to_string(),
-            board_size: "11x11".to_string(),
+            board_height: 11,
+            board_width: 11,
             game_type: "Standard".to_string(),
             visibility: "public".to_string(),
         };
         assert!(!form.name.is_empty());
-        assert!(is_valid_board_size(&form.board_size));
+        assert!(is_valid_board_dimension(form.board_height));
+        assert!(is_valid_board_dimension(form.board_width));
         assert!(is_valid_game_type(&form.game_type));
     }
 
