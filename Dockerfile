@@ -37,11 +37,12 @@ RUN mkdir -p server/src/bin server/src/cli mock-github-oauth/src rules/src && \
 RUN VERGEN_IDEMPOTENT=1 cargo build --release --package arena
 
 # Remove dummy files
-RUN rm -rf server/src
+RUN rm -rf server/src rules/src
 
-# Copy actual source code (only arena, not mock-github-oauth)
+# Copy actual source code (only arena and rules, not mock-github-oauth)
 COPY server/src ./server/src
 COPY server/static ./server/static
+COPY rules/src ./rules/src
 COPY migrations ./migrations
 COPY .sqlx ./.sqlx
 
@@ -51,8 +52,8 @@ COPY .git ./.git
 # Set SQLX offline mode
 ENV SQLX_OFFLINE=true
 
-# Touch the main.rs to ensure rebuild with actual source
-RUN touch server/src/main.rs
+# Touch source files to ensure rebuild with actual source
+RUN touch server/src/main.rs rules/src/lib.rs
 
 # Build the application (with real git info from .git)
 RUN cargo build --release --package arena
