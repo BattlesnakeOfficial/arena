@@ -165,3 +165,51 @@ pub enum RulesError {
 pub const SNAKE_MAX_HEALTH: i32 = 100;
 pub const SNAKE_START_SIZE: usize = 3;
 pub const BOARD_SIZE_MEDIUM: i32 = 11;
+
+/// Test helpers for constructing game state.
+///
+/// Available to all modules' test blocks via `use crate::types::test_helpers::*`.
+#[cfg(test)]
+pub(crate) mod test_helpers {
+    use super::*;
+
+    pub fn make_snake(id: &str, body: &[(i32, i32)], health: i32) -> Snake {
+        Snake {
+            id: id.to_string(),
+            body: body.iter().map(|(x, y)| Point::new(*x, *y)).collect(),
+            health,
+            eliminated_cause: EliminationCause::NotEliminated,
+            eliminated_by: String::new(),
+            eliminated_on_turn: 0,
+        }
+    }
+
+    pub fn make_board(width: i32, height: i32, snakes: Vec<Snake>) -> BoardState {
+        BoardState {
+            turn: 0,
+            width,
+            height,
+            food: Vec::new(),
+            snakes,
+            hazards: Vec::new(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Port of Go `TestGetDistanceBetweenPoints`
+    #[test]
+    fn test_distance_between_points() {
+        assert_eq!(Point::new(0, 0).manhattan_distance(Point::new(0, 0)), 0);
+        assert_eq!(Point::new(0, 0).manhattan_distance(Point::new(1, 0)), 1);
+        assert_eq!(Point::new(0, 0).manhattan_distance(Point::new(0, 1)), 1);
+        assert_eq!(Point::new(0, 0).manhattan_distance(Point::new(1, 1)), 2);
+        assert_eq!(Point::new(0, 0).manhattan_distance(Point::new(5, 5)), 10);
+        assert_eq!(Point::new(3, 4).manhattan_distance(Point::new(7, 2)), 6);
+        // Negative coords
+        assert_eq!(Point::new(-1, -1).manhattan_distance(Point::new(1, 1)), 4);
+    }
+}
