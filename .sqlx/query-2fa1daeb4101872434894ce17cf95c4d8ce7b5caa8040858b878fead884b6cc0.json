@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id)\n         VALUES ($1, $2)\n         RETURNING\n            leaderboard_entry_id, leaderboard_id, battlesnake_id,\n            mu, sigma, display_score, games_played, first_place_finishes, non_first_finishes,\n            disabled_at, created_at, updated_at",
+  "query": "INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id)\n         VALUES ($1, $2)\n         ON CONFLICT (leaderboard_id, battlesnake_id) DO UPDATE\n            SET updated_at = NOW()\n         RETURNING\n            leaderboard_entry_id, leaderboard_id, battlesnake_id,\n            mu, sigma, display_score, games_played, first_place_finishes, non_first_finishes,\n            disabled_at, created_at, updated_at",
   "describe": {
     "columns": [
       {
@@ -85,5 +85,5 @@
       false
     ]
   },
-  "hash": "af2ac9240eeaba2d783a3e0d0565e7b877b1e8040765affa97dab8ce9502a61a"
+  "hash": "2fa1daeb4101872434894ce17cf95c4d8ce7b5caa8040858b878fead884b6cc0"
 }

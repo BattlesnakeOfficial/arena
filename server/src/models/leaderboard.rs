@@ -125,8 +125,7 @@ pub async fn get_leaderboard_by_id(
 
 // --- Leaderboard entry queries ---
 
-/// Opt-in a snake to a leaderboard. Always inserts a new entry.
-/// The unique constraint has been removed to allow duplicate entries for stress-testing.
+/// Opt-in a snake to a leaderboard. Returns the existing entry if one already exists.
 pub async fn get_or_create_entry(
     pool: &PgPool,
     leaderboard_id: Uuid,
@@ -136,6 +135,8 @@ pub async fn get_or_create_entry(
         LeaderboardEntry,
         r#"INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id)
          VALUES ($1, $2)
+         ON CONFLICT (leaderboard_id, battlesnake_id) DO UPDATE
+            SET updated_at = NOW()
          RETURNING
             leaderboard_entry_id, leaderboard_id, battlesnake_id,
             mu, sigma, display_score, games_played, first_place_finishes, non_first_finishes,
