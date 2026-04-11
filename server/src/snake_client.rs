@@ -3,14 +3,14 @@
 //! This module handles all HTTP communication with snake servers following
 //! the official Battlesnake API specification.
 
-use battlesnake_game_types::types::Move;
-use battlesnake_game_types::wire_representation::{BattleSnake, Game};
 use reqwest::Client;
+use rules::Direction;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use url::Url;
 
+use crate::engine::EngineGame;
 use crate::wire;
 
 /// Response from a snake's /move endpoint
@@ -25,7 +25,7 @@ pub struct MoveResponse {
 #[derive(Debug, Clone)]
 pub struct MoveResult {
     pub snake_id: String,
-    pub direction: Move,
+    pub direction: Direction,
     pub latency_ms: Option<i64>,
     pub timed_out: bool,
     pub shout: Option<String>,
@@ -36,22 +36,16 @@ pub struct MoveResult {
 /// The Battlesnake API expects the `you` field to be set to the snake
 /// that the request is being sent to.
 fn build_request_for_snake(
-    game: &Game,
-    snake: &BattleSnake,
+    game: &EngineGame,
+    snake_id: &str,
     snake_contexts: &HashMap<String, wire::SnakeContext>,
 ) -> wire::Game {
-    wire::Game::from_engine_game(game, snake, snake_contexts)
+    wire::Game::from_engine_game(game, snake_id, snake_contexts)
 }
 
-/// Parse a direction string into a Move enum
-fn parse_direction(s: &str) -> Option<Move> {
-    match s.to_lowercase().as_str() {
-        "up" => Some(Move::Up),
-        "down" => Some(Move::Down),
-        "left" => Some(Move::Left),
-        "right" => Some(Move::Right),
-        _ => None,
-    }
+/// Parse a direction string into a Direction enum
+fn parse_direction(s: &str) -> Option<Direction> {
+    Direction::from_str_case_insensitive(s)
 }
 
 /// Build a URL for a snake endpoint, properly handling query parameters
@@ -78,13 +72,13 @@ fn build_endpoint_url(base_url: &str, endpoint: &str) -> String {
 pub async fn request_move(
     client: &Client,
     url: &str,
-    game: &Game,
-    snake: &BattleSnake,
+    game: &EngineGame,
+    snake_id: &str,
     timeout: Duration,
-    last_direction: Option<Move>,
+    last_direction: Option<Direction>,
     snake_contexts: &HashMap<String, wire::SnakeContext>,
 ) -> MoveResult {
-    let request_body = build_request_for_snake(game, snake, snake_contexts);
+    let request_body = build_request_for_snake(game, snake_id, snake_contexts);
     let move_url = build_endpoint_url(url, "move");
 
     let start = Instant::now();
@@ -99,9 +93,9 @@ pub async fn request_move(
             match response.json::<MoveResponse>().await {
                 Ok(move_response) => {
                     let direction = parse_direction(&move_response.direction)
-                        .unwrap_or_else(|| last_direction.unwrap_or(Move::Up));
+                        .unwrap_or_else(|| last_direction.unwrap_or(Direction::Up));
                     MoveResult {
-                        snake_id: snake.id.clone(),
+                        snake_id: snake_id.to_string(),
                         direction,
                         latency_ms: Some(elapsed),
                         timed_out: false,
@@ -111,13 +105,13 @@ pub async fn request_move(
                 Err(e) => {
                     // JSON parse error - use fallback
                     tracing::warn!(
-                        snake_id = %snake.id,
+                        snake_id = %snake_id,
                         error = %e,
                         "Failed to parse move response, using fallback"
                     );
                     MoveResult {
-                        snake_id: snake.id.clone(),
-                        direction: last_direction.unwrap_or(Move::Up),
+                        snake_id: snake_id.to_string(),
+                        direction: last_direction.unwrap_or(Direction::Up),
                         latency_ms: Some(elapsed),
                         timed_out: false,
                         shout: None,
@@ -128,13 +122,13 @@ pub async fn request_move(
         Ok(Err(e)) => {
             // Network error - continue in same direction
             tracing::warn!(
-                snake_id = %snake.id,
+                snake_id = %snake_id,
                 error = %e,
                 "Network error calling snake, using fallback"
             );
             MoveResult {
-                snake_id: snake.id.clone(),
-                direction: last_direction.unwrap_or(Move::Up),
+                snake_id: snake_id.to_string(),
+                direction: last_direction.unwrap_or(Direction::Up),
                 latency_ms: None,
                 timed_out: true,
                 shout: None,
@@ -143,13 +137,13 @@ pub async fn request_move(
         Err(_) => {
             // Timeout - continue in same direction
             tracing::warn!(
-                snake_id = %snake.id,
+                snake_id = %snake_id,
                 timeout_ms = timeout.as_millis(),
                 "Snake timed out, using fallback"
             );
             MoveResult {
-                snake_id: snake.id.clone(),
-                direction: last_direction.unwrap_or(Move::Up),
+                snake_id: snake_id.to_string(),
+                direction: last_direction.unwrap_or(Direction::Up),
                 latency_ms: None,
                 timed_out: true,
                 shout: None,
@@ -162,24 +156,24 @@ pub async fn request_move(
 pub async fn request_start(
     client: &Client,
     url: &str,
-    game: &Game,
-    snake: &BattleSnake,
+    game: &EngineGame,
+    snake_id: &str,
     timeout: Duration,
     snake_contexts: &HashMap<String, wire::SnakeContext>,
 ) {
-    let request_body = build_request_for_snake(game, snake, snake_contexts);
+    let request_body = build_request_for_snake(game, snake_id, snake_contexts);
     let start_url = build_endpoint_url(url, "start");
 
     // Fire and forget - ignore result but log errors
     match tokio::time::timeout(timeout, client.post(&start_url).json(&request_body).send()).await {
         Ok(Ok(_)) => {
-            tracing::debug!(snake_id = %snake.id, "Called /start successfully");
+            tracing::debug!(snake_id = %snake_id, "Called /start successfully");
         }
         Ok(Err(e)) => {
-            tracing::warn!(snake_id = %snake.id, error = %e, "Failed to call /start");
+            tracing::warn!(snake_id = %snake_id, error = %e, "Failed to call /start");
         }
         Err(_) => {
-            tracing::warn!(snake_id = %snake.id, "Timeout calling /start");
+            tracing::warn!(snake_id = %snake_id, "Timeout calling /start");
         }
     }
 }
@@ -188,24 +182,24 @@ pub async fn request_start(
 pub async fn request_end(
     client: &Client,
     url: &str,
-    game: &Game,
-    snake: &BattleSnake,
+    game: &EngineGame,
+    snake_id: &str,
     timeout: Duration,
     snake_contexts: &HashMap<String, wire::SnakeContext>,
 ) {
-    let request_body = build_request_for_snake(game, snake, snake_contexts);
+    let request_body = build_request_for_snake(game, snake_id, snake_contexts);
     let end_url = build_endpoint_url(url, "end");
 
     // Fire and forget - ignore result but log errors
     match tokio::time::timeout(timeout, client.post(&end_url).json(&request_body).send()).await {
         Ok(Ok(_)) => {
-            tracing::debug!(snake_id = %snake.id, "Called /end successfully");
+            tracing::debug!(snake_id = %snake_id, "Called /end successfully");
         }
         Ok(Err(e)) => {
-            tracing::warn!(snake_id = %snake.id, error = %e, "Failed to call /end");
+            tracing::warn!(snake_id = %snake_id, error = %e, "Failed to call /end");
         }
         Err(_) => {
-            tracing::warn!(snake_id = %snake.id, "Timeout calling /end");
+            tracing::warn!(snake_id = %snake_id, "Timeout calling /end");
         }
     }
 }
@@ -215,17 +209,17 @@ pub async fn request_end(
 /// Returns a MoveResult for each alive snake.
 pub async fn request_moves_parallel(
     client: &Client,
-    game: &Game,
+    game: &EngineGame,
     snake_urls: &[(String, String)], // (snake_id, url)
     timeout: Duration,
-    last_moves: &HashMap<String, Move>,
+    last_moves: &HashMap<String, Direction>,
     snake_contexts: &HashMap<String, wire::SnakeContext>,
 ) -> Vec<MoveResult> {
     let futures: Vec<_> = game
         .board
         .snakes
         .iter()
-        .filter(|s| s.health > 0)
+        .filter(|s| !s.eliminated_cause.is_eliminated())
         .filter_map(|snake| {
             snake_urls
                 .iter()
@@ -236,7 +230,7 @@ pub async fn request_moves_parallel(
                         client,
                         url,
                         game,
-                        snake,
+                        &snake.id,
                         timeout,
                         last_direction,
                         snake_contexts,
@@ -251,7 +245,7 @@ pub async fn request_moves_parallel(
 /// Call /start for all snakes in parallel
 pub async fn request_start_parallel(
     client: &Client,
-    game: &Game,
+    game: &EngineGame,
     snake_urls: &[(String, String)],
     timeout: Duration,
     snake_contexts: &HashMap<String, wire::SnakeContext>,
@@ -264,7 +258,9 @@ pub async fn request_start_parallel(
             snake_urls
                 .iter()
                 .find(|(id, _)| id == &snake.id)
-                .map(|(_, url)| request_start(client, url, game, snake, timeout, snake_contexts))
+                .map(|(_, url)| {
+                    request_start(client, url, game, &snake.id, timeout, snake_contexts)
+                })
         })
         .collect();
 
@@ -274,7 +270,7 @@ pub async fn request_start_parallel(
 /// Call /end for all snakes in parallel
 pub async fn request_end_parallel(
     client: &Client,
-    game: &Game,
+    game: &EngineGame,
     snake_urls: &[(String, String)],
     timeout: Duration,
     snake_contexts: &HashMap<String, wire::SnakeContext>,
@@ -287,7 +283,7 @@ pub async fn request_end_parallel(
             snake_urls
                 .iter()
                 .find(|(id, _)| id == &snake.id)
-                .map(|(_, url)| request_end(client, url, game, snake, timeout, snake_contexts))
+                .map(|(_, url)| request_end(client, url, game, &snake.id, timeout, snake_contexts))
         })
         .collect();
 
@@ -368,9 +364,7 @@ pub async fn request_info_parallel(
 mod tests {
     use super::*;
     use crate::wire;
-    use battlesnake_game_types::wire_representation::{Board, NestedGame, Position, Ruleset};
     use proptest::prelude::*;
-    use std::collections::VecDeque;
 
     #[test]
     fn test_build_endpoint_url_simple() {
@@ -425,58 +419,52 @@ mod tests {
         );
     }
 
-    fn create_test_snake(id: &str) -> BattleSnake {
-        BattleSnake {
-            id: id.to_string(),
-            name: format!("Snake {}", id),
-            head: Position::new(5, 5),
-            body: VecDeque::from([
-                Position::new(5, 5),
-                Position::new(5, 4),
-                Position::new(5, 3),
-            ]),
-            health: 100,
-            shout: None,
-            actual_length: None,
-        }
-    }
+    fn create_test_engine_game_with_snakes(snake_ids: Vec<&str>) -> EngineGame {
+        use rules::{BoardState, EliminationCause, Point, Snake, StandardSettings};
 
-    fn create_test_game_with_snakes(snakes: Vec<BattleSnake>) -> Game {
-        let you = snakes
-            .first()
-            .cloned()
-            .unwrap_or_else(|| create_test_snake("default"));
-        Game {
-            you,
-            board: Board {
-                height: 11,
+        let snakes: Vec<Snake> = snake_ids
+            .iter()
+            .map(|id| Snake {
+                id: id.to_string(),
+                body: vec![Point::new(5, 5), Point::new(5, 4), Point::new(5, 3)],
+                health: 100,
+                eliminated_cause: EliminationCause::NotEliminated,
+                eliminated_by: String::new(),
+                eliminated_on_turn: 0,
+            })
+            .collect();
+
+        let mut snake_names = std::collections::HashMap::new();
+        for id in &snake_ids {
+            snake_names.insert(id.to_string(), format!("Snake {}", id));
+        }
+
+        EngineGame {
+            board: BoardState {
+                turn: 5,
                 width: 11,
-                food: vec![Position::new(3, 3)],
+                height: 11,
+                food: vec![Point::new(3, 3)],
                 snakes,
                 hazards: vec![],
             },
-            turn: 5,
-            game: NestedGame {
-                id: "test-game".to_string(),
-                ruleset: Ruleset {
-                    name: "standard".to_string(),
-                    version: "v1.0.0".to_string(),
-                    settings: None,
-                },
+            meta: crate::engine::GameMeta {
+                game_id: "test-game".to_string(),
+                ruleset_name: "standard".to_string(),
                 timeout: 500,
-                map: None,
-                source: None,
+                settings: StandardSettings::default(),
             },
+            snake_names,
         }
     }
 
     #[test]
     fn test_parse_direction() {
-        assert_eq!(parse_direction("up"), Some(Move::Up));
-        assert_eq!(parse_direction("UP"), Some(Move::Up));
-        assert_eq!(parse_direction("Down"), Some(Move::Down));
-        assert_eq!(parse_direction("left"), Some(Move::Left));
-        assert_eq!(parse_direction("RIGHT"), Some(Move::Right));
+        assert_eq!(parse_direction("up"), Some(Direction::Up));
+        assert_eq!(parse_direction("UP"), Some(Direction::Up));
+        assert_eq!(parse_direction("Down"), Some(Direction::Down));
+        assert_eq!(parse_direction("left"), Some(Direction::Left));
+        assert_eq!(parse_direction("RIGHT"), Some(Direction::Right));
         assert_eq!(parse_direction("invalid"), None);
         assert_eq!(parse_direction(""), None);
     }
@@ -485,14 +473,14 @@ mod tests {
     fn test_move_result_clone() {
         let result = MoveResult {
             snake_id: "test".to_string(),
-            direction: Move::Up,
+            direction: Direction::Up,
             latency_ms: Some(100),
             timed_out: false,
             shout: Some("hello".to_string()),
         };
         let cloned = result.clone();
         assert_eq!(cloned.snake_id, "test");
-        assert_eq!(cloned.direction, Move::Up);
+        assert_eq!(cloned.direction, Direction::Up);
         assert_eq!(cloned.latency_ms, Some(100));
         assert!(!cloned.timed_out);
         assert_eq!(cloned.shout, Some("hello".to_string()));
@@ -500,13 +488,11 @@ mod tests {
 
     #[test]
     fn test_build_request_for_snake_sets_you_field() {
-        let snake1 = create_test_snake("snake-1");
-        let snake2 = create_test_snake("snake-2");
-        let game = create_test_game_with_snakes(vec![snake1.clone(), snake2.clone()]);
+        let game = create_test_engine_game_with_snakes(vec!["snake-1", "snake-2"]);
         let contexts = HashMap::<String, wire::SnakeContext>::new();
 
         // Build request for snake2 - the `you` field should be snake2
-        let request = build_request_for_snake(&game, &snake2, &contexts);
+        let request = build_request_for_snake(&game, "snake-2", &contexts);
 
         assert_eq!(request.you.id, "snake-2");
         assert_eq!(request.you.name, "Snake snake-2");
@@ -518,11 +504,10 @@ mod tests {
 
     #[test]
     fn test_build_request_for_snake_preserves_board() {
-        let snake1 = create_test_snake("snake-1");
-        let game = create_test_game_with_snakes(vec![snake1.clone()]);
+        let game = create_test_engine_game_with_snakes(vec!["snake-1"]);
         let contexts = HashMap::<String, wire::SnakeContext>::new();
 
-        let request = build_request_for_snake(&game, &snake1, &contexts);
+        let request = build_request_for_snake(&game, "snake-1", &contexts);
 
         // All board properties should be preserved
         assert_eq!(request.board.height, 11);
@@ -550,23 +535,21 @@ mod tests {
 
     #[test]
     fn test_move_response_deserialization_case_sensitivity() {
-        // The API spec says "move" should be lowercase, but snakes might return different cases
         let json = r#"{"move": "LEFT"}"#;
         let response: MoveResponse = serde_json::from_str(json).unwrap();
         assert_eq!(response.direction, "LEFT");
-        // parse_direction handles case normalization
-        assert_eq!(parse_direction(&response.direction), Some(Move::Left));
+        assert_eq!(parse_direction(&response.direction), Some(Direction::Left));
     }
 
     // === Property-based tests ===
 
-    /// Strategy that generates a valid Move variant
-    fn arb_move() -> impl Strategy<Value = Move> {
+    /// Strategy that generates a valid Direction variant
+    fn arb_direction() -> impl Strategy<Value = Direction> {
         prop_oneof![
-            Just(Move::Up),
-            Just(Move::Down),
-            Just(Move::Left),
-            Just(Move::Right),
+            Just(Direction::Up),
+            Just(Direction::Down),
+            Just(Direction::Left),
+            Just(Direction::Right),
         ]
     }
 
@@ -665,7 +648,6 @@ mod tests {
         ) {
             let result = build_endpoint_url(&base, endpoint);
             let result_parsed = Url::parse(&result).unwrap();
-            // Check path portion only (scheme has ://)
             prop_assert!(!result_parsed.path().contains("//"),
                 "Path '{}' should not contain double slashes", result_parsed.path());
         }
@@ -684,14 +666,13 @@ mod tests {
         // -- parse_direction properties --
 
         #[test]
-        fn prop_parse_direction_round_trip(m in arb_move()) {
-            // Display gives lowercase string, parse_direction should round-trip
+        fn prop_parse_direction_round_trip(m in arb_direction()) {
             let s = m.to_string();
             prop_assert_eq!(parse_direction(&s), Some(m));
         }
 
         #[test]
-        fn prop_parse_direction_case_insensitive(m in arb_move()) {
+        fn prop_parse_direction_case_insensitive(m in arb_direction()) {
             let s = m.to_string();
             // Lowercase
             prop_assert_eq!(parse_direction(&s.to_lowercase()), Some(m));
@@ -706,7 +687,6 @@ mod tests {
 
         #[test]
         fn prop_parse_direction_rejects_non_directions(s in "[a-z]{1,10}") {
-            // Filter out the 4 valid directions
             let lower = s.to_lowercase();
             if lower != "up" && lower != "down" && lower != "left" && lower != "right" {
                 prop_assert_eq!(parse_direction(&s), None);
@@ -717,8 +697,6 @@ mod tests {
         fn prop_parse_direction_rejects_empty_and_whitespace(
             padding in "\\s{0,5}"
         ) {
-            // Direction strings with leading/trailing whitespace should fail
-            // (parse_direction does to_lowercase but not trim)
             if !padding.is_empty() {
                 prop_assert_eq!(parse_direction(&format!("{}up", padding)), None);
                 prop_assert_eq!(parse_direction(&format!("up{}", padding)), None);

@@ -102,6 +102,28 @@ impl Direction {
             Direction::Right => (1, 0),
         }
     }
+
+    /// Parse a direction from a case-insensitive string.
+    pub fn from_str_case_insensitive(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "up" => Some(Direction::Up),
+            "down" => Some(Direction::Down),
+            "left" => Some(Direction::Left),
+            "right" => Some(Direction::Right),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for Direction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Direction::Up => write!(f, "up"),
+            Direction::Down => write!(f, "down"),
+            Direction::Left => write!(f, "left"),
+            Direction::Right => write!(f, "right"),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
