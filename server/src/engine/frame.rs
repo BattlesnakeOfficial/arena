@@ -3,9 +3,10 @@
 //! This module converts the internal game state to the PascalCase JSON format
 //! expected by the board viewer.
 
-use battlesnake_game_types::wire_representation::{Game, Position};
+use rules::Point;
 use serde::Serialize;
-use std::collections::VecDeque;
+
+use super::EngineGame;
 
 /// Information about a snake's death
 #[derive(Debug, Clone)]
@@ -17,13 +18,7 @@ pub struct DeathInfo {
     /// The cause of death (e.g., "wall-collision", "head-collision")
     pub cause: String,
     /// The ID of the snake that eliminated this snake (if applicable)
-    /// TODO: Pass eliminated_by from the game engine once head-to-head collision tracking is implemented
     pub eliminated_by: String,
-}
-
-/// Convert a VecDeque of Positions to a Vec of FrameCoords
-fn body_to_coords(body: &VecDeque<Position>) -> Vec<FrameCoord> {
-    body.iter().map(|p| FrameCoord { x: p.x, y: p.y }).collect()
 }
 
 /// Frame data in PascalCase format for the board viewer
@@ -75,8 +70,8 @@ pub struct FrameDeath {
     pub eliminated_by: String,
 }
 
-impl From<Position> for FrameCoord {
-    fn from(pos: Position) -> Self {
+impl From<Point> for FrameCoord {
+    fn from(pos: Point) -> Self {
         FrameCoord { x: pos.x, y: pos.y }
     }
 }
@@ -89,17 +84,17 @@ pub struct SnakeCustomizations {
 
 use crate::snake_client::MoveResult;
 
-/// Convert a Game state to a frame for the board viewer
+/// Convert an EngineGame state to a frame for the board viewer
 ///
 /// Includes latency info from move results when provided.
 pub fn game_to_frame(
-    game: &Game,
+    game: &EngineGame,
     death_info: &[DeathInfo],
     move_results: &[MoveResult],
     customizations: &std::collections::HashMap<String, SnakeCustomizations>,
 ) -> EngineGameFrame {
     EngineGameFrame {
-        turn: game.turn,
+        turn: game.board.turn,
         snakes: game
             .board
             .snakes
@@ -114,7 +109,7 @@ pub fn game_to_frame(
                         eliminated_by: d.eliminated_by.clone(),
                     });
 
-                let (eliminated_cause, eliminated_by) = if s.health <= 0 {
+                let (eliminated_cause, eliminated_by) = if s.eliminated_cause.is_eliminated() {
                     death_info
                         .iter()
                         .find(|d| d.snake_id == s.id)
@@ -144,13 +139,22 @@ pub fn game_to_frame(
                     .iter()
                     .find(|r| r.snake_id == s.id)
                     .and_then(|r| r.shout.clone())
-                    .or_else(|| s.shout.clone())
                     .unwrap_or_default();
+
+                let name = game
+                    .snake_names
+                    .get(&s.id)
+                    .cloned()
+                    .unwrap_or_else(|| s.id.clone());
 
                 FrameSnake {
                     id: s.id.clone(),
-                    name: s.name.clone(),
-                    body: body_to_coords(&s.body),
+                    name,
+                    body: s
+                        .body
+                        .iter()
+                        .map(|p| FrameCoord { x: p.x, y: p.y })
+                        .collect(),
                     health: s.health,
                     color: customizations
                         .get(&s.id)
@@ -219,9 +223,8 @@ fn generate_snake_color(id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use battlesnake_game_types::wire_representation::{
-        BattleSnake, Board, Game, NestedGame, Ruleset,
-    };
+    use crate::engine::GameMeta;
+    use rules::{BoardState, EliminationCause, Snake, StandardSettings};
 
     #[test]
     fn test_frame_coord_serialization() {
@@ -298,7 +301,7 @@ mod tests {
     #[test]
     fn test_game_to_frame_with_death_info() {
         let mut game = create_test_game();
-        game.board.snakes[0].health = 0; // Snake is dead
+        game.board.snakes[0].eliminated_cause = EliminationCause::OutOfBounds;
 
         let death_info = vec![DeathInfo {
             snake_id: "snake-1".to_string(),
@@ -320,7 +323,7 @@ mod tests {
     #[test]
     fn test_game_to_frame_with_eliminated_by() {
         let mut game = create_test_game();
-        game.board.snakes[0].health = 0;
+        game.board.snakes[0].eliminated_cause = EliminationCause::HeadToHeadCollision;
 
         let death_info = vec![DeathInfo {
             snake_id: "snake-1".to_string(),
@@ -340,19 +343,16 @@ mod tests {
     fn test_game_to_frame_multiple_snakes() {
         let mut game = create_test_game();
         // Add a second snake
-        game.board.snakes.push(BattleSnake {
+        game.board.snakes.push(Snake {
             id: "snake-2".to_string(),
-            name: "Second Snake".to_string(),
-            head: Position::new(3, 3),
-            body: VecDeque::from([
-                Position::new(3, 3),
-                Position::new(3, 2),
-                Position::new(3, 1),
-            ]),
+            body: vec![Point::new(3, 3), Point::new(3, 2), Point::new(3, 1)],
             health: 80,
-            shout: None,
-            actual_length: None,
+            eliminated_cause: EliminationCause::NotEliminated,
+            eliminated_by: String::new(),
+            eliminated_on_turn: 0,
         });
+        game.snake_names
+            .insert("snake-2".to_string(), "Second Snake".to_string());
 
         let death_info: Vec<DeathInfo> = vec![];
         let frame = game_to_frame(&game, &death_info, &[], &std::collections::HashMap::new());
@@ -366,7 +366,7 @@ mod tests {
     #[test]
     fn test_game_to_frame_with_food() {
         let mut game = create_test_game();
-        game.board.food = vec![Position::new(5, 5), Position::new(7, 7)];
+        game.board.food = vec![Point::new(5, 5), Point::new(7, 7)];
 
         let frame = game_to_frame(&game, &[], &[], &std::collections::HashMap::new());
 
@@ -380,7 +380,7 @@ mod tests {
     #[test]
     fn test_game_to_frame_with_hazards() {
         let mut game = create_test_game();
-        game.board.hazards = vec![Position::new(0, 0), Position::new(10, 10)];
+        game.board.hazards = vec![Point::new(0, 0), Point::new(10, 10)];
 
         let frame = game_to_frame(&game, &[], &[], &std::collections::HashMap::new());
 
@@ -403,7 +403,7 @@ mod tests {
     #[test]
     fn test_game_to_frame_alive_snake_no_death() {
         let game = create_test_game();
-        // Even if there's death_info for this snake, if health > 0, no eliminated fields
+        // Even if there's death_info for this snake, if not eliminated, no eliminated fields
         let death_info = vec![DeathInfo {
             snake_id: "snake-1".to_string(),
             turn: 5,
@@ -456,13 +456,12 @@ mod tests {
     #[test]
     fn test_game_to_frame_latency_basic() {
         use crate::snake_client::MoveResult;
-        use battlesnake_game_types::types::Move;
 
         let game = create_test_game();
         let death_info: Vec<DeathInfo> = vec![];
         let move_results = vec![MoveResult {
             snake_id: "snake-1".to_string(),
-            direction: Move::Up,
+            direction: rules::Direction::Up,
             latency_ms: Some(42),
             timed_out: false,
             shout: None,
@@ -481,13 +480,12 @@ mod tests {
     #[test]
     fn test_game_to_frame_latency_timeout() {
         use crate::snake_client::MoveResult;
-        use battlesnake_game_types::types::Move;
 
         let game = create_test_game();
         let death_info: Vec<DeathInfo> = vec![];
         let move_results = vec![MoveResult {
             snake_id: "snake-1".to_string(),
-            direction: Move::Up,
+            direction: rules::Direction::Up,
             latency_ms: None,
             timed_out: true,
             shout: None,
@@ -506,13 +504,12 @@ mod tests {
     #[test]
     fn test_game_to_frame_shout_from_move_result() {
         use crate::snake_client::MoveResult;
-        use battlesnake_game_types::types::Move;
 
         let game = create_test_game();
         let death_info: Vec<DeathInfo> = vec![];
         let move_results = vec![MoveResult {
             snake_id: "snake-1".to_string(),
-            direction: Move::Up,
+            direction: rules::Direction::Up,
             latency_ms: Some(100),
             timed_out: false,
             shout: Some("Hello from move!".to_string()),
@@ -530,42 +527,15 @@ mod tests {
     }
 
     #[test]
-    fn test_game_to_frame_fallback_shout() {
-        use crate::snake_client::MoveResult;
-        use battlesnake_game_types::types::Move;
-
-        let game = create_test_game(); // This game has a snake with shout "Hello!"
-        let death_info: Vec<DeathInfo> = vec![];
-        let move_results = vec![MoveResult {
-            snake_id: "snake-1".to_string(),
-            direction: Move::Up,
-            latency_ms: Some(100),
-            timed_out: false,
-            shout: None, // No shout in move result
-        }];
-
-        let frame = game_to_frame(
-            &game,
-            &death_info,
-            &move_results,
-            &std::collections::HashMap::new(),
-        );
-
-        // Should fall back to snake's existing shout
-        assert_eq!(frame.snakes[0].shout, "Hello!");
-    }
-
-    #[test]
     fn test_game_to_frame_no_matching_latency_result() {
         use crate::snake_client::MoveResult;
-        use battlesnake_game_types::types::Move;
 
         let game = create_test_game();
         let death_info: Vec<DeathInfo> = vec![];
         // Move result for a different snake
         let move_results = vec![MoveResult {
             snake_id: "other-snake".to_string(),
-            direction: Move::Down,
+            direction: rules::Direction::Down,
             latency_ms: Some(50),
             timed_out: false,
             shout: None,
@@ -582,46 +552,39 @@ mod tests {
         assert_eq!(frame.snakes[0].latency, "0");
     }
 
-    fn create_test_game() -> Game {
-        let snake = BattleSnake {
+    fn create_test_game() -> EngineGame {
+        let snake = Snake {
             id: "snake-1".to_string(),
-            name: "Test Snake".to_string(),
-            head: Position::new(5, 5),
-            body: VecDeque::from([
-                Position::new(5, 5),
-                Position::new(5, 4),
-                Position::new(5, 3),
-            ]),
+            body: vec![Point::new(5, 5), Point::new(5, 4), Point::new(5, 3)],
             health: 100,
-            shout: Some("Hello!".to_string()),
-            actual_length: None,
+            eliminated_cause: EliminationCause::NotEliminated,
+            eliminated_by: String::new(),
+            eliminated_on_turn: 0,
         };
 
-        Game {
-            you: snake.clone(),
-            board: Board {
-                height: 11,
+        let mut snake_names = std::collections::HashMap::new();
+        snake_names.insert("snake-1".to_string(), "Test Snake".to_string());
+
+        EngineGame {
+            board: BoardState {
+                turn: 0,
                 width: 11,
+                height: 11,
                 food: vec![],
                 snakes: vec![snake],
                 hazards: vec![],
             },
-            turn: 0,
-            game: NestedGame {
-                id: "test-game".to_string(),
-                ruleset: Ruleset {
-                    name: "standard".to_string(),
-                    version: "v1.0.0".to_string(),
-                    settings: None,
-                },
+            meta: GameMeta {
+                game_id: "test-game".to_string(),
+                ruleset_name: "standard".to_string(),
                 timeout: 500,
-                map: None,
-                source: None,
+                settings: StandardSettings::default(),
             },
+            snake_names,
         }
     }
 
-    // === Test scaffold for BS-d6da131bea2c4868: Snake customization support ===
+    // === Snake customization tests ===
 
     #[test]
     fn test_game_to_frame_uses_customizations() {
