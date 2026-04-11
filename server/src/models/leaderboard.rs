@@ -136,7 +136,7 @@ pub async fn get_or_create_entry(
         r#"INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id)
          VALUES ($1, $2)
          ON CONFLICT (leaderboard_id, battlesnake_id) DO UPDATE
-            SET updated_at = NOW()
+            SET disabled_at = NULL, updated_at = NOW()
          RETURNING
             leaderboard_entry_id, leaderboard_id, battlesnake_id,
             mu, sigma, display_score, games_played, first_place_finishes, non_first_finishes,
