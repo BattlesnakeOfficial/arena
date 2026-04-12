@@ -1623,21 +1623,16 @@ pub async fn accept_enrollment_request(
         ));
     }
 
-    leaderboard::update_enrollment_request_status(
-        &state.db,
-        request_id,
-        "accepted",
-    )
-    .await
-    .wrap_err("Failed to accept request")
-    .with_redirect(redirect.clone())?;
+    leaderboard::update_enrollment_request_status(&state.db, request_id, "accepted")
+        .await
+        .wrap_err("Failed to accept request")
+        .with_redirect(redirect.clone())?;
 
     // Upsert: creates entry or re-enables if previously disabled
-    let entry =
-        leaderboard::get_or_create_entry(&state.db, req.leaderboard_id, req.battlesnake_id)
-            .await
-            .wrap_err("Failed to create entry")
-            .with_redirect(redirect.clone())?;
+    let entry = leaderboard::get_or_create_entry(&state.db, req.leaderboard_id, req.battlesnake_id)
+        .await
+        .wrap_err("Failed to create entry")
+        .with_redirect(redirect.clone())?;
 
     for algo in state.scoring.algorithms() {
         algo.initialize_entry(&state.db, entry.leaderboard_entry_id)
@@ -1693,14 +1688,10 @@ pub async fn decline_enrollment_request(
         ));
     }
 
-    leaderboard::update_enrollment_request_status(
-        &state.db,
-        request_id,
-        "declined",
-    )
-    .await
-    .wrap_err("Failed to decline request")
-    .with_redirect(redirect.clone())?;
+    leaderboard::update_enrollment_request_status(&state.db, request_id, "declined")
+        .await
+        .wrap_err("Failed to decline request")
+        .with_redirect(redirect.clone())?;
 
     Ok(redirect)
 }
