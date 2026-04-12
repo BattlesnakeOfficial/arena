@@ -1,0 +1,100 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE leaderboards\n         SET name = $2, description = $3, visibility = $4, board_height = $5, board_width = $6, game_type = $7, updated_at = NOW()\n         WHERE leaderboard_id = $1\n         RETURNING leaderboard_id, name,\n                   creator_user_id, description,\n                   visibility as \"visibility: Visibility\",\n                   board_height, board_width, game_type,\n                   matchmaking_enabled, games_per_day,\n                   disabled_at, created_at, updated_at",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "leaderboard_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "creator_user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "description",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "visibility: Visibility",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "board_height",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 6,
+        "name": "board_width",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 7,
+        "name": "game_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "matchmaking_enabled",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 9,
+        "name": "games_per_day",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 10,
+        "name": "disabled_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 11,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 12,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Int4",
+        "Int4",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "4241be86f1591f9d4ac54827aa567949c9c4917fcdb07d910765cef8158b48f4"
+}

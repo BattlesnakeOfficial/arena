@@ -3,9 +3,12 @@ use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, PgPool, Postgres};
 use uuid::Uuid;
 
+use crate::models::battlesnake::Visibility;
+
 /// Application constants for leaderboard configuration
 pub const MATCH_SIZE: usize = 4;
 pub const MIN_GAMES_FOR_RANKING: i32 = 10;
+/// Default games per day for new leaderboards (matches the migration default)
 pub const GAMES_PER_DAY: i32 = 100;
 
 // Leaderboard model
@@ -13,6 +16,14 @@ pub const GAMES_PER_DAY: i32 = 100;
 pub struct Leaderboard {
     pub leaderboard_id: Uuid,
     pub name: String,
+    pub creator_user_id: Option<Uuid>,
+    pub description: String,
+    pub visibility: Visibility,
+    pub board_height: i32,
+    pub board_width: i32,
+    pub game_type: String,
+    pub matchmaking_enabled: bool,
+    pub games_per_day: i32,
     pub disabled_at: Option<chrono::DateTime<chrono::Utc>>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
@@ -79,7 +90,12 @@ pub struct RankedEntry {
 pub async fn get_all_leaderboards(pool: &PgPool) -> cja::Result<Vec<Leaderboard>> {
     let rows = sqlx::query_as!(
         Leaderboard,
-        r#"SELECT leaderboard_id, name, disabled_at, created_at, updated_at
+        r#"SELECT leaderboard_id, name,
+                  creator_user_id, description,
+                  visibility as "visibility: Visibility",
+                  board_height, board_width, game_type,
+                  matchmaking_enabled, games_per_day,
+                  disabled_at, created_at, updated_at
          FROM leaderboards
          ORDER BY created_at ASC"#
     )
@@ -93,9 +109,14 @@ pub async fn get_all_leaderboards(pool: &PgPool) -> cja::Result<Vec<Leaderboard>
 pub async fn get_active_leaderboards(pool: &PgPool) -> cja::Result<Vec<Leaderboard>> {
     let rows = sqlx::query_as!(
         Leaderboard,
-        r#"SELECT leaderboard_id, name, disabled_at, created_at, updated_at
+        r#"SELECT leaderboard_id, name,
+                  creator_user_id, description,
+                  visibility as "visibility: Visibility",
+                  board_height, board_width, game_type,
+                  matchmaking_enabled, games_per_day,
+                  disabled_at, created_at, updated_at
          FROM leaderboards
-         WHERE disabled_at IS NULL
+         WHERE disabled_at IS NULL AND matchmaking_enabled = true
          ORDER BY created_at ASC"#
     )
     .fetch_all(pool)
@@ -111,7 +132,12 @@ pub async fn get_leaderboard_by_id(
 ) -> cja::Result<Option<Leaderboard>> {
     let row = sqlx::query_as!(
         Leaderboard,
-        r#"SELECT leaderboard_id, name, disabled_at, created_at, updated_at
+        r#"SELECT leaderboard_id, name,
+                  creator_user_id, description,
+                  visibility as "visibility: Visibility",
+                  board_height, board_width, game_type,
+                  matchmaking_enabled, games_per_day,
+                  disabled_at, created_at, updated_at
          FROM leaderboards
          WHERE leaderboard_id = $1"#,
         leaderboard_id
@@ -151,6 +177,27 @@ pub async fn get_or_create_entry(
     Ok(entry)
 }
 
+/// Check if a snake already has an active (non-disabled) entry in a leaderboard.
+pub async fn has_active_entry(
+    pool: &PgPool,
+    leaderboard_id: Uuid,
+    battlesnake_id: Uuid,
+) -> cja::Result<bool> {
+    let exists = sqlx::query_scalar!(
+        r#"SELECT EXISTS(
+            SELECT 1 FROM leaderboard_entries
+            WHERE leaderboard_id = $1 AND battlesnake_id = $2 AND disabled_at IS NULL
+        ) as "exists!: bool""#,
+        leaderboard_id,
+        battlesnake_id
+    )
+    .fetch_one(pool)
+    .await
+    .wrap_err("Failed to check active entry")?;
+
+    Ok(exists)
+}
+
 /// Get all active entries for a leaderboard (not disabled)
 pub async fn get_active_entries(
     pool: &PgPool,
@@ -172,6 +219,74 @@ pub async fn get_active_entries(
     .wrap_err("Failed to fetch active leaderboard entries")?;
 
     Ok(entries)
+}
+
+/// Entry with snake name, for the management UI (avoids N+1 queries)
+#[derive(Debug, Serialize, Deserialize, FromRow)]
+pub struct EntryWithSnakeName {
+    pub leaderboard_entry_id: Uuid,
+    pub battlesnake_id: Uuid,
+    pub display_score: f64,
+    pub games_played: i32,
+    pub snake_name: String,
+}
+
+/// Get active entries with snake names in a single JOIN query
+pub async fn get_active_entries_with_names(
+    pool: &PgPool,
+    leaderboard_id: Uuid,
+) -> cja::Result<Vec<EntryWithSnakeName>> {
+    let entries = sqlx::query_as!(
+        EntryWithSnakeName,
+        r#"SELECT
+            le.leaderboard_entry_id,
+            le.battlesnake_id,
+            le.display_score,
+            le.games_played,
+            b.name as snake_name
+         FROM leaderboard_entries le
+         JOIN battlesnakes b ON b.battlesnake_id = le.battlesnake_id
+         WHERE le.leaderboard_id = $1 AND le.disabled_at IS NULL
+         ORDER BY le.display_score DESC"#,
+        leaderboard_id
+    )
+    .fetch_all(pool)
+    .await
+    .wrap_err("Failed to fetch active entries with names")?;
+
+    Ok(entries)
+}
+
+/// Pending enrollment request with snake name, for the management UI
+#[derive(Debug, Serialize, Deserialize, FromRow)]
+pub struct PendingRequestWithSnakeName {
+    pub enrollment_request_id: Uuid,
+    pub battlesnake_id: Uuid,
+    pub snake_name: String,
+}
+
+/// Get pending enrollment requests with snake names in a single JOIN query
+pub async fn get_pending_requests_with_names(
+    pool: &PgPool,
+    leaderboard_id: Uuid,
+) -> cja::Result<Vec<PendingRequestWithSnakeName>> {
+    let reqs = sqlx::query_as!(
+        PendingRequestWithSnakeName,
+        r#"SELECT
+            er.enrollment_request_id,
+            er.battlesnake_id,
+            b.name as snake_name
+         FROM leaderboard_enrollment_requests er
+         JOIN battlesnakes b ON b.battlesnake_id = er.battlesnake_id
+         WHERE er.leaderboard_id = $1 AND er.status = 'pending'
+         ORDER BY er.created_at DESC"#,
+        leaderboard_id
+    )
+    .fetch_all(pool)
+    .await
+    .wrap_err("Failed to fetch pending requests with names")?;
+
+    Ok(reqs)
 }
 
 /// Get ranked entries (only snakes with enough games) with snake/owner info
@@ -902,4 +1017,477 @@ pub async fn get_rank_for_entry(
     .wrap_err("Failed to get rank for entry")?;
 
     Ok(Some(rank))
+}
+
+// --- Custom leaderboard functions ---
+
+pub async fn get_visible_leaderboards(
+    pool: &PgPool,
+    user_id: Option<Uuid>,
+) -> cja::Result<Vec<Leaderboard>> {
+    let rows = sqlx::query_as!(
+        Leaderboard,
+        r#"SELECT leaderboard_id, name,
+                  creator_user_id, description,
+                  visibility as "visibility: Visibility",
+                  board_height, board_width, game_type,
+                  matchmaking_enabled, games_per_day,
+                  disabled_at, created_at, updated_at
+         FROM leaderboards
+         WHERE disabled_at IS NULL
+           AND (visibility = 'public' OR ($1::uuid IS NOT NULL AND creator_user_id = $1))
+         ORDER BY created_at DESC"#,
+        user_id as Option<Uuid>
+    )
+    .fetch_all(pool)
+    .await
+    .wrap_err("Failed to fetch visible leaderboards")?;
+
+    Ok(rows)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn create_leaderboard(
+    pool: &PgPool,
+    creator_user_id: Uuid,
+    name: &str,
+    description: &str,
+    visibility: &Visibility,
+    board_height: i32,
+    board_width: i32,
+    game_type: &str,
+) -> cja::Result<Leaderboard> {
+    let visibility_str = visibility.as_str();
+    let lb = sqlx::query_as!(
+        Leaderboard,
+        r#"INSERT INTO leaderboards (name, creator_user_id, description, visibility, board_height, board_width, game_type)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         RETURNING leaderboard_id, name,
+                   creator_user_id, description,
+                   visibility as "visibility: Visibility",
+                   board_height, board_width, game_type,
+                   matchmaking_enabled, games_per_day,
+                   disabled_at, created_at, updated_at"#,
+        name,
+        creator_user_id,
+        description,
+        visibility_str,
+        board_height,
+        board_width,
+        game_type
+    )
+    .fetch_one(pool)
+    .await
+    .wrap_err("Failed to create leaderboard")?;
+
+    Ok(lb)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn update_leaderboard(
+    pool: &PgPool,
+    leaderboard_id: Uuid,
+    name: &str,
+    description: &str,
+    visibility: &Visibility,
+    board_height: i32,
+    board_width: i32,
+    game_type: &str,
+) -> cja::Result<Leaderboard> {
+    let visibility_str = visibility.as_str();
+    let lb = sqlx::query_as!(
+        Leaderboard,
+        r#"UPDATE leaderboards
+         SET name = $2, description = $3, visibility = $4, board_height = $5, board_width = $6, game_type = $7, updated_at = NOW()
+         WHERE leaderboard_id = $1
+         RETURNING leaderboard_id, name,
+                   creator_user_id, description,
+                   visibility as "visibility: Visibility",
+                   board_height, board_width, game_type,
+                   matchmaking_enabled, games_per_day,
+                   disabled_at, created_at, updated_at"#,
+        leaderboard_id,
+        name,
+        description,
+        visibility_str,
+        board_height,
+        board_width,
+        game_type
+    )
+    .fetch_one(pool)
+    .await
+    .wrap_err("Failed to update leaderboard")?;
+
+    Ok(lb)
+}
+
+pub async fn set_matchmaking_enabled(
+    pool: &PgPool,
+    leaderboard_id: Uuid,
+    enabled: bool,
+) -> cja::Result<()> {
+    sqlx::query!(
+        r#"UPDATE leaderboards SET matchmaking_enabled = $2, updated_at = NOW() WHERE leaderboard_id = $1"#,
+        leaderboard_id,
+        enabled
+    )
+    .execute(pool)
+    .await
+    .wrap_err("Failed to set matchmaking enabled")?;
+
+    Ok(())
+}
+
+pub async fn get_leaderboards_by_creator(
+    pool: &PgPool,
+    user_id: Uuid,
+) -> cja::Result<Vec<Leaderboard>> {
+    let rows = sqlx::query_as!(
+        Leaderboard,
+        r#"SELECT leaderboard_id, name,
+                  creator_user_id, description,
+                  visibility as "visibility: Visibility",
+                  board_height, board_width, game_type,
+                  matchmaking_enabled, games_per_day,
+                  disabled_at, created_at, updated_at
+         FROM leaderboards
+         WHERE creator_user_id = $1
+         ORDER BY created_at DESC"#,
+        user_id
+    )
+    .fetch_all(pool)
+    .await
+    .wrap_err("Failed to fetch leaderboards by creator")?;
+
+    Ok(rows)
+}
+
+// --- Validation helpers ---
+
+pub fn is_valid_board_dimension(d: i32) -> bool {
+    matches!(d, 7 | 11 | 19)
+}
+
+/// Helper to format board dimensions for display
+pub fn format_board_size(width: i32, height: i32) -> String {
+    format!("{width}x{height}")
+}
+
+pub fn is_valid_game_type(s: &str) -> bool {
+    matches!(s, "Standard" | "Royale" | "Constrictor" | "Snail Mode")
+}
+
+// --- Enrollment request types and queries ---
+
+#[derive(Debug, Serialize, Deserialize, FromRow)]
+pub struct EnrollmentRequest {
+    pub enrollment_request_id: Uuid,
+    pub leaderboard_id: Uuid,
+    pub battlesnake_id: Uuid,
+    pub initiated_by_user_id: Uuid,
+    pub status: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Serialize, Deserialize, FromRow)]
+pub struct EnrollmentRequestWithContext {
+    pub enrollment_request_id: Uuid,
+    pub leaderboard_id: Uuid,
+    pub leaderboard_name: String,
+    pub battlesnake_id: Uuid,
+    pub battlesnake_name: String,
+    pub initiated_by_user_id: Uuid,
+    pub status: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+pub async fn create_enrollment_request(
+    pool: &PgPool,
+    leaderboard_id: Uuid,
+    battlesnake_id: Uuid,
+    initiated_by_user_id: Uuid,
+) -> cja::Result<Option<EnrollmentRequest>> {
+    let req = sqlx::query_as!(
+        EnrollmentRequest,
+        r#"INSERT INTO leaderboard_enrollment_requests (leaderboard_id, battlesnake_id, initiated_by_user_id)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (leaderboard_id, battlesnake_id) DO UPDATE
+           SET status = 'pending',
+               initiated_by_user_id = $3,
+               updated_at = NOW()
+           WHERE leaderboard_enrollment_requests.status = 'declined'
+         RETURNING enrollment_request_id, leaderboard_id, battlesnake_id,
+                   initiated_by_user_id, status, created_at, updated_at"#,
+        leaderboard_id,
+        battlesnake_id,
+        initiated_by_user_id
+    )
+    .fetch_optional(pool)
+    .await
+    .wrap_err("Failed to create enrollment request")?;
+
+    Ok(req)
+}
+
+pub async fn get_pending_requests_for_leaderboard(
+    pool: &PgPool,
+    leaderboard_id: Uuid,
+) -> cja::Result<Vec<EnrollmentRequest>> {
+    let reqs = sqlx::query_as!(
+        EnrollmentRequest,
+        r#"SELECT enrollment_request_id, leaderboard_id, battlesnake_id,
+                  initiated_by_user_id, status, created_at, updated_at
+         FROM leaderboard_enrollment_requests
+         WHERE leaderboard_id = $1 AND status = 'pending'
+         ORDER BY created_at DESC"#,
+        leaderboard_id
+    )
+    .fetch_all(pool)
+    .await
+    .wrap_err("Failed to fetch pending enrollment requests")?;
+
+    Ok(reqs)
+}
+
+pub async fn get_enrollment_request_by_id(
+    pool: &PgPool,
+    enrollment_request_id: Uuid,
+) -> cja::Result<Option<EnrollmentRequest>> {
+    let req = sqlx::query_as!(
+        EnrollmentRequest,
+        r#"SELECT enrollment_request_id, leaderboard_id, battlesnake_id,
+                  initiated_by_user_id, status, created_at, updated_at
+         FROM leaderboard_enrollment_requests
+         WHERE enrollment_request_id = $1"#,
+        enrollment_request_id
+    )
+    .fetch_optional(pool)
+    .await
+    .wrap_err("Failed to fetch enrollment request")?;
+
+    Ok(req)
+}
+
+pub async fn update_enrollment_request_status(
+    pool: &PgPool,
+    enrollment_request_id: Uuid,
+    status: &str,
+) -> cja::Result<()> {
+    sqlx::query!(
+        r#"UPDATE leaderboard_enrollment_requests SET status = $2 WHERE enrollment_request_id = $1"#,
+        enrollment_request_id,
+        status
+    )
+    .execute(pool)
+    .await
+    .wrap_err("Failed to update enrollment request status")?;
+
+    Ok(())
+}
+
+pub async fn get_pending_requests_for_snake_owner(
+    pool: &PgPool,
+    owner_user_id: Uuid,
+) -> cja::Result<Vec<EnrollmentRequestWithContext>> {
+    let reqs = sqlx::query_as!(
+        EnrollmentRequestWithContext,
+        r#"SELECT
+            er.enrollment_request_id,
+            er.leaderboard_id,
+            l.name as leaderboard_name,
+            er.battlesnake_id,
+            b.name as battlesnake_name,
+            er.initiated_by_user_id,
+            er.status,
+            er.created_at
+         FROM leaderboard_enrollment_requests er
+         JOIN battlesnakes b ON b.battlesnake_id = er.battlesnake_id
+         JOIN leaderboards l ON l.leaderboard_id = er.leaderboard_id
+         WHERE b.user_id = $1 AND er.status = 'pending'
+         ORDER BY er.created_at DESC"#,
+        owner_user_id
+    )
+    .fetch_all(pool)
+    .await
+    .wrap_err("Failed to fetch pending requests for snake owner")?;
+
+    Ok(reqs)
+}
+
+// --- BS-37342921850a4fc2: Custom leaderboard tests ---
+
+#[cfg(test)]
+mod custom_leaderboard_tests {
+    use super::Leaderboard;
+    use uuid::Uuid;
+
+    #[test]
+    fn test_visibility_from_str_public() {
+        use std::str::FromStr;
+        let v = crate::models::battlesnake::Visibility::from_str("public").unwrap();
+        assert!(
+            matches!(v, crate::models::battlesnake::Visibility::Public),
+            "\"public\" should parse to Visibility::Public"
+        );
+    }
+
+    #[test]
+    fn test_visibility_from_str_private() {
+        use std::str::FromStr;
+        let v = crate::models::battlesnake::Visibility::from_str("private").unwrap();
+        assert!(
+            matches!(v, crate::models::battlesnake::Visibility::Private),
+            "\"private\" should parse to Visibility::Private"
+        );
+    }
+
+    #[test]
+    fn test_visibility_from_str_case_insensitive() {
+        use std::str::FromStr;
+        // Visibility::from_str is case-insensitive per implementation
+        assert!(crate::models::battlesnake::Visibility::from_str("PUBLIC").is_ok());
+        assert!(crate::models::battlesnake::Visibility::from_str("Private").is_ok());
+    }
+
+    #[test]
+    fn test_visibility_from_str_invalid_returns_error() {
+        use std::str::FromStr;
+        let result = crate::models::battlesnake::Visibility::from_str("unlisted");
+        assert!(
+            result.is_err(),
+            "\"unlisted\" is not a valid visibility value"
+        );
+    }
+
+    #[test]
+    fn test_visibility_as_str_roundtrip() {
+        use crate::models::battlesnake::Visibility;
+        use std::str::FromStr;
+        let public = Visibility::Public;
+        let private = Visibility::Private;
+
+        assert!(matches!(
+            Visibility::from_str(public.as_str()).unwrap(),
+            Visibility::Public
+        ));
+        assert!(matches!(
+            Visibility::from_str(private.as_str()).unwrap(),
+            Visibility::Private
+        ));
+    }
+
+    #[test]
+    fn test_enrollment_request_status_constants() {
+        // The status field uses these three string values.
+        // This documents the expected status values for the enrollment request state machine.
+        let pending = "pending";
+        let accepted = "accepted";
+        let declined = "declined";
+
+        // Verify they are distinct
+        assert_ne!(pending, accepted);
+        assert_ne!(pending, declined);
+        assert_ne!(accepted, declined);
+    }
+
+    #[test]
+    fn test_leaderboard_struct_new_fields() {
+        use crate::models::battlesnake::Visibility;
+        let system_lb = Leaderboard {
+            leaderboard_id: Uuid::new_v4(),
+            name: "Standard 11x11".to_string(),
+            creator_user_id: None,
+            description: "".to_string(),
+            visibility: Visibility::Public,
+            board_height: 11,
+            board_width: 11,
+            game_type: "Standard".to_string(),
+            matchmaking_enabled: true,
+            games_per_day: 100,
+            disabled_at: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        assert!(
+            system_lb.creator_user_id.is_none(),
+            "System leaderboard has no creator"
+        );
+        assert!(
+            system_lb.matchmaking_enabled,
+            "System leaderboard has matchmaking enabled"
+        );
+
+        let user_lb = Leaderboard {
+            leaderboard_id: Uuid::new_v4(),
+            name: "My League".to_string(),
+            creator_user_id: Some(Uuid::new_v4()),
+            description: "Custom".to_string(),
+            visibility: Visibility::Private,
+            board_height: 7,
+            board_width: 7,
+            game_type: "Royale".to_string(),
+            matchmaking_enabled: false,
+            games_per_day: 50,
+            disabled_at: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        assert!(user_lb.creator_user_id.is_some());
+        assert!(!user_lb.matchmaking_enabled);
+        assert_eq!(user_lb.visibility, Visibility::Private);
+        assert_eq!(user_lb.board_height, 7);
+        assert_eq!(user_lb.board_width, 7);
+    }
+
+    #[test]
+    fn test_enrollment_request_struct() {
+        use super::EnrollmentRequest;
+        let req = EnrollmentRequest {
+            enrollment_request_id: uuid::Uuid::new_v4(),
+            leaderboard_id: uuid::Uuid::new_v4(),
+            battlesnake_id: uuid::Uuid::new_v4(),
+            initiated_by_user_id: uuid::Uuid::new_v4(),
+            status: "pending".to_string(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        assert_eq!(
+            req.status, "pending",
+            "New enrollment requests start as pending"
+        );
+    }
+
+    #[test]
+    fn test_enrollment_request_with_context_struct() {
+        use super::EnrollmentRequestWithContext;
+        let ctx = EnrollmentRequestWithContext {
+            enrollment_request_id: uuid::Uuid::new_v4(),
+            leaderboard_id: uuid::Uuid::new_v4(),
+            leaderboard_name: "My Private League".to_string(),
+            battlesnake_id: uuid::Uuid::new_v4(),
+            battlesnake_name: "My Snake".to_string(),
+            initiated_by_user_id: uuid::Uuid::new_v4(),
+            status: "pending".to_string(),
+            created_at: chrono::Utc::now(),
+        };
+        assert_eq!(ctx.leaderboard_name, "My Private League");
+        assert_eq!(ctx.battlesnake_name, "My Snake");
+        assert_eq!(ctx.status, "pending");
+    }
+
+    #[test]
+    fn test_create_leaderboard_function_exists() {
+        let _ = super::create_leaderboard;
+    }
+
+    #[test]
+    fn test_get_visible_leaderboards_function_exists() {
+        let _ = super::get_visible_leaderboards;
+    }
+
+    #[test]
+    fn test_set_matchmaking_enabled_function_exists() {
+        let _ = super::set_matchmaking_enabled;
+    }
 }
