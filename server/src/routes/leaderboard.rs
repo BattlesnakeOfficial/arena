@@ -1626,7 +1626,7 @@ pub async fn accept_enrollment_request(
     leaderboard::update_enrollment_request_status(
         &state.db,
         request_id,
-        leaderboard::EnrollmentRequestStatus::Accepted,
+        "accepted",
     )
     .await
     .wrap_err("Failed to accept request")
@@ -1696,7 +1696,7 @@ pub async fn decline_enrollment_request(
     leaderboard::update_enrollment_request_status(
         &state.db,
         request_id,
-        leaderboard::EnrollmentRequestStatus::Declined,
+        "declined",
     )
     .await
     .wrap_err("Failed to decline request")

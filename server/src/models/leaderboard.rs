@@ -1272,13 +1272,12 @@ pub async fn get_enrollment_request_by_id(
 pub async fn update_enrollment_request_status(
     pool: &PgPool,
     enrollment_request_id: Uuid,
-    status: EnrollmentRequestStatus,
+    status: &str,
 ) -> cja::Result<()> {
-    let status_str = status.as_str();
     sqlx::query!(
         r#"UPDATE leaderboard_enrollment_requests SET status = $2 WHERE enrollment_request_id = $1"#,
         enrollment_request_id,
-        status_str
+        status
     )
     .execute(pool)
     .await
