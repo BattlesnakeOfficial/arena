@@ -82,7 +82,6 @@ impl Direction {
             Direction::Right => (1, 0),
         }
     }
-
 }
 
 impl std::str::FromStr for Direction {

@@ -500,11 +500,7 @@ mod tests {
             ("up", vec![(5, 11), (5, 10), (5, 9)]),
         ] {
             let body_tuples: Vec<(i32, i32)> = body.into_iter().collect();
-            let mut board = make_board(
-                11,
-                11,
-                vec![make_snake("one", &body_tuples, 100)],
-            );
+            let mut board = make_board(11, 11, vec![make_snake("one", &body_tuples, 100)]);
             eliminate_snakes(&mut board).unwrap();
             assert_eq!(
                 board.snakes[0].eliminated_cause,
