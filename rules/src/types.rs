@@ -1,4 +1,4 @@
-/// Board coordinate, matching Go `Point{X, Y int}`.
+/// A 2D coordinate on the game board.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Point {
     pub x: i32,
@@ -10,21 +10,21 @@ impl Point {
         Self { x, y }
     }
 
-    /// Equivalent to Go's `getDistanceBetweenPoints` in `board.go`.
+    /// Manhattan distance between two points.
     pub fn manhattan_distance(self, other: Point) -> i32 {
         (self.x - other.x).abs() + (self.y - other.y).abs()
     }
 }
 
-/// Elimination cause, matching Go constants from `constants.go:22-29`.
+/// Why a snake was eliminated.
 ///
-/// - `NotEliminated` -> `""` (Go `NotEliminated`)
-/// - `OutOfHealth` -> `"out-of-health"` (Go `EliminatedByOutOfHealth`)
-/// - `OutOfBounds` -> `"wall-collision"` (Go `EliminatedByOutOfBounds`)
-/// - `SelfCollision` -> `"snake-self-collision"` (Go `EliminatedBySelfCollision`)
-/// - `Collision` -> `"snake-collision"` (Go `EliminatedByCollision`)
-/// - `HeadToHeadCollision` -> `"head-collision"` (Go `EliminatedByHeadToHeadCollision`)
-/// - `Hazard` -> `"hazard"` (Go `EliminatedByHazard`)
+/// String representations match the wire format used in the Battlesnake API:
+/// - `OutOfHealth` -> `"out-of-health"`
+/// - `OutOfBounds` -> `"wall-collision"`
+/// - `SelfCollision` -> `"snake-self-collision"`
+/// - `Collision` -> `"snake-collision"`
+/// - `HeadToHeadCollision` -> `"head-collision"`
+/// - `Hazard` -> `"hazard"`
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EliminationCause {
     NotEliminated,
@@ -93,7 +93,7 @@ pub enum Direction {
 }
 
 impl Direction {
-    /// Matches Go: Up=(0,1), Down=(0,-1), Left=(-1,0), Right=(1,0).
+    /// Delta for each direction: Up=(0,1), Down=(0,-1), Left=(-1,0), Right=(1,0).
     pub fn to_delta(self) -> (i32, i32) {
         match self {
             Direction::Up => (0, 1),
@@ -132,7 +132,7 @@ pub struct SnakeMove {
     pub direction: Direction,
 }
 
-/// Settings for standard game mode.
+/// Settings for the standard game rules.
 #[derive(Debug, Clone)]
 pub struct StandardSettings {
     /// Percent chance of spawning food each turn (default 15).
@@ -140,8 +140,6 @@ pub struct StandardSettings {
     /// Minimum food on the board (default 1).
     pub minimum_food: i32,
     /// Health damage per hazard tile per turn (default 14).
-    ///
-    /// Go CLI defaults to 14; the arena uses 15 — a known discrepancy.
     pub hazard_damage_per_turn: i32,
 }
 
@@ -166,50 +164,30 @@ pub const SNAKE_MAX_HEALTH: i32 = 100;
 pub const SNAKE_START_SIZE: usize = 3;
 pub const BOARD_SIZE_MEDIUM: i32 = 11;
 
-/// Test helpers for constructing game state.
-///
-/// Available to all modules' test blocks via `use crate::types::test_helpers::*`.
-#[cfg(test)]
-pub(crate) mod test_helpers {
-    use super::*;
-
-    pub fn make_snake(id: &str, body: &[(i32, i32)], health: i32) -> Snake {
-        Snake {
-            id: id.to_string(),
-            body: body.iter().map(|(x, y)| Point::new(*x, *y)).collect(),
-            health,
-            eliminated_cause: EliminationCause::NotEliminated,
-            eliminated_by: String::new(),
-            eliminated_on_turn: 0,
-        }
-    }
-
-    pub fn make_board(width: i32, height: i32, snakes: Vec<Snake>) -> BoardState {
-        BoardState {
-            turn: 0,
-            width,
-            height,
-            food: Vec::new(),
-            snakes,
-            hazards: Vec::new(),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Port of Go `TestGetDistanceBetweenPoints`
     #[test]
-    fn test_distance_between_points() {
+    fn manhattan_distance_same_point() {
         assert_eq!(Point::new(0, 0).manhattan_distance(Point::new(0, 0)), 0);
+    }
+
+    #[test]
+    fn manhattan_distance_adjacent() {
         assert_eq!(Point::new(0, 0).manhattan_distance(Point::new(1, 0)), 1);
         assert_eq!(Point::new(0, 0).manhattan_distance(Point::new(0, 1)), 1);
+    }
+
+    #[test]
+    fn manhattan_distance_diagonal_and_far() {
         assert_eq!(Point::new(0, 0).manhattan_distance(Point::new(1, 1)), 2);
         assert_eq!(Point::new(0, 0).manhattan_distance(Point::new(5, 5)), 10);
         assert_eq!(Point::new(3, 4).manhattan_distance(Point::new(7, 2)), 6);
-        // Negative coords
+    }
+
+    #[test]
+    fn manhattan_distance_negative_coords() {
         assert_eq!(Point::new(-1, -1).manhattan_distance(Point::new(1, 1)), 4);
     }
 }

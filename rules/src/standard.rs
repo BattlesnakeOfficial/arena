@@ -1,7 +1,7 @@
 use crate::board::eliminate_snake;
 use crate::types::*;
 
-/// Go: `GameOverStandard`. 0 or 1 alive snakes = game over.
+/// Check if the game is over (0 or 1 alive snakes remaining).
 pub fn is_game_over(board: &BoardState) -> bool {
     let alive = board
         .snakes
@@ -11,7 +11,7 @@ pub fn is_game_over(board: &BoardState) -> bool {
     alive <= 1
 }
 
-/// Go: `MoveSnakesStandard`.
+/// Move all non-eliminated snakes according to their submitted moves.
 ///
 /// - Empty `moves` slice: no-op (returns `Ok(())`), even if alive snakes exist
 /// - Validates all non-eliminated snakes have non-empty body and a matching move entry
@@ -48,10 +48,10 @@ pub fn move_snakes(board: &mut BoardState, moves: &[SnakeMove]) -> Result<(), Ru
     Ok(())
 }
 
-/// Go: `ReduceSnakeHealthStandard`.
+/// Reduce health of all non-eliminated snakes by 1.
 ///
-/// Health decrements by 1. DO NOT clamp — health can go negative.
-/// Eliminated snakes untouched.
+/// Health decrements by 1. Does NOT clamp -- health can go negative.
+/// Eliminated snakes are untouched.
 pub fn reduce_snake_health(board: &mut BoardState) {
     for snake in &mut board.snakes {
         if snake.eliminated_cause.is_eliminated() {
@@ -61,9 +61,9 @@ pub fn reduce_snake_health(board: &mut BoardState) {
     }
 }
 
-/// Go: `DamageHazardsStandard`.
+/// Apply hazard damage to snakes standing on hazard tiles.
 ///
-/// Iterates EVERY ENTRY in `board.hazards` (including duplicates — stacked hazards
+/// Iterates EVERY ENTRY in `board.hazards` (including duplicates -- stacked hazards
 /// apply N times). For each non-eliminated snake, for each hazard point: if snake's
 /// HEAD matches and no food at that point, apply damage. Clamps health to
 /// `[0, SNAKE_MAX_HEALTH]`. Eliminates with `EliminationCause::Hazard` if health
@@ -95,13 +95,12 @@ pub fn damage_hazards(board: &mut BoardState, settings: &StandardSettings) {
 
             if snake.health == 0 {
                 eliminate_snake(snake, EliminationCause::Hazard, "", board.turn + 1);
-                // Do NOT break — continue inner loop for Go parity
             }
         }
     }
 }
 
-/// Go: `FeedSnakesStandard`.
+/// Feed snakes whose head is on a food tile.
 ///
 /// For each non-eliminated snake whose head is on food:
 ///   - grow: push last body element again (tail duplicate)
@@ -131,10 +130,10 @@ pub fn feed_snakes(board: &mut BoardState) {
     board.food.retain(|f| !eaten.contains(f));
 }
 
-/// Go: `EliminateSnakesStandard`.
+/// Eliminate snakes based on health, boundaries, and collisions.
 ///
-/// Phase 1 — Immediate (natural order): out-of-health, out-of-bounds.
-/// Phase 2 — Deferred collisions: self-collision, body collision, head-to-head.
+/// Phase 1 -- Immediate (natural order): out-of-health, out-of-bounds.
+/// Phase 2 -- Deferred collisions: self-collision, body collision, head-to-head.
 ///
 /// All eliminations use `eliminated_on_turn = board.turn + 1`.
 pub fn eliminate_snakes(board: &mut BoardState) -> Result<(), RulesError> {
@@ -154,7 +153,7 @@ pub fn eliminate_snakes(board: &mut BoardState) -> Result<(), RulesError> {
             continue;
         }
 
-        // Out of bounds — check ALL body segments
+        // Out of bounds -- check ALL body segments
         let out_of_bounds = snake
             .body
             .iter()
@@ -240,7 +239,7 @@ pub fn eliminate_snakes(board: &mut BoardState) -> Result<(), RulesError> {
     Ok(())
 }
 
-/// High-level: execute one turn.
+/// Execute one turn of the standard rules pipeline.
 ///
 /// Returns `true` if the game was already over BEFORE processing (early exit).
 ///
@@ -253,7 +252,7 @@ pub fn eliminate_snakes(board: &mut BoardState) -> Result<(), RulesError> {
 ///   6. `eliminate_snakes`
 ///   7. `board.turn += 1`
 ///
-/// NOTE: food spawning (`maybe_spawn_food`) is NOT in this pipeline — caller
+/// NOTE: food spawning (`maybe_spawn_food`) is NOT in this pipeline -- caller
 /// invokes it after.
 pub fn execute_turn(
     board: &mut BoardState,
@@ -278,12 +277,22 @@ pub fn execute_turn(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::test_helpers::*;
+    use crate::test_utils::{make_board, make_snake};
 
-    /// Port of Go `TestSanity`
     #[test]
-    fn test_sanity() {
-        // Two alive snakes => not game over
+    fn game_over_conditions() {
+        // No snakes = game over
+        assert!(is_game_over(&make_board(11, 11, vec![])));
+
+        // One alive snake = game over
+        let board = make_board(
+            11,
+            11,
+            vec![make_snake("one", &[(5, 5), (5, 4), (5, 3)], 100)],
+        );
+        assert!(is_game_over(&board));
+
+        // Two alive snakes = not game over
         let board = make_board(
             11,
             11,
@@ -294,256 +303,26 @@ mod tests {
         );
         assert!(!is_game_over(&board));
 
-        // Single alive snake => game over (standard rules: <=1 alive)
-        let board2 = make_board(
-            11,
-            11,
-            vec![make_snake("one", &[(5, 5), (5, 4), (5, 3)], 100)],
-        );
-        assert!(is_game_over(&board2));
-
-        // No snakes => game over
-        let board3 = make_board(11, 11, vec![]);
-        assert!(is_game_over(&board3));
-    }
-
-    /// Port of Go `TestStandardCreateNextBoardState` -- parameterized cases.
-    ///
-    /// Tests full turn execution with various scenarios.
-    #[test]
-    fn test_standard_cases() {
-        let settings = StandardSettings::default();
-
-        // "bystander" snake keeps the game alive (>=2 snakes needed)
-        let bystander = make_snake("bystander", &[(0, 0), (0, 1), (0, 2)], 100);
-
-        // Case 1: snake moves and loses health
+        // Two snakes but one eliminated = game over
         let mut board = make_board(
             11,
             11,
             vec![
                 make_snake("one", &[(5, 5), (5, 4), (5, 3)], 100),
-                bystander.clone(),
+                make_snake("two", &[(8, 8), (8, 7), (8, 6)], 100),
             ],
         );
-        let moves = vec![
-            SnakeMove {
-                id: "one".to_string(),
-                direction: Direction::Up,
-            },
-            SnakeMove {
-                id: "bystander".to_string(),
-                direction: Direction::Down,
-            },
-        ];
-        let game_over = execute_turn(&mut board, &moves, &settings).unwrap();
-        assert!(!game_over);
-        assert_eq!(board.snakes[0].health, 99);
-        assert_eq!(board.snakes[0].head(), Point::new(5, 6));
-
-        // Case 2: snake eats food, health restored
-        let mut board = make_board(
-            11,
-            11,
-            vec![
-                make_snake("one", &[(5, 5), (5, 4), (5, 3)], 50),
-                bystander.clone(),
-            ],
-        );
-        board.food.push(Point::new(5, 6));
-        let moves = vec![
-            SnakeMove {
-                id: "one".to_string(),
-                direction: Direction::Up,
-            },
-            SnakeMove {
-                id: "bystander".to_string(),
-                direction: Direction::Down,
-            },
-        ];
-        let game_over = execute_turn(&mut board, &moves, &settings).unwrap();
-        assert!(!game_over);
-        assert_eq!(board.snakes[0].health, 100);
-        // Grew by 1
-        assert_eq!(board.snakes[0].body.len(), 4);
-        assert!(board.food.is_empty());
-
-        // Case 3: snake starves
-        let mut board = make_board(
-            11,
-            11,
-            vec![
-                make_snake("one", &[(5, 5), (5, 4), (5, 3)], 1),
-                bystander.clone(),
-            ],
-        );
-        let moves = vec![
-            SnakeMove {
-                id: "one".to_string(),
-                direction: Direction::Up,
-            },
-            SnakeMove {
-                id: "bystander".to_string(),
-                direction: Direction::Down,
-            },
-        ];
-        let game_over = execute_turn(&mut board, &moves, &settings).unwrap();
-        assert!(!game_over);
-        assert!(board.snakes[0].eliminated_cause.is_eliminated());
-        assert_eq!(
-            board.snakes[0].eliminated_cause,
-            EliminationCause::OutOfHealth
-        );
-
-        // Case 4: snake goes out of bounds
-        let mut board = make_board(
-            11,
-            11,
-            vec![
-                make_snake("one", &[(0, 5), (1, 5), (2, 5)], 100),
-                bystander.clone(),
-            ],
-        );
-        let moves = vec![
-            SnakeMove {
-                id: "one".to_string(),
-                direction: Direction::Left,
-            },
-            SnakeMove {
-                id: "bystander".to_string(),
-                direction: Direction::Down,
-            },
-        ];
-        let game_over = execute_turn(&mut board, &moves, &settings).unwrap();
-        assert!(!game_over);
-        assert_eq!(
-            board.snakes[0].eliminated_cause,
-            EliminationCause::OutOfBounds
-        );
+        eliminate_snake(&mut board.snakes[1], EliminationCause::OutOfHealth, "", 1);
+        assert!(is_game_over(&board));
     }
 
-    /// Port of Go `TestEatingOnLastMove`
     #[test]
-    fn test_eating_on_last_move() {
-        let settings = StandardSettings::default();
-
-        // Snake at health 1, food at next position -- should eat BEFORE elimination
-        // (feed_snakes runs before eliminate_snakes in pipeline)
-        let mut board = make_board(
-            11,
-            11,
-            vec![
-                make_snake("one", &[(5, 5), (5, 4), (5, 3)], 1),
-                make_snake("bystander", &[(0, 0), (0, 1), (0, 2)], 100),
-            ],
-        );
-        board.food.push(Point::new(5, 6));
-        let moves = vec![
-            SnakeMove {
-                id: "one".to_string(),
-                direction: Direction::Up,
-            },
-            SnakeMove {
-                id: "bystander".to_string(),
-                direction: Direction::Down,
-            },
-        ];
-
-        let game_over = execute_turn(&mut board, &moves, &settings).unwrap();
-        assert!(!game_over);
-        // Health reduced to 0, then restored to 100 by feeding
-        assert_eq!(board.snakes[0].health, 100);
-        assert!(!board.snakes[0].eliminated_cause.is_eliminated());
-        assert_eq!(board.snakes[0].body.len(), 4);
-    }
-
-    /// Port of Go `TestHeadToHeadOnFood`
-    #[test]
-    fn test_head_to_head_on_food() {
-        let settings = StandardSettings::default();
-
-        // Two equal-length snakes collide head-to-head on food
-        let mut board = make_board(
-            11,
-            11,
-            vec![
-                make_snake("one", &[(4, 5), (3, 5), (2, 5)], 100),
-                make_snake("two", &[(6, 5), (7, 5), (8, 5)], 100),
-            ],
-        );
-        board.food.push(Point::new(5, 5));
-
-        let moves = vec![
-            SnakeMove {
-                id: "one".to_string(),
-                direction: Direction::Right,
-            },
-            SnakeMove {
-                id: "two".to_string(),
-                direction: Direction::Left,
-            },
-        ];
-
-        let game_over = execute_turn(&mut board, &moves, &settings).unwrap();
-        assert!(!game_over);
-
-        // Both should eat the food (grow + heal) but then die by head-to-head
-        // because equal length (both grew to 4, still equal)
-        assert_eq!(
-            board.snakes[0].eliminated_cause,
-            EliminationCause::HeadToHeadCollision
-        );
-        assert_eq!(
-            board.snakes[1].eliminated_cause,
-            EliminationCause::HeadToHeadCollision
-        );
-        assert!(board.food.is_empty());
-    }
-
-    /// Port of Go `TestRegressionIssue19`
-    ///
-    /// A snake eating food on its last move should survive -- the pipeline order
-    /// ensures feeding happens before elimination.
-    #[test]
-    fn test_regression_issue_19() {
-        let settings = StandardSettings::default();
-
-        let mut board = make_board(
-            11,
-            11,
-            vec![
-                make_snake("one", &[(5, 5), (5, 4), (5, 3)], 1),
-                make_snake("bystander", &[(0, 0), (0, 1), (0, 2)], 100),
-            ],
-        );
-        board.food.push(Point::new(5, 6));
-
-        let moves = vec![
-            SnakeMove {
-                id: "one".to_string(),
-                direction: Direction::Up,
-            },
-            SnakeMove {
-                id: "bystander".to_string(),
-                direction: Direction::Down,
-            },
-        ];
-
-        execute_turn(&mut board, &moves, &settings).unwrap();
-
-        assert!(!board.snakes[0].eliminated_cause.is_eliminated());
-        assert_eq!(board.snakes[0].health, 100);
-    }
-
-    /// Port of Go `TestMoveSnakes`
-    #[test]
-    fn test_move_snakes() {
+    fn move_snakes_basic() {
         let mut board = make_board(
             11,
             11,
             vec![make_snake("one", &[(5, 5), (5, 4), (5, 3)], 100)],
         );
-
         let moves = vec![SnakeMove {
             id: "one".to_string(),
             direction: Direction::Up,
@@ -554,19 +333,17 @@ mod tests {
         assert_eq!(board.snakes[0].body.len(), 3);
         assert_eq!(
             board.snakes[0].body,
-            vec![Point::new(5, 6), Point::new(5, 5), Point::new(5, 4),]
+            vec![Point::new(5, 6), Point::new(5, 5), Point::new(5, 4)]
         );
     }
 
-    /// Port of Go `TestMoveSnakesWrongID`
     #[test]
-    fn test_move_snakes_wrong_id() {
+    fn move_snakes_wrong_id() {
         let mut board = make_board(
             11,
             11,
             vec![make_snake("one", &[(5, 5), (5, 4), (5, 3)], 100)],
         );
-
         let moves = vec![SnakeMove {
             id: "wrong".to_string(),
             direction: Direction::Up,
@@ -580,9 +357,8 @@ mod tests {
         );
     }
 
-    /// Port of Go `TestMoveSnakesNotEnoughMoves`
     #[test]
-    fn test_move_snakes_not_enough_moves() {
+    fn move_snakes_not_enough_moves() {
         let mut board = make_board(
             11,
             11,
@@ -591,7 +367,6 @@ mod tests {
                 make_snake("two", &[(8, 8), (8, 7), (8, 6)], 100),
             ],
         );
-
         let moves = vec![SnakeMove {
             id: "one".to_string(),
             direction: Direction::Up,
@@ -605,15 +380,13 @@ mod tests {
         );
     }
 
-    /// Port of Go `TestMoveSnakesExtraMovesIgnored`
     #[test]
-    fn test_move_snakes_extra_moves_ignored() {
+    fn move_snakes_extra_moves_ignored() {
         let mut board = make_board(
             11,
             11,
             vec![make_snake("one", &[(5, 5), (5, 4), (5, 3)], 100)],
         );
-
         let moves = vec![
             SnakeMove {
                 id: "one".to_string(),
@@ -629,9 +402,8 @@ mod tests {
         assert_eq!(board.snakes[0].head(), Point::new(5, 6));
     }
 
-    /// Port of Go `TestMoveSnakesDefault` -- test all 4 directions.
     #[test]
-    fn test_move_snakes_all_directions() {
+    fn move_snakes_all_directions() {
         let directions = [
             (Direction::Up, (5, 6)),
             (Direction::Down, (5, 4)),
@@ -658,9 +430,20 @@ mod tests {
         }
     }
 
-    /// Port of Go `TestReduceSnakeHealth`
     #[test]
-    fn test_reduce_snake_health() {
+    fn move_snakes_empty_is_noop() {
+        let mut board = make_board(
+            11,
+            11,
+            vec![make_snake("one", &[(5, 5), (5, 4), (5, 3)], 100)],
+        );
+        let original_head = board.snakes[0].head();
+        move_snakes(&mut board, &[]).unwrap();
+        assert_eq!(board.snakes[0].head(), original_head);
+    }
+
+    #[test]
+    fn reduce_health_basic() {
         let mut board = make_board(
             11,
             11,
@@ -678,18 +461,29 @@ mod tests {
         eliminate_snake(&mut board.snakes[1], EliminationCause::OutOfBounds, "", 0);
         reduce_snake_health(&mut board);
         assert_eq!(board.snakes[0].health, 98);
-        assert_eq!(board.snakes[1].health, 49); // unchanged
+        assert_eq!(board.snakes[1].health, 49);
     }
 
-    /// Port of Go `TestSnakeIsOutOfHealth`
     #[test]
-    fn test_snake_is_out_of_health() {
+    fn reduce_health_goes_negative() {
         let mut board = make_board(
             11,
             11,
             vec![make_snake("one", &[(5, 5), (5, 4), (5, 3)], 0)],
         );
+        reduce_snake_health(&mut board);
+        assert_eq!(board.snakes[0].health, -1);
+        reduce_snake_health(&mut board);
+        assert_eq!(board.snakes[0].health, -2);
+    }
 
+    #[test]
+    fn eliminate_out_of_health() {
+        let mut board = make_board(
+            11,
+            11,
+            vec![make_snake("one", &[(5, 5), (5, 4), (5, 3)], 0)],
+        );
         eliminate_snakes(&mut board).unwrap();
         assert_eq!(
             board.snakes[0].eliminated_cause,
@@ -697,56 +491,27 @@ mod tests {
         );
     }
 
-    /// Port of Go `TestSnakeIsOutOfBounds`
     #[test]
-    fn test_snake_is_out_of_bounds() {
-        // Head out of bounds (left)
-        let mut board = make_board(
-            11,
-            11,
-            vec![make_snake("one", &[(-1, 5), (0, 5), (1, 5)], 100)],
-        );
-        eliminate_snakes(&mut board).unwrap();
-        assert_eq!(
-            board.snakes[0].eliminated_cause,
-            EliminationCause::OutOfBounds
-        );
-
-        // Head out of bounds (right)
-        let mut board = make_board(
-            11,
-            11,
-            vec![make_snake("one", &[(11, 5), (10, 5), (9, 5)], 100)],
-        );
-        eliminate_snakes(&mut board).unwrap();
-        assert_eq!(
-            board.snakes[0].eliminated_cause,
-            EliminationCause::OutOfBounds
-        );
-
-        // Head out of bounds (down)
-        let mut board = make_board(
-            11,
-            11,
-            vec![make_snake("one", &[(5, -1), (5, 0), (5, 1)], 100)],
-        );
-        eliminate_snakes(&mut board).unwrap();
-        assert_eq!(
-            board.snakes[0].eliminated_cause,
-            EliminationCause::OutOfBounds
-        );
-
-        // Head out of bounds (up)
-        let mut board = make_board(
-            11,
-            11,
-            vec![make_snake("one", &[(5, 11), (5, 10), (5, 9)], 100)],
-        );
-        eliminate_snakes(&mut board).unwrap();
-        assert_eq!(
-            board.snakes[0].eliminated_cause,
-            EliminationCause::OutOfBounds
-        );
+    fn eliminate_out_of_bounds() {
+        for (label, body) in [
+            ("left", vec![(-1, 5), (0, 5), (1, 5)]),
+            ("right", vec![(11, 5), (10, 5), (9, 5)]),
+            ("down", vec![(5, -1), (5, 0), (5, 1)]),
+            ("up", vec![(5, 11), (5, 10), (5, 9)]),
+        ] {
+            let body_tuples: Vec<(i32, i32)> = body.into_iter().collect();
+            let mut board = make_board(
+                11,
+                11,
+                vec![make_snake("one", &body_tuples, 100)],
+            );
+            eliminate_snakes(&mut board).unwrap();
+            assert_eq!(
+                board.snakes[0].eliminated_cause,
+                EliminationCause::OutOfBounds,
+                "snake should be eliminated going {label}"
+            );
+        }
 
         // Body segment out of bounds (tail hanging off edge)
         let mut board = make_board(
@@ -761,10 +526,8 @@ mod tests {
         );
     }
 
-    /// Port of Go `TestSnakeHasBodyCollidedSelf`
     #[test]
-    fn test_snake_self_collision() {
-        // Snake coiled on itself
+    fn self_collision() {
         let mut board = make_board(
             11,
             11,
@@ -774,7 +537,6 @@ mod tests {
                 100,
             )],
         );
-
         eliminate_snakes(&mut board).unwrap();
         assert_eq!(
             board.snakes[0].eliminated_cause,
@@ -783,32 +545,27 @@ mod tests {
         assert_eq!(board.snakes[0].eliminated_by, "one");
     }
 
-    /// Port of Go `TestSnakeHasBodyCollidedOther`
     #[test]
-    fn test_snake_body_collision() {
+    fn body_collision() {
         let mut board = make_board(
             11,
             11,
             vec![
-                // "one" has head at (5,5), which is on "two"'s body
                 make_snake("one", &[(5, 5), (5, 4), (5, 3)], 100),
                 make_snake("two", &[(5, 6), (5, 5), (5, 4)], 100),
             ],
         );
-
         eliminate_snakes(&mut board).unwrap();
         assert_eq!(
             board.snakes[0].eliminated_cause,
             EliminationCause::Collision
         );
         assert_eq!(board.snakes[0].eliminated_by, "two");
-        // "two" is fine
         assert!(!board.snakes[1].eliminated_cause.is_eliminated());
     }
 
-    /// Port of Go `TestSnakeHasLostHeadToHead`
     #[test]
-    fn test_snake_head_to_head() {
+    fn head_to_head_collision() {
         // Equal length: both eliminated
         let mut board = make_board(
             11,
@@ -846,10 +603,8 @@ mod tests {
         assert!(!board.snakes[1].eliminated_cause.is_eliminated());
     }
 
-    /// Port of Go `TestMaybeEliminateSnakes`
     #[test]
-    fn test_eliminate_snakes() {
-        // Multiple simultaneous eliminations
+    fn multiple_simultaneous_eliminations() {
         let mut board = make_board(
             11,
             11,
@@ -859,7 +614,6 @@ mod tests {
                 make_snake("alive", &[(8, 8), (8, 7), (8, 6)], 100),
             ],
         );
-
         eliminate_snakes(&mut board).unwrap();
         assert_eq!(
             board.snakes[0].eliminated_cause,
@@ -872,13 +626,9 @@ mod tests {
         assert!(!board.snakes[2].eliminated_cause.is_eliminated());
     }
 
-    /// Port of Go `TestMaybeEliminateSnakesPriority`
-    ///
     /// Self-collision takes priority over body collision and head-to-head.
     #[test]
-    fn test_eliminate_snakes_priority() {
-        // Snake "one" has self-collision AND would also collide with "two"
-        // Self-collision should be the cause
+    fn elimination_priority() {
         let mut board = make_board(
             11,
             11,
@@ -887,7 +637,6 @@ mod tests {
                 make_snake("two", &[(5, 5), (4, 5), (3, 5)], 100),
             ],
         );
-
         eliminate_snakes(&mut board).unwrap();
         assert_eq!(
             board.snakes[0].eliminated_cause,
@@ -896,9 +645,8 @@ mod tests {
         assert_eq!(board.snakes[0].eliminated_by, "one");
     }
 
-    /// Port of Go `TestMaybeDamageHazards`
     #[test]
-    fn test_damage_hazards() {
+    fn hazard_damage() {
         let settings = StandardSettings {
             hazard_damage_per_turn: 14,
             ..StandardSettings::default()
@@ -911,9 +659,8 @@ mod tests {
             vec![make_snake("one", &[(5, 5), (5, 4), (5, 3)], 100)],
         );
         board.hazards.push(Point::new(5, 5));
-
         damage_hazards(&mut board, &settings);
-        assert_eq!(board.snakes[0].health, 86); // 100 - 14
+        assert_eq!(board.snakes[0].health, 86);
 
         // Snake head on hazard with food -- no damage
         let mut board = make_board(
@@ -923,9 +670,8 @@ mod tests {
         );
         board.hazards.push(Point::new(5, 5));
         board.food.push(Point::new(5, 5));
-
         damage_hazards(&mut board, &settings);
-        assert_eq!(board.snakes[0].health, 100); // no damage
+        assert_eq!(board.snakes[0].health, 100);
 
         // Snake body on hazard but not head -- no damage
         let mut board = make_board(
@@ -934,31 +680,28 @@ mod tests {
             vec![make_snake("one", &[(5, 5), (5, 4), (5, 3)], 100)],
         );
         board.hazards.push(Point::new(5, 4));
-
         damage_hazards(&mut board, &settings);
-        assert_eq!(board.snakes[0].health, 100); // no damage
+        assert_eq!(board.snakes[0].health, 100);
     }
 
-    /// Port of Go `TestHazardDamagePerTurn`
     #[test]
-    fn test_hazard_damage_per_turn() {
-        // Custom damage per turn
+    fn hazard_damage_stacked_and_lethal() {
         let settings = StandardSettings {
             hazard_damage_per_turn: 50,
             ..StandardSettings::default()
         };
 
+        // Single hazard
         let mut board = make_board(
             11,
             11,
             vec![make_snake("one", &[(5, 5), (5, 4), (5, 3)], 100)],
         );
         board.hazards.push(Point::new(5, 5));
-
         damage_hazards(&mut board, &settings);
         assert_eq!(board.snakes[0].health, 50);
 
-        // Stacked hazards (same coord twice) apply damage twice
+        // Stacked hazards apply damage twice
         let mut board = make_board(
             11,
             11,
@@ -966,12 +709,11 @@ mod tests {
         );
         board.hazards.push(Point::new(5, 5));
         board.hazards.push(Point::new(5, 5));
-
         damage_hazards(&mut board, &settings);
         assert_eq!(board.snakes[0].health, 0);
         assert_eq!(board.snakes[0].eliminated_cause, EliminationCause::Hazard);
 
-        // Damage that would go below 0 clamps to 0
+        // Damage clamps to 0
         let settings = StandardSettings {
             hazard_damage_per_turn: 200,
             ..StandardSettings::default()
@@ -982,15 +724,13 @@ mod tests {
             vec![make_snake("one", &[(5, 5), (5, 4), (5, 3)], 100)],
         );
         board.hazards.push(Point::new(5, 5));
-
         damage_hazards(&mut board, &settings);
         assert_eq!(board.snakes[0].health, 0);
         assert_eq!(board.snakes[0].eliminated_cause, EliminationCause::Hazard);
     }
 
-    /// Port of Go `TestMaybeFeedSnakes`
     #[test]
-    fn test_feed_snakes() {
+    fn feed_snakes_basic() {
         // Snake eats food
         let mut board = make_board(
             11,
@@ -998,10 +738,9 @@ mod tests {
             vec![make_snake("one", &[(5, 5), (5, 4), (5, 3)], 50)],
         );
         board.food.push(Point::new(5, 5));
-
         feed_snakes(&mut board);
         assert_eq!(board.snakes[0].health, 100);
-        assert_eq!(board.snakes[0].body.len(), 4); // grew
+        assert_eq!(board.snakes[0].body.len(), 4);
         assert!(board.food.is_empty());
 
         // Snake not on food -- no change
@@ -1011,7 +750,6 @@ mod tests {
             vec![make_snake("one", &[(5, 5), (5, 4), (5, 3)], 50)],
         );
         board.food.push(Point::new(0, 0));
-
         feed_snakes(&mut board);
         assert_eq!(board.snakes[0].health, 50);
         assert_eq!(board.snakes[0].body.len(), 3);
@@ -1027,7 +765,6 @@ mod tests {
             ],
         );
         board.food.push(Point::new(5, 5));
-
         feed_snakes(&mut board);
         assert_eq!(board.snakes[0].health, 100);
         assert_eq!(board.snakes[0].body.len(), 4);
@@ -1036,72 +773,196 @@ mod tests {
         assert!(board.food.is_empty());
     }
 
-    /// Port of Go `TestIsGameOver`
     #[test]
-    fn test_is_game_over() {
-        // No snakes = game over
-        let board = make_board(11, 11, vec![]);
-        assert!(is_game_over(&board));
+    fn full_turn_move_and_health() {
+        let settings = StandardSettings::default();
+        let bystander = make_snake("bystander", &[(0, 0), (0, 1), (0, 2)], 100);
 
-        // One alive snake = game over
-        let board = make_board(
-            11,
-            11,
-            vec![make_snake("one", &[(5, 5), (5, 4), (5, 3)], 100)],
-        );
-        assert!(is_game_over(&board));
-
-        // Two alive snakes = not game over
-        let board = make_board(
-            11,
-            11,
-            vec![
-                make_snake("one", &[(5, 5), (5, 4), (5, 3)], 100),
-                make_snake("two", &[(8, 8), (8, 7), (8, 6)], 100),
-            ],
-        );
-        assert!(!is_game_over(&board));
-
-        // Two snakes but one eliminated = game over
         let mut board = make_board(
             11,
             11,
             vec![
                 make_snake("one", &[(5, 5), (5, 4), (5, 3)], 100),
-                make_snake("two", &[(8, 8), (8, 7), (8, 6)], 100),
+                bystander.clone(),
             ],
         );
-        eliminate_snake(&mut board.snakes[1], EliminationCause::OutOfHealth, "", 1);
-        assert!(is_game_over(&board));
+        let moves = vec![
+            SnakeMove {
+                id: "one".to_string(),
+                direction: Direction::Up,
+            },
+            SnakeMove {
+                id: "bystander".to_string(),
+                direction: Direction::Down,
+            },
+        ];
+        let game_over = execute_turn(&mut board, &moves, &settings).unwrap();
+        assert!(!game_over);
+        assert_eq!(board.snakes[0].health, 99);
+        assert_eq!(board.snakes[0].head(), Point::new(5, 6));
     }
 
-    /// Empty moves = no-op (distinct from missing move which errors).
     #[test]
-    fn test_move_snakes_empty_moves() {
+    fn full_turn_eating() {
+        let settings = StandardSettings::default();
+        let bystander = make_snake("bystander", &[(0, 0), (0, 1), (0, 2)], 100);
+
         let mut board = make_board(
             11,
             11,
-            vec![make_snake("one", &[(5, 5), (5, 4), (5, 3)], 100)],
+            vec![
+                make_snake("one", &[(5, 5), (5, 4), (5, 3)], 50),
+                bystander.clone(),
+            ],
         );
-        let original_head = board.snakes[0].head();
-
-        move_snakes(&mut board, &[]).unwrap();
-        assert_eq!(board.snakes[0].head(), original_head);
+        board.food.push(Point::new(5, 6));
+        let moves = vec![
+            SnakeMove {
+                id: "one".to_string(),
+                direction: Direction::Up,
+            },
+            SnakeMove {
+                id: "bystander".to_string(),
+                direction: Direction::Down,
+            },
+        ];
+        let game_over = execute_turn(&mut board, &moves, &settings).unwrap();
+        assert!(!game_over);
+        assert_eq!(board.snakes[0].health, 100);
+        assert_eq!(board.snakes[0].body.len(), 4);
+        assert!(board.food.is_empty());
     }
 
-    /// Health can go negative in `reduce_snake_health` -- no clamping.
     #[test]
-    fn test_reduce_snake_health_goes_negative() {
+    fn full_turn_starvation() {
+        let settings = StandardSettings::default();
+        let bystander = make_snake("bystander", &[(0, 0), (0, 1), (0, 2)], 100);
+
         let mut board = make_board(
             11,
             11,
-            vec![make_snake("one", &[(5, 5), (5, 4), (5, 3)], 0)],
+            vec![
+                make_snake("one", &[(5, 5), (5, 4), (5, 3)], 1),
+                bystander.clone(),
+            ],
         );
+        let moves = vec![
+            SnakeMove {
+                id: "one".to_string(),
+                direction: Direction::Up,
+            },
+            SnakeMove {
+                id: "bystander".to_string(),
+                direction: Direction::Down,
+            },
+        ];
+        let game_over = execute_turn(&mut board, &moves, &settings).unwrap();
+        assert!(!game_over);
+        assert!(board.snakes[0].eliminated_cause.is_eliminated());
+        assert_eq!(
+            board.snakes[0].eliminated_cause,
+            EliminationCause::OutOfHealth
+        );
+    }
 
-        reduce_snake_health(&mut board);
-        assert_eq!(board.snakes[0].health, -1);
+    #[test]
+    fn full_turn_out_of_bounds() {
+        let settings = StandardSettings::default();
+        let bystander = make_snake("bystander", &[(0, 0), (0, 1), (0, 2)], 100);
 
-        reduce_snake_health(&mut board);
-        assert_eq!(board.snakes[0].health, -2);
+        let mut board = make_board(
+            11,
+            11,
+            vec![
+                make_snake("one", &[(0, 5), (1, 5), (2, 5)], 100),
+                bystander.clone(),
+            ],
+        );
+        let moves = vec![
+            SnakeMove {
+                id: "one".to_string(),
+                direction: Direction::Left,
+            },
+            SnakeMove {
+                id: "bystander".to_string(),
+                direction: Direction::Down,
+            },
+        ];
+        let game_over = execute_turn(&mut board, &moves, &settings).unwrap();
+        assert!(!game_over);
+        assert_eq!(
+            board.snakes[0].eliminated_cause,
+            EliminationCause::OutOfBounds
+        );
+    }
+
+    /// Eating on the last move: snake at health 1 eats food and survives because
+    /// feeding happens before elimination in the pipeline.
+    #[test]
+    fn eating_on_last_move_survives() {
+        let settings = StandardSettings::default();
+
+        let mut board = make_board(
+            11,
+            11,
+            vec![
+                make_snake("one", &[(5, 5), (5, 4), (5, 3)], 1),
+                make_snake("bystander", &[(0, 0), (0, 1), (0, 2)], 100),
+            ],
+        );
+        board.food.push(Point::new(5, 6));
+        let moves = vec![
+            SnakeMove {
+                id: "one".to_string(),
+                direction: Direction::Up,
+            },
+            SnakeMove {
+                id: "bystander".to_string(),
+                direction: Direction::Down,
+            },
+        ];
+
+        execute_turn(&mut board, &moves, &settings).unwrap();
+        assert_eq!(board.snakes[0].health, 100);
+        assert!(!board.snakes[0].eliminated_cause.is_eliminated());
+        assert_eq!(board.snakes[0].body.len(), 4);
+    }
+
+    /// Two equal-length snakes collide head-to-head on food: both eat (grow/heal)
+    /// but both die because they're still equal length after growing.
+    #[test]
+    fn head_to_head_on_food() {
+        let settings = StandardSettings::default();
+
+        let mut board = make_board(
+            11,
+            11,
+            vec![
+                make_snake("one", &[(4, 5), (3, 5), (2, 5)], 100),
+                make_snake("two", &[(6, 5), (7, 5), (8, 5)], 100),
+            ],
+        );
+        board.food.push(Point::new(5, 5));
+        let moves = vec![
+            SnakeMove {
+                id: "one".to_string(),
+                direction: Direction::Right,
+            },
+            SnakeMove {
+                id: "two".to_string(),
+                direction: Direction::Left,
+            },
+        ];
+
+        execute_turn(&mut board, &moves, &settings).unwrap();
+        assert_eq!(
+            board.snakes[0].eliminated_cause,
+            EliminationCause::HeadToHeadCollision
+        );
+        assert_eq!(
+            board.snakes[1].eliminated_cause,
+            EliminationCause::HeadToHeadCollision
+        );
+        assert!(board.food.is_empty());
     }
 }

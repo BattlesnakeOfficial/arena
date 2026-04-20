@@ -4,7 +4,7 @@ use rand::seq::SliceRandom;
 use crate::board::get_unoccupied_points;
 use crate::types::*;
 
-/// Mid-game food spawning. Go: `maps/standard.go PostUpdateBoard`.
+/// Mid-game food spawning.
 ///
 /// Logic:
 /// 1. If food count < `minimum_food`: spawn `(minimum_food - count)` food
@@ -38,11 +38,7 @@ pub fn maybe_spawn_food(rng: &mut impl Rng, board: &mut BoardState, settings: &S
     }
 }
 
-/// Legacy per-food placement. Go: `board.go PlaceFoodRandomly`.
-///
-/// Calls `get_unoccupied_points(board, false, false)` FRESH for each food
-/// placement (unlike `maybe_spawn_food` which shuffles once). Exists for
-/// test parity.
+/// Place N food at random unoccupied positions, re-checking occupancy after each.
 pub fn place_food_randomly(rng: &mut impl Rng, board: &mut BoardState, n: usize) {
     for _ in 0..n {
         let mut unoccupied = get_unoccupied_points(board, false, false);
@@ -57,38 +53,12 @@ pub fn place_food_randomly(rng: &mut impl Rng, board: &mut BoardState, n: usize)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::test_helpers::*;
+    use crate::test_utils::make_board;
     use rand::SeedableRng;
     use rand::rngs::StdRng;
-    use std::collections::HashSet;
 
-    /// Port of Go `TestPlaceFoodRandomly`
     #[test]
-    fn test_place_food_randomly() {
-        let mut rng = StdRng::seed_from_u64(42);
-        let mut board = BoardState {
-            turn: 0,
-            width: 5,
-            height: 5,
-            food: Vec::new(),
-            snakes: Vec::new(),
-            hazards: Vec::new(),
-        };
-
-        place_food_randomly(&mut rng, &mut board, 3);
-        assert_eq!(board.food.len(), 3);
-
-        // All food should be on the board and unique
-        let food_set: HashSet<Point> = board.food.iter().copied().collect();
-        assert_eq!(food_set.len(), 3);
-        for f in &board.food {
-            assert!(f.x >= 0 && f.x < 5 && f.y >= 0 && f.y < 5);
-        }
-    }
-
-    /// Port of Go `TestMaybeSpawnFoodMinimum`
-    #[test]
-    fn test_spawn_food_minimum() {
+    fn spawn_food_minimum() {
         let settings = StandardSettings {
             minimum_food: 3,
             food_spawn_chance: 0,
@@ -98,18 +68,17 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(42);
         let mut board = make_board(11, 11, vec![]);
 
-        // No food — should spawn up to minimum
+        // No food -- should spawn up to minimum
         maybe_spawn_food(&mut rng, &mut board, &settings);
         assert_eq!(board.food.len(), 3);
 
-        // Already at minimum — no spawn (chance is 0)
+        // Already at minimum -- no spawn (chance is 0)
         maybe_spawn_food(&mut rng, &mut board, &settings);
         assert_eq!(board.food.len(), 3);
     }
 
-    /// Port of Go `TestMaybeSpawnFoodZeroChance`
     #[test]
-    fn test_spawn_food_zero_chance() {
+    fn spawn_food_zero_chance() {
         let settings = StandardSettings {
             food_spawn_chance: 0,
             minimum_food: 0,
@@ -125,12 +94,10 @@ mod tests {
         assert_eq!(board.food.len(), 0);
     }
 
-    /// Port of Go `TestMaybeSpawnFoodHundredChance`
-    ///
     /// `food_spawn_chance=100` is 99% per roll (fails when RNG returns 0).
-    /// Over 100 iterations, expect >= 99 spawns.
+    /// Over 100 iterations, expect >= 95 spawns.
     #[test]
-    fn test_spawn_food_hundred_chance() {
+    fn spawn_food_hundred_chance() {
         let settings = StandardSettings {
             food_spawn_chance: 100,
             minimum_food: 0,
@@ -143,7 +110,6 @@ mod tests {
         for _ in 0..100 {
             maybe_spawn_food(&mut rng, &mut board, &settings);
         }
-        // 99% chance per roll — expect at least 95 in practice
         assert!(
             board.food.len() >= 95,
             "expected >= 95 food spawns, got {}",
@@ -151,9 +117,8 @@ mod tests {
         );
     }
 
-    /// Port of Go `TestMaybeSpawnFoodHalfChance`
     #[test]
-    fn test_spawn_food_half_chance() {
+    fn spawn_food_half_chance() {
         let settings = StandardSettings {
             food_spawn_chance: 50,
             minimum_food: 0,
@@ -167,8 +132,6 @@ mod tests {
             maybe_spawn_food(&mut rng, &mut board, &settings);
         }
 
-        // With 50% chance (actually 49% due to the formula), expect roughly 490
-        // Board is 100x100 so won't saturate. Allow wide range: 350-650.
         let food_count = board.food.len();
         assert!(
             (350..=650).contains(&food_count),

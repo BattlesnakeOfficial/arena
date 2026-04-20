@@ -4,10 +4,7 @@ use std::collections::HashSet;
 
 use crate::types::*;
 
-/// Equivalent to Go's `CreateDefaultBoardState`.
-///
-/// Creates a board with snakes placed at fixed spawn positions and
-/// initial food placed using the fixed algorithm.
+/// Create a default board with snakes at fixed spawn positions and initial food.
 pub fn create_default_board_state(
     rng: &mut impl Rng,
     width: i32,
@@ -29,12 +26,12 @@ pub fn create_default_board_state(
     Ok(board)
 }
 
-/// Equivalent to Go's `isSquareBoard`.
+/// Whether the board is square (width == height).
 pub fn is_square_board(board: &BoardState) -> bool {
     board.width == board.height
 }
 
-/// Equivalent to Go's `EliminateSnake` in `board.go:595`.
+/// Mark a snake as eliminated with the given cause, eliminator ID, and turn.
 pub fn eliminate_snake(snake: &mut Snake, cause: EliminationCause, by: &str, turn: i32) {
     snake.eliminated_cause = cause;
     snake.eliminated_by = by.to_string();
@@ -99,8 +96,6 @@ pub fn get_unoccupied_points(
 }
 
 /// Unoccupied points on even coords (`(x+y) % 2 == 0`).
-///
-/// Calls `get_unoccupied_points(board, true, false)` then filters.
 pub fn get_even_unoccupied_points(board: &BoardState) -> Vec<Point> {
     get_unoccupied_points(board, true, false)
         .into_iter()
@@ -108,7 +103,7 @@ pub fn get_even_unoccupied_points(board: &BoardState) -> Vec<Point> {
         .collect()
 }
 
-/// Place snakes at fixed spawn positions (`PlaceSnakesFixed`).
+/// Place snakes at fixed spawn positions.
 ///
 /// - `mn=1`, `md=(width-1)/2`, `mx=width-2`
 /// - 4 corner points: `(mn,mn), (mn,mx), (mx,mn), (mx,mx)`
@@ -165,10 +160,10 @@ fn place_snakes_fixed(rng: &mut impl Rng, board: &mut BoardState, snake_ids: &[S
     }
 }
 
-/// Place initial food using the fixed algorithm (`PlaceFoodFixed`).
+/// Place initial food using the fixed algorithm.
 ///
 /// Phase 1 — per-snake food (conditional):
-/// - `is_small_board = width * height < BOARD_SIZE_MEDIUM * BOARD_SIZE_MEDIUM` (area 121)
+/// - `is_small_board = width * height < BOARD_SIZE_MEDIUM^2` (area 121)
 /// - If `num_snakes <= 4 || !is_small_board`: place 1 food per snake at a diagonal from head
 /// - If `num_snakes > 4 && is_small_board`: skip per-snake food entirely
 ///
@@ -242,17 +237,16 @@ fn place_food_fixed(rng: &mut impl Rng, board: &mut BoardState) -> Result<(), Ru
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::test_helpers::*;
+    use crate::food::place_food_randomly;
+    use crate::test_utils::make_snake;
     use rand::SeedableRng;
     use rand::rngs::StdRng;
     use std::collections::HashSet;
 
-    /// Port of Go `TestCreateDefaultBoardState`
     #[test]
-    fn test_create_default_board_state() {
+    fn create_default_board_state_basic() {
         let mut rng = StdRng::seed_from_u64(42);
         let ids: Vec<String> = (0..4).map(|i| format!("snake-{i}")).collect();
-
         let board = create_default_board_state(&mut rng, 11, 11, &ids).unwrap();
 
         assert_eq!(board.width, 11);
@@ -264,29 +258,22 @@ mod tests {
         for snake in &board.snakes {
             assert_eq!(snake.health, SNAKE_MAX_HEALTH);
             assert_eq!(snake.body.len(), SNAKE_START_SIZE);
-            // All body segments at same position (stacked at spawn)
             let head = snake.head();
             assert!(snake.body.iter().all(|p| *p == head));
         }
 
-        // Should have food: 4 per-snake + 1 center = 5
-        assert_eq!(board.food.len(), 5);
-        // Center food should be present
+        assert_eq!(board.food.len(), 5); // 4 per-snake + 1 center
         assert!(board.food.contains(&Point::new(5, 5)));
     }
 
-    /// Port of Go `TestPlaceSnakesDefault`
     #[test]
-    fn test_place_snakes_default() {
+    fn place_snakes_unique_positions() {
         let mut rng = StdRng::seed_from_u64(42);
-
         for num_snakes in 1..=8 {
             let ids: Vec<String> = (0..num_snakes).map(|i| format!("snake-{i}")).collect();
             let board = create_default_board_state(&mut rng, 11, 11, &ids).unwrap();
 
             assert_eq!(board.snakes.len(), num_snakes);
-
-            // All spawn positions should be unique
             let positions: HashSet<Point> = board.snakes.iter().map(|s| s.head()).collect();
             assert_eq!(
                 positions.len(),
@@ -296,11 +283,8 @@ mod tests {
         }
     }
 
-    /// Port of Go `TestPlaceSnakesFixed`
-    ///
-    /// Verifies that spawn positions come from the fixed corner/cardinal set.
     #[test]
-    fn test_place_snakes_fixed() {
+    fn place_snakes_at_valid_fixed_positions() {
         let mn = 1;
         let md = 5;
         let mx = 9;
@@ -334,41 +318,26 @@ mod tests {
         }
     }
 
-    /// Port of Go `TestPlaceFood`
-    ///
-    /// Basic test that food is placed during board creation.
     #[test]
-    fn test_place_food() {
+    fn initial_food_placement() {
         let mut rng = StdRng::seed_from_u64(42);
         let ids: Vec<String> = (0..2).map(|i| format!("snake-{i}")).collect();
-
         let board = create_default_board_state(&mut rng, 11, 11, &ids).unwrap();
 
-        // Should have at least 1 food (center) + per-snake food
         assert!(!board.food.is_empty());
-        // 2 snakes + center = 3
-        assert_eq!(board.food.len(), 3);
+        assert_eq!(board.food.len(), 3); // 2 per-snake + center
     }
 
-    /// Port of Go `TestPlaceFoodFixed`
-    ///
-    /// Verifies per-snake food placement follows the diagonal/away-from-center rules.
     #[test]
-    fn test_place_food_fixed() {
+    fn food_placement_not_at_corners() {
         let mut rng = StdRng::seed_from_u64(42);
         let ids: Vec<String> = (0..4).map(|i| format!("snake-{i}")).collect();
-
         let board = create_default_board_state(&mut rng, 11, 11, &ids).unwrap();
         let center = Point::new(5, 5);
 
-        // Center food should be present
         assert!(board.food.contains(&center));
+        assert_eq!(board.food.len(), 5);
 
-        // Per-snake food should be diagonal from head and away from center
-        // (We can't check exact positions due to randomness, but verify food count)
-        assert_eq!(board.food.len(), 5); // 4 per-snake + 1 center
-
-        // No food at the board corners
         let corners = [
             Point::new(0, 0),
             Point::new(0, 10),
@@ -383,38 +352,27 @@ mod tests {
         }
     }
 
-    /// Port of Go `TestPlaceFoodFixedNoRoom`
-    ///
-    /// On a small board with many snakes (>4), per-snake food is skipped.
-    /// If center is occupied, returns error.
     #[test]
-    fn test_place_food_fixed_no_room() {
-        // On a small board with >4 snakes, per-snake food is skipped
-        // 7x7 = 49, which is < 121 (BOARD_SIZE_MEDIUM^2)
+    fn small_board_skips_per_snake_food() {
+        // 7x7 = 49, which is < 121 (area threshold)
         let mut rng = StdRng::seed_from_u64(42);
         let ids: Vec<String> = (0..5).map(|i| format!("snake-{i}")).collect();
-
         let board = create_default_board_state(&mut rng, 7, 7, &ids).unwrap();
         // With >4 snakes on small board, only center food
         assert_eq!(board.food.len(), 1);
         assert!(board.food.contains(&Point::new(3, 3)));
     }
 
-    /// Port of Go `TestDev1235`
-    ///
     /// Regression test: 8 snakes on 11x11 should all get unique positions and food.
     #[test]
-    fn test_dev_1235() {
+    fn eight_snakes_unique_positions_and_food() {
         for seed in 0..50 {
             let mut rng = StdRng::seed_from_u64(seed);
             let ids: Vec<String> = (0..8).map(|i| format!("snake-{i}")).collect();
-
             let board = create_default_board_state(&mut rng, 11, 11, &ids).unwrap();
 
-            // All 8 snakes placed
             assert_eq!(board.snakes.len(), 8);
 
-            // Unique positions
             let positions: HashSet<Point> = board.snakes.iter().map(|s| s.head()).collect();
             assert_eq!(
                 positions.len(),
@@ -422,10 +380,7 @@ mod tests {
                 "seed {seed}: spawn positions should be unique"
             );
 
-            // Food: 8 per-snake + 1 center = 9
             assert_eq!(board.food.len(), 9, "seed {seed}: expected 9 food");
-
-            // Center food
             assert!(
                 board.food.contains(&Point::new(5, 5)),
                 "seed {seed}: missing center food"
@@ -433,10 +388,8 @@ mod tests {
         }
     }
 
-    /// Port of Go `TestGetUnoccupiedPoints`
     #[test]
-    fn test_get_unoccupied_points() {
-        // Empty board
+    fn unoccupied_points_empty_board() {
         let board = BoardState {
             turn: 0,
             width: 3,
@@ -445,11 +398,12 @@ mod tests {
             snakes: Vec::new(),
             hazards: Vec::new(),
         };
-
         let points = get_unoccupied_points(&board, true, false);
-        assert_eq!(points.len(), 9); // 3x3
+        assert_eq!(points.len(), 9);
+    }
 
-        // Board with food
+    #[test]
+    fn unoccupied_points_excludes_food() {
         let board = BoardState {
             turn: 0,
             width: 3,
@@ -458,12 +412,13 @@ mod tests {
             snakes: Vec::new(),
             hazards: Vec::new(),
         };
-
         let points = get_unoccupied_points(&board, true, false);
         assert_eq!(points.len(), 8);
         assert!(!points.contains(&Point::new(1, 1)));
+    }
 
-        // Board with snake
+    #[test]
+    fn unoccupied_points_excludes_snake_body() {
         let board = BoardState {
             turn: 0,
             width: 3,
@@ -472,21 +427,27 @@ mod tests {
             snakes: vec![make_snake("one", &[(0, 0), (0, 1), (0, 2)], 100)],
             hazards: Vec::new(),
         };
-
         let points = get_unoccupied_points(&board, true, false);
         assert_eq!(points.len(), 6);
+    }
 
-        // With include_possible_moves=false, adjacent to head also occupied
+    #[test]
+    fn unoccupied_points_excludes_possible_moves() {
+        let board = BoardState {
+            turn: 0,
+            width: 3,
+            height: 3,
+            food: Vec::new(),
+            snakes: vec![make_snake("one", &[(0, 0), (0, 1), (0, 2)], 100)],
+            hazards: Vec::new(),
+        };
+        // include_possible_moves=false excludes squares adjacent to head
         let points = get_unoccupied_points(&board, false, false);
-        // Head at (0,0), adjacent: (-1,0), (1,0), (0,-1), (0,1)
-        // (-1,0) and (0,-1) are off-board, so only (1,0) and (0,1) are excluded extra
-        // But (0,1) is already body. So only (1,0) is newly excluded.
         assert_eq!(points.len(), 5);
     }
 
-    /// Port of Go `TestGetEvenUnoccupiedPoints`
     #[test]
-    fn test_get_even_unoccupied_points() {
+    fn even_unoccupied_points() {
         let board = BoardState {
             turn: 0,
             width: 3,
@@ -495,7 +456,6 @@ mod tests {
             snakes: Vec::new(),
             hazards: Vec::new(),
         };
-
         let points = get_even_unoccupied_points(&board);
         // Even points where (x+y)%2==0: (0,0),(0,2),(1,1),(2,0),(2,2) = 5
         assert_eq!(points.len(), 5);
@@ -504,10 +464,9 @@ mod tests {
         }
     }
 
-    /// Port of Go `TestIsSquareBoard`
     #[test]
-    fn test_is_square_board() {
-        let board = BoardState {
+    fn square_board_detection() {
+        let square = BoardState {
             turn: 0,
             width: 11,
             height: 11,
@@ -515,9 +474,9 @@ mod tests {
             snakes: Vec::new(),
             hazards: Vec::new(),
         };
-        assert!(is_square_board(&board));
+        assert!(is_square_board(&square));
 
-        let board = BoardState {
+        let rect = BoardState {
             turn: 0,
             width: 7,
             height: 11,
@@ -525,14 +484,12 @@ mod tests {
             snakes: Vec::new(),
             hazards: Vec::new(),
         };
-        assert!(!is_square_board(&board));
+        assert!(!is_square_board(&rect));
     }
 
-    /// Port of Go `TestEliminateSnake`
     #[test]
-    fn test_eliminate_snake_helper() {
+    fn eliminate_snake_sets_fields() {
         let mut snake = make_snake("one", &[(5, 5), (5, 4), (5, 3)], 100);
-
         eliminate_snake(&mut snake, EliminationCause::OutOfHealth, "other", 5);
 
         assert_eq!(snake.eliminated_cause, EliminationCause::OutOfHealth);
@@ -541,35 +498,51 @@ mod tests {
         assert!(snake.eliminated_cause.is_eliminated());
     }
 
-    /// Small board detection uses area, not just width.
     #[test]
-    fn test_small_board_area_detection() {
+    fn place_food_randomly_basic() {
+        let mut rng = StdRng::seed_from_u64(42);
+        let mut board = BoardState {
+            turn: 0,
+            width: 5,
+            height: 5,
+            food: Vec::new(),
+            snakes: Vec::new(),
+            hazards: Vec::new(),
+        };
+
+        place_food_randomly(&mut rng, &mut board, 3);
+        assert_eq!(board.food.len(), 3);
+
+        let food_set: HashSet<Point> = board.food.iter().copied().collect();
+        assert_eq!(food_set.len(), 3);
+        for f in &board.food {
+            assert!(f.x >= 0 && f.x < 5 && f.y >= 0 && f.y < 5);
+        }
+    }
+
+    #[test]
+    fn small_board_area_detection() {
         // 7x7 = 49 < 121 -> small board
         let mut rng = StdRng::seed_from_u64(42);
         let ids: Vec<String> = (0..5).map(|i| format!("snake-{i}")).collect();
         let board = create_default_board_state(&mut rng, 7, 7, &ids).unwrap();
-        // >4 snakes on small board -> no per-snake food, only center
         assert_eq!(board.food.len(), 1);
 
-        // 11x11 = 121, NOT small (< 121 is small)
+        // 11x11 = 121, NOT small
         let mut rng = StdRng::seed_from_u64(42);
         let ids: Vec<String> = (0..5).map(|i| format!("snake-{i}")).collect();
         let board = create_default_board_state(&mut rng, 11, 11, &ids).unwrap();
-        // 5 per-snake + 1 center = 6
         assert_eq!(board.food.len(), 6);
 
         // 7x15 = 105 < 121 -> small
         let mut rng = StdRng::seed_from_u64(42);
         let ids: Vec<String> = (0..5).map(|i| format!("snake-{i}")).collect();
         let board = create_default_board_state(&mut rng, 7, 15, &ids).unwrap();
-        // >4 snakes on small board -> no per-snake food, only center
         assert_eq!(board.food.len(), 1);
     }
 
-    /// Spawn position values: mx = width - 2 (1 cell from edge).
     #[test]
-    fn test_spawn_positions_values() {
-        // For 11x11: mn=1, md=5, mx=9
+    fn spawn_position_values() {
         let valid: HashSet<Point> = [
             Point::new(1, 1),
             Point::new(1, 9),
