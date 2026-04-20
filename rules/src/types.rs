@@ -17,14 +17,6 @@ impl Point {
 }
 
 /// Why a snake was eliminated.
-///
-/// String representations match the wire format used in the Battlesnake API:
-/// - `OutOfHealth` -> `"out-of-health"`
-/// - `OutOfBounds` -> `"wall-collision"`
-/// - `SelfCollision` -> `"snake-self-collision"`
-/// - `Collision` -> `"snake-collision"`
-/// - `HeadToHeadCollision` -> `"head-collision"`
-/// - `Hazard` -> `"hazard"`
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EliminationCause {
     NotEliminated,
@@ -39,18 +31,6 @@ pub enum EliminationCause {
 impl EliminationCause {
     pub fn is_eliminated(&self) -> bool {
         !matches!(self, EliminationCause::NotEliminated)
-    }
-
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            EliminationCause::NotEliminated => "",
-            EliminationCause::OutOfHealth => "out-of-health",
-            EliminationCause::OutOfBounds => "wall-collision",
-            EliminationCause::SelfCollision => "snake-self-collision",
-            EliminationCause::Collision => "snake-collision",
-            EliminationCause::HeadToHeadCollision => "head-collision",
-            EliminationCause::Hazard => "hazard",
-        }
     }
 }
 
@@ -103,14 +83,18 @@ impl Direction {
         }
     }
 
-    /// Parse a direction from a case-insensitive string.
-    pub fn from_str_case_insensitive(s: &str) -> Option<Self> {
+}
+
+impl std::str::FromStr for Direction {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "up" => Some(Direction::Up),
-            "down" => Some(Direction::Down),
-            "left" => Some(Direction::Left),
-            "right" => Some(Direction::Right),
-            _ => None,
+            "up" => Ok(Direction::Up),
+            "down" => Ok(Direction::Down),
+            "left" => Ok(Direction::Left),
+            "right" => Ok(Direction::Right),
+            _ => Err(()),
         }
     }
 }

@@ -1,5 +1,5 @@
 use color_eyre::eyre::Context as _;
-use rules::Direction;
+use rules::{Direction, EliminationCause};
 use std::collections::HashMap;
 use uuid::Uuid;
 
@@ -204,7 +204,7 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
                 death_info.push(DeathInfo {
                     snake_id: snake.id.clone(),
                     turn: engine_game.board.turn,
-                    cause: snake.eliminated_cause.as_str().to_string(),
+                    cause: elimination_cause_label(&snake.eliminated_cause),
                     eliminated_by: snake.eliminated_by.clone(),
                 });
             }
@@ -369,4 +369,17 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
     game_channels.cleanup(game_id).await;
 
     Ok(())
+}
+
+/// Human-readable label for an elimination cause, used in frame data.
+fn elimination_cause_label(cause: &EliminationCause) -> String {
+    match cause {
+        EliminationCause::NotEliminated => String::new(),
+        EliminationCause::OutOfHealth => "out-of-health".to_string(),
+        EliminationCause::OutOfBounds => "wall-collision".to_string(),
+        EliminationCause::SelfCollision => "self-collision".to_string(),
+        EliminationCause::Collision => "snake-collision".to_string(),
+        EliminationCause::HeadToHeadCollision => "head-collision".to_string(),
+        EliminationCause::Hazard => "hazard".to_string(),
+    }
 }

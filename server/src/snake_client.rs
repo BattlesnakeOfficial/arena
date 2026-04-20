@@ -45,7 +45,7 @@ fn build_request_for_snake(
 
 /// Parse a direction string into a Direction enum
 fn parse_direction(s: &str) -> Option<Direction> {
-    Direction::from_str_case_insensitive(s)
+    s.parse().ok()
 }
 
 /// Build a URL for a snake endpoint, properly handling query parameters
