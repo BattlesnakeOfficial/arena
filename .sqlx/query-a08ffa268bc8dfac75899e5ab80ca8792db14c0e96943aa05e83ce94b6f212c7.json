@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE leaderboard_game_results SET food_eaten = $3 WHERE leaderboard_game_id = $1 AND leaderboard_entry_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a08ffa268bc8dfac75899e5ab80ca8792db14c0e96943aa05e83ce94b6f212c7"
+}

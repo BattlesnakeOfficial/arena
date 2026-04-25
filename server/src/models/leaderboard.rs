@@ -56,6 +56,7 @@ pub struct LeaderboardGameResult {
     pub sigma_before: f64,
     pub sigma_after: f64,
     pub display_score_change: f64,
+    pub food_eaten: i32,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -72,6 +73,24 @@ pub struct RankedEntry {
     pub sigma: f64,
     pub snake_name: String,
     pub owner_login: String,
+}
+
+/// Sort order for ranked leaderboard entries.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LeaderboardSort {
+    #[default]
+    Rating,
+    FoodEaten,
+}
+
+impl LeaderboardSort {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            LeaderboardSort::Rating => "rating",
+            LeaderboardSort::FoodEaten => "food_eaten",
+        }
+    }
 }
 
 // --- Leaderboard queries ---
@@ -178,33 +197,67 @@ pub async fn get_active_entries(
 pub async fn get_ranked_entries(
     pool: &PgPool,
     leaderboard_id: Uuid,
+    sort: LeaderboardSort,
 ) -> cja::Result<Vec<RankedEntry>> {
-    let entries = sqlx::query_as!(
-        RankedEntry,
-        r#"SELECT
-            le.leaderboard_entry_id,
-            le.battlesnake_id,
-            le.display_score,
-            le.games_played,
-            le.first_place_finishes,
-            le.non_first_finishes,
-            le.mu,
-            le.sigma,
-            b.name as snake_name,
-            u.github_login as owner_login
-         FROM leaderboard_entries le
-         JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id
-         JOIN users u ON b.user_id = u.user_id
-         WHERE le.leaderboard_id = $1
-           AND le.disabled_at IS NULL
-           AND le.games_played >= $2
-         ORDER BY le.display_score DESC
-         LIMIT 100"#,
-        leaderboard_id,
-        MIN_GAMES_FOR_RANKING
-    )
-    .fetch_all(pool)
-    .await
+    let entries = match sort {
+        LeaderboardSort::Rating => {
+            sqlx::query_as!(
+                RankedEntry,
+                r#"SELECT
+                    le.leaderboard_entry_id,
+                    le.battlesnake_id,
+                    le.display_score,
+                    le.games_played,
+                    le.first_place_finishes,
+                    le.non_first_finishes,
+                    le.mu,
+                    le.sigma,
+                    b.name as snake_name,
+                    u.github_login as owner_login
+                 FROM leaderboard_entries le
+                 JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id
+                 JOIN users u ON b.user_id = u.user_id
+                 WHERE le.leaderboard_id = $1
+                   AND le.disabled_at IS NULL
+                   AND le.games_played >= $2
+                 ORDER BY le.display_score DESC
+                 LIMIT 100"#,
+                leaderboard_id,
+                MIN_GAMES_FOR_RANKING
+            )
+            .fetch_all(pool)
+            .await
+        }
+        LeaderboardSort::FoodEaten => {
+            sqlx::query_as!(
+                RankedEntry,
+                r#"SELECT
+                    le.leaderboard_entry_id,
+                    le.battlesnake_id,
+                    le.display_score,
+                    le.games_played,
+                    le.first_place_finishes,
+                    le.non_first_finishes,
+                    le.mu,
+                    le.sigma,
+                    b.name as snake_name,
+                    u.github_login as owner_login
+                 FROM leaderboard_entries le
+                 JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id
+                 JOIN users u ON b.user_id = u.user_id
+                 LEFT JOIN food_eaten_stats fes ON le.leaderboard_entry_id = fes.leaderboard_entry_id
+                 WHERE le.leaderboard_id = $1
+                   AND le.disabled_at IS NULL
+                   AND le.games_played >= $2
+                 ORDER BY COALESCE(fes.food_score, 0) DESC
+                 LIMIT 100"#,
+                leaderboard_id,
+                MIN_GAMES_FOR_RANKING
+            )
+            .fetch_all(pool)
+            .await
+        }
+    }
     .wrap_err("Failed to fetch ranked leaderboard entries")?;
 
     Ok(entries)
@@ -506,7 +559,7 @@ where
          RETURNING
             leaderboard_game_result_id, leaderboard_game_id, leaderboard_entry_id,
             placement, mu_before, mu_after, sigma_before, sigma_after,
-            display_score_change, created_at"#,
+            display_score_change, food_eaten, created_at"#,
         data.leaderboard_game_id,
         data.leaderboard_entry_id,
         data.placement,
@@ -546,36 +599,72 @@ pub async fn get_ranked_entries_paginated(
     leaderboard_id: Uuid,
     page: i64,
     per_page: i64,
+    sort: LeaderboardSort,
 ) -> cja::Result<Vec<RankedEntry>> {
     let offset = page * per_page;
-    let entries = sqlx::query_as!(
-        RankedEntry,
-        r#"SELECT
-            le.leaderboard_entry_id,
-            le.battlesnake_id,
-            le.display_score,
-            le.games_played,
-            le.first_place_finishes,
-            le.non_first_finishes,
-            le.mu,
-            le.sigma,
-            b.name as snake_name,
-            u.github_login as owner_login
-         FROM leaderboard_entries le
-         JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id
-         JOIN users u ON b.user_id = u.user_id
-         WHERE le.leaderboard_id = $1
-           AND le.disabled_at IS NULL
-           AND le.games_played >= $2
-         ORDER BY le.display_score DESC
-         LIMIT $3 OFFSET $4"#,
-        leaderboard_id,
-        MIN_GAMES_FOR_RANKING,
-        per_page,
-        offset
-    )
-    .fetch_all(pool)
-    .await
+    let entries = match sort {
+        LeaderboardSort::Rating => {
+            sqlx::query_as!(
+                RankedEntry,
+                r#"SELECT
+                    le.leaderboard_entry_id,
+                    le.battlesnake_id,
+                    le.display_score,
+                    le.games_played,
+                    le.first_place_finishes,
+                    le.non_first_finishes,
+                    le.mu,
+                    le.sigma,
+                    b.name as snake_name,
+                    u.github_login as owner_login
+                 FROM leaderboard_entries le
+                 JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id
+                 JOIN users u ON b.user_id = u.user_id
+                 WHERE le.leaderboard_id = $1
+                   AND le.disabled_at IS NULL
+                   AND le.games_played >= $2
+                 ORDER BY le.display_score DESC
+                 LIMIT $3 OFFSET $4"#,
+                leaderboard_id,
+                MIN_GAMES_FOR_RANKING,
+                per_page,
+                offset
+            )
+            .fetch_all(pool)
+            .await
+        }
+        LeaderboardSort::FoodEaten => {
+            sqlx::query_as!(
+                RankedEntry,
+                r#"SELECT
+                    le.leaderboard_entry_id,
+                    le.battlesnake_id,
+                    le.display_score,
+                    le.games_played,
+                    le.first_place_finishes,
+                    le.non_first_finishes,
+                    le.mu,
+                    le.sigma,
+                    b.name as snake_name,
+                    u.github_login as owner_login
+                 FROM leaderboard_entries le
+                 JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id
+                 JOIN users u ON b.user_id = u.user_id
+                 LEFT JOIN food_eaten_stats fes ON le.leaderboard_entry_id = fes.leaderboard_entry_id
+                 WHERE le.leaderboard_id = $1
+                   AND le.disabled_at IS NULL
+                   AND le.games_played >= $2
+                 ORDER BY COALESCE(fes.food_score, 0) DESC
+                 LIMIT $3 OFFSET $4"#,
+                leaderboard_id,
+                MIN_GAMES_FOR_RANKING,
+                per_page,
+                offset
+            )
+            .fetch_all(pool)
+            .await
+        }
+    }
     .wrap_err("Failed to fetch paginated ranked entries")?;
 
     Ok(entries)
@@ -608,6 +697,7 @@ pub struct LeaderboardGameHistoryEntry {
     pub mu_after: f64,
     pub sigma_before: f64,
     pub sigma_after: f64,
+    pub food_eaten: i32,
     pub game_created_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -630,6 +720,7 @@ pub async fn get_game_history_for_entry(
             lgr.mu_after,
             lgr.sigma_before,
             lgr.sigma_after,
+            lgr.food_eaten,
             lg.created_at as game_created_at
          FROM leaderboard_game_results lgr
          JOIN leaderboard_games lg ON lgr.leaderboard_game_id = lg.leaderboard_game_id
@@ -902,4 +993,45 @@ pub async fn get_rank_for_entry(
     .wrap_err("Failed to get rank for entry")?;
 
     Ok(Some(rank))
+}
+
+/// Top food-eater on a leaderboard (display row)
+#[derive(Debug, FromRow)]
+pub struct TopEater {
+    pub leaderboard_entry_id: Uuid,
+    pub food_score: i64,
+    pub snake_name: String,
+    pub owner_login: String,
+}
+
+/// Get the top food-eaters for a leaderboard, ordered by cumulative food eaten.
+pub async fn get_top_eaters(
+    pool: &PgPool,
+    leaderboard_id: Uuid,
+    limit: i64,
+) -> cja::Result<Vec<TopEater>> {
+    let entries = sqlx::query_as!(
+        TopEater,
+        r#"SELECT
+            le.leaderboard_entry_id,
+            fes.food_score,
+            b.name as snake_name,
+            u.github_login as owner_login
+         FROM leaderboard_entries le
+         JOIN food_eaten_stats fes ON le.leaderboard_entry_id = fes.leaderboard_entry_id
+         JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id
+         JOIN users u ON b.user_id = u.user_id
+         WHERE le.leaderboard_id = $1
+           AND le.disabled_at IS NULL
+           AND fes.food_score > 0
+         ORDER BY fes.food_score DESC
+         LIMIT $2"#,
+        leaderboard_id,
+        limit
+    )
+    .fetch_all(pool)
+    .await
+    .wrap_err("Failed to fetch top eaters")?;
+
+    Ok(entries)
 }

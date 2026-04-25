@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO food_eaten_stats (leaderboard_entry_id) VALUES ($1) ON CONFLICT (leaderboard_entry_id) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "289fec34eb466ea70285c16cbec0848ba1c86cd9d4509116d03ec450c06d65fc"
+}

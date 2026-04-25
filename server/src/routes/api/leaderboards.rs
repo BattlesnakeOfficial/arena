@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
 };
@@ -54,6 +54,12 @@ pub struct OptInRequest {
     pub battlesnake_id: Uuid,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct RankingsQuery {
+    #[serde(default)]
+    pub sort: leaderboard::LeaderboardSort,
+}
+
 #[derive(Debug, Serialize)]
 pub struct EntryResponse {
     pub leaderboard_entry_id: Uuid,
@@ -96,6 +102,7 @@ pub async fn list_leaderboards(
 pub async fn get_rankings(
     State(state): State<AppState>,
     Path(leaderboard_id): Path<Uuid>,
+    Query(query): Query<RankingsQuery>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let lb = leaderboard::get_leaderboard_by_id(&state.db, leaderboard_id)
         .await
@@ -108,7 +115,7 @@ pub async fn get_rankings(
         })?
         .ok_or((StatusCode::NOT_FOUND, "Leaderboard not found".to_string()))?;
 
-    let ranked = leaderboard::get_ranked_entries(&state.db, leaderboard_id)
+    let ranked = leaderboard::get_ranked_entries(&state.db, leaderboard_id, query.sort)
         .await
         .map_err(|e| {
             tracing::error!("Failed to fetch ranked entries: {}", e);

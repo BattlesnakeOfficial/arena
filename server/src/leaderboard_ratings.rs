@@ -82,7 +82,7 @@ pub async fn update_ratings(app_state: &AppState, leaderboard_game_id: Uuid) -> 
     }
 
     // Look up each snake's leaderboard entry with FOR UPDATE to lock the rows
-    let mut entries_with_placements: Vec<(leaderboard::LeaderboardEntry, i32)> = Vec::new();
+    let mut entries_with_placements: Vec<(leaderboard::LeaderboardEntry, i32, Uuid)> = Vec::new();
 
     for gs in &game_snakes {
         let placement = gs.placement.unwrap_or(game_snakes.len() as i32);
@@ -107,7 +107,7 @@ pub async fn update_ratings(app_state: &AppState, leaderboard_game_id: Uuid) -> 
         };
 
         if let Some(entry) = entry {
-            entries_with_placements.push((entry, placement));
+            entries_with_placements.push((entry, placement, gs.game_battlesnake_id));
         } else {
             tracing::warn!(
                 battlesnake_id = %gs.battlesnake_id,
@@ -132,12 +132,13 @@ pub async fn update_ratings(app_state: &AppState, leaderboard_game_id: Uuid) -> 
         game_id: lb_game.game_id,
         results: entries_with_placements
             .iter()
-            .map(|(entry, placement)| GameResultEntry {
+            .map(|(entry, placement, game_battlesnake_id)| GameResultEntry {
                 leaderboard_entry_id: entry.leaderboard_entry_id,
                 battlesnake_id: entry.battlesnake_id,
                 placement: *placement,
                 mu: entry.mu,
                 sigma: entry.sigma,
+                game_battlesnake_id: *game_battlesnake_id,
             })
             .collect(),
     };

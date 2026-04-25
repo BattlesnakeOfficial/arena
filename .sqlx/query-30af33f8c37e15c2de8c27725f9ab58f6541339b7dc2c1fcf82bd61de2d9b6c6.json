@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT\n            lgr.leaderboard_game_id,\n            lg.game_id,\n            lgr.placement,\n            lgr.display_score_change,\n            lgr.mu_before,\n            lgr.mu_after,\n            lgr.sigma_before,\n            lgr.sigma_after,\n            lg.created_at as game_created_at\n         FROM leaderboard_game_results lgr\n         JOIN leaderboard_games lg ON lgr.leaderboard_game_id = lg.leaderboard_game_id\n         WHERE lgr.leaderboard_entry_id = $1\n         ORDER BY lg.created_at DESC\n         LIMIT $2 OFFSET $3",
+  "query": "SELECT\n            lgr.leaderboard_game_id,\n            lg.game_id,\n            lgr.placement,\n            lgr.display_score_change,\n            lgr.mu_before,\n            lgr.mu_after,\n            lgr.sigma_before,\n            lgr.sigma_after,\n            lgr.food_eaten,\n            lg.created_at as game_created_at\n         FROM leaderboard_game_results lgr\n         JOIN leaderboard_games lg ON lgr.leaderboard_game_id = lg.leaderboard_game_id\n         WHERE lgr.leaderboard_entry_id = $1\n         ORDER BY lg.created_at DESC\n         LIMIT $2 OFFSET $3",
   "describe": {
     "columns": [
       {
@@ -45,6 +45,11 @@
       },
       {
         "ordinal": 8,
+        "name": "food_eaten",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 9,
         "name": "game_created_at",
         "type_info": "Timestamptz"
       }
@@ -65,8 +70,9 @@
       false,
       false,
       false,
+      false,
       false
     ]
   },
-  "hash": "d840d084fe1dcdbd3aadf7305727e50eef5e0eacb6a9e32952e4dadf48777ba6"
+  "hash": "30af33f8c37e15c2de8c27725f9ab58f6541339b7dc2c1fcf82bd61de2d9b6c6"
 }
