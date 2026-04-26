@@ -29,6 +29,8 @@ use crate::{
 pub struct PaginationParams {
     #[serde(default)]
     pub page: Option<i64>,
+    #[serde(default)]
+    pub sort: leaderboard::LeaderboardSort,
 }
 
 /// GET /leaderboards — list all leaderboards
@@ -106,10 +108,15 @@ pub async fn show_leaderboard(
     };
     let page = pagination.page.unwrap_or(0).clamp(0, total_pages - 1);
 
-    let ranked =
-        leaderboard::get_ranked_entries_paginated(&state.db, leaderboard_id, page, per_page)
-            .await
-            .wrap_err("Failed to fetch ranked entries")?;
+    let ranked = leaderboard::get_ranked_entries_paginated(
+        &state.db,
+        leaderboard_id,
+        page,
+        per_page,
+        pagination.sort,
+    )
+    .await
+    .wrap_err("Failed to fetch ranked entries")?;
 
     let placement = leaderboard::get_placement_entries(&state.db, leaderboard_id)
         .await
@@ -122,6 +129,10 @@ pub async fn show_leaderboard(
     let activity = leaderboard::get_activity_feed(&state.db, leaderboard_id, 20)
         .await
         .wrap_err("Failed to fetch activity feed")?;
+
+    let top_eaters = leaderboard::get_top_eaters(&state.db, leaderboard_id, 3)
+        .await
+        .wrap_err("Failed to fetch top eaters")?;
 
     // Get user's snakes for the join form
     let user_snakes = if let Some(ref u) = user {
@@ -148,6 +159,7 @@ pub async fn show_leaderboard(
     });
 
     let rank_start = page * per_page;
+    let sort_param = pagination.sort.as_str();
 
     // Collect entry IDs from the current page for scoring lookups
     let entry_ids: Vec<Uuid> = ranked
@@ -209,6 +221,23 @@ pub async fn show_leaderboard(
                     }
                 }
 
+                // Top 3 Eaters
+                @if !top_eaters.is_empty() {
+                    div style="margin-bottom: 20px; padding: 16px; background: #f8f9fa; border: 1px solid #ddd; border-radius: 8px;" {
+                        h3 { "Top Eaters" }
+                        @for (i, eater) in top_eaters.iter().enumerate() {
+                            div style="display: flex; gap: 8px; align-items: center; margin-bottom: 4px;" {
+                                span { (i + 1) ". " }
+                                a href={"/leaderboards/"(leaderboard_id)"/entries/"(eater.leaderboard_entry_id)} {
+                                    (eater.snake_name)
+                                }
+                                span style="color: #666;" { " (" (eater.owner_login) ")" }
+                                span style="font-weight: bold;" { (eater.food_score) " food" }
+                            }
+                        }
+                    }
+                }
+
                 // Join/leave section for logged-in users
                 @if user.is_some() {
                     div style="margin-bottom: 20px; padding: 16px; border: 1px solid #ddd; border-radius: 8px;" {
@@ -260,6 +289,20 @@ pub async fn show_leaderboard(
 
                 // Rankings table
                 h2 { "Rankings" }
+                div style="margin-bottom: 12px;" {
+                    "Sort by: "
+                    @if pagination.sort == leaderboard::LeaderboardSort::Rating {
+                        strong { "Rating" }
+                    } @else {
+                        a href={"/leaderboards/"(leaderboard_id)"?sort=rating"} { "Rating" }
+                    }
+                    " | "
+                    @if pagination.sort == leaderboard::LeaderboardSort::FoodEaten {
+                        strong { "Food Eaten" }
+                    } @else {
+                        a href={"/leaderboards/"(leaderboard_id)"?sort=food_eaten"} { "Food Eaten" }
+                    }
+                }
                 @if ranked.is_empty() {
                     p { "No snakes have completed enough games to be ranked yet. (Minimum: " (MIN_GAMES_FOR_RANKING) " games)" }
                 } @else {
@@ -313,13 +356,13 @@ pub async fn show_leaderboard(
                     @if total_pages > 1 {
                         div class="pagination" {
                             @if page > 0 {
-                                a href={"/leaderboards/"(leaderboard_id)"?page="(page - 1)} { "Previous" }
+                                a href={"/leaderboards/"(leaderboard_id)"?sort="(sort_param)"&page="(page - 1)} { "Previous" }
                             } @else {
                                 span class="disabled" { "Previous" }
                             }
                             span class="current" { "Page " (page + 1) " of " (total_pages) }
                             @if page < total_pages - 1 {
-                                a href={"/leaderboards/"(leaderboard_id)"?page="(page + 1)} { "Next" }
+                                a href={"/leaderboards/"(leaderboard_id)"?sort="(sort_param)"&page="(page + 1)} { "Next" }
                             } @else {
                                 span class="disabled" { "Next" }
                             }
@@ -717,6 +760,7 @@ pub async fn show_leaderboard_entry(
                                 th { "Opponents" }
                                 th { "Placement" }
                                 th { "Rating Change" }
+                                th { "Food" }
                                 th { "Replay" }
                             }
                         }
@@ -753,6 +797,7 @@ pub async fn show_leaderboard_entry(
                                             span class="rating-negative" { (format!("{:+.1}", game.display_score_change)) }
                                         }
                                     }
+                                    td { (game.food_eaten) }
                                     td {
                                         a href={"/games/"(game.game_id)} class="btn btn-sm btn-primary" { "Watch" }
                                     }

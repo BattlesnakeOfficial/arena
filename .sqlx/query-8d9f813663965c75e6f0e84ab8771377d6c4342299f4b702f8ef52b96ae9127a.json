@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT\n            le.leaderboard_entry_id,\n            le.battlesnake_id,\n            le.display_score,\n            le.games_played,\n            le.first_place_finishes,\n            le.non_first_finishes,\n            le.mu,\n            le.sigma,\n            b.name as snake_name,\n            u.github_login as owner_login\n         FROM leaderboard_entries le\n         JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id\n         JOIN users u ON b.user_id = u.user_id\n         WHERE le.leaderboard_id = $1\n           AND le.disabled_at IS NULL\n           AND le.games_played >= $2\n         ORDER BY le.display_score DESC\n         LIMIT $3 OFFSET $4",
+  "query": "SELECT\n                    le.leaderboard_entry_id,\n                    le.battlesnake_id,\n                    le.display_score,\n                    le.games_played,\n                    le.first_place_finishes,\n                    le.non_first_finishes,\n                    le.mu,\n                    le.sigma,\n                    b.name as snake_name,\n                    u.github_login as owner_login\n                 FROM leaderboard_entries le\n                 JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id\n                 JOIN users u ON b.user_id = u.user_id\n                 WHERE le.leaderboard_id = $1\n                   AND le.disabled_at IS NULL\n                   AND le.games_played >= $2\n                 ORDER BY le.display_score DESC\n                 LIMIT 100",
   "describe": {
     "columns": [
       {
@@ -57,9 +57,7 @@
     "parameters": {
       "Left": [
         "Uuid",
-        "Int4",
-        "Int8",
-        "Int8"
+        "Int4"
       ]
     },
     "nullable": [
@@ -75,5 +73,5 @@
       false
     ]
   },
-  "hash": "5331816adfde82678009b35696e8f64253d81a8a5ce801c8a6893d7bf7044b90"
+  "hash": "8d9f813663965c75e6f0e84ab8771377d6c4342299f4b702f8ef52b96ae9127a"
 }

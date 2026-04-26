@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT frame_data FROM turns WHERE game_id = $1 AND turn_number = 0",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "frame_data",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "085334680bd5d117532b71855faf68bd929cc187539700d46ad98bf7b8981059"
+}

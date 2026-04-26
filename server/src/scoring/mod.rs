@@ -21,6 +21,9 @@ pub struct GameResultEntry {
     pub mu: f64,
     /// Current sigma from the locked leaderboard_entries row.
     pub sigma: f64,
+    /// The game_battlesnake_id for this entry's participation in the game.
+    /// Matches the "ID" field in frame data (as a UUID string).
+    pub game_battlesnake_id: Uuid,
 }
 
 /// A score for a single leaderboard entry, as computed by a scoring algorithm.
@@ -94,6 +97,7 @@ impl ScoringRegistry {
     }
 }
 
+pub mod food_eaten;
 pub mod weng_lin;
 pub mod win_rate;
 
@@ -250,6 +254,7 @@ mod tests {
                     placement: 1,
                     mu: 25.0,
                     sigma: 8.333,
+                    game_battlesnake_id: Uuid::new_v4(),
                 },
                 GameResultEntry {
                     leaderboard_entry_id: Uuid::new_v4(),
@@ -257,6 +262,7 @@ mod tests {
                     placement: 2,
                     mu: 25.0,
                     sigma: 8.333,
+                    game_battlesnake_id: Uuid::new_v4(),
                 },
             ],
         };

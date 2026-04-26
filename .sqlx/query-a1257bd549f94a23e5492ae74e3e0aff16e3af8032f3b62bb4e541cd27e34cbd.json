@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO leaderboard_game_results (\n            leaderboard_game_id, leaderboard_entry_id, placement,\n            mu_before, mu_after, sigma_before, sigma_after, display_score_change\n         )\n         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)\n         ON CONFLICT (leaderboard_game_id, leaderboard_entry_id) DO NOTHING\n         RETURNING\n            leaderboard_game_result_id, leaderboard_game_id, leaderboard_entry_id,\n            placement, mu_before, mu_after, sigma_before, sigma_after,\n            display_score_change, created_at",
+  "query": "INSERT INTO leaderboard_game_results (\n            leaderboard_game_id, leaderboard_entry_id, placement,\n            mu_before, mu_after, sigma_before, sigma_after, display_score_change\n         )\n         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)\n         ON CONFLICT (leaderboard_game_id, leaderboard_entry_id) DO NOTHING\n         RETURNING\n            leaderboard_game_result_id, leaderboard_game_id, leaderboard_entry_id,\n            placement, mu_before, mu_after, sigma_before, sigma_after,\n            display_score_change, food_eaten, created_at",
   "describe": {
     "columns": [
       {
@@ -50,6 +50,11 @@
       },
       {
         "ordinal": 9,
+        "name": "food_eaten",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 10,
         "name": "created_at",
         "type_info": "Timestamptz"
       }
@@ -76,8 +81,9 @@
       false,
       false,
       false,
+      false,
       false
     ]
   },
-  "hash": "7388fb9954941c9db84a3b6366919fb7effbbb66064e7e8176e43e116a2d17f9"
+  "hash": "a1257bd549f94a23e5492ae74e3e0aff16e3af8032f3b62bb4e541cd27e34cbd"
 }

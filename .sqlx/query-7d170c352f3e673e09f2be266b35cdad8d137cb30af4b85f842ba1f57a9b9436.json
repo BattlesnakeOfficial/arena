@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE food_eaten_stats SET food_score = food_score + $2, updated_at = NOW() WHERE leaderboard_entry_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7d170c352f3e673e09f2be266b35cdad8d137cb30af4b85f842ba1f57a9b9436"
+}
