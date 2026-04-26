@@ -11,16 +11,17 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy manifests and build.rs (needed for dependency build)
-# Note: mock-github-oauth Cargo.toml is needed because it's a workspace member
+# Note: mock-github-oauth and rules Cargo.toml are needed because they're workspace members
 COPY Cargo.toml Cargo.lock ./
 COPY server/Cargo.toml ./server/
 COPY server/build.rs ./server/
 COPY mock-github-oauth/Cargo.toml ./mock-github-oauth/
+COPY rules/Cargo.toml ./rules/
 
 # Create dummy files for dependency caching
 # Note: arena has both lib.rs and main.rs, plus bin/arena-cli.rs and bin/stress_test.rs
 # The dummy lib.rs needs cli::config module stub since arena-cli imports it
-RUN mkdir -p server/src/bin server/src/cli mock-github-oauth/src && \
+RUN mkdir -p server/src/bin server/src/cli mock-github-oauth/src rules/src && \
     echo "fn main() {}" > server/src/main.rs && \
     echo "pub mod cli;" > server/src/lib.rs && \
     echo "pub mod config;" > server/src/cli/mod.rs && \
@@ -28,18 +29,20 @@ RUN mkdir -p server/src/bin server/src/cli mock-github-oauth/src && \
     echo "fn main() {}" > server/src/bin/arena-cli.rs && \
     echo "fn main() {}" > server/src/bin/stress_test.rs && \
     echo "fn main() {}" > mock-github-oauth/src/main.rs && \
-    echo "" > mock-github-oauth/src/lib.rs
+    echo "" > mock-github-oauth/src/lib.rs && \
+    echo "" > rules/src/lib.rs
 
 # Build dependencies only (for caching)
 # VERGEN_IDEMPOTENT allows build without .git directory (uses placeholder values)
 RUN VERGEN_IDEMPOTENT=1 cargo build --release --package arena
 
 # Remove dummy files
-RUN rm -rf server/src
+RUN rm -rf server/src rules/src
 
-# Copy actual source code (only arena, not mock-github-oauth)
+# Copy actual source code (only arena and rules, not mock-github-oauth)
 COPY server/src ./server/src
 COPY server/static ./server/static
+COPY rules/src ./rules/src
 COPY migrations ./migrations
 COPY .sqlx ./.sqlx
 
@@ -49,8 +52,8 @@ COPY .git ./.git
 # Set SQLX offline mode
 ENV SQLX_OFFLINE=true
 
-# Touch the main.rs to ensure rebuild with actual source
-RUN touch server/src/main.rs
+# Touch source files to ensure rebuild with actual source
+RUN touch server/src/main.rs rules/src/lib.rs
 
 # Build the application (with real git info from .git)
 RUN cargo build --release --package arena

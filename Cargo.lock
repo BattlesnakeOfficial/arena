@@ -171,7 +171,6 @@ dependencies = [
  "axum-macros",
  "base64 0.21.7",
  "base64ct",
- "battlesnake-game-types",
  "chrono",
  "chrono-humanize",
  "cja",
@@ -196,6 +195,7 @@ dependencies = [
  "rand 0.8.5",
  "reqwest 0.12.15",
  "ring",
+ "rules",
  "rusqlite",
  "sentry 0.32.3",
  "sentry-tower 0.32.3",
@@ -371,19 +371,6 @@ name = "base64ct"
 version = "1.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "89e25b6adfb930f02d1981565a6e5d9c547ac15a96606256d3b59040e5cd4ca3"
-
-[[package]]
-name = "battlesnake-game-types"
-version = "0.17.0"
-source = "git+https://github.com/fables-tales/battlesnake-game-types?branch=main#c5d0354bacd073b0410da836dd0d09ca9a94da29"
-dependencies = [
- "fxhash",
- "itertools",
- "rand 0.8.5",
- "serde",
- "serde_json",
- "tracing",
-]
 
 [[package]]
 name = "bit-set"
@@ -1186,15 +1173,6 @@ dependencies = [
  "pin-project-lite",
  "pin-utils",
  "slab",
-]
-
-[[package]]
-name = "fxhash"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c31b6d751ae2c7f11320402d34e41349dd1016f8d5d45e48c4312bc8625af50c"
-dependencies = [
- "byteorder",
 ]
 
 [[package]]
@@ -3691,6 +3669,14 @@ dependencies = [
  "spki",
  "subtle",
  "zeroize",
+]
+
+[[package]]
+name = "rules"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "rand 0.8.5",
 ]
 
 [[package]]

@@ -1,0 +1,10 @@
+[package]
+name = "rules"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rand = "0.8"
+
+[dev-dependencies]
+proptest = "1"

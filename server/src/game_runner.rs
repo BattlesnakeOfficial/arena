@@ -1,8 +1,7 @@
 use color_eyre::eyre::Context as _;
+use rules::{Direction, EliminationCause};
 use std::collections::HashMap;
 use uuid::Uuid;
-
-use battlesnake_game_types::types::Move;
 
 use crate::engine::MAX_TURNS;
 use crate::engine::frame::{DeathInfo, SnakeCustomizations, game_to_frame};
@@ -119,12 +118,12 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
     let mut engine_game =
         crate::engine::create_initial_game(game_id, game.board_size, game.game_type, &battlesnakes);
 
-    // Get timeout from game settings (default 500ms)
-    let timeout = std::time::Duration::from_millis(engine_game.game.timeout as u64);
+    // Get timeout from game settings
+    let timeout = std::time::Duration::from_millis(engine_game.meta.timeout as u64);
 
     let mut death_info: Vec<DeathInfo> = Vec::new();
     let mut elimination_order: Vec<String> = Vec::new();
-    let mut last_moves: HashMap<String, Move> = HashMap::new();
+    let mut last_moves: HashMap<String, Direction> = HashMap::new();
     let mut snake_contexts: HashMap<String, wire::SnakeContext> = HashMap::new();
 
     // Call /start for all snakes in parallel (fire and forget)
@@ -137,11 +136,6 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
         &snake_contexts,
     )
     .await;
-
-    // Helper to check if game is over
-    let is_game_over = |g: &battlesnake_game_types::wire_representation::Game| {
-        g.board.snakes.iter().filter(|s| s.health > 0).count() <= 1
-    };
 
     // Store turn 0 (initial state, no moves yet)
     let frame_0 = game_to_frame(&engine_game, &death_info, &[], &customizations);
@@ -157,7 +151,7 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
     let mut total_snake_wait_ms: i64 = 0;
 
     // Run the game turn by turn
-    while !is_game_over(&engine_game) && engine_game.turn < MAX_TURNS {
+    while !crate::engine::is_game_over(&engine_game) && engine_game.board.turn < MAX_TURNS {
         // Request moves from all alive snakes in parallel
         let move_results = request_moves_parallel(
             http_client,
@@ -177,7 +171,7 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
         }
 
         // Convert to move vector for engine
-        let moves: Vec<(String, Move)> = move_results
+        let moves: Vec<(String, Direction)> = move_results
             .iter()
             .map(|r| (r.snake_id.clone(), r.direction))
             .collect();
@@ -200,18 +194,18 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
         }
 
         // Apply the moves using the engine
-        engine_game = crate::engine::apply_turn(engine_game, &moves);
-        engine_game.turn += 1;
+        crate::engine::apply_turn(&mut engine_game, &moves);
+        engine_game.board.turn += 1;
 
         // Track newly eliminated snakes
         for snake in &engine_game.board.snakes {
-            if snake.health <= 0 && !elimination_order.contains(&snake.id) {
+            if snake.eliminated_cause.is_eliminated() && !elimination_order.contains(&snake.id) {
                 elimination_order.push(snake.id.clone());
                 death_info.push(DeathInfo {
                     snake_id: snake.id.clone(),
-                    turn: engine_game.turn,
-                    cause: "eliminated".to_string(),
-                    eliminated_by: String::new(),
+                    turn: engine_game.board.turn,
+                    cause: elimination_cause_label(&snake.eliminated_cause),
+                    eliminated_by: snake.eliminated_by.clone(),
                 });
             }
         }
@@ -219,23 +213,22 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
         // Store the turn frame with latency info and notify subscribers
         let frame = game_to_frame(&engine_game, &death_info, &move_results, &customizations);
         let frame_json = serde_json::to_value(&frame)
-            .wrap_err_with(|| format!("Failed to serialize frame {}", engine_game.turn))?;
+            .wrap_err_with(|| format!("Failed to serialize frame {}", engine_game.board.turn))?;
 
         // Measure DB write latency
         let db_write_start = std::time::Instant::now();
 
-        tracing::debug!(game_id = %game_id, turn = engine_game.turn, "Storing turn");
+        tracing::debug!(game_id = %game_id, turn = engine_game.board.turn, "Storing turn");
         let turn = crate::models::turn::create_turn(
             pool,
             game_channels,
             game_id,
-            engine_game.turn,
+            engine_game.board.turn,
             Some(frame_json),
         )
         .await?;
 
         // Store individual snake moves with latency
-        // The snake_id in move_results is now the game_battlesnake_id (UUID string)
         for result in &move_results {
             if let Ok(game_battlesnake_id) = Uuid::parse_str(&result.snake_id) {
                 crate::models::turn::create_snake_turn(
@@ -254,7 +247,7 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
         tracing::info!(
             metric_type = "db_write_latency",
             game_id = %game_id,
-            turn = engine_game.turn,
+            turn = engine_game.board.turn,
             duration_ms = db_write_duration.as_millis() as u64,
             "turn persistence latency"
         );
@@ -266,7 +259,7 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
         tracing::info!(
             metric_type = "scheduler_jitter",
             game_id = %game_id,
-            turn = engine_game.turn,
+            turn = engine_game.board.turn,
             duration_us = yield_duration.as_micros() as u64,
             "async scheduler jitter"
         );
@@ -298,7 +291,7 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
 
     tracing::info!(
         game_id = %game_id,
-        final_turn = engine_game.turn,
+        final_turn = engine_game.board.turn,
         "Game completed with persistence"
     );
 
@@ -308,7 +301,7 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
         .board
         .snakes
         .iter()
-        .filter(|s| s.health > 0)
+        .filter(|s| !s.eliminated_cause.is_eliminated())
         .map(|s| s.id.clone())
         .collect();
 
@@ -317,7 +310,6 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
     placements.extend(elimination_order);
 
     // Assign placements to database
-    // snake_id is now game_battlesnake_id (unique per game instance)
     for (i, snake_id) in placements.iter().enumerate() {
         let placement = (i + 1) as i32;
 
@@ -345,7 +337,7 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
     tracing::info!(
         event_type = "game_completed",
         game_id = %game_id,
-        final_turn = engine_game.turn,
+        final_turn = engine_game.board.turn,
         total_ms = total_time_ms,
         winner_battlesnake_id = ?placements.first(),
         "game completed"
@@ -377,4 +369,17 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
     game_channels.cleanup(game_id).await;
 
     Ok(())
+}
+
+/// Human-readable label for an elimination cause, used in frame data.
+fn elimination_cause_label(cause: &EliminationCause) -> String {
+    match cause {
+        EliminationCause::NotEliminated => String::new(),
+        EliminationCause::OutOfHealth => "out-of-health".to_string(),
+        EliminationCause::OutOfBounds => "wall-collision".to_string(),
+        EliminationCause::SelfCollision => "self-collision".to_string(),
+        EliminationCause::Collision => "snake-collision".to_string(),
+        EliminationCause::HeadToHeadCollision => "head-collision".to_string(),
+        EliminationCause::Hazard => "hazard".to_string(),
+    }
 }
