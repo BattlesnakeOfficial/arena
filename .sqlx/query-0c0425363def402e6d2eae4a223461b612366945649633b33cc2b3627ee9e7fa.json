@@ -1,0 +1,87 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO tournament_matches (\n            tournament_id, round, position, next_match_id, visual_column, visual_row\n        )\n        VALUES ($1, $2, $3, $4, $5, $6)\n        RETURNING\n            match_id,\n            tournament_id,\n            round,\n            position,\n            status as \"status: MatchStatus\",\n            next_match_id,\n            winner_id,\n            visual_column,\n            visual_row,\n            created_at,\n            updated_at\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "match_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "tournament_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "round",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 3,
+        "name": "position",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 4,
+        "name": "status: MatchStatus",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "next_match_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 6,
+        "name": "winner_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 7,
+        "name": "visual_column",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 8,
+        "name": "visual_row",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 9,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 10,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4",
+        "Int4",
+        "Uuid",
+        "Int4",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "0c0425363def402e6d2eae4a223461b612366945649633b33cc2b3627ee9e7fa"
+}
