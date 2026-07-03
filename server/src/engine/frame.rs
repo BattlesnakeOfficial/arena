@@ -579,6 +579,7 @@ mod tests {
                 ruleset_name: "standard".to_string(),
                 timeout: 500,
                 settings: StandardSettings::default(),
+                royale: None,
             },
             snake_names,
         }
