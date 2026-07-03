@@ -19,13 +19,15 @@ use crate::{
         game::{GameBoardSize, GameType},
         leaderboard, session,
         tournament::{
-            self, CreateTournament, MatchStyle, RegistrationStatus, Tournament, TournamentStatus,
+            self, BracketParticipant, CreateTournament, MatchGame, MatchStatus, MatchStyle,
+            RegistrationStatus, Tournament, TournamentMatch, TournamentStatus,
             TournamentVisibility, UpdateTournamentSettings,
         },
         user,
     },
     routes::auth::{CurrentUser, CurrentUserWithSession, OptionalUser},
     state::AppState,
+    tournament_bracket::persist_bracket,
 };
 
 /// Cap for the leaderboard import qualifier flow.
@@ -124,6 +126,57 @@ fn parse_board_size(s: &str) -> Result<GameBoardSize, String> {
     }
 }
 
+/// Start rules (BS-022): the tournament must be in `registration`, and enough
+/// snakes must be registered — at least `required_participants`, and never
+/// fewer than 2 (a bracket needs two sides even if the owner set a lower bar).
+fn validate_start(tournament: &Tournament, registration_count: i64) -> Result<(), String> {
+    if !tournament
+        .status
+        .can_transition_to(TournamentStatus::InProgress)
+    {
+        return Err(format!(
+            "Tournament cannot start from status '{}'",
+            tournament.status.as_str()
+        ));
+    }
+    if registration_count < 2 {
+        return Err("At least 2 registered snakes are needed to start a tournament".to_string());
+    }
+    if registration_count < i64::from(tournament.required_participants) {
+        return Err(format!(
+            "Tournament requires {} participants but only {} are registered",
+            tournament.required_participants, registration_count
+        ));
+    }
+    Ok(())
+}
+
+/// Header label for a bracket round: the last round is the Final.
+fn round_label(round: i32, total_rounds: i32) -> String {
+    if round == total_rounds {
+        "Final".to_string()
+    } else {
+        format!("Round {round}")
+    }
+}
+
+/// Wins for a participant, derived from per-game winners (`None` = tie or
+/// still running — counts for nobody).
+fn win_count(game_winners: &[Option<Uuid>], battlesnake_id: Uuid) -> usize {
+    game_winners
+        .iter()
+        .flatten()
+        .filter(|winner| **winner == battlesnake_id)
+        .count()
+}
+
+/// Whether a match game with no recorded winner finished as a tie (vs still
+/// being in flight). A later game only exists once this one finished, and a
+/// completed match has no games in flight.
+fn is_tie_game(winner_id: Option<Uuid>, has_later_game: bool, match_status: MatchStatus) -> bool {
+    winner_id.is_none() && (has_later_game || match_status == MatchStatus::Completed)
+}
+
 // --- Shared rendering helpers ---
 
 fn status_badge(status: TournamentStatus) -> Markup {
@@ -135,6 +188,147 @@ fn status_badge(status: TournamentStatus) -> Markup {
         TournamentStatus::Canceled => ("badge bg-danger text-white", "Canceled"),
     };
     html! { span class=(class) { (label) } }
+}
+
+/// Border color + badge for a match card, keyed off the match status.
+fn match_status_style(status: MatchStatus) -> (&'static str, &'static str, &'static str) {
+    match status {
+        MatchStatus::Scheduled => ("#6c757d", "badge bg-secondary text-white", "Scheduled"),
+        MatchStatus::InProgress => ("#ffc107", "badge bg-warning text-dark", "In Progress"),
+        MatchStatus::Completed => ("#28a745", "badge bg-success text-white", "Completed"),
+        MatchStatus::Canceled => ("#dc3545", "badge bg-danger text-white", "Canceled"),
+    }
+}
+
+/// Everything needed to render one match card in the bracket.
+struct BracketMatchView<'a> {
+    tournament_match: &'a TournamentMatch,
+    participants: &'a [BracketParticipant],
+    games: &'a [MatchGame],
+}
+
+/// One match card, placed on the bracket grid by its visual coordinates
+/// (rows are shifted down one to leave room for the round headers).
+fn bracket_match_card(view: &BracketMatchView, match_style: MatchStyle) -> Markup {
+    let m = view.tournament_match;
+    let (border_color, badge_class, badge_label) = match_status_style(m.status);
+    let game_winners: Vec<Option<Uuid>> = view.games.iter().map(|g| g.winner_id).collect();
+    let show_wins = match_style != MatchStyle::SingleGame;
+    // Byes only have their single seeded participant persisted.
+    let is_bye = m.round == 1 && view.participants.len() == 1;
+
+    html! {
+        div class="card"
+            style={
+                "grid-column: "(m.visual_column + 1)"; grid-row: "(m.visual_row + 2)"; "
+                "align-self: center; border: 1px solid #ddd; border-left: 4px solid "(border_color)"; "
+                "border-radius: 6px; padding: 8px 12px; background: #fff;"
+            } {
+            div style="margin-bottom: 6px;" {
+                span class=(badge_class) { (badge_label) }
+            }
+            @for p in view.participants {
+                @let is_winner = p.battlesnake_id.is_some() && p.battlesnake_id == m.winner_id;
+                div style=[is_winner.then_some("font-weight: bold; color: #28a745;")] {
+                    @if let Some(name) = &p.snake_name {
+                        (name)
+                    } @else {
+                        span style="color: #999; font-style: italic;" { "TBD" }
+                    }
+                    @if show_wins {
+                        @if let Some(battlesnake_id) = p.battlesnake_id {
+                            span style="color: #666; font-weight: normal;" {
+                                " (" (win_count(&game_winners, battlesnake_id)) ")"
+                            }
+                        }
+                    }
+                    @if is_winner { " ✓" }
+                }
+            }
+            @if is_bye {
+                div style="color: #999; font-style: italic;" { "Bye" }
+            }
+            @if !view.games.is_empty() {
+                div class="d-flex" style="gap: 8px; flex-wrap: wrap; margin-top: 6px; font-size: 0.85em;" {
+                    @for (i, game) in view.games.iter().enumerate() {
+                        a href={"/games/"(game.game_id)} {
+                            "Game " (game.game_number)
+                            @if is_tie_game(game.winner_id, i + 1 < view.games.len(), m.status) {
+                                " (tie)"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The bracket section of the detail page: a CSS grid laid out from each
+/// match's `visual_column`/`visual_row`, with round headers in the first grid
+/// row and a horizontal scroll container for small screens. When the
+/// tournament is completed, the champion (winner of the final) is called out.
+fn bracket_section(
+    t: &Tournament,
+    matches: &[TournamentMatch],
+    participants_by_match: &HashMap<Uuid, Vec<BracketParticipant>>,
+    games_by_match: &HashMap<Uuid, Vec<MatchGame>>,
+) -> Markup {
+    let total_rounds = matches.iter().map(|m| m.round).max().unwrap_or(0);
+
+    // Champion: the winner of the final (highest round), named via that
+    // match's participant rows.
+    let champion_name = (t.status == TournamentStatus::Completed)
+        .then(|| {
+            let final_match = matches.iter().find(|m| m.round == total_rounds)?;
+            let winner_id = final_match.winner_id?;
+            participants_by_match
+                .get(&final_match.match_id)?
+                .iter()
+                .find(|p| p.battlesnake_id == Some(winner_id))?
+                .snake_name
+                .clone()
+        })
+        .flatten();
+
+    static EMPTY_PARTICIPANTS: Vec<BracketParticipant> = Vec::new();
+    static EMPTY_GAMES: Vec<MatchGame> = Vec::new();
+
+    html! {
+        div class="card mb-4" {
+            div class="card-body" {
+                h2 { "Bracket" }
+                @if let Some(name) = &champion_name {
+                    div class="alert alert-success" style="margin: 12px 0;" {
+                        h3 style="margin: 0;" { "🏆 Champion: " (name) }
+                    }
+                }
+                div style="overflow-x: auto; padding-bottom: 8px;" {
+                    div style={
+                        "display: grid; "
+                        "grid-template-columns: repeat("(total_rounds)", 240px); "
+                        "column-gap: 24px; row-gap: 8px; width: max-content;"
+                    } {
+                        @for round in 1..=total_rounds {
+                            div style={"grid-column: "(round)"; grid-row: 1; font-weight: bold; text-align: center;"} {
+                                (round_label(round, total_rounds))
+                            }
+                        }
+                        @for m in matches {
+                            @let view = BracketMatchView {
+                                tournament_match: m,
+                                participants: participants_by_match
+                                    .get(&m.match_id)
+                                    .unwrap_or(&EMPTY_PARTICIPANTS),
+                                games: games_by_match.get(&m.match_id).unwrap_or(&EMPTY_GAMES),
+                            };
+                            (bracket_match_card(&view, t.match_style))
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Form fields shared by the create and edit pages. When `current` is Some,
@@ -530,6 +724,42 @@ pub async fn show_tournament(
         vec![]
     };
 
+    // Bracket data, only once a bracket exists (in_progress or completed).
+    let bracket_data = if matches!(
+        t.status,
+        TournamentStatus::InProgress | TournamentStatus::Completed
+    ) {
+        let matches = tournament::get_matches_for_tournament(&state.db, tournament_id)
+            .await
+            .wrap_err("Failed to fetch tournament matches")?;
+        let participants =
+            tournament::get_participants_with_names_for_tournament(&state.db, tournament_id)
+                .await
+                .wrap_err("Failed to fetch bracket participants")?;
+        let match_games = tournament::get_match_games_for_tournament(&state.db, tournament_id)
+            .await
+            .wrap_err("Failed to fetch tournament match games")?;
+
+        let mut participants_by_match: HashMap<Uuid, Vec<BracketParticipant>> = HashMap::new();
+        for participant in participants {
+            participants_by_match
+                .entry(participant.match_id)
+                .or_default()
+                .push(participant);
+        }
+        let mut games_by_match: HashMap<Uuid, Vec<MatchGame>> = HashMap::new();
+        for match_game in match_games {
+            games_by_match
+                .entry(match_game.match_id)
+                .or_default()
+                .push(match_game);
+        }
+
+        Some((matches, participants_by_match, games_by_match))
+    } else {
+        None
+    };
+
     let can_edit_registrations = registrations_editable(t.status);
     let max_seed = registrations.len();
     let flash = page_factory.flash.clone();
@@ -582,6 +812,20 @@ pub async fn show_tournament(
                                         button type="submit" class="btn btn-success" { "Open Registration" }
                                     }
                                 }
+                                @if t.status == TournamentStatus::Registration {
+                                    form action={"/tournaments/"(t.tournament_id)"/start"} method="post" style="display: inline;" {
+                                        button type="submit" class="btn btn-success" { "Start Tournament" }
+                                    }
+                                }
+                                @if t.status == TournamentStatus::InProgress {
+                                    form action={"/tournaments/"(t.tournament_id)"/run-round"} method="post" style="display: inline;" {
+                                        button type="submit" class="btn btn-success" { "Run Round " (t.current_round) }
+                                    }
+                                    form action={"/tournaments/"(t.tournament_id)"/reset"} method="post" style="display: inline;" {
+                                        button type="submit" class="btn btn-warning"
+                                            onclick="return confirm('Reset this tournament? The bracket and all match results will be deleted. Registrations are kept.');" { "Reset Tournament" }
+                                    }
+                                }
                                 @if t.status.can_transition_to(TournamentStatus::Canceled) {
                                     form action={"/tournaments/"(t.tournament_id)"/status"} method="post" style="display: inline;" {
                                         input type="hidden" name="action" value="cancel";
@@ -616,6 +860,11 @@ pub async fn show_tournament(
                             }
                         }
                     }
+                }
+
+                // Bracket (in_progress / completed only)
+                @if let Some((matches, participants_by_match, games_by_match)) = &bracket_data {
+                    (bracket_section(&t, matches, participants_by_match, games_by_match))
                 }
 
                 // Registered snakes
@@ -1144,6 +1393,195 @@ pub async fn update_status(
     .await
 }
 
+/// POST /tournaments/{id}/start — generate the bracket and begin round 1
+/// (owner only, BS-022).
+pub async fn start_tournament(
+    State(state): State<AppState>,
+    CurrentUserWithSession { user, session }: CurrentUserWithSession,
+    Path(tournament_id): Path<Uuid>,
+) -> ServerResult<impl IntoResponse, StatusCode> {
+    let t = tournament::get_tournament_by_id(&state.db, tournament_id)
+        .await
+        .wrap_err("Failed to fetch tournament")?
+        .ok_or_else(|| "Tournament not found".to_string())
+        .with_status(StatusCode::NOT_FOUND)?;
+
+    if t.user_id != user.user_id {
+        return Err("Only the tournament owner can start it".to_string())
+            .with_status(StatusCode::FORBIDDEN);
+    }
+
+    let detail_url = format!("/tournaments/{tournament_id}");
+
+    // Bracket generation, status, and current_round all move together: read
+    // the registrations and write everything in one transaction so a
+    // concurrent unregister can't desync the bracket from its seeds.
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .wrap_err("Failed to begin start transaction")?;
+
+    let registrations = tournament::get_registrations_for_tournament(&mut *tx, tournament_id)
+        .await
+        .wrap_err("Failed to fetch registrations")?;
+
+    if let Err(message) = validate_start(&t, registrations.len() as i64) {
+        // Dropping the transaction rolls it back.
+        return flash_redirect(
+            &state,
+            session.session_id,
+            message,
+            session::FLASH_TYPE_ERROR,
+            &detail_url,
+        )
+        .await;
+    }
+
+    persist_bracket(&mut tx, tournament_id, &registrations)
+        .await
+        .wrap_err("Failed to generate bracket")?;
+    tournament::set_tournament_status(&mut *tx, tournament_id, TournamentStatus::InProgress)
+        .await
+        .wrap_err("Failed to set tournament in progress")?;
+    tournament::set_tournament_current_round(&mut *tx, tournament_id, 1)
+        .await
+        .wrap_err("Failed to set current round")?;
+
+    tx.commit()
+        .await
+        .wrap_err("Failed to commit start transaction")?;
+
+    flash_redirect(
+        &state,
+        session.session_id,
+        format!(
+            "Tournament started with {} snakes! Use \"Run Round\" to play each round.",
+            registrations.len()
+        ),
+        session::FLASH_TYPE_SUCCESS,
+        &detail_url,
+    )
+    .await
+}
+
+/// POST /tournaments/{id}/run-round — kick off the current round's matches
+/// (owner only, BS-023). The actual work happens in RunTournamentRoundJob;
+/// the job is enqueued outside any transaction (matchmaker pattern).
+pub async fn run_round(
+    State(state): State<AppState>,
+    CurrentUserWithSession { user, session }: CurrentUserWithSession,
+    Path(tournament_id): Path<Uuid>,
+) -> ServerResult<impl IntoResponse, StatusCode> {
+    let t = tournament::get_tournament_by_id(&state.db, tournament_id)
+        .await
+        .wrap_err("Failed to fetch tournament")?
+        .ok_or_else(|| "Tournament not found".to_string())
+        .with_status(StatusCode::NOT_FOUND)?;
+
+    if t.user_id != user.user_id {
+        return Err("Only the tournament owner can run rounds".to_string())
+            .with_status(StatusCode::FORBIDDEN);
+    }
+
+    let detail_url = format!("/tournaments/{tournament_id}");
+
+    if t.status != TournamentStatus::InProgress {
+        return flash_redirect(
+            &state,
+            session.session_id,
+            "Rounds can only be run while the tournament is in progress".to_string(),
+            session::FLASH_TYPE_ERROR,
+            &detail_url,
+        )
+        .await;
+    }
+
+    cja::jobs::Job::enqueue(
+        crate::jobs::RunTournamentRoundJob { tournament_id },
+        state.clone(),
+        format!(
+            "Owner ran round {} of tournament {tournament_id}",
+            t.current_round
+        ),
+    )
+    .await
+    .wrap_err("Failed to enqueue round job")?;
+
+    flash_redirect(
+        &state,
+        session.session_id,
+        format!("Round {} started", t.current_round),
+        session::FLASH_TYPE_SUCCESS,
+        &detail_url,
+    )
+    .await
+}
+
+/// POST /tournaments/{id}/reset — delete the bracket and reopen registration
+/// (owner only, BS-024). Matches (and their participants/games via FK
+/// cascade) are deleted; registrations are preserved.
+pub async fn reset_tournament(
+    State(state): State<AppState>,
+    CurrentUserWithSession { user, session }: CurrentUserWithSession,
+    Path(tournament_id): Path<Uuid>,
+) -> ServerResult<impl IntoResponse, StatusCode> {
+    let t = tournament::get_tournament_by_id(&state.db, tournament_id)
+        .await
+        .wrap_err("Failed to fetch tournament")?
+        .ok_or_else(|| "Tournament not found".to_string())
+        .with_status(StatusCode::NOT_FOUND)?;
+
+    if t.user_id != user.user_id {
+        return Err("Only the tournament owner can reset it".to_string())
+            .with_status(StatusCode::FORBIDDEN);
+    }
+
+    let detail_url = format!("/tournaments/{tournament_id}");
+
+    // Only in_progress -> registration is a valid reset (can_transition_to
+    // allows exactly this backward edge).
+    if t.status != TournamentStatus::InProgress
+        || !t.status.can_transition_to(TournamentStatus::Registration)
+    {
+        return flash_redirect(
+            &state,
+            session.session_id,
+            "Only an in-progress tournament can be reset".to_string(),
+            session::FLASH_TYPE_ERROR,
+            &detail_url,
+        )
+        .await;
+    }
+
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .wrap_err("Failed to begin reset transaction")?;
+    tournament::delete_matches_for_tournament(&mut *tx, tournament_id)
+        .await
+        .wrap_err("Failed to delete tournament matches")?;
+    tournament::set_tournament_current_round(&mut *tx, tournament_id, 0)
+        .await
+        .wrap_err("Failed to reset current round")?;
+    tournament::set_tournament_status(&mut *tx, tournament_id, TournamentStatus::Registration)
+        .await
+        .wrap_err("Failed to reopen registration")?;
+    tx.commit()
+        .await
+        .wrap_err("Failed to commit reset transaction")?;
+
+    flash_redirect(
+        &state,
+        session.session_id,
+        "Tournament reset — the bracket was cleared and registration is open again".to_string(),
+        session::FLASH_TYPE_SUCCESS,
+        &detail_url,
+    )
+    .await
+}
+
 /// POST /tournaments/{id}/import-leaderboard — the "leaderboards feed
 /// tournaments" qualifier flow. Registers the top N ranked snakes that aren't
 /// already registered, respecting max_snakes_per_user, seeded in rank order
@@ -1474,5 +1912,96 @@ mod tests {
         assert_eq!(parse_board_size("19x19").unwrap(), GameBoardSize::Large);
         assert!(parse_board_size("25x25").is_err());
         assert!(parse_board_size("").is_err());
+    }
+
+    #[test]
+    fn validate_start_requires_registration_status() {
+        for status in [
+            TournamentStatus::Created,
+            TournamentStatus::InProgress,
+            TournamentStatus::Completed,
+            TournamentStatus::Canceled,
+        ] {
+            let t = test_tournament(
+                status,
+                RegistrationStatus::Open,
+                TournamentVisibility::Public,
+            );
+            assert!(
+                validate_start(&t, 8).is_err(),
+                "start should be rejected from status {status:?}"
+            );
+        }
+
+        let t = test_tournament(
+            TournamentStatus::Registration,
+            RegistrationStatus::Open,
+            TournamentVisibility::Public,
+        );
+        assert!(validate_start(&t, 8).is_ok());
+    }
+
+    #[test]
+    fn validate_start_requires_enough_participants() {
+        let mut t = test_tournament(
+            TournamentStatus::Registration,
+            RegistrationStatus::Open,
+            TournamentVisibility::Public,
+        );
+
+        // required_participants = 2 (default)
+        assert!(validate_start(&t, 0).is_err());
+        assert!(validate_start(&t, 1).is_err());
+        assert!(validate_start(&t, 2).is_ok());
+        assert!(validate_start(&t, 3).is_ok());
+
+        // Higher bar: must meet required_participants
+        t.required_participants = 8;
+        assert!(validate_start(&t, 7).is_err());
+        assert!(validate_start(&t, 8).is_ok());
+        assert!(validate_start(&t, 9).is_ok());
+
+        // Degenerate config below 2 still needs 2 snakes for a bracket
+        t.required_participants = 0;
+        assert!(validate_start(&t, 1).is_err());
+        assert!(validate_start(&t, 2).is_ok());
+    }
+
+    #[test]
+    fn round_labels_name_the_final() {
+        assert_eq!(round_label(1, 1), "Final"); // 2-snake tournament
+        assert_eq!(round_label(1, 3), "Round 1");
+        assert_eq!(round_label(2, 3), "Round 2");
+        assert_eq!(round_label(3, 3), "Final");
+    }
+
+    #[test]
+    fn win_count_counts_only_the_participants_wins() {
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let winners = [Some(a), None, Some(b), Some(a)];
+
+        assert_eq!(win_count(&winners, a), 2);
+        assert_eq!(win_count(&winners, b), 1);
+        assert_eq!(win_count(&winners, Uuid::new_v4()), 0);
+        assert_eq!(win_count(&[], a), 0);
+        assert_eq!(win_count(&[None, None], a), 0);
+    }
+
+    #[test]
+    fn tie_games_are_distinguished_from_in_flight_games() {
+        let winner = Some(Uuid::new_v4());
+
+        // A decided game is never a tie.
+        assert!(!is_tie_game(winner, false, MatchStatus::InProgress));
+        assert!(!is_tie_game(winner, true, MatchStatus::Completed));
+
+        // No winner + a later game exists: this game finished as a tie.
+        assert!(is_tie_game(None, true, MatchStatus::InProgress));
+
+        // No winner on the last game: tie only if the match is over.
+        assert!(!is_tie_game(None, false, MatchStatus::InProgress));
+        assert!(!is_tie_game(None, false, MatchStatus::Scheduled));
+        assert!(is_tie_game(None, false, MatchStatus::Completed));
     }
 }
