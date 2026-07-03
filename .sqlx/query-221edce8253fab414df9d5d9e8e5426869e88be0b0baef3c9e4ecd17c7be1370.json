@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT GREATEST(\n            g.updated_at,\n            (SELECT MAX(t.created_at) FROM turns t WHERE t.game_id = g.game_id)\n        ) as \"last_activity!\"\n        FROM games g\n        WHERE g.game_id = $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "last_activity!",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "221edce8253fab414df9d5d9e8e5426869e88be0b0baef3c9e4ecd17c7be1370"
+}

@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT battlesnake_id FROM match_participants\n             WHERE match_id = $1 AND source_match_id = $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "battlesnake_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "4af1335fd8aa6fa7ecf3d0a3a1cdbeaf16b4a48cd46bb564f4e1083658b04f18"
+}

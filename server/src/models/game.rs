@@ -426,6 +426,97 @@ pub async fn update_game_status(
     })
 }
 
+/// Update a game's status inside an existing transaction. Used by the game
+/// runner's atomic finish sequence, where the status flip must commit together
+/// with the placements and the tournament match result.
+pub async fn update_game_status_tx(
+    conn: &mut sqlx::PgConnection,
+    game_id: Uuid,
+    status: GameStatus,
+) -> cja::Result<()> {
+    sqlx::query!(
+        "UPDATE games SET status = $2 WHERE game_id = $1",
+        game_id,
+        status.as_str(),
+    )
+    .execute(&mut *conn)
+    .await
+    .wrap_err_with(|| format!("Failed to update status for game {game_id}"))?;
+
+    Ok(())
+}
+
+/// Bump a game's `updated_at` without changing anything else (the
+/// `update_games_updated_at` trigger stamps `NOW()` on any UPDATE). Used to
+/// mark a stalled game as "being handled" when its runner job is re-enqueued,
+/// so overlapping staleness checks don't enqueue duplicate runners.
+pub async fn touch_game_updated_at(pool: &PgPool, game_id: Uuid) -> cja::Result<()> {
+    sqlx::query!(
+        "UPDATE games SET updated_at = NOW() WHERE game_id = $1",
+        game_id
+    )
+    .execute(pool)
+    .await
+    .wrap_err_with(|| format!("Failed to touch updated_at for game {game_id}"))?;
+
+    Ok(())
+}
+
+/// Latest sign of life for a game: its `updated_at` (bumped on status changes
+/// and explicit touches) or the `created_at` of its most recently persisted
+/// turn, whichever is later. `None` if the game does not exist. Used to judge
+/// whether an in-flight game has stalled (its runner job died).
+pub async fn get_game_last_activity(
+    pool: &PgPool,
+    game_id: Uuid,
+) -> cja::Result<Option<chrono::DateTime<chrono::Utc>>> {
+    let last_activity = sqlx::query_scalar!(
+        r#"
+        SELECT GREATEST(
+            g.updated_at,
+            (SELECT MAX(t.created_at) FROM turns t WHERE t.game_id = g.game_id)
+        ) as "last_activity!"
+        FROM games g
+        WHERE g.game_id = $1
+        "#,
+        game_id
+    )
+    .fetch_optional(pool)
+    .await
+    .wrap_err("Failed to fetch game last activity")?;
+
+    Ok(last_activity)
+}
+
+/// Wipe the per-game state a previous (crashed) run left behind so `run_game`
+/// can restart cleanly from turn 0: turns (snake_turns cascade with them) and
+/// any partially written placements. Runs in a single transaction.
+pub async fn reset_game_state_for_retry(pool: &PgPool, game_id: Uuid) -> cja::Result<()> {
+    let mut tx = pool
+        .begin()
+        .await
+        .wrap_err("Failed to start game reset transaction")?;
+
+    sqlx::query!("DELETE FROM turns WHERE game_id = $1", game_id)
+        .execute(&mut *tx)
+        .await
+        .wrap_err_with(|| format!("Failed to delete turns for game {game_id} reset"))?;
+
+    sqlx::query!(
+        "UPDATE game_battlesnakes SET placement = NULL WHERE game_id = $1",
+        game_id
+    )
+    .execute(&mut *tx)
+    .await
+    .wrap_err_with(|| format!("Failed to clear placements for game {game_id} reset"))?;
+
+    tx.commit()
+        .await
+        .wrap_err("Failed to commit game reset transaction")?;
+
+    Ok(())
+}
+
 // Set the enqueued_at timestamp for a game
 pub async fn set_game_enqueued_at(
     pool: &PgPool,

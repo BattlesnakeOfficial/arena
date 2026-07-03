@@ -7,7 +7,7 @@
 
 pub mod frame;
 
-use rules::{BoardState, Direction, Point, SnakeMove, StandardSettings};
+use rules::{BoardState, Direction, Point, RoyaleSettings, SnakeMove, StandardSettings};
 use uuid::Uuid;
 
 use crate::models::game::{GameBoardSize, GameType};
@@ -24,6 +24,9 @@ pub struct GameMeta {
     pub ruleset_name: String,
     pub timeout: i64,
     pub settings: StandardSettings,
+    /// `Some` when this is a Royale game; drives hazard population each turn
+    /// and the `royale` block of the wire-protocol ruleset settings.
+    pub royale: Option<RoyaleSettings>,
 }
 
 /// Full engine game state: board + metadata.
@@ -44,11 +47,21 @@ pub struct GameResult {
     pub final_turn: i32,
 }
 
+/// Derive a deterministic RNG seed from the game's UUID.
+///
+/// Royale hazard placement must be reproducible from stored game data (see
+/// the determinism notes in `rules::royale`), so the seed is a pure function
+/// of the game ID rather than a fresh random value.
+fn game_seed(game_id: Uuid) -> u64 {
+    let bytes = game_id.as_bytes();
+    u64::from_le_bytes(bytes[..8].try_into().expect("uuid has 16 bytes"))
+}
+
 /// Create the initial game state from database models
 pub fn create_initial_game(
     game_id: Uuid,
     board_size: GameBoardSize,
-    _game_type: GameType,
+    game_type: GameType,
     battlesnakes: &[GameBattlesnakeWithDetails],
 ) -> EngineGame {
     let (w, h) = board_size.dimensions();
@@ -68,19 +81,43 @@ pub fn create_initial_game(
         snake_names.insert(bs.game_battlesnake_id.to_string(), bs.name.clone());
     }
 
-    let settings = StandardSettings {
-        food_spawn_chance: 15,
-        minimum_food: 1,
-        hazard_damage_per_turn: 15,
+    // Hazard damage: the arena has historically used 15 for standard games
+    // (where it is inert -- standard boards never spawn hazards), and we keep
+    // that unchanged. Royale uses 14, the default in the canonical Go rules
+    // (`hazardDamagePerTurn` in BattlesnakeOfficial/rules cli).
+    let (ruleset_name, settings, royale) = match game_type {
+        GameType::Royale => (
+            "royale",
+            StandardSettings {
+                food_spawn_chance: 15,
+                minimum_food: 1,
+                hazard_damage_per_turn: 14,
+            },
+            Some(RoyaleSettings {
+                shrink_every_n_turns: 25,
+                seed: game_seed(game_id),
+            }),
+        ),
+        // Constrictor / Snail Mode / Other currently run standard rules.
+        _ => (
+            "standard",
+            StandardSettings {
+                food_spawn_chance: 15,
+                minimum_food: 1,
+                hazard_damage_per_turn: 15,
+            },
+            None,
+        ),
     };
 
     EngineGame {
         board,
         meta: GameMeta {
             game_id: game_id.to_string(),
-            ruleset_name: "standard".to_string(),
+            ruleset_name: ruleset_name.to_string(),
             timeout: 500,
             settings,
+            royale,
         },
         snake_names,
     }
@@ -138,9 +175,13 @@ pub fn run_game_with_random_moves(mut game: EngineGame) -> GameResult {
             .collect();
 
         // Apply the turn
-        let _game_over =
-            rules::standard::execute_turn(&mut game.board, &moves, &game.meta.settings)
-                .expect("execute_turn failed");
+        let _game_over = match &game.meta.royale {
+            Some(royale) => {
+                rules::royale::execute_turn(&mut game.board, &moves, &game.meta.settings, royale)
+            }
+            None => rules::standard::execute_turn(&mut game.board, &moves, &game.meta.settings),
+        }
+        .expect("execute_turn failed");
 
         // Spawn food after turn
         rules::food::maybe_spawn_food(&mut rng, &mut game.board, &game.meta.settings);
@@ -198,6 +239,15 @@ pub fn apply_turn(game: &mut EngineGame, moves: &[(String, Direction)]) {
     rules::standard::damage_hazards(&mut game.board, &game.meta.settings);
     rules::standard::feed_snakes(&mut game.board);
     let _ = rules::standard::eliminate_snakes(&mut game.board);
+
+    // Royale: spawn/grow hazards for the next turn (matches Go's
+    // StageSpawnHazardsShrinkMap, which runs after elimination). Uses
+    // `board.turn + 1` internally, so this must run before the caller
+    // increments `board.turn`.
+    if let Some(royale) = &game.meta.royale {
+        rules::royale::populate_hazards(&mut game.board, royale)
+            .expect("royale hazard population failed: invalid shrink frequency");
+    }
 }
 
 #[cfg(test)]
@@ -299,6 +349,7 @@ mod tests {
                             ruleset_name: "standard".to_string(),
                             timeout: 500,
                             settings: StandardSettings::default(),
+                            royale: None,
                         },
                         snake_names,
                     }
@@ -1186,6 +1237,7 @@ mod tests {
                 ruleset_name: "standard".to_string(),
                 timeout: 500,
                 settings: StandardSettings::default(),
+                royale: None,
             },
             snake_names,
         }
@@ -1260,5 +1312,187 @@ mod tests {
             snake_ids[1],
             battlesnakes[1].game_battlesnake_id.to_string()
         );
+    }
+
+    // === Royale wiring tests ===
+
+    fn make_battlesnake_details(n: usize) -> Vec<GameBattlesnakeWithDetails> {
+        use crate::models::game_battlesnake::GameBattlesnakeWithDetails;
+
+        (0..n)
+            .map(|i| GameBattlesnakeWithDetails {
+                game_battlesnake_id: Uuid::new_v4(),
+                game_id: Uuid::new_v4(),
+                battlesnake_id: Uuid::new_v4(),
+                placement: None,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                name: format!("Snake {i}"),
+                url: "https://example.com/snake".to_string(),
+                user_id: Uuid::new_v4(),
+                leaderboard_entry_id: None,
+                color: String::new(),
+                head: String::new(),
+                tail: String::new(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_create_initial_game_royale_settings() {
+        let game_id = Uuid::new_v4();
+        let battlesnakes = make_battlesnake_details(2);
+        let game = create_initial_game(
+            game_id,
+            GameBoardSize::Medium,
+            GameType::Royale,
+            &battlesnakes,
+        );
+
+        assert_eq!(game.meta.ruleset_name, "royale");
+        assert_eq!(
+            game.meta.settings.hazard_damage_per_turn, 14,
+            "royale uses the Go rules default hazard damage"
+        );
+        let royale = game.meta.royale.as_ref().expect("royale settings set");
+        assert_eq!(royale.shrink_every_n_turns, 25);
+
+        // Seed is derived from the game UUID: same game ID -> same seed.
+        let game2 = create_initial_game(
+            game_id,
+            GameBoardSize::Medium,
+            GameType::Royale,
+            &battlesnakes,
+        );
+        assert_eq!(game2.meta.royale.as_ref().unwrap().seed, royale.seed);
+    }
+
+    #[test]
+    fn test_create_initial_game_standard_unaffected() {
+        let battlesnakes = make_battlesnake_details(2);
+        let game = create_initial_game(
+            Uuid::new_v4(),
+            GameBoardSize::Medium,
+            GameType::Standard,
+            &battlesnakes,
+        );
+
+        assert_eq!(game.meta.ruleset_name, "standard");
+        assert_eq!(game.meta.settings.hazard_damage_per_turn, 15);
+        assert!(game.meta.royale.is_none());
+        assert!(game.board.hazards.is_empty());
+    }
+
+    /// A Royale game's turns produce growing hazards in board-viewer frames.
+    /// Mimics the game_runner loop: apply_turn, then increment board.turn,
+    /// then snapshot a frame.
+    #[test]
+    fn test_royale_game_hazards_grow_in_frames() {
+        let battlesnakes = make_battlesnake_details(2);
+        let mut game = create_initial_game(
+            Uuid::new_v4(),
+            GameBoardSize::Medium,
+            GameType::Royale,
+            &battlesnakes,
+        );
+
+        let mut prev_hazards = 0usize;
+        for _ in 0..60 {
+            // Empty moves: move_snakes is a no-op, but the rest of the
+            // pipeline (including hazard population) still runs.
+            apply_turn(&mut game, &[]);
+            game.board.turn += 1;
+
+            let frame = frame::game_to_frame(&game, &[], &[], &std::collections::HashMap::new());
+            assert_eq!(
+                frame.hazards.len(),
+                game.board.hazards.len(),
+                "board hazards must flow into frame data"
+            );
+
+            if frame.turn < 25 {
+                assert!(
+                    frame.hazards.is_empty(),
+                    "no hazards before the first shrink (turn {})",
+                    frame.turn
+                );
+            }
+            if frame.turn == 25 {
+                assert_eq!(
+                    frame.hazards.len(),
+                    11,
+                    "first shrink covers one full edge of an 11x11 board"
+                );
+            }
+            assert!(
+                frame.hazards.len() >= prev_hazards,
+                "hazards must only grow (turn {})",
+                frame.turn
+            );
+            for h in &frame.hazards {
+                assert!(
+                    h.x >= 0 && h.x < 11 && h.y >= 0 && h.y < 11,
+                    "hazard ({}, {}) out of bounds",
+                    h.x,
+                    h.y
+                );
+            }
+            prev_hazards = frame.hazards.len();
+        }
+
+        assert!(
+            prev_hazards > 11,
+            "expected at least two shrinks after 60 turns, got {prev_hazards} hazards"
+        );
+    }
+
+    /// Standard games are completely unaffected: no hazards ever appear.
+    #[test]
+    fn test_standard_game_frames_have_zero_hazards() {
+        let battlesnakes = make_battlesnake_details(2);
+        let mut game = create_initial_game(
+            Uuid::new_v4(),
+            GameBoardSize::Medium,
+            GameType::Standard,
+            &battlesnakes,
+        );
+
+        for _ in 0..60 {
+            apply_turn(&mut game, &[]);
+            game.board.turn += 1;
+
+            let frame = frame::game_to_frame(&game, &[], &[], &std::collections::HashMap::new());
+            assert!(
+                frame.hazards.is_empty(),
+                "standard game must never have hazards (turn {})",
+                frame.turn
+            );
+        }
+    }
+
+    /// Royale hazard placement is deterministic per game: replaying the same
+    /// game ID produces the same hazard sequence.
+    #[test]
+    fn test_royale_hazards_deterministic_per_game_id() {
+        let game_id = Uuid::new_v4();
+        let battlesnakes = make_battlesnake_details(2);
+
+        let run = |game_id: Uuid| -> Vec<Vec<Point>> {
+            let mut game = create_initial_game(
+                game_id,
+                GameBoardSize::Medium,
+                GameType::Royale,
+                &battlesnakes,
+            );
+            let mut hazard_history = Vec::new();
+            for _ in 0..120 {
+                apply_turn(&mut game, &[]);
+                game.board.turn += 1;
+                hazard_history.push(game.board.hazards.clone());
+            }
+            hazard_history
+        };
+
+        assert_eq!(run(game_id), run(game_id));
     }
 }

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT\n            match_participant_id,\n            match_id,\n            battlesnake_id,\n            source_match_id,\n            participant_type as \"participant_type: ParticipantType\",\n            seed_position,\n            created_at\n        FROM match_participants\n        WHERE match_id = $1\n        ORDER BY seed_position ASC NULLS LAST, created_at ASC\n        ",
+  "query": "\n        INSERT INTO match_participants (\n            match_id, slot, battlesnake_id, source_match_id, participant_type, seed_position\n        )\n        VALUES ($1, $2, $3, $4, $5, $6)\n        RETURNING\n            match_participant_id,\n            match_id,\n            slot,\n            battlesnake_id,\n            source_match_id,\n            participant_type as \"participant_type: ParticipantType\",\n            seed_position,\n            created_at\n        ",
   "describe": {
     "columns": [
       {
@@ -15,36 +15,47 @@
       },
       {
         "ordinal": 2,
+        "name": "slot",
+        "type_info": "Int2"
+      },
+      {
+        "ordinal": 3,
         "name": "battlesnake_id",
         "type_info": "Uuid"
       },
       {
-        "ordinal": 3,
+        "ordinal": 4,
         "name": "source_match_id",
         "type_info": "Uuid"
       },
       {
-        "ordinal": 4,
+        "ordinal": 5,
         "name": "participant_type: ParticipantType",
         "type_info": "Text"
       },
       {
-        "ordinal": 5,
+        "ordinal": 6,
         "name": "seed_position",
         "type_info": "Int4"
       },
       {
-        "ordinal": 6,
+        "ordinal": 7,
         "name": "created_at",
         "type_info": "Timestamptz"
       }
     ],
     "parameters": {
       "Left": [
-        "Uuid"
+        "Uuid",
+        "Int2",
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Int4"
       ]
     },
     "nullable": [
+      false,
       false,
       false,
       true,
@@ -54,5 +65,5 @@
       false
     ]
   },
-  "hash": "259d5e7f51bd0cd8e70064029676eda1a6981b17e8d1409b2614d64fc18eb9cb"
+  "hash": "81a0712973c3aff295de8aa5f3d869f26eeed7b3a2711275a9b5d79717ffc002"
 }
