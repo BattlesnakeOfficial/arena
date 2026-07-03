@@ -5,6 +5,9 @@ edition.workspace = true
 
 [dependencies]
 rand = "0.8"
+# Explicit dependency for royale hazard placement: ChaCha8Rng is documented
+# as a portable, reproducible stream, unlike rand's StdRng.
+rand_chacha = "0.3"
 
 [dev-dependencies]
 proptest = "1"

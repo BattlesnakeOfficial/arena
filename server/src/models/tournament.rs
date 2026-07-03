@@ -311,6 +311,8 @@ pub struct TournamentMatch {
 pub struct MatchParticipant {
     pub match_participant_id: Uuid,
     pub match_id: Uuid,
+    /// Which side of the match this participant occupies (1 or 2).
+    pub slot: i16,
     /// None until the feeder match completes and the participant is known.
     pub battlesnake_id: Option<Uuid>,
     pub source_match_id: Option<Uuid>,
@@ -488,22 +490,37 @@ where
 /// Update status without transition validation — callers are responsible for
 /// checking `TournamentStatus::can_transition_to` first (route/job layer owns
 /// the error message).
+///
+/// Compare-and-swap: the update only applies if the tournament is currently in
+/// `expected`, which protects against concurrent status changes racing between
+/// the caller's transition check and this write.
 pub async fn set_tournament_status<'e, E>(
     executor: E,
     tournament_id: Uuid,
     status: TournamentStatus,
+    expected: TournamentStatus,
 ) -> cja::Result<()>
 where
     E: Executor<'e, Database = Postgres>,
 {
-    sqlx::query!(
-        "UPDATE tournaments SET status = $2 WHERE tournament_id = $1",
+    let result = sqlx::query!(
+        "UPDATE tournaments SET status = $2 WHERE tournament_id = $1 AND status = $3",
         tournament_id,
         status.as_str(),
+        expected.as_str(),
     )
     .execute(executor)
     .await
     .wrap_err("Failed to update tournament status")?;
+
+    if result.rows_affected() == 0 {
+        return Err(color_eyre::eyre::eyre!(
+            "Failed to update tournament {} status to {}: tournament not found or status is no longer {}",
+            tournament_id,
+            status.as_str(),
+            expected.as_str(),
+        ));
+    }
 
     Ok(())
 }
@@ -568,6 +585,34 @@ pub async fn get_registrations_for_tournament(
     .wrap_err("Failed to fetch tournament registrations")?;
 
     Ok(registrations)
+}
+
+/// Count registrations a battlesnake holds in tournaments that are still
+/// active (open for registration or in progress). Used to refuse deleting a
+/// snake out from under a live tournament — the FK cascade would silently
+/// remove its registrations and match participations.
+pub async fn count_active_tournament_registrations<'e, E>(
+    executor: E,
+    battlesnake_id: Uuid,
+) -> cja::Result<i64>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    let count = sqlx::query_scalar!(
+        r#"
+        SELECT COUNT(*) as "count!"
+        FROM tournament_registrations tr
+        JOIN tournaments t ON t.tournament_id = tr.tournament_id
+        WHERE tr.battlesnake_id = $1
+          AND t.status IN ('registration', 'in_progress')
+        "#,
+        battlesnake_id
+    )
+    .fetch_one(executor)
+    .await
+    .wrap_err("Failed to count active tournament registrations")?;
+
+    Ok(count)
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -656,6 +701,8 @@ pub async fn get_matches_for_tournament(
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CreateMatchParticipant {
     pub match_id: Uuid,
+    /// Which side of the match this participant occupies (1 or 2).
+    pub slot: i16,
     pub battlesnake_id: Option<Uuid>,
     pub source_match_id: Option<Uuid>,
     pub participant_type: ParticipantType,
@@ -673,12 +720,13 @@ where
         MatchParticipant,
         r#"
         INSERT INTO match_participants (
-            match_id, battlesnake_id, source_match_id, participant_type, seed_position
+            match_id, slot, battlesnake_id, source_match_id, participant_type, seed_position
         )
-        VALUES ($1, $2, $3, $4, $5)
+        VALUES ($1, $2, $3, $4, $5, $6)
         RETURNING
             match_participant_id,
             match_id,
+            slot,
             battlesnake_id,
             source_match_id,
             participant_type as "participant_type: ParticipantType",
@@ -686,6 +734,7 @@ where
             created_at
         "#,
         data.match_id,
+        data.slot,
         data.battlesnake_id,
         data.source_match_id,
         data.participant_type.as_str(),
@@ -708,6 +757,7 @@ pub async fn get_participants_for_match(
         SELECT
             match_participant_id,
             match_id,
+            slot,
             battlesnake_id,
             source_match_id,
             participant_type as "participant_type: ParticipantType",
@@ -715,7 +765,7 @@ pub async fn get_participants_for_match(
             created_at
         FROM match_participants
         WHERE match_id = $1
-        ORDER BY seed_position ASC NULLS LAST, created_at ASC
+        ORDER BY slot ASC
         "#,
         match_id
     )
@@ -1006,7 +1056,7 @@ mod tests {
         assert!(InProgress.can_transition_to(Completed));
         assert!(InProgress.can_transition_to(Registration)); // reset
 
-        // Canceled from any non-terminal state
+        // Canceled is reachable from any other state, including Completed
         assert!(Created.can_transition_to(Canceled));
         assert!(Registration.can_transition_to(Canceled));
         assert!(InProgress.can_transition_to(Canceled));
@@ -1105,6 +1155,139 @@ mod tests {
             );
         }
         assert!(ParticipantType::from_str("bogus").is_err());
+    }
+
+    // Insert a user + battlesnake pair with raw (non-macro) queries so the
+    // fixtures don't need entries in the sqlx offline cache.
+    async fn fixture_user_and_snake(pool: &PgPool) -> cja::Result<(Uuid, Uuid)> {
+        let user_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO users (external_github_id, github_login, github_access_token)
+             VALUES ($1, $2, $3) RETURNING user_id",
+        )
+        .bind(424_242_i64)
+        .bind("test-user")
+        .bind("test-token")
+        .fetch_one(pool)
+        .await?;
+
+        let battlesnake_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO battlesnakes (user_id, name, url)
+             VALUES ($1, $2, $3) RETURNING battlesnake_id",
+        )
+        .bind(user_id)
+        .bind("test-snake")
+        .bind("http://example.com")
+        .fetch_one(pool)
+        .await?;
+
+        Ok((user_id, battlesnake_id))
+    }
+
+    fn fixture_tournament() -> CreateTournament {
+        CreateTournament {
+            name: "Test Tournament".to_string(),
+            description: None,
+            game_type: GameType::Standard,
+            board_size: GameBoardSize::Medium,
+            registration_status: RegistrationStatus::Open,
+            visibility: TournamentVisibility::Public,
+            match_style: MatchStyle::SingleGame,
+            max_snakes_per_user: 1,
+            required_participants: 2,
+        }
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn counts_only_registrations_in_active_tournaments(pool: PgPool) -> cja::Result<()> {
+        let (user_id, battlesnake_id) = fixture_user_and_snake(&pool).await?;
+
+        // No registrations yet.
+        let count = count_active_tournament_registrations(&pool, battlesnake_id).await?;
+        assert_eq!(count, 0);
+
+        let tournament = create_tournament(&pool, user_id, fixture_tournament()).await?;
+        create_registration(&pool, tournament.tournament_id, battlesnake_id, user_id, 1).await?;
+
+        // Registered, but the tournament is still 'created' — not active.
+        let count = count_active_tournament_registrations(&pool, battlesnake_id).await?;
+        assert_eq!(count, 0);
+
+        set_tournament_status(
+            &pool,
+            tournament.tournament_id,
+            TournamentStatus::Registration,
+            TournamentStatus::Created,
+        )
+        .await?;
+        let count = count_active_tournament_registrations(&pool, battlesnake_id).await?;
+        assert_eq!(count, 1);
+
+        set_tournament_status(
+            &pool,
+            tournament.tournament_id,
+            TournamentStatus::InProgress,
+            TournamentStatus::Registration,
+        )
+        .await?;
+        let count = count_active_tournament_registrations(&pool, battlesnake_id).await?;
+        assert_eq!(count, 1);
+
+        set_tournament_status(
+            &pool,
+            tournament.tournament_id,
+            TournamentStatus::Completed,
+            TournamentStatus::InProgress,
+        )
+        .await?;
+        let count = count_active_tournament_registrations(&pool, battlesnake_id).await?;
+        assert_eq!(count, 0);
+
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn set_tournament_status_is_a_compare_and_swap(pool: PgPool) -> cja::Result<()> {
+        let (user_id, _) = fixture_user_and_snake(&pool).await?;
+        let tournament = create_tournament(&pool, user_id, fixture_tournament()).await?;
+
+        // Wrong expected status: refused, status unchanged.
+        let result = set_tournament_status(
+            &pool,
+            tournament.tournament_id,
+            TournamentStatus::InProgress,
+            TournamentStatus::Registration,
+        )
+        .await;
+        assert!(result.is_err());
+        let reloaded = get_tournament_by_id(&pool, tournament.tournament_id)
+            .await?
+            .unwrap();
+        assert_eq!(reloaded.status, TournamentStatus::Created);
+
+        // Matching expected status: applied.
+        set_tournament_status(
+            &pool,
+            tournament.tournament_id,
+            TournamentStatus::Registration,
+            TournamentStatus::Created,
+        )
+        .await?;
+        let reloaded = get_tournament_by_id(&pool, tournament.tournament_id)
+            .await?
+            .unwrap();
+        assert_eq!(reloaded.status, TournamentStatus::Registration);
+
+        // Unknown tournament: refused.
+        let result = set_tournament_status(
+            &pool,
+            Uuid::new_v4(),
+            TournamentStatus::Registration,
+            TournamentStatus::Created,
+        )
+        .await;
+        assert!(result.is_err());
+
+        Ok(())
     }
 
     #[test]

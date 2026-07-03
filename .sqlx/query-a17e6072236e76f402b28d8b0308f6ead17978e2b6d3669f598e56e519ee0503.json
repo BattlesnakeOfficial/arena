@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE match_participants\n        SET battlesnake_id = $3\n        WHERE match_id = $1 AND source_match_id = $2\n          AND (battlesnake_id IS NULL OR battlesnake_id = $3)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a17e6072236e76f402b28d8b0308f6ead17978e2b6d3669f598e56e519ee0503"
+}
