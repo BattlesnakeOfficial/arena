@@ -73,7 +73,14 @@ pub async fn run_match(app_state: &AppState, match_id: Uuid) -> cja::Result<()> 
     let pool = &app_state.db;
 
     let Some(tournament_match) = get_match_by_id(pool, match_id).await? else {
-        return Err(color_eyre::eyre::eyre!("Match {match_id} not found"));
+        // The match can vanish between enqueue and execution when the owner
+        // resets the tournament (matches are deleted). Treat it as a no-op
+        // rather than an error so stale jobs don't retry forever.
+        tracing::warn!(
+            match_id = %match_id,
+            "Match not found (deleted by a tournament reset?); skipping"
+        );
+        return Ok(());
     };
     if matches!(
         tournament_match.status,

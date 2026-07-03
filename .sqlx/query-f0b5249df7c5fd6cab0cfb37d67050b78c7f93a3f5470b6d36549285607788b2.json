@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            mg.match_game_id,\n            mg.match_id,\n            mg.game_id,\n            mg.game_number,\n            mg.winner_id,\n            mg.created_at\n        FROM match_games mg\n        JOIN tournament_matches tm ON mg.match_id = tm.match_id\n        WHERE tm.tournament_id = $1\n        ORDER BY mg.match_id ASC, mg.game_number ASC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "match_game_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "match_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "game_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "game_number",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 4,
+        "name": "winner_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 5,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "f0b5249df7c5fd6cab0cfb37d67050b78c7f93a3f5470b6d36549285607788b2"
+}
