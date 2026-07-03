@@ -349,7 +349,13 @@ pub async fn run_match(app_state: &AppState, match_id: Uuid) -> cja::Result<()> 
 }
 
 /// Kick off every ready match in the tournament's current round.
-pub async fn run_round(app_state: &AppState, tournament_id: Uuid) -> cja::Result<()> {
+///
+/// `round` is the round the owner was shown when they clicked "Run Round".
+/// The job queue can delay execution past a round transition (or past a
+/// reset-then-restart that rebuilt the bracket), so a payload that no longer
+/// matches `current_round` is stale and must no-op — auto-running a round the
+/// owner never asked for would break the caster flow.
+pub async fn run_round(app_state: &AppState, tournament_id: Uuid, round: i32) -> cja::Result<()> {
     let pool = &app_state.db;
 
     let Some(tournament) = get_tournament_by_id(pool, tournament_id).await? else {
@@ -365,8 +371,17 @@ pub async fn run_round(app_state: &AppState, tournament_id: Uuid) -> cja::Result
         );
         return Ok(());
     }
+    if round != tournament.current_round {
+        tracing::warn!(
+            tournament_id = %tournament_id,
+            payload_round = round,
+            current_round = tournament.current_round,
+            "Run round payload is stale (round changed since enqueue); skipping"
+        );
+        return Ok(());
+    }
 
-    let matches = get_matches_for_round(pool, tournament_id, tournament.current_round).await?;
+    let matches = get_matches_for_round(pool, tournament_id, round).await?;
     for tournament_match in matches {
         if matches!(
             tournament_match.status,
@@ -526,7 +541,7 @@ fn forced_tie_resolution(
 
 /// True if `err`'s chain contains a Postgres unique violation (SQLSTATE
 /// 23505) on the named constraint.
-fn is_unique_violation(err: &color_eyre::eyre::Report, constraint: &str) -> bool {
+pub(crate) fn is_unique_violation(err: &color_eyre::eyre::Report, constraint: &str) -> bool {
     err.chain().any(|cause| {
         let Some(sqlx::Error::Database(db_err)) = cause.downcast_ref::<sqlx::Error>() else {
             return false;
@@ -1039,6 +1054,27 @@ mod tests {
             "match_games_match_id_game_number_key"
         ));
         assert!(!is_unique_violation(&err, "some_other_constraint"));
+
+        Ok(())
+    }
+
+    /// A RunTournamentRoundJob whose payload round no longer matches
+    /// `current_round` (the round advanced, or a reset-then-restart rebuilt
+    /// the bracket) must no-op instead of firing matches the owner never
+    /// clicked.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn stale_round_payload_no_ops(pool: PgPool) -> cja::Result<()> {
+        let app_state = AppState::test_from_pool(pool.clone());
+        let (tournament, _, _) = fixture_two_snake_match(&pool, MatchStyle::SingleGame).await?;
+        set_tournament_current_round(&pool, tournament.tournament_id, 1).await?;
+
+        // Stale payload: no match jobs are enqueued.
+        run_round(&app_state, tournament.tournament_id, 2).await?;
+        assert_eq!(count_jobs(&pool, "RunMatchJob").await?, 0);
+
+        // Matching payload: the round's (single) match is kicked off.
+        run_round(&app_state, tournament.tournament_id, 1).await?;
+        assert_eq!(count_jobs(&pool, "RunMatchJob").await?, 1);
 
         Ok(())
     }

@@ -126,9 +126,17 @@ impl Job<AppState> for LeaderboardRatingUpdateJob {
 
 /// Job to kick off every ready match in a tournament's current round.
 /// Enqueued when the owner clicks "Run Round".
+///
+/// `round` pins the job to the round the owner saw when they clicked: if the
+/// tournament has moved on (or was reset and restarted) by the time the job
+/// runs, `run_round` no-ops instead of firing matches the owner never asked
+/// for. `serde(default)` makes payloads enqueued before this field existed
+/// deserialize to round 0, which never matches a live round — a safe no-op.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RunTournamentRoundJob {
     pub tournament_id: Uuid,
+    #[serde(default)]
+    pub round: i32,
 }
 
 #[async_trait::async_trait]
@@ -136,7 +144,7 @@ impl Job<AppState> for RunTournamentRoundJob {
     const NAME: &'static str = "RunTournamentRoundJob";
 
     async fn run(&self, app_state: AppState) -> cja::Result<()> {
-        crate::tournament_match::run_round(&app_state, self.tournament_id).await?;
+        crate::tournament_match::run_round(&app_state, self.tournament_id, self.round).await?;
         Ok(())
     }
 }

@@ -431,17 +431,24 @@ fn bracket_section(
     let total_rounds = matches.iter().map(|m| m.round).max().unwrap_or(0);
 
     // Champion: the winner of the final (highest round), named via that
-    // match's participant rows.
+    // match's participant rows. If the winning snake was deleted since (its
+    // participant row cascades away), still show the callout with a neutral
+    // placeholder rather than silently dropping it.
     let champion_name = (t.status == TournamentStatus::Completed)
         .then(|| {
             let final_match = matches.iter().find(|m| m.round == total_rounds)?;
             let winner_id = final_match.winner_id?;
-            participants_by_match
-                .get(&final_match.match_id)?
-                .iter()
-                .find(|p| p.battlesnake_id == Some(winner_id))?
-                .snake_name
-                .clone()
+            Some(
+                participants_by_match
+                    .get(&final_match.match_id)
+                    .and_then(|participants| {
+                        participants
+                            .iter()
+                            .find(|p| p.battlesnake_id == Some(winner_id))
+                    })
+                    .and_then(|p| p.snake_name.clone())
+                    .unwrap_or_else(|| "(deleted snake)".to_string()),
+            )
         })
         .flatten();
 
@@ -457,26 +464,30 @@ fn bracket_section(
                         h3 style="margin: 0;" { "🏆 Champion: " (name) }
                     }
                 }
-                div style="overflow-x: auto; padding-bottom: 8px;" {
-                    div style={
-                        "display: grid; "
-                        "grid-template-columns: repeat("(total_rounds)", 240px); "
-                        "column-gap: 24px; row-gap: 8px; width: max-content;"
-                    } {
-                        @for round in 1..=total_rounds {
-                            div style={"grid-column: "(round)"; grid-row: 1; font-weight: bold; text-align: center;"} {
-                                (round_label(round, total_rounds))
+                // No matches means no grid: `repeat(0, ...)` is invalid CSS,
+                // so skip the layout entirely for an empty bracket.
+                @if total_rounds > 0 {
+                    div style="overflow-x: auto; padding-bottom: 8px;" {
+                        div style={
+                            "display: grid; "
+                            "grid-template-columns: repeat("(total_rounds)", 240px); "
+                            "column-gap: 24px; row-gap: 8px; width: max-content;"
+                        } {
+                            @for round in 1..=total_rounds {
+                                div style={"grid-column: "(round)"; grid-row: 1; font-weight: bold; text-align: center;"} {
+                                    (round_label(round, total_rounds))
+                                }
                             }
-                        }
-                        @for m in matches {
-                            @let view = BracketMatchView {
-                                tournament_match: m,
-                                participants: participants_by_match
-                                    .get(&m.match_id)
-                                    .unwrap_or(&EMPTY_PARTICIPANTS),
-                                games: games_by_match.get(&m.match_id).unwrap_or(&EMPTY_GAMES),
-                            };
-                            (bracket_match_card(&view, t.match_style))
+                            @for m in matches {
+                                @let view = BracketMatchView {
+                                    tournament_match: m,
+                                    participants: participants_by_match
+                                        .get(&m.match_id)
+                                        .unwrap_or(&EMPTY_PARTICIPANTS),
+                                    games: games_by_match.get(&m.match_id).unwrap_or(&EMPTY_GAMES),
+                                };
+                                (bracket_match_card(&view, t.match_style))
+                            }
                         }
                     }
                 }
@@ -978,7 +989,7 @@ pub async fn show_tournament(
                                     }
                                     form action={"/tournaments/"(t.tournament_id)"/reset"} method="post" style="display: inline;" {
                                         button type="submit" class="btn btn-warning"
-                                            onclick="return confirm('Reset this tournament? The bracket and all match results will be deleted. Registrations are kept.');" { "Reset Tournament" }
+                                            onclick="return confirm('Reset this tournament? The bracket and all match results will be deleted. Registrations are kept. Any games still running will finish on their own but won\'t count.');" { "Reset Tournament" }
                                     }
                                 }
                                 @if t.status.can_transition_to(TournamentStatus::Canceled) {
@@ -1619,6 +1630,61 @@ pub async fn update_status(
     .await
 }
 
+/// The start flow against the locked tournament row: read the registrations
+/// in-transaction, validate, persist the bracket, and CAS the tournament into
+/// `in_progress` at round 1. Returns `Ok(Err(message))` for user-facing
+/// refusals (the caller flashes and drops the transaction to roll back).
+///
+/// `t` must come from `get_tournament_for_update` on this transaction:
+/// register/unregister take the same row lock, so the registration set read
+/// here can't change between validation and the bracket write — that's what
+/// keeps the bracket consistent with its seeds.
+///
+/// The row lock also serializes concurrent starts (the loser re-reads
+/// `in_progress` and is refused by `validate_start`), but as a second line of
+/// defense a `(tournament_id, round, position)` unique violation from a
+/// bracket that already exists is surfaced as a friendly refusal instead of
+/// a 500.
+async fn start_tournament_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    t: &Tournament,
+) -> cja::Result<Result<usize, String>> {
+    let registrations = tournament::get_registrations_for_tournament(&mut **tx, t.tournament_id)
+        .await
+        .wrap_err("Failed to fetch registrations")?;
+
+    if let Err(message) = validate_start(t, registrations.len() as i64) {
+        return Ok(Err(message));
+    }
+
+    if let Err(err) = persist_bracket(tx, t.tournament_id, &registrations).await {
+        if crate::tournament_match::is_unique_violation(
+            &err,
+            "tournament_matches_tournament_id_round_position_key",
+        ) {
+            return Ok(Err("Tournament already started".to_string()));
+        }
+        return Err(err).wrap_err("Failed to generate bracket");
+    }
+
+    // CAS on the locked row's status (validate_start guarantees it's
+    // `registration` — that's the only status that can transition to
+    // `in_progress`).
+    tournament::set_tournament_status(
+        &mut **tx,
+        t.tournament_id,
+        TournamentStatus::InProgress,
+        t.status,
+    )
+    .await
+    .wrap_err("Failed to set tournament in progress")?;
+    tournament::set_tournament_current_round(&mut **tx, t.tournament_id, 1)
+        .await
+        .wrap_err("Failed to set current round")?;
+
+    Ok(Ok(registrations.len()))
+}
+
 /// POST /tournaments/{id}/start — generate the bracket and begin round 1
 /// (owner only, BS-022).
 pub async fn start_tournament(
@@ -1626,74 +1692,64 @@ pub async fn start_tournament(
     CurrentUserWithSession { user, session }: CurrentUserWithSession,
     Path(tournament_id): Path<Uuid>,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
-    let t = tournament::get_tournament_by_id(&state.db, tournament_id)
-        .await
-        .wrap_err("Failed to fetch tournament")?
-        .ok_or_else(|| "Tournament not found".to_string())
-        .with_status(StatusCode::NOT_FOUND)?;
-
-    if t.user_id != user.user_id {
-        return Err("Only the tournament owner can start it".to_string())
-            .with_status(StatusCode::FORBIDDEN);
-    }
-
-    let detail_url = format!("/tournaments/{tournament_id}");
-
-    // Bracket generation, status, and current_round all move together: read
-    // the registrations and write everything in one transaction so a
-    // concurrent unregister can't desync the bracket from its seeds.
+    // One transaction for the whole handler, with the tournament row locked
+    // FIRST: owner/status checks, the registration read, bracket
+    // persistence, and the status/round writes all see the same state, and
+    // register/unregister serialize on the same lock.
     let mut tx = state
         .db
         .begin()
         .await
         .wrap_err("Failed to begin start transaction")?;
 
-    let registrations = tournament::get_registrations_for_tournament(&mut *tx, tournament_id)
+    let t = tournament::get_tournament_for_update(&mut tx, tournament_id)
         .await
-        .wrap_err("Failed to fetch registrations")?;
+        .wrap_err("Failed to fetch tournament")?
+        .ok_or_else(|| "Tournament not found".to_string())
+        .with_status(StatusCode::NOT_FOUND)?;
 
-    if let Err(message) = validate_start(&t, registrations.len() as i64) {
-        // Dropping the transaction rolls it back.
-        return flash_redirect(
-            &state,
-            session.session_id,
-            message,
-            session::FLASH_TYPE_ERROR,
-            &detail_url,
-        )
-        .await;
+    if t.user_id != user.user_id {
+        // Hidden tournaments 404 for outsiders — a 403 here would confirm the
+        // tournament exists, distinguishing valid hidden UUIDs from noise.
+        if is_hidden_from(&mut *tx, &t, user.user_id).await? {
+            return Err("Tournament not found".to_string()).with_status(StatusCode::NOT_FOUND);
+        }
+        return Err("Only the tournament owner can start it".to_string())
+            .with_status(StatusCode::FORBIDDEN);
     }
 
-    persist_bracket(&mut tx, tournament_id, &registrations)
-        .await
-        .wrap_err("Failed to generate bracket")?;
-    tournament::set_tournament_status(
-        &mut *tx,
-        tournament_id,
-        TournamentStatus::InProgress,
-        TournamentStatus::Registration,
-    )
-    .await
-    .wrap_err("Failed to set tournament in progress")?;
-    tournament::set_tournament_current_round(&mut *tx, tournament_id, 1)
-        .await
-        .wrap_err("Failed to set current round")?;
+    let detail_url = format!("/tournaments/{tournament_id}");
 
-    tx.commit()
-        .await
-        .wrap_err("Failed to commit start transaction")?;
+    match start_tournament_in_tx(&mut tx, &t).await? {
+        Err(message) => {
+            // Dropping the transaction rolls it back.
+            drop(tx);
+            flash_redirect(
+                &state,
+                session.session_id,
+                message,
+                session::FLASH_TYPE_ERROR,
+                &detail_url,
+            )
+            .await
+        }
+        Ok(snake_count) => {
+            tx.commit()
+                .await
+                .wrap_err("Failed to commit start transaction")?;
 
-    flash_redirect(
-        &state,
-        session.session_id,
-        format!(
-            "Tournament started with {} snakes! Use \"Run Round\" to play each round.",
-            registrations.len()
-        ),
-        session::FLASH_TYPE_SUCCESS,
-        &detail_url,
-    )
-    .await
+            flash_redirect(
+                &state,
+                session.session_id,
+                format!(
+                    "Tournament started with {snake_count} snakes! Use \"Run Round\" to play each round."
+                ),
+                session::FLASH_TYPE_SUCCESS,
+                &detail_url,
+            )
+            .await
+        }
+    }
 }
 
 /// POST /tournaments/{id}/run-round — kick off the current round's matches
@@ -1728,8 +1784,15 @@ pub async fn run_round(
         .await;
     }
 
+    // Pin the job to the round we just validated and are about to tell the
+    // owner about: if the tournament moves on (or is reset and restarted)
+    // before the job runs, the stale payload no-ops instead of auto-running
+    // a round the owner never clicked.
     cja::jobs::Job::enqueue(
-        crate::jobs::RunTournamentRoundJob { tournament_id },
+        crate::jobs::RunTournamentRoundJob {
+            tournament_id,
+            round: t.current_round,
+        },
         state.clone(),
         format!(
             "Owner ran round {} of tournament {tournament_id}",
@@ -1752,29 +1815,55 @@ pub async fn run_round(
 /// POST /tournaments/{id}/reset — delete the bracket and reopen registration
 /// (owner only, BS-024). Matches (and their participants/games via FK
 /// cascade) are deleted; registrations are preserved.
+///
+/// Reset policy for in-flight games: we deliberately do NOT cancel them.
+/// Games are hard-bounded by `MAX_TURNS` so they always terminate on their
+/// own, and every downstream consumer tolerates the deleted match data:
+/// - the game-completion hook (`resolve_finished_match_game`) no-ops for
+///   games whose `match_games` row was cascaded away,
+/// - stranded `RunMatchJob`s warn and no-op when their match is gone,
+/// - the stuck-match sweeper only re-enqueues matches that still exist in
+///   `in_progress`, and
+/// - a stranded `RunTournamentRoundJob` carries the round it was enqueued
+///   for and no-ops when it no longer matches `current_round`.
+///
+/// So a reset leaves running games to finish harmlessly; their results just
+/// don't count toward anything.
 pub async fn reset_tournament(
     State(state): State<AppState>,
     CurrentUserWithSession { user, session }: CurrentUserWithSession,
     Path(tournament_id): Path<Uuid>,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
-    let t = tournament::get_tournament_by_id(&state.db, tournament_id)
+    // One transaction with the tournament row locked first, like every other
+    // mutating handler: the status guard and the bracket delete can't race a
+    // concurrent status change (e.g. a double-clicked reset).
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .wrap_err("Failed to begin reset transaction")?;
+
+    let t = tournament::get_tournament_for_update(&mut tx, tournament_id)
         .await
         .wrap_err("Failed to fetch tournament")?
         .ok_or_else(|| "Tournament not found".to_string())
         .with_status(StatusCode::NOT_FOUND)?;
 
     if t.user_id != user.user_id {
+        // Hidden tournaments 404 for outsiders — a 403 here would confirm the
+        // tournament exists, distinguishing valid hidden UUIDs from noise.
+        if is_hidden_from(&mut *tx, &t, user.user_id).await? {
+            return Err("Tournament not found".to_string()).with_status(StatusCode::NOT_FOUND);
+        }
         return Err("Only the tournament owner can reset it".to_string())
             .with_status(StatusCode::FORBIDDEN);
     }
 
     let detail_url = format!("/tournaments/{tournament_id}");
 
-    // Only in_progress -> registration is a valid reset (can_transition_to
-    // allows exactly this backward edge).
-    if t.status != TournamentStatus::InProgress
-        || !t.status.can_transition_to(TournamentStatus::Registration)
-    {
+    // Completed tournaments are intentionally not resettable: once a
+    // champion is decided the result is final (cancel is the only way out).
+    if t.status != TournamentStatus::InProgress {
         return flash_redirect(
             &state,
             session.session_id,
@@ -1785,11 +1874,6 @@ pub async fn reset_tournament(
         .await;
     }
 
-    let mut tx = state
-        .db
-        .begin()
-        .await
-        .wrap_err("Failed to begin reset transaction")?;
     tournament::delete_matches_for_tournament(&mut *tx, tournament_id)
         .await
         .wrap_err("Failed to delete tournament matches")?;
@@ -1811,7 +1895,9 @@ pub async fn reset_tournament(
     flash_redirect(
         &state,
         session.session_id,
-        "Tournament reset — the bracket was cleared and registration is open again".to_string(),
+        "Tournament reset — the bracket was cleared and registration is open again. \
+         Any games still running will finish on their own but won't count."
+            .to_string(),
         session::FLASH_TYPE_SUCCESS,
         &detail_url,
     )
@@ -2437,6 +2523,120 @@ mod tests {
         assert!(!is_hidden_from(&mut *tx, &locked, owner).await?);
         assert!(!is_hidden_from(&mut *tx, &locked, participant).await?);
         assert!(is_hidden_from(&mut *tx, &locked, outsider).await?);
+        Ok(())
+    }
+
+    // --- DB tests: the start flow validates against the locked row and
+    // in-transaction registrations, and refuses cleanly instead of 500ing. ---
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn start_with_one_registration_is_refused_under_the_lock(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        let user_id = fixture_user(&pool, 10, "starter").await?;
+        let snake = fixture_snake(&pool, user_id, "lonely-snake").await?;
+        let t = tournament::create_tournament(&pool, user_id, create_params(2)).await?;
+        tournament::set_tournament_status(
+            &pool,
+            t.tournament_id,
+            TournamentStatus::Registration,
+            TournamentStatus::Created,
+        )
+        .await?;
+        tournament::create_registration(&pool, t.tournament_id, snake, user_id, 1).await?;
+
+        let mut tx = pool.begin().await?;
+        let locked = tournament::get_tournament_for_update(&mut tx, t.tournament_id)
+            .await?
+            .expect("tournament exists");
+        let message = start_tournament_in_tx(&mut tx, &locked)
+            .await?
+            .expect_err("one registration should not be enough to start");
+        assert!(
+            message.contains("At least 2"),
+            "unexpected refusal message: {message}"
+        );
+        drop(tx); // roll back
+
+        // Nothing was persisted: still in registration, no bracket.
+        let reloaded = tournament::get_tournament_by_id(&pool, t.tournament_id)
+            .await?
+            .unwrap();
+        assert_eq!(reloaded.status, TournamentStatus::Registration);
+        assert!(
+            tournament::get_matches_for_tournament(&pool, t.tournament_id)
+                .await?
+                .is_empty()
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn double_start_gets_a_friendly_refusal_not_a_raw_error(pool: PgPool) -> cja::Result<()> {
+        let user_id = fixture_user(&pool, 11, "double-starter").await?;
+        let t = tournament::create_tournament(&pool, user_id, create_params(2)).await?;
+        tournament::set_tournament_status(
+            &pool,
+            t.tournament_id,
+            TournamentStatus::Registration,
+            TournamentStatus::Created,
+        )
+        .await?;
+        for seed in 1..=2i32 {
+            let snake = fixture_snake(&pool, user_id, &format!("snake-{seed}")).await?;
+            tournament::create_registration(&pool, t.tournament_id, snake, user_id, seed).await?;
+        }
+
+        // First start succeeds and commits.
+        let mut tx = pool.begin().await?;
+        let locked = tournament::get_tournament_for_update(&mut tx, t.tournament_id)
+            .await?
+            .expect("tournament exists");
+        let snake_count = start_tournament_in_tx(&mut tx, &locked)
+            .await?
+            .expect("first start should succeed");
+        assert_eq!(snake_count, 2);
+        tx.commit().await?;
+
+        let reloaded = tournament::get_tournament_by_id(&pool, t.tournament_id)
+            .await?
+            .unwrap();
+        assert_eq!(reloaded.status, TournamentStatus::InProgress);
+        assert_eq!(reloaded.current_round, 1);
+
+        // Second start: the re-read under the lock sees in_progress and is
+        // refused by validation (Ok(Err(..)), not Err(..)).
+        let mut tx = pool.begin().await?;
+        let locked = tournament::get_tournament_for_update(&mut tx, t.tournament_id)
+            .await?
+            .expect("tournament exists");
+        let message = start_tournament_in_tx(&mut tx, &locked)
+            .await?
+            .expect_err("second start should be refused");
+        assert!(
+            message.contains("cannot start from status"),
+            "unexpected refusal message: {message}"
+        );
+        drop(tx);
+
+        // Belt-and-suspenders: if a bracket already exists anyway (simulated
+        // by forcing the status back without clearing the matches), the
+        // unique violation surfaces as the friendly message, not a raw error.
+        tournament::set_tournament_status(
+            &pool,
+            t.tournament_id,
+            TournamentStatus::Registration,
+            TournamentStatus::InProgress,
+        )
+        .await?;
+        let mut tx = pool.begin().await?;
+        let locked = tournament::get_tournament_for_update(&mut tx, t.tournament_id)
+            .await?
+            .expect("tournament exists");
+        let message = start_tournament_in_tx(&mut tx, &locked)
+            .await?
+            .expect_err("starting over an existing bracket should be refused");
+        assert_eq!(message, "Tournament already started");
         Ok(())
     }
 
