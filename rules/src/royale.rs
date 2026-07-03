@@ -228,8 +228,7 @@ mod tests {
         let s = settings(25, 7);
         let mut prev: HashSet<Point> = HashSet::new();
         for board_turn in 0..300 {
-            let current: HashSet<Point> =
-                hazards_at(11, 11, board_turn, &s).into_iter().collect();
+            let current: HashSet<Point> = hazards_at(11, 11, board_turn, &s).into_iter().collect();
             assert!(
                 prev.is_subset(&current),
                 "hazards shrank while resolving turn {}",
