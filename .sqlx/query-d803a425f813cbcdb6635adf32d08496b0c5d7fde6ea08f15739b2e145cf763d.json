@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT COUNT(*) as \"count!\"\n        FROM tournament_registrations tr\n        JOIN tournaments t ON t.tournament_id = tr.tournament_id\n        WHERE tr.battlesnake_id = $1\n          AND t.status IN ('registration', 'in_progress')\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "d803a425f813cbcdb6635adf32d08496b0c5d7fde6ea08f15739b2e145cf763d"
+}

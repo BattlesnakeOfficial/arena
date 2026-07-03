@@ -1,0 +1,64 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            match_participant_id,\n            match_id,\n            slot,\n            battlesnake_id,\n            source_match_id,\n            participant_type as \"participant_type: ParticipantType\",\n            seed_position,\n            created_at\n        FROM match_participants\n        WHERE match_id = $1\n        ORDER BY slot ASC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "match_participant_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "match_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "slot",
+        "type_info": "Int2"
+      },
+      {
+        "ordinal": 3,
+        "name": "battlesnake_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 4,
+        "name": "source_match_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 5,
+        "name": "participant_type: ParticipantType",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "seed_position",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 7,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "ed2b28507e274ab6586e6bf2898dab2658fb3c70c2850875e4aa0062091bcd3a"
+}

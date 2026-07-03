@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE tournaments SET status = $2 WHERE tournament_id = $1 AND status = $3",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d2b46cff800226c59ffdbf15cd714a472d2fb4125aeaf0f7789d089046329c99"
+}

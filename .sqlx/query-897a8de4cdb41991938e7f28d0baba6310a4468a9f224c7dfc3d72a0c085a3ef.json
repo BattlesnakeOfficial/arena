@@ -1,0 +1,115 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO tournaments (\n            name, description, user_id, game_type, board_size,\n            registration_status, visibility, match_style,\n            max_snakes_per_user, required_participants\n        )\n        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)\n        RETURNING\n            tournament_id,\n            name,\n            description,\n            user_id,\n            game_type,\n            board_size,\n            registration_status as \"registration_status: RegistrationStatus\",\n            visibility as \"visibility: TournamentVisibility\",\n            status as \"status: TournamentStatus\",\n            match_style as \"match_style: MatchStyle\",\n            max_snakes_per_user,\n            required_participants,\n            current_round,\n            created_at,\n            updated_at\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "tournament_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "description",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 4,
+        "name": "game_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "board_size",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "registration_status: RegistrationStatus",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "visibility: TournamentVisibility",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "status: TournamentStatus",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "match_style: MatchStyle",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 10,
+        "name": "max_snakes_per_user",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 11,
+        "name": "required_participants",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 12,
+        "name": "current_round",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 13,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 14,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Int4",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "897a8de4cdb41991938e7f28d0baba6310a4468a9f224c7dfc3d72a0c085a3ef"
+}

@@ -15,6 +15,7 @@ use crate::{
     models::game_battlesnake,
     models::leaderboard,
     models::session,
+    models::tournament,
     models::user::get_user_by_id,
     routes::auth::{CurrentUser, CurrentUserWithSession},
     state::AppState,
@@ -356,6 +357,26 @@ pub async fn delete_battlesnake(
     if !exists {
         return Err("Battlesnake not found or you don't have permission to delete it".to_string())
             .with_status(StatusCode::FORBIDDEN);
+    }
+
+    // Refuse to delete a battlesnake that is registered in an active
+    // tournament — the FK cascades would rip it out of a live bracket.
+    let active_registrations =
+        tournament::count_active_tournament_registrations(&state.db, battlesnake_id)
+            .await
+            .wrap_err("Failed to check tournament registrations")?;
+
+    if active_registrations > 0 {
+        session::set_flash_message(
+            &state.db,
+            session.session_id,
+            "This battlesnake is registered in an active tournament and can't be deleted. Withdraw it from the tournament first.".to_string(),
+            session::FLASH_TYPE_ERROR,
+        )
+        .await
+        .wrap_err("Failed to set flash message")?;
+
+        return Ok(Redirect::to("/battlesnakes").into_response());
     }
 
     // Delete the battlesnake

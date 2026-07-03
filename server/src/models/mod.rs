@@ -5,5 +5,6 @@ pub mod game;
 pub mod game_battlesnake;
 pub mod leaderboard;
 pub mod session;
+pub mod tournament;
 pub mod turn;
 pub mod user;
