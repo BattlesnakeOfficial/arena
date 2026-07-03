@@ -141,6 +141,9 @@ pub enum RulesError {
     NoMoveFound(String),
     ZeroLengthSnake(String),
     NoRoomForFood,
+    /// Royale games can't shrink more frequently than every turn
+    /// (`shrink_every_n_turns < 1`).
+    InvalidShrinkFrequency,
 }
 
 pub const SNAKE_MAX_HEALTH: i32 = 100;
