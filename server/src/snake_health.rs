@@ -30,6 +30,14 @@ pub const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 /// Maximum number of characters of raw response body shown in results.
 const BODY_EXCERPT_MAX_CHARS: usize = 500;
 
+/// Maximum number of bytes read from any response body.
+///
+/// A hostile (or buggy) snake server can stream an unbounded body — or lie in
+/// its `Content-Length` header — so we read chunk by chunk and stop at this
+/// cap, discarding the remainder. Only [`BODY_EXCERPT_MAX_CHARS`] characters
+/// are ever displayed anyway.
+const BODY_READ_CAP_BYTES: usize = 64 * 1024;
+
 /// Result of a single test call against a snake endpoint.
 pub struct HealthCheckCall {
     /// Human-readable endpoint name, e.g. `"GET /"` or `"POST /move"`.
@@ -167,7 +175,8 @@ pub async fn run_health_check(
     calls.push(evaluate_call("POST /move", &Expectation::Move, outcome));
 
     // Call /end to be a good citizen: the wire protocol calls it, and snakes
-    // may have allocated per-game state on /start.
+    // may have allocated per-game state on /start. Note this reuses the
+    // turn-0 payload; a real game would send the final board state on /end.
     let end_url = build_endpoint_url(url, "end");
     let outcome = execute_call(client.post(&end_url).json(&payload), HEALTH_CHECK_TIMEOUT).await;
     calls.push(evaluate_call("POST /end", &Expectation::Ack, outcome));
@@ -185,15 +194,19 @@ async fn execute_call(builder: reqwest::RequestBuilder, timeout: Duration) -> Ca
 
     match tokio::time::timeout(timeout, builder.send()).await {
         Ok(Ok(response)) => {
+            // Latency is measured at response-headers time, before the body
+            // download — the same point real games record it (snake_client),
+            // so the over-budget badge reflects what a game would measure.
+            let latency_ms = start.elapsed().as_millis() as u64;
             let status = response.status().as_u16();
-            match response.text().await {
+            match read_body_capped(response, BODY_READ_CAP_BYTES).await {
                 Ok(body) => CallOutcome::Response {
                     status,
-                    latency_ms: start.elapsed().as_millis() as u64,
+                    latency_ms,
                     body,
                 },
                 Err(e) => CallOutcome::Failed {
-                    latency_ms: Some(start.elapsed().as_millis() as u64),
+                    latency_ms: Some(latency_ms),
                     summary: format!(
                         "Received HTTP {status} but failed to read the response body: {}",
                         describe_request_error(&e)
@@ -213,6 +226,40 @@ async fn execute_call(builder: reqwest::RequestBuilder, timeout: Duration) -> Ca
             ),
         },
     }
+}
+
+/// Read a response body chunk by chunk, stopping at `cap` bytes.
+///
+/// Once the cap is reached the remainder is discarded (we stop reading rather
+/// than draining the connection) and the body is marked as truncated, so a
+/// hostile server streaming hundreds of megabytes cannot exhaust memory.
+async fn read_body_capped(
+    mut response: reqwest::Response,
+    cap: usize,
+) -> Result<String, reqwest::Error> {
+    let mut buf: Vec<u8> = Vec::new();
+    let mut capped = false;
+    while let Some(chunk) = response.chunk().await? {
+        if accumulate_body_chunk(&mut buf, &chunk, cap) {
+            capped = true;
+            break;
+        }
+    }
+    let mut body = String::from_utf8_lossy(&buf).into_owned();
+    if capped {
+        body.push_str("… [body truncated at read cap]");
+    }
+    Ok(body)
+}
+
+/// Append `chunk` to `buf` without letting `buf` grow past `cap` bytes.
+///
+/// Returns `true` once the cap is reached, meaning the caller must stop
+/// reading and discard any remaining input.
+fn accumulate_body_chunk(buf: &mut Vec<u8>, chunk: &[u8], cap: usize) -> bool {
+    let remaining = cap.saturating_sub(buf.len());
+    buf.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+    buf.len() >= cap
 }
 
 /// Turn a reqwest error into a human-readable explanation.
@@ -291,7 +338,9 @@ fn evaluate_call(
 
 /// Validate the `GET /` identity response body.
 ///
-/// The arena (like the official engine) requires `apiversion` to be `"1"`.
+/// The Battlesnake API spec expects `apiversion` to be `"1"`. The arena's
+/// game runner never checks it, so a wrong value is reported as a spec
+/// compliance failure while making clear games will still run.
 fn evaluate_info_body(body: &str) -> (bool, String) {
     match serde_json::from_str::<InfoResponse>(body) {
         Ok(info) => match info.apiversion.as_deref() {
@@ -305,7 +354,10 @@ fn evaluate_info_body(body: &str) -> (bool, String) {
             }
             Some(other) => (
                 false,
-                format!("Unsupported apiversion {other:?} — the arena requires \"1\""),
+                format!(
+                    "apiversion is {other:?} — the Battlesnake API spec expects \"1\" \
+                     (games on this arena will still run)"
+                ),
             ),
             None => (
                 false,
@@ -400,8 +452,9 @@ mod tests {
     fn info_body_wrong_apiversion_fails() {
         let (ok, summary) = evaluate_info_body(r#"{"apiversion":"2","author":"x"}"#);
         assert!(!ok);
-        assert!(summary.contains("Unsupported apiversion"));
-        assert!(summary.contains('2'));
+        assert!(summary.contains("apiversion is \"2\""));
+        assert!(summary.contains("the Battlesnake API spec expects \"1\""));
+        assert!(summary.contains("games on this arena will still run"));
     }
 
     #[test]
@@ -551,6 +604,34 @@ mod tests {
         let body = "é".repeat(600);
         let excerpt = truncate_excerpt(&body);
         assert_eq!(excerpt.chars().count(), BODY_EXCERPT_MAX_CHARS + 1);
+    }
+
+    // === accumulate_body_chunk ===
+
+    #[test]
+    fn body_chunks_under_cap_accumulate_losslessly() {
+        let mut buf = Vec::new();
+        assert!(!accumulate_body_chunk(&mut buf, b"hello ", 64));
+        assert!(!accumulate_body_chunk(&mut buf, b"world", 64));
+        assert_eq!(buf, b"hello world");
+    }
+
+    #[test]
+    fn body_chunk_exceeding_cap_is_cut_at_cap() {
+        let mut buf = Vec::new();
+        let big = vec![b'x'; BODY_READ_CAP_BYTES * 3];
+        assert!(accumulate_body_chunk(&mut buf, &big, BODY_READ_CAP_BYTES));
+        assert_eq!(buf.len(), BODY_READ_CAP_BYTES);
+    }
+
+    #[test]
+    fn body_chunk_landing_exactly_on_cap_stops_reading() {
+        let mut buf = vec![b'a'; 10];
+        assert!(accumulate_body_chunk(&mut buf, b"bbbbbb", 16));
+        assert_eq!(buf.len(), 16);
+        // Any further chunks are discarded entirely.
+        assert!(accumulate_body_chunk(&mut buf, b"ccc", 16));
+        assert_eq!(buf.len(), 16);
     }
 
     // === build_test_game ===
