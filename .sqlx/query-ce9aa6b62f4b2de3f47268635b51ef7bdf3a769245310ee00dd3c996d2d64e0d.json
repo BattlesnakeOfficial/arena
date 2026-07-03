@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT m.match_id\n        FROM tournament_matches m\n        JOIN tournaments t ON t.tournament_id = m.tournament_id\n        WHERE m.status = 'in_progress'\n          AND t.status = 'in_progress'\n          AND m.updated_at < $1\n        ORDER BY m.updated_at ASC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "match_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "ce9aa6b62f4b2de3f47268635b51ef7bdf3a769245310ee00dd3c996d2d64e0d"
+}
