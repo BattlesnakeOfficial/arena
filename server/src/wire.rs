@@ -222,7 +222,13 @@ impl Game {
                         hazard_map: None,
                         hazard_map_author: None,
                         royale: RoyaleSettings {
-                            shrink_every_n_turns: 0,
+                            // Real shrink cadence for Royale games; 0 for
+                            // standard/other modes (board-viewer convention).
+                            shrink_every_n_turns: engine_game
+                                .meta
+                                .royale
+                                .as_ref()
+                                .map_or(0, |r| r.shrink_every_n_turns),
                         },
                         squad: SquadSettings {
                             allow_body_collisions: false,
@@ -296,6 +302,7 @@ mod tests {
                     minimum_food: 1,
                     hazard_damage_per_turn: 15,
                 },
+                royale: None,
             },
             snake_names,
         }
@@ -417,6 +424,29 @@ mod tests {
         assert_eq!(settings["squad"]["sharedElimination"], false);
         assert_eq!(settings["squad"]["sharedHealth"], false);
         assert_eq!(settings["squad"]["sharedLength"], false);
+    }
+
+    #[test]
+    fn test_royale_game_serializes_real_royale_settings() {
+        let mut engine_game = create_test_engine_game();
+        engine_game.meta.ruleset_name = "royale".to_string();
+        engine_game.meta.settings.hazard_damage_per_turn = 14;
+        engine_game.meta.royale = Some(rules::RoyaleSettings {
+            shrink_every_n_turns: 25,
+            seed: 7,
+        });
+
+        let contexts = HashMap::new();
+        let wire = Game::from_engine_game(&engine_game, "s1", &contexts);
+        let json: Value = serde_json::to_value(&wire).unwrap();
+
+        assert_eq!(json["game"]["ruleset"]["name"], "royale");
+        let settings = &json["game"]["ruleset"]["settings"];
+        assert_eq!(
+            settings["royale"]["shrinkEveryNTurns"], 25,
+            "royale games must serialize their real shrink cadence"
+        );
+        assert_eq!(settings["hazardDamagePerTurn"], 14);
     }
 
     #[test]
