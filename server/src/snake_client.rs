@@ -44,7 +44,10 @@ fn build_request_for_snake(
 }
 
 /// Parse a direction string into a Direction enum
-fn parse_direction(s: &str) -> Option<Direction> {
+///
+/// Shared with the on-demand snake health check (`snake_health`) so test
+/// results judge moves exactly like real games do.
+pub(crate) fn parse_direction(s: &str) -> Option<Direction> {
     s.parse().ok()
 }
 
@@ -52,7 +55,10 @@ fn parse_direction(s: &str) -> Option<Direction> {
 ///
 /// This appends the endpoint path (e.g., "move", "start", "end") to the base URL
 /// while preserving any query parameters in the correct position.
-fn build_endpoint_url(base_url: &str, endpoint: &str) -> String {
+///
+/// Shared with the on-demand snake health check (`snake_health`) so test
+/// calls hit exactly the URLs real games would.
+pub(crate) fn build_endpoint_url(base_url: &str, endpoint: &str) -> String {
     // Try to parse as a proper URL
     if let Ok(mut url) = Url::parse(base_url) {
         // Get the current path, trim trailing slashes, and append the endpoint

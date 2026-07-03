@@ -18,6 +18,7 @@ use crate::{
     models::tournament,
     models::user::get_user_by_id,
     routes::auth::{CurrentUser, CurrentUserWithSession},
+    snake_health,
     state::AppState,
 };
 
@@ -559,6 +560,9 @@ pub async fn view_battlesnake_profile(
                             }
                             @if is_owner {
                                 div {
+                                    form action={"/battlesnakes/"(battlesnake_id)"/test"} method="post" class="inline" style="display: inline;" {
+                                        button type="submit" class="btn btn-sm btn-info" { "Test Snake" }
+                                    }
                                     a href={"/battlesnakes/"(battlesnake_id)"/edit"} class="btn btn-sm btn-primary" { "Edit" }
                                     form action={"/battlesnakes/"(battlesnake_id)"/delete"} method="post" class="inline" style="display: inline;" {
                                         button type="submit" class="btn btn-sm btn-danger" onclick="return confirm('Are you sure you want to delete this battlesnake?');" { "Delete" }
@@ -742,5 +746,138 @@ pub async fn view_battlesnake_profile(
             }
         }),
         flash,
+    ))
+}
+
+// Run an on-demand health check against a battlesnake's URL (BS-015).
+//
+// Owner-only: the snake URL may be publicly visible, but the test makes the
+// server poke the user's infrastructure on demand, so only the owner can
+// trigger it. Renders the results page directly from the POST (a flash +
+// redirect would lose the per-call details).
+#[allow(clippy::too_many_lines)]
+pub async fn test_battlesnake(
+    State(state): State<AppState>,
+    CurrentUser(user): CurrentUser,
+    Path(battlesnake_id): Path<Uuid>,
+    page_factory: PageFactory,
+) -> ServerResult<impl IntoResponse, StatusCode> {
+    // Fetch the battlesnake
+    let snake = battlesnake::get_battlesnake_by_id(&state.db, battlesnake_id)
+        .await
+        .wrap_err("Failed to get battlesnake")?
+        .ok_or_else(|| "Battlesnake not found".to_string())
+        .with_status(StatusCode::NOT_FOUND)?;
+
+    // Only the owner may trigger test calls against the snake's server
+    if snake.user_id != user.user_id {
+        return Err("You don't have permission to test this battlesnake".to_string())
+            .with_status(StatusCode::FORBIDDEN);
+    }
+
+    // Dedicated client: the shared snake client enforces the real in-game
+    // budget (600ms hard timeout); the test is deliberately more forgiving
+    // and reports latency so users can see whether they'd fit the budget.
+    // Redirect handling matches the game client (reqwest defaults).
+    let client = reqwest::Client::builder()
+        .timeout(snake_health::HEALTH_CHECK_TIMEOUT)
+        .build()
+        .wrap_err("Failed to build HTTP client for snake test")?;
+
+    let (engine_game, snake_id) = snake_health::build_test_game(&snake);
+    let report = snake_health::run_health_check(&client, &snake.url, &engine_game, &snake_id).await;
+
+    let failures = report.failure_count();
+    let all_ok = failures == 0;
+
+    Ok(page_factory.create_page(
+        format!("Test Results: {}", snake.name),
+        Box::new(html! {
+            div class="container" {
+                h1 { "Test Results: " (snake.name) }
+                p {
+                    "Tested "
+                    a href=(snake.url) target="_blank" { (snake.url) }
+                    " with the same calls a real game makes."
+                }
+
+                @if all_ok {
+                    div class="alert alert-success" {
+                        p { "All " (report.calls.len()) " checks passed. This snake looks ready to play!" }
+                    }
+                } @else {
+                    div class="alert alert-danger" {
+                        p { (failures) " of " (report.calls.len()) " checks failed. See details below." }
+                    }
+                }
+
+                table class="table" {
+                    thead {
+                        tr {
+                            th { "Call" }
+                            th { "Result" }
+                            th { "HTTP Status" }
+                            th { "Latency" }
+                            th { "Details" }
+                        }
+                    }
+                    tbody {
+                        @for call in &report.calls {
+                            tr {
+                                td { code { (call.name) } }
+                                td {
+                                    @if call.ok {
+                                        span class="badge bg-success text-white" { "OK" }
+                                    } @else {
+                                        span class="badge bg-danger text-white" { "Failed" }
+                                    }
+                                }
+                                td {
+                                    @if let Some(status) = call.http_status {
+                                        (status)
+                                    } @else {
+                                        "—"
+                                    }
+                                }
+                                td {
+                                    @if let Some(latency) = call.latency_ms {
+                                        (latency) " ms"
+                                        @if i64::try_from(latency).is_ok_and(|l| l > report.game_timeout_ms) {
+                                            " "
+                                            span class="badge bg-warning text-dark" { "over game budget" }
+                                        }
+                                    } @else {
+                                        "—"
+                                    }
+                                }
+                                td {
+                                    (call.summary)
+                                    @if let Some(excerpt) = &call.body_excerpt {
+                                        pre style="white-space: pre-wrap; word-break: break-all; margin-top: 8px; font-size: 0.85em;" {
+                                            (excerpt)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                p class="text-muted" {
+                    "Each test call was allowed "
+                    (snake_health::HEALTH_CHECK_TIMEOUT.as_secs())
+                    " seconds, but real games only allow "
+                    (report.game_timeout_ms)
+                    " ms per request — check the latency column to see if your snake fits the in-game budget."
+                }
+
+                div class="mt-4" {
+                    form action={"/battlesnakes/"(battlesnake_id)"/test"} method="post" class="inline" style="display: inline;" {
+                        button type="submit" class="btn btn-primary" { "Run Test Again" }
+                    }
+                    a href={"/battlesnakes/"(battlesnake_id)"/profile"} class="btn btn-secondary ms-2" { "Back to Profile" }
+                }
+            }
+        }),
     ))
 }
