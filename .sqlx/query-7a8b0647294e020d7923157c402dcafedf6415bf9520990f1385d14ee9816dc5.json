@@ -1,0 +1,58 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            t.tournament_id,\n            t.name,\n            u.github_login as owner_login,\n            t.status as \"status: TournamentStatus\",\n            t.game_type,\n            COUNT(r.registration_id) as \"registration_count!\",\n            t.created_at\n        FROM tournaments t\n        JOIN users u ON t.user_id = u.user_id\n        LEFT JOIN tournament_registrations r ON r.tournament_id = t.tournament_id\n        WHERE t.visibility = 'public' OR t.user_id = $1\n        GROUP BY t.tournament_id, u.github_login\n        ORDER BY t.created_at DESC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "tournament_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "owner_login",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "status: TournamentStatus",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "game_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "registration_count!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 6,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      null,
+      false
+    ]
+  },
+  "hash": "7a8b0647294e020d7923157c402dcafedf6415bf9520990f1385d14ee9816dc5"
+}

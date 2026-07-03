@@ -1,0 +1,106 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            tournament_id,\n            name,\n            description,\n            user_id,\n            game_type,\n            board_size,\n            registration_status as \"registration_status: RegistrationStatus\",\n            visibility as \"visibility: TournamentVisibility\",\n            status as \"status: TournamentStatus\",\n            match_style as \"match_style: MatchStyle\",\n            max_snakes_per_user,\n            required_participants,\n            current_round,\n            created_at,\n            updated_at\n        FROM tournaments\n        WHERE tournament_id = $1\n        FOR UPDATE\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "tournament_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "description",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 4,
+        "name": "game_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "board_size",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "registration_status: RegistrationStatus",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "visibility: TournamentVisibility",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "status: TournamentStatus",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "match_style: MatchStyle",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 10,
+        "name": "max_snakes_per_user",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 11,
+        "name": "required_participants",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 12,
+        "name": "current_round",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 13,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 14,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "cc960ede692a8bdf475e149279c9bb69e6ac086f42200eb236e60bbba85f9f68"
+}

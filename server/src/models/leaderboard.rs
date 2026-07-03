@@ -65,6 +65,10 @@ pub struct LeaderboardGameResult {
 pub struct RankedEntry {
     pub leaderboard_entry_id: Uuid,
     pub battlesnake_id: Uuid,
+    /// The snake owner's user id. Internal (used by the tournament import
+    /// flow to enforce per-user caps) — not exposed in API responses.
+    #[serde(skip)]
+    pub user_id: Uuid,
     pub display_score: f64,
     pub games_played: i32,
     pub first_place_finishes: i32,
@@ -206,6 +210,7 @@ pub async fn get_ranked_entries(
                 r#"SELECT
                     le.leaderboard_entry_id,
                     le.battlesnake_id,
+                    b.user_id,
                     le.display_score,
                     le.games_played,
                     le.first_place_finishes,
@@ -234,6 +239,7 @@ pub async fn get_ranked_entries(
                 r#"SELECT
                     le.leaderboard_entry_id,
                     le.battlesnake_id,
+                    b.user_id,
                     le.display_score,
                     le.games_played,
                     le.first_place_finishes,
@@ -273,6 +279,7 @@ pub async fn get_placement_entries(
         r#"SELECT
             le.leaderboard_entry_id,
             le.battlesnake_id,
+            b.user_id,
             le.display_score,
             le.games_played,
             le.first_place_finishes,
@@ -609,6 +616,7 @@ pub async fn get_ranked_entries_paginated(
                 r#"SELECT
                     le.leaderboard_entry_id,
                     le.battlesnake_id,
+                    b.user_id,
                     le.display_score,
                     le.games_played,
                     le.first_place_finishes,
@@ -639,6 +647,7 @@ pub async fn get_ranked_entries_paginated(
                 r#"SELECT
                     le.leaderboard_entry_id,
                     le.battlesnake_id,
+                    b.user_id,
                     le.display_score,
                     le.games_played,
                     le.first_place_finishes,

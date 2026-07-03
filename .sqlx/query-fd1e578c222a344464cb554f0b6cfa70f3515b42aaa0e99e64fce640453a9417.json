@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            r.registration_id,\n            r.battlesnake_id,\n            r.user_id,\n            r.seed,\n            b.name as snake_name,\n            u.github_login as owner_login\n        FROM tournament_registrations r\n        JOIN battlesnakes b ON r.battlesnake_id = b.battlesnake_id\n        JOIN users u ON r.user_id = u.user_id\n        WHERE r.tournament_id = $1\n        ORDER BY r.seed ASC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "registration_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "battlesnake_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "seed",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 4,
+        "name": "snake_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "owner_login",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "fd1e578c222a344464cb554f0b6cfa70f3515b42aaa0e99e64fce640453a9417"
+}
