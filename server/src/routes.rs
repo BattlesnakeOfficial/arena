@@ -17,6 +17,7 @@ pub mod battlesnake;
 pub mod game;
 pub mod github_auth;
 pub mod leaderboard;
+pub mod tournament;
 
 pub fn routes(app_state: AppState) -> axum::Router {
     // CORS layer for API routes - allows board.battlesnake.com to access our API
@@ -132,6 +133,39 @@ pub fn routes(app_state: AppState) -> axum::Router {
             "/leaderboards/{id}/entries/{entry_id}",
             get(leaderboard::show_leaderboard_entry),
         )
+        // Tournament routes
+        .route("/tournaments", get(tournament::list_tournaments))
+        .route(
+            "/tournaments",
+            axum::routing::post(tournament::create_tournament),
+        )
+        .route("/tournaments/new", get(tournament::new_tournament))
+        .route("/tournaments/{id}", get(tournament::show_tournament))
+        .route("/tournaments/{id}/edit", get(tournament::edit_tournament))
+        .route(
+            "/tournaments/{id}/settings",
+            axum::routing::post(tournament::update_settings),
+        )
+        .route(
+            "/tournaments/{id}/register",
+            axum::routing::post(tournament::register_snake),
+        )
+        .route(
+            "/tournaments/{id}/unregister",
+            axum::routing::post(tournament::unregister_snake),
+        )
+        .route(
+            "/tournaments/{id}/seed",
+            axum::routing::post(tournament::move_seed),
+        )
+        .route(
+            "/tournaments/{id}/status",
+            axum::routing::post(tournament::update_status),
+        )
+        .route(
+            "/tournaments/{id}/import-leaderboard",
+            axum::routing::post(tournament::import_leaderboard),
+        )
         // Admin routes
         .route("/admin", get(admin::dashboard))
         // Game API routes for board viewer (with CORS)
@@ -167,6 +201,7 @@ async fn root_page(
                             a href="/me" class="btn btn-primary" { "Profile" }
                             a href="/battlesnakes" class="btn btn-primary" { "Battlesnakes" }
                             a href="/leaderboards" class="btn btn-primary" { "Leaderboards" }
+                            a href="/tournaments" class="btn btn-primary" { "Tournaments" }
                             a href="/auth/logout" class="btn btn-secondary" { "Logout" }
                         }
                     }
@@ -177,6 +212,7 @@ async fn root_page(
                     }
                     div style="margin-top: 10px;" {
                         a href="/leaderboards" class="btn btn-primary" { "Leaderboards" }
+                        a href="/tournaments" class="btn btn-primary" { "Tournaments" }
                     }
                 }
                 div class="content" style="margin-top: 20px;" {

@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SET CONSTRAINTS tournament_registrations_tournament_id_seed_key DEFERRED",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "ebd091edb9a8f1b1baf79a009108071f73da67b289b23cda28aa6ef3e458c678"
+}

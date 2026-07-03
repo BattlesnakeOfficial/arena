@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE tournament_registrations\n            SET seed = seed - 1\n            WHERE tournament_id = $1 AND seed > $2 AND seed <= $3\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "094d95e4d9bbb6bd253b51b041a0b49ec6dca0844d2e9ceb99b47b7f9375c8a8"
+}

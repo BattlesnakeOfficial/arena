@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE tournament_registrations tr\n        SET seed = ranked.new_seed\n        FROM (\n            SELECT registration_id, (ROW_NUMBER() OVER (ORDER BY seed ASC))::int AS new_seed\n            FROM tournament_registrations\n            WHERE tournament_id = $1\n        ) ranked\n        WHERE tr.registration_id = ranked.registration_id\n          AND tr.seed <> ranked.new_seed\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "05c07e6499ebd5b41a8e4ceef124ab7a353956544bb9a630295a5c14af8c1295"
+}

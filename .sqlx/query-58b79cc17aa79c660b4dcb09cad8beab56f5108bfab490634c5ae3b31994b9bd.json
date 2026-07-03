@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT\n                    le.leaderboard_entry_id,\n                    le.battlesnake_id,\n                    le.display_score,\n                    le.games_played,\n                    le.first_place_finishes,\n                    le.non_first_finishes,\n                    le.mu,\n                    le.sigma,\n                    b.name as snake_name,\n                    u.github_login as owner_login\n                 FROM leaderboard_entries le\n                 JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id\n                 JOIN users u ON b.user_id = u.user_id\n                 WHERE le.leaderboard_id = $1\n                   AND le.disabled_at IS NULL\n                   AND le.games_played >= $2\n                 ORDER BY le.display_score DESC\n                 LIMIT 100",
+  "query": "SELECT\n            le.leaderboard_entry_id,\n            le.battlesnake_id,\n            b.user_id,\n            le.display_score,\n            le.games_played,\n            le.first_place_finishes,\n            le.non_first_finishes,\n            le.mu,\n            le.sigma,\n            b.name as snake_name,\n            u.github_login as owner_login\n         FROM leaderboard_entries le\n         JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id\n         JOIN users u ON b.user_id = u.user_id\n         WHERE le.leaderboard_id = $1\n           AND le.disabled_at IS NULL\n           AND le.games_played < $2\n         ORDER BY le.games_played DESC\n         LIMIT 100",
   "describe": {
     "columns": [
       {
@@ -15,41 +15,46 @@
       },
       {
         "ordinal": 2,
+        "name": "user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
         "name": "display_score",
         "type_info": "Float8"
       },
       {
-        "ordinal": 3,
+        "ordinal": 4,
         "name": "games_played",
         "type_info": "Int4"
       },
       {
-        "ordinal": 4,
+        "ordinal": 5,
         "name": "first_place_finishes",
         "type_info": "Int4"
       },
       {
-        "ordinal": 5,
+        "ordinal": 6,
         "name": "non_first_finishes",
         "type_info": "Int4"
       },
       {
-        "ordinal": 6,
+        "ordinal": 7,
         "name": "mu",
         "type_info": "Float8"
       },
       {
-        "ordinal": 7,
+        "ordinal": 8,
         "name": "sigma",
         "type_info": "Float8"
       },
       {
-        "ordinal": 8,
+        "ordinal": 9,
         "name": "snake_name",
         "type_info": "Text"
       },
       {
-        "ordinal": 9,
+        "ordinal": 10,
         "name": "owner_login",
         "type_info": "Text"
       }
@@ -70,8 +75,9 @@
       false,
       false,
       false,
+      false,
       false
     ]
   },
-  "hash": "8d9f813663965c75e6f0e84ab8771377d6c4342299f4b702f8ef52b96ae9127a"
+  "hash": "58b79cc17aa79c660b4dcb09cad8beab56f5108bfab490634c5ae3b31994b9bd"
 }
