@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT COALESCE(MAX(seed), 0) + 1 as \"next_seed!\"\n        FROM tournament_registrations\n        WHERE tournament_id = $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "next_seed!",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "6494cce916c75c7dd3e49103b8223f6062da8598a0f2ab9df182a8e103859138"
+}

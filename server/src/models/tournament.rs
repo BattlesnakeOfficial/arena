@@ -570,6 +570,465 @@ pub async fn get_registrations_for_tournament(
     Ok(registrations)
 }
 
+// --- Tournament list / detail / registration queries (BS-017 + BS-018) ---
+
+/// A tournament row enriched with owner login and registration count for the
+/// list page.
+#[derive(Debug, Clone)]
+pub struct TournamentListItem {
+    pub tournament_id: Uuid,
+    pub name: String,
+    pub owner_login: String,
+    pub status: TournamentStatus,
+    pub game_type: GameType,
+    pub registration_count: i64,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// List tournaments visible to a viewer: all public tournaments, plus the
+/// viewer's own non-public ones when logged in.
+pub async fn list_visible_tournaments(
+    pool: &PgPool,
+    viewer_user_id: Option<Uuid>,
+) -> cja::Result<Vec<TournamentListItem>> {
+    struct Row {
+        tournament_id: Uuid,
+        name: String,
+        owner_login: String,
+        status: TournamentStatus,
+        game_type: String,
+        registration_count: i64,
+        created_at: chrono::DateTime<chrono::Utc>,
+    }
+
+    let rows = sqlx::query_as!(
+        Row,
+        r#"
+        SELECT
+            t.tournament_id,
+            t.name,
+            u.github_login as owner_login,
+            t.status as "status: TournamentStatus",
+            t.game_type,
+            COUNT(r.registration_id) as "registration_count!",
+            t.created_at
+        FROM tournaments t
+        JOIN users u ON t.user_id = u.user_id
+        LEFT JOIN tournament_registrations r ON r.tournament_id = t.tournament_id
+        WHERE t.visibility = 'public' OR t.user_id = $1
+        GROUP BY t.tournament_id, u.github_login
+        ORDER BY t.created_at DESC
+        "#,
+        viewer_user_id,
+    )
+    .fetch_all(pool)
+    .await
+    .wrap_err("Failed to list visible tournaments")?;
+
+    rows.into_iter()
+        .map(|row| {
+            let game_type = GameType::from_str(&row.game_type)
+                .wrap_err_with(|| format!("Invalid game type: {}", row.game_type))?;
+            Ok(TournamentListItem {
+                tournament_id: row.tournament_id,
+                name: row.name,
+                owner_login: row.owner_login,
+                status: row.status,
+                game_type,
+                registration_count: row.registration_count,
+                created_at: row.created_at,
+            })
+        })
+        .collect()
+}
+
+/// A registration enriched with snake name and owner login for display.
+#[derive(Debug, Clone)]
+pub struct RegistrationWithDetails {
+    pub registration_id: Uuid,
+    pub battlesnake_id: Uuid,
+    pub user_id: Uuid,
+    pub seed: i32,
+    pub snake_name: String,
+    pub owner_login: String,
+}
+
+pub async fn get_registrations_with_details(
+    pool: &PgPool,
+    tournament_id: Uuid,
+) -> cja::Result<Vec<RegistrationWithDetails>> {
+    let registrations = sqlx::query_as!(
+        RegistrationWithDetails,
+        r#"
+        SELECT
+            r.registration_id,
+            r.battlesnake_id,
+            r.user_id,
+            r.seed,
+            b.name as snake_name,
+            u.github_login as owner_login
+        FROM tournament_registrations r
+        JOIN battlesnakes b ON r.battlesnake_id = b.battlesnake_id
+        JOIN users u ON r.user_id = u.user_id
+        WHERE r.tournament_id = $1
+        ORDER BY r.seed ASC
+        "#,
+        tournament_id
+    )
+    .fetch_all(pool)
+    .await
+    .wrap_err("Failed to fetch registrations with details")?;
+
+    Ok(registrations)
+}
+
+pub async fn get_registration_by_id<'e, E>(
+    executor: E,
+    registration_id: Uuid,
+) -> cja::Result<Option<TournamentRegistration>>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    let registration = sqlx::query_as!(
+        TournamentRegistration,
+        r#"
+        SELECT
+            registration_id,
+            tournament_id,
+            battlesnake_id,
+            user_id,
+            seed,
+            registered_at
+        FROM tournament_registrations
+        WHERE registration_id = $1
+        "#,
+        registration_id
+    )
+    .fetch_optional(executor)
+    .await
+    .wrap_err("Failed to fetch registration by id")?;
+
+    Ok(registration)
+}
+
+pub async fn count_registrations<'e, E>(executor: E, tournament_id: Uuid) -> cja::Result<i64>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    let count = sqlx::query_scalar!(
+        r#"SELECT COUNT(*) as "count!" FROM tournament_registrations WHERE tournament_id = $1"#,
+        tournament_id
+    )
+    .fetch_one(executor)
+    .await
+    .wrap_err("Failed to count registrations")?;
+
+    Ok(count)
+}
+
+pub async fn count_registrations_for_user<'e, E>(
+    executor: E,
+    tournament_id: Uuid,
+    user_id: Uuid,
+) -> cja::Result<i64>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    let count = sqlx::query_scalar!(
+        r#"
+        SELECT COUNT(*) as "count!"
+        FROM tournament_registrations
+        WHERE tournament_id = $1 AND user_id = $2
+        "#,
+        tournament_id,
+        user_id
+    )
+    .fetch_one(executor)
+    .await
+    .wrap_err("Failed to count registrations for user")?;
+
+    Ok(count)
+}
+
+pub async fn is_battlesnake_registered<'e, E>(
+    executor: E,
+    tournament_id: Uuid,
+    battlesnake_id: Uuid,
+) -> cja::Result<bool>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    let exists = sqlx::query_scalar!(
+        r#"
+        SELECT EXISTS(
+            SELECT 1 FROM tournament_registrations
+            WHERE tournament_id = $1 AND battlesnake_id = $2
+        ) as "exists!"
+        "#,
+        tournament_id,
+        battlesnake_id
+    )
+    .fetch_one(executor)
+    .await
+    .wrap_err("Failed to check if battlesnake is registered")?;
+
+    Ok(exists)
+}
+
+/// Next free seed for a tournament (max seed + 1). Call inside the same
+/// transaction as the registration insert to keep assignment consistent.
+pub async fn next_seed<'e, E>(executor: E, tournament_id: Uuid) -> cja::Result<i32>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    let next = sqlx::query_scalar!(
+        r#"
+        SELECT COALESCE(MAX(seed), 0) + 1 as "next_seed!"
+        FROM tournament_registrations
+        WHERE tournament_id = $1
+        "#,
+        tournament_id
+    )
+    .fetch_one(executor)
+    .await
+    .wrap_err("Failed to compute next seed")?;
+
+    Ok(next)
+}
+
+/// Register a snake with the next free seed, inside a single transaction.
+pub async fn register_snake_with_next_seed(
+    pool: &PgPool,
+    tournament_id: Uuid,
+    battlesnake_id: Uuid,
+    user_id: Uuid,
+) -> cja::Result<TournamentRegistration> {
+    let mut tx = pool
+        .begin()
+        .await
+        .wrap_err("Failed to begin registration transaction")?;
+
+    let seed = next_seed(&mut *tx, tournament_id).await?;
+    let registration =
+        create_registration(&mut *tx, tournament_id, battlesnake_id, user_id, seed).await?;
+
+    tx.commit()
+        .await
+        .wrap_err("Failed to commit registration transaction")?;
+
+    Ok(registration)
+}
+
+/// Renumber seeds to 1..N (ordered by current seed) to close any gaps.
+/// The (tournament_id, seed) unique constraint is deferrable, so a straight
+/// renumbering inside a transaction is safe.
+async fn renumber_seeds<'e, E>(executor: E, tournament_id: Uuid) -> cja::Result<()>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    sqlx::query!(
+        r#"
+        UPDATE tournament_registrations tr
+        SET seed = ranked.new_seed
+        FROM (
+            SELECT registration_id, (ROW_NUMBER() OVER (ORDER BY seed ASC))::int AS new_seed
+            FROM tournament_registrations
+            WHERE tournament_id = $1
+        ) ranked
+        WHERE tr.registration_id = ranked.registration_id
+          AND tr.seed <> ranked.new_seed
+        "#,
+        tournament_id
+    )
+    .execute(executor)
+    .await
+    .wrap_err("Failed to renumber seeds")?;
+
+    Ok(())
+}
+
+/// Delete a registration and renumber remaining seeds to close the gap, all
+/// inside a single transaction. Returns whether a row was deleted.
+pub async fn delete_registration_and_renumber(
+    pool: &PgPool,
+    tournament_id: Uuid,
+    registration_id: Uuid,
+) -> cja::Result<bool> {
+    let mut tx = pool
+        .begin()
+        .await
+        .wrap_err("Failed to begin unregister transaction")?;
+
+    let result = sqlx::query!(
+        "DELETE FROM tournament_registrations WHERE registration_id = $1 AND tournament_id = $2",
+        registration_id,
+        tournament_id
+    )
+    .execute(&mut *tx)
+    .await
+    .wrap_err("Failed to delete registration")?;
+
+    renumber_seeds(&mut *tx, tournament_id).await?;
+
+    tx.commit()
+        .await
+        .wrap_err("Failed to commit unregister transaction")?;
+
+    Ok(result.rows_affected() > 0)
+}
+
+/// Move a registration to a new seed, shifting the others to make room.
+/// The requested seed is clamped to the valid range [1, max seed].
+pub async fn move_registration_seed(
+    pool: &PgPool,
+    tournament_id: Uuid,
+    registration_id: Uuid,
+    new_seed: i32,
+) -> cja::Result<()> {
+    let mut tx = pool
+        .begin()
+        .await
+        .wrap_err("Failed to begin seed move transaction")?;
+
+    let current_seed = sqlx::query_scalar!(
+        r#"
+        SELECT seed FROM tournament_registrations
+        WHERE registration_id = $1 AND tournament_id = $2
+        FOR UPDATE
+        "#,
+        registration_id,
+        tournament_id
+    )
+    .fetch_optional(&mut *tx)
+    .await
+    .wrap_err("Failed to fetch registration seed")?
+    .ok_or_else(|| color_eyre::eyre::eyre!("Registration not found in this tournament"))?;
+
+    let max_seed = sqlx::query_scalar!(
+        r#"
+        SELECT COALESCE(MAX(seed), 0) as "max_seed!"
+        FROM tournament_registrations
+        WHERE tournament_id = $1
+        "#,
+        tournament_id
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .wrap_err("Failed to fetch max seed")?;
+
+    let target_seed = new_seed.clamp(1, max_seed);
+
+    if target_seed == current_seed {
+        tx.commit()
+            .await
+            .wrap_err("Failed to commit seed move transaction")?;
+        return Ok(());
+    }
+
+    if target_seed < current_seed {
+        // Moving up: shift the block [target, current) down by one.
+        sqlx::query!(
+            r#"
+            UPDATE tournament_registrations
+            SET seed = seed + 1
+            WHERE tournament_id = $1 AND seed >= $2 AND seed < $3
+            "#,
+            tournament_id,
+            target_seed,
+            current_seed
+        )
+        .execute(&mut *tx)
+        .await
+        .wrap_err("Failed to shift seeds up")?;
+    } else {
+        // Moving down: shift the block (current, target] up by one.
+        sqlx::query!(
+            r#"
+            UPDATE tournament_registrations
+            SET seed = seed - 1
+            WHERE tournament_id = $1 AND seed > $2 AND seed <= $3
+            "#,
+            tournament_id,
+            current_seed,
+            target_seed
+        )
+        .execute(&mut *tx)
+        .await
+        .wrap_err("Failed to shift seeds down")?;
+    }
+
+    sqlx::query!(
+        "UPDATE tournament_registrations SET seed = $2 WHERE registration_id = $1",
+        registration_id,
+        target_seed
+    )
+    .execute(&mut *tx)
+    .await
+    .wrap_err("Failed to set new seed")?;
+
+    tx.commit()
+        .await
+        .wrap_err("Failed to commit seed move transaction")?;
+
+    Ok(())
+}
+
+/// Editable tournament settings (BS-017). Callers are responsible for
+/// validating that game_type/board_size changes are allowed (they are frozen
+/// once registrations exist).
+#[derive(Debug, Clone)]
+pub struct UpdateTournamentSettings {
+    pub name: String,
+    pub description: Option<String>,
+    pub game_type: GameType,
+    pub board_size: GameBoardSize,
+    pub match_style: MatchStyle,
+    pub registration_status: RegistrationStatus,
+    pub visibility: TournamentVisibility,
+    pub max_snakes_per_user: i32,
+    pub required_participants: i32,
+}
+
+pub async fn update_tournament_settings<'e, E>(
+    executor: E,
+    tournament_id: Uuid,
+    data: UpdateTournamentSettings,
+) -> cja::Result<()>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    sqlx::query!(
+        r#"
+        UPDATE tournaments
+        SET name = $2,
+            description = $3,
+            game_type = $4,
+            board_size = $5,
+            match_style = $6,
+            registration_status = $7,
+            visibility = $8,
+            max_snakes_per_user = $9,
+            required_participants = $10
+        WHERE tournament_id = $1
+        "#,
+        tournament_id,
+        data.name,
+        data.description,
+        data.game_type.as_str(),
+        data.board_size.as_str(),
+        data.match_style.as_str(),
+        data.registration_status.as_str(),
+        data.visibility.as_str(),
+        data.max_snakes_per_user,
+        data.required_participants,
+    )
+    .execute(executor)
+    .await
+    .wrap_err("Failed to update tournament settings")?;
+
+    Ok(())
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CreateTournamentMatch {
     pub tournament_id: Uuid,

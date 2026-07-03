@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE tournaments\n        SET name = $2,\n            description = $3,\n            game_type = $4,\n            board_size = $5,\n            match_style = $6,\n            registration_status = $7,\n            visibility = $8,\n            max_snakes_per_user = $9,\n            required_participants = $10\n        WHERE tournament_id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Int4",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f87fc1ae14a8ba05a698876e30bb6d3a16d3918feb73e38de4738dd25824480f"
+}

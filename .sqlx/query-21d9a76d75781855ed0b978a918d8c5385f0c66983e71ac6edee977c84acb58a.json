@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM tournament_registrations WHERE registration_id = $1 AND tournament_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "21d9a76d75781855ed0b978a918d8c5385f0c66983e71ac6edee977c84acb58a"
+}
