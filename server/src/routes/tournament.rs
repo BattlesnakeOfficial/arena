@@ -7,6 +7,7 @@ use axum::{
 use color_eyre::eyre::Context as _;
 use maud::{Markup, html};
 use serde::Deserialize;
+use sqlx::{Postgres, Transaction};
 use std::collections::HashMap;
 use std::str::FromStr as _;
 use uuid::Uuid;
@@ -31,6 +32,18 @@ use crate::{
 /// Cap for the leaderboard import qualifier flow.
 const MAX_IMPORT_COUNT: i64 = 32;
 
+/// Hard cap on total registrations per tournament. Bracket generation is
+/// property-tested up to 128 participants, so both register and import refuse
+/// to push a tournament past this. Keep in sync with
+/// `MAX_REQUIRED_PARTICIPANTS`.
+const MAX_TOTAL_REGISTRATIONS: i64 = 128;
+
+/// Input limits for tournament settings (server-side; the form mirrors them).
+const MAX_NAME_CHARS: usize = 128;
+const MAX_DESCRIPTION_CHARS: usize = 4000;
+const MAX_SNAKES_PER_USER_LIMIT: i32 = 32;
+const MAX_REQUIRED_PARTICIPANTS: i32 = 128;
+
 // --- Pure business rules (unit tested below) ---
 
 /// Registrations can only be added/removed/reseeded before the bracket exists.
@@ -43,8 +56,15 @@ fn registrations_editable(status: TournamentStatus) -> bool {
 
 /// Registration permission matrix: the tournament must be in a pre-start
 /// status, and the registration_status must allow the caller.
+///
+/// For participants-only tournaments, only the owner may register snakes.
+/// Otherwise an outsider could self-register, become a "participant", and
+/// defeat the visibility 404 that hides the tournament from them.
 fn can_register(tournament: &Tournament, is_owner: bool) -> bool {
     if !registrations_editable(tournament.status) {
+        return false;
+    }
+    if tournament.visibility == TournamentVisibility::ParticipantsOnly && !is_owner {
         return false;
     }
     match tournament.registration_status {
@@ -71,17 +91,33 @@ fn can_view(
 /// Shared validation for create + settings update.
 fn validate_tournament_params(
     name: &str,
+    description: &str,
     required_participants: i32,
     max_snakes_per_user: i32,
 ) -> Result<(), String> {
-    if name.trim().is_empty() {
+    let trimmed_name = name.trim();
+    if trimmed_name.is_empty() {
         return Err("Tournament name cannot be empty".to_string());
     }
-    if required_participants < 2 {
-        return Err("Required participants must be at least 2".to_string());
+    if trimmed_name.chars().count() > MAX_NAME_CHARS {
+        return Err(format!(
+            "Tournament name must be at most {MAX_NAME_CHARS} characters"
+        ));
     }
-    if max_snakes_per_user < 1 {
-        return Err("Max snakes per user must be at least 1".to_string());
+    if description.chars().count() > MAX_DESCRIPTION_CHARS {
+        return Err(format!(
+            "Description must be at most {MAX_DESCRIPTION_CHARS} characters"
+        ));
+    }
+    if !(2..=MAX_REQUIRED_PARTICIPANTS).contains(&required_participants) {
+        return Err(format!(
+            "Required participants must be between 2 and {MAX_REQUIRED_PARTICIPANTS}"
+        ));
+    }
+    if !(1..=MAX_SNAKES_PER_USER_LIMIT).contains(&max_snakes_per_user) {
+        return Err(format!(
+            "Max snakes per user must be between 1 and {MAX_SNAKES_PER_USER_LIMIT}"
+        ));
     }
     Ok(())
 }
@@ -122,6 +158,124 @@ fn parse_board_size(s: &str) -> Result<GameBoardSize, String> {
         Ok(GameBoardSize::Custom(_)) | Err(_) => Err(format!("Invalid board size: {s}")),
         Ok(board_size) => Ok(board_size),
     }
+}
+
+/// Select snakes to import from a leaderboard, walking down the rankings:
+/// skip snakes already registered, skip owners at the per-user cap, stop at
+/// the requested count, and never push total registrations past
+/// `MAX_TOTAL_REGISTRATIONS`. Returns `(battlesnake_id, user_id)` pairs in
+/// rank order. Pure — callers pass the in-transaction registration snapshot.
+fn select_import_candidates(
+    ranked: &[leaderboard::RankedEntry],
+    existing: &[tournament::TournamentRegistration],
+    max_snakes_per_user: i32,
+    requested: i64,
+) -> Vec<(Uuid, Uuid)> {
+    let mut registered_snakes: Vec<Uuid> = existing.iter().map(|r| r.battlesnake_id).collect();
+    let mut per_user_counts: HashMap<Uuid, i64> = HashMap::new();
+    for reg in existing {
+        *per_user_counts.entry(reg.user_id).or_insert(0) += 1;
+    }
+
+    let remaining_capacity = MAX_TOTAL_REGISTRATIONS - existing.len() as i64;
+    let target = requested.min(remaining_capacity).max(0);
+
+    let mut candidates: Vec<(Uuid, Uuid)> = Vec::new();
+    for entry in ranked {
+        if candidates.len() as i64 >= target {
+            break;
+        }
+        if registered_snakes.contains(&entry.battlesnake_id) {
+            continue;
+        }
+        let owner_count = per_user_counts.entry(entry.user_id).or_insert(0);
+        if *owner_count >= i64::from(max_snakes_per_user) {
+            continue;
+        }
+        *owner_count += 1;
+        registered_snakes.push(entry.battlesnake_id);
+        candidates.push((entry.battlesnake_id, entry.user_id));
+    }
+    candidates
+}
+
+// --- In-transaction helpers ---
+//
+// Every mutating handler follows the same shape: open one transaction, lock
+// the tournament row via `get_tournament_for_update`, run ALL validation
+// against the locked row, mutate, then commit. Validating on the pool and
+// opening a transaction afterwards is a TOCTOU bug — these helpers only make
+// sense inside that locked transaction.
+
+/// Whether this tournament must be concealed (404) from the requester,
+/// mirroring `show_tournament`'s `can_view` rule: participants_only
+/// tournaments don't exist for anyone but the owner and registered
+/// participants. Mutating handlers pass their locked transaction so the
+/// participant check reads in-transaction state.
+async fn is_hidden_from<'e, E>(executor: E, t: &Tournament, user_id: Uuid) -> cja::Result<bool>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
+    if t.visibility != TournamentVisibility::ParticipantsOnly || t.user_id == user_id {
+        return Ok(false);
+    }
+    let registrations =
+        tournament::count_registrations_for_user(executor, t.tournament_id, user_id)
+            .await
+            .wrap_err("Failed to count requester registrations")?;
+    Ok(registrations == 0)
+}
+
+/// Registration checks + insert against the locked tournament row: duplicate
+/// snake, per-user cap, and the total-registrations cap are all evaluated on
+/// in-transaction counts. Returns `Err(message)` in the inner result for
+/// user-facing refusals (flash + redirect at the route layer).
+async fn register_snake_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    t: &Tournament,
+    owner_user_id: Uuid,
+    battlesnake_id: Uuid,
+    snake_name: &str,
+) -> cja::Result<Result<tournament::TournamentRegistration, String>> {
+    if tournament::is_battlesnake_registered(&mut **tx, t.tournament_id, battlesnake_id)
+        .await
+        .wrap_err("Failed to check existing registration")?
+    {
+        return Ok(Err(format!(
+            "{snake_name} is already registered in this tournament"
+        )));
+    }
+
+    let user_reg_count =
+        tournament::count_registrations_for_user(&mut **tx, t.tournament_id, owner_user_id)
+            .await
+            .wrap_err("Failed to count user registrations")?;
+    if user_reg_count >= i64::from(t.max_snakes_per_user) {
+        return Ok(Err(format!(
+            "You have reached the limit of {} snake(s) for this tournament",
+            t.max_snakes_per_user
+        )));
+    }
+
+    let total = tournament::count_registrations(&mut **tx, t.tournament_id)
+        .await
+        .wrap_err("Failed to count registrations")?;
+    if total >= MAX_TOTAL_REGISTRATIONS {
+        return Ok(Err(format!(
+            "This tournament is full ({MAX_TOTAL_REGISTRATIONS} snakes)"
+        )));
+    }
+
+    let registration = tournament::register_snake_with_next_seed(
+        tx,
+        t.tournament_id,
+        battlesnake_id,
+        owner_user_id,
+    )
+    .await
+    .wrap_err("Failed to register snake")?;
+
+    Ok(Ok(registration))
 }
 
 // --- Shared rendering helpers ---
@@ -406,6 +560,7 @@ pub async fn create_tournament(
 ) -> ServerResult<impl IntoResponse, StatusCode> {
     let parsed = validate_tournament_params(
         &form.name,
+        &form.description,
         form.required_participants,
         form.max_snakes_per_user,
     )
@@ -523,7 +678,7 @@ pub async fn show_tournament(
 
     // Leaderboards for the owner's import form
     let leaderboards = if is_owner && registrations_editable(t.status) {
-        leaderboard::get_all_leaderboards(&state.db)
+        leaderboard::get_active_leaderboards(&state.db)
             .await
             .wrap_err("Failed to fetch leaderboards")?
     } else {
@@ -711,6 +866,11 @@ pub async fn edit_tournament(
         .with_status(StatusCode::NOT_FOUND)?;
 
     if t.user_id != user.user_id {
+        // Hidden tournaments 404 for outsiders — a 403 here would confirm the
+        // tournament exists, distinguishing valid hidden UUIDs from noise.
+        if is_hidden_from(&state.db, &t, user.user_id).await? {
+            return Err("Tournament not found".to_string()).with_status(StatusCode::NOT_FOUND);
+        }
         return Err("You don't have permission to edit this tournament".to_string())
             .with_status(StatusCode::FORBIDDEN);
     }
@@ -762,25 +922,40 @@ pub async fn update_settings(
     Path(tournament_id): Path<Uuid>,
     Form(form): Form<TournamentSettingsForm>,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
-    let t = tournament::get_tournament_by_id(&state.db, tournament_id)
+    // One transaction for the whole handler: lock the tournament row, then
+    // validate (ownership, status, the registration-based settings freeze)
+    // against the locked row before writing.
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .wrap_err("Failed to begin settings transaction")?;
+
+    let t = tournament::get_tournament_for_update(&mut tx, tournament_id)
         .await
         .wrap_err("Failed to fetch tournament")?
         .ok_or_else(|| "Tournament not found".to_string())
         .with_status(StatusCode::NOT_FOUND)?;
 
     if t.user_id != user.user_id {
+        // Hidden tournaments 404 for outsiders — a 403 here would confirm the
+        // tournament exists, distinguishing valid hidden UUIDs from noise.
+        if is_hidden_from(&mut *tx, &t, user.user_id).await? {
+            return Err("Tournament not found".to_string()).with_status(StatusCode::NOT_FOUND);
+        }
         return Err("You don't have permission to edit this tournament".to_string())
             .with_status(StatusCode::FORBIDDEN);
     }
 
     let edit_url = format!("/tournaments/{tournament_id}/edit");
 
-    let registration_count = tournament::count_registrations(&state.db, tournament_id)
+    let registration_count = tournament::count_registrations(&mut *tx, tournament_id)
         .await
         .wrap_err("Failed to count registrations")?;
 
     let parsed = validate_tournament_params(
         &form.name,
+        &form.description,
         form.required_participants,
         form.max_snakes_per_user,
     )
@@ -810,7 +985,7 @@ pub async fn update_settings(
     };
 
     tournament::update_tournament_settings(
-        &state.db,
+        &mut *tx,
         tournament_id,
         UpdateTournamentSettings {
             name: form.name.trim().to_string(),
@@ -826,6 +1001,10 @@ pub async fn update_settings(
     )
     .await
     .wrap_err("Failed to update tournament settings")?;
+
+    tx.commit()
+        .await
+        .wrap_err("Failed to commit settings transaction")?;
 
     flash_redirect(
         &state,
@@ -844,13 +1023,28 @@ pub async fn register_snake(
     Path(tournament_id): Path<Uuid>,
     Form(form): Form<RegisterForm>,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
-    let t = tournament::get_tournament_by_id(&state.db, tournament_id)
+    let detail_url = format!("/tournaments/{tournament_id}");
+
+    // One transaction for the whole handler: lock the tournament row, then
+    // run every check (visibility, registration matrix, dupe, per-user and
+    // total caps) against the locked row before inserting.
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .wrap_err("Failed to begin registration transaction")?;
+
+    let t = tournament::get_tournament_for_update(&mut tx, tournament_id)
         .await
         .wrap_err("Failed to fetch tournament")?
         .ok_or_else(|| "Tournament not found".to_string())
         .with_status(StatusCode::NOT_FOUND)?;
 
-    let detail_url = format!("/tournaments/{tournament_id}");
+    // Hidden tournaments 404 for outsiders, exactly like the detail page.
+    if is_hidden_from(&mut *tx, &t, user.user_id).await? {
+        return Err("Tournament not found".to_string()).with_status(StatusCode::NOT_FOUND);
+    }
+
     let is_owner = t.user_id == user.user_id;
 
     if !can_register(&t, is_owner) {
@@ -879,47 +1073,27 @@ pub async fn register_snake(
         .await;
     };
 
-    if tournament::is_battlesnake_registered(&state.db, tournament_id, snake.battlesnake_id)
+    let registration =
+        match register_snake_in_tx(&mut tx, &t, user.user_id, snake.battlesnake_id, &snake.name)
+            .await?
+        {
+            Ok(registration) => registration,
+            Err(message) => {
+                // Dropping the transaction rolls it back.
+                return flash_redirect(
+                    &state,
+                    session.session_id,
+                    message,
+                    session::FLASH_TYPE_ERROR,
+                    &detail_url,
+                )
+                .await;
+            }
+        };
+
+    tx.commit()
         .await
-        .wrap_err("Failed to check existing registration")?
-    {
-        return flash_redirect(
-            &state,
-            session.session_id,
-            format!("{} is already registered in this tournament", snake.name),
-            session::FLASH_TYPE_ERROR,
-            &detail_url,
-        )
-        .await;
-    }
-
-    let user_reg_count =
-        tournament::count_registrations_for_user(&state.db, tournament_id, user.user_id)
-            .await
-            .wrap_err("Failed to count user registrations")?;
-
-    if user_reg_count >= i64::from(t.max_snakes_per_user) {
-        return flash_redirect(
-            &state,
-            session.session_id,
-            format!(
-                "You have reached the limit of {} snake(s) for this tournament",
-                t.max_snakes_per_user
-            ),
-            session::FLASH_TYPE_ERROR,
-            &detail_url,
-        )
-        .await;
-    }
-
-    let registration = tournament::register_snake_with_next_seed(
-        &state.db,
-        tournament_id,
-        snake.battlesnake_id,
-        user.user_id,
-    )
-    .await
-    .wrap_err("Failed to register snake")?;
+        .wrap_err("Failed to commit registration transaction")?;
 
     flash_redirect(
         &state,
@@ -939,13 +1113,27 @@ pub async fn unregister_snake(
     Path(tournament_id): Path<Uuid>,
     Form(form): Form<UnregisterForm>,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
-    let t = tournament::get_tournament_by_id(&state.db, tournament_id)
+    let detail_url = format!("/tournaments/{tournament_id}");
+
+    // One transaction for the whole handler: lock the tournament row so the
+    // status check, registration lookup, and seed renumbering can't race
+    // other mutations.
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .wrap_err("Failed to begin unregister transaction")?;
+
+    let t = tournament::get_tournament_for_update(&mut tx, tournament_id)
         .await
         .wrap_err("Failed to fetch tournament")?
         .ok_or_else(|| "Tournament not found".to_string())
         .with_status(StatusCode::NOT_FOUND)?;
 
-    let detail_url = format!("/tournaments/{tournament_id}");
+    // Hidden tournaments 404 for outsiders, exactly like the detail page.
+    if is_hidden_from(&mut *tx, &t, user.user_id).await? {
+        return Err("Tournament not found".to_string()).with_status(StatusCode::NOT_FOUND);
+    }
 
     if !registrations_editable(t.status) {
         return flash_redirect(
@@ -958,7 +1146,7 @@ pub async fn unregister_snake(
         .await;
     }
 
-    let registration = tournament::get_registration_by_id(&state.db, form.registration_id)
+    let registration = tournament::get_registration_by_id(&mut *tx, form.registration_id)
         .await
         .wrap_err("Failed to fetch registration")?
         .filter(|r| r.tournament_id == tournament_id);
@@ -988,12 +1176,16 @@ pub async fn unregister_snake(
     }
 
     tournament::delete_registration_and_renumber(
-        &state.db,
+        &mut tx,
         tournament_id,
         registration.registration_id,
     )
     .await
     .wrap_err("Failed to unregister snake")?;
+
+    tx.commit()
+        .await
+        .wrap_err("Failed to commit unregister transaction")?;
 
     flash_redirect(
         &state,
@@ -1012,13 +1204,26 @@ pub async fn move_seed(
     Path(tournament_id): Path<Uuid>,
     Form(form): Form<SeedForm>,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
-    let t = tournament::get_tournament_by_id(&state.db, tournament_id)
+    // One transaction for the whole handler: lock the tournament row so seed
+    // shuffles serialize with registrations, unregistrations, and each other.
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .wrap_err("Failed to begin seed move transaction")?;
+
+    let t = tournament::get_tournament_for_update(&mut tx, tournament_id)
         .await
         .wrap_err("Failed to fetch tournament")?
         .ok_or_else(|| "Tournament not found".to_string())
         .with_status(StatusCode::NOT_FOUND)?;
 
     if t.user_id != user.user_id {
+        // Hidden tournaments 404 for outsiders — a 403 here would confirm the
+        // tournament exists, distinguishing valid hidden UUIDs from noise.
+        if is_hidden_from(&mut *tx, &t, user.user_id).await? {
+            return Err("Tournament not found".to_string()).with_status(StatusCode::NOT_FOUND);
+        }
         return Err("Only the tournament owner can change seeds".to_string())
             .with_status(StatusCode::FORBIDDEN);
     }
@@ -1036,12 +1241,18 @@ pub async fn move_seed(
         .await;
     }
 
-    let registration = tournament::get_registration_by_id(&state.db, form.registration_id)
-        .await
-        .wrap_err("Failed to fetch registration")?
-        .filter(|r| r.tournament_id == tournament_id);
+    // Single in-transaction fetch: move_registration_seed reports a missing
+    // registration as `false` and we surface it as a flash error.
+    let moved = tournament::move_registration_seed(
+        &mut tx,
+        tournament_id,
+        form.registration_id,
+        form.new_seed,
+    )
+    .await
+    .wrap_err("Failed to move seed")?;
 
-    if registration.is_none() {
+    if !moved {
         return flash_redirect(
             &state,
             session.session_id,
@@ -1052,14 +1263,9 @@ pub async fn move_seed(
         .await;
     }
 
-    tournament::move_registration_seed(
-        &state.db,
-        tournament_id,
-        form.registration_id,
-        form.new_seed,
-    )
-    .await
-    .wrap_err("Failed to move seed")?;
+    tx.commit()
+        .await
+        .wrap_err("Failed to commit seed move transaction")?;
 
     flash_redirect(
         &state,
@@ -1081,13 +1287,27 @@ pub async fn update_status(
     Path(tournament_id): Path<Uuid>,
     Form(form): Form<StatusForm>,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
-    let t = tournament::get_tournament_by_id(&state.db, tournament_id)
+    // One transaction for the whole handler: lock the tournament row so the
+    // transition check and the status write can't race another change. The
+    // compare-and-swap in set_tournament_status is a second line of defense.
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .wrap_err("Failed to begin status transaction")?;
+
+    let t = tournament::get_tournament_for_update(&mut tx, tournament_id)
         .await
         .wrap_err("Failed to fetch tournament")?
         .ok_or_else(|| "Tournament not found".to_string())
         .with_status(StatusCode::NOT_FOUND)?;
 
     if t.user_id != user.user_id {
+        // Hidden tournaments 404 for outsiders — a 403 here would confirm the
+        // tournament exists, distinguishing valid hidden UUIDs from noise.
+        if is_hidden_from(&mut *tx, &t, user.user_id).await? {
+            return Err("Tournament not found".to_string()).with_status(StatusCode::NOT_FOUND);
+        }
         return Err("Only the tournament owner can change its status".to_string())
             .with_status(StatusCode::FORBIDDEN);
     }
@@ -1124,11 +1344,15 @@ pub async fn update_status(
         .await;
     }
 
-    // Compare-and-swap on the status we validated the transition from, so a
-    // concurrent status change between the check and the write is refused.
-    tournament::set_tournament_status(&state.db, tournament_id, next_status, t.status)
+    // Compare-and-swap on the status we validated the transition from; the
+    // row lock means `t.status` can't have changed underneath us.
+    tournament::set_tournament_status(&mut *tx, tournament_id, next_status, t.status)
         .await
         .wrap_err("Failed to update tournament status")?;
+
+    tx.commit()
+        .await
+        .wrap_err("Failed to commit status transaction")?;
 
     let message = match next_status {
         TournamentStatus::Registration => "Registration is now open!".to_string(),
@@ -1157,24 +1381,51 @@ pub async fn import_leaderboard(
     Path(tournament_id): Path<Uuid>,
     Form(form): Form<ImportLeaderboardForm>,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
-    let t = tournament::get_tournament_by_id(&state.db, tournament_id)
+    let detail_url = format!("/tournaments/{tournament_id}");
+
+    // One transaction for the whole handler: lock the tournament row, then
+    // snapshot registrations, select candidates, and insert — all against the
+    // locked row so a racing self-registration can't collide with the import.
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .wrap_err("Failed to begin import transaction")?;
+
+    let t = tournament::get_tournament_for_update(&mut tx, tournament_id)
         .await
         .wrap_err("Failed to fetch tournament")?
         .ok_or_else(|| "Tournament not found".to_string())
         .with_status(StatusCode::NOT_FOUND)?;
 
     if t.user_id != user.user_id {
+        // Hidden tournaments 404 for outsiders — a 403 here would confirm the
+        // tournament exists, distinguishing valid hidden UUIDs from noise.
+        if is_hidden_from(&mut *tx, &t, user.user_id).await? {
+            return Err("Tournament not found".to_string()).with_status(StatusCode::NOT_FOUND);
+        }
         return Err("Only the tournament owner can import from a leaderboard".to_string())
             .with_status(StatusCode::FORBIDDEN);
     }
 
-    let detail_url = format!("/tournaments/{tournament_id}");
-
+    // Import obeys the same registration matrix as manual registration by the
+    // owner: pre-start status only, and never when registration is closed.
     if !registrations_editable(t.status) {
         return flash_redirect(
             &state,
             session.session_id,
             "Snakes can only be imported before the tournament starts".to_string(),
+            session::FLASH_TYPE_ERROR,
+            &detail_url,
+        )
+        .await;
+    }
+
+    if t.registration_status == RegistrationStatus::Closed {
+        return flash_redirect(
+            &state,
+            session.session_id,
+            "Registration is closed for this tournament".to_string(),
             session::FLASH_TYPE_ERROR,
             &detail_url,
         )
@@ -1195,6 +1446,17 @@ pub async fn import_leaderboard(
         .await;
     };
 
+    if lb.disabled_at.is_some() {
+        return flash_redirect(
+            &state,
+            session.session_id,
+            format!("{} is disabled and cannot be imported from", lb.name),
+            session::FLASH_TYPE_ERROR,
+            &detail_url,
+        )
+        .await;
+    }
+
     let count = form.count.clamp(1, MAX_IMPORT_COUNT);
 
     let ranked = leaderboard::get_ranked_entries(
@@ -1205,41 +1467,13 @@ pub async fn import_leaderboard(
     .await
     .wrap_err("Failed to fetch ranked leaderboard entries")?;
 
-    // Snapshot the current registrations so we can skip duplicates and enforce
-    // the per-user cap while walking down the rankings.
-    let existing = tournament::get_registrations_for_tournament(&state.db, tournament_id)
+    // Snapshot the registrations inside the locked transaction so duplicate
+    // skipping and the per-user/total caps are enforced against reality.
+    let existing = tournament::get_registrations_for_tournament(&mut *tx, tournament_id)
         .await
         .wrap_err("Failed to fetch existing registrations")?;
-    let mut registered_snakes: Vec<Uuid> = existing.iter().map(|r| r.battlesnake_id).collect();
-    let mut per_user_counts: HashMap<Uuid, i64> = HashMap::new();
-    for reg in &existing {
-        *per_user_counts.entry(reg.user_id).or_insert(0) += 1;
-    }
 
-    // Select candidates in rank order: skip already-registered snakes and
-    // owners at their limit; continue until N selected or rankings exhausted.
-    let mut candidates: Vec<(Uuid, Uuid)> = Vec::new(); // (battlesnake_id, user_id)
-    for entry in &ranked {
-        if candidates.len() as i64 >= count {
-            break;
-        }
-        if registered_snakes.contains(&entry.battlesnake_id) {
-            continue;
-        }
-        let Some(snake) = battlesnake::get_battlesnake_by_id(&state.db, entry.battlesnake_id)
-            .await
-            .wrap_err("Failed to fetch ranked battlesnake")?
-        else {
-            continue;
-        };
-        let owner_count = per_user_counts.entry(snake.user_id).or_insert(0);
-        if *owner_count >= i64::from(t.max_snakes_per_user) {
-            continue;
-        }
-        *owner_count += 1;
-        registered_snakes.push(snake.battlesnake_id);
-        candidates.push((snake.battlesnake_id, snake.user_id));
-    }
+    let candidates = select_import_candidates(&ranked, &existing, t.max_snakes_per_user, count);
 
     if candidates.is_empty() {
         return flash_redirect(
@@ -1252,18 +1486,13 @@ pub async fn import_leaderboard(
         .await;
     }
 
-    // Register all selected snakes in one transaction, appended after the
-    // existing registrations in rating-rank order.
-    let mut tx = state
-        .db
-        .begin()
-        .await
-        .wrap_err("Failed to begin import transaction")?;
+    // Register all selected snakes, appended after the existing registrations
+    // in rating-rank order.
     let imported = candidates.len();
+    let mut seed = tournament::next_seed(&mut *tx, tournament_id)
+        .await
+        .wrap_err("Failed to compute seed during import")?;
     for (battlesnake_id, owner_user_id) in candidates {
-        let seed = tournament::next_seed(&mut *tx, tournament_id)
-            .await
-            .wrap_err("Failed to compute seed during import")?;
         tournament::create_registration(
             &mut *tx,
             tournament_id,
@@ -1273,6 +1502,7 @@ pub async fn import_leaderboard(
         )
         .await
         .wrap_err("Failed to register imported snake")?;
+        seed += 1;
     }
     tx.commit()
         .await
@@ -1291,6 +1521,8 @@ pub async fn import_leaderboard(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::tournament::TournamentRegistration;
+    use sqlx::PgPool;
 
     fn test_tournament(
         status: TournamentStatus,
@@ -1329,39 +1561,53 @@ mod tests {
     fn can_register_permission_matrix() {
         use RegistrationStatus::{Closed, Open, OwnerOnly};
         use TournamentStatus::{Canceled, Completed, Created, InProgress, Registration};
+        use TournamentVisibility::{ParticipantsOnly, Public};
 
-        // (status, registration_status, is_owner, expected)
+        // (status, registration_status, visibility, is_owner, expected)
         let cases = [
-            // Open: anyone, but only while created/registration
-            (Created, Open, false, true),
-            (Created, Open, true, true),
-            (Registration, Open, false, true),
-            (Registration, Open, true, true),
-            (InProgress, Open, false, false),
-            (InProgress, Open, true, false),
-            (Completed, Open, true, false),
-            (Canceled, Open, true, false),
+            // Open + public: anyone, but only while created/registration
+            (Created, Open, Public, false, true),
+            (Created, Open, Public, true, true),
+            (Registration, Open, Public, false, true),
+            (Registration, Open, Public, true, true),
+            (InProgress, Open, Public, false, false),
+            (InProgress, Open, Public, true, false),
+            (Completed, Open, Public, true, false),
+            (Canceled, Open, Public, true, false),
             // OwnerOnly: only the owner, still gated by status
-            (Created, OwnerOnly, false, false),
-            (Created, OwnerOnly, true, true),
-            (Registration, OwnerOnly, false, false),
-            (Registration, OwnerOnly, true, true),
-            (InProgress, OwnerOnly, true, false),
-            (Canceled, OwnerOnly, true, false),
+            (Created, OwnerOnly, Public, false, false),
+            (Created, OwnerOnly, Public, true, true),
+            (Registration, OwnerOnly, Public, false, false),
+            (Registration, OwnerOnly, Public, true, true),
+            (InProgress, OwnerOnly, Public, true, false),
+            (Canceled, OwnerOnly, Public, true, false),
             // Closed: nobody, not even the owner
-            (Created, Closed, false, false),
-            (Created, Closed, true, false),
-            (Registration, Closed, false, false),
-            (Registration, Closed, true, false),
-            (InProgress, Closed, true, false),
+            (Created, Closed, Public, false, false),
+            (Created, Closed, Public, true, false),
+            (Registration, Closed, Public, false, false),
+            (Registration, Closed, Public, true, false),
+            (InProgress, Closed, Public, true, false),
+            // ParticipantsOnly: only the OWNER may register snakes — an
+            // outsider self-registering would become a "participant" and
+            // defeat the visibility 404.
+            (Created, Open, ParticipantsOnly, false, false),
+            (Created, Open, ParticipantsOnly, true, true),
+            (Registration, Open, ParticipantsOnly, false, false),
+            (Registration, Open, ParticipantsOnly, true, true),
+            (Registration, OwnerOnly, ParticipantsOnly, false, false),
+            (Registration, OwnerOnly, ParticipantsOnly, true, true),
+            (Registration, Closed, ParticipantsOnly, false, false),
+            (Registration, Closed, ParticipantsOnly, true, false),
+            (InProgress, Open, ParticipantsOnly, true, false),
+            (Canceled, Open, ParticipantsOnly, true, false),
         ];
 
-        for (status, registration_status, is_owner, expected) in cases {
-            let t = test_tournament(status, registration_status, TournamentVisibility::Public);
+        for (status, registration_status, visibility, is_owner, expected) in cases {
+            let t = test_tournament(status, registration_status, visibility);
             assert_eq!(
                 can_register(&t, is_owner),
                 expected,
-                "status={status:?} registration_status={registration_status:?} is_owner={is_owner}"
+                "status={status:?} registration_status={registration_status:?} visibility={visibility:?} is_owner={is_owner}"
             );
         }
     }
@@ -1398,15 +1644,128 @@ mod tests {
 
     #[test]
     fn validate_tournament_params_rules() {
-        assert!(validate_tournament_params("Snake Cup", 2, 1).is_ok());
-        assert!(validate_tournament_params("Snake Cup", 8, 3).is_ok());
+        assert!(validate_tournament_params("Snake Cup", "", 2, 1).is_ok());
+        assert!(validate_tournament_params("Snake Cup", "A fine cup", 8, 3).is_ok());
 
-        assert!(validate_tournament_params("", 2, 1).is_err());
-        assert!(validate_tournament_params("   ", 2, 1).is_err());
-        assert!(validate_tournament_params("Snake Cup", 1, 1).is_err());
-        assert!(validate_tournament_params("Snake Cup", 0, 1).is_err());
-        assert!(validate_tournament_params("Snake Cup", 2, 0).is_err());
-        assert!(validate_tournament_params("Snake Cup", 2, -1).is_err());
+        assert!(validate_tournament_params("", "", 2, 1).is_err());
+        assert!(validate_tournament_params("   ", "", 2, 1).is_err());
+        assert!(validate_tournament_params("Snake Cup", "", 1, 1).is_err());
+        assert!(validate_tournament_params("Snake Cup", "", 0, 1).is_err());
+        assert!(validate_tournament_params("Snake Cup", "", 2, 0).is_err());
+        assert!(validate_tournament_params("Snake Cup", "", 2, -1).is_err());
+    }
+
+    #[test]
+    fn validate_tournament_params_upper_limits() {
+        let max_name = "n".repeat(MAX_NAME_CHARS);
+        let max_description = "d".repeat(MAX_DESCRIPTION_CHARS);
+
+        // At the limits: fine.
+        assert!(
+            validate_tournament_params(
+                &max_name,
+                &max_description,
+                MAX_REQUIRED_PARTICIPANTS,
+                MAX_SNAKES_PER_USER_LIMIT
+            )
+            .is_ok()
+        );
+        // Name is measured after trimming.
+        assert!(validate_tournament_params(&format!("  {max_name}  "), "", 2, 1).is_ok());
+
+        // One past each limit: refused.
+        let long_name = "n".repeat(MAX_NAME_CHARS + 1);
+        assert!(validate_tournament_params(&long_name, "", 2, 1).is_err());
+
+        let long_description = "d".repeat(MAX_DESCRIPTION_CHARS + 1);
+        assert!(validate_tournament_params("Snake Cup", &long_description, 2, 1).is_err());
+
+        assert!(
+            validate_tournament_params("Snake Cup", "", MAX_REQUIRED_PARTICIPANTS + 1, 1).is_err()
+        );
+        assert!(
+            validate_tournament_params("Snake Cup", "", 2, MAX_SNAKES_PER_USER_LIMIT + 1).is_err()
+        );
+    }
+
+    fn ranked_entry(battlesnake_id: Uuid, user_id: Uuid) -> leaderboard::RankedEntry {
+        leaderboard::RankedEntry {
+            leaderboard_entry_id: Uuid::new_v4(),
+            battlesnake_id,
+            user_id,
+            display_score: 25.0,
+            games_played: 50,
+            first_place_finishes: 10,
+            non_first_finishes: 40,
+            mu: 25.0,
+            sigma: 8.333,
+            snake_name: "ranked-snake".to_string(),
+            owner_login: "ranked-owner".to_string(),
+        }
+    }
+
+    fn registration(battlesnake_id: Uuid, user_id: Uuid, seed: i32) -> TournamentRegistration {
+        TournamentRegistration {
+            registration_id: Uuid::new_v4(),
+            tournament_id: Uuid::new_v4(),
+            battlesnake_id,
+            user_id,
+            seed,
+            registered_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn import_candidates_skip_duplicates_and_capped_owners() {
+        let user_a = Uuid::new_v4();
+        let user_b = Uuid::new_v4();
+        let already_registered = Uuid::new_v4();
+        let a_snake_2 = Uuid::new_v4();
+        let b_snake = Uuid::new_v4();
+
+        let existing = vec![registration(already_registered, user_a, 1)];
+        let ranked = vec![
+            ranked_entry(already_registered, user_a), // dupe: skipped
+            ranked_entry(a_snake_2, user_a),          // user_a at cap 1: skipped
+            ranked_entry(b_snake, user_b),            // selected
+        ];
+
+        let candidates = select_import_candidates(&ranked, &existing, 1, 10);
+        assert_eq!(candidates, vec![(b_snake, user_b)]);
+    }
+
+    #[test]
+    fn import_candidates_stop_at_requested_count() {
+        let ranked: Vec<_> = (0..10)
+            .map(|_| ranked_entry(Uuid::new_v4(), Uuid::new_v4()))
+            .collect();
+
+        let candidates = select_import_candidates(&ranked, &[], 1, 3);
+        assert_eq!(candidates.len(), 3);
+        // Rank order preserved.
+        assert_eq!(candidates[0].0, ranked[0].battlesnake_id);
+        assert_eq!(candidates[2].0, ranked[2].battlesnake_id);
+    }
+
+    #[test]
+    fn import_candidates_never_exceed_total_registration_cap() {
+        // 126 existing registrations: only 2 slots left no matter the ask.
+        let existing: Vec<_> = (0..126)
+            .map(|i| registration(Uuid::new_v4(), Uuid::new_v4(), i + 1))
+            .collect();
+        let ranked: Vec<_> = (0..10)
+            .map(|_| ranked_entry(Uuid::new_v4(), Uuid::new_v4()))
+            .collect();
+
+        let candidates = select_import_candidates(&ranked, &existing, 1, 10);
+        assert_eq!(candidates.len(), 2);
+
+        // Already full: nothing to import.
+        let full: Vec<_> = (0..128)
+            .map(|i| registration(Uuid::new_v4(), Uuid::new_v4(), i + 1))
+            .collect();
+        let candidates = select_import_candidates(&ranked, &full, 1, 10);
+        assert!(candidates.is_empty());
     }
 
     #[test]
@@ -1476,5 +1835,160 @@ mod tests {
         assert_eq!(parse_board_size("19x19").unwrap(), GameBoardSize::Large);
         assert!(parse_board_size("25x25").is_err());
         assert!(parse_board_size("").is_err());
+    }
+
+    // --- DB tests: the registration caps and visibility concealment are
+    // enforced against in-transaction state under the tournament row lock. ---
+
+    // Raw (non-macro) queries so the fixtures don't need entries in the sqlx
+    // offline cache.
+    async fn fixture_user(pool: &PgPool, github_id: i64, login: &str) -> cja::Result<Uuid> {
+        let user_id = sqlx::query_scalar(
+            "INSERT INTO users (external_github_id, github_login, github_access_token)
+             VALUES ($1, $2, $3) RETURNING user_id",
+        )
+        .bind(github_id)
+        .bind(login)
+        .bind("test-token")
+        .fetch_one(pool)
+        .await?;
+        Ok(user_id)
+    }
+
+    async fn fixture_snake(pool: &PgPool, user_id: Uuid, name: &str) -> cja::Result<Uuid> {
+        let battlesnake_id = sqlx::query_scalar(
+            "INSERT INTO battlesnakes (user_id, name, url)
+             VALUES ($1, $2, $3) RETURNING battlesnake_id",
+        )
+        .bind(user_id)
+        .bind(name)
+        .bind("http://example.com")
+        .fetch_one(pool)
+        .await?;
+        Ok(battlesnake_id)
+    }
+
+    fn create_params(max_snakes_per_user: i32) -> CreateTournament {
+        CreateTournament {
+            name: "Cap Test".to_string(),
+            description: None,
+            game_type: GameType::Standard,
+            board_size: GameBoardSize::Medium,
+            registration_status: RegistrationStatus::Open,
+            visibility: TournamentVisibility::Public,
+            match_style: MatchStyle::SingleGame,
+            max_snakes_per_user,
+            required_participants: 2,
+        }
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn per_user_cap_and_dupes_enforced_inside_locked_transaction(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        let user_id = fixture_user(&pool, 1, "capped-user").await?;
+        let snake_1 = fixture_snake(&pool, user_id, "snake-1").await?;
+        let snake_2 = fixture_snake(&pool, user_id, "snake-2").await?;
+        let t = tournament::create_tournament(&pool, user_id, create_params(1)).await?;
+
+        let mut tx = pool.begin().await?;
+        let locked = tournament::get_tournament_for_update(&mut tx, t.tournament_id)
+            .await?
+            .expect("tournament exists");
+
+        let first = register_snake_in_tx(&mut tx, &locked, user_id, snake_1, "snake-1").await?;
+        assert!(first.is_ok());
+
+        // Same snake again: duplicate, refused on in-tx state (not committed).
+        let dupe = register_snake_in_tx(&mut tx, &locked, user_id, snake_1, "snake-1").await?;
+        let message = dupe.expect_err("duplicate registration should be refused");
+        assert!(
+            message.contains("already registered"),
+            "unexpected refusal message: {message}"
+        );
+
+        // Second snake for the same user: over the per-user cap of 1, and the
+        // count it trips on is the in-transaction one.
+        let second = register_snake_in_tx(&mut tx, &locked, user_id, snake_2, "snake-2").await?;
+        let message = second.expect_err("second registration should hit the per-user cap");
+        assert!(
+            message.contains("limit"),
+            "unexpected refusal message: {message}"
+        );
+
+        tx.commit().await?;
+
+        let total = tournament::count_registrations(&pool, t.tournament_id).await?;
+        assert_eq!(total, 1);
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn total_registration_cap_refuses_the_129th_snake(pool: PgPool) -> cja::Result<()> {
+        let owner = fixture_user(&pool, 999, "owner").await?;
+        let t = tournament::create_tournament(&pool, owner, create_params(32)).await?;
+
+        // Fill the tournament to the 128-snake cap: 4 users x 32 snakes.
+        for u in 0..4i64 {
+            let filler = fixture_user(&pool, u, &format!("filler-{u}")).await?;
+            sqlx::query(
+                "INSERT INTO battlesnakes (user_id, name, url)
+                 SELECT $1, 'snake-' || g, 'http://example.com' FROM generate_series(1, 32) g",
+            )
+            .bind(filler)
+            .execute(&pool)
+            .await?;
+        }
+        sqlx::query(
+            "INSERT INTO tournament_registrations (tournament_id, battlesnake_id, user_id, seed)
+             SELECT $1, battlesnake_id, user_id,
+                    (ROW_NUMBER() OVER (ORDER BY battlesnake_id))::int
+             FROM battlesnakes WHERE user_id <> $2",
+        )
+        .bind(t.tournament_id)
+        .bind(owner)
+        .execute(&pool)
+        .await?;
+        assert_eq!(
+            tournament::count_registrations(&pool, t.tournament_id).await?,
+            MAX_TOTAL_REGISTRATIONS
+        );
+
+        let late_snake = fixture_snake(&pool, owner, "late-snake").await?;
+        let mut tx = pool.begin().await?;
+        let locked = tournament::get_tournament_for_update(&mut tx, t.tournament_id)
+            .await?
+            .expect("tournament exists");
+        let result =
+            register_snake_in_tx(&mut tx, &locked, owner, late_snake, "late-snake").await?;
+        let message = result.expect_err("the 129th registration should be refused");
+        assert!(
+            message.contains("full"),
+            "unexpected refusal message: {message}"
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn participants_only_tournaments_hidden_from_outsiders(pool: PgPool) -> cja::Result<()> {
+        let owner = fixture_user(&pool, 1, "owner").await?;
+        let participant = fixture_user(&pool, 2, "participant").await?;
+        let outsider = fixture_user(&pool, 3, "outsider").await?;
+        let snake = fixture_snake(&pool, participant, "participant-snake").await?;
+
+        let mut params = create_params(1);
+        params.visibility = TournamentVisibility::ParticipantsOnly;
+        let t = tournament::create_tournament(&pool, owner, params).await?;
+        tournament::create_registration(&pool, t.tournament_id, snake, participant, 1).await?;
+
+        let mut tx = pool.begin().await?;
+        let locked = tournament::get_tournament_for_update(&mut tx, t.tournament_id)
+            .await?
+            .expect("tournament exists");
+
+        assert!(!is_hidden_from(&mut *tx, &locked, owner).await?);
+        assert!(!is_hidden_from(&mut *tx, &locked, participant).await?);
+        assert!(is_hidden_from(&mut *tx, &locked, outsider).await?);
+        Ok(())
     }
 }

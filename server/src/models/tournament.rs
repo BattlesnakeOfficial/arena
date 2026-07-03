@@ -1,6 +1,6 @@
 use color_eyre::eyre::Context as _;
 use serde::{Deserialize, Serialize};
-use sqlx::{Executor, PgPool, Postgres, Type};
+use sqlx::{Executor, PgPool, Postgres, Transaction, Type};
 use std::str::FromStr;
 use uuid::Uuid;
 
@@ -487,6 +487,48 @@ where
     row.map(Tournament::try_from).transpose()
 }
 
+/// Fetch a tournament with `FOR UPDATE`, locking its row for the rest of the
+/// transaction. Every mutating handler locks the tournament row first so that
+/// all validation (status, registration caps, dupe checks, settings freeze)
+/// and the subsequent writes are serialized per tournament — this is the
+/// TOCTOU guard for concurrent registrations, seed moves, imports, and
+/// settings/status changes.
+pub async fn get_tournament_for_update(
+    tx: &mut Transaction<'_, Postgres>,
+    tournament_id: Uuid,
+) -> cja::Result<Option<Tournament>> {
+    let row = sqlx::query_as!(
+        TournamentRow,
+        r#"
+        SELECT
+            tournament_id,
+            name,
+            description,
+            user_id,
+            game_type,
+            board_size,
+            registration_status as "registration_status: RegistrationStatus",
+            visibility as "visibility: TournamentVisibility",
+            status as "status: TournamentStatus",
+            match_style as "match_style: MatchStyle",
+            max_snakes_per_user,
+            required_participants,
+            current_round,
+            created_at,
+            updated_at
+        FROM tournaments
+        WHERE tournament_id = $1
+        FOR UPDATE
+        "#,
+        tournament_id
+    )
+    .fetch_optional(&mut **tx)
+    .await
+    .wrap_err("Failed to fetch tournament for update")?;
+
+    row.map(Tournament::try_from).transpose()
+}
+
 /// Update status without transition validation — callers are responsible for
 /// checking `TournamentStatus::can_transition_to` first (route/job layer owns
 /// the error message).
@@ -560,10 +602,13 @@ where
     Ok(registration)
 }
 
-pub async fn get_registrations_for_tournament(
-    pool: &PgPool,
+pub async fn get_registrations_for_tournament<'e, E>(
+    executor: E,
     tournament_id: Uuid,
-) -> cja::Result<Vec<TournamentRegistration>> {
+) -> cja::Result<Vec<TournamentRegistration>>
+where
+    E: Executor<'e, Database = Postgres>,
+{
     let registrations = sqlx::query_as!(
         TournamentRegistration,
         r#"
@@ -580,7 +625,7 @@ pub async fn get_registrations_for_tournament(
         "#,
         tournament_id
     )
-    .fetch_all(pool)
+    .fetch_all(executor)
     .await
     .wrap_err("Failed to fetch tournament registrations")?;
 
@@ -813,32 +858,37 @@ where
     Ok(next)
 }
 
-/// Register a snake with the next free seed, inside a single transaction.
+/// Register a snake with the next free seed. Runs inside the caller's
+/// transaction — the caller must have locked the tournament row (via
+/// `get_tournament_for_update`) so the seed assignment can't race.
 pub async fn register_snake_with_next_seed(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     tournament_id: Uuid,
     battlesnake_id: Uuid,
     user_id: Uuid,
 ) -> cja::Result<TournamentRegistration> {
-    let mut tx = pool
-        .begin()
-        .await
-        .wrap_err("Failed to begin registration transaction")?;
-
-    let seed = next_seed(&mut *tx, tournament_id).await?;
+    let seed = next_seed(&mut **tx, tournament_id).await?;
     let registration =
-        create_registration(&mut *tx, tournament_id, battlesnake_id, user_id, seed).await?;
-
-    tx.commit()
-        .await
-        .wrap_err("Failed to commit registration transaction")?;
+        create_registration(&mut **tx, tournament_id, battlesnake_id, user_id, seed).await?;
 
     Ok(registration)
 }
 
+/// Defer the (tournament_id, seed) unique constraint for the rest of the
+/// current transaction. Must be run inside any transaction that transiently
+/// violates seed uniqueness (block shifts, swaps, renumbering); the constraint
+/// is DEFERRABLE INITIALLY IMMEDIATE, so it is re-checked at commit.
+async fn defer_seed_constraint(tx: &mut Transaction<'_, Postgres>) -> cja::Result<()> {
+    sqlx::query!("SET CONSTRAINTS tournament_registrations_tournament_id_seed_key DEFERRED")
+        .execute(&mut **tx)
+        .await
+        .wrap_err("Failed to defer seed uniqueness constraint")?;
+
+    Ok(())
+}
+
 /// Renumber seeds to 1..N (ordered by current seed) to close any gaps.
-/// The (tournament_id, seed) unique constraint is deferrable, so a straight
-/// renumbering inside a transaction is safe.
+/// Callers must have deferred the seed uniqueness constraint first.
 async fn renumber_seeds<'e, E>(executor: E, tournament_id: Uuid) -> cja::Result<()>
 where
     E: Executor<'e, Database = Postgres>,
@@ -864,62 +914,57 @@ where
     Ok(())
 }
 
-/// Delete a registration and renumber remaining seeds to close the gap, all
-/// inside a single transaction. Returns whether a row was deleted.
+/// Delete a registration and renumber remaining seeds to close the gap. Runs
+/// inside the caller's transaction — the caller must have locked the
+/// tournament row first. Returns whether a row was deleted.
 pub async fn delete_registration_and_renumber(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     tournament_id: Uuid,
     registration_id: Uuid,
 ) -> cja::Result<bool> {
-    let mut tx = pool
-        .begin()
-        .await
-        .wrap_err("Failed to begin unregister transaction")?;
+    defer_seed_constraint(tx).await?;
 
     let result = sqlx::query!(
         "DELETE FROM tournament_registrations WHERE registration_id = $1 AND tournament_id = $2",
         registration_id,
         tournament_id
     )
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await
     .wrap_err("Failed to delete registration")?;
 
-    renumber_seeds(&mut *tx, tournament_id).await?;
-
-    tx.commit()
-        .await
-        .wrap_err("Failed to commit unregister transaction")?;
+    renumber_seeds(&mut **tx, tournament_id).await?;
 
     Ok(result.rows_affected() > 0)
 }
 
 /// Move a registration to a new seed, shifting the others to make room.
 /// The requested seed is clamped to the valid range [1, max seed].
+///
+/// Runs inside the caller's transaction — the caller must have locked the
+/// tournament row first so seed mutations serialize. Returns `false` when the
+/// registration doesn't exist in this tournament (callers surface that as a
+/// user-facing error rather than a 500).
 pub async fn move_registration_seed(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     tournament_id: Uuid,
     registration_id: Uuid,
     new_seed: i32,
-) -> cja::Result<()> {
-    let mut tx = pool
-        .begin()
-        .await
-        .wrap_err("Failed to begin seed move transaction")?;
-
-    let current_seed = sqlx::query_scalar!(
+) -> cja::Result<bool> {
+    let Some(current_seed) = sqlx::query_scalar!(
         r#"
         SELECT seed FROM tournament_registrations
         WHERE registration_id = $1 AND tournament_id = $2
-        FOR UPDATE
         "#,
         registration_id,
         tournament_id
     )
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut **tx)
     .await
     .wrap_err("Failed to fetch registration seed")?
-    .ok_or_else(|| color_eyre::eyre::eyre!("Registration not found in this tournament"))?;
+    else {
+        return Ok(false);
+    };
 
     let max_seed = sqlx::query_scalar!(
         r#"
@@ -929,18 +974,18 @@ pub async fn move_registration_seed(
         "#,
         tournament_id
     )
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut **tx)
     .await
     .wrap_err("Failed to fetch max seed")?;
 
     let target_seed = new_seed.clamp(1, max_seed);
 
     if target_seed == current_seed {
-        tx.commit()
-            .await
-            .wrap_err("Failed to commit seed move transaction")?;
-        return Ok(());
+        return Ok(true);
     }
+
+    // The block shift below transiently collides with the moved row's seed.
+    defer_seed_constraint(tx).await?;
 
     if target_seed < current_seed {
         // Moving up: shift the block [target, current) down by one.
@@ -954,7 +999,7 @@ pub async fn move_registration_seed(
             target_seed,
             current_seed
         )
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .wrap_err("Failed to shift seeds up")?;
     } else {
@@ -969,7 +1014,7 @@ pub async fn move_registration_seed(
             current_seed,
             target_seed
         )
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .wrap_err("Failed to shift seeds down")?;
     }
@@ -979,15 +1024,11 @@ pub async fn move_registration_seed(
         registration_id,
         target_seed
     )
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await
     .wrap_err("Failed to set new seed")?;
 
-    tx.commit()
-        .await
-        .wrap_err("Failed to commit seed move transaction")?;
-
-    Ok(())
+    Ok(true)
 }
 
 /// Editable tournament settings (BS-017). Callers are responsible for
@@ -1552,6 +1593,77 @@ mod tests {
         )
         .await;
         assert!(result.is_err());
+
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn seed_moves_and_renumbering_defer_the_seed_constraint(pool: PgPool) -> cja::Result<()> {
+        let (user_id, snake_1) = fixture_user_and_snake(&pool).await?;
+        let snake_2: Uuid = sqlx::query_scalar(
+            "INSERT INTO battlesnakes (user_id, name, url)
+             VALUES ($1, 'snake-2', 'http://example.com') RETURNING battlesnake_id",
+        )
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await?;
+        let snake_3: Uuid = sqlx::query_scalar(
+            "INSERT INTO battlesnakes (user_id, name, url)
+             VALUES ($1, 'snake-3', 'http://example.com') RETURNING battlesnake_id",
+        )
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await?;
+
+        let mut params = fixture_tournament();
+        params.max_snakes_per_user = 3;
+        let tournament = create_tournament(&pool, user_id, params).await?;
+        let tid = tournament.tournament_id;
+
+        let reg_1 = create_registration(&pool, tid, snake_1, user_id, 1).await?;
+        let reg_2 = create_registration(&pool, tid, snake_2, user_id, 2).await?;
+        let reg_3 = create_registration(&pool, tid, snake_3, user_id, 3).await?;
+
+        let seeds_of = |regs: Vec<TournamentRegistration>| {
+            regs.into_iter()
+                .map(|r| (r.registration_id, r.seed))
+                .collect::<Vec<_>>()
+        };
+
+        // Move seed 3 -> 1: the block shift transiently collides with the
+        // moved row, so this only works if the unique constraint is deferred.
+        let mut tx = pool.begin().await?;
+        let moved = move_registration_seed(&mut tx, tid, reg_3.registration_id, 1).await?;
+        assert!(moved);
+        tx.commit().await?;
+
+        let regs = get_registrations_for_tournament(&pool, tid).await?;
+        assert_eq!(
+            seeds_of(regs),
+            vec![
+                (reg_3.registration_id, 1),
+                (reg_1.registration_id, 2),
+                (reg_2.registration_id, 3),
+            ]
+        );
+
+        // Unknown registration: reported as not-found, not an error.
+        let mut tx = pool.begin().await?;
+        let moved = move_registration_seed(&mut tx, tid, Uuid::new_v4(), 1).await?;
+        assert!(!moved);
+        drop(tx);
+
+        // Unregister the middle seed: remaining seeds renumber to 1..N.
+        let mut tx = pool.begin().await?;
+        let deleted = delete_registration_and_renumber(&mut tx, tid, reg_1.registration_id).await?;
+        assert!(deleted);
+        tx.commit().await?;
+
+        let regs = get_registrations_for_tournament(&pool, tid).await?;
+        assert_eq!(
+            seeds_of(regs),
+            vec![(reg_3.registration_id, 1), (reg_2.registration_id, 2)]
+        );
 
         Ok(())
     }
