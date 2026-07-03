@@ -1124,7 +1124,9 @@ pub async fn update_status(
         .await;
     }
 
-    tournament::set_tournament_status(&state.db, tournament_id, next_status)
+    // Compare-and-swap on the status we validated the transition from, so a
+    // concurrent status change between the check and the write is refused.
+    tournament::set_tournament_status(&state.db, tournament_id, next_status, t.status)
         .await
         .wrap_err("Failed to update tournament status")?;
 
