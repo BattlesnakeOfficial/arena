@@ -1584,6 +1584,95 @@ pub async fn find_stale_in_progress_matches(
     Ok(match_ids)
 }
 
+/// A match participant enriched with its snake's name, for rendering the
+/// bracket. `snake_name` is `None` for unfilled slots (waiting on a feeder
+/// match).
+#[derive(Debug, Clone)]
+pub struct BracketParticipant {
+    pub match_id: Uuid,
+    pub battlesnake_id: Option<Uuid>,
+    pub snake_name: Option<String>,
+}
+
+/// All participants for every match in a tournament, with snake names, in one
+/// query (the bracket page renders every match — no per-match lookups).
+/// Ordered to match `get_participants_for_match` within each match.
+pub async fn get_participants_with_names_for_tournament(
+    pool: &PgPool,
+    tournament_id: Uuid,
+) -> cja::Result<Vec<BracketParticipant>> {
+    let participants = sqlx::query_as!(
+        BracketParticipant,
+        r#"
+        SELECT
+            mp.match_id,
+            mp.battlesnake_id,
+            b.name as "snake_name?"
+        FROM match_participants mp
+        JOIN tournament_matches tm ON mp.match_id = tm.match_id
+        LEFT JOIN battlesnakes b ON mp.battlesnake_id = b.battlesnake_id
+        WHERE tm.tournament_id = $1
+        ORDER BY mp.match_id ASC, mp.slot ASC
+        "#,
+        tournament_id
+    )
+    .fetch_all(pool)
+    .await
+    .wrap_err("Failed to fetch bracket participants")?;
+
+    Ok(participants)
+}
+
+/// All match games for every match in a tournament, in one query.
+pub async fn get_match_games_for_tournament(
+    pool: &PgPool,
+    tournament_id: Uuid,
+) -> cja::Result<Vec<MatchGame>> {
+    let match_games = sqlx::query_as!(
+        MatchGame,
+        r#"
+        SELECT
+            mg.match_game_id,
+            mg.match_id,
+            mg.game_id,
+            mg.game_number,
+            mg.winner_id,
+            mg.created_at
+        FROM match_games mg
+        JOIN tournament_matches tm ON mg.match_id = tm.match_id
+        WHERE tm.tournament_id = $1
+        ORDER BY mg.match_id ASC, mg.game_number ASC
+        "#,
+        tournament_id
+    )
+    .fetch_all(pool)
+    .await
+    .wrap_err("Failed to fetch tournament match games")?;
+
+    Ok(match_games)
+}
+
+/// Delete every match for a tournament. `match_participants` and
+/// `match_games` rows cascade via their FKs; registrations are untouched.
+/// Used by the owner "reset" action. Returns the number of matches deleted.
+pub async fn delete_matches_for_tournament<'e, E>(
+    executor: E,
+    tournament_id: Uuid,
+) -> cja::Result<u64>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    let result = sqlx::query!(
+        "DELETE FROM tournament_matches WHERE tournament_id = $1",
+        tournament_id
+    )
+    .execute(executor)
+    .await
+    .wrap_err("Failed to delete tournament matches")?;
+
+    Ok(result.rows_affected())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

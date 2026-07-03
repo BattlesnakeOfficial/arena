@@ -163,6 +163,18 @@ pub fn routes(app_state: AppState) -> axum::Router {
             axum::routing::post(tournament::update_status),
         )
         .route(
+            "/tournaments/{id}/start",
+            axum::routing::post(tournament::start_tournament),
+        )
+        .route(
+            "/tournaments/{id}/run-round",
+            axum::routing::post(tournament::run_round),
+        )
+        .route(
+            "/tournaments/{id}/reset",
+            axum::routing::post(tournament::reset_tournament),
+        )
+        .route(
             "/tournaments/{id}/import-leaderboard",
             axum::routing::post(tournament::import_leaderboard),
         )
