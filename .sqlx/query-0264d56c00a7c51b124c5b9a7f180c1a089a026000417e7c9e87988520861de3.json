@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE match_participants\n        SET battlesnake_id = $3\n        WHERE match_id = $1 AND source_match_id = $2\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "0264d56c00a7c51b124c5b9a7f180c1a089a026000417e7c9e87988520861de3"
+}

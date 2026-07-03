@@ -365,6 +365,19 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
         );
     }
 
+    // Check if this game belongs to a tournament match: record the result
+    // (placements can't express ties, so the winner is derived from the
+    // final snake states) and re-enqueue match evaluation.
+    let match_winner_snake_id =
+        crate::tournament_match::game_winner_from_snakes(&engine_game.board.snakes);
+    crate::tournament_match::record_finished_match_game(
+        app_state,
+        game_id,
+        match_winner_snake_id.as_deref(),
+    )
+    .await
+    .wrap_err("Failed to record tournament match game result")?;
+
     // Clean up game channel (will be removed when no subscribers)
     game_channels.cleanup(game_id).await;
 
