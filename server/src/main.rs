@@ -30,6 +30,7 @@ mod state;
 mod static_assets;
 mod telemetry;
 mod tournament_bracket;
+mod tournament_match;
 mod wire;
 
 /// Frontend UI components only - do not place backend logic here

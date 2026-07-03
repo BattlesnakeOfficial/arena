@@ -128,6 +128,25 @@ impl AppState {
     }
 }
 
+#[cfg(test)]
+impl AppState {
+    /// Minimal AppState for DB-backed tests: a real pool, inert everything
+    /// else (no OAuth, no engine DB, an empty scoring registry).
+    pub fn test_from_pool(db: sqlx::PgPool) -> Self {
+        Self {
+            db,
+            cookie_key: cja::server::cookies::CookieKey::from_env_or_generate()
+                .expect("failed to generate a test cookie key"),
+            github_oauth_config: None,
+            engine_db: None,
+            gcs_bucket: None,
+            game_channels: GameChannels::new(),
+            http_client: reqwest::Client::new(),
+            scoring: std::sync::Arc::new(crate::scoring::ScoringRegistry::new()),
+        }
+    }
+}
+
 impl cja::app_state::AppState for AppState {
     fn version(&self) -> &str {
         env!("VERGEN_GIT_SHA")

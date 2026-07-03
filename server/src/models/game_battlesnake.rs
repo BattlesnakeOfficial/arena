@@ -254,9 +254,11 @@ pub async fn set_game_result(
     Ok(game_battlesnake)
 }
 
-// Set the result for a specific game_battlesnake (supports duplicate snakes)
+// Set the result for a specific game_battlesnake (supports duplicate snakes).
+// Takes a connection so the game runner can compose it into its atomic
+// finish transaction.
 pub async fn set_game_result_by_id(
-    pool: &PgPool,
+    conn: &mut sqlx::PgConnection,
     game_battlesnake_id: Uuid,
     placement: i32,
 ) -> cja::Result<GameBattlesnake> {
@@ -284,7 +286,7 @@ pub async fn set_game_result_by_id(
         game_battlesnake_id,
         placement
     )
-    .fetch_one(pool)
+    .fetch_one(&mut *conn)
     .await
     .wrap_err("Failed to set game result")?;
 

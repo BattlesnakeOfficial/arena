@@ -124,6 +124,75 @@ impl Job<AppState> for LeaderboardRatingUpdateJob {
     }
 }
 
+/// Job to kick off every ready match in a tournament's current round.
+/// Enqueued when the owner clicks "Run Round".
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RunTournamentRoundJob {
+    pub tournament_id: Uuid,
+}
+
+#[async_trait::async_trait]
+impl Job<AppState> for RunTournamentRoundJob {
+    const NAME: &'static str = "RunTournamentRoundJob";
+
+    async fn run(&self, app_state: AppState) -> cja::Result<()> {
+        crate::tournament_match::run_round(&app_state, self.tournament_id).await?;
+        Ok(())
+    }
+}
+
+/// Job to evaluate a tournament match and take its next step: create the
+/// next game, wait on one in flight, or complete the match and advance the
+/// winner. Re-enqueued by the game completion hook, so it is re-entrant.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RunMatchJob {
+    pub match_id: Uuid,
+}
+
+#[async_trait::async_trait]
+impl Job<AppState> for RunMatchJob {
+    const NAME: &'static str = "RunMatchJob";
+
+    async fn run(&self, app_state: AppState) -> cja::Result<()> {
+        crate::tournament_match::run_match(&app_state, self.match_id).await?;
+        Ok(())
+    }
+}
+
+/// Job to advance a tournament's round counter when a round finishes, and
+/// mark the tournament completed after the final.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct UpdateTournamentStatusJob {
+    pub tournament_id: Uuid,
+}
+
+#[async_trait::async_trait]
+impl Job<AppState> for UpdateTournamentStatusJob {
+    const NAME: &'static str = "UpdateTournamentStatusJob";
+
+    async fn run(&self, app_state: AppState) -> cja::Result<()> {
+        crate::tournament_match::update_tournament_progress(&app_state, self.tournament_id).await?;
+        Ok(())
+    }
+}
+
+/// Cron job that re-enqueues evaluation for tournament matches whose driving
+/// jobs died (the job system deletes jobs that exhaust their retries, so a
+/// match can otherwise get stuck in progress forever). Runs every couple of
+/// minutes; see [`crate::tournament_match::sweep_stuck_matches`].
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct StuckMatchSweeperJob;
+
+#[async_trait::async_trait]
+impl Job<AppState> for StuckMatchSweeperJob {
+    const NAME: &'static str = "StuckMatchSweeperJob";
+
+    async fn run(&self, app_state: AppState) -> cja::Result<()> {
+        crate::tournament_match::sweep_stuck_matches(&app_state).await?;
+        Ok(())
+    }
+}
+
 cja::impl_job_registry!(
     AppState,
     NoopJob,
@@ -132,5 +201,9 @@ cja::impl_job_registry!(
     BackupSingleGameJob,
     HistoricalBackupDiscoveryJob,
     LeaderboardMatchmakerJob,
-    LeaderboardRatingUpdateJob
+    LeaderboardRatingUpdateJob,
+    RunTournamentRoundJob,
+    RunMatchJob,
+    UpdateTournamentStatusJob,
+    StuckMatchSweeperJob
 );

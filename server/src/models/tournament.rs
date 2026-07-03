@@ -545,6 +545,34 @@ pub async fn set_tournament_status<'e, E>(
 where
     E: Executor<'e, Database = Postgres>,
 {
+    let updated = try_set_tournament_status(executor, tournament_id, status, expected).await?;
+
+    if !updated {
+        return Err(color_eyre::eyre::eyre!(
+            "Failed to update tournament {} status to {}: tournament not found or status is no longer {}",
+            tournament_id,
+            status.as_str(),
+            expected.as_str(),
+        ));
+    }
+
+    Ok(())
+}
+
+/// CAS variant of [`set_tournament_status`] that reports whether the swap
+/// applied instead of erroring: returns `false` when the tournament is missing
+/// or its status is no longer `expected`. Use this when losing the race is
+/// benign — e.g. a tournament completion racing a concurrent cancel must not
+/// resurrect the canceled tournament, and must not surface as a job failure.
+pub async fn try_set_tournament_status<'e, E>(
+    executor: E,
+    tournament_id: Uuid,
+    status: TournamentStatus,
+    expected: TournamentStatus,
+) -> cja::Result<bool>
+where
+    E: Executor<'e, Database = Postgres>,
+{
     let result = sqlx::query!(
         "UPDATE tournaments SET status = $2 WHERE tournament_id = $1 AND status = $3",
         tournament_id,
@@ -555,16 +583,7 @@ where
     .await
     .wrap_err("Failed to update tournament status")?;
 
-    if result.rows_affected() == 0 {
-        return Err(color_eyre::eyre::eyre!(
-            "Failed to update tournament {} status to {}: tournament not found or status is no longer {}",
-            tournament_id,
-            status.as_str(),
-            expected.as_str(),
-        ));
-    }
-
-    Ok(())
+    Ok(result.rows_affected() == 1)
 }
 
 pub async fn create_registration<'e, E>(
@@ -1334,6 +1353,235 @@ pub async fn get_match_games_for_match(
     .wrap_err("Failed to fetch match games")?;
 
     Ok(match_games)
+}
+
+pub async fn get_match_by_id<'e, E>(
+    executor: E,
+    match_id: Uuid,
+) -> cja::Result<Option<TournamentMatch>>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    let tournament_match = sqlx::query_as!(
+        TournamentMatch,
+        r#"
+        SELECT
+            match_id,
+            tournament_id,
+            round,
+            position,
+            status as "status: MatchStatus",
+            next_match_id,
+            winner_id,
+            visual_column,
+            visual_row,
+            created_at,
+            updated_at
+        FROM tournament_matches
+        WHERE match_id = $1
+        "#,
+        match_id
+    )
+    .fetch_optional(executor)
+    .await
+    .wrap_err("Failed to fetch tournament match")?;
+
+    Ok(tournament_match)
+}
+
+pub async fn get_matches_for_round(
+    pool: &PgPool,
+    tournament_id: Uuid,
+    round: i32,
+) -> cja::Result<Vec<TournamentMatch>> {
+    let matches = sqlx::query_as!(
+        TournamentMatch,
+        r#"
+        SELECT
+            match_id,
+            tournament_id,
+            round,
+            position,
+            status as "status: MatchStatus",
+            next_match_id,
+            winner_id,
+            visual_column,
+            visual_row,
+            created_at,
+            updated_at
+        FROM tournament_matches
+        WHERE tournament_id = $1 AND round = $2
+        ORDER BY position ASC
+        "#,
+        tournament_id,
+        round,
+    )
+    .fetch_all(pool)
+    .await
+    .wrap_err("Failed to fetch matches for round")?;
+
+    Ok(matches)
+}
+
+pub async fn set_match_status<'e, E>(
+    executor: E,
+    match_id: Uuid,
+    status: MatchStatus,
+) -> cja::Result<()>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    sqlx::query!(
+        "UPDATE tournament_matches SET status = $2 WHERE match_id = $1",
+        match_id,
+        status.as_str(),
+    )
+    .execute(executor)
+    .await
+    .wrap_err("Failed to update match status")?;
+
+    Ok(())
+}
+
+pub async fn count_unfinished_matches_in_round(
+    pool: &PgPool,
+    tournament_id: Uuid,
+    round: i32,
+) -> cja::Result<i64> {
+    let count = sqlx::query_scalar!(
+        r#"
+        SELECT COUNT(*) as "count!"
+        FROM tournament_matches
+        WHERE tournament_id = $1
+          AND round = $2
+          AND status NOT IN ('completed', 'canceled')
+        "#,
+        tournament_id,
+        round,
+    )
+    .fetch_one(pool)
+    .await
+    .wrap_err("Failed to count unfinished matches")?;
+
+    Ok(count)
+}
+
+pub async fn round_exists(pool: &PgPool, tournament_id: Uuid, round: i32) -> cja::Result<bool> {
+    let exists = sqlx::query_scalar!(
+        r#"
+        SELECT EXISTS (
+            SELECT 1 FROM tournament_matches
+            WHERE tournament_id = $1 AND round = $2
+        ) as "exists!"
+        "#,
+        tournament_id,
+        round,
+    )
+    .fetch_one(pool)
+    .await
+    .wrap_err("Failed to check round existence")?;
+
+    Ok(exists)
+}
+
+pub async fn set_tournament_current_round<'e, E>(
+    executor: E,
+    tournament_id: Uuid,
+    current_round: i32,
+) -> cja::Result<()>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    sqlx::query!(
+        "UPDATE tournaments SET current_round = $2 WHERE tournament_id = $1",
+        tournament_id,
+        current_round,
+    )
+    .execute(executor)
+    .await
+    .wrap_err("Failed to update tournament current round")?;
+
+    Ok(())
+}
+
+pub async fn find_match_game_by_game_id(
+    pool: &PgPool,
+    game_id: Uuid,
+) -> cja::Result<Option<MatchGame>> {
+    let match_game = sqlx::query_as!(
+        MatchGame,
+        r#"
+        SELECT
+            match_game_id,
+            match_id,
+            game_id,
+            game_number,
+            winner_id,
+            created_at
+        FROM match_games
+        WHERE game_id = $1
+        "#,
+        game_id
+    )
+    .fetch_optional(pool)
+    .await
+    .wrap_err("Failed to look up match game by game id")?;
+
+    Ok(match_game)
+}
+
+/// Record a game's winner on its match_games row. `None` records a tie.
+///
+/// Executor-generic so the game runner can write the result inside the same
+/// transaction that marks the game finished.
+pub async fn set_match_game_winner<'e, E>(
+    executor: E,
+    match_game_id: Uuid,
+    winner_id: Option<Uuid>,
+) -> cja::Result<()>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    sqlx::query!(
+        "UPDATE match_games SET winner_id = $2 WHERE match_game_id = $1",
+        match_game_id,
+        winner_id,
+    )
+    .execute(executor)
+    .await
+    .wrap_err("Failed to set match game winner")?;
+
+    Ok(())
+}
+
+/// Matches that look stuck: `in_progress` in an `in_progress` tournament with
+/// no update since `cutoff`. The stuck-match sweeper cron re-enqueues
+/// evaluation for these; `run_match` is idempotent, so false positives (e.g. a
+/// long match whose current game is still healthy) are harmless no-ops.
+///
+/// The tournament-status filter keeps the sweeper from repeatedly poking
+/// matches of canceled or otherwise ended tournaments.
+pub async fn find_stale_in_progress_matches(
+    pool: &PgPool,
+    cutoff: chrono::DateTime<chrono::Utc>,
+) -> cja::Result<Vec<Uuid>> {
+    let match_ids = sqlx::query_scalar!(
+        r#"
+        SELECT m.match_id
+        FROM tournament_matches m
+        JOIN tournaments t ON t.tournament_id = m.tournament_id
+        WHERE m.status = 'in_progress'
+          AND t.status = 'in_progress'
+          AND m.updated_at < $1
+        ORDER BY m.updated_at ASC
+        "#,
+        cutoff,
+    )
+    .fetch_all(pool)
+    .await
+    .wrap_err("Failed to find stale in-progress matches")?;
+
+    Ok(match_ids)
 }
 
 #[cfg(test)]

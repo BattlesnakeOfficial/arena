@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE game_battlesnakes SET placement = NULL WHERE game_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "222d7092ee57e3269860e42a1a5391f49043604dbb03974bcadfd6d08e179535"
+}
