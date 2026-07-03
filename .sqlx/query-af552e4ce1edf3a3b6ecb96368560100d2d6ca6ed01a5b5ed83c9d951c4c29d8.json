@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT EXISTS(\n            SELECT 1 FROM match_participants\n            WHERE match_id = $1 AND battlesnake_id = $2\n        ) as \"is_participant!\"\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "is_participant!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "af552e4ce1edf3a3b6ecb96368560100d2d6ca6ed01a5b5ed83c9d951c4c29d8"
+}

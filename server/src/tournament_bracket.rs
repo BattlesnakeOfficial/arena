@@ -124,6 +124,18 @@ pub fn generate_bracket(participant_count: usize) -> cja::Result<BracketPlan> {
 /// winner-fed slots for later rounds. Round-1 byes are resolved immediately:
 /// the lone participant is marked the winner and advanced into round 2.
 ///
+/// Slot assignment is deterministic:
+/// - Round 1: the first seed of the pair (the higher seed, e.g. 1 in 1v8)
+///   takes slot 1, the second takes slot 2. A bye leaves slot 2 empty.
+/// - Later rounds: the feeder match with the lower `position` feeds slot 1,
+///   the higher `position` feeds slot 2.
+///
+/// Note that non-round-1 matches may be fully populated immediately: when two
+/// round-1 byes feed the same round-2 match (e.g. 5 participants), that
+/// round-2 match ends up with both participants filled while its status stays
+/// `scheduled`. This is intentional — matches are started by the owner-
+/// triggered round-execution scan, not by an event fired when a match fills.
+///
 /// `registrations` must contain exactly the seeds `1..=len` (the caller
 /// renumbers seeds on unregister, so this holds for any started tournament).
 pub async fn persist_bracket(
@@ -146,10 +158,18 @@ pub async fn persist_bracket(
 
     // Create matches from the final backward so next_match_id targets exist.
     let mut match_ids: HashMap<(i32, i32), Uuid> = HashMap::new();
+    let lookup_match_id = |match_ids: &HashMap<(i32, i32), Uuid>, round: i32, position: i32| {
+        match_ids.get(&(round, position)).copied().ok_or_else(|| {
+            color_eyre::eyre::eyre!(
+                "Bracket plan is inconsistent: no match at round {round} position {position}"
+            )
+        })
+    };
     for planned in plan.matches.iter().rev() {
-        let next_match_id = planned
-            .next_position
-            .map(|next_pos| match_ids[&(planned.round + 1, next_pos)]);
+        let next_match_id = match planned.next_position {
+            Some(next_pos) => Some(lookup_match_id(&match_ids, planned.round + 1, next_pos)?),
+            None => None,
+        };
         let created = create_match(
             &mut **tx,
             CreateTournamentMatch {
@@ -165,15 +185,25 @@ pub async fn persist_bracket(
         match_ids.insert((planned.round, planned.position), created.match_id);
     }
 
-    // Round-1 seeded participants.
+    let snake_for_seed = |seed: i32| {
+        by_seed
+            .get(&seed)
+            .map(|r| r.battlesnake_id)
+            .ok_or_else(|| color_eyre::eyre::eyre!("Bracket plan references unknown seed {seed}"))
+    };
+
+    // Round-1 seeded participants: the first seed of the pair takes slot 1,
+    // the second takes slot 2 (a bye leaves slot 2 empty).
     for planned in plan.matches.iter().filter(|m| m.round == 1) {
-        let match_id = match_ids[&(planned.round, planned.position)];
-        for seed in planned.seed_slots.iter().flatten() {
+        let match_id = lookup_match_id(&match_ids, planned.round, planned.position)?;
+        for (slot_index, seed) in planned.seed_slots.iter().enumerate() {
+            let Some(seed) = seed else { continue };
             create_match_participant(
                 &mut **tx,
                 CreateMatchParticipant {
                     match_id,
-                    battlesnake_id: Some(by_seed[seed].battlesnake_id),
+                    slot: slot_index as i16 + 1,
+                    battlesnake_id: Some(snake_for_seed(*seed)?),
                     source_match_id: None,
                     participant_type: ParticipantType::Seed,
                     seed_position: Some(*seed),
@@ -183,15 +213,20 @@ pub async fn persist_bracket(
         }
     }
 
-    // Later rounds: one empty winner-fed slot per feeder match.
+    // Later rounds: one empty winner-fed slot per feeder match. The feeder
+    // with the lower position feeds slot 1, the higher position slot 2.
     for planned in plan.matches.iter().filter(|m| m.round > 1) {
-        let match_id = match_ids[&(planned.round, planned.position)];
-        for feeder_position in [planned.position * 2, planned.position * 2 + 1] {
-            let source_match_id = match_ids[&(planned.round - 1, feeder_position)];
+        let match_id = lookup_match_id(&match_ids, planned.round, planned.position)?;
+        for (slot_index, feeder_position) in [planned.position * 2, planned.position * 2 + 1]
+            .iter()
+            .enumerate()
+        {
+            let source_match_id = lookup_match_id(&match_ids, planned.round - 1, *feeder_position)?;
             create_match_participant(
                 &mut **tx,
                 CreateMatchParticipant {
                     match_id,
+                    slot: slot_index as i16 + 1,
                     battlesnake_id: None,
                     source_match_id: Some(source_match_id),
                     participant_type: ParticipantType::Winner,
@@ -204,19 +239,20 @@ pub async fn persist_bracket(
 
     // Resolve byes: the lone participant wins and advances immediately.
     for planned in plan.matches.iter().filter(|m| m.is_bye()) {
-        let match_id = match_ids[&(planned.round, planned.position)];
-        let seed = planned
-            .seed_slots
-            .iter()
-            .flatten()
-            .next()
-            .expect("bye match has exactly one seed");
-        let winner_battlesnake_id = by_seed[seed].battlesnake_id;
+        let match_id = lookup_match_id(&match_ids, planned.round, planned.position)?;
+        let seed = planned.seed_slots.iter().flatten().next().ok_or_else(|| {
+            color_eyre::eyre::eyre!(
+                "Bye match at round {} position {} has no seed",
+                planned.round,
+                planned.position
+            )
+        })?;
+        let winner_battlesnake_id = snake_for_seed(*seed)?;
 
         complete_match_with_winner(tx, match_id, winner_battlesnake_id).await?;
 
         if let Some(next_pos) = planned.next_position {
-            let next_match_id = match_ids[&(planned.round + 1, next_pos)];
+            let next_match_id = lookup_match_id(&match_ids, planned.round + 1, next_pos)?;
             fill_participant_from_source(tx, next_match_id, match_id, winner_battlesnake_id)
                 .await?;
         }
@@ -226,13 +262,38 @@ pub async fn persist_bracket(
 }
 
 /// Mark a match completed with the given winner.
+///
+/// The winner must be one of the match's participants. Idempotent: completing
+/// a match that is already completed with the same winner is a no-op (job
+/// retries must be safe); completing with a different winner is an error.
 pub async fn complete_match_with_winner(
     tx: &mut Transaction<'_, Postgres>,
     match_id: Uuid,
     winner_battlesnake_id: Uuid,
 ) -> cja::Result<()> {
-    sqlx::query!(
-        "UPDATE tournament_matches SET status = $2, winner_id = $3 WHERE match_id = $1",
+    let is_participant = sqlx::query_scalar!(
+        r#"
+        SELECT EXISTS(
+            SELECT 1 FROM match_participants
+            WHERE match_id = $1 AND battlesnake_id = $2
+        ) as "is_participant!"
+        "#,
+        match_id,
+        winner_battlesnake_id,
+    )
+    .fetch_one(&mut **tx)
+    .await
+    .wrap_err("Failed to check match participants")?;
+
+    if !is_participant {
+        return Err(color_eyre::eyre::eyre!(
+            "Cannot complete match {match_id}: {winner_battlesnake_id} is not a participant"
+        ));
+    }
+
+    let updated = sqlx::query!(
+        "UPDATE tournament_matches SET status = $2, winner_id = $3
+         WHERE match_id = $1 AND status <> $2",
         match_id,
         MatchStatus::Completed.as_str(),
         winner_battlesnake_id,
@@ -241,10 +302,36 @@ pub async fn complete_match_with_winner(
     .await
     .wrap_err("Failed to complete match")?;
 
-    Ok(())
+    if updated.rows_affected() == 1 {
+        return Ok(());
+    }
+
+    // 0 rows: the match is already completed (it must exist — it has
+    // participants). Retrying with the same winner is fine; a different
+    // winner means two results were recorded for one match.
+    let existing_winner = sqlx::query_scalar!(
+        "SELECT winner_id FROM tournament_matches WHERE match_id = $1",
+        match_id,
+    )
+    .fetch_one(&mut **tx)
+    .await
+    .wrap_err("Failed to fetch completed match")?;
+
+    if existing_winner == Some(winner_battlesnake_id) {
+        Ok(())
+    } else {
+        Err(color_eyre::eyre::eyre!(
+            "Match {match_id} is already completed with winner {existing_winner:?}; \
+             refusing to overwrite with {winner_battlesnake_id}"
+        ))
+    }
 }
 
 /// Fill the participant slot in `match_id` that is fed by `source_match_id`.
+///
+/// Retry-safe: re-filling a slot with the same battlesnake is a no-op update
+/// that still counts as success. Filling a slot that already holds a
+/// different battlesnake is an error.
 pub async fn fill_participant_from_source(
     tx: &mut Transaction<'_, Postgres>,
     match_id: Uuid,
@@ -256,6 +343,7 @@ pub async fn fill_participant_from_source(
         UPDATE match_participants
         SET battlesnake_id = $3
         WHERE match_id = $1 AND source_match_id = $2
+          AND (battlesnake_id IS NULL OR battlesnake_id = $3)
         "#,
         match_id,
         source_match_id,
@@ -266,10 +354,27 @@ pub async fn fill_participant_from_source(
     .wrap_err("Failed to advance participant into next match")?;
 
     if updated.rows_affected() != 1 {
-        return Err(color_eyre::eyre::eyre!(
-            "Expected exactly one participant slot in match {match_id} fed by {source_match_id}, updated {}",
-            updated.rows_affected()
-        ));
+        // 0 rows: either no slot is fed by this match, or the slot is already
+        // filled with a different battlesnake — check which.
+        let existing = sqlx::query_scalar!(
+            "SELECT battlesnake_id FROM match_participants
+             WHERE match_id = $1 AND source_match_id = $2",
+            match_id,
+            source_match_id,
+        )
+        .fetch_optional(&mut **tx)
+        .await
+        .wrap_err("Failed to inspect participant slot")?;
+
+        return Err(match existing {
+            None => color_eyre::eyre::eyre!(
+                "No participant slot in match {match_id} is fed by {source_match_id}"
+            ),
+            Some(other) => color_eyre::eyre::eyre!(
+                "Participant slot in match {match_id} fed by {source_match_id} already \
+                 holds {other:?}; refusing to overwrite with {battlesnake_id}"
+            ),
+        });
     }
 
     Ok(())
@@ -279,6 +384,14 @@ pub async fn fill_participant_from_source(
 mod tests {
     use super::*;
     use proptest::prelude::*;
+    use sqlx::PgPool;
+
+    use crate::models::game::{GameBoardSize, GameType};
+    use crate::models::tournament::{
+        CreateTournament, MatchParticipant, MatchStyle, RegistrationStatus, TournamentMatch,
+        TournamentVisibility, create_registration, create_tournament, get_matches_for_tournament,
+        get_participants_for_match,
+    };
 
     fn round_one_pairs(plan: &BracketPlan) -> Vec<[Option<i32>; 2]> {
         plan.matches
@@ -388,20 +501,45 @@ mod tests {
                     plan.matches.iter().filter(|m| m.round == round).collect();
                 prop_assert_eq!(in_round.len() as i32, size >> round);
 
-                // Positions are 0..count, visual rows strictly increase, and
-                // every non-final match feeds position / 2 in the next round.
+                // Positions are 0..count and visual rows strictly increase.
                 for (i, m) in in_round.iter().enumerate() {
                     prop_assert_eq!(m.position, i as i32);
-                    prop_assert_eq!(m.visual_column, round - 1);
-                    if round < plan.total_rounds {
-                        prop_assert_eq!(m.next_position, Some(m.position / 2));
-                    } else {
-                        prop_assert_eq!(m.next_position, None);
-                    }
                     if i > 0 {
                         prop_assert!(m.visual_row > in_round[i - 1].visual_row);
                     }
                 }
+            }
+
+            // Only the final has no next match.
+            for m in &plan.matches {
+                prop_assert_eq!(m.next_position.is_none(), m.round == plan.total_rounds);
+            }
+
+            // Feeder pairing: every non-round-1 match at position k is fed by
+            // exactly the two previous-round matches at positions 2k and
+            // 2k + 1 (the matches whose winners advance into it), it sits one
+            // visual column to their right, and its visual row is the mean of
+            // its feeders' rows (each match is centered between its feeders).
+            for m in plan.matches.iter().filter(|m| m.round > 1) {
+                let feeders: Vec<_> = plan
+                    .matches
+                    .iter()
+                    .filter(|f| f.round == m.round - 1 && f.next_position == Some(m.position))
+                    .collect();
+                prop_assert_eq!(feeders.len(), 2);
+                prop_assert_eq!(
+                    feeders.iter().map(|f| f.position).collect::<Vec<_>>(),
+                    vec![m.position * 2, m.position * 2 + 1]
+                );
+                prop_assert_eq!(feeders[0].visual_column, feeders[1].visual_column);
+                prop_assert_eq!(m.visual_column, feeders[0].visual_column + 1);
+                prop_assert_eq!(
+                    m.visual_row * 2,
+                    feeders[0].visual_row + feeders[1].visual_row,
+                    "match r{} p{} is not centered between its feeders",
+                    m.round,
+                    m.position
+                );
             }
         }
 
@@ -464,5 +602,220 @@ mod tests {
                 prop_assert_eq!(quarters.len(), 4.min(round_one.len()));
             }
         }
+    }
+
+    // --- DB tests for persist_bracket and match progression ---
+
+    /// Create a tournament with `n` registered snakes (seeds 1..=n) and
+    /// persist its bracket. Returns the tournament id and the battlesnake ids
+    /// indexed by seed (`snakes[0]` is seed 1).
+    async fn fixture_persisted_bracket(pool: &PgPool, n: usize) -> cja::Result<(Uuid, Vec<Uuid>)> {
+        let user_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO users (external_github_id, github_login, github_access_token)
+             VALUES ($1, $2, $3) RETURNING user_id",
+        )
+        .bind(424_242_i64)
+        .bind("test-user")
+        .bind("test-token")
+        .fetch_one(pool)
+        .await?;
+
+        let tournament = create_tournament(
+            pool,
+            user_id,
+            CreateTournament {
+                name: "Bracket Test".to_string(),
+                description: None,
+                game_type: GameType::Standard,
+                board_size: GameBoardSize::Medium,
+                registration_status: RegistrationStatus::Open,
+                visibility: TournamentVisibility::Public,
+                match_style: MatchStyle::SingleGame,
+                max_snakes_per_user: n as i32,
+                required_participants: n as i32,
+            },
+        )
+        .await?;
+
+        let mut registrations = Vec::new();
+        for seed in 1..=n as i32 {
+            let battlesnake_id: Uuid = sqlx::query_scalar(
+                "INSERT INTO battlesnakes (user_id, name, url)
+                 VALUES ($1, $2, $3) RETURNING battlesnake_id",
+            )
+            .bind(user_id)
+            .bind(format!("snake-{seed}"))
+            .bind("http://example.com")
+            .fetch_one(pool)
+            .await?;
+            registrations.push(
+                create_registration(
+                    pool,
+                    tournament.tournament_id,
+                    battlesnake_id,
+                    user_id,
+                    seed,
+                )
+                .await?,
+            );
+        }
+
+        let mut tx = pool.begin().await?;
+        persist_bracket(&mut tx, tournament.tournament_id, &registrations).await?;
+        tx.commit().await?;
+
+        let snakes = registrations.iter().map(|r| r.battlesnake_id).collect();
+        Ok((tournament.tournament_id, snakes))
+    }
+
+    fn match_at(matches: &[TournamentMatch], round: i32, position: i32) -> &TournamentMatch {
+        matches
+            .iter()
+            .find(|m| m.round == round && m.position == position)
+            .unwrap_or_else(|| panic!("no match at round {round} position {position}"))
+    }
+
+    fn snake_in_slot(participants: &[MatchParticipant], slot: i16) -> Option<Uuid> {
+        participants
+            .iter()
+            .find(|p| p.slot == slot)
+            .and_then(|p| p.battlesnake_id)
+    }
+
+    /// Five participants: seeds 1, 2, and 3 get round-1 byes. Seeds 2 and 3
+    /// both feed round-2 position 1, so that match is fully populated
+    /// immediately — but stays `scheduled`, because matches are started by
+    /// the round-execution scan, not by an event when they fill.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn five_participants_double_bye_fills_round_two_but_stays_scheduled(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        let (tournament_id, snakes) = fixture_persisted_bracket(&pool, 5).await?;
+        let matches = get_matches_for_tournament(&pool, tournament_id).await?;
+        assert_eq!(matches.len(), 7); // bracket size 8
+
+        // Round 1: 1-bye, 4v5, 2-bye, 3-bye. Byes complete immediately.
+        for (position, seed) in [(0, 1), (2, 2), (3, 3)] {
+            let bye = match_at(&matches, 1, position);
+            assert_eq!(bye.status, MatchStatus::Completed);
+            assert_eq!(bye.winner_id, Some(snakes[seed - 1]));
+        }
+
+        // 4v5 is a real match: higher seed in slot 1, still scheduled.
+        let four_v_five = match_at(&matches, 1, 1);
+        assert_eq!(four_v_five.status, MatchStatus::Scheduled);
+        assert_eq!(four_v_five.winner_id, None);
+        let participants = get_participants_for_match(&pool, four_v_five.match_id).await?;
+        assert_eq!(snake_in_slot(&participants, 1), Some(snakes[3]));
+        assert_eq!(snake_in_slot(&participants, 2), Some(snakes[4]));
+
+        // Round-2 position 0: seed 1's bye fills slot 1, slot 2 waits on 4v5.
+        let semi_top = match_at(&matches, 2, 0);
+        assert_eq!(semi_top.status, MatchStatus::Scheduled);
+        let participants = get_participants_for_match(&pool, semi_top.match_id).await?;
+        assert_eq!(snake_in_slot(&participants, 1), Some(snakes[0]));
+        assert_eq!(snake_in_slot(&participants, 2), None);
+
+        // Round-2 position 1: fed by two byes, so both slots are filled —
+        // lower feeder position (seed 2's bye) in slot 1 — and the match is
+        // still scheduled, waiting for round execution to start it.
+        let semi_bottom = match_at(&matches, 2, 1);
+        assert_eq!(semi_bottom.status, MatchStatus::Scheduled);
+        assert_eq!(semi_bottom.winner_id, None);
+        let participants = get_participants_for_match(&pool, semi_bottom.match_id).await?;
+        assert_eq!(participants.len(), 2);
+        assert_eq!(snake_in_slot(&participants, 1), Some(snakes[1]));
+        assert_eq!(snake_in_slot(&participants, 2), Some(snakes[2]));
+
+        // The final is untouched: two empty winner-fed slots.
+        let final_match = match_at(&matches, 3, 0);
+        assert_eq!(final_match.status, MatchStatus::Scheduled);
+        let participants = get_participants_for_match(&pool, final_match.match_id).await?;
+        assert_eq!(participants.len(), 2);
+        assert!(participants.iter().all(|p| p.battlesnake_id.is_none()));
+
+        Ok(())
+    }
+
+    /// Completing a match and advancing its winner must be safe under job
+    /// retries: same-winner repeats are no-ops, conflicting results error.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn completion_and_advancement_are_retry_safe(pool: PgPool) -> cja::Result<()> {
+        // Three participants: seed 1 gets a bye into the final (round 2),
+        // 2v3 plays round 1.
+        let (tournament_id, snakes) = fixture_persisted_bracket(&pool, 3).await?;
+        let matches = get_matches_for_tournament(&pool, tournament_id).await?;
+        let bye = match_at(&matches, 1, 0);
+        let two_v_three = match_at(&matches, 1, 1);
+        let final_match = match_at(&matches, 2, 0);
+
+        let mut tx = pool.begin().await?;
+
+        // Re-completing the bye with the same winner is idempotent.
+        complete_match_with_winner(&mut tx, bye.match_id, snakes[0]).await?;
+        // A non-participant can never be recorded as the winner.
+        let result = complete_match_with_winner(&mut tx, bye.match_id, snakes[1]).await;
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("not a participant")
+        );
+
+        // Complete 2v3, then retry with the same and a different winner.
+        complete_match_with_winner(&mut tx, two_v_three.match_id, snakes[1]).await?;
+        complete_match_with_winner(&mut tx, two_v_three.match_id, snakes[1]).await?;
+        let result = complete_match_with_winner(&mut tx, two_v_three.match_id, snakes[2]).await;
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("already completed")
+        );
+
+        // Re-filling the bye-fed final slot with the same snake is idempotent.
+        fill_participant_from_source(&mut tx, final_match.match_id, bye.match_id, snakes[0])
+            .await?;
+        // Advance the 2v3 winner; retry with the same snake, then conflict.
+        fill_participant_from_source(
+            &mut tx,
+            final_match.match_id,
+            two_v_three.match_id,
+            snakes[1],
+        )
+        .await?;
+        fill_participant_from_source(
+            &mut tx,
+            final_match.match_id,
+            two_v_three.match_id,
+            snakes[1],
+        )
+        .await?;
+        let result = fill_participant_from_source(
+            &mut tx,
+            final_match.match_id,
+            two_v_three.match_id,
+            snakes[2],
+        )
+        .await;
+        assert!(result.unwrap_err().to_string().contains("already"));
+        // A source match that doesn't feed this match is a distinct error.
+        let result =
+            fill_participant_from_source(&mut tx, final_match.match_id, Uuid::new_v4(), snakes[1])
+                .await;
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("No participant slot")
+        );
+
+        tx.commit().await?;
+
+        let final_participants = get_participants_for_match(&pool, final_match.match_id).await?;
+        assert_eq!(snake_in_slot(&final_participants, 1), Some(snakes[0]));
+        assert_eq!(snake_in_slot(&final_participants, 2), Some(snakes[1]));
+
+        Ok(())
     }
 }
