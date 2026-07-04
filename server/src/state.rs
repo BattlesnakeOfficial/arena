@@ -4,6 +4,7 @@ use color_eyre::eyre::{Context as _, eyre};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 
 use crate::config::AppConfig;
+use crate::discord::DiscordNotifier;
 use crate::email::Mailer;
 use crate::game_channels::GameChannels;
 
@@ -22,6 +23,8 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     /// Transactional email sender (no-op until Mailgun is configured)
     pub mailer: Mailer,
+    /// Discord webhook notifier (no-op until DISCORD_WEBHOOK_URL is configured)
+    pub discord: DiscordNotifier,
     /// Scoring algorithm registry
     pub scoring: std::sync::Arc<crate::scoring::ScoringRegistry>,
 }
@@ -120,6 +123,22 @@ impl AppState {
             }
         };
 
+        // Optional: Discord webhook notifications (disabled until configured).
+        // Uses its own client like the mailer — the snake client's 600ms timeout
+        // is too tight for an external webhook API.
+        let discord = DiscordNotifier::new(
+            config.discord_webhook_url.clone(),
+            reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+                .wrap_err("Failed to create Discord HTTP client")?,
+        );
+        if discord.is_enabled() {
+            tracing::info!("Discord webhook configured for community notifications");
+        } else {
+            tracing::info!("DISCORD_WEBHOOK_URL not set, Discord notifications disabled");
+        }
+
         let mut scoring_registry = crate::scoring::ScoringRegistry::new();
         scoring_registry.register(Box::new(crate::scoring::weng_lin::WengLinScoring));
         scoring_registry.register(Box::new(crate::scoring::win_rate::WinRateScoring));
@@ -133,6 +152,7 @@ impl AppState {
             game_channels: GameChannels::new(),
             http_client,
             mailer,
+            discord,
             scoring: std::sync::Arc::new(scoring_registry),
         })
     }
@@ -152,6 +172,7 @@ impl AppState {
             game_channels: GameChannels::new(),
             http_client: reqwest::Client::new(),
             mailer: crate::email::Mailer::disabled(),
+            discord: crate::discord::DiscordNotifier::disabled(),
             scoring: std::sync::Arc::new(crate::scoring::ScoringRegistry::new()),
         }
     }

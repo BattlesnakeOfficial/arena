@@ -122,6 +122,12 @@ pub async fn create_snake(
             }
         })?;
 
+    if snake.visibility == Visibility::Public {
+        state
+            .discord
+            .notify_snake_registered(&snake.name, &user.github_login);
+    }
+
     Ok((StatusCode::CREATED, Json(SnakeResponse::from(snake))))
 }
 

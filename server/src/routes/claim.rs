@@ -202,6 +202,9 @@ pub async fn submit_claim(
     // Notify the play email that the account was claimed — a security signal
     // for the real owner if a claim wasn't theirs. Best-effort.
     state.mailer.notify_account_claimed(&summary);
+    state
+        .discord
+        .notify_account_claimed(&summary.username, summary.snakes_created);
 
     flasher
         .add_flash(format!(
