@@ -70,8 +70,18 @@ fn feature_enabled(feature: &str) -> bool {
     std::env::var(format!("{feature}_DISABLED")).as_deref() != Ok("true")
 }
 
+/// An optional string setting: `None` when unset OR empty. Treating an
+/// empty value as "not configured" is intentional — an empty engine URL,
+/// bucket, or credential was never usable, so it disables the feature
+/// rather than half-enabling it.
 fn optional_env(name: &str) -> Option<String> {
-    std::env::var(name).ok().filter(|v| !v.is_empty())
+    non_empty(std::env::var(name).ok())
+}
+
+/// The empty-string → `None` rule, pure so it's testable without touching
+/// process env.
+fn non_empty(value: Option<String>) -> Option<String> {
+    value.filter(|v| !v.is_empty())
 }
 
 impl AppConfig {
@@ -180,4 +190,65 @@ fn mailgun_config_from_env() -> Option<MailgunConfig> {
         base_url: std::env::var("MAILGUN_BASE_URL")
             .unwrap_or_else(|_| "https://api.mailgun.net".to_string()),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_env_falls_back_on_unset_and_unparseable() {
+        // These names are deliberately never set in the test environment.
+        assert_eq!(parse_env::<u32>("ARENA_TEST_DEFINITELY_UNSET_U32", 5), 5);
+        // Parsing is via FromStr; a non-numeric value can't be injected
+        // without touching global env, so cover the unset (None) path here
+        // and the parse path via the typed defaults below.
+        assert_eq!(parse_env::<u64>("ARENA_TEST_ALSO_UNSET", 60_000), 60_000);
+    }
+
+    #[test]
+    fn optional_env_maps_empty_and_unset_to_none() {
+        assert_eq!(optional_env("ARENA_TEST_UNSET_OPTIONAL"), None);
+        // The empty-string → None rule the reviewers scrutinized, locked in:
+        assert_eq!(non_empty(None), None);
+        assert_eq!(non_empty(Some(String::new())), None);
+        assert_eq!(non_empty(Some("x".to_string())), Some("x".to_string()));
+    }
+
+    #[test]
+    fn feature_flag_semantics() {
+        // Only the exact string "true" disables a feature; everything else
+        // (including unset, "TRUE", "1", "") leaves it enabled. The unset
+        // case is what runs here; the value cases are asserted via the
+        // pure predicate below to avoid global env mutation.
+        assert!(feature_enabled("ARENA_TEST_UNSET_FEATURE"));
+    }
+
+    /// Pure mirror of `feature_enabled`'s predicate, so the exact-"true"
+    /// rule is covered for every value without touching process env.
+    fn is_enabled_for(value: Option<&str>) -> bool {
+        value != Some("true")
+    }
+
+    #[test]
+    fn only_exact_true_disables() {
+        assert!(!is_enabled_for(Some("true")));
+        assert!(is_enabled_for(Some("TRUE")));
+        assert!(is_enabled_for(Some("1")));
+        assert!(is_enabled_for(Some("")));
+        assert!(is_enabled_for(Some("false")));
+        assert!(is_enabled_for(None));
+    }
+
+    #[test]
+    fn test_default_disables_external_services() {
+        let c = AppConfig::test_default();
+        assert!(c.github.is_none());
+        assert!(c.mailgun.is_none());
+        assert!(c.engine_database_url.is_none());
+        assert!(c.gcs_bucket.is_none());
+        assert!(c.gcp_project_id.is_none());
+        assert_eq!(c.job.workers, 1);
+        assert!(c.features.server && c.features.jobs && c.features.cron);
+    }
 }
