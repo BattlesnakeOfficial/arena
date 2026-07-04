@@ -70,6 +70,11 @@ fn claim_form(error: Option<&str>) -> Markup {
                     "Your old password is checked once to prove the account is "
                     "yours and is never stored. Arena sign-in stays GitHub-only."
                 }
+                p style="color: #666; font-size: 0.85em;" {
+                    "Imported play data is handled per our "
+                    a href="/privacy" { "privacy policy" }
+                    "."
+                }
                 button type="submit" class="btn btn-primary" { "Claim account" }
             }
 
