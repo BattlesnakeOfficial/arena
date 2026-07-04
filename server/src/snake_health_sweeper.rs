@@ -43,9 +43,13 @@ fn summarize(report: &HealthCheckReport) -> ProbeOutcome {
 }
 
 /// All snakes currently in matchmaking rotation: distinct snakes with at
-/// least one enabled leaderboard entry. Snakes the sweeper already pulled
-/// have no enabled entries, so they naturally drop out of the sweep until
-/// the owner reactivates them.
+/// least one enabled entry on an enabled leaderboard. The leaderboard
+/// filter matters: the matchmaker only draws from active leaderboards
+/// (`get_active_leaderboards`), so a snake whose only entry sits on a
+/// retired board is matched in zero games — probing (let alone
+/// deactivating and emailing about) it would be pure noise. Snakes the
+/// sweeper already pulled have no enabled entries, so they naturally drop
+/// out of the sweep until the owner reactivates them.
 async fn snakes_in_matchmaking(pool: &sqlx::PgPool) -> cja::Result<Vec<Battlesnake>> {
     use color_eyre::eyre::Context as _;
 
@@ -64,7 +68,9 @@ async fn snakes_in_matchmaking(pool: &sqlx::PgPool) -> cja::Result<Vec<Battlesna
             b.updated_at
          FROM battlesnakes b
          JOIN leaderboard_entries le ON le.battlesnake_id = b.battlesnake_id
+         JOIN leaderboards l ON l.leaderboard_id = le.leaderboard_id
          WHERE le.disabled_at IS NULL
+           AND l.disabled_at IS NULL
          ORDER BY b.battlesnake_id"#,
     )
     .fetch_all(pool)
@@ -94,8 +100,16 @@ pub async fn run_sweep(app_state: &AppState) -> cja::Result<()> {
 
     for snake in &snakes {
         let (engine_game, snake_id) = snake_health::build_test_game(snake);
-        let report =
-            snake_health::run_health_check(&client, &snake.url, &engine_game, &snake_id).await;
+        // AbortOnFailure keeps a dead snake at one timeout (~5s) instead of
+        // four, bounding how far a sweep full of dead snakes can stretch.
+        let report = snake_health::run_health_check(
+            &client,
+            &snake.url,
+            &engine_game,
+            &snake_id,
+            snake_health::FailureMode::AbortOnFailure,
+        )
+        .await;
         let outcome = summarize(&report);
 
         if let Err(e) = apply_probe_outcome(app_state, snake, &outcome).await {
@@ -225,6 +239,20 @@ mod tests {
         Ok((battlesnake_id, entry.leaderboard_entry_id))
     }
 
+    /// Simulate a real sweep interval passing: push the snake's last check
+    /// past the failure-count spacing gate.
+    async fn age_last_check(pool: &PgPool, battlesnake_id: Uuid) -> cja::Result<()> {
+        sqlx::query!(
+            "UPDATE snake_health_status
+             SET last_checked_at = last_checked_at - INTERVAL '16 minutes'
+             WHERE battlesnake_id = $1",
+            battlesnake_id,
+        )
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
     async fn entry_disabled(pool: &PgPool, entry_id: Uuid) -> cja::Result<Option<String>> {
         let row = sqlx::query!(
             "SELECT disabled_at, disabled_reason FROM leaderboard_entries
@@ -263,6 +291,8 @@ mod tests {
         assert!(threshold >= 2, "test assumes a multi-sweep threshold");
 
         // Every sweep below the threshold leaves the snake in matchmaking.
+        // (Failure counting is gated to one per spacing window, so age the
+        // last check between sweeps to simulate real 30-minute intervals.)
         for expected_failures in 1..threshold {
             run_sweep(&app_state).await?;
             let status = snake_health_status::get(&pool, battlesnake_id)
@@ -270,6 +300,7 @@ mod tests {
                 .expect("sweeper recorded a row");
             assert_eq!(status.consecutive_failures, expected_failures);
             assert_eq!(entry_disabled(&pool, entry_id).await?, None);
+            age_last_check(&pool, battlesnake_id).await?;
         }
 
         // The sweep that reaches the threshold pulls it.
@@ -321,6 +352,30 @@ mod tests {
         assert_eq!(status.consecutive_failures, 0);
         assert!(status.last_failure.is_none());
         assert_eq!(entry_disabled(&pool, entry_id).await?, None);
+
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn sweep_skips_snakes_whose_only_board_is_disabled(pool: PgPool) -> cja::Result<()> {
+        let server = broken_snake_server().await;
+        let (battlesnake_id, _entry_id) = create_snake_on_leaderboard(&pool, &server.uri()).await?;
+
+        // Retire the leaderboard: the matchmaker no longer draws from it,
+        // so the sweeper must not probe (or ever deactivate) this snake.
+        sqlx::query!("UPDATE leaderboards SET disabled_at = NOW()")
+            .execute(&pool)
+            .await?;
+
+        let app_state = AppState::test_from_pool(pool.clone());
+        run_sweep(&app_state).await?;
+
+        assert!(
+            snake_health_status::get(&pool, battlesnake_id)
+                .await?
+                .is_none(),
+            "snake on a disabled leaderboard must not be probed"
+        );
 
         Ok(())
     }
