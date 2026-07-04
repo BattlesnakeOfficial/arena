@@ -7,7 +7,7 @@ CREATE TABLE customization_grants (
     customization_grant_id UUID PRIMARY KEY DEFAULT uuid_generate_v4 (),
     user_id UUID NOT NULL REFERENCES users (user_id) ON DELETE CASCADE,
     customization_type TEXT NOT NULL CHECK (customization_type IN ('head', 'tail')),
-    slug TEXT NOT NULL,
+    slug TEXT NOT NULL CHECK (slug <> ''),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (user_id, customization_type, slug)
 );

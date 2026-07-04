@@ -15,7 +15,9 @@ use uuid::Uuid;
 pub use catalog::{Availability, CustomizationDef, Group, Head, Tail};
 
 /// The slug snakes fall back to when they declare a customization they
-/// can't use (unknown or not granted). Matches play's behavior.
+/// can't use (unknown or not granted). Play's allow/deny rules are the
+/// same, but play kept the snake's previously-stored value on a denied
+/// declare; arena re-resolves from the declaration every game.
 pub const DEFAULT_SLUG: &str = "default";
 
 impl CustomizationDef {
