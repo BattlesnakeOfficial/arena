@@ -199,6 +199,10 @@ pub async fn submit_claim(
         "play account claimed via password"
     );
 
+    // Notify the play email that the account was claimed — a security signal
+    // for the real owner if a claim wasn't theirs. Best-effort.
+    state.mailer.notify_account_claimed(&summary);
+
     flasher
         .add_flash(format!(
             "Welcome back, {}! Brought over {} snake(s) and {} customization unlock(s).",

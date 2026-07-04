@@ -113,3 +113,4 @@ vergen = { version = "8.3.1", features = [
 
 [dev-dependencies]
 proptest = "1"
+wiremock = "0.6"

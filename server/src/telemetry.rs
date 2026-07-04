@@ -129,12 +129,10 @@ impl tracing::field::Visit for JsonVisitor {
 ///
 /// Returns `Ok(None)` for the Eyes shutdown handle (not used with GCP logging),
 /// maintaining type compatibility with `cja::setup::setup_tracing`.
-pub fn setup_gcp_tracing() -> color_eyre::Result<Option<EyesShutdownHandle>> {
+pub fn setup_gcp_tracing(rust_log: &str) -> color_eyre::Result<Option<EyesShutdownHandle>> {
     use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
-    let rust_log = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string());
-
-    let env_filter = EnvFilter::builder().parse(&rust_log).map_err(|e| {
+    let env_filter = EnvFilter::builder().parse(rust_log).map_err(|e| {
         color_eyre::eyre::eyre!("Couldn't create env filter from {}: {}", rust_log, e)
     })?;
 
@@ -154,8 +152,11 @@ pub fn setup_gcp_tracing() -> color_eyre::Result<Option<EyesShutdownHandle>> {
 ///
 /// Header format: `TRACE_ID/SPAN_ID;o=TRACE_TRUE`
 /// Returns: `projects/{project_id}/traces/{trace_id}`
-pub fn extract_trace_context(header_value: &str) -> Option<String> {
-    let project_id = std::env::var("GCP_PROJECT_ID").ok()?;
+///
+/// `project_id` comes from config (see `AppConfig::gcp_project_id`), not the
+/// environment — this runs per request, so it must not read env.
+pub fn extract_trace_context(header_value: &str, project_id: Option<&str>) -> Option<String> {
+    let project_id = project_id?;
 
     // Extract trace_id (everything before the first '/')
     let trace_id = header_value.split('/').next()?;
@@ -189,42 +190,36 @@ mod tests {
 
     #[test]
     fn test_extract_trace_context_valid() {
-        // SAFETY: Test-only env var manipulation, tests run serially with serial_test if needed
-        unsafe { std::env::set_var("GCP_PROJECT_ID", "test-project") };
-        let result = extract_trace_context("105445aa7843bc8bf206b12000100000/1;o=1");
+        let result = extract_trace_context(
+            "105445aa7843bc8bf206b12000100000/1;o=1",
+            Some("test-project"),
+        );
         assert_eq!(
             result,
             Some("projects/test-project/traces/105445aa7843bc8bf206b12000100000".to_string())
         );
-        unsafe { std::env::remove_var("GCP_PROJECT_ID") };
     }
 
     #[test]
     fn test_extract_trace_context_no_options() {
-        // SAFETY: Test-only env var manipulation
-        unsafe { std::env::set_var("GCP_PROJECT_ID", "test-project") };
-        let result = extract_trace_context("105445aa7843bc8bf206b12000100000/1");
+        let result =
+            extract_trace_context("105445aa7843bc8bf206b12000100000/1", Some("test-project"));
         assert_eq!(
             result,
             Some("projects/test-project/traces/105445aa7843bc8bf206b12000100000".to_string())
         );
-        unsafe { std::env::remove_var("GCP_PROJECT_ID") };
     }
 
     #[test]
     fn test_extract_trace_context_empty() {
-        // SAFETY: Test-only env var manipulation
-        unsafe { std::env::set_var("GCP_PROJECT_ID", "test-project") };
-        let result = extract_trace_context("");
+        let result = extract_trace_context("", Some("test-project"));
         assert_eq!(result, None);
-        unsafe { std::env::remove_var("GCP_PROJECT_ID") };
     }
 
     #[test]
     fn test_extract_trace_context_no_project_id() {
-        // SAFETY: Test-only env var manipulation
-        unsafe { std::env::remove_var("GCP_PROJECT_ID") };
-        let result = extract_trace_context("105445aa7843bc8bf206b12000100000/1;o=1");
+        // No configured project id → no trace path, regardless of header.
+        let result = extract_trace_context("105445aa7843bc8bf206b12000100000/1;o=1", None);
         assert_eq!(result, None);
     }
 }

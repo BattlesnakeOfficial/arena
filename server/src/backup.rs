@@ -307,7 +307,7 @@ pub async fn backup_single_game(
         }
     };
 
-    let bucket = match &app_state.gcs_bucket {
+    let bucket = match &app_state.config.gcs_bucket {
         Some(b) => b.clone(),
         None => {
             return Err(eyre!("GCS bucket not configured").into());
