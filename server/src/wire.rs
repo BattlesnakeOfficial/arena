@@ -8,6 +8,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 
 use crate::engine::EngineGame;
+use crate::engine::frame::SnakeCustomizations;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Position {
@@ -15,7 +16,7 @@ pub struct Position {
     pub y: i32,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct Customizations {
     pub color: String,
     pub head: String,
@@ -122,6 +123,7 @@ impl BattleSnake {
         snake: &rules::Snake,
         name: &str,
         context: Option<&SnakeContext>,
+        customization: Option<&SnakeCustomizations>,
     ) -> Self {
         let head = snake
             .body
@@ -139,11 +141,13 @@ impl BattleSnake {
                 .map_or_else(|| "0".to_string(), |ms| ms.to_string()),
             shout: context.and_then(|c| c.shout.clone()).unwrap_or_default(),
             squad: String::new(),
-            customizations: Customizations {
-                color: String::new(),
-                head: String::new(),
-                tail: String::new(),
-            },
+            customizations: customization.map_or_else(Customizations::default, |c| {
+                Customizations {
+                    color: c.color.clone(),
+                    head: c.head.clone(),
+                    tail: c.tail.clone(),
+                }
+            }),
         }
     }
 }
@@ -174,6 +178,7 @@ impl Game {
         engine_game: &EngineGame,
         you_snake_id: &str,
         snake_contexts: &HashMap<String, SnakeContext>,
+        customizations: &HashMap<String, SnakeCustomizations>,
     ) -> Self {
         let convert_snake = |s: &rules::Snake| {
             let name = engine_game
@@ -181,7 +186,12 @@ impl Game {
                 .get(&s.id)
                 .map(|n| n.as_str())
                 .unwrap_or(&s.id);
-            BattleSnake::from_rules_snake(s, name, snake_contexts.get(&s.id))
+            BattleSnake::from_rules_snake(
+                s,
+                name,
+                snake_contexts.get(&s.id),
+                customizations.get(&s.id),
+            )
         };
 
         let you = engine_game
@@ -200,11 +210,7 @@ impl Game {
                 latency: "0".to_string(),
                 shout: String::new(),
                 squad: String::new(),
-                customizations: Customizations {
-                    color: String::new(),
-                    head: String::new(),
-                    tail: String::new(),
-                },
+                customizations: Customizations::default(),
             });
 
         let settings = &engine_game.meta.settings;
@@ -373,7 +379,8 @@ mod tests {
 
         // No context -- simulates /start or first turn
         let contexts: HashMap<String, SnakeContext> = HashMap::new();
-        let wire = Game::from_engine_game(&engine_game, "s1", &contexts);
+        let customizations: HashMap<String, SnakeCustomizations> = HashMap::new();
+        let wire = Game::from_engine_game(&engine_game, "s1", &contexts, &customizations);
 
         assert_eq!(wire.you.length, 3);
         assert_eq!(wire.you.latency, "0");
@@ -392,17 +399,30 @@ mod tests {
                 shout: Some("go!".to_string()),
             },
         );
-        let wire2 = Game::from_engine_game(&engine_game, "s1", &contexts);
+        let mut customizations = HashMap::new();
+        customizations.insert(
+            "s1".to_string(),
+            SnakeCustomizations {
+                color: "#ff8800".to_string(),
+                head: "beluga".to_string(),
+                tail: "bolt".to_string(),
+            },
+        );
+        let wire2 = Game::from_engine_game(&engine_game, "s1", &contexts, &customizations);
 
         assert_eq!(wire2.you.latency, "123");
         assert_eq!(wire2.you.shout, "go!");
+        assert_eq!(wire2.you.customizations.color, "#ff8800");
+        assert_eq!(wire2.you.customizations.head, "beluga");
+        assert_eq!(wire2.you.customizations.tail, "bolt");
     }
 
     #[test]
     fn test_standard_game_has_default_royale_and_squad() {
         let engine_game = create_test_engine_game();
         let contexts = HashMap::new();
-        let wire = Game::from_engine_game(&engine_game, "s1", &contexts);
+        let customizations = HashMap::new();
+        let wire = Game::from_engine_game(&engine_game, "s1", &contexts, &customizations);
         let json: Value = serde_json::to_value(&wire).unwrap();
 
         let settings = &json["game"]["ruleset"]["settings"];
@@ -437,7 +457,8 @@ mod tests {
         });
 
         let contexts = HashMap::new();
-        let wire = Game::from_engine_game(&engine_game, "s1", &contexts);
+        let customizations = HashMap::new();
+        let wire = Game::from_engine_game(&engine_game, "s1", &contexts, &customizations);
         let json: Value = serde_json::to_value(&wire).unwrap();
 
         assert_eq!(json["game"]["ruleset"]["name"], "royale");
@@ -453,7 +474,8 @@ mod tests {
     fn test_missing_engine_fields_produce_defaults() {
         let engine_game = create_test_engine_game();
         let contexts = HashMap::new();
-        let wire = Game::from_engine_game(&engine_game, "s1", &contexts);
+        let customizations = HashMap::new();
+        let wire = Game::from_engine_game(&engine_game, "s1", &contexts, &customizations);
         let json: Value = serde_json::to_value(&wire).unwrap();
 
         let game = &json["game"];

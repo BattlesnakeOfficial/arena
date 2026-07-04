@@ -12,6 +12,7 @@ use tracing::info;
 
 mod backup;
 mod cron;
+mod customizations;
 mod engine;
 mod engine_models;
 mod errors;
