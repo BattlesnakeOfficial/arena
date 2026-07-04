@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE users SET pronouns = 'she/her', country = 'US', backstory = 'Existing story' WHERE user_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "3ea6f755377f59ec0d4ad8ce7a342e9ff5e0a4b4706ae3264d9c07c0b8745f93"
+}

@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE users\n        SET display_name = COALESCE(display_name, NULLIF($2, ''), $3),\n            pronouns = COALESCE(NULLIF(pronouns, ''), $4, pronouns),\n            country = COALESCE(NULLIF(country, ''), $5, country),\n            backstory = COALESCE(NULLIF(backstory, ''), $6, backstory)\n        WHERE user_id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "dfcb05a8c5bc004558fdb541af45e9f559fd58da3ed8d95ba094ce698ff292bb"
+}

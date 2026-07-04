@@ -1,13 +1,24 @@
 use axum::{
+    Form,
     extract::State,
     http::StatusCode,
-    response::IntoResponse,
+    response::{IntoResponse, Redirect},
     routing::{delete, get, post, put},
 };
+use color_eyre::eyre::Context as _;
 use maud::html;
+use serde::Deserialize;
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::{components::page_factory::PageFactory, errors::ServerResult, state::AppState};
+
+#[derive(Deserialize)]
+pub struct UpdateProfileForm {
+    pub display_name: String,
+    pub pronouns: String,
+    pub country: String,
+    pub backstory: String,
+}
 
 // Include route modules
 pub mod admin;
@@ -67,7 +78,7 @@ pub fn routes(app_state: AppState) -> axum::Router {
         // Public pages
         .route("/", get(root_page))
         // Profile page - requires authentication
-        .route("/me", get(profile_page))
+        .route("/me", get(profile_page).post(update_profile))
         // GitHub OAuth routes
         .route("/auth/github", get(github_auth::github_auth))
         .route(
@@ -251,28 +262,54 @@ async fn root_page(
 }
 
 /// Profile page that requires authentication
+#[allow(clippy::too_many_lines)]
 async fn profile_page(
     auth::CurrentUser(user): auth::CurrentUser,
     page_factory: PageFactory,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
-    Ok(page_factory.create_page(
+    let flash = page_factory.flash.clone();
+
+    Ok(page_factory.create_page_with_flash(
         "My Profile".to_string(),
         Box::new(html! {
             div {
                 h1 { "My Profile" }
+
+                @if let Some(message) = flash.message() {
+                    div class=(flash.class()) {
+                        p { (message) }
+                    }
+                }
 
                 div class="profile-card" style="border: 1px solid #ddd; border-radius: 8px; padding: 20px; margin: 20px 0; max-width: 600px;" {
                     div class="profile-header" style="display: flex; align-items: center; margin-bottom: 20px;" {
                         img src=(user.github_avatar_url.unwrap_or_default()) alt="Avatar" style="width: 100px; height: 100px; border-radius: 50%; margin-right: 20px;" {}
 
                         div {
-                            h2 style="margin: 0 0 10px 0;" { (user.github_login) }
+                            @if let Some(name) = user.display_name.as_ref().filter(|n| !n.is_empty()) {
+                                h2 style="margin: 0 0 10px 0;" { (name) }
+                            } @else {
+                                h2 style="margin: 0 0 10px 0;" { (user.github_login) }
+                            }
                             @if let Some(name) = user.github_name.as_ref() {
                                 p style="margin: 0; color: #666;" { (name) }
                             }
                             @if let Some(email) = user.github_email.as_ref() {
                                 p style="margin: 0; color: #666;" { (email) }
                             }
+                            @if !user.pronouns.is_empty() {
+                                p style="margin: 0; color: #666;" { (user.pronouns) }
+                            }
+                            @if !user.country.is_empty() {
+                                p style="margin: 0; color: #666;" { (user.country) }
+                            }
+                        }
+                    }
+
+                    @if !user.backstory.is_empty() {
+                        div class="profile-backstory" style="margin-bottom: 20px;" {
+                            h3 { "About" }
+                            p style="white-space: pre-wrap;" { (user.backstory) }
                         }
                     }
 
@@ -282,17 +319,61 @@ async fn profile_page(
                         p { "Account created: " (user.created_at.format("%Y-%m-%d %H:%M:%S")) }
                         p { "Last updated: " (user.updated_at.format("%Y-%m-%d %H:%M:%S")) }
                     }
+                }
 
-                    div class="profile-actions" style="margin-top: 20px;" {
-                        h3 { "Your Battlesnakes" }
-                        p { "Manage your Battlesnake collection." }
-                        a href="/battlesnakes" class="btn btn-primary" { "Manage Battlesnakes" }
-
-                        h3 class="mt-4" { "Games" }
-                        p { "Create and view games with your Battlesnakes." }
-                        div {
-                            a href="/games/new" class="btn btn-primary" { "Create New Game" }
+                // Edit form
+                div class="profile-edit" style="border: 1px solid #ddd; border-radius: 8px; padding: 20px; margin: 20px 0; max-width: 600px;" {
+                    h3 { "Edit Profile" }
+                    form action="/me" method="post" {
+                        div class="form-group" style="margin-bottom: 12px;" {
+                            label for="display_name" { "Display Name" }
+                            br;
+                            input type="text" id="display_name" name="display_name"
+                                class="form-control" style="width: 100%; padding: 8px;"
+                                value=(user.display_name.as_deref().unwrap_or("")) {}
+                            small class="form-text text-muted" { "Shown instead of your GitHub login" }
                         }
+
+                        div class="form-group" style="margin-bottom: 12px;" {
+                            label for="pronouns" { "Pronouns" }
+                            br;
+                            input type="text" id="pronouns" name="pronouns"
+                                class="form-control" style="width: 100%; padding: 8px;"
+                                value=(user.pronouns) {}
+                            small class="form-text text-muted" { "Max 50 characters" }
+                        }
+
+                        div class="form-group" style="margin-bottom: 12px;" {
+                            label for="country" { "Country" }
+                            br;
+                            input type="text" id="country" name="country"
+                                class="form-control" style="width: 100%; padding: 8px;"
+                                value=(user.country) {}
+                            small class="form-text text-muted" { "Max 100 characters" }
+                        }
+
+                        div class="form-group" style="margin-bottom: 12px;" {
+                            label for="backstory" { "Backstory" }
+                            br;
+                            textarea id="backstory" name="backstory"
+                                class="form-control" style="width: 100%; padding: 8px; min-height: 100px;"
+                                { (user.backstory) }
+                            small class="form-text text-muted" { "Max 2000 characters. Plain text, no markdown." }
+                        }
+
+                        button type="submit" class="btn btn-primary" { "Save Changes" }
+                    }
+                }
+
+                div class="profile-actions" style="margin-top: 20px;" {
+                    h3 { "Your Battlesnakes" }
+                    p { "Manage your Battlesnake collection." }
+                    a href="/battlesnakes" class="btn btn-primary" { "Manage Battlesnakes" }
+
+                    h3 class="mt-4" { "Games" }
+                    p { "Create and view games with your Battlesnakes." }
+                    div {
+                        a href="/games/new" class="btn btn-primary" { "Create New Game" }
                     }
                 }
 
@@ -303,7 +384,57 @@ async fn profile_page(
                 }
             }
         }),
+        flash,
     ))
+}
+
+/// POST handler for updating profile fields
+async fn update_profile(
+    State(state): State<AppState>,
+    auth::CurrentUserWithSession { user, session }: auth::CurrentUserWithSession,
+    Form(form): Form<UpdateProfileForm>,
+) -> ServerResult<impl IntoResponse, StatusCode> {
+    let display_name = form.display_name.trim();
+    let pronouns = form.pronouns.trim();
+    let country = form.country.trim();
+    let backstory = form.backstory.trim();
+
+    if let Err(msg) =
+        crate::models::user::validate_profile_fields(display_name, pronouns, country, backstory)
+    {
+        crate::models::session::set_flash_message(
+            &state.db,
+            session.session_id,
+            msg,
+            crate::models::session::FLASH_TYPE_ERROR,
+        )
+        .await
+        .wrap_err("Failed to set flash message")?;
+
+        return Ok(Redirect::to("/me").into_response());
+    }
+
+    crate::models::user::update_profile_fields(
+        &state.db,
+        user.user_id,
+        display_name,
+        pronouns,
+        country,
+        backstory,
+    )
+    .await
+    .wrap_err("Failed to update profile")?;
+
+    crate::models::session::set_flash_message(
+        &state.db,
+        session.session_id,
+        "Profile updated successfully!".to_string(),
+        crate::models::session::FLASH_TYPE_SUCCESS,
+    )
+    .await
+    .wrap_err("Failed to set flash message")?;
+
+    Ok(Redirect::to("/me").into_response())
 }
 
 /// Middleware to extract GCP trace context from the `X-Cloud-Trace-Context` header
