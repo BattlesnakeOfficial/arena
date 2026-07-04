@@ -110,6 +110,22 @@ impl Mailer {
         );
     }
 
+    /// Send the email-recovery magic link. Fire-and-forget on purpose: the
+    /// requesting handler must respond identically whether or not the email
+    /// matched an account, so it can never wait on (or fail with) the
+    /// transport.
+    pub fn notify_claim_verification(
+        &self,
+        pool: &sqlx::PgPool,
+        hourly_limit: i64,
+        to_email: &str,
+        play_username: &str,
+        verify_url: &str,
+    ) {
+        let message = messages::claim_verification(to_email, play_username, verify_url);
+        self.spawn_limited_send(pool.clone(), hourly_limit, "claim_verification", message);
+    }
+
     /// The shared fire-and-forget tail: run `send_limited` in a spawned
     /// task, log any failure, never propagate.
     fn spawn_limited_send(

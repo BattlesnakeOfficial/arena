@@ -11,7 +11,6 @@ use serde::Deserialize;
 use crate::{
     components::page_factory::PageFactory,
     django_password,
-    email::messages,
     errors::ServerResult,
     flasher::Flasher,
     models::{claim_email_token, imported_account},
@@ -356,26 +355,23 @@ pub async fn submit_email_claim(
             "{}/claim/email/verify?token={}",
             state.config.base_url, secret
         );
-        let message = messages::claim_verification(&account.email, &account.username, &verify_url);
 
-        // Awaited (not fire-and-forget): the send outcome doesn't change the
-        // response body, but a transport error should surface as a 500
-        // rather than a false "link is on its way".
-        let outcome = state
-            .mailer
-            .send_limited(
-                &state.db,
-                state.config.email_per_recipient_hourly_limit,
-                "claim_verification",
-                &message,
-            )
-            .await
-            .wrap_err("Failed to send claim verification email")?;
+        // Fire-and-forget, like every other notification — and load-bearing
+        // here: awaiting the Mailgun call would make a matching email
+        // measurably slower than a miss (and turn a transport error into a
+        // 500 only matches can produce), handing back exactly the
+        // enumeration oracle the uniform response below exists to prevent.
+        state.mailer.notify_claim_verification(
+            &state.db,
+            state.config.email_per_recipient_hourly_limit,
+            &account.email,
+            &account.username,
+            &verify_url,
+        );
 
         tracing::info!(
             event_type = "email_claim_link_requested",
             user_id = %user.user_id,
-            outcome = ?outcome,
             "email claim link requested"
         );
     } else {
