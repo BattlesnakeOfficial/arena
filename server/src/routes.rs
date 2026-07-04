@@ -78,6 +78,8 @@ pub fn routes(app_state: AppState) -> axum::Router {
         .route("/auth/cli-token", get(github_auth::cli_token_page))
         // Battlesnake routes
         .route("/customizations", get(customizations::list_customizations))
+        .route("/claim", get(claim::claim_page))
+        .route("/claim", post(claim::submit_claim))
         .route("/battlesnakes", get(battlesnake::list_battlesnakes))
         .route("/battlesnakes/new", get(battlesnake::new_battlesnake))
         .route(

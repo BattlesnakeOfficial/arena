@@ -13,8 +13,15 @@ use crate::{
     models::imported_account, routes::auth::CurrentUser, state::AppState,
 };
 
-/// Failed attempts per user per hour before the claim form locks out.
-const MAX_FAILED_ATTEMPTS_PER_HOUR: i64 = 5;
+/// Attempts per arena user per hour: stops one account from enumerating
+/// many play emails.
+const MAX_ATTEMPTS_PER_USER_PER_HOUR: i64 = 5;
+
+/// Attempts per target play email per hour, across ALL arena users: the
+/// real brute-force cap, since arena login is GitHub-only and an attacker
+/// could otherwise mint a fresh per-user budget per throwaway account. A
+/// legitimate owner needs one correct attempt, so this only bites abuse.
+const MAX_ATTEMPTS_PER_EMAIL_PER_HOUR: i64 = 10;
 
 fn claim_form(error: Option<&str>) -> Markup {
     html! {
@@ -89,16 +96,30 @@ pub async fn submit_claim(
     flasher: Flasher,
     Form(form): Form<ClaimForm>,
 ) -> ServerResult<axum::response::Response, StatusCode> {
-    let attempts = imported_account::recent_failed_claim_attempts(&state.db, user.user_id)
-        .await
-        .wrap_err("Failed to check claim attempts")?;
-    if attempts >= MAX_FAILED_ATTEMPTS_PER_HOUR {
+    // Record this attempt before doing any work, then read the counts —
+    // that ordering is what makes the rate limit hold under concurrent
+    // requests. Both the per-user and per-email windows must be under
+    // budget.
+    let counts =
+        imported_account::record_and_count_claim_attempts(&state.db, user.user_id, &form.email)
+            .await
+            .wrap_err("Failed to record claim attempt")?;
+    if counts.by_user > MAX_ATTEMPTS_PER_USER_PER_HOUR
+        || counts.by_email > MAX_ATTEMPTS_PER_EMAIL_PER_HOUR
+    {
+        tracing::warn!(
+            event_type = "play_claim_rate_limited",
+            user_id = %user.user_id,
+            by_user = counts.by_user,
+            by_email = counts.by_email,
+            "play account claim rate limited"
+        );
         return Ok(page_factory
             .create_page(
                 "Claim Play Account".to_string(),
                 Box::new(claim_form(Some(
-                    "Too many failed attempts. Try again in an hour, or reach \
-                     out on Discord for help.",
+                    "Too many attempts. Try again in an hour, or reach out on \
+                     Discord for help.",
                 ))),
             )
             .into_response());
@@ -116,9 +137,12 @@ pub async fn submit_claim(
         .find(|account| django_password::verify(&form.password, &account.password_hash));
 
     let Some(account) = matched else {
-        imported_account::record_failed_claim_attempt(&state.db, user.user_id)
-            .await
-            .wrap_err("Failed to record claim attempt")?;
+        // No candidate matched. If the email was unknown we did zero PBKDF2
+        // work above; spend one now so a non-existent email costs the same
+        // as a wrong password and can't be told apart by response time.
+        if candidates.is_empty() {
+            django_password::spend_decoy_work(&form.password);
+        }
         tracing::info!(
             event_type = "play_claim_failed",
             user_id = %user.user_id,

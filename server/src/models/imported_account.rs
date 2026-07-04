@@ -403,30 +403,55 @@ pub async fn try_auto_claim(
     claim_account(pool, account.imported_account_id, user_id).await
 }
 
-/// Failed password-claim attempts in the last hour, for rate limiting.
-pub async fn recent_failed_claim_attempts(pool: &PgPool, user_id: Uuid) -> cja::Result<i64> {
+/// Counts of claim attempts in the last hour, by arena user and by target
+/// email, for two-dimension rate limiting.
+#[derive(Debug)]
+pub struct ClaimAttemptCounts {
+    pub by_user: i64,
+    pub by_email: i64,
+}
+
+/// Record a claim attempt, then return the last-hour counts for this user
+/// and this (case-insensitive) email — including the just-recorded row.
+///
+/// Recording before the count (rather than after a separate check) makes
+/// the rate limit race-safe: concurrent attempts each insert first, so the
+/// count every request sees reflects the others instead of all reading
+/// zero and sailing past the gate.
+pub async fn record_and_count_claim_attempts(
+    pool: &PgPool,
+    user_id: Uuid,
+    email: &str,
+) -> cja::Result<ClaimAttemptCounts> {
+    sqlx::query!(
+        "INSERT INTO claim_attempts (user_id, email) VALUES ($1, $2)",
+        user_id,
+        email,
+    )
+    .execute(pool)
+    .await
+    .wrap_err("Failed to record claim attempt")?;
+
     let row = sqlx::query!(
         r#"
-        SELECT COUNT(*) as "count!"
+        SELECT
+            COUNT(*) FILTER (WHERE user_id = $1) as "by_user!",
+            COUNT(*) FILTER (WHERE lower(email) = lower($2)) as "by_email!"
         FROM claim_attempts
-        WHERE user_id = $1 AND attempted_at > NOW() - INTERVAL '1 hour'
+        WHERE attempted_at > NOW() - INTERVAL '1 hour'
+          AND (user_id = $1 OR lower(email) = lower($2))
         "#,
         user_id,
+        email,
     )
     .fetch_one(pool)
     .await
     .wrap_err("Failed to count claim attempts")?;
 
-    Ok(row.count)
-}
-
-pub async fn record_failed_claim_attempt(pool: &PgPool, user_id: Uuid) -> cja::Result<()> {
-    sqlx::query!("INSERT INTO claim_attempts (user_id) VALUES ($1)", user_id)
-        .execute(pool)
-        .await
-        .wrap_err("Failed to record claim attempt")?;
-
-    Ok(())
+    Ok(ClaimAttemptCounts {
+        by_user: row.by_user,
+        by_email: row.by_email,
+    })
 }
 
 #[cfg(test)]
@@ -672,12 +697,28 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "../migrations")]
-    async fn failed_attempt_rate_limit_counts(pool: PgPool) -> cja::Result<()> {
-        let user_id = create_user(&pool, 8001).await?;
-        assert_eq!(recent_failed_claim_attempts(&pool, user_id).await?, 0);
-        record_failed_claim_attempt(&pool, user_id).await?;
-        record_failed_claim_attempt(&pool, user_id).await?;
-        assert_eq!(recent_failed_claim_attempts(&pool, user_id).await?, 2);
+    async fn claim_attempts_count_by_user_and_email(pool: PgPool) -> cja::Result<()> {
+        let attacker = create_user(&pool, 8001).await?;
+        let other = create_user(&pool, 8002).await?;
+
+        // First attempt: one for this user, one for this email (itself).
+        let c = record_and_count_claim_attempts(&pool, attacker, "victim@example.com").await?;
+        assert_eq!(c.by_user, 1);
+        assert_eq!(c.by_email, 1);
+
+        // Same user, different email: user count climbs, email count for
+        // the new address starts fresh.
+        let c = record_and_count_claim_attempts(&pool, attacker, "other@example.com").await?;
+        assert_eq!(c.by_user, 2);
+        assert_eq!(c.by_email, 1);
+
+        // A DIFFERENT arena user hammering the SAME victim email: the
+        // per-email window keeps climbing across users (the key defense —
+        // per-user limits alone wouldn't catch this), case-insensitively.
+        let c = record_and_count_claim_attempts(&pool, other, "VICTIM@example.com").await?;
+        assert_eq!(c.by_user, 1);
+        assert_eq!(c.by_email, 2);
+
         Ok(())
     }
 }

@@ -83,11 +83,18 @@ CREATE TABLE imported_grants (
     UNIQUE (imported_account_id, customization_type, slug)
 );
 
--- Failed claim attempts, for rate limiting the password-claim endpoint.
+-- Password-claim attempts, for rate limiting. Rate limited on BOTH
+-- dimensions: per arena user (one account can't enumerate many emails)
+-- and per target email (many arena accounts can't brute-force one play
+-- email — arena login is GitHub-only, so per-user alone would let an
+-- attacker mint fresh budgets against a single victim). Every attempt is
+-- recorded before verification, so the count is race-safe.
 CREATE TABLE claim_attempts (
     claim_attempt_id UUID PRIMARY KEY DEFAULT uuid_generate_v4 (),
     user_id UUID NOT NULL REFERENCES users (user_id) ON DELETE CASCADE,
+    email TEXT NOT NULL,
     attempted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX claim_attempts_user_idx ON claim_attempts (user_id, attempted_at);
+CREATE INDEX claim_attempts_email_idx ON claim_attempts (lower(email), attempted_at);

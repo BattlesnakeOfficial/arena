@@ -15,6 +15,19 @@ use subtle::ConstantTimeEq as _;
 /// malformed rather than an invitation to burn CPU.
 const MAX_ITERATIONS: u32 = 5_000_000;
 
+/// A well-formed hash that no real password matches, at Django's current
+/// default iteration count. Verifying against it costs one full PBKDF2, so
+/// the claim endpoint can spend the same work on a non-existent email as on
+/// a wrong password and not leak account existence through timing.
+pub const DECOY_HASH: &str =
+    "pbkdf2_sha256$390000$Zk3xQ9pLmN2v$r/Z3PYktYjEdbIe45L7k4M7Yu8NxSguSV+TVYtl8fv0=";
+
+/// Run one PBKDF2 whose result is discarded, to equalize timing on the
+/// no-candidate path. `black_box` keeps the optimizer from eliding it.
+pub fn spend_decoy_work(password: &str) {
+    std::hint::black_box(verify(password, DECOY_HASH));
+}
+
 /// Check `password` against a Django `pbkdf2_sha256` hash string.
 ///
 /// Returns false for wrong passwords AND for malformed/unsupported hash
@@ -82,6 +95,17 @@ mod tests {
         assert!(!verify("wrong-password", HASH));
         assert!(!verify("", HASH));
         assert!(!verify("correct-horse-battery ", HASH));
+    }
+
+    #[test]
+    fn decoy_hash_is_well_formed_but_unmatchable() {
+        // Must be a real parseable hash (so it runs a full PBKDF2 for the
+        // timing defense) that no plausible password matches.
+        assert!(!verify("", DECOY_HASH));
+        assert!(!verify("password", DECOY_HASH));
+        assert!(!verify("Zk3xQ9pLmN2v", DECOY_HASH));
+        // Exercises the same code path used for constant-time defense.
+        spend_decoy_work("anything");
     }
 
     #[test]
