@@ -394,6 +394,25 @@ mod tests {
         !old_snake.eliminated_cause.is_eliminated() && old_food.contains(&new_snake.head())
     }
 
+    /// Helper: was this snake eliminated in phase 1 of `eliminate_snakes`
+    /// (out-of-health or out-of-bounds)?
+    ///
+    /// The standard rules resolve eliminations in two phases: out-of-health and
+    /// out-of-bounds snakes are removed *first*, and the subsequent body/head-to-head
+    /// collision passes skip any already-eliminated snake as a collision target
+    /// (matching the official Go `EliminateSnakesStandard`). So a snake that shares a
+    /// square with a snake that starved or went out of bounds *this* turn does NOT lose
+    /// a head-to-head against it -- there is nothing left to collide with. The
+    /// head-to-head properties must exclude these phase-1 eliminations, otherwise they
+    /// go randomly red on valid, reachable boards (e.g. a health-1 snake starving on the
+    /// same square a shorter snake moves into).
+    fn eliminated_in_phase_one(cause: &EliminationCause) -> bool {
+        matches!(
+            cause,
+            EliminationCause::OutOfHealth | EliminationCause::OutOfBounds
+        )
+    }
+
     // --- Property tests ---
 
     proptest! {
@@ -794,7 +813,14 @@ mod tests {
                     .zip(new_game.board.snakes.iter())
                     .enumerate()
                 {
-                    if j <= i || old_b.eliminated_cause.is_eliminated() {
+                    // If either snake starved or went out of bounds this turn it is removed
+                    // as a collision target before head-to-head resolution, so the mutual
+                    // head-to-head elimination doesn't happen. See `eliminated_in_phase_one`.
+                    if j <= i
+                        || old_b.eliminated_cause.is_eliminated()
+                        || eliminated_in_phase_one(&new_a.eliminated_cause)
+                        || eliminated_in_phase_one(&new_b.eliminated_cause)
+                    {
                         continue;
                     }
                     if new_a.head() == new_b.head() && new_a.body.len() == new_b.body.len() {
@@ -833,7 +859,13 @@ mod tests {
                     .zip(new_game.board.snakes.iter())
                     .enumerate()
                 {
-                    if j == i || old_b.eliminated_cause.is_eliminated() {
+                    // A snake that starved or went out of bounds this turn is removed as a
+                    // collision target before head-to-head resolution, so `a` does not lose
+                    // a head-to-head against it. See `eliminated_in_phase_one`.
+                    if j == i
+                        || old_b.eliminated_cause.is_eliminated()
+                        || eliminated_in_phase_one(&new_b.eliminated_cause)
+                    {
                         continue;
                     }
                     if new_a.head() == new_b.head() && new_a.body.len() < new_b.body.len() {
