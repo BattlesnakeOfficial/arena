@@ -16,22 +16,26 @@ use crate::models::imported_account::ClaimSummary;
 
 impl Mailer {
     /// Notify a play account's owner that their account was claimed on
-    /// arena. Best-effort: a send failure is logged, never propagated, so it
-    /// can't fail the claim that triggered it.
-    pub async fn notify_account_claimed(&self, summary: &ClaimSummary) {
+    /// arena. Fire-and-forget: the send runs in a spawned task so it never
+    /// adds latency to the claim/login response, and a failure is logged,
+    /// never propagated, so it can't fail the claim that triggered it.
+    pub fn notify_account_claimed(&self, summary: &ClaimSummary) {
         let message = messages::account_claimed(
             &summary.email,
             &summary.username,
             summary.snakes_created,
             summary.grants_created,
         );
-        if let Err(e) = self.send(&message).await {
-            tracing::warn!(
-                to = %summary.email,
-                error = %e,
-                "Failed to send account-claimed email"
-            );
-        }
+        let mailer = self.clone();
+        tokio::spawn(async move {
+            if let Err(e) = mailer.send(&message).await {
+                tracing::warn!(
+                    to = %message.to,
+                    error = %e,
+                    "Failed to send account-claimed email"
+                );
+            }
+        });
     }
 }
 
@@ -49,16 +53,13 @@ pub struct MailgunConfig {
 }
 
 impl MailgunConfig {
-    /// Read config from env. Returns `Ok(None)` (disabled) when
-    /// `MAILGUN_API_KEY` is unset — the expected state until creds land —
-    /// and `Err` only when a key is present but other required settings are
-    /// malformed.
-    pub fn from_env() -> cja::Result<Option<Self>> {
-        let Ok(api_key) = std::env::var("MAILGUN_API_KEY") else {
-            return Ok(None);
-        };
+    /// Read config from env. Returns `None` (disabled) when `MAILGUN_API_KEY`
+    /// is unset or empty — the expected state until creds land. The other
+    /// settings fall back to defaults, so this never fails.
+    pub fn from_env() -> Option<Self> {
+        let api_key = std::env::var("MAILGUN_API_KEY").ok()?;
         if api_key.is_empty() {
-            return Ok(None);
+            return None;
         }
 
         let domain =
@@ -68,17 +69,18 @@ impl MailgunConfig {
         let base_url = std::env::var("MAILGUN_BASE_URL")
             .unwrap_or_else(|_| "https://api.mailgun.net".to_string());
 
-        Ok(Some(Self {
+        Some(Self {
             api_key,
             domain,
             from,
             base_url,
-        }))
+        })
     }
 }
 
 /// Sends transactional email, or silently drops it when Mailgun isn't
-/// configured. Cloneable and cheap to hold in `AppState`.
+/// configured. Cloneable (the client is `Arc`-backed; the small config is
+/// copied) so it can live in `AppState` and be moved into spawned sends.
 #[derive(Clone)]
 pub struct Mailer {
     config: Option<MailgunConfig>,
@@ -117,6 +119,11 @@ impl Mailer {
             return Ok(());
         };
 
+        if message.to.trim().is_empty() {
+            tracing::warn!(subject = %message.subject, "Skipping email with empty recipient");
+            return Ok(());
+        }
+
         let url = format!("{}/v3/{}/messages", config.base_url, config.domain);
         let response = self
             .http
@@ -149,7 +156,7 @@ impl Mailer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{body_string_contains, header_exists, method, path};
+    use wiremock::matchers::{body_string_contains, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn test_message() -> EmailMessage {
@@ -185,8 +192,9 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v3/mg.example.com/messages"))
-            // Basic auth header present (api:key-test).
-            .and(header_exists("authorization"))
+            // Basic auth is exactly base64("api:key-test") — asserting the
+            // value (not just presence) catches a wrong-key regression.
+            .and(header("authorization", "Basic YXBpOmtleS10ZXN0"))
             .and(body_string_contains("someone%40example.com"))
             .and(body_string_contains("subject=hi"))
             .respond_with(ResponseTemplate::new(200).set_body_string("{\"id\":\"ok\"}"))
@@ -197,6 +205,26 @@ mod tests {
         let mailer = configured_mailer(server.uri());
         mailer.send(&test_message()).await.unwrap();
         // Mock's .expect(1) verifies exactly one matching request on drop.
+    }
+
+    #[tokio::test]
+    async fn empty_recipient_is_skipped_not_sent() {
+        let server = MockServer::start().await;
+        // Any request to the mock is a failure — an empty recipient must not
+        // reach Mailgun.
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let mailer = configured_mailer(server.uri());
+        let msg = EmailMessage {
+            to: "   ".to_string(),
+            subject: "hi".to_string(),
+            text: "body".to_string(),
+        };
+        mailer.send(&msg).await.unwrap();
     }
 
     #[tokio::test]

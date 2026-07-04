@@ -113,15 +113,21 @@ impl AppState {
             .wrap_err("Failed to create HTTP client")?;
         tracing::info!("HTTP client initialized for snake API calls");
 
-        // Optional: Mailgun transactional email (disabled until configured)
-        let mailer = match MailgunConfig::from_env()? {
+        // Optional: Mailgun transactional email (disabled until configured).
+        // Uses its own client — the snake client's 600ms timeout is far too
+        // tight for a public email API and would fail most real sends.
+        let mailer = match MailgunConfig::from_env() {
             Some(config) => {
+                let email_client = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(10))
+                    .build()
+                    .wrap_err("Failed to create email HTTP client")?;
                 tracing::info!(domain = %config.domain, "Mailgun configured for email");
-                Mailer::new(Some(config), http_client.clone())
+                Mailer::new(Some(config), email_client)
             }
             None => {
                 tracing::info!("MAILGUN_API_KEY not set, transactional email disabled");
-                Mailer::new(None, http_client.clone())
+                Mailer::disabled()
             }
         };
 

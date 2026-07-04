@@ -194,7 +194,7 @@ pub async fn github_auth_callback(
             "play account auto-claimed via GitHub link"
         );
         // Notify the play email that the account was claimed. Best-effort.
-        state.mailer.notify_account_claimed(summary).await;
+        state.mailer.notify_account_claimed(summary);
     }
 
     // Associate the user with the current session
