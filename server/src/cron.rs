@@ -3,7 +3,9 @@ use std::time::Duration;
 use cja::cron::{CronRegistry, Worker};
 use tokio_util::sync::CancellationToken;
 
-use crate::jobs::{GameBackupJob, LeaderboardMatchmakerJob, StuckMatchSweeperJob};
+use crate::jobs::{
+    GameBackupJob, LeaderboardMatchmakerJob, RateLimitPruneJob, StuckMatchSweeperJob,
+};
 use crate::state::AppState;
 
 /// Matchmaker cron interval in seconds. Shared with the matchmaker to compute games_per_run.
@@ -32,6 +34,14 @@ fn cron_registry() -> CronRegistry<AppState> {
         StuckMatchSweeperJob,
         Some("Re-enqueue evaluation for stuck tournament matches"),
         Duration::from_secs(2 * 60),
+    );
+
+    // Rate-limit bookkeeping prune: keeps the attempt tables from growing
+    // without bound (every request inserts, including rejected ones)
+    registry.register_job(
+        RateLimitPruneJob,
+        Some("Prune rate-limit attempt rows past retention"),
+        Duration::from_secs(6 * 60 * 60),
     );
 
     registry

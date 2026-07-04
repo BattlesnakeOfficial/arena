@@ -6,34 +6,37 @@ use color_eyre::eyre::Context as _;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-/// Record a game-creation attempt for `user_id` from `source` (`"web"` or
-/// `"api"`), then return how many attempts that user has made within the
-/// trailing `window_minutes` — including the just-recorded row, so callers
-/// reject when the count is strictly greater than the limit.
-///
-/// Recording before the count (rather than after a separate check) makes
-/// the rate limit race-safe: concurrent attempts each insert first, so the
-/// count every request sees reflects the others instead of all reading a
-/// stale count and sailing past the gate. Rejected attempts still count,
-/// so hammering the endpoint never earns extra games.
-///
-/// The window is shared per account across both entry points — a web
-/// attempt counts against the API budget and vice versa.
-pub async fn record_and_count_game_creation_attempts(
-    pool: &PgPool,
+/// Record one game-creation attempt without checking anything. Used
+/// directly by paths that create games inside a job (tournament matches):
+/// they charge the responsible user's budget but must never fail a match
+/// mid-flight, so enforcement happens at the user-triggerable entry points
+/// instead (`run_round`, the web flow, the API).
+pub async fn record_game_creation_attempt<'e, E>(
+    executor: E,
     user_id: Uuid,
     source: &str,
-    window_minutes: i32,
-) -> cja::Result<i64> {
+) -> cja::Result<()>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
     sqlx::query!(
         "INSERT INTO game_creation_attempts (user_id, source) VALUES ($1, $2)",
         user_id,
         source,
     )
-    .execute(pool)
+    .execute(executor)
     .await
     .wrap_err("Failed to record game creation attempt")?;
 
+    Ok(())
+}
+
+/// How many game-creation attempts `user_id` has in the trailing window.
+pub async fn count_recent_game_creation_attempts(
+    pool: &PgPool,
+    user_id: Uuid,
+    window_minutes: i32,
+) -> cja::Result<i64> {
     let row = sqlx::query!(
         r#"
         SELECT COUNT(*) as "count!"
@@ -49,6 +52,65 @@ pub async fn record_and_count_game_creation_attempts(
     .wrap_err("Failed to count game creation attempts")?;
 
     Ok(row.count)
+}
+
+/// Record a game-creation attempt for `user_id` from `source` (`"web"` or
+/// `"api"`), then return how many attempts that user has made within the
+/// trailing `window_minutes` — including the just-recorded row, so callers
+/// reject when the count is strictly greater than the limit.
+///
+/// Recording before the count (rather than after a separate check) makes
+/// the rate limit race-safe: concurrent attempts each insert first, so the
+/// count every request sees reflects the others instead of all reading a
+/// stale count and sailing past the gate. Rejected attempts still count,
+/// so hammering the endpoint never earns extra games.
+///
+/// The window is shared per account across all entry points — web, API,
+/// and tournament-triggered games all spend the same budget.
+pub async fn record_and_count_game_creation_attempts(
+    pool: &PgPool,
+    user_id: Uuid,
+    source: &str,
+    window_minutes: i32,
+) -> cja::Result<i64> {
+    record_game_creation_attempt(pool, user_id, source).await?;
+    count_recent_game_creation_attempts(pool, user_id, window_minutes).await
+}
+
+/// Retention for attempt rows, comfortably past any plausible window
+/// setting so the sliding-window counts are never affected.
+const PRUNE_RETENTION_HOURS: i32 = 24;
+
+/// Delete rate-limit bookkeeping older than the retention period. The
+/// tables grow with every request (including rejected ones — that's what
+/// makes the limits race-safe), so a cron job calls this to keep them from
+/// growing without bound.
+pub async fn prune_old_attempts(pool: &PgPool) -> cja::Result<()> {
+    let games = sqlx::query!(
+        "DELETE FROM game_creation_attempts
+         WHERE attempted_at < NOW() - make_interval(hours => $1)",
+        PRUNE_RETENTION_HOURS,
+    )
+    .execute(pool)
+    .await
+    .wrap_err("Failed to prune game creation attempts")?;
+
+    let claims = sqlx::query!(
+        "DELETE FROM claim_attempts
+         WHERE attempted_at < NOW() - make_interval(hours => $1)",
+        PRUNE_RETENTION_HOURS,
+    )
+    .execute(pool)
+    .await
+    .wrap_err("Failed to prune claim attempts")?;
+
+    tracing::info!(
+        game_creation_attempts = games.rows_affected(),
+        claim_attempts = claims.rows_affected(),
+        "Pruned rate-limit bookkeeping"
+    );
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -127,6 +189,41 @@ mod tests {
         // slid out of the window.
         let count = record_and_count_game_creation_attempts(&pool, user, "api", 10).await?;
         assert_eq!(count, 2);
+
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn prune_deletes_only_rows_past_retention(pool: PgPool) -> cja::Result<()> {
+        let user = create_user(&pool, 9005).await?;
+
+        // One row past the 24h retention, one fresh, in each table.
+        sqlx::query!(
+            "INSERT INTO game_creation_attempts (user_id, source, attempted_at)
+             VALUES ($1, 'api', NOW() - INTERVAL '25 hours'), ($1, 'api', NOW())",
+            user,
+        )
+        .execute(&pool)
+        .await?;
+        sqlx::query!(
+            "INSERT INTO claim_attempts (user_id, email, attempted_at)
+             VALUES ($1, 'p@example.com', NOW() - INTERVAL '25 hours'),
+                    ($1, 'p@example.com', NOW())",
+            user,
+        )
+        .execute(&pool)
+        .await?;
+
+        prune_old_attempts(&pool).await?;
+
+        let games: i64 =
+            sqlx::query_scalar!(r#"SELECT COUNT(*) as "c!" FROM game_creation_attempts"#)
+                .fetch_one(&pool)
+                .await?;
+        let claims: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) as "c!" FROM claim_attempts"#)
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!((games, claims), (1, 1));
 
         Ok(())
     }

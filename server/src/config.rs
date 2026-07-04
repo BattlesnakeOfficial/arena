@@ -109,11 +109,15 @@ impl AppConfig {
             github: github_config_from_env(),
             mailgun: mailgun_config_from_env(),
 
+            // Limit 0 is a deliberate "block all game creation" switch; a
+            // zero or negative WINDOW, though, would silently disable the
+            // limit (nothing is ever "within" an empty window), so clamp it.
             game_creation_rate_limit: parse_env("GAME_CREATION_RATE_LIMIT", 20),
             game_creation_rate_limit_window_minutes: parse_env(
                 "GAME_CREATION_RATE_LIMIT_WINDOW_MINUTES",
                 10,
-            ),
+            )
+            .max(1),
 
             tokio_worker_multiplier: parse_env("ARENA_TOKIO_WORKER_MULTIPLIER", 2),
             gcp_logging: std::env::var("GCP_LOGGING").is_ok(),

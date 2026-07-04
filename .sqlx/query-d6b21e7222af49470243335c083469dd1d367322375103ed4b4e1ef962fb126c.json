@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO game_creation_attempts (user_id, source, attempted_at)\n             VALUES ($1, 'api', NOW() - INTERVAL '25 hours'), ($1, 'api', NOW())",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d6b21e7222af49470243335c083469dd1d367322375103ed4b4e1ef962fb126c"
+}

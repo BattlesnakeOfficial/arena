@@ -324,6 +324,19 @@ pub async fn run_match(app_state: &AppState, match_id: Uuid) -> cja::Result<()> 
         set_match_status(&mut *tx, match_id, MatchStatus::InProgress).await?;
     }
 
+    // Tournament games spend the owner's game-creation budget (same table
+    // the web/API limits check) so the start → run-round → reset loop can't
+    // mint unmetered games. Recorded here, not rejected: a job must never
+    // fail a match mid-flight — enforcement lives in the run-round handler.
+    // Same transaction as the game, so a losing concurrent evaluation rolls
+    // its charge back with its orphan game.
+    crate::models::rate_limit::record_game_creation_attempt(
+        &mut *tx,
+        tournament.user_id,
+        "tournament",
+    )
+    .await?;
+
     tx.commit()
         .await
         .wrap_err("Failed to commit match game creation")?;
