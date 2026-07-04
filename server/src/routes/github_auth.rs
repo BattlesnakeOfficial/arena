@@ -41,7 +41,7 @@ pub async fn github_auth(
     Query(query): Query<GitHubAuthQuery>,
 ) -> ServerResult<Redirect, StatusCode> {
     // Check if OAuth is configured
-    let oauth_config = state.github_oauth_config.as_ref().ok_or_else(|| {
+    let oauth_config = state.config.github.as_ref().ok_or_else(|| {
         ServerError(
             eyre!("GitHub OAuth is not configured"),
             StatusCode::SERVICE_UNAVAILABLE,
@@ -82,7 +82,7 @@ pub async fn github_auth_callback(
     flasher: Flasher,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
     // Check if OAuth is configured
-    let oauth_config = state.github_oauth_config.as_ref().ok_or_else(|| {
+    let oauth_config = state.config.github.as_ref().ok_or_else(|| {
         ServerError(
             eyre!("GitHub OAuth is not configured"),
             StatusCode::SERVICE_UNAVAILABLE,

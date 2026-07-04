@@ -39,8 +39,8 @@ impl Mailer {
     }
 }
 
-/// Resolved Mailgun settings. Built from env; absence of `MAILGUN_API_KEY`
-/// leaves the [`Mailer`] disabled rather than erroring.
+/// Resolved Mailgun settings. Built from env in `crate::config` (the single
+/// env-reading boundary); a `None` here leaves the [`Mailer`] disabled.
 #[derive(Clone, Debug)]
 pub struct MailgunConfig {
     pub api_key: String,
@@ -50,32 +50,6 @@ pub struct MailgunConfig {
     pub from: String,
     /// API base, overridable so tests can point at a mock server.
     pub base_url: String,
-}
-
-impl MailgunConfig {
-    /// Read config from env. Returns `None` (disabled) when `MAILGUN_API_KEY`
-    /// is unset or empty — the expected state until creds land. The other
-    /// settings fall back to defaults, so this never fails.
-    pub fn from_env() -> Option<Self> {
-        let api_key = std::env::var("MAILGUN_API_KEY").ok()?;
-        if api_key.is_empty() {
-            return None;
-        }
-
-        let domain =
-            std::env::var("MAILGUN_DOMAIN").unwrap_or_else(|_| "mg.battlesnake.com".to_string());
-        let from = std::env::var("MAILGUN_FROM")
-            .unwrap_or_else(|_| "Battlesnake Arena <reply@battlesnake.com>".to_string());
-        let base_url = std::env::var("MAILGUN_BASE_URL")
-            .unwrap_or_else(|_| "https://api.mailgun.net".to_string());
-
-        Some(Self {
-            api_key,
-            domain,
-            from,
-            base_url,
-        })
-    }
 }
 
 /// Sends transactional email, or silently drops it when Mailgun isn't
