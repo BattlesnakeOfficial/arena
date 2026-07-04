@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT EXISTS (\n            SELECT 1\n            FROM customizations c\n            JOIN customization_groups g\n                ON g.customization_group_id = c.customization_group_id\n            WHERE c.customization_type = $1\n              AND c.slug = $2\n              AND (c.release_date IS NULL OR c.release_date <= NOW())\n              AND (\n                  g.availability = 'everyone'\n                  OR (g.availability = 'restricted' AND c.cost = 0)\n                  OR EXISTS (\n                      SELECT 1\n                      FROM customization_grants cg\n                      WHERE cg.customization_id = c.customization_id\n                        AND cg.user_id = $3\n                  )\n              )\n        ) as \"allowed!\"\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "allowed!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "efcf89b243410e016f73d37f31af6acd649a6bb340346be60edd4892bdd1b082"
+}

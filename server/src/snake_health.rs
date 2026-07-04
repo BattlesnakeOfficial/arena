@@ -159,7 +159,8 @@ pub async fn run_health_check(
     // No previous-turn context, exactly like a real game's /start and first
     // /move calls.
     let contexts: HashMap<String, wire::SnakeContext> = HashMap::new();
-    let payload = wire::Game::from_engine_game(engine_game, snake_id, &contexts);
+    let customizations = HashMap::new();
+    let payload = wire::Game::from_engine_game(engine_game, snake_id, &contexts, &customizations);
 
     let mut calls = Vec::with_capacity(4);
 
@@ -662,7 +663,8 @@ mod tests {
         let snake = test_snake();
         let (game, snake_id) = build_test_game(&snake);
         let contexts = HashMap::new();
-        let payload = wire::Game::from_engine_game(&game, &snake_id, &contexts);
+        let customizations = HashMap::new();
+        let payload = wire::Game::from_engine_game(&game, &snake_id, &contexts, &customizations);
         let json = serde_json::to_value(&payload).unwrap();
 
         // All top-level wire fields present, `you` is our snake.

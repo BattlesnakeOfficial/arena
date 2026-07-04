@@ -14,6 +14,7 @@ pub mod admin;
 pub mod api;
 pub mod auth;
 pub mod battlesnake;
+pub mod customizations;
 pub mod game;
 pub mod github_auth;
 pub mod leaderboard;
@@ -75,6 +76,7 @@ pub fn routes(app_state: AppState) -> axum::Router {
         .route("/auth/logout", get(github_auth::logout))
         .route("/auth/cli-token", get(github_auth::cli_token_page))
         // Battlesnake routes
+        .route("/customizations", get(customizations::list_customizations))
         .route("/battlesnakes", get(battlesnake::list_battlesnakes))
         .route("/battlesnakes/new", get(battlesnake::new_battlesnake))
         .route(
@@ -218,6 +220,7 @@ async fn root_page(
                             a href="/battlesnakes" class="btn btn-primary" { "Battlesnakes" }
                             a href="/leaderboards" class="btn btn-primary" { "Leaderboards" }
                             a href="/tournaments" class="btn btn-primary" { "Tournaments" }
+                            a href="/customizations" class="btn btn-primary" { "Customizations" }
                             a href="/auth/logout" class="btn btn-secondary" { "Logout" }
                         }
                     }
@@ -229,6 +232,7 @@ async fn root_page(
                     div style="margin-top: 10px;" {
                         a href="/leaderboards" class="btn btn-primary" { "Leaderboards" }
                         a href="/tournaments" class="btn btn-primary" { "Tournaments" }
+                        a href="/customizations" class="btn btn-primary" { "Customizations" }
                     }
                 }
                 div class="content" style="margin-top: 20px;" {

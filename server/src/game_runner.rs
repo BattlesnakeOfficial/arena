@@ -5,6 +5,7 @@ use uuid::Uuid;
 
 use crate::engine::MAX_TURNS;
 use crate::engine::frame::{DeathInfo, SnakeCustomizations, game_to_frame};
+use crate::models::customization::{self, CustomizationType};
 use crate::models::game::{GameStatus, get_game_by_id, update_game_status};
 use crate::snake_client::{request_end_parallel, request_moves_parallel, request_start_parallel};
 use crate::state::AppState;
@@ -101,29 +102,47 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
     let info_results =
         crate::snake_client::request_info_parallel(http_client, &snake_urls, info_timeout).await;
 
-    // Build customization map and update DB records
+    // Build customization map and update DB records. Declared head/tail are
+    // honored only if the snake's owner is allowed to use them (free, or
+    // granted); anything else falls back to the default.
     let mut customizations: HashMap<String, SnakeCustomizations> = HashMap::new();
     for bs in &battlesnakes {
         let snake_id = bs.game_battlesnake_id.to_string();
         if let Some(info) = info_results.get(&snake_id) {
-            let color = info
-                .customizations
-                .as_ref()
-                .map(|c| c.color.clone())
-                .or_else(|| info.color.clone())
-                .unwrap_or_default();
-            let head = info
+            let color = customization::normalize_color(
+                &info
+                    .customizations
+                    .as_ref()
+                    .map(|c| c.color.clone())
+                    .or_else(|| info.color.clone())
+                    .unwrap_or_default(),
+            );
+            let declared_head = info
                 .customizations
                 .as_ref()
                 .map(|c| c.head.clone())
                 .or_else(|| info.head.clone())
                 .unwrap_or_default();
-            let tail = info
+            let declared_tail = info
                 .customizations
                 .as_ref()
                 .map(|c| c.tail.clone())
                 .or_else(|| info.tail.clone())
                 .unwrap_or_default();
+            let head = customization::resolve_customization(
+                pool,
+                bs.user_id,
+                CustomizationType::Head,
+                &declared_head,
+            )
+            .await?;
+            let tail = customization::resolve_customization(
+                pool,
+                bs.user_id,
+                CustomizationType::Tail,
+                &declared_tail,
+            )
+            .await?;
 
             if let Err(e) = crate::models::battlesnake::update_battlesnake_customizations(
                 pool,
@@ -165,6 +184,7 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
         &snake_urls,
         timeout,
         &snake_contexts,
+        &customizations,
     )
     .await;
 
@@ -191,6 +211,7 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
             timeout,
             &last_moves,
             &snake_contexts,
+            &customizations,
         )
         .await;
 
@@ -317,6 +338,7 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
         &snake_urls,
         timeout,
         &snake_contexts,
+        &customizations,
     )
     .await;
 

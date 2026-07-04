@@ -1,5 +1,6 @@
 pub mod api_token;
 pub mod battlesnake;
+pub mod customization;
 pub mod flow;
 pub mod game;
 pub mod game_battlesnake;

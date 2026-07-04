@@ -1,0 +1,80 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            c.customization_id,\n            c.customization_type,\n            c.slug,\n            c.display_name,\n            c.description,\n            c.image_url,\n            c.cost,\n            g.slug as group_slug,\n            g.title as group_title,\n            g.availability as group_availability,\n            g.ordinal as group_ordinal\n        FROM customizations c\n        JOIN customization_groups g ON g.customization_group_id = c.customization_group_id\n        WHERE g.availability IN ('everyone', 'restricted', 'preview')\n          AND (c.release_date IS NULL OR c.release_date <= NOW())\n        ORDER BY g.ordinal, g.title, c.customization_type, c.display_name\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "customization_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "customization_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "slug",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "display_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "description",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "image_url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "cost",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 7,
+        "name": "group_slug",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "group_title",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "group_availability",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 10,
+        "name": "group_ordinal",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "16118d18044c1d5559896cf0163dcf3e2e60f4395805a8872f5a96c4346e9e0b"
+}
