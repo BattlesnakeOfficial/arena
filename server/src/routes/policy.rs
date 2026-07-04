@@ -67,7 +67,7 @@ fn conduct_content() -> Markup {
             h2 { "Reporting" }
             p {
                 "If you witness or experience a violation, report it on the "
-                a href="https://discord.battlesnake.com" { "Battlesnake Discord" }
+                a href="https://discord.gg/BYubeHQ" { "Battlesnake Discord" }
                 ". Include screenshots, game IDs, or other relevant context "
                 "where possible. Reports are reviewed by the moderation team."
             }
@@ -139,7 +139,7 @@ fn privacy_content() -> Markup {
             h2 { "Contact" }
             p {
                 "Questions about privacy? Reach us on the "
-                a href="https://discord.battlesnake.com" { "Battlesnake Discord" }
+                a href="https://discord.gg/BYubeHQ" { "Battlesnake Discord" }
                 "."
             }
         }
@@ -195,7 +195,7 @@ fn terms_content() -> Markup {
             h2 { "Contact" }
             p {
                 "Questions? Reach us on the "
-                a href="https://discord.battlesnake.com" { "Battlesnake Discord" }
+                a href="https://discord.gg/BYubeHQ" { "Battlesnake Discord" }
                 "."
             }
         }
