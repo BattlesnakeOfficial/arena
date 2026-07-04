@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO imported_snakes (\n            imported_account_id, play_snake_id, name, url, head, tail, color, is_public\n        )\n        SELECT ia.imported_account_id, $2, $3, $4, $5, $6, $7, $8\n        FROM imported_accounts ia\n        WHERE ia.play_account_id = $1\n        ON CONFLICT (play_snake_id) DO UPDATE SET\n            name = $3,\n            url = $4,\n            head = $5,\n            tail = $6,\n            color = $7,\n            is_public = $8\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "99a65e4756f098a8b1a9e063da5658928ecff4ae1567c47abef2842cc39b4104"
+}

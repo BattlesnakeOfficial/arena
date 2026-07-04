@@ -1,0 +1,32 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT is_staff, pronouns, github_uid FROM imported_accounts\n             WHERE play_user_id = 'usr_legacy'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "is_staff",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 1,
+        "name": "pronouns",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "github_uid",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "dfd1be3500d83fda661356363eda3eb2d53f0b27476b0224b37d4f1de954963a"
+}

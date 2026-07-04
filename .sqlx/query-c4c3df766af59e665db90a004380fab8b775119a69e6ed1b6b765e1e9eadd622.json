@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE imported_snakes SET materialized_battlesnake_id = $2\n             WHERE imported_snake_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c4c3df766af59e665db90a004380fab8b775119a69e6ed1b6b765e1e9eadd622"
+}

@@ -13,6 +13,7 @@ use tracing::info;
 mod backup;
 mod cron;
 mod customizations;
+mod django_password;
 mod engine;
 mod engine_models;
 mod errors;
@@ -24,6 +25,7 @@ mod jobs;
 mod leaderboard_matchmaker;
 mod leaderboard_ratings;
 mod models;
+mod play_import;
 mod routes;
 mod scoring;
 mod snake_client;
@@ -45,6 +47,15 @@ mod components {
 fn main() -> color_eyre::Result<()> {
     // Initialize Sentry for error tracking
     let _sentry_guard = setup_sentry();
+
+    // One-shot subcommand: copy play's DB into the migration staging
+    // tables, then exit (no server, no job workers).
+    if std::env::args().nth(1).as_deref() == Some("import-play") {
+        return tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?
+            .block_on(async { play_import::run_import().await });
+    }
 
     // Configure tokio worker threads as a multiplier on CPU core count.
     // Since game execution is I/O-bound (snake API calls ~500ms each),

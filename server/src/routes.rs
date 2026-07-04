@@ -14,6 +14,7 @@ pub mod admin;
 pub mod api;
 pub mod auth;
 pub mod battlesnake;
+pub mod claim;
 pub mod customizations;
 pub mod game;
 pub mod github_auth;
