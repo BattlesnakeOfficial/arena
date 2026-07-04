@@ -3,9 +3,9 @@ use rules::{Direction, EliminationCause};
 use std::collections::HashMap;
 use uuid::Uuid;
 
+use crate::customizations;
 use crate::engine::MAX_TURNS;
 use crate::engine::frame::{DeathInfo, SnakeCustomizations, game_to_frame};
-use crate::models::customization::{self, CustomizationType};
 use crate::models::game::{GameStatus, get_game_by_id, update_game_status};
 use crate::snake_client::{request_end_parallel, request_moves_parallel, request_start_parallel};
 use crate::state::AppState;
@@ -109,7 +109,7 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
     for bs in &battlesnakes {
         let snake_id = bs.game_battlesnake_id.to_string();
         if let Some(info) = info_results.get(&snake_id) {
-            let color = customization::normalize_color(
+            let color = customizations::normalize_color(
                 &info
                     .customizations
                     .as_ref()
@@ -129,20 +129,8 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
                 .map(|c| c.tail.clone())
                 .or_else(|| info.tail.clone())
                 .unwrap_or_default();
-            let head = customization::resolve_customization(
-                pool,
-                bs.user_id,
-                CustomizationType::Head,
-                &declared_head,
-            )
-            .await?;
-            let tail = customization::resolve_customization(
-                pool,
-                bs.user_id,
-                CustomizationType::Tail,
-                &declared_tail,
-            )
-            .await?;
+            let head = customizations::resolve_head(pool, bs.user_id, &declared_head).await?;
+            let tail = customizations::resolve_tail(pool, bs.user_id, &declared_tail).await?;
 
             if let Err(e) = crate::models::battlesnake::update_battlesnake_customizations(
                 pool,
