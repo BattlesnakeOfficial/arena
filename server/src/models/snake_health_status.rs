@@ -39,7 +39,15 @@ pub async fn get(pool: &PgPool, battlesnake_id: Uuid) -> cja::Result<Option<Snak
     .wrap_err("Failed to fetch snake health status")
 }
 
-/// Record a successful probe: reset the failure streak.
+/// Record a successful probe: reset the failure streak and clear any stale
+/// deactivation stamp.
+///
+/// Clearing `deactivated_at` here matters: the owner can put a deactivated
+/// snake back into matchmaking through paths that don't know about health
+/// state (re-joining a leaderboard, the leaderboard page's Resume button).
+/// A success probe only runs for snakes back in matchmaking, which is
+/// exactly when the once-per-deactivation email gate should re-arm — and
+/// when the profile banner should stop claiming the snake is paused.
 pub async fn record_success(pool: &PgPool, battlesnake_id: Uuid) -> cja::Result<()> {
     sqlx::query!(
         r#"INSERT INTO snake_health_status (battlesnake_id, consecutive_failures, last_checked_at, last_failure)
@@ -48,6 +56,7 @@ pub async fn record_success(pool: &PgPool, battlesnake_id: Uuid) -> cja::Result<
             SET consecutive_failures = 0,
                 last_checked_at = NOW(),
                 last_failure = NULL,
+                deactivated_at = NULL,
                 updated_at = NOW()"#,
         battlesnake_id
     )
@@ -58,7 +67,21 @@ pub async fn record_success(pool: &PgPool, battlesnake_id: Uuid) -> cja::Result<
     Ok(())
 }
 
-/// Record a failed probe and return the new consecutive-failure count.
+/// Minimum spacing between counted failures. The cron enqueues a sweep
+/// every 30 minutes with no dedup or completion check, so sweeps can pile
+/// up and drain back-to-back (or overlap with `workers > 1`); without this
+/// gate a snake down for one short window could burn its whole failure
+/// budget in minutes. Half the sweep interval: real consecutive sweeps
+/// always count, piled-up ones don't.
+const FAILURE_COUNT_SPACING_MINUTES: i32 = 15;
+
+/// Record a failed probe and return the consecutive-failure count.
+///
+/// The count only increments when the previous check is at least
+/// [`FAILURE_COUNT_SPACING_MINUTES`] old — back-to-back probes from
+/// piled-up or concurrent sweeps update `last_failure` but don't inflate
+/// the streak, keeping "N consecutive failures" meaning N separate sweep
+/// windows (~N × 30 min), as the threshold design assumes.
 pub async fn record_failure(
     pool: &PgPool,
     battlesnake_id: Uuid,
@@ -68,13 +91,19 @@ pub async fn record_failure(
         r#"INSERT INTO snake_health_status (battlesnake_id, consecutive_failures, last_checked_at, last_failure)
          VALUES ($1, 1, NOW(), $2)
          ON CONFLICT (battlesnake_id) DO UPDATE
-            SET consecutive_failures = snake_health_status.consecutive_failures + 1,
+            SET consecutive_failures = CASE
+                    WHEN snake_health_status.last_checked_at
+                         <= NOW() - make_interval(mins => $3)
+                    THEN snake_health_status.consecutive_failures + 1
+                    ELSE GREATEST(snake_health_status.consecutive_failures, 1)
+                END,
                 last_checked_at = NOW(),
                 last_failure = $2,
                 updated_at = NOW()
          RETURNING consecutive_failures"#,
         battlesnake_id,
-        failure_summary
+        failure_summary,
+        FAILURE_COUNT_SPACING_MINUTES,
     )
     .fetch_one(pool)
     .await
@@ -239,12 +268,33 @@ mod tests {
         Ok((row.disabled, row.disabled_reason))
     }
 
+    /// Push a snake's `last_checked_at` back past the failure-count spacing
+    /// gate, simulating the passage of a real sweep interval.
+    async fn age_last_check(pool: &PgPool, battlesnake_id: Uuid) -> cja::Result<()> {
+        sqlx::query!(
+            "UPDATE snake_health_status
+             SET last_checked_at = last_checked_at - INTERVAL '16 minutes'
+             WHERE battlesnake_id = $1",
+            battlesnake_id,
+        )
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
     #[sqlx::test(migrations = "../migrations")]
     async fn failure_streak_increments_and_success_resets(pool: PgPool) -> cja::Result<()> {
         let user_id = create_user(&pool, 9001).await?;
         let snake_id = create_snake(&pool, user_id, "streaky").await?;
 
         assert_eq!(record_failure(&pool, snake_id, "GET /: timeout").await?, 1);
+
+        // Piled-up or overlapping sweeps probe again within minutes: the
+        // streak must not inflate (it means "N separate sweep windows").
+        assert_eq!(record_failure(&pool, snake_id, "GET /: refused").await?, 1);
+
+        // A real next sweep (past the spacing gate) does count.
+        age_last_check(&pool, snake_id).await?;
         assert_eq!(record_failure(&pool, snake_id, "GET /: refused").await?, 2);
 
         let status = get(&pool, snake_id).await?.expect("row exists");
@@ -257,7 +307,8 @@ mod tests {
         assert_eq!(status.consecutive_failures, 0);
         assert!(status.last_failure.is_none());
 
-        // The streak really is consecutive: a success starts it over.
+        // The streak really is consecutive: a success starts it over — and a
+        // failure right after a success still registers as 1, gate or not.
         assert_eq!(record_failure(&pool, snake_id, "boom").await?, 1);
 
         Ok(())
@@ -344,6 +395,34 @@ mod tests {
         // sweeper's marker — the owner has taken over.
         leaderboard::set_disabled(&pool, entry, None).await?;
         assert_eq!(entry_state(&pool, entry).await?, (false, None));
+
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn healthy_probe_after_out_of_band_resume_rearms_the_email_gate(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        let user_id = create_user(&pool, 9006).await?;
+        let snake_id = create_snake(&pool, user_id, "wanderer").await?;
+        let entry = create_leaderboard_with_entry(&pool, snake_id, "standard").await?;
+
+        record_failure(&pool, snake_id, "down").await?;
+        assert!(deactivate(&pool, snake_id).await?);
+
+        // Owner resumes through the leaderboard page (not the banner
+        // button), which knows nothing about health state…
+        leaderboard::set_disabled(&pool, entry, None).await?;
+
+        // …so the next healthy sweep is what clears the stale stamp.
+        record_success(&pool, snake_id).await?;
+        let status = get(&pool, snake_id).await?.expect("row exists");
+        assert!(status.deactivated_at.is_none());
+
+        // Which means a future genuine breakage notifies again instead of
+        // being swallowed by a once-per-lifetime gate.
+        record_failure(&pool, snake_id, "down again").await?;
+        assert!(deactivate(&pool, snake_id).await?);
 
         Ok(())
     }

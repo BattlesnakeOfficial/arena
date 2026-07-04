@@ -463,8 +463,6 @@ fn compute_stats(history: &[game_battlesnake::GameHistoryEntry]) -> BattlesnakeS
     }
 }
 
-// View a battlesnake's profile with game history and stats
-#[allow(clippy::too_many_lines)]
 /// POST /battlesnakes/{id}/reactivate — owner recovery from a health-sweeper
 /// deactivation (BS-3534). Re-enables exactly the leaderboard entries the
 /// sweeper disabled (manual pauses stay paused) and resets the failure
@@ -527,6 +525,8 @@ pub async fn reactivate_battlesnake(
     Ok(Redirect::to(&format!("/battlesnakes/{battlesnake_id}/profile")).into_response())
 }
 
+// View a battlesnake's profile with game history and stats
+#[allow(clippy::too_many_lines)]
 pub async fn view_battlesnake_profile(
     State(state): State<AppState>,
     CurrentUser(user): CurrentUser,
@@ -876,7 +876,14 @@ pub async fn test_battlesnake(
         .wrap_err("Failed to build HTTP client for snake test")?;
 
     let (engine_game, snake_id) = snake_health::build_test_game(&snake);
-    let report = snake_health::run_health_check(&client, &snake.url, &engine_game, &snake_id).await;
+    let report = snake_health::run_health_check(
+        &client,
+        &snake.url,
+        &engine_game,
+        &snake_id,
+        snake_health::FailureMode::RunAll,
+    )
+    .await;
 
     let failures = report.failure_count();
     let all_ok = failures == 0;

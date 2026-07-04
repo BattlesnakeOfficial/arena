@@ -146,6 +146,20 @@ pub fn build_test_game(snake: &Battlesnake) -> (EngineGame, String) {
     (engine_game, game_battlesnake_id.to_string())
 }
 
+/// How a health-check run handles a failed call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureMode {
+    /// Run all four calls regardless: the Test Snake button, where the user
+    /// wants the complete picture.
+    RunAll,
+    /// Stop after the first failed call: the background sweeper, where
+    /// "unhealthy" is already decided and each further call against a dead
+    /// host costs another full timeout (a down snake would otherwise cost
+    /// 4 × 5s per sweep, which is what lets big sweeps outlast their cron
+    /// interval).
+    AbortOnFailure,
+}
+
 /// Run the four test calls sequentially against the snake's URL.
 ///
 /// The caller supplies the HTTP client (with its own timeout policy) and the
@@ -155,6 +169,7 @@ pub async fn run_health_check(
     url: &str,
     engine_game: &EngineGame,
     snake_id: &str,
+    failure_mode: FailureMode,
 ) -> HealthCheckReport {
     // No previous-turn context, exactly like a real game's /start and first
     // /move calls.
@@ -163,24 +178,37 @@ pub async fn run_health_check(
     let payload = wire::Game::from_engine_game(engine_game, snake_id, &contexts, &customizations);
 
     let mut calls = Vec::with_capacity(4);
+    let abort = |calls: &Vec<HealthCheckCall>| {
+        failure_mode == FailureMode::AbortOnFailure && calls.iter().any(|c| !c.ok)
+    };
 
     let outcome = execute_call(client.get(url), HEALTH_CHECK_TIMEOUT).await;
     calls.push(evaluate_call("GET /", &Expectation::Info, outcome));
 
-    let start_url = build_endpoint_url(url, "start");
-    let outcome = execute_call(client.post(&start_url).json(&payload), HEALTH_CHECK_TIMEOUT).await;
-    calls.push(evaluate_call("POST /start", &Expectation::Ack, outcome));
+    if !abort(&calls) {
+        let start_url = build_endpoint_url(url, "start");
+        let outcome =
+            execute_call(client.post(&start_url).json(&payload), HEALTH_CHECK_TIMEOUT).await;
+        calls.push(evaluate_call("POST /start", &Expectation::Ack, outcome));
+    }
 
-    let move_url = build_endpoint_url(url, "move");
-    let outcome = execute_call(client.post(&move_url).json(&payload), HEALTH_CHECK_TIMEOUT).await;
-    calls.push(evaluate_call("POST /move", &Expectation::Move, outcome));
+    if !abort(&calls) {
+        let move_url = build_endpoint_url(url, "move");
+        let outcome =
+            execute_call(client.post(&move_url).json(&payload), HEALTH_CHECK_TIMEOUT).await;
+        calls.push(evaluate_call("POST /move", &Expectation::Move, outcome));
+    }
 
-    // Call /end to be a good citizen: the wire protocol calls it, and snakes
-    // may have allocated per-game state on /start. Note this reuses the
-    // turn-0 payload; a real game would send the final board state on /end.
-    let end_url = build_endpoint_url(url, "end");
-    let outcome = execute_call(client.post(&end_url).json(&payload), HEALTH_CHECK_TIMEOUT).await;
-    calls.push(evaluate_call("POST /end", &Expectation::Ack, outcome));
+    if !abort(&calls) {
+        // Call /end to be a good citizen: the wire protocol calls it, and
+        // snakes may have allocated per-game state on /start. Note this
+        // reuses the turn-0 payload; a real game would send the final board
+        // state on /end.
+        let end_url = build_endpoint_url(url, "end");
+        let outcome =
+            execute_call(client.post(&end_url).json(&payload), HEALTH_CHECK_TIMEOUT).await;
+        calls.push(evaluate_call("POST /end", &Expectation::Ack, outcome));
+    }
 
     HealthCheckReport {
         calls,
