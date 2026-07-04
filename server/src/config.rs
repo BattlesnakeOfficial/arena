@@ -48,6 +48,13 @@ pub struct AppConfig {
     pub github: Option<GitHubOAuthConfig>,
     pub mailgun: Option<MailgunConfig>,
 
+    // Rate limiting
+    /// Max games an account may create within the sliding window (shared
+    /// across the web flow and the API).
+    pub game_creation_rate_limit: i64,
+    /// Length of the game-creation sliding window, in minutes.
+    pub game_creation_rate_limit_window_minutes: i32,
+
     // Runtime / telemetry
     pub tokio_worker_multiplier: usize,
     pub gcp_logging: bool,
@@ -102,6 +109,12 @@ impl AppConfig {
             github: github_config_from_env(),
             mailgun: mailgun_config_from_env(),
 
+            game_creation_rate_limit: parse_env("GAME_CREATION_RATE_LIMIT", 20),
+            game_creation_rate_limit_window_minutes: parse_env(
+                "GAME_CREATION_RATE_LIMIT_WINDOW_MINUTES",
+                10,
+            ),
+
             tokio_worker_multiplier: parse_env("ARENA_TOKIO_WORKER_MULTIPLIER", 2),
             gcp_logging: std::env::var("GCP_LOGGING").is_ok(),
             gcp_project_id: optional_env("GCP_PROJECT_ID"),
@@ -137,6 +150,8 @@ impl AppConfig {
             gcs_bucket: None,
             github: None,
             mailgun: None,
+            game_creation_rate_limit: 20,
+            game_creation_rate_limit_window_minutes: 10,
             tokio_worker_multiplier: 2,
             gcp_logging: false,
             gcp_project_id: None,

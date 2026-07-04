@@ -5,6 +5,7 @@ pub mod game;
 pub mod game_battlesnake;
 pub mod imported_account;
 pub mod leaderboard;
+pub mod rate_limit;
 pub mod session;
 pub mod tournament;
 pub mod turn;
