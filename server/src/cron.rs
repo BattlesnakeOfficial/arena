@@ -3,11 +3,17 @@ use std::time::Duration;
 use cja::cron::{CronRegistry, Worker};
 use tokio_util::sync::CancellationToken;
 
-use crate::jobs::{GameBackupJob, LeaderboardMatchmakerJob, StuckMatchSweeperJob};
+use crate::jobs::{
+    GameBackupJob, LeaderboardMatchmakerJob, SnakeHealthSweeperJob, StuckMatchSweeperJob,
+};
 use crate::state::AppState;
 
 /// Matchmaker cron interval in seconds. Shared with the matchmaker to compute games_per_run.
 pub const MATCHMAKER_INTERVAL_SECS: u64 = 15 * 60;
+
+/// Snake health sweep interval. With the default failure threshold of 3,
+/// a broken snake is pulled from matchmaking after ~90 minutes.
+pub const SNAKE_HEALTH_SWEEP_INTERVAL_SECS: u64 = 30 * 60;
 
 fn cron_registry() -> CronRegistry<AppState> {
     let mut registry = CronRegistry::new();
@@ -32,6 +38,14 @@ fn cron_registry() -> CronRegistry<AppState> {
         StuckMatchSweeperJob,
         Some("Re-enqueue evaluation for stuck tournament matches"),
         Duration::from_secs(2 * 60),
+    );
+
+    // Snake health sweeper: probes leaderboard snakes and pulls ones that
+    // keep failing, emailing the owner (BS-3534)
+    registry.register_job(
+        SnakeHealthSweeperJob,
+        Some("Health-check leaderboard snakes and deactivate broken ones"),
+        Duration::from_secs(SNAKE_HEALTH_SWEEP_INTERVAL_SECS),
     );
 
     registry
