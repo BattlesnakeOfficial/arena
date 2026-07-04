@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO battlesnakes (user_id, name, url, visibility)\n             VALUES ($1, 'Hissy', 'https://example.com/existing', 'private')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "127799bd4e49b1661bb20db7325b3bc0c8e5f37d67614b3f7ae91b6f53ad7a96"
+}

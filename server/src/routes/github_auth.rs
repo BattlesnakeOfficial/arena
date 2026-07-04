@@ -163,6 +163,38 @@ pub async fn github_auth_callback(
         .await
         .wrap_err("Failed to create or update user")?;
 
+    // Zero-friction migration path: if an imported play account carries
+    // this GitHub ID, claim it now. Errors are logged, not fatal — login
+    // must not break because migration data is off, and the claim retries
+    // on the next login since the account stays unclaimed.
+    let auto_claim = match crate::models::imported_account::try_auto_claim(
+        &state.db,
+        user.user_id,
+        user.external_github_id,
+    )
+    .await
+    {
+        Ok(summary) => summary,
+        Err(e) => {
+            tracing::error!(
+                user_id = %user.user_id,
+                error = %e,
+                "Auto-claim of imported play account failed"
+            );
+            None
+        }
+    };
+    if let Some(summary) = &auto_claim {
+        tracing::info!(
+            event_type = "play_claim_succeeded",
+            user_id = %user.user_id,
+            play_username = %summary.username,
+            snakes = summary.snakes_created,
+            grants = summary.grants_created,
+            "play account auto-claimed via GitHub link"
+        );
+    }
+
     // Associate the user with the current session
     associate_user_with_session(&state.db, current_session.session.session_id, user.user_id)
         .await
@@ -190,9 +222,18 @@ pub async fn github_auth_callback(
     }
 
     // Redirect to home page with success message
-    flasher
-        .add_flash("Successfully logged in with GitHub!")
-        .await?;
+    if let Some(summary) = auto_claim {
+        flasher
+            .add_flash(format!(
+                "Welcome back, {}! Your play.battlesnake.com account was linked: {} snake(s) and {} customization unlock(s) migrated.",
+                summary.username, summary.snakes_created, summary.grants_created
+            ))
+            .await?;
+    } else {
+        flasher
+            .add_flash("Successfully logged in with GitHub!")
+            .await?;
+    }
     Ok(Redirect::to("/"))
 }
 

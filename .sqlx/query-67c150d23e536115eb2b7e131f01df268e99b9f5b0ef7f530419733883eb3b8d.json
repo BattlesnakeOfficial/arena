@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO imported_grants (imported_account_id, customization_type, slug)\n        SELECT ia.imported_account_id, $2, $3\n        FROM imported_accounts ia\n        WHERE ia.play_account_id = $1\n        ON CONFLICT (imported_account_id, customization_type, slug)\n            DO UPDATE SET imported_account_id = EXCLUDED.imported_account_id\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "67c150d23e536115eb2b7e131f01df268e99b9f5b0ef7f530419733883eb3b8d"
+}

@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT password_hash FROM imported_accounts WHERE password_hash <> '' LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "password_hash",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "2b8e5f269bd9699a4af7faba2a7ffd44246aa9997b6c40a81b9cbc01330aa4a0"
+}

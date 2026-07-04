@@ -1,0 +1,37 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO imported_accounts (\n            play_user_id, play_account_id, email, password_hash,\n            is_email_verified, username, display_name, pronouns, country,\n            backstory, github_uid, github_login, points, points_high_score,\n            is_staff, play_created_at\n        )\n        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)\n        ON CONFLICT (play_user_id) DO UPDATE SET\n            email = $3,\n            password_hash = $4,\n            is_email_verified = $5,\n            username = $6,\n            display_name = $7,\n            pronouns = $8,\n            country = $9,\n            backstory = $10,\n            github_uid = $11,\n            github_login = $12,\n            points = $13,\n            points_high_score = $14,\n            is_staff = $15,\n            play_created_at = $16\n        RETURNING imported_account_id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "imported_account_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Bool",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Int8",
+        "Text",
+        "Int4",
+        "Int4",
+        "Bool",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "65631932ec92b55d2f3f53c55268764c83ff16f6739229349a14459c27fdd305"
+}

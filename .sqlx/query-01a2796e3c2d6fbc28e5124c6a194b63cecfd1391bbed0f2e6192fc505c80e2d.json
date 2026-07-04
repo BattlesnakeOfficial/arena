@@ -1,0 +1,68 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT email, username, display_name, pronouns, github_uid,\n                      github_login, points, is_staff, is_email_verified\n               FROM imported_accounts WHERE play_user_id = 'usr_linked'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "email",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "username",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "display_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "pronouns",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "github_uid",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 5,
+        "name": "github_login",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "points",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 7,
+        "name": "is_staff",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 8,
+        "name": "is_email_verified",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "01a2796e3c2d6fbc28e5124c6a194b63cecfd1391bbed0f2e6192fc505c80e2d"
+}

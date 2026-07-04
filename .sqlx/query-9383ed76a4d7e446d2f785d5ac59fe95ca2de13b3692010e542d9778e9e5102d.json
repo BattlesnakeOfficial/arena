@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT display_name FROM imported_accounts WHERE play_user_id = 'usr_linked'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "display_name",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "9383ed76a4d7e446d2f785d5ac59fe95ca2de13b3692010e542d9778e9e5102d"
+}

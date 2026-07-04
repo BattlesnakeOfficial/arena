@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            COUNT(*) FILTER (WHERE user_id = $1) as \"by_user!\",\n            COUNT(*) FILTER (WHERE lower(email) = lower($2)) as \"by_email!\"\n        FROM claim_attempts\n        WHERE attempted_at > NOW() - INTERVAL '1 hour'\n          AND (user_id = $1 OR lower(email) = lower($2))\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "by_user!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "by_email!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "ae043de43936090dcd97da656cdbff4713cadd16e448598a2df94c546185c831"
+}

@@ -14,6 +14,7 @@ pub mod admin;
 pub mod api;
 pub mod auth;
 pub mod battlesnake;
+pub mod claim;
 pub mod customizations;
 pub mod game;
 pub mod github_auth;
@@ -77,6 +78,8 @@ pub fn routes(app_state: AppState) -> axum::Router {
         .route("/auth/cli-token", get(github_auth::cli_token_page))
         // Battlesnake routes
         .route("/customizations", get(customizations::list_customizations))
+        .route("/claim", get(claim::claim_page))
+        .route("/claim", post(claim::submit_claim))
         .route("/battlesnakes", get(battlesnake::list_battlesnakes))
         .route("/battlesnakes/new", get(battlesnake::new_battlesnake))
         .route(
