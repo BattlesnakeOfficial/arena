@@ -1,6 +1,7 @@
 use color_eyre::eyre::{Context as _, eyre};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 
+use crate::email::{Mailer, MailgunConfig};
 use crate::game_channels::GameChannels;
 use crate::github::auth::GitHubOAuthConfig;
 
@@ -17,6 +18,8 @@ pub struct AppState {
     pub game_channels: GameChannels,
     /// HTTP client for calling snake APIs
     pub http_client: reqwest::Client,
+    /// Transactional email sender (no-op until Mailgun is configured)
+    pub mailer: Mailer,
     /// Scoring algorithm registry
     pub scoring: std::sync::Arc<crate::scoring::ScoringRegistry>,
 }
@@ -110,6 +113,18 @@ impl AppState {
             .wrap_err("Failed to create HTTP client")?;
         tracing::info!("HTTP client initialized for snake API calls");
 
+        // Optional: Mailgun transactional email (disabled until configured)
+        let mailer = match MailgunConfig::from_env()? {
+            Some(config) => {
+                tracing::info!(domain = %config.domain, "Mailgun configured for email");
+                Mailer::new(Some(config), http_client.clone())
+            }
+            None => {
+                tracing::info!("MAILGUN_API_KEY not set, transactional email disabled");
+                Mailer::new(None, http_client.clone())
+            }
+        };
+
         let mut scoring_registry = crate::scoring::ScoringRegistry::new();
         scoring_registry.register(Box::new(crate::scoring::weng_lin::WengLinScoring));
         scoring_registry.register(Box::new(crate::scoring::win_rate::WinRateScoring));
@@ -123,6 +138,7 @@ impl AppState {
             gcs_bucket,
             game_channels: GameChannels::new(),
             http_client,
+            mailer,
             scoring: std::sync::Arc::new(scoring_registry),
         })
     }
@@ -142,6 +158,7 @@ impl AppState {
             gcs_bucket: None,
             game_channels: GameChannels::new(),
             http_client: reqwest::Client::new(),
+            mailer: crate::email::Mailer::disabled(),
             scoring: std::sync::Arc::new(crate::scoring::ScoringRegistry::new()),
         }
     }

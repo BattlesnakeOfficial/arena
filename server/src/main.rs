@@ -14,6 +14,7 @@ mod backup;
 mod cron;
 mod customizations;
 mod django_password;
+mod email;
 mod engine;
 mod engine_models;
 mod errors;

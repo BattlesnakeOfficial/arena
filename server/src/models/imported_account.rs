@@ -258,6 +258,9 @@ pub struct ClaimSummary {
     pub snakes_created: usize,
     pub grants_created: u64,
     pub username: String,
+    /// The play account's email, so callers can send a claim notification
+    /// to the original owner.
+    pub email: String,
 }
 
 /// Claim an imported account for an arena user: copy the display identity,
@@ -278,7 +281,7 @@ pub async fn claim_account(
         UPDATE imported_accounts
         SET claimed_by_user_id = $2, claimed_at = NOW()
         WHERE imported_account_id = $1 AND claimed_by_user_id IS NULL
-        RETURNING username, display_name
+        RETURNING username, display_name, email
         "#,
         imported_account_id,
         user_id,
@@ -429,6 +432,7 @@ pub async fn claim_account(
         snakes_created,
         grants_created,
         username: claimed.username,
+        email: claimed.email,
     }))
 }
 
