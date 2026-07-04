@@ -54,6 +54,28 @@ pub struct StageSnake {
 /// Upsert a play account into staging. Re-runnable: refreshes play-side
 /// data on conflict but never touches claim state.
 pub async fn stage_account(pool: &PgPool, account: &StageAccount) -> cja::Result<Uuid> {
+    // A GitHub link can move between play users across imports (user A
+    // unlinks, user B links the same account — legal, since social_django's
+    // (provider, uid) uniqueness holds at every instant). On re-import, A's
+    // stale staging row still holds the uid, so B's upsert would trip the
+    // `github_uid` unique index and abort the whole run. Release the uid
+    // from any other staging row first; A's own row gets refreshed (to NULL
+    // or its new uid) when A is processed later in this same import.
+    if let Some(github_uid) = account.github_uid {
+        sqlx::query!(
+            r#"
+            UPDATE imported_accounts
+            SET github_uid = NULL
+            WHERE github_uid = $1 AND play_user_id <> $2
+            "#,
+            github_uid,
+            account.play_user_id,
+        )
+        .execute(pool)
+        .await
+        .wrap_err("Failed to release GitHub uid from stale staging row")?;
+    }
+
     let row = sqlx::query!(
         r#"
         INSERT INTO imported_accounts (
@@ -140,7 +162,11 @@ pub async fn stage_snake(pool: &PgPool, snake: &StageSnake) -> cja::Result<bool>
 }
 
 /// Upsert a play customization grant into staging, keyed by (type, slug).
-/// Returns false if the owner isn't staged.
+/// Returns false only when the owner isn't staged (a real orphan). On a
+/// re-import of an already-staged grant, the no-op `DO UPDATE` keeps
+/// `rows_affected` at 1 so it counts as staged, not orphaned — mirroring
+/// `stage_snake`. (Plain `DO NOTHING` reports 0 affected on conflict, which
+/// would misreport every grant as orphaned on the second run.)
 pub async fn stage_grant(
     pool: &PgPool,
     play_account_id: &str,
@@ -153,7 +179,8 @@ pub async fn stage_grant(
         SELECT ia.imported_account_id, $2, $3
         FROM imported_accounts ia
         WHERE ia.play_account_id = $1
-        ON CONFLICT (imported_account_id, customization_type, slug) DO NOTHING
+        ON CONFLICT (imported_account_id, customization_type, slug)
+            DO UPDATE SET imported_account_id = EXCLUDED.imported_account_id
         "#,
         play_account_id,
         customization_type,
@@ -186,6 +213,23 @@ pub async fn find_unclaimed_by_github_uid(
     .wrap_err("Failed to look up imported account by GitHub ID")?;
 
     Ok(account)
+}
+
+/// Any one real imported password hash, for the claim endpoint's timing
+/// decoy — verifying against a genuine play hash makes the no-candidate
+/// path cost the same as an existing account (matching play's real
+/// iteration count) instead of a hardcoded guess. Returns None before the
+/// first import or when every account is OAuth-only (empty hash), in which
+/// case no password-bearing email exists to enumerate anyway.
+pub async fn representative_password_hash(pool: &PgPool) -> cja::Result<Option<String>> {
+    let row = sqlx::query!(
+        "SELECT password_hash FROM imported_accounts WHERE password_hash <> '' LIMIT 1"
+    )
+    .fetch_optional(pool)
+    .await
+    .wrap_err("Failed to fetch a representative password hash")?;
+
+    Ok(row.map(|r| r.password_hash))
 }
 
 /// All unclaimed accounts matching an email case-insensitively. Play
@@ -718,6 +762,47 @@ mod tests {
         let c = record_and_count_claim_attempts(&pool, other, "VICTIM@example.com").await?;
         assert_eq!(c.by_user, 1);
         assert_eq!(c.by_email, 2);
+
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn reimport_survives_github_uid_move_between_users(pool: PgPool) -> cja::Result<()> {
+        // Import 1: user A owns GitHub uid 100.
+        let mut a = play_account(1);
+        a.github_uid = Some(100);
+        stage_account(&pool, &a).await?;
+
+        // Between imports, in play, A unlinks and B links the same GitHub
+        // account. Import 2 processes B first (stale A row still holds 100).
+        let mut b = play_account(2);
+        b.github_uid = Some(100);
+        stage_account(&pool, &b).await?; // must NOT abort on the uid unique index
+
+        // B now owns the uid; A's stale row was released to NULL.
+        let a_uid =
+            sqlx::query!("SELECT github_uid FROM imported_accounts WHERE play_user_id = 'usr_1'")
+                .fetch_one(&pool)
+                .await?
+                .github_uid;
+        assert_eq!(a_uid, None);
+
+        let b_owner = find_unclaimed_by_github_uid(&pool, 100)
+            .await?
+            .expect("uid 100 should resolve to exactly one account");
+        assert_eq!(b_owner.play_user_id, "usr_2");
+
+        // Then A is processed with its real (now unlinked) play data.
+        let mut a_now = play_account(1);
+        a_now.github_uid = None;
+        stage_account(&pool, &a_now).await?;
+        assert_eq!(
+            find_unclaimed_by_github_uid(&pool, 100)
+                .await?
+                .unwrap()
+                .play_user_id,
+            "usr_2"
+        );
 
         Ok(())
     }

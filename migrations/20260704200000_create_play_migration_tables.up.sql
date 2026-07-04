@@ -89,6 +89,11 @@ CREATE TABLE imported_grants (
 -- email — arena login is GitHub-only, so per-user alone would let an
 -- attacker mint fresh budgets against a single victim). Every attempt is
 -- recorded before verification, so the count is race-safe.
+--
+-- Rows are only ever read through the trailing 1-hour window and never
+-- deleted; growth is bounded by the claim-attempt rate (low). If the
+-- migration window is long-lived, a periodic prune of rows older than an
+-- hour would keep it tidy — not wired up here.
 CREATE TABLE claim_attempts (
     claim_attempt_id UUID PRIMARY KEY DEFAULT uuid_generate_v4 (),
     user_id UUID NOT NULL REFERENCES users (user_id) ON DELETE CASCADE,

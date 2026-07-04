@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE imported_accounts\n            SET github_uid = NULL\n            WHERE github_uid = $1 AND play_user_id <> $2\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "da73e11b1d250696c8f498d4f1117a995235d82c1212431f8d5adc01522d10fe"
+}

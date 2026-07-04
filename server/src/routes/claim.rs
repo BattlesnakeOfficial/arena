@@ -21,6 +21,13 @@ const MAX_ATTEMPTS_PER_USER_PER_HOUR: i64 = 5;
 /// real brute-force cap, since arena login is GitHub-only and an attacker
 /// could otherwise mint a fresh per-user budget per throwaway account. A
 /// legitimate owner needs one correct attempt, so this only bites abuse.
+///
+/// Accepted tradeoff: a cross-user per-email cap means an attacker can burn
+/// this budget to lock a known play email out of *password* claim for an
+/// hour. That's bounded and has escape hatches — GitHub auto-link (the
+/// primary path) is unaffected, and the owner can retry after the window or
+/// reach out on Discord. The alternative (per-user only) is the exact hole
+/// this closes, so the DoS is the lesser evil. Revisit if griefing shows up.
 const MAX_ATTEMPTS_PER_EMAIL_PER_HOUR: i64 = 10;
 
 fn claim_form(error: Option<&str>) -> Markup {
@@ -140,8 +147,14 @@ pub async fn submit_claim(
         // No candidate matched. If the email was unknown we did zero PBKDF2
         // work above; spend one now so a non-existent email costs the same
         // as a wrong password and can't be told apart by response time.
+        // Decoy against a real imported hash so its iteration count (and
+        // thus timing) matches a genuine account rather than a guessed one.
         if candidates.is_empty() {
-            django_password::spend_decoy_work(&form.password);
+            let decoy = imported_account::representative_password_hash(&state.db)
+                .await
+                .wrap_err("Failed to fetch decoy hash")?
+                .unwrap_or_else(|| django_password::FALLBACK_DECOY_HASH.to_string());
+            django_password::spend_decoy_work(&form.password, &decoy);
         }
         tracing::info!(
             event_type = "play_claim_failed",

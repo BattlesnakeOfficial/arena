@@ -26,6 +26,27 @@ pub struct ImportCounts {
 pub async fn import_from_play(play: &PgPool, arena: &PgPool) -> cja::Result<ImportCounts> {
     let mut counts = ImportCounts::default();
 
+    // Play users without a core_account (e.g. createsuperuser, which makes
+    // only the User) have nothing to migrate and are dropped by the inner
+    // JOIN below. Surface the count so the drop isn't silent.
+    let accountless: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*)
+        FROM authentication_user u
+        LEFT JOIN core_account a ON a.user_id = u.id
+        WHERE a.id IS NULL
+        "#,
+    )
+    .fetch_one(play)
+    .await
+    .wrap_err("Failed to count accountless play users")?;
+    if accountless > 0 {
+        tracing::warn!(
+            accountless_users = accountless,
+            "Play users without a core_account are excluded from the import"
+        );
+    }
+
     // One row per play user: identity + profile + optional GitHub link.
     // uid/extra_data are cast to text so this works against both older
     // (text) and newer (jsonb) social_django schemas.
@@ -410,6 +431,12 @@ mod tests {
 
         let counts = import_from_play(&pool, &pool).await?;
         assert_eq!(counts.accounts, 3);
+        // Re-staged grants must count as staged, not orphaned (regression:
+        // ON CONFLICT DO NOTHING reported 0 rows_affected on the 2nd run).
+        assert_eq!(counts.grants, 2);
+        assert_eq!(counts.grants_orphaned, 1);
+        // Snakes likewise stay counted on re-import.
+        assert_eq!(counts.snakes, 2);
 
         let total = sqlx::query!(r#"SELECT COUNT(*) as "count!" FROM imported_accounts"#)
             .fetch_one(&pool)
