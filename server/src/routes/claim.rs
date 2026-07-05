@@ -213,6 +213,9 @@ pub async fn submit_claim(
         state.config.email_per_recipient_hourly_limit,
         &summary,
     );
+    state
+        .discord
+        .notify_account_claimed(&summary.username, summary.snakes_created);
 
     flasher
         .add_flash(format!(
@@ -492,6 +495,9 @@ pub async fn complete_email_claim(
         state.config.email_per_recipient_hourly_limit,
         &summary,
     );
+    state
+        .discord
+        .notify_account_claimed(&summary.username, summary.snakes_created);
 
     flasher
         .add_flash(format!(

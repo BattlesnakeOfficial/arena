@@ -173,7 +173,12 @@ pub async fn create_battlesnake(
         battlesnake::create_battlesnake(&state.db, user.user_id, create_data.clone()).await;
 
     match battlesnake_result {
-        Ok(_) => {
+        Ok(snake) => {
+            if snake.visibility == Visibility::Public {
+                state
+                    .discord
+                    .notify_snake_registered(&snake.name, &user.github_login);
+            }
             // Flash message for success and redirect
             let updated_session = session::set_flash_message(
                 &state.db,

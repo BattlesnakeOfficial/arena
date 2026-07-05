@@ -13,6 +13,7 @@ mod backup;
 mod config;
 mod cron;
 mod customizations;
+mod discord;
 mod django_password;
 mod email;
 mod engine;

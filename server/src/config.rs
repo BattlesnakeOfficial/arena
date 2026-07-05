@@ -47,6 +47,7 @@ pub struct AppConfig {
     pub gcs_bucket: Option<String>,
     pub github: Option<GitHubOAuthConfig>,
     pub mailgun: Option<MailgunConfig>,
+    pub discord_webhook_url: Option<String>,
 
     // Rate limiting
     /// Max games an account may create within the sliding window (shared
@@ -116,6 +117,7 @@ impl AppConfig {
             gcs_bucket: optional_env("GCS_BUCKET"),
             github: github_config_from_env(),
             mailgun: mailgun_config_from_env(),
+            discord_webhook_url: optional_env("DISCORD_WEBHOOK_URL"),
 
             // Limit 0 is a deliberate "block all game creation" switch; a
             // zero or negative WINDOW, though, would silently disable the
@@ -165,6 +167,7 @@ impl AppConfig {
             gcs_bucket: None,
             github: None,
             mailgun: None,
+            discord_webhook_url: None,
             game_creation_rate_limit: 20,
             game_creation_rate_limit_window_minutes: 10,
             snake_health_failure_threshold: 3,
@@ -277,6 +280,7 @@ mod tests {
         let c = AppConfig::test_default();
         assert!(c.github.is_none());
         assert!(c.mailgun.is_none());
+        assert!(c.discord_webhook_url.is_none());
         assert!(c.engine_database_url.is_none());
         assert!(c.gcs_bucket.is_none());
         assert!(c.gcp_project_id.is_none());

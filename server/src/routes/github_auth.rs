@@ -163,6 +163,11 @@ pub async fn github_auth_callback(
         .await
         .wrap_err("Failed to create or update user")?;
 
+    // Detect first-time signup: on INSERT both created_at and updated_at
+    // default to NOW() (same transaction); the BEFORE UPDATE trigger changes
+    // updated_at on every subsequent login, so equality means new user.
+    let is_new_user = user.created_at == user.updated_at;
+
     // Zero-friction migration path: if an imported play account carries
     // this GitHub ID, claim it now. Errors are logged, not fatal — login
     // must not break because migration data is off, and the claim retries
@@ -199,6 +204,13 @@ pub async fn github_auth_callback(
             state.config.email_per_recipient_hourly_limit,
             summary,
         );
+        state
+            .discord
+            .notify_account_claimed(&summary.username, summary.snakes_created);
+    }
+
+    if is_new_user {
+        state.discord.notify_user_signup(&user.github_login);
     }
 
     // Associate the user with the current session
