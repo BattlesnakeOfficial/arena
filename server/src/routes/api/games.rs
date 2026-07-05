@@ -1,7 +1,7 @@
 use axum::{
     Json,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{StatusCode, header},
     response::IntoResponse,
 };
 use serde::{Deserialize, Serialize};
@@ -12,7 +12,7 @@ use crate::{
     models::{
         game::{self, CreateGameWithSnakes, Game, GameBoardSize, GameStatus, GameType},
         game_battlesnake::{self, GameBattlesnakeWithDetails},
-        turn,
+        rate_limit, turn,
     },
     routes::auth::ApiUser,
     state::AppState,
@@ -150,6 +150,46 @@ pub async fn create_game(
     ApiUser(user): ApiUser,
     Json(request): Json<CreateGameRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    // Rate limit game creation per account (shared with the web flow).
+    // The attempt is recorded before the check so concurrent requests see
+    // each other, and the returned count includes this attempt — reject
+    // when it exceeds the limit.
+    let limit = state.config.game_creation_rate_limit;
+    let window_minutes = state.config.game_creation_rate_limit_window_minutes;
+    let attempts = rate_limit::record_and_count_game_creation_attempts(
+        &state.db,
+        user.user_id,
+        "api",
+        window_minutes,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to record game creation attempt: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Internal server error".to_string(),
+        )
+    })?;
+    if attempts > limit {
+        tracing::warn!(
+            event_type = "game_creation_rate_limited",
+            user_id = %user.user_id,
+            attempts = attempts,
+            limit = limit,
+            source = "api",
+            "game creation rate limited"
+        );
+        let window_seconds = i64::from(window_minutes) * 60;
+        return Ok((
+            StatusCode::TOO_MANY_REQUESTS,
+            [(header::RETRY_AFTER, window_seconds.to_string())],
+            format!(
+                "Rate limit exceeded: max {limit} games per {window_minutes} minutes. Try again later."
+            ),
+        )
+            .into_response());
+    }
+
     // Parse board size
     let board_size =
         parse_board_size(&request.board).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
@@ -274,7 +314,8 @@ pub async fn create_game(
             id: game.game_id,
             status: game.status.as_str().to_string(),
         }),
-    ))
+    )
+        .into_response())
 }
 
 /// GET /api/games - List games

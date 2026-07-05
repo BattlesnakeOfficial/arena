@@ -15,6 +15,7 @@ use crate::{
     models::game_battlesnake,
     models::leaderboard,
     models::session,
+    models::snake_health_status,
     models::tournament,
     models::user::get_user_by_id,
     routes::auth::{CurrentUser, CurrentUserWithSession},
@@ -462,6 +463,68 @@ fn compute_stats(history: &[game_battlesnake::GameHistoryEntry]) -> BattlesnakeS
     }
 }
 
+/// POST /battlesnakes/{id}/reactivate — owner recovery from a health-sweeper
+/// deactivation (BS-3534). Re-enables exactly the leaderboard entries the
+/// sweeper disabled (manual pauses stay paused) and resets the failure
+/// streak so the next sweep starts fresh.
+pub async fn reactivate_battlesnake(
+    State(state): State<AppState>,
+    CurrentUserWithSession { user, session }: CurrentUserWithSession,
+    Path(battlesnake_id): Path<Uuid>,
+) -> ServerResult<impl IntoResponse, StatusCode> {
+    let owns = battlesnake::belongs_to_user(&state.db, battlesnake_id, user.user_id)
+        .await
+        .wrap_err("Failed to check battlesnake ownership")?;
+
+    if !owns {
+        return Err(
+            "Battlesnake not found or you don't have permission to reactivate it".to_string(),
+        )
+        .with_status(StatusCode::FORBIDDEN);
+    }
+
+    let was_deactivated = snake_health_status::get(&state.db, battlesnake_id)
+        .await
+        .wrap_err("Failed to get snake health status")?
+        .is_some_and(|s| s.deactivated_at.is_some());
+
+    if !was_deactivated {
+        session::set_flash_message(
+            &state.db,
+            session.session_id,
+            "This battlesnake isn't paused for health issues.".to_string(),
+            session::FLASH_TYPE_ERROR,
+        )
+        .await
+        .wrap_err("Failed to set flash message")?;
+
+        return Ok(
+            Redirect::to(&format!("/battlesnakes/{battlesnake_id}/profile")).into_response(),
+        );
+    }
+
+    snake_health_status::reactivate(&state.db, battlesnake_id)
+        .await
+        .wrap_err("Failed to reactivate battlesnake")?;
+
+    tracing::info!(
+        battlesnake_id = %battlesnake_id,
+        user_id = %user.user_id,
+        "Owner reactivated snake for leaderboard matchmaking"
+    );
+
+    session::set_flash_message(
+        &state.db,
+        session.session_id,
+        "Matchmaking resumed! Your snake will be picked up in upcoming matches.".to_string(),
+        session::FLASH_TYPE_SUCCESS,
+    )
+    .await
+    .wrap_err("Failed to set flash message")?;
+
+    Ok(Redirect::to(&format!("/battlesnakes/{battlesnake_id}/profile")).into_response())
+}
+
 // View a battlesnake's profile with game history and stats
 #[allow(clippy::too_many_lines)]
 pub async fn view_battlesnake_profile(
@@ -492,6 +555,11 @@ pub async fn view_battlesnake_profile(
         .await
         .wrap_err("Failed to get leaderboard entries")?;
 
+    // Health-sweeper state, for the owner-facing deactivation banner
+    let health_status = snake_health_status::get(&state.db, battlesnake_id)
+        .await
+        .wrap_err("Failed to get snake health status")?;
+
     let flash = page_factory.flash.clone();
 
     // Compute stats
@@ -521,6 +589,29 @@ pub async fn view_battlesnake_profile(
                 @if let Some(message) = flash.message() {
                     div class=(flash.class()) {
                         p { (message) }
+                    }
+                }
+
+                // Auto-deactivation banner: the health sweeper pulled this
+                // snake from matchmaking; the owner can resume once fixed.
+                @if is_owner {
+                    @if let Some(status) = health_status.as_ref().filter(|s| s.deactivated_at.is_some()) {
+                        div class="alert alert-warning" {
+                            p {
+                                strong { "Paused from leaderboard matchmaking. " }
+                                "This snake failed " (status.consecutive_failures)
+                                " health checks in a row, so we stopped matching it to protect its rating."
+                            }
+                            @if let Some(failure) = status.last_failure.as_ref() {
+                                p class="small" { "Most recent problem: " (failure) }
+                            }
+                            p class="small" {
+                                "Fix your snake (the Test Snake button runs the same checks), then resume."
+                            }
+                            form action={"/battlesnakes/"(battlesnake_id)"/reactivate"} method="post" style="display: inline;" {
+                                button type="submit" class="btn btn-sm btn-success" { "Resume Matchmaking" }
+                            }
+                        }
                     }
                 }
 
@@ -792,7 +883,14 @@ pub async fn test_battlesnake(
         .wrap_err("Failed to build HTTP client for snake test")?;
 
     let (engine_game, snake_id) = snake_health::build_test_game(&snake);
-    let report = snake_health::run_health_check(&client, &snake.url, &engine_game, &snake_id).await;
+    let report = snake_health::run_health_check(
+        &client,
+        &snake.url,
+        &engine_game,
+        &snake_id,
+        snake_health::FailureMode::RunAll,
+    )
+    .await;
 
     let failures = report.failure_count();
     let all_ok = failures == 0;

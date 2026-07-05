@@ -91,6 +91,12 @@ pub fn routes(app_state: AppState) -> axum::Router {
         .route("/customizations", get(customizations::list_customizations))
         .route("/claim", get(claim::claim_page))
         .route("/claim", post(claim::submit_claim))
+        .route("/claim/email", get(claim::email_claim_page))
+        .route("/claim/email", post(claim::submit_email_claim))
+        .route(
+            "/claim/email/verify",
+            get(claim::email_claim_verify_page).post(claim::complete_email_claim),
+        )
         .route("/battlesnakes", get(battlesnake::list_battlesnakes))
         .route("/battlesnakes/new", get(battlesnake::new_battlesnake))
         .route(
@@ -116,6 +122,10 @@ pub fn routes(app_state: AppState) -> axum::Router {
         .route(
             "/battlesnakes/{id}/test",
             axum::routing::post(battlesnake::test_battlesnake),
+        )
+        .route(
+            "/battlesnakes/{id}/reactivate",
+            axum::routing::post(battlesnake::reactivate_battlesnake),
         )
         // Game routes
         .route("/games/new", get(game::new_game))

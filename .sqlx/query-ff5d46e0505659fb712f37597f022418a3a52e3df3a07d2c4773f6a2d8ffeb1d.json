@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE email_log SET sent_at = NOW() - INTERVAL '2 hours'\n             WHERE lower(recipient) = 'a@example.com'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "ff5d46e0505659fb712f37597f022418a3a52e3df3a07d2c4773f6a2d8ffeb1d"
+}

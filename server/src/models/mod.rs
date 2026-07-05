@@ -1,11 +1,15 @@
 pub mod api_token;
 pub mod battlesnake;
+pub mod claim_email_token;
+pub mod email_log;
 pub mod flow;
 pub mod game;
 pub mod game_battlesnake;
 pub mod imported_account;
 pub mod leaderboard;
+pub mod rate_limit;
 pub mod session;
+pub mod snake_health_status;
 pub mod tournament;
 pub mod turn;
 pub mod user;

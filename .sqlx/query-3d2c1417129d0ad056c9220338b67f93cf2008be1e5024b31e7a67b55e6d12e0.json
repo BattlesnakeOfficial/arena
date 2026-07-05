@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM claim_attempts\n         WHERE attempted_at < NOW() - make_interval(hours => $1)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "3d2c1417129d0ad056c9220338b67f93cf2008be1e5024b31e7a67b55e6d12e0"
+}

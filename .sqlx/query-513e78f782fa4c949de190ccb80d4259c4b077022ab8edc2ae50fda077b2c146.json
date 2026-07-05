@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO claim_attempts (user_id, email, attempted_at)\n             VALUES ($1, 'p@example.com', NOW() - INTERVAL '25 hours'),\n                    ($1, 'p@example.com', NOW())",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "513e78f782fa4c949de190ccb80d4259c4b077022ab8edc2ae50fda077b2c146"
+}
