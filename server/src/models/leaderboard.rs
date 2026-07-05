@@ -159,7 +159,7 @@ pub async fn get_or_create_entry(
         r#"INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id)
          VALUES ($1, $2)
          ON CONFLICT (leaderboard_id, battlesnake_id) DO UPDATE
-            SET disabled_at = NULL, updated_at = NOW()
+            SET disabled_at = NULL, disabled_reason = NULL, updated_at = NOW()
          RETURNING
             leaderboard_entry_id, leaderboard_id, battlesnake_id,
             mu, sigma, display_score, games_played, first_place_finishes, non_first_finishes,
@@ -443,7 +443,11 @@ where
     Ok(())
 }
 
-/// Pause or resume a leaderboard entry
+/// Pause or resume a leaderboard entry (owner/admin action).
+///
+/// Always clears `disabled_reason`: a manual pause is reason-less, and a
+/// manual resume of a health-disabled entry means the owner has taken over
+/// from the sweeper.
 pub async fn set_disabled(
     pool: &PgPool,
     entry_id: Uuid,
@@ -451,7 +455,7 @@ pub async fn set_disabled(
 ) -> cja::Result<()> {
     sqlx::query!(
         r#"UPDATE leaderboard_entries
-         SET disabled_at = $2
+         SET disabled_at = $2, disabled_reason = NULL
          WHERE leaderboard_entry_id = $1"#,
         entry_id,
         disabled_at

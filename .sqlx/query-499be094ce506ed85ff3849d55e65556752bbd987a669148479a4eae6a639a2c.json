@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE snake_health_status\n             SET last_checked_at = last_checked_at - INTERVAL '16 minutes'\n             WHERE battlesnake_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "499be094ce506ed85ff3849d55e65556752bbd987a669148479a4eae6a639a2c"
+}

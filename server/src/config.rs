@@ -48,6 +48,10 @@ pub struct AppConfig {
     pub github: Option<GitHubOAuthConfig>,
     pub mailgun: Option<MailgunConfig>,
 
+    /// Consecutive failed health probes before the sweeper pulls a snake
+    /// from leaderboard matchmaking (BS-3534).
+    pub snake_health_failure_threshold: i32,
+
     // Runtime / telemetry
     pub tokio_worker_multiplier: usize,
     pub gcp_logging: bool,
@@ -102,6 +106,8 @@ impl AppConfig {
             github: github_config_from_env(),
             mailgun: mailgun_config_from_env(),
 
+            snake_health_failure_threshold: parse_env("SNAKE_HEALTH_FAILURE_THRESHOLD", 3).max(1),
+
             tokio_worker_multiplier: parse_env("ARENA_TOKIO_WORKER_MULTIPLIER", 2),
             gcp_logging: std::env::var("GCP_LOGGING").is_ok(),
             gcp_project_id: optional_env("GCP_PROJECT_ID"),
@@ -137,6 +143,7 @@ impl AppConfig {
             gcs_bucket: None,
             github: None,
             mailgun: None,
+            snake_health_failure_threshold: 3,
             tokio_worker_multiplier: 2,
             gcp_logging: false,
             gcp_project_id: None,

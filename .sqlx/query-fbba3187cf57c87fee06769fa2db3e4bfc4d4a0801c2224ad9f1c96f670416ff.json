@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT COALESCE(u.github_email, ia.email) as \"email?\"\n         FROM battlesnakes b\n         JOIN users u ON b.user_id = u.user_id\n         LEFT JOIN imported_accounts ia ON ia.claimed_by_user_id = u.user_id\n         WHERE b.battlesnake_id = $1\n         ORDER BY ia.is_email_verified DESC NULLS LAST\n         LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "email?",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "fbba3187cf57c87fee06769fa2db3e4bfc4d4a0801c2224ad9f1c96f670416ff"
+}

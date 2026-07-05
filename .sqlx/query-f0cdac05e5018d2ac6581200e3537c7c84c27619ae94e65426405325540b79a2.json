@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO snake_health_status (battlesnake_id, consecutive_failures, last_checked_at, last_failure)\n         VALUES ($1, 1, NOW(), $2)\n         ON CONFLICT (battlesnake_id) DO UPDATE\n            SET consecutive_failures = CASE\n                    WHEN snake_health_status.last_checked_at\n                         <= NOW() - make_interval(mins => $3)\n                    THEN snake_health_status.consecutive_failures + 1\n                    ELSE GREATEST(snake_health_status.consecutive_failures, 1)\n                END,\n                last_checked_at = NOW(),\n                last_failure = $2,\n                updated_at = NOW()\n         RETURNING consecutive_failures",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "consecutive_failures",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "f0cdac05e5018d2ac6581200e3537c7c84c27619ae94e65426405325540b79a2"
+}
