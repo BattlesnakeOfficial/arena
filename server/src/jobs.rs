@@ -201,6 +201,23 @@ impl Job<AppState> for StuckMatchSweeperJob {
     }
 }
 
+/// Cron job that prunes rate-limit bookkeeping (game_creation_attempts,
+/// claim_attempts) past its retention window. The limits record every
+/// attempt — including rejected ones — so without this the tables grow
+/// without bound.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RateLimitPruneJob;
+
+#[async_trait::async_trait]
+impl Job<AppState> for RateLimitPruneJob {
+    const NAME: &'static str = "RateLimitPruneJob";
+
+    async fn run(&self, app_state: AppState) -> cja::Result<()> {
+        crate::models::rate_limit::prune_old_attempts(&app_state.db).await?;
+        Ok(())
+    }
+}
+
 /// Cron job that health-checks every snake in leaderboard matchmaking and
 /// pulls the ones that keep failing (BS-3534). All bookkeeping is idempotent
 /// and the owner email is CAS-gated, so retries and duplicate enqueues are
@@ -231,5 +248,6 @@ cja::impl_job_registry!(
     RunMatchJob,
     UpdateTournamentStatusJob,
     StuckMatchSweeperJob,
+    RateLimitPruneJob,
     SnakeHealthSweeperJob
 );

@@ -1784,6 +1784,44 @@ pub async fn run_round(
         .await;
     }
 
+    // Every game a round creates is charged to the owner's game-creation
+    // budget (see tournament_match); this gate is where that budget is
+    // enforced, since the match jobs themselves must never fail mid-flight.
+    // A round can overshoot the limit by its own games (they're charged as
+    // they're created, not up front), but the next click gets stopped here —
+    // which is what turns "reset and re-run forever" from unlimited games
+    // into the same throughput cap everyone else has.
+    let limit = state.config.game_creation_rate_limit;
+    let window_minutes = state.config.game_creation_rate_limit_window_minutes;
+    let attempts = crate::models::rate_limit::count_recent_game_creation_attempts(
+        &state.db,
+        user.user_id,
+        window_minutes,
+    )
+    .await
+    .wrap_err("Failed to count game creation attempts")?;
+    if attempts >= limit {
+        tracing::warn!(
+            event_type = "game_creation_rate_limited",
+            user_id = %user.user_id,
+            attempts = attempts,
+            limit = limit,
+            source = "tournament",
+            "tournament round blocked by game creation rate limit"
+        );
+        return flash_redirect(
+            &state,
+            session.session_id,
+            format!(
+                "You're over the game-creation limit ({limit} games per {window_minutes} \
+                 minutes, tournament games included). Wait a bit before running the next round."
+            ),
+            session::FLASH_TYPE_ERROR,
+            &detail_url,
+        )
+        .await;
+    }
+
     // Pin the job to the round we just validated and are about to tell the
     // owner about: if the tournament moves on (or is reset and restarted)
     // before the job runs, the stale payload no-ops instead of auto-running
