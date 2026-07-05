@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO snake_health_status (battlesnake_id, consecutive_failures, last_checked_at, last_failure)\n         VALUES ($1, 0, NOW(), NULL)\n         ON CONFLICT (battlesnake_id) DO UPDATE\n            SET consecutive_failures = 0,\n                last_checked_at = NOW(),\n                last_failure = NULL,\n                deactivated_at = NULL,\n                updated_at = NOW()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "8db09d8e62c4b26f26eb4463a0894415d6e1f4690be9a1c854726261b065d77e"
+}

@@ -1,0 +1,46 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT battlesnake_id, consecutive_failures, last_checked_at, last_failure, deactivated_at\n         FROM snake_health_status\n         WHERE battlesnake_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "battlesnake_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "consecutive_failures",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 2,
+        "name": "last_checked_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 3,
+        "name": "last_failure",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "deactivated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "f8dc4da7984efe7b524cf9c5339ffecec835c52084ef9c1f695f3431b1b415de"
+}

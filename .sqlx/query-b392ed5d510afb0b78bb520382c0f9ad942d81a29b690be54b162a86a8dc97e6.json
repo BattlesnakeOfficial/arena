@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO claim_email_tokens\n            (token_hash, imported_account_id, requested_by_user_id, expires_at)\n         VALUES ($1, $2, $3, NOW() + make_interval(mins => $4))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Uuid",
+        "Uuid",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b392ed5d510afb0b78bb520382c0f9ad942d81a29b690be54b162a86a8dc97e6"
+}

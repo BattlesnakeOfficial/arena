@@ -117,18 +117,41 @@ impl DiscordNotifier {
 
 // --- Message builders (private, testable from in-file tests) ---
 
+/// Longest interpolated name we'll show. Snake names have no length limit
+/// anywhere, and a message past Discord's 2000-char content cap gets a 400
+/// and is silently dropped — truncating keeps the notification deliverable
+/// no matter what the name is.
+const MAX_NAME_CHARS: usize = 100;
+
+fn truncated(name: &str) -> String {
+    if name.chars().count() <= MAX_NAME_CHARS {
+        name.to_string()
+    } else {
+        let cut: String = name.chars().take(MAX_NAME_CHARS).collect();
+        format!("{cut}…")
+    }
+}
+
 fn user_signup_message(github_login: &str) -> String {
-    format!("👋 {github_login} just joined Battlesnake Arena")
+    format!(
+        "👋 {} just joined Battlesnake Arena",
+        truncated(github_login)
+    )
 }
 
 fn account_claimed_message(play_username: &str, snakes_migrated: usize) -> String {
     format!(
-        "🎉 {play_username} claimed their play.battlesnake.com account ({snakes_migrated} snake(s) migrated)"
+        "🎉 {} claimed their play.battlesnake.com account ({snakes_migrated} snake(s) migrated)",
+        truncated(play_username)
     )
 }
 
 fn snake_registered_message(snake_name: &str, github_login: &str) -> String {
-    format!("🐍 {snake_name} slithered into the arena (by {github_login})")
+    format!(
+        "🐍 {} slithered into the arena (by {})",
+        truncated(snake_name),
+        truncated(github_login)
+    )
 }
 
 #[cfg(test)]
@@ -213,5 +236,15 @@ mod tests {
         assert!(msg.contains("Slitherbot"));
         assert!(msg.contains("octocat"));
         assert!(msg.contains("slithered"));
+    }
+
+    #[test]
+    fn oversized_names_are_truncated_below_discord_cap() {
+        // A pathological snake name must not push content past Discord's
+        // 2000-char cap (which drops the message with a 400).
+        let huge = "n".repeat(5000);
+        let msg = snake_registered_message(&huge, "dev");
+        assert!(msg.chars().count() < 2000);
+        assert!(msg.contains('…'));
     }
 }

@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE snake_health_status\n         SET deactivated_at = NULL, consecutive_failures = 0, last_failure = NULL, updated_at = NOW()\n         WHERE battlesnake_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "767f3516b7e28f53255f26402c1693ade032e66dcb1f0b0e54e78784ea5bab52"
+}
