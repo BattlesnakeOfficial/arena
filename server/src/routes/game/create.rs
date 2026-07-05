@@ -17,6 +17,7 @@ use crate::{
     errors::{ServerResult, WithStatus},
     models::flow::GameCreationFlow,
     models::game::{GameBoardSize, GameType},
+    models::rate_limit,
     models::session,
     routes::auth::{CurrentUser, CurrentUserWithSession},
     state::AppState,
@@ -353,6 +354,46 @@ pub async fn create_game(
     Path(flow_id): Path<Uuid>,
     Form(data): Form<ConfigureGameForm>,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
+    // Rate limit game creation per account (shared with the API). The
+    // attempt is recorded before the check so concurrent requests see each
+    // other, and the returned count includes this attempt — reject when it
+    // exceeds the limit. The flow is left intact so nothing is lost.
+    let limit = state.config.game_creation_rate_limit;
+    let window_minutes = state.config.game_creation_rate_limit_window_minutes;
+    let attempts = rate_limit::record_and_count_game_creation_attempts(
+        &state.db,
+        user.user_id,
+        "web",
+        window_minutes,
+    )
+    .await
+    .wrap_err("Failed to record game creation attempt")?;
+    if attempts > limit {
+        tracing::warn!(
+            event_type = "game_creation_rate_limited",
+            user_id = %user.user_id,
+            attempts = attempts,
+            limit = limit,
+            source = "web",
+            "game creation rate limited"
+        );
+
+        // Set an error flash message in the session
+        session::set_flash_message(
+            &state.db,
+            session.session_id,
+            format!(
+                "You're creating games too fast — max {limit} games per {window_minutes} minutes."
+            ),
+            session::FLASH_TYPE_ERROR,
+        )
+        .await
+        .wrap_err("Failed to set flash message")?;
+
+        // Redirect back to the flow page
+        return Ok(Redirect::to(&format!("/games/flow/{}", flow_id)).into_response());
+    }
+
     // Get the flow
     let mut flow = GameCreationFlow::get_by_id(&state.db, flow_id, user.user_id)
         .await
