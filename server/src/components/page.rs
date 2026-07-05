@@ -33,6 +33,14 @@ impl Render for Page {
                 }
 
                 (self.content.render())
+
+                footer style="margin-top: 40px; padding: 16px 0; border-top: 1px solid #ddd; text-align: center; max-width: 800px; margin-left: auto; margin-right: auto;" {
+                    a href="/conduct" style="margin: 0 8px;" { "Code of Conduct" }
+                    " | "
+                    a href="/privacy" style="margin: 0 8px;" { "Privacy Policy" }
+                    " | "
+                    a href="/terms" style="margin: 0 8px;" { "Terms of Service" }
+                }
             }
         }
     }

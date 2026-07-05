@@ -19,6 +19,7 @@ pub mod customizations;
 pub mod game;
 pub mod github_auth;
 pub mod leaderboard;
+pub mod policy;
 pub mod tournament;
 
 pub fn routes(app_state: AppState) -> axum::Router {
@@ -66,6 +67,10 @@ pub fn routes(app_state: AppState) -> axum::Router {
     axum::Router::new()
         // Public pages
         .route("/", get(root_page))
+        // Policy pages
+        .route("/conduct", get(policy::conduct_page))
+        .route("/privacy", get(policy::privacy_page))
+        .route("/terms", get(policy::terms_page))
         // Profile page - requires authentication
         .route("/me", get(profile_page))
         // GitHub OAuth routes
