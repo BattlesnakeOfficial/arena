@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE claim_email_tokens SET expires_at = NOW() - INTERVAL '1 minute'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "eb0795c3f68311859d634e8416b5384750aa53930c4e5b5210888e3ac4fdccde"
+}

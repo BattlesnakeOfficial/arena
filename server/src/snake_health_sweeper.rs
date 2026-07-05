@@ -183,6 +183,8 @@ async fn apply_probe_outcome(
     {
         Some(email) => {
             app_state.mailer.notify_matchmaking_deactivated(
+                &app_state.db,
+                app_state.config.email_per_recipient_hourly_limit,
                 &email,
                 &snake.name,
                 &outcome.failure_summary,
