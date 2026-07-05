@@ -281,7 +281,7 @@ pub async fn claim_account(
         UPDATE imported_accounts
         SET claimed_by_user_id = $2, claimed_at = NOW()
         WHERE imported_account_id = $1 AND claimed_by_user_id IS NULL
-        RETURNING username, display_name, email
+        RETURNING username, display_name, email, pronouns, country, backstory
         "#,
         imported_account_id,
         user_id,
@@ -299,16 +299,22 @@ pub async fn claim_account(
     sqlx::query!(
         r#"
         UPDATE users
-        SET display_name = COALESCE(display_name, NULLIF($2, ''), $3)
+        SET display_name = COALESCE(display_name, NULLIF(left($2, 100), ''), left($3, 100)),
+            pronouns = COALESCE(NULLIF(pronouns, ''), left($4, 50), pronouns),
+            country = COALESCE(NULLIF(country, ''), left($5, 100), country),
+            backstory = COALESCE(NULLIF(backstory, ''), left($6, 2000), backstory)
         WHERE user_id = $1
         "#,
         user_id,
         claimed.display_name,
         claimed.username,
+        claimed.pronouns,
+        claimed.country,
+        claimed.backstory,
     )
     .execute(&mut *tx)
     .await
-    .wrap_err("Failed to set display name")?;
+    .wrap_err("Failed to set display name and profile fields")?;
 
     // Materialize snakes. Names must be unique per user in arena; play had
     // no such constraint, so collisions get a numeric suffix. Existing
@@ -670,6 +676,107 @@ mod tests {
                 .await?
                 .display_name;
         assert_eq!(display_name.as_deref(), Some("Chosen Name"));
+
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn claim_copies_pronouns_country_backstory(pool: PgPool) -> cja::Result<()> {
+        let user_id = create_user(&pool, 4101).await?;
+        let account_id = stage_full_account(&pool, 10).await?;
+
+        claim_account(&pool, account_id, user_id).await?;
+
+        let user = sqlx::query!(
+            "SELECT pronouns, country, backstory FROM users WHERE user_id = $1",
+            user_id
+        )
+        .fetch_one(&pool)
+        .await?;
+        // play_account(10) sets country="CA", backstory="hiss", pronouns=""
+        assert_eq!(user.pronouns, "");
+        assert_eq!(user.country, "CA");
+        assert_eq!(user.backstory, "hiss");
+
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn claim_does_not_clobber_existing_profile_fields(pool: PgPool) -> cja::Result<()> {
+        let user_id = create_user(&pool, 4201).await?;
+        // User already set their profile fields.
+        sqlx::query!(
+            "UPDATE users SET pronouns = 'she/her', country = 'US', backstory = 'Existing story' WHERE user_id = $1",
+            user_id
+        )
+        .execute(&pool)
+        .await?;
+
+        let account_id = stage_full_account(&pool, 11).await?;
+        claim_account(&pool, account_id, user_id).await?;
+
+        let user = sqlx::query!(
+            "SELECT pronouns, country, backstory FROM users WHERE user_id = $1",
+            user_id
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(user.pronouns, "she/her");
+        assert_eq!(user.country, "US");
+        assert_eq!(user.backstory, "Existing story");
+
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn claim_clamps_over_limit_imported_fields(pool: PgPool) -> cja::Result<()> {
+        let user_id = create_user(&pool, 4401).await?;
+
+        // Play never enforced these limits; an oversized import must not
+        // land values the profile edit form would then refuse to save.
+        let mut account = play_account(13);
+        account.backstory = "b".repeat(5000);
+        account.pronouns = "p".repeat(200);
+        let account_id = stage_account(&pool, &account).await?;
+
+        claim_account(&pool, account_id, user_id).await?;
+
+        let user = sqlx::query!(
+            "SELECT pronouns, backstory FROM users WHERE user_id = $1",
+            user_id
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(user.pronouns.chars().count(), 50);
+        assert_eq!(user.backstory.chars().count(), 2000);
+
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn claim_empty_imported_fields_leave_user_untouched(pool: PgPool) -> cja::Result<()> {
+        let user_id = create_user(&pool, 4301).await?;
+
+        // Stage an account where pronouns, country, backstory are all empty.
+        let mut account = play_account(12);
+        account.pronouns = String::new();
+        account.country = String::new();
+        account.backstory = String::new();
+        let account_id = stage_account(&pool, &account).await?;
+
+        claim_account(&pool, account_id, user_id).await?;
+
+        let user = sqlx::query!(
+            "SELECT pronouns, country, backstory FROM users WHERE user_id = $1",
+            user_id
+        )
+        .fetch_one(&pool)
+        .await?;
+        // User fields remain at their DEFAULT '' — empty imported fields
+        // don't write anything.
+        assert_eq!(user.pronouns, "");
+        assert_eq!(user.country, "");
+        assert_eq!(user.backstory, "");
 
         Ok(())
     }

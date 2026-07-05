@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE users\n        SET display_name = NULLIF($2, ''),\n            pronouns = $3,\n            country = $4,\n            backstory = $5\n        WHERE user_id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "269cf43cf3c5275f215a027f535daaf9231b0f1b26b9bcd85b64ed3b788696ba"
+}

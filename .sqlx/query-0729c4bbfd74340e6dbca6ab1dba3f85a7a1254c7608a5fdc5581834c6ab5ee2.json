@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT\n            user_id,\n            external_github_id,\n            github_login,\n            github_avatar_url,\n            github_name,\n            github_email,\n            is_admin,\n            created_at,\n            updated_at\n        FROM users\n        WHERE user_id = $1\n        ",
+  "query": "\n        SELECT\n            user_id,\n            external_github_id,\n            github_login,\n            github_avatar_url,\n            github_name,\n            github_email,\n            display_name,\n            pronouns,\n            country,\n            backstory,\n            is_admin,\n            created_at,\n            updated_at\n        FROM users\n        WHERE user_id = $1\n        ",
   "describe": {
     "columns": [
       {
@@ -35,16 +35,36 @@
       },
       {
         "ordinal": 6,
+        "name": "display_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "pronouns",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "country",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "backstory",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 10,
         "name": "is_admin",
         "type_info": "Bool"
       },
       {
-        "ordinal": 7,
+        "ordinal": 11,
         "name": "created_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 8,
+        "ordinal": 12,
         "name": "updated_at",
         "type_info": "Timestamptz"
       }
@@ -61,10 +81,14 @@
       true,
       true,
       true,
+      true,
+      false,
+      false,
+      false,
       false,
       false,
       false
     ]
   },
-  "hash": "152447c4bb39194555216139fa30c6ccbc621ddf3d429253030459d7e9076988"
+  "hash": "0729c4bbfd74340e6dbca6ab1dba3f85a7a1254c7608a5fdc5581834c6ab5ee2"
 }

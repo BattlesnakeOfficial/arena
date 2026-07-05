@@ -581,6 +581,10 @@ pub async fn view_battlesnake_profile(
         .as_ref()
         .and_then(|o| o.github_avatar_url.clone())
         .unwrap_or_default();
+    let owner_pronouns = owner
+        .as_ref()
+        .map(|o| o.pronouns.clone())
+        .unwrap_or_default();
 
     Ok(page_factory.create_page_with_flash(
         format!("Battlesnake: {}", snake.name),
@@ -625,6 +629,9 @@ pub async fn view_battlesnake_profile(
                                 div class="d-flex align-items-center mb-2" {
                                     img src=(owner_avatar) alt="Owner avatar" style="width: 24px; height: 24px; border-radius: 50%; margin-right: 8px;" {}
                                     span { (owner_login) }
+                                    @if !owner_pronouns.is_empty() {
+                                        span class="text-muted" { " · " (owner_pronouns) }
+                                    }
                                 }
                                 @if snake.visibility == Visibility::Public {
                                     span class="badge bg-success text-white" { "Public" }

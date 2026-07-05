@@ -1,0 +1,53 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE imported_accounts\n        SET claimed_by_user_id = $2, claimed_at = NOW()\n        WHERE imported_account_id = $1 AND claimed_by_user_id IS NULL\n        RETURNING username, display_name, email, pronouns, country, backstory\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "username",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "display_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "email",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "pronouns",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "country",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "backstory",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "2d802b25e76767608ca127fd389bd80a686fd9b2c2a3df6faee6f332401dc936"
+}

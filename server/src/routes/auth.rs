@@ -227,7 +227,7 @@ pub struct ApiUser(pub User);
 /// Result of attempting Bearer token authentication
 enum BearerAuthResult {
     /// Successfully authenticated user
-    Authenticated(User),
+    Authenticated(Box<User>),
     /// Authorization header present but token invalid/revoked
     InvalidToken,
     /// No Authorization header present
@@ -255,7 +255,7 @@ async fn try_bearer_auth(parts: &Parts, state: &AppState) -> BearerAuthResult {
     };
 
     match get_user_by_id(&state.db, user_id).await {
-        Ok(Some(user)) => BearerAuthResult::Authenticated(user),
+        Ok(Some(user)) => BearerAuthResult::Authenticated(Box::new(user)),
         _ => BearerAuthResult::InvalidToken,
     }
 }
@@ -308,7 +308,7 @@ impl FromRequestParts<AppState> for ApiUser {
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
         match try_bearer_auth(parts, state).await {
-            BearerAuthResult::Authenticated(user) => return Ok(ApiUser(user)),
+            BearerAuthResult::Authenticated(user) => return Ok(ApiUser(*user)),
             BearerAuthResult::InvalidToken => {
                 return Err((StatusCode::UNAUTHORIZED, "Invalid or revoked token").into_response());
             }
