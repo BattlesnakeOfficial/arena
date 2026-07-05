@@ -309,7 +309,7 @@ async fn profile_page(
                     @if !user.backstory.is_empty() {
                         div class="profile-backstory" style="margin-bottom: 20px;" {
                             h3 { "About" }
-                            p style="white-space: pre-wrap;" { (user.backstory) }
+                            p style="white-space: pre-wrap; overflow-wrap: break-word;" { (user.backstory) }
                         }
                     }
 
@@ -328,7 +328,7 @@ async fn profile_page(
                         div class="form-group" style="margin-bottom: 12px;" {
                             label for="display_name" { "Display Name" }
                             br;
-                            input type="text" id="display_name" name="display_name"
+                            input type="text" id="display_name" name="display_name" maxlength="100"
                                 class="form-control" style="width: 100%; padding: 8px;"
                                 value=(user.display_name.as_deref().unwrap_or("")) {}
                             small class="form-text text-muted" { "Shown instead of your GitHub login" }
@@ -337,7 +337,7 @@ async fn profile_page(
                         div class="form-group" style="margin-bottom: 12px;" {
                             label for="pronouns" { "Pronouns" }
                             br;
-                            input type="text" id="pronouns" name="pronouns"
+                            input type="text" id="pronouns" name="pronouns" maxlength="50"
                                 class="form-control" style="width: 100%; padding: 8px;"
                                 value=(user.pronouns) {}
                             small class="form-text text-muted" { "Max 50 characters" }
@@ -346,7 +346,7 @@ async fn profile_page(
                         div class="form-group" style="margin-bottom: 12px;" {
                             label for="country" { "Country" }
                             br;
-                            input type="text" id="country" name="country"
+                            input type="text" id="country" name="country" maxlength="100"
                                 class="form-control" style="width: 100%; padding: 8px;"
                                 value=(user.country) {}
                             small class="form-text text-muted" { "Max 100 characters" }
@@ -355,7 +355,7 @@ async fn profile_page(
                         div class="form-group" style="margin-bottom: 12px;" {
                             label for="backstory" { "Backstory" }
                             br;
-                            textarea id="backstory" name="backstory"
+                            textarea id="backstory" name="backstory" maxlength="2000"
                                 class="form-control" style="width: 100%; padding: 8px; min-height: 100px;"
                                 { (user.backstory) }
                             small class="form-text text-muted" { "Max 2000 characters. Plain text, no markdown." }

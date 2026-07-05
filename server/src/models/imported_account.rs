@@ -299,10 +299,10 @@ pub async fn claim_account(
     sqlx::query!(
         r#"
         UPDATE users
-        SET display_name = COALESCE(display_name, NULLIF($2, ''), $3),
-            pronouns = COALESCE(NULLIF(pronouns, ''), $4, pronouns),
-            country = COALESCE(NULLIF(country, ''), $5, country),
-            backstory = COALESCE(NULLIF(backstory, ''), $6, backstory)
+        SET display_name = COALESCE(display_name, NULLIF(left($2, 100), ''), left($3, 100)),
+            pronouns = COALESCE(NULLIF(pronouns, ''), left($4, 50), pronouns),
+            country = COALESCE(NULLIF(country, ''), left($5, 100), country),
+            backstory = COALESCE(NULLIF(backstory, ''), left($6, 2000), backstory)
         WHERE user_id = $1
         "#,
         user_id,
@@ -724,6 +724,31 @@ mod tests {
         assert_eq!(user.pronouns, "she/her");
         assert_eq!(user.country, "US");
         assert_eq!(user.backstory, "Existing story");
+
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn claim_clamps_over_limit_imported_fields(pool: PgPool) -> cja::Result<()> {
+        let user_id = create_user(&pool, 4401).await?;
+
+        // Play never enforced these limits; an oversized import must not
+        // land values the profile edit form would then refuse to save.
+        let mut account = play_account(13);
+        account.backstory = "b".repeat(5000);
+        account.pronouns = "p".repeat(200);
+        let account_id = stage_account(&pool, &account).await?;
+
+        claim_account(&pool, account_id, user_id).await?;
+
+        let user = sqlx::query!(
+            "SELECT pronouns, backstory FROM users WHERE user_id = $1",
+            user_id
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(user.pronouns.chars().count(), 50);
+        assert_eq!(user.backstory.chars().count(), 2000);
 
         Ok(())
     }

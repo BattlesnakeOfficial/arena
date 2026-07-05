@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT pronouns, backstory FROM users WHERE user_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "pronouns",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "backstory",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "6e25c3f33254efc811225f004240104369a83333cfe171f000f8463d2c62e44b"
+}

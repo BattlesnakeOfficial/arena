@@ -129,22 +129,22 @@ pub fn validate_profile_fields(
     country: &str,
     backstory: &str,
 ) -> Result<(), String> {
-    if display_name.len() > MAX_DISPLAY_NAME_LEN {
+    if display_name.chars().count() > MAX_DISPLAY_NAME_LEN {
         return Err(format!(
             "Display name must be {MAX_DISPLAY_NAME_LEN} characters or fewer"
         ));
     }
-    if pronouns.len() > MAX_PRONOUNS_LEN {
+    if pronouns.chars().count() > MAX_PRONOUNS_LEN {
         return Err(format!(
             "Pronouns must be {MAX_PRONOUNS_LEN} characters or fewer"
         ));
     }
-    if country.len() > MAX_COUNTRY_LEN {
+    if country.chars().count() > MAX_COUNTRY_LEN {
         return Err(format!(
             "Country must be {MAX_COUNTRY_LEN} characters or fewer"
         ));
     }
-    if backstory.len() > MAX_BACKSTORY_LEN {
+    if backstory.chars().count() > MAX_BACKSTORY_LEN {
         return Err(format!(
             "Backstory must be {MAX_BACKSTORY_LEN} characters or fewer"
         ));
@@ -251,6 +251,17 @@ mod tests {
 
         let long_display = "x".repeat(101);
         assert!(validate_profile_fields(&long_display, "ok", "ok", "ok").is_err());
+    }
+
+    #[test]
+    fn validation_counts_characters_not_bytes() {
+        // 40 emoji = 160 bytes but only 40 chars — under the 50-char
+        // pronouns limit; byte-based validation would wrongly reject it.
+        let emoji_pronouns = "\u{1F40D}".repeat(40);
+        assert!(validate_profile_fields("ok", &emoji_pronouns, "ok", "ok").is_ok());
+
+        let too_many = "\u{1F40D}".repeat(51);
+        assert!(validate_profile_fields("ok", &too_many, "ok", "ok").is_err());
     }
 
     #[test]
