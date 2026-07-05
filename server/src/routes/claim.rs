@@ -9,8 +9,13 @@ use maud::{Markup, html};
 use serde::Deserialize;
 
 use crate::{
-    components::page_factory::PageFactory, django_password, errors::ServerResult, flasher::Flasher,
-    models::imported_account, routes::auth::CurrentUser, state::AppState,
+    components::page_factory::PageFactory,
+    django_password,
+    errors::ServerResult,
+    flasher::Flasher,
+    models::{claim_email_token, imported_account},
+    routes::auth::CurrentUser,
+    state::AppState,
 };
 
 /// Attempts per arena user per hour: stops one account from enumerating
@@ -79,8 +84,10 @@ fn claim_form(error: Option<&str>) -> Markup {
             }
 
             p style="margin-top: 16px; color: #666; font-size: 0.9em;" {
-                "Forgot your play password? Contact us on Discord and we'll "
-                "verify you another way."
+                "Forgot your play password? "
+                a href="/claim/email" { "Claim by email instead" }
+                " — we'll send a one-time link to your old play address. Or "
+                "contact us on Discord and we'll verify you another way."
             }
         }
     }
@@ -206,7 +213,290 @@ pub async fn submit_claim(
 
     // Notify the play email that the account was claimed — a security signal
     // for the real owner if a claim wasn't theirs. Best-effort.
-    state.mailer.notify_account_claimed(&summary);
+    state.mailer.notify_account_claimed(
+        &state.db,
+        state.config.email_per_recipient_hourly_limit,
+        &summary,
+    );
+
+    flasher
+        .add_flash(format!(
+            "Welcome back, {}! Brought over {} snake(s) and {} customization unlock(s).",
+            summary.username, summary.snakes_created, summary.grants_created
+        ))
+        .await?;
+    Ok(Redirect::to("/battlesnakes").into_response())
+}
+
+// ---------------------------------------------------------------------------
+// Email-recovery claim (BS-7e38): the last-resort path for play users with
+// no usable password (OAuth-only play accounts) and no GitHub link. A
+// logged-in arena user enters their old play email; if it matches an
+// unclaimed imported account we mail that address a one-time link, and
+// completing the link (as the same arena user) runs the normal claim.
+// ---------------------------------------------------------------------------
+
+fn email_claim_form(notice: Option<Markup>) -> Markup {
+    html! {
+        div class="container" style="max-width: 480px;" {
+            h1 { "Claim by email" }
+            p {
+                "No usable play password (signed up with GitHub on play, or "
+                "just forgot it)? Enter your old play email and we'll send a "
+                "one-time link there. Opening it while signed in here "
+                "finishes the claim."
+            }
+
+            @if let Some(notice) = notice {
+                (notice)
+            }
+
+            form method="post" action="/claim/email" {
+                div style="margin-bottom: 12px;" {
+                    label for="email" { "Play account email" }
+                    br;
+                    input type="email" id="email" name="email" required
+                        style="width: 100%; padding: 8px;";
+                }
+                button type="submit" class="btn btn-primary" { "Email me a claim link" }
+            }
+
+            p style="margin-top: 16px; color: #666; font-size: 0.9em;" {
+                "Know your play password? "
+                a href="/claim" { "Claim with it directly" }
+                "."
+            }
+        }
+    }
+}
+
+/// The one response POST /claim/email ever gives about the lookup, so the
+/// form can't be used to probe which play emails exist.
+fn email_claim_sent_notice() -> Markup {
+    html! {
+        div class="alert alert-success" style="margin: 12px 0;" {
+            p {
+                "If that address matches an unclaimed play account, a claim "
+                "link is on its way. It works once, expires in 30 minutes, "
+                "and only completes on this arena account."
+            }
+        }
+    }
+}
+
+/// GET /claim/email — request form for the recovery link.
+pub async fn email_claim_page(
+    CurrentUser(_user): CurrentUser,
+    page_factory: PageFactory,
+) -> ServerResult<impl IntoResponse, StatusCode> {
+    Ok(page_factory.create_page(
+        "Claim by Email".to_string(),
+        Box::new(email_claim_form(None)),
+    ))
+}
+
+#[derive(Deserialize)]
+pub struct EmailClaimForm {
+    pub email: String,
+}
+
+/// POST /claim/email — maybe send a one-time claim link.
+pub async fn submit_email_claim(
+    State(state): State<AppState>,
+    CurrentUser(user): CurrentUser,
+    page_factory: PageFactory,
+    Form(form): Form<EmailClaimForm>,
+) -> ServerResult<axum::response::Response, StatusCode> {
+    // Shares the claim_attempts budget with the password form: both flows
+    // probe the same "which emails exist" surface, so they spend the same
+    // per-user and per-email allowances. Record-before-check, as ever.
+    let counts =
+        imported_account::record_and_count_claim_attempts(&state.db, user.user_id, &form.email)
+            .await
+            .wrap_err("Failed to record claim attempt")?;
+    if counts.by_user > MAX_ATTEMPTS_PER_USER_PER_HOUR
+        || counts.by_email > MAX_ATTEMPTS_PER_EMAIL_PER_HOUR
+    {
+        tracing::warn!(
+            event_type = "email_claim_rate_limited",
+            user_id = %user.user_id,
+            by_user = counts.by_user,
+            by_email = counts.by_email,
+            "email claim rate limited"
+        );
+        return Ok(page_factory
+            .create_page(
+                "Claim by Email".to_string(),
+                Box::new(email_claim_form(Some(html! {
+                    div class="alert alert-danger" style="color: #b00; margin: 12px 0;" {
+                        p {
+                            "Too many attempts. Try again in an hour, or reach \
+                             out on Discord for help."
+                        }
+                    }
+                }))),
+            )
+            .into_response());
+    }
+
+    let candidates = imported_account::find_unclaimed_by_email(&state.db, &form.email)
+        .await
+        .wrap_err("Failed to look up imported account")?;
+
+    // Case-variant duplicates are possible; with no password to
+    // disambiguate, prefer an account whose email play had verified.
+    let target = candidates
+        .iter()
+        .find(|a| a.is_email_verified)
+        .or_else(|| candidates.first());
+
+    if let Some(account) = target {
+        let secret =
+            claim_email_token::create(&state.db, account.imported_account_id, user.user_id)
+                .await
+                .wrap_err("Failed to create claim token")?;
+
+        let verify_url = format!(
+            "{}/claim/email/verify?token={}",
+            state.config.base_url, secret
+        );
+
+        // Fire-and-forget, like every other notification — and load-bearing
+        // here: awaiting the Mailgun call would make a matching email
+        // measurably slower than a miss (and turn a transport error into a
+        // 500 only matches can produce), handing back exactly the
+        // enumeration oracle the uniform response below exists to prevent.
+        state.mailer.notify_claim_verification(
+            &state.db,
+            state.config.email_per_recipient_hourly_limit,
+            &account.email,
+            &account.username,
+            &verify_url,
+        );
+
+        tracing::info!(
+            event_type = "email_claim_link_requested",
+            user_id = %user.user_id,
+            "email claim link requested"
+        );
+    } else {
+        tracing::info!(
+            event_type = "email_claim_no_match",
+            user_id = %user.user_id,
+            "email claim requested for unknown or claimed email"
+        );
+    }
+
+    // Uniform response whether or not anything matched or sent.
+    Ok(page_factory
+        .create_page(
+            "Claim by Email".to_string(),
+            Box::new(email_claim_form(Some(email_claim_sent_notice()))),
+        )
+        .into_response())
+}
+
+#[derive(Deserialize)]
+pub struct VerifyQuery {
+    pub token: String,
+}
+
+/// GET /claim/email/verify?token=… — confirmation page. The claim itself
+/// happens on the POST below, so a link prefetched by a mail scanner (or
+/// opened twice) consumes nothing.
+pub async fn email_claim_verify_page(
+    CurrentUser(_user): CurrentUser,
+    page_factory: PageFactory,
+    axum::extract::Query(query): axum::extract::Query<VerifyQuery>,
+) -> ServerResult<impl IntoResponse, StatusCode> {
+    Ok(page_factory.create_page(
+        "Finish Claiming".to_string(),
+        Box::new(html! {
+            div class="container" style="max-width: 480px;" {
+                h1 { "Finish claiming your play account" }
+                p {
+                    "You're about to attach the play account from your claim "
+                    "email to this arena login, bringing its snakes and "
+                    "customization unlocks with it."
+                }
+                form method="post" action="/claim/email/verify" {
+                    input type="hidden" name="token" value=(query.token);
+                    button type="submit" class="btn btn-primary" { "Complete claim" }
+                }
+            }
+        }),
+    ))
+}
+
+#[derive(Deserialize)]
+pub struct VerifyForm {
+    pub token: String,
+}
+
+/// POST /claim/email/verify — redeem the one-time token and claim.
+pub async fn complete_email_claim(
+    State(state): State<AppState>,
+    CurrentUser(user): CurrentUser,
+    page_factory: PageFactory,
+    flasher: Flasher,
+    Form(form): Form<VerifyForm>,
+) -> ServerResult<axum::response::Response, StatusCode> {
+    // One uniform failure page for unknown/expired/used/wrong-user tokens;
+    // the CAS inside `consume` decides, we don't say which check failed.
+    let failed = |page_factory: PageFactory| {
+        page_factory
+            .create_page(
+                "Finish Claiming".to_string(),
+                Box::new(html! {
+                    div class="container" style="max-width: 480px;" {
+                        h1 { "That link didn't work" }
+                        p {
+                            "The claim link is invalid, expired, already used, "
+                            "or was requested from a different arena account. "
+                            "You can "
+                            a href="/claim/email" { "request a fresh one" }
+                            "."
+                        }
+                    }
+                }),
+            )
+            .into_response()
+    };
+
+    let Some(imported_account_id) =
+        claim_email_token::consume(&state.db, &form.token, user.user_id)
+            .await
+            .wrap_err("Failed to consume claim token")?
+    else {
+        return Ok(failed(page_factory));
+    };
+
+    let summary = imported_account::claim_account(&state.db, imported_account_id, user.user_id)
+        .await
+        .wrap_err("Failed to claim imported account")?;
+
+    let Some(summary) = summary else {
+        // The account got claimed between link request and click (e.g. by
+        // GitHub auto-link in another session). The token is spent either
+        // way — a claimed account has nothing left to unlock.
+        return Ok(failed(page_factory));
+    };
+
+    tracing::info!(
+        event_type = "play_claim_succeeded",
+        user_id = %user.user_id,
+        play_username = %summary.username,
+        snakes = summary.snakes_created,
+        grants = summary.grants_created,
+        "play account claimed via email link"
+    );
+
+    // Same security signal as the other claim paths.
+    state.mailer.notify_account_claimed(
+        &state.db,
+        state.config.email_per_recipient_hourly_limit,
+        &summary,
+    );
 
     flasher
         .add_flash(format!(

@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE leaderboards SET disabled_at = NOW()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "4c2d4c48367aa87b46e35541f3577784ccbf6eda2aeafa6e87a8f03478b3b553"
+}
