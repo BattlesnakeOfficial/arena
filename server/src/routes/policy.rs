@@ -85,8 +85,8 @@ fn privacy_content() -> Markup {
             p {
                 "When you sign in with GitHub, we receive and store your GitHub "
                 "user ID, username (login), and avatar URL. If GitHub provides "
-                "them, we also store your name and email. We store your GitHub "
-                "OAuth access and refresh tokens to maintain your session."
+                "them, we also store your name and email, along with the OAuth "
+                "tokens received during sign-in."
             }
             p {
                 "If you create snakes, we store the name and URL you provide. "
@@ -97,11 +97,11 @@ fn privacy_content() -> Markup {
             h3 { "Play.battlesnake.com Migration Data" }
             p {
                 "If you had an account on the old play.battlesnake.com, we "
-                "imported your email, username, display name, and profile "
-                "fields (pronouns, country, backstory) to allow you to claim "
-                "your account. Your play password hash was imported for "
-                "verification only — it is used once during the claim process "
-                "and is never stored in plaintext. When you claim your "
+                "imported your email, username, display name, profile fields "
+                "(pronouns, country, backstory), and points balances to allow "
+                "you to claim your account. Your play password was imported "
+                "in hashed form only — it is never stored in plaintext, and "
+                "it is checked only to verify a claim. When you claim your "
                 "account, your play snakes and customization unlocks are "
                 "merged into your Arena account."
             }
@@ -116,11 +116,14 @@ fn privacy_content() -> Markup {
                 li { "Run games and store game results." }
                 li { "Maintain leaderboards and tournament results." }
                 li { "Send transactional email (via Mailgun) when your play account is claimed, as a security notice." }
+                li { "Notify you by email if your snake is removed from leaderboard matchmaking because its server keeps failing." }
             }
             p {
                 "We do not send marketing emails. We do not show "
-                "advertisements. We do not sell or share your data with "
-                "third parties."
+                "advertisements. We do not sell your data. We share it only "
+                "with the service providers that run Arena on our behalf — "
+                "Mailgun for transactional email and Google Cloud for hosting "
+                "and storage."
             }
 
             h2 { "Data Storage" }
