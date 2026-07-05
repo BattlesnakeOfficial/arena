@@ -54,6 +54,9 @@ pub struct AppConfig {
     pub game_creation_rate_limit: i64,
     /// Length of the game-creation sliding window, in minutes.
     pub game_creation_rate_limit_window_minutes: i32,
+    /// Consecutive failed health probes before the sweeper pulls a snake
+    /// from leaderboard matchmaking (BS-3534).
+    pub snake_health_failure_threshold: i32,
 
     // Runtime / telemetry
     pub tokio_worker_multiplier: usize,
@@ -118,6 +121,7 @@ impl AppConfig {
                 10,
             )
             .max(1),
+            snake_health_failure_threshold: parse_env("SNAKE_HEALTH_FAILURE_THRESHOLD", 3).max(1),
 
             tokio_worker_multiplier: parse_env("ARENA_TOKIO_WORKER_MULTIPLIER", 2),
             gcp_logging: std::env::var("GCP_LOGGING").is_ok(),
@@ -156,6 +160,7 @@ impl AppConfig {
             mailgun: None,
             game_creation_rate_limit: 20,
             game_creation_rate_limit_window_minutes: 10,
+            snake_health_failure_threshold: 3,
             tokio_worker_multiplier: 2,
             gcp_logging: false,
             gcp_project_id: None,

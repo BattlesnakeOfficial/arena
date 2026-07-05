@@ -37,6 +37,31 @@ impl Mailer {
             }
         });
     }
+
+    /// Notify a snake's owner that the health sweeper pulled their snake
+    /// from leaderboard matchmaking. Same fire-and-forget contract as
+    /// [`Mailer::notify_account_claimed`]: the sweep never waits on or fails
+    /// because of an email.
+    pub fn notify_matchmaking_deactivated(
+        &self,
+        to_email: &str,
+        snake_name: &str,
+        failure_summary: &str,
+        profile_url: &str,
+    ) {
+        let message =
+            messages::matchmaking_deactivated(to_email, snake_name, failure_summary, profile_url);
+        let mailer = self.clone();
+        tokio::spawn(async move {
+            if let Err(e) = mailer.send(&message).await {
+                tracing::warn!(
+                    to = %message.to,
+                    error = %e,
+                    "Failed to send matchmaking-deactivated email"
+                );
+            }
+        });
+    }
 }
 
 /// Resolved Mailgun settings. Built from env in `crate::config` (the single

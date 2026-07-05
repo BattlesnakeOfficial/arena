@@ -7,6 +7,7 @@ pub mod imported_account;
 pub mod leaderboard;
 pub mod rate_limit;
 pub mod session;
+pub mod snake_health_status;
 pub mod tournament;
 pub mod turn;
 pub mod user;

@@ -218,6 +218,23 @@ impl Job<AppState> for RateLimitPruneJob {
     }
 }
 
+/// Cron job that health-checks every snake in leaderboard matchmaking and
+/// pulls the ones that keep failing (BS-3534). All bookkeeping is idempotent
+/// and the owner email is CAS-gated, so retries and duplicate enqueues are
+/// safe; see [`crate::snake_health_sweeper`].
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SnakeHealthSweeperJob;
+
+#[async_trait::async_trait]
+impl Job<AppState> for SnakeHealthSweeperJob {
+    const NAME: &'static str = "SnakeHealthSweeperJob";
+
+    async fn run(&self, app_state: AppState) -> cja::Result<()> {
+        crate::snake_health_sweeper::run_sweep(&app_state).await?;
+        Ok(())
+    }
+}
+
 cja::impl_job_registry!(
     AppState,
     NoopJob,
@@ -231,5 +248,6 @@ cja::impl_job_registry!(
     RunMatchJob,
     UpdateTournamentStatusJob,
     StuckMatchSweeperJob,
-    RateLimitPruneJob
+    RateLimitPruneJob,
+    SnakeHealthSweeperJob
 );

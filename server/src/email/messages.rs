@@ -43,9 +43,64 @@ pub fn account_claimed(
     }
 }
 
+/// Sent to a snake's owner when the health sweeper pulls the snake from
+/// leaderboard matchmaking after repeated failed probes. Mirrors play's
+/// arena_matchmaking_deactivated notice: says what happened, why, and how to
+/// get back in.
+pub fn matchmaking_deactivated(
+    to_email: &str,
+    snake_name: &str,
+    failure_summary: &str,
+    profile_url: &str,
+) -> EmailMessage {
+    let text = format!(
+        "Hi,\n\
+         \n\
+         Your Battlesnake \"{snake_name}\" has been temporarily removed from \
+         Arena leaderboard matchmaking due to repeated timeouts or errors \
+         from its server.\n\
+         \n\
+         Most recent problem: {failure_summary}\n\
+         \n\
+         Its ratings are safe — we stop matching it so a down server doesn't \
+         hurt its standing. Once your snake is fixed, resume matchmaking from \
+         its profile page:\n\
+         \n\
+         {profile_url}\n\
+         \n\
+         (The \"Test Snake\" button there runs the same checks we do.)\n\
+         \n\
+         — Battlesnake Arena\n"
+    );
+
+    EmailMessage {
+        to: to_email.to_string(),
+        subject: format!("{snake_name} was paused from Arena matchmaking"),
+        text,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn matchmaking_deactivated_renders_snake_and_recovery_link() {
+        let msg = matchmaking_deactivated(
+            "owner@example.com",
+            "Hissy",
+            "POST /move: request timed out",
+            "https://arena.example.com/battlesnakes/abc/profile",
+        );
+        assert_eq!(msg.to, "owner@example.com");
+        assert_eq!(msg.subject, "Hissy was paused from Arena matchmaking");
+        assert!(msg.text.contains("\"Hissy\""));
+        assert!(msg.text.contains("POST /move: request timed out"));
+        assert!(
+            msg.text
+                .contains("https://arena.example.com/battlesnakes/abc/profile")
+        );
+    }
 
     #[test]
     fn account_claimed_renders_counts_and_recipient() {

@@ -31,6 +31,7 @@ mod routes;
 mod scoring;
 mod snake_client;
 mod snake_health;
+mod snake_health_sweeper;
 mod state;
 mod static_assets;
 mod telemetry;
