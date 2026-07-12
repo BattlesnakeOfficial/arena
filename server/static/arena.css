@@ -414,6 +414,70 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
 
 /* --- page: profile + snakes (slice 5) ------------------------------------ */
 
+/* identity header (/me) */
+.profile-head { display: flex; align-items: center; gap: 22px; margin-top: 36px; }
+.profile-head .avatar {
+  width: 76px;
+  height: 76px;
+  border-radius: 50%;
+  border: 1px solid var(--hairline-dark);
+  flex-shrink: 0;
+  background: var(--pill);
+  box-shadow: 0 10px 26px -14px rgba(0, 0, 0, .45);
+}
+.profile-head .who { min-width: 0; }
+.profile-head h2 { font-weight: 800; letter-spacing: -.02em; font-size: clamp(24px, 3vw, 32px); line-height: 1.15; overflow-wrap: anywhere; }
+.profile-head .meta { font-family: var(--mono); font-size: 13px; color: var(--muted); margin-top: 4px; }
+.profile-head .bio { font-size: 15px; color: var(--muted); margin-top: 8px; max-width: 60ch; white-space: pre-wrap; overflow-wrap: break-word; }
+
+.profile-actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 24px; }
+
+/* editorial forms (profile edit + snake create/edit) */
+.form-stack { display: flex; flex-direction: column; gap: 20px; margin-top: 22px; max-width: 560px; }
+.field label {
+  display: block;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  text-transform: uppercase;
+  letter-spacing: .12em;
+  color: var(--muted);
+  margin-bottom: 7px;
+}
+.field input,
+.field select,
+.field textarea {
+  width: 100%;
+  font-family: var(--body);
+  font-size: 15px;
+  color: var(--ink);
+  background: var(--card);
+  border: 1px solid var(--hairline-dark);
+  border-radius: 12px;
+  padding: 11px 14px;
+  min-height: 46px;
+}
+.field input:hover, .field select:hover, .field textarea:hover { border-color: var(--muted); }
+.field input[type="url"] { font-family: var(--mono); font-size: 13.5px; }
+.field textarea { min-height: 130px; resize: vertical; line-height: 1.55; }
+.field .help { font-size: 12.5px; color: var(--muted); margin-top: 6px; }
+.form-cta { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 4px; }
+
+/* snakes list table (/battlesnakes) */
+.head-actions { margin-left: auto; padding-bottom: 6px; display: flex; gap: 10px; flex-wrap: wrap; }
+.url-cell { font-family: var(--mono); font-size: 13px; color: var(--muted); max-width: 340px; }
+.url-cell a { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+.url-cell a:hover { color: var(--pink); }
+.row-actions { display: flex; gap: 8px; justify-content: flex-end; align-items: center; flex-wrap: wrap; }
+.row-actions form { display: inline; margin: 0; }
+
+@media (max-width: 640px) {
+  .profile-head { gap: 16px; }
+  .profile-head .avatar { width: 60px; height: 60px; }
+  .profile-actions .btn, .head-actions .btn { padding: 11px 20px; }
+  .row-actions { flex-direction: column; align-items: flex-end; gap: 6px; }
+  .row-actions .btn.sm { padding: 9px 16px; }
+}
+
 /* --- page: customizations (slice 6) --------------------------------------- */
 
 /* --- page: claim/import (slice 7) ------------------------------------------ */

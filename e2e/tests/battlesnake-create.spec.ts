@@ -51,8 +51,8 @@ test.describe('Create Battlesnake', () => {
 
     await expect(authenticatedPage).toHaveURL('/battlesnakes');
 
-    // Should see success flash message (check for the alert container with success styling)
-    const successAlert = authenticatedPage.locator('.alert-success');
+    // Should see success flash message (rendered once by the page shell)
+    const successAlert = authenticatedPage.locator('.flash-message[data-flash-type="success"]');
     await expect(successAlert).toBeVisible();
     await expect(successAlert).toContainText('Battlesnake created successfully!');
   });
