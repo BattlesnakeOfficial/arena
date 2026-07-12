@@ -428,19 +428,19 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
 .form-page .fine a { color: var(--pink); }
 .form-page .fine.alt { margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--hairline); }
 
-.form-stack { display: flex; flex-direction: column; gap: 16px; margin-top: 8px; }
-.form-stack .field { display: flex; flex-direction: column; gap: 6px; }
-.form-stack label { font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: .1em; color: var(--muted); }
-.form-stack input { font-family: var(--body); font-size: 15px; padding: 11px 13px; border: 1px solid var(--hairline-dark); border-radius: 10px; background: var(--card); color: var(--ink); width: 100%; }
-.form-stack input:focus { outline: none; border-color: var(--pink); }
-.form-stack .btn { align-self: flex-start; margin-top: 4px; }
-.form-stack .fine { margin: 0; }
+.form-page .form-stack { display: flex; flex-direction: column; gap: 16px; margin-top: 8px; }
+.form-page .form-stack .field { display: flex; flex-direction: column; gap: 6px; }
+.form-page .form-stack label { font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: .1em; color: var(--muted); }
+.form-page .form-stack input { font-family: var(--body); font-size: 15px; padding: 11px 13px; border: 1px solid var(--hairline-dark); border-radius: 10px; background: var(--card); color: var(--ink); width: 100%; }
+.form-page .form-stack input:focus-visible { outline: none; border-color: var(--pink); box-shadow: 0 0 0 3px var(--pink-wash); }
+.form-page .form-stack .btn { align-self: flex-start; margin-top: 4px; }
+.form-page .form-stack .fine { margin: 0; }
 
 .form-error { background: var(--pink-wash); border: 1px solid var(--pink); color: var(--ink); border-radius: 12px; padding: 12px 16px; font-size: 14px; margin: 16px 0; }
 .form-ok { background: color-mix(in srgb, var(--up) 12%, transparent); border: 1px solid var(--up); color: var(--ink); border-radius: 12px; padding: 12px 16px; font-size: 14px; margin: 16px 0; }
 
 @media (max-width: 640px) {
-  .form-stack .btn { align-self: stretch; text-align: center; }
+  .form-page .form-stack .btn { align-self: stretch; text-align: center; }
 }
 
 /* --- page: tournaments (slice 8) -------------------------------------------- */

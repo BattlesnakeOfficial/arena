@@ -56,17 +56,17 @@ fn claim_form(error: Option<&str>) -> Markup {
             }
 
             @if let Some(error) = error {
-                div class="form-error" { (error) }
+                div class="form-error" role="alert" { (error) }
             }
 
             form class="form-stack" method="post" action="/claim" {
                 div class="field" {
                     label for="email" { "Play account email" }
-                    input type="email" id="email" name="email" required;
+                    input type="email" id="email" name="email" autocomplete="email" required;
                 }
                 div class="field" {
                     label for="password" { "Play account password" }
-                    input type="password" id="password" name="password" required;
+                    input type="password" id="password" name="password" autocomplete="current-password" required;
                 }
                 p class="fine" {
                     "Your old password is checked once to prove the account is "
@@ -258,7 +258,7 @@ fn email_claim_form(notice: Option<Markup>) -> Markup {
             form class="form-stack" method="post" action="/claim/email" {
                 div class="field" {
                     label for="email" { "Play account email" }
-                    input type="email" id="email" name="email" required;
+                    input type="email" id="email" name="email" autocomplete="email" required;
                 }
                 button type="submit" class="btn solid" { "Email me a claim link" }
             }
@@ -276,7 +276,7 @@ fn email_claim_form(notice: Option<Markup>) -> Markup {
 /// form can't be used to probe which play emails exist.
 fn email_claim_sent_notice() -> Markup {
     html! {
-        div class="form-ok" {
+        div class="form-ok" role="status" {
             "If that address matches an unclaimed play account, a claim "
             "link is on its way. It works once, expires in 30 minutes, "
             "and only completes on this arena account."
@@ -328,7 +328,7 @@ pub async fn submit_email_claim(
             .create_page(
                 "Claim by Email".to_string(),
                 Box::new(email_claim_form(Some(html! {
-                    div class="form-error" {
+                    div class="form-error" role="alert" {
                         "Too many attempts. Try again in an hour, or reach "
                         "out on Discord for help."
                     }
@@ -411,6 +411,7 @@ pub async fn email_claim_verify_page(
         "Finish Claiming".to_string(),
         Box::new(html! {
             div class="form-page" {
+                div class="crumb" { "Play migration" }
                 div class="page-head" {
                     h1 { "Finish claiming your play account" }
                 }
@@ -449,6 +450,7 @@ pub async fn complete_email_claim(
                 "Finish Claiming".to_string(),
                 Box::new(html! {
                     div class="form-page" {
+                        div class="crumb" { "Play migration" }
                         div class="page-head" {
                             h1 { "That link didn't work" }
                         }
