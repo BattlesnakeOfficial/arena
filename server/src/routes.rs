@@ -40,6 +40,7 @@ pub mod game;
 pub mod github_auth;
 pub mod leaderboard;
 pub mod policy;
+pub mod redirects;
 pub mod settings;
 pub mod tournament;
 
@@ -85,9 +86,10 @@ pub fn routes(app_state: AppState) -> axum::Router {
         )
         .layer(cors);
 
-    axum::Router::new()
+    let router = axum::Router::new()
         // Public pages
         .route("/", get(root_page))
+        .route("/robots.txt", get(robots_txt))
         // Policy pages
         .route("/conduct", get(policy::conduct_page))
         .route("/privacy", get(policy::privacy_page))
@@ -236,11 +238,63 @@ pub fn routes(app_state: AppState) -> axum::Router {
         )
         // Internal routes
         .route("/_/version", get(version_page))
+        // Unknown routes get a branded 404 instead of an empty response
+        .fallback(not_found_page);
+
+    // Community short links (/docs, /discord, ...) carried over from play
+    redirects::register(router)
         .layer(axum::middleware::from_fn_with_state(
             app_state.clone(),
             inject_trace_context,
         ))
         .with_state(app_state)
+}
+
+async fn not_found_page(page_factory: PageFactory) -> impl IntoResponse {
+    (
+        StatusCode::NOT_FOUND,
+        page_factory.create_page(
+            "Page Not Found".to_string(),
+            Box::new(html! {
+                div class="home" {
+                    section class="section" {
+                        h1 { "404 — Page not found" }
+                        p class="empty" {
+                            "This page doesn't exist. It may have been eliminated, "
+                            "or the link points at something from the old site."
+                        }
+                        div class="cta-row" {
+                            a class="btn solid" href="/" { "Back to Home" }
+                            a class="btn" href="/leaderboards" { "View Leaderboards" }
+                        }
+                    }
+                }
+            }),
+        ),
+    )
+}
+
+/// Crawlers are welcome on the public pages; keep them out of auth flows,
+/// account management, and the JSON API.
+async fn robots_txt() -> impl IntoResponse {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; charset=utf-8",
+        )],
+        concat!(
+            "User-agent: *\n",
+            "Disallow: /api/\n",
+            "Disallow: /auth/\n",
+            "Disallow: /admin\n",
+            "Disallow: /me\n",
+            "Disallow: /settings/\n",
+            "Disallow: /claim\n",
+            "Disallow: /battlesnakes\n",
+            "Disallow: /games/flow/\n",
+            "Disallow: /games/new\n",
+        ),
+    )
 }
 
 async fn root_page(
