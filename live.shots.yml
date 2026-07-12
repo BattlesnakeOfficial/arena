@@ -1,0 +1,39 @@
+# Live-site screenshots, taken on a schedule by .github/workflows/screenshots.yml
+# and committed under screenshots/. Referenced from the README.
+- url: https://arena.battlesnake.com/
+  output: screenshots/home-light.png
+  width: 1280
+  height: 900
+  wait: 3000
+
+- url: https://arena.battlesnake.com/
+  output: screenshots/home-dark.png
+  width: 1280
+  height: 900
+  wait: 3000
+  javascript: |
+    document.documentElement.setAttribute('data-app-theme', 'dark');
+
+- url: https://arena.battlesnake.com/
+  output: screenshots/home-mobile.png
+  width: 375
+  height: 812
+  wait: 3000
+
+- url: https://arena.battlesnake.com/leaderboards
+  output: screenshots/leaderboards.png
+  width: 1280
+  height: 800
+  wait: 3000
+
+- url: https://arena.battlesnake.com/tournaments
+  output: screenshots/tournaments.png
+  width: 1280
+  height: 800
+  wait: 3000
+
+- url: https://arena.battlesnake.com/customizations
+  output: screenshots/customizations.png
+  width: 1280
+  height: 900
+  wait: 3000

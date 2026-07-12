@@ -1,0 +1,87 @@
+name: Screenshots
+
+on:
+  schedule:
+    - cron: "0 6 * * 1" # Mondays 06:00 UTC
+  workflow_dispatch:
+
+concurrency:
+  group: screenshots
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  shot-scraper:
+    runs-on: ubuntu-latest
+    if: ${{ github.ref == 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Configure pip caching
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-shot-scraper
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright/
+          key: ${{ runner.os }}-browsers
+      - name: Cache OxiPNG
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/
+          key: ${{ runner.os }}-cargo-oxipng
+      - name: Install dependencies
+        run: |
+          pip install shot-scraper
+          which oxipng || cargo install oxipng
+          shot-scraper install
+
+      - name: Take static shots
+        run: shot-scraper multi live.shots.yml --retina
+
+      # Detail pages have unstable UUIDs, so discover them from the live
+      # site each run instead of hardcoding. Skipped gracefully when the
+      # site has no data to link to.
+      - name: Take detail-page shots
+        run: |
+          BASE=https://arena.battlesnake.com
+          LB=$(curl -sf "$BASE/leaderboards" | grep -oE '/leaderboards/[0-9a-f-]{36}' | head -1 || true)
+          {
+            if [ -n "$LB" ]; then
+              printf -- '- url: %s%s\n  output: screenshots/leaderboard-detail.png\n  width: 1280\n  height: 900\n  wait: 3000\n' "$BASE" "$LB"
+              GAME=$(curl -sf "$BASE$LB" | grep -oE '/games/[0-9a-f-]{36}' | head -1 || true)
+              if [ -n "$GAME" ]; then
+                printf -- '- url: %s%s\n  output: screenshots/game-theater.png\n  width: 1280\n  height: 900\n  wait: 5000\n' "$BASE" "$GAME"
+              fi
+            fi
+          } > dynamic.shots.yml
+          if [ -s dynamic.shots.yml ]; then
+            shot-scraper multi dynamic.shots.yml --retina
+          else
+            echo "No detail pages discoverable — skipping"
+          fi
+
+      - name: Optimize PNGs
+        run: oxipng -o 4 -i 0 --strip safe screenshots/*.png
+
+      - name: Commit and push if there are changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add screenshots
+          if git diff --staged --quiet; then
+            echo "No screenshot changes — nothing to commit"
+          else
+            git commit -m "Update live screenshots — $(date +'%Y-%m-%d')"
+            git pull --rebase origin main
+            git push
+          fi
