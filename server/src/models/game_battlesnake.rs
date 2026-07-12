@@ -47,6 +47,7 @@ pub struct GameBattlesnakeWithDetails {
     pub head: String,
     pub tail: String,
     pub owner_login: String,
+    pub visibility: super::battlesnake::Visibility,
 }
 
 // Database functions for game battlesnake management
@@ -75,7 +76,8 @@ pub async fn get_battlesnakes_by_game_id(
             b.color,
             b.head,
             b.tail,
-            u.github_login AS owner_login
+            u.github_login AS owner_login,
+            b.visibility
         FROM game_battlesnakes gb
         LEFT JOIN leaderboard_entries le ON gb.leaderboard_entry_id = le.leaderboard_entry_id
         JOIN battlesnakes b

@@ -12,6 +12,7 @@ use crate::{
     components::page_factory::PageFactory,
     customizations::chip_color,
     errors::{ServerResult, WithStatus},
+    models::battlesnake::Visibility,
     models::game::GameStatus,
     models::game_battlesnake,
     routes::auth::OptionalUser,
@@ -105,8 +106,21 @@ pub async fn view_game(
                                 div class="top" {
                                     span class="chip" style={"background:"(chip_color(&battlesnake.color))} {}
                                     div {
-                                        div class="name" { (battlesnake.name) }
-                                        div class="owner" { "by " (battlesnake.owner_login) }
+                                        div class="name" {
+                                            // Private snake profiles 404 for visitors, so only
+                                            // link the public ones.
+                                            @if battlesnake.visibility == Visibility::Public {
+                                                a href={"/battlesnakes/"(battlesnake.battlesnake_id)"/profile"} {
+                                                    (battlesnake.name)
+                                                }
+                                            } @else {
+                                                (battlesnake.name)
+                                            }
+                                        }
+                                        div class="owner" {
+                                            "by "
+                                            a href={"/users/"(battlesnake.owner_login)} { (battlesnake.owner_login) }
+                                        }
                                     }
                                     div class="place" {
                                         @if let Some(placement) = battlesnake.placement {

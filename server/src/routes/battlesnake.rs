@@ -19,7 +19,7 @@ use crate::{
     models::snake_health_status,
     models::tournament,
     models::user::get_user_by_id,
-    routes::auth::{CurrentUser, CurrentUserWithSession},
+    routes::auth::{CurrentUser, CurrentUserWithSession, OptionalUser},
     snake_health,
     state::AppState,
 };
@@ -520,11 +520,13 @@ pub async fn reactivate_battlesnake(
     Ok(Redirect::to(&format!("/battlesnakes/{battlesnake_id}/profile")).into_response())
 }
 
-// View a battlesnake's profile with game history and stats
+// View a battlesnake's profile with game history and stats.
+// Public for public snakes (like play.battlesnake.com); private snakes are
+// only visible to their owner and 404 for everyone else.
 #[allow(clippy::too_many_lines)]
 pub async fn view_battlesnake_profile(
     State(state): State<AppState>,
-    CurrentUser(user): CurrentUser,
+    OptionalUser(user): OptionalUser,
     Path(battlesnake_id): Path<Uuid>,
     page_factory: PageFactory,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
@@ -534,6 +536,13 @@ pub async fn view_battlesnake_profile(
         .wrap_err("Failed to get battlesnake")?
         .ok_or_else(|| "Battlesnake not found".to_string())
         .with_status(StatusCode::NOT_FOUND)?;
+
+    let is_owner = user.as_ref().is_some_and(|u| u.user_id == snake.user_id);
+
+    // Private snakes 404 (rather than 403) so their existence isn't leaked.
+    if snake.visibility != Visibility::Public && !is_owner {
+        Err("Battlesnake not found".to_string()).with_status(StatusCode::NOT_FOUND)?;
+    }
 
     // Fetch the owner user info
     let owner = get_user_by_id(&state.db, snake.user_id)
@@ -559,8 +568,6 @@ pub async fn view_battlesnake_profile(
 
     // Compute stats
     let stats = compute_stats(&history);
-
-    let is_owner = user.user_id == snake.user_id;
 
     // Owner display info
     let owner_login = owner
@@ -618,7 +625,11 @@ pub async fn view_battlesnake_profile(
                                 h1 class="mb-2" { (snake.name) }
                                 div class="d-flex align-items-center mb-2" {
                                     img src=(owner_avatar) alt="Owner avatar" style="width: 24px; height: 24px; border-radius: 50%; margin-right: 8px;" {}
-                                    span { (owner_login) }
+                                    @if owner.is_some() {
+                                        a href={"/users/"(owner_login)} { (owner_login) }
+                                    } @else {
+                                        span { (owner_login) }
+                                    }
                                     @if !owner_pronouns.is_empty() {
                                         span class="text-muted" { " · " (owner_pronouns) }
                                     }
@@ -834,7 +845,12 @@ pub async fn view_battlesnake_profile(
                     @if is_owner {
                         a href="/battlesnakes" class="btn btn-secondary ms-2" { "Your Battlesnakes" }
                     }
-                    a href="/me" class="btn btn-secondary ms-2" { "My Profile" }
+                    @if owner.is_some() {
+                        a href={"/users/"(owner_login)} class="btn btn-secondary ms-2" { "Owner Profile" }
+                    }
+                    @if user.is_some() {
+                        a href="/me" class="btn btn-secondary ms-2" { "My Profile" }
+                    }
                 }
             }
         }),
