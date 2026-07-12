@@ -418,6 +418,31 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
 
 /* --- page: claim/import (slice 7) ------------------------------------------ */
 
+/* Narrow centered column for the play-account claim/recovery flow. */
+.form-page { max-width: 460px; margin: 0 auto; }
+.form-page .crumb { margin-bottom: 4px; }
+.form-page .page-head { margin-bottom: 20px; }
+.form-page h1 { font-size: clamp(28px, 3vw, 38px); }
+.form-page .lede { color: var(--ink); font-size: 15.5px; margin-bottom: 16px; }
+.form-page .fine { color: var(--muted); font-size: 13px; line-height: 1.6; margin-bottom: 16px; }
+.form-page .fine a { color: var(--pink); }
+.form-page .fine.alt { margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--hairline); }
+
+.form-page .form-stack { display: flex; flex-direction: column; gap: 16px; margin-top: 8px; }
+.form-page .form-stack .field { display: flex; flex-direction: column; gap: 6px; }
+.form-page .form-stack label { font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: .1em; color: var(--muted); }
+.form-page .form-stack input { font-family: var(--body); font-size: 15px; padding: 11px 13px; border: 1px solid var(--hairline-dark); border-radius: 10px; background: var(--card); color: var(--ink); width: 100%; }
+.form-page .form-stack input:focus-visible { outline: none; border-color: var(--pink); box-shadow: 0 0 0 3px var(--pink-wash); }
+.form-page .form-stack .btn { align-self: flex-start; margin-top: 4px; }
+.form-page .form-stack .fine { margin: 0; }
+
+.form-error { background: var(--pink-wash); border: 1px solid var(--pink); color: var(--ink); border-radius: 12px; padding: 12px 16px; font-size: 14px; margin: 16px 0; }
+.form-ok { background: color-mix(in srgb, var(--up) 12%, transparent); border: 1px solid var(--up); color: var(--ink); border-radius: 12px; padding: 12px 16px; font-size: 14px; margin: 16px 0; }
+
+@media (max-width: 640px) {
+  .form-page .form-stack .btn { align-self: stretch; text-align: center; }
+}
+
 /* --- page: tournaments (slice 8) -------------------------------------------- */
 
 /* --- responsive ---------------------------------------------------------- */
