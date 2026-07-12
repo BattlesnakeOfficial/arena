@@ -278,7 +278,10 @@ async fn not_found_page(page_factory: PageFactory) -> impl IntoResponse {
 /// account management, and the JSON API.
 async fn robots_txt() -> impl IntoResponse {
     (
-        [(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; charset=utf-8",
+        )],
         concat!(
             "User-agent: *\n",
             "Disallow: /api/\n",

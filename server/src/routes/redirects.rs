@@ -11,8 +11,14 @@ use crate::state::AppState;
 /// working after cutover.
 pub const REDIRECTS: &[(&str, &str)] = &[
     // Sponsors
-    ("/sponsor", "https://github.com/sponsors/BattlesnakeOfficial"),
-    ("/sponsors", "https://github.com/sponsors/BattlesnakeOfficial"),
+    (
+        "/sponsor",
+        "https://github.com/sponsors/BattlesnakeOfficial",
+    ),
+    (
+        "/sponsors",
+        "https://github.com/sponsors/BattlesnakeOfficial",
+    ),
     // Docs
     ("/docs", "https://docs.battlesnake.com"),
     ("/faq", "https://docs.battlesnake.com/faq"),
@@ -26,7 +32,10 @@ pub const REDIRECTS: &[(&str, &str)] = &[
     ("/discord", "https://discord.gg/BYubeHQ"),
     ("/facebook", "https://www.facebook.com/playbattlesnake/"),
     ("/github", "https://github.com/battlesnakeofficial"),
-    ("/instagram", "https://www.instagram.com/battlesnakeofficial/"),
+    (
+        "/instagram",
+        "https://www.instagram.com/battlesnakeofficial/",
+    ),
     ("/reddit", "https://www.reddit.com/r/battlesnake"),
     ("/twitch", "https://twitch.tv/BattlesnakeOfficial"),
     ("/twitter", "https://twitter.com/playbattlesnake"),
@@ -36,12 +45,13 @@ pub const REDIRECTS: &[(&str, &str)] = &[
 /// Register every short-link route on the given router.
 pub fn register(mut router: axum::Router<AppState>) -> axum::Router<AppState> {
     for (path, target) in REDIRECTS {
-        router = router.route(
-            path,
-            get(move |RawQuery(query): RawQuery| async move {
-                redirect_to(target, query.as_deref())
-            }),
-        );
+        router =
+            router.route(
+                path,
+                get(move |RawQuery(query): RawQuery| async move {
+                    redirect_to(target, query.as_deref())
+                }),
+            );
     }
     router
 }
@@ -75,8 +85,8 @@ mod tests {
 
     #[test]
     fn redirect_preserves_query_string() {
-        let response = redirect_to("https://example.com", Some("utm_source=discord"))
-            .into_response();
+        let response =
+            redirect_to("https://example.com", Some("utm_source=discord")).into_response();
         assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
         assert_eq!(
             response.headers().get(LOCATION).unwrap(),
