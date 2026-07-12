@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 use crate::{
     components::page_factory::PageFactory,
+    customizations::chip_color,
     errors::{ServerResult, WithStatus},
     models::game::GameStatus,
     models::game_battlesnake,
@@ -36,6 +37,7 @@ pub async fn view_game(
     Ok(page_factory.create_theater_page(
         format!("Game {game_id}"),
         Box::new(html! {
+            h1 class="vh" { "Game Details" }
             div class="crumb" {
                 a href="/leaderboards" { "Leaderboards" }
                 " / " span { "Game " (game_id) }
@@ -49,7 +51,7 @@ pub async fn view_game(
             @if game.status == GameStatus::Waiting {
                 p class="empty" {
                     "This game is waiting to start. "
-                    a href="" onclick="location.reload(); return false;" style="color:var(--pink)" { "Refresh" }
+                    a href="" onclick="location.reload(); return false;" class="refresh-link" { "Refresh" }
                     " to check for updates."
                 }
             }
@@ -101,7 +103,7 @@ pub async fn view_game(
                         @for battlesnake in &battlesnakes {
                             div .scard .p1[battlesnake.placement == Some(1)] {
                                 div class="top" {
-                                    span class="chip" style={"background:"(battlesnake.color)} {}
+                                    span class="chip" style={"background:"(chip_color(&battlesnake.color))} {}
                                     div {
                                         div class="name" { (battlesnake.name) }
                                         div class="owner" { "by " (battlesnake.owner_login) }
@@ -121,11 +123,11 @@ pub async fn view_game(
                     }
 
                     div class="gmeta" {
-                        h3 { "Game details" }
+                        h3 { "Details" }
                         dl class="meta-list" {
                             div { dt { "Board" } dd { (game.board_size.as_str()) } }
                             div { dt { "Mode" } dd { (game.game_type.as_str()) } }
-                            div { dt { "Status" } dd { (game.status.as_str()) } }
+                            div { dt { "Status" } dd { (capitalize(game.status.as_str())) } }
                             div { dt { "Created" } dd { (game.created_at.format("%Y-%m-%d %H:%M UTC")) } }
                         }
                     }
@@ -136,10 +138,20 @@ pub async fn view_game(
 }
 
 fn ordinal_place(n: i32) -> String {
-    match n {
-        1 => "1st Place".to_string(),
-        2 => "2nd Place".to_string(),
-        3 => "3rd Place".to_string(),
-        _ => format!("{n}th Place"),
+    let suffix = match (n % 10, n % 100) {
+        (_, 11..=13) => "th",
+        (1, _) => "st",
+        (2, _) => "nd",
+        (3, _) => "rd",
+        _ => "th",
+    };
+    format!("{n}{suffix} Place")
+}
+
+fn capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
     }
 }

@@ -59,8 +59,8 @@ test.describe('Game Details', () => {
     await authenticatedPage.getByRole('button', { name: 'Create Game' }).click();
 
     // Verify details page shows correct config
-    await expect(authenticatedPage.getByText('7x7', { exact: true })).toBeVisible();
-    await expect(authenticatedPage.getByText('Constrictor', { exact: true })).toBeVisible();
+    await expect(authenticatedPage.locator('.gmeta').getByText('7x7', { exact: true })).toBeVisible();
+    await expect(authenticatedPage.locator('.gmeta').getByText('Constrictor', { exact: true })).toBeVisible();
   });
 
 });

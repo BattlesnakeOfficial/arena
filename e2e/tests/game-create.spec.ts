@@ -131,7 +131,7 @@ test.describe('Create Game', () => {
     await snakeCard.getByRole('button', { name: 'Add to Game' }).click();
     await authenticatedPage.getByLabel('Board Size').selectOption('7x7');
     await authenticatedPage.getByRole('button', { name: 'Create Game' }).click();
-    await expect(authenticatedPage.getByText('7x7', { exact: true })).toBeVisible();
+    await expect(authenticatedPage.locator('.gmeta').getByText('7x7', { exact: true })).toBeVisible();
 
     // Test Large board
     await authenticatedPage.goto('/games/new');
@@ -139,7 +139,7 @@ test.describe('Create Game', () => {
     await snakeCard.getByRole('button', { name: 'Add to Game' }).click();
     await authenticatedPage.getByLabel('Board Size').selectOption('19x19');
     await authenticatedPage.getByRole('button', { name: 'Create Game' }).click();
-    await expect(authenticatedPage.getByText('19x19', { exact: true })).toBeVisible();
+    await expect(authenticatedPage.locator('.gmeta').getByText('19x19', { exact: true })).toBeVisible();
   });
 
   test('can select different game types', async ({ authenticatedPage }) => {
@@ -161,7 +161,7 @@ test.describe('Create Game', () => {
       await snakeCard.getByRole('button', { name: 'Add to Game' }).click();
       await authenticatedPage.getByLabel('Game Type').selectOption(gameType);
       await authenticatedPage.getByRole('button', { name: 'Create Game' }).click();
-      await expect(authenticatedPage.getByText(gameType, { exact: true })).toBeVisible();
+      await expect(authenticatedPage.locator('.gmeta').getByText(gameType, { exact: true })).toBeVisible();
     }
   });
 
