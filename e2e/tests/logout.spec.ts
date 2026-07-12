@@ -21,9 +21,9 @@ test.describe('Logout Flow', () => {
     await authenticatedPage.getByRole('link', { name: 'Logout' }).click();
     await authenticatedPage.waitForURL('/');
 
-    // Should now see the login link instead
-    await expect(authenticatedPage.getByRole('link', { name: 'Login with GitHub' })).toBeVisible();
-    await expect(authenticatedPage.getByText('You are not logged in.')).toBeVisible();
+    // Should now see the logged-out hero with its sign-in CTA instead
+    await expect(authenticatedPage.locator('main').getByRole('link', { name: 'Sign in with GitHub' })).toBeVisible();
+    await expect(authenticatedPage.getByRole('heading', { name: 'Your code is the controller.' })).toBeVisible();
   });
 
   test('protected routes return 401 after logout', async ({ authenticatedPage }) => {

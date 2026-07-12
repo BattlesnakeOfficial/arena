@@ -76,15 +76,16 @@ test.describe('Homepage Leaderboard Link for Unauthenticated Users', () => {
   test('homepage shows Leaderboards link when not logged in', async ({ page }) => {
     await page.goto('/');
 
-    // Unauthenticated users should see a Leaderboards link/button
-    await expect(page.getByRole('link', { name: 'Leaderboards' })).toBeVisible();
+    // Unauthenticated users should see a leaderboards link/button (the hero
+    // CTA; "Leaderboards" alone would also match the global nav link)
+    await expect(page.getByRole('link', { name: 'Browse leaderboards' })).toBeVisible();
   });
 
   test('Leaderboards link on homepage navigates to leaderboards page', async ({ page }) => {
     await page.goto('/');
 
-    // Click the leaderboards link
-    await page.getByRole('link', { name: 'Leaderboards' }).click();
+    // Click the leaderboards hero CTA
+    await page.getByRole('link', { name: 'Browse leaderboards' }).click();
 
     // Should navigate to the leaderboards page
     await expect(page).toHaveURL('/leaderboards');

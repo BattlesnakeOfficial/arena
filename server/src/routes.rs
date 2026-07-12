@@ -6,11 +6,20 @@ use axum::{
     routing::{delete, get, post, put},
 };
 use color_eyre::eyre::Context as _;
-use maud::html;
+use maud::{Markup, html};
 use serde::Deserialize;
 use tower_http::cors::{Any, CorsLayer};
 
-use crate::{components::page_factory::PageFactory, errors::ServerResult, state::AppState};
+use crate::{
+    components::page_factory::PageFactory,
+    customizations::chip_color,
+    errors::ServerResult,
+    models::{
+        battlesnake as battlesnake_model,
+        leaderboard::{self as leaderboard_model, ActivityFeedEntry, Leaderboard, RankedEntry},
+    },
+    state::AppState,
+};
 
 #[derive(Deserialize)]
 pub struct UpdateProfileForm {
@@ -235,41 +244,361 @@ pub fn routes(app_state: AppState) -> axum::Router {
 }
 
 async fn root_page(
-    _: State<AppState>,
+    State(state): State<AppState>,
     auth::OptionalUser(user): auth::OptionalUser,
     page_factory: PageFactory,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
+    // The home page features the first active leaderboard: its recent games
+    // feed the ticker + rail, and its top five make the ladder preview.
+    let leaderboards = leaderboard_model::get_active_leaderboards(&state.db)
+        .await
+        .wrap_err("Failed to fetch leaderboards")?;
+    let featured = leaderboards.first();
+
+    let (activity, top_entries) = if let Some(lb) = featured {
+        let activity = leaderboard_model::get_activity_feed(&state.db, lb.leaderboard_id, 14)
+            .await
+            .wrap_err("Failed to fetch activity feed")?;
+        let top = leaderboard_model::get_ranked_entries_paginated(
+            &state.db,
+            lb.leaderboard_id,
+            0,
+            5,
+            leaderboard_model::LeaderboardSort::Rating,
+        )
+        .await
+        .wrap_err("Failed to fetch top entries")?;
+        (activity, top)
+    } else {
+        (Vec::new(), Vec::new())
+    };
+
+    let user_snakes = if let Some(user) = &user {
+        battlesnake_model::get_battlesnakes_by_user_id(&state.db, user.user_id)
+            .await
+            .wrap_err("Failed to fetch user's battlesnakes")?
+    } else {
+        Vec::new()
+    };
+
     Ok(page_factory.create_page(
         "Home".to_string(),
         Box::new(html! {
-            div {
-                @if let Some(user) = user {
-                    div class="user-info" {
-                        img src=(user.github_avatar_url.unwrap_or_default()) alt="Avatar" style="width: 50px; height: 50px; border-radius: 50%;" {}
-                        p { "Welcome, " (user.github_login) "!" }
-                        @if let Some(name) = user.github_name {
-                            p { "Name: " (name) }
+            div class="home" {
+                @if let Some(user) = &user {
+                    section class="welcome" {
+                        img src=(user.github_avatar_url.clone().unwrap_or_default()) alt="" width="64" height="64";
+                        div class="who" {
+                            h1 { "Welcome, " (user.github_login) "!" }
+                            p class="sub" {
+                                @if user_snakes.is_empty() {
+                                    "No snakes in your stable yet — deploy a server and claim a spot on the ladder."
+                                } @else if user_snakes.len() == 1 {
+                                    "One snake in your stable, playing around the clock."
+                                } @else {
+                                    (user_snakes.len()) " snakes in your stable, playing around the clock."
+                                }
+                            }
                         }
-                        // Section links live in the global nav now; only
-                        // actions the nav doesn't offer stay here.
-                        div class="user-actions" style="margin-top: 10px;" {
-                            a href="/me" class="btn" { "Profile" }
-                            a href="/auth/logout" class="btn" { "Logout" }
+                        div class="cta-row" {
+                            a class="btn" href="/me" { "Profile" }
+                            a class="btn" href="/battlesnakes" { "My snakes" }
+                            a class="btn" href="/auth/logout" { "Logout" }
+                        }
+                    }
+
+                    @if user_snakes.is_empty() {
+                        section class="section" {
+                            h2 { "Get on the board" }
+                            p class="empty" { "Register your first snake to start playing ranked games." }
+                            a class="btn solid" href="/battlesnakes/new" { "Register a snake" }
+                        }
+                    } @else {
+                        section class="section snakes" {
+                            h2 { "Your snakes" }
+                            div class="rows" {
+                                @for snake in &user_snakes {
+                                    a class="srow" href={"/battlesnakes/"(snake.battlesnake_id)"/profile"} {
+                                        span class="chip" style={"background:"(chip_color(&snake.color))} {}
+                                        span class="sname" { (snake.name) }
+                                        span class="surl hide-sm" { (snake.url) }
+                                        @if snake.visibility == battlesnake_model::Visibility::Public {
+                                            span class="badge ok" { "Public" }
+                                        } @else {
+                                            span class="badge" { "Private" }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 } @else {
-                    div class="login" {
-                        p { "You are not logged in." }
-                        a href="/auth/github" { "Login with GitHub" }
+                    section class="hero" {
+                        div class="copy" {
+                            div class="kicker" { "A game for programmers" }
+                            h1 { "Your code is the " em { "controller." } }
+                            p class="lede" {
+                                "Write a web server that plays snake. Deploy it in any language. "
+                                "Climb the leaderboards while your code competes around the clock — "
+                                "even while you sleep."
+                            }
+                            div class="cta-row" {
+                                a class="btn solid" href="/auth/github" { "Sign in with GitHub" }
+                                a class="btn" href="/leaderboards" { "Browse leaderboards" }
+                            }
+                            div class="cta-note" { code { "$ curl -X POST your-server.dev/move → {\"move\": \"up\"}" } }
+                        }
+                        div class="board-frame" {
+                            (home_board())
+                            div class="board-caption" {
+                                span class="live-dot" {}
+                                @if let Some(lb) = featured {
+                                    (lb.name) " · ranked games around the clock"
+                                } @else {
+                                    "Standard 11×11 · ranked games around the clock"
+                                }
+                            }
+                        }
                     }
                 }
-                div class="content" style="margin-top: 20px;" {
-                    h1 { "Hello, world!" }
-                    p { "Welcome to the Arena application!" }
+
+                @if let (Some(lb), false) = (featured, activity.is_empty()) {
+                    div class="strip" aria-hidden="true" {
+                        div class="inner" {
+                            (home_ticker_items(&activity, &lb.name))
+                            (home_ticker_items(&activity, &lb.name))
+                        }
+                    }
+                }
+
+                @if user.is_none() {
+                    section class="features" {
+                        div class="feature" {
+                            div class="num" { "01" }
+                            h2 { "Automated leaderboards" }
+                            p {
+                                "Ranked matches run continuously. Your snake earns its rating in "
+                                "thousands of games against developers worldwide, not a handful of "
+                                "showcase matches."
+                            }
+                            a class="more" href="/leaderboards" { "See the rankings →" }
+                        }
+                        div class="feature" {
+                            div class="num" { "02" }
+                            h2 { "Any language, any stack" }
+                            p {
+                                "If it can answer an HTTP request in 500ms, it can play. Rust, "
+                                "Python, TypeScript, COBOL if you're feeling dangerous — starter "
+                                "projects for a dozen languages."
+                            }
+                            a class="more" href="https://docs.battlesnake.com" { "Read the docs →" }
+                        }
+                        div class="feature" {
+                            div class="num" { "03" }
+                            h2 { "Tournaments & community" }
+                            p {
+                                "Compete in seasonal championships, run brackets for your team or "
+                                "classroom, and replay any game move-by-move to study exactly where "
+                                "it went wrong."
+                            }
+                            a class="more" href="/tournaments" { "Follow the brackets →" }
+                        }
+                    }
+                }
+
+                (home_ladder_grid(featured, &top_entries, &activity))
+
+                @if user.is_none() {
+                    section class="statement" {
+                        h2 { "As simple — or as " em { "unhinged" } " — as you want it to be." }
+                        p {
+                            "Start with an if-statement that avoids walls. End up with a minimax "
+                            "search you think about in the shower. Battlesnake is open-ended by "
+                            "design: how far you take it is up to you."
+                        }
+                        a class="btn solid" href="/auth/github" { "Get started free" }
+                    }
                 }
             }
         }),
     ))
+}
+
+/// Decorative 11×11 board for the logged-out hero. Intentionally dark-framed
+/// in both themes (hardcoded colors match the mockup's board panel).
+fn home_board() -> Markup {
+    const N: usize = 11;
+    let pink: &[(usize, usize)] = &[
+        (3, 2),
+        (3, 3),
+        (4, 3),
+        (4, 4),
+        (4, 5),
+        (5, 5),
+        (5, 6),
+        (5, 7),
+    ];
+    let cream: &[(usize, usize)] = &[(8, 7), (8, 6), (7, 6), (7, 5), (7, 4), (8, 4), (9, 4)];
+    let food: &[(usize, usize)] = &[(1, 1), (6, 2), (9, 9), (2, 8)];
+
+    let mut cells: Vec<(&'static str, Option<String>)> = vec![("cell", None); N * N];
+    let mut draw_snake = |coords: &[(usize, usize)], color: &str| {
+        for (i, &(x, y)) in coords.iter().enumerate() {
+            let class = if i == 0 { "cell seg head" } else { "cell seg" };
+            let mut style = format!("background:{color}");
+            if i == coords.len() - 1 {
+                style.push_str(";opacity:.55");
+            }
+            cells[y * N + x] = (class, Some(style));
+        }
+    };
+    draw_snake(pink, "#FF3D8A");
+    draw_snake(cream, "#F4EFEA");
+    for &(x, y) in food {
+        cells[y * N + x] = ("cell food", None);
+    }
+
+    html! {
+        div class="board" aria-hidden="true" {
+            @for (class, style) in &cells {
+                div class=(class) style=[style.as_deref()] {}
+            }
+        }
+    }
+}
+
+/// One pass of ticker copy; rendered twice so the -50% loop is seamless.
+fn home_ticker_items(activity: &[ActivityFeedEntry], leaderboard_name: &str) -> Markup {
+    html! {
+        @for event in activity {
+            b { (event.snake_name) }
+            @if event.placement == 1 {
+                " won on "
+            } @else {
+                " placed " (home_ordinal(event.placement)) " on "
+            }
+            (leaderboard_name)
+            " "
+            @if event.display_score_change >= 0.0 {
+                span class="win" { (format!("{:+.1}", event.display_score_change)) }
+            } @else {
+                span class="lose" { (format!("{:+.1}", event.display_score_change)) }
+            }
+            span class="sep" { "/" }
+        }
+    }
+}
+
+/// Ladder preview (top five by rating) + recent games rail, shared by the
+/// logged-in and logged-out home page.
+fn home_ladder_grid(
+    featured: Option<&Leaderboard>,
+    top_entries: &[RankedEntry],
+    activity: &[ActivityFeedEntry],
+) -> Markup {
+    html! {
+        div class="grid" {
+            section class="ladder" {
+                h2 { "Top of the ladder" }
+                @if let Some(lb) = featured {
+                    p class="ladder-sub" { (lb.name) " — current standings, updated every game." }
+                }
+                @if top_entries.is_empty() {
+                    p class="empty" { "No ranked snakes yet. The ladder is wide open." }
+                } @else {
+                    table class="data" {
+                        thead {
+                            tr {
+                                th { "Rank" }
+                                th { "Snake" }
+                                th class="r" { "Rating" }
+                            }
+                        }
+                        tbody {
+                            @for (i, entry) in top_entries.iter().enumerate() {
+                                tr class=[(i == 0).then_some("top")] {
+                                    td class="rank" { "#" (i + 1) }
+                                    td {
+                                        div class="snake-cell" {
+                                            span class="chip" style={"background:"(chip_color(&entry.snake_color))} {}
+                                            span {
+                                                @if let Some(lb) = featured {
+                                                    a class="name" href={"/leaderboards/"(lb.leaderboard_id)"/entries/"(entry.leaderboard_entry_id)} { (entry.snake_name) }
+                                                } @else {
+                                                    span class="name" { (entry.snake_name) }
+                                                }
+                                                span class="owner" { "by " (entry.owner_login) }
+                                            }
+                                        }
+                                    }
+                                    td class="r rating" { (format!("{:.1}", entry.display_score)) }
+                                }
+                            }
+                        }
+                    }
+                    @if let Some(lb) = featured {
+                        a class="more" href={"/leaderboards/"(lb.leaderboard_id)} { "Full standings →" }
+                    }
+                }
+            }
+
+            aside class="rail" {
+                div class="block" {
+                    h3 { span class="live-dot" {} "Recent games" }
+                    @if activity.is_empty() {
+                        p class="railp" { "No games yet — be the first on the board." }
+                    } @else {
+                        ul class="feed" {
+                            @for event in &activity[..activity.len().min(8)] {
+                                li {
+                                    span class="t" { (home_fmt_ago(event.created_at)) }
+                                    span {
+                                        @if let Some(lb) = featured {
+                                            a href={"/leaderboards/"(lb.leaderboard_id)"/entries/"(event.leaderboard_entry_id)} {
+                                                b { (event.snake_name) }
+                                            }
+                                        } @else {
+                                            b { (event.snake_name) }
+                                        }
+                                        " "
+                                        span class={"place p"(event.placement)} { (home_ordinal(event.placement)) }
+                                        " "
+                                        @if event.display_score_change >= 0.0 {
+                                            span class="delta up" { (format!("{:+.1}", event.display_score_change)) }
+                                        } @else {
+                                            span class="delta down" { (format!("{:+.1}", event.display_score_change)) }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Compact relative time for the home rail feed ("2m ago").
+fn home_fmt_ago(t: chrono::DateTime<chrono::Utc>) -> String {
+    let secs = (chrono::Utc::now() - t).num_seconds().max(0);
+    match secs {
+        0..=59 => format!("{secs}s ago"),
+        60..=3599 => format!("{}m ago", secs / 60),
+        3600..=86399 => format!("{}h ago", secs / 3600),
+        _ => format!("{}d ago", secs / 86400),
+    }
+}
+
+fn home_ordinal(n: i32) -> String {
+    let suffix = match (n % 10, n % 100) {
+        (_, 11..=13) => "th",
+        (1, _) => "st",
+        (2, _) => "nd",
+        (3, _) => "rd",
+        _ => "th",
+    };
+    format!("{n}{suffix}")
 }
 
 /// Profile page that requires authentication

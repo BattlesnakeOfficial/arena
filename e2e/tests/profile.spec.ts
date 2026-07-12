@@ -54,7 +54,8 @@ test.describe('Profile Page', () => {
     await authenticatedPage.getByRole('link', { name: 'Back to Home' }).click();
 
     await expect(authenticatedPage).toHaveURL('/');
-    await expect(authenticatedPage.getByRole('heading', { name: 'Hello, world!' })).toBeVisible();
+    // Authenticated home leads with a personalized welcome (redesign slice 4)
+    await expect(authenticatedPage.getByRole('heading', { name: /Welcome,/ })).toBeVisible();
   });
 
   test('Logout link logs out the user', async ({ authenticatedPage }) => {
@@ -65,8 +66,8 @@ test.describe('Profile Page', () => {
     // Should redirect to homepage
     await expect(authenticatedPage).toHaveURL('/');
 
-    // Should show login link (logged out state)
-    await expect(authenticatedPage.getByRole('link', { name: 'Login with GitHub' })).toBeVisible();
+    // Should show the logged-out hero sign-in CTA (scoped to main; nav has its own)
+    await expect(authenticatedPage.locator('main').getByRole('link', { name: 'Sign in with GitHub' })).toBeVisible();
   });
 
   test('profile page requires authentication', async ({ page }) => {

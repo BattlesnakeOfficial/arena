@@ -4,15 +4,15 @@ test.describe('Smoke Tests', () => {
   test('homepage loads successfully', async ({ page }) => {
     await page.goto('/');
 
-    // Verify the page loads with expected content
-    await expect(page.getByRole('heading', { name: 'Hello, world!' })).toBeVisible();
-    await expect(page.getByText('Welcome to the Arena application!')).toBeVisible();
+    // Verify the page loads with the hero content
+    await expect(page.getByRole('heading', { name: 'Your code is the controller.' })).toBeVisible();
+    await expect(page.getByText('Write a web server that plays snake.')).toBeVisible();
   });
 
   test('shows login link for unauthenticated users', async ({ page }) => {
     await page.goto('/');
 
-    await expect(page.getByText('You are not logged in.')).toBeVisible();
-    await expect(page.getByRole('link', { name: 'Login with GitHub' })).toBeVisible();
+    // Hero sign-in CTA (scoped to main; the global nav has its own sign-in button)
+    await expect(page.locator('main').getByRole('link', { name: 'Sign in with GitHub' })).toBeVisible();
   });
 });

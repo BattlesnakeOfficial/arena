@@ -7,8 +7,8 @@ test.describe('Homepage - Authenticated User', () => {
     // User's GitHub login name is displayed
     await expect(authenticatedPage.getByText(`Welcome, ${mockUser.login}!`)).toBeVisible();
 
-    // User's avatar is displayed (img with the avatar URL)
-    const avatar = authenticatedPage.locator('img[alt="Avatar"]');
+    // User's avatar is displayed (decorative img in the welcome band)
+    const avatar = authenticatedPage.locator('.welcome img');
     await expect(avatar).toBeVisible();
   });
 
@@ -28,7 +28,7 @@ test.describe('Homepage - Authenticated User', () => {
   test('does not show login link when authenticated', async ({ authenticatedPage }) => {
     await authenticatedPage.goto('/');
 
-    // Login link should NOT be visible
-    await expect(authenticatedPage.getByRole('link', { name: 'Login with GitHub' })).not.toBeVisible();
+    // Sign-in link should NOT be visible anywhere for authenticated users
+    await expect(authenticatedPage.getByRole('link', { name: 'Sign in with GitHub' })).not.toBeVisible();
   });
 });
