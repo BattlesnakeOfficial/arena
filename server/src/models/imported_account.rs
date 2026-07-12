@@ -2,6 +2,8 @@ use color_eyre::eyre::Context as _;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::customizations::normalize_color;
+
 /// A play account staged for migration. Inert until claimed.
 #[derive(Debug, sqlx::FromRow)]
 pub struct ImportedAccount {
@@ -151,7 +153,7 @@ pub async fn stage_snake(pool: &PgPool, snake: &StageSnake) -> cja::Result<bool>
         snake.url,
         snake.head,
         snake.tail,
-        snake.color,
+        normalize_color(&snake.color),
         snake.is_public,
     )
     .execute(pool)
@@ -361,7 +363,7 @@ pub async fn claim_account(
             name,
             snake.url,
             visibility,
-            snake.color,
+            normalize_color(&snake.color),
             snake.head,
             snake.tail,
         )
@@ -591,6 +593,7 @@ mod tests {
         assert_eq!(snake.name, "Hissy");
         assert_eq!(snake.head, "alligator");
         assert_eq!(snake.visibility, "public");
+        assert_eq!(snake.color, "#ff0000");
 
         let display_name =
             sqlx::query!("SELECT display_name FROM users WHERE user_id = $1", user_id)
@@ -602,6 +605,40 @@ mod tests {
         // The granted head is now usable in games.
         let resolved = crate::customizations::resolve_head(&pool, user_id, "alligator").await?;
         assert_eq!(resolved, "alligator");
+
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn hostile_import_color_is_neutralized(pool: PgPool) -> cja::Result<()> {
+        let user_id = create_user(&pool, 3001).await?;
+        let account_id = stage_account(&pool, &play_account(3)).await?;
+        stage_snake(
+            &pool,
+            &StageSnake {
+                play_snake_id: "snk_hostile".to_string(),
+                play_account_id: "act_3".to_string(),
+                name: "Sneaky".to_string(),
+                url: "https://example.com/snake".to_string(),
+                head: "default".to_string(),
+                tail: "default".to_string(),
+                color: "red;position:fixed;inset:0".to_string(),
+                is_public: true,
+            },
+        )
+        .await?;
+
+        claim_account(&pool, account_id, user_id)
+            .await?
+            .expect("claim should succeed");
+
+        // Invalid play colors become '' (the board picks a stable fallback
+        // for empty; the UI chip renderer greys it out) — never raw CSS.
+        let color = sqlx::query!("SELECT color FROM battlesnakes WHERE user_id = $1", user_id)
+            .fetch_one(&pool)
+            .await?
+            .color;
+        assert_eq!(color, "");
 
         Ok(())
     }
