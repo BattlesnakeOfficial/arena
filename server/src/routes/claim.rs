@@ -37,14 +37,17 @@ const MAX_ATTEMPTS_PER_EMAIL_PER_HOUR: i64 = 10;
 
 fn claim_form(error: Option<&str>) -> Markup {
     html! {
-        div class="container" style="max-width: 480px;" {
-            h1 { "Claim your play.battlesnake.com account" }
-            p {
-                "If you played on the old site, your snakes, profile, and "
-                "customization unlocks are waiting. Enter your old play email "
-                "and password to bring them over to this account."
+        div class="form-page" {
+            div class="crumb" { "Play migration" }
+            div class="page-head" {
+                h1 { "Claim your play account" }
             }
-            p style="color: #666; font-size: 0.9em;" {
+            p class="lede" {
+                "If you played on play.battlesnake.com, your snakes, profile, and "
+                "customization unlocks are waiting. Enter your old play email and "
+                "password to bring them over to this account."
+            }
+            p class="fine" {
                 "Had GitHub connected on play? Your account was linked "
                 "automatically when you signed in here — check "
                 a href="/battlesnakes" { "your battlesnakes" }
@@ -53,37 +56,29 @@ fn claim_form(error: Option<&str>) -> Markup {
             }
 
             @if let Some(error) = error {
-                div class="alert alert-danger" style="color: #b00; margin: 12px 0;" {
-                    p { (error) }
-                }
+                div class="form-error" { (error) }
             }
 
-            form method="post" action="/claim" {
-                div style="margin-bottom: 12px;" {
+            form class="form-stack" method="post" action="/claim" {
+                div class="field" {
                     label for="email" { "Play account email" }
-                    br;
-                    input type="email" id="email" name="email" required
-                        style="width: 100%; padding: 8px;";
+                    input type="email" id="email" name="email" required;
                 }
-                div style="margin-bottom: 12px;" {
+                div class="field" {
                     label for="password" { "Play account password" }
-                    br;
-                    input type="password" id="password" name="password" required
-                        style="width: 100%; padding: 8px;";
+                    input type="password" id="password" name="password" required;
                 }
-                p style="color: #666; font-size: 0.85em;" {
+                p class="fine" {
                     "Your old password is checked once to prove the account is "
-                    "yours and is never stored. Arena sign-in stays GitHub-only."
-                }
-                p style="color: #666; font-size: 0.85em;" {
+                    "yours and is never stored. Arena sign-in stays GitHub-only. "
                     "Imported play data is handled per our "
                     a href="/privacy" { "privacy policy" }
                     "."
                 }
-                button type="submit" class="btn btn-primary" { "Claim account" }
+                button type="submit" class="btn solid" { "Claim account" }
             }
 
-            p style="margin-top: 16px; color: #666; font-size: 0.9em;" {
+            p class="fine alt" {
                 "Forgot your play password? "
                 a href="/claim/email" { "Claim by email instead" }
                 " — we'll send a one-time link to your old play address. Or "
@@ -241,9 +236,15 @@ pub async fn submit_claim(
 
 fn email_claim_form(notice: Option<Markup>) -> Markup {
     html! {
-        div class="container" style="max-width: 480px;" {
-            h1 { "Claim by email" }
-            p {
+        div class="form-page" {
+            div class="crumb" {
+                a href="/claim" { "Claim" }
+                " / by email"
+            }
+            div class="page-head" {
+                h1 { "Claim by email" }
+            }
+            p class="lede" {
                 "No usable play password (signed up with GitHub on play, or "
                 "just forgot it)? Enter your old play email and we'll send a "
                 "one-time link there. Opening it while signed in here "
@@ -254,17 +255,15 @@ fn email_claim_form(notice: Option<Markup>) -> Markup {
                 (notice)
             }
 
-            form method="post" action="/claim/email" {
-                div style="margin-bottom: 12px;" {
+            form class="form-stack" method="post" action="/claim/email" {
+                div class="field" {
                     label for="email" { "Play account email" }
-                    br;
-                    input type="email" id="email" name="email" required
-                        style="width: 100%; padding: 8px;";
+                    input type="email" id="email" name="email" required;
                 }
-                button type="submit" class="btn btn-primary" { "Email me a claim link" }
+                button type="submit" class="btn solid" { "Email me a claim link" }
             }
 
-            p style="margin-top: 16px; color: #666; font-size: 0.9em;" {
+            p class="fine alt" {
                 "Know your play password? "
                 a href="/claim" { "Claim with it directly" }
                 "."
@@ -277,12 +276,10 @@ fn email_claim_form(notice: Option<Markup>) -> Markup {
 /// form can't be used to probe which play emails exist.
 fn email_claim_sent_notice() -> Markup {
     html! {
-        div class="alert alert-success" style="margin: 12px 0;" {
-            p {
-                "If that address matches an unclaimed play account, a claim "
-                "link is on its way. It works once, expires in 30 minutes, "
-                "and only completes on this arena account."
-            }
+        div class="form-ok" {
+            "If that address matches an unclaimed play account, a claim "
+            "link is on its way. It works once, expires in 30 minutes, "
+            "and only completes on this arena account."
         }
     }
 }
@@ -331,11 +328,9 @@ pub async fn submit_email_claim(
             .create_page(
                 "Claim by Email".to_string(),
                 Box::new(email_claim_form(Some(html! {
-                    div class="alert alert-danger" style="color: #b00; margin: 12px 0;" {
-                        p {
-                            "Too many attempts. Try again in an hour, or reach \
-                             out on Discord for help."
-                        }
+                    div class="form-error" {
+                        "Too many attempts. Try again in an hour, or reach "
+                        "out on Discord for help."
                     }
                 }))),
             )
@@ -415,16 +410,18 @@ pub async fn email_claim_verify_page(
     Ok(page_factory.create_page(
         "Finish Claiming".to_string(),
         Box::new(html! {
-            div class="container" style="max-width: 480px;" {
-                h1 { "Finish claiming your play account" }
-                p {
+            div class="form-page" {
+                div class="page-head" {
+                    h1 { "Finish claiming your play account" }
+                }
+                p class="lede" {
                     "You're about to attach the play account from your claim "
                     "email to this arena login, bringing its snakes and "
                     "customization unlocks with it."
                 }
-                form method="post" action="/claim/email/verify" {
+                form class="form-stack" method="post" action="/claim/email/verify" {
                     input type="hidden" name="token" value=(query.token);
-                    button type="submit" class="btn btn-primary" { "Complete claim" }
+                    button type="submit" class="btn solid" { "Complete claim" }
                 }
             }
         }),
@@ -451,9 +448,11 @@ pub async fn complete_email_claim(
             .create_page(
                 "Finish Claiming".to_string(),
                 Box::new(html! {
-                    div class="container" style="max-width: 480px;" {
-                        h1 { "That link didn't work" }
-                        p {
+                    div class="form-page" {
+                        div class="page-head" {
+                            h1 { "That link didn't work" }
+                        }
+                        p class="lede" {
                             "The claim link is invalid, expired, already used, "
                             "or was requested from a different arena account. "
                             "You can "
