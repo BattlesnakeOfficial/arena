@@ -289,7 +289,7 @@ async fn profile_page(
             }
 
             header class="profile-head" {
-                img class="avatar" src=(user.github_avatar_url.clone().unwrap_or_default()) alt="Avatar";
+                img class="avatar" src=(user.github_avatar_url.clone().unwrap_or_default()) alt="";
                 div class="who" {
                     @if let Some(name) = user.display_name.as_ref().filter(|n| !n.is_empty()) {
                         h2 { (name) }

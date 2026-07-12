@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 use crate::{
     components::page_factory::PageFactory,
+    customizations::chip_color,
     errors::{ServerResult, WithStatus},
     models::battlesnake::{self, CreateBattlesnake, UpdateBattlesnake, Visibility},
     models::game_battlesnake,
@@ -65,11 +66,10 @@ pub async fn list_battlesnakes(
                         }
                         tbody {
                             @for snake in &battlesnakes {
-                                @let color = if snake.color.is_empty() { "#888888" } else { snake.color.as_str() };
                                 tr {
                                     td {
                                         div class="snake-cell" {
-                                            span class="chip" style={"background:" (color)} {}
+                                            span class="chip" style={"background:" (chip_color(&snake.color))} {}
                                             a class="name" href={"/battlesnakes/"(snake.battlesnake_id)"/profile"} { (snake.name) }
                                         }
                                     }
