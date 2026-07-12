@@ -643,7 +643,7 @@ fn tournament_form_fields(current: Option<&Tournament>) -> Markup {
                 option value="Constrictor" selected[game_type == GameType::Constrictor] { "Constrictor" }
                 option value="Snail Mode" selected[game_type == GameType::SnailMode] { "Snail Mode" }
             }
-            div class="hint" { "Cannot be changed once snakes have registered" }
+            div class="help" { "Cannot be changed once snakes have registered" }
         }
 
         div class="field" {
@@ -653,7 +653,7 @@ fn tournament_form_fields(current: Option<&Tournament>) -> Markup {
                 option value="11x11" selected[board_size == GameBoardSize::Medium] { "11x11 (Medium)" }
                 option value="19x19" selected[board_size == GameBoardSize::Large] { "19x19 (Large)" }
             }
-            div class="hint" { "Cannot be changed once snakes have registered" }
+            div class="help" { "Cannot be changed once snakes have registered" }
         }
 
         div class="field" {
@@ -858,10 +858,10 @@ pub async fn new_tournament(
                 }
             }
 
-            form class="tform" action="/tournaments" method="post" {
+            form class="form-stack" action="/tournaments" method="post" {
                 (tournament_form_fields(None))
 
-                div class="actions" {
+                div class="form-cta" {
                     button type="submit" class="btn solid" { "Create Tournament" }
                     a href="/tournaments" class="btn" { "Cancel" }
                 }
@@ -1336,10 +1336,10 @@ pub async fn edit_tournament(
                 }
             }
 
-            form class="tform" action={"/tournaments/"(tournament_id)"/settings"} method="post" {
+            form class="form-stack" action={"/tournaments/"(tournament_id)"/settings"} method="post" {
                 (tournament_form_fields(Some(&t)))
 
-                div class="actions" {
+                div class="form-cta" {
                     button type="submit" class="btn solid" { "Update Tournament" }
                     a href={"/tournaments/"(tournament_id)} class="btn" { "Cancel" }
                 }

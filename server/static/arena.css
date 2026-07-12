@@ -403,6 +403,53 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
 .activity-feed-item { padding: 6px 0; border-bottom: 1px solid var(--hairline); }
 .activity-feed-item:last-child { border-bottom: none; }
 
+/* --- forms (shared editorial form kit) ----------------------------------- */
+/* Promoted post-redesign from the slice 5/7/8 sections so every stacked form
+   (profile edit, snake create/edit, claim flow, tournament create/edit)
+   shares one recipe. Inline row forms (.join-form, .seed-form, .rail-form)
+   stay page-local. */
+.form-stack { display: flex; flex-direction: column; gap: 20px; margin-top: 22px; max-width: 560px; }
+.form-stack > .btn { align-self: flex-start; margin-top: 4px; }
+.field label {
+  display: block;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  text-transform: uppercase;
+  letter-spacing: .12em;
+  color: var(--muted);
+  margin-bottom: 7px;
+}
+.field input,
+.field select,
+.field textarea {
+  width: 100%;
+  font-family: var(--body);
+  font-size: 15px;
+  color: var(--ink);
+  background: var(--card);
+  border: 1px solid var(--hairline-dark);
+  border-radius: 12px;
+  padding: 11px 14px;
+  min-height: 46px;
+}
+.field input:hover, .field select:hover, .field textarea:hover { border-color: var(--muted); }
+.field input:focus-visible, .field select:focus-visible, .field textarea:focus-visible {
+  outline: none;
+  border-color: var(--pink);
+  box-shadow: 0 0 0 3px var(--pink-wash);
+}
+.field input[type="url"] { font-family: var(--mono); font-size: 13.5px; }
+.field input[type="number"] { font-family: var(--mono); }
+.field textarea { min-height: 130px; resize: vertical; line-height: 1.55; }
+.field .help { font-size: 12.5px; color: var(--muted); margin-top: 6px; }
+.form-cta { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 4px; }
+.form-error { background: var(--pink-wash); border: 1px solid var(--pink); color: var(--ink); border-radius: 12px; padding: 12px 16px; font-size: 14px; margin: 16px 0; }
+.form-ok { background: color-mix(in srgb, var(--up) 12%, transparent); border: 1px solid var(--up); color: var(--ink); border-radius: 12px; padding: 12px 16px; font-size: 14px; margin: 16px 0; }
+.vh { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+@media (max-width: 640px) {
+  .form-stack > .btn { align-self: stretch; text-align: center; }
+}
+
 /* ==========================================================================
    Per-page sections. Each redesign slice owns exactly one block below and
    must not edit outside it — keeps parallel slice PRs conflict-free.
@@ -593,7 +640,6 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
 
 /* Theater pages resolve their theme from the theater axis (create_theater_page).
    The stage panel frames the board.battlesnake.com iframe. */
-.vh { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .refresh-link { color: var(--pink); }
 .live-pill { font-family: var(--mono); font-size: 10.5px; text-transform: uppercase; letter-spacing: .14em; padding: 3px 11px; border-radius: 999px; border: 1px solid var(--pink); color: var(--pink-deep); display: inline-flex; gap: 7px; align-items: center; margin-left: 12px; vertical-align: 1px; }
 .live-pill.quiet { border-color: var(--hairline-dark); color: var(--muted); }
@@ -637,37 +683,6 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
 .profile-head .bio { font-size: 15px; color: var(--muted); margin-top: 8px; max-width: 60ch; white-space: pre-wrap; overflow-wrap: break-word; }
 
 .profile-actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 24px; }
-
-/* editorial forms (profile edit + snake create/edit) */
-.form-stack { display: flex; flex-direction: column; gap: 20px; margin-top: 22px; max-width: 560px; }
-.field label {
-  display: block;
-  font-family: var(--mono);
-  font-size: 11.5px;
-  text-transform: uppercase;
-  letter-spacing: .12em;
-  color: var(--muted);
-  margin-bottom: 7px;
-}
-.field input,
-.field select,
-.field textarea {
-  width: 100%;
-  font-family: var(--body);
-  font-size: 15px;
-  color: var(--ink);
-  background: var(--card);
-  border: 1px solid var(--hairline-dark);
-  border-radius: 12px;
-  padding: 11px 14px;
-  min-height: 46px;
-}
-.field input:hover, .field select:hover, .field textarea:hover { border-color: var(--muted); }
-.field input:focus-visible, .field select:focus-visible, .field textarea:focus-visible { border-color: var(--pink); }
-.field input[type="url"] { font-family: var(--mono); font-size: 13.5px; }
-.field textarea { min-height: 130px; resize: vertical; line-height: 1.55; }
-.field .help { font-size: 12.5px; color: var(--muted); margin-top: 6px; }
-.form-cta { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 4px; }
 
 /* snakes list table (/battlesnakes) */
 .head-actions { margin-left: auto; padding-bottom: 6px; display: flex; gap: 10px; flex-wrap: wrap; }
@@ -720,25 +735,12 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
 .form-page .fine a { color: var(--pink); }
 .form-page .fine.alt { margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--hairline); }
 
-.form-page .form-stack { display: flex; flex-direction: column; gap: 16px; margin-top: 8px; }
-.form-page .form-stack .field { display: flex; flex-direction: column; gap: 6px; }
-.form-page .form-stack label { font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: .1em; color: var(--muted); }
-.form-page .form-stack input { font-family: var(--body); font-size: 15px; padding: 11px 13px; border: 1px solid var(--hairline-dark); border-radius: 10px; background: var(--card); color: var(--ink); width: 100%; }
-.form-page .form-stack input:focus-visible { outline: none; border-color: var(--pink); box-shadow: 0 0 0 3px var(--pink-wash); }
-.form-page .form-stack .btn { align-self: flex-start; margin-top: 4px; }
+.form-page .form-stack { margin-top: 8px; }
 .form-page .form-stack .fine { margin: 0; }
-
-.form-error { background: var(--pink-wash); border: 1px solid var(--pink); color: var(--ink); border-radius: 12px; padding: 12px 16px; font-size: 14px; margin: 16px 0; }
-.form-ok { background: color-mix(in srgb, var(--up) 12%, transparent); border: 1px solid var(--up); color: var(--ink); border-radius: 12px; padding: 12px 16px; font-size: 14px; margin: 16px 0; }
-
-@media (max-width: 640px) {
-  .form-page .form-stack .btn { align-self: stretch; text-align: center; }
-}
 
 /* --- page: tournaments (slice 8) -------------------------------------------- */
 
 .page-head .spacer { flex: 1; }
-.vh { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .head-cta { margin-bottom: 12px; }
 .head-status { margin-bottom: 14px; }
 .champ-chip { display: inline-block; vertical-align: -2px; margin-right: 8px; }
@@ -940,33 +942,6 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
 .rail-form select { flex: 1; min-width: 0; }
 .rail-form input[type="number"] { width: 76px; font-family: var(--mono); }
 .rail-form .lbl { font-family: var(--mono); font-size: 12px; color: var(--muted); }
-
-/* create / edit forms */
-.tform { max-width: 560px; margin-top: 34px; }
-.tform .field { margin-bottom: 22px; }
-.tform label {
-  display: block;
-  font-family: var(--mono);
-  font-size: 11.5px;
-  text-transform: uppercase;
-  letter-spacing: .12em;
-  color: var(--muted);
-  margin-bottom: 6px;
-}
-.tform input, .tform select, .tform textarea {
-  width: 100%;
-  font-family: var(--body);
-  font-size: 15px;
-  padding: 10px 12px;
-  border: 1px solid var(--hairline-dark);
-  border-radius: 10px;
-  background: var(--card);
-  color: var(--ink);
-}
-.tform textarea { resize: vertical; line-height: 1.5; }
-.tform input:focus, .tform select:focus, .tform textarea:focus { outline: 2px solid var(--pink); outline-offset: 0; border-color: var(--pink); }
-.tform .hint { font-size: 12.5px; color: var(--muted); margin-top: 5px; }
-.tform .actions { display: flex; gap: 10px; margin-top: 30px; }
 
 @media (max-width: 640px) {
   .bracket-scroll { margin-left: -20px; margin-right: -20px; padding-left: 20px; padding-right: 20px; }
