@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT\n            leaderboard_entry_id, leaderboard_id, battlesnake_id,\n            mu, sigma, display_score, games_played, first_place_finishes, non_first_finishes,\n            disabled_at, created_at, updated_at\n         FROM leaderboard_entries\n         WHERE leaderboard_id = $1 AND battlesnake_id = $2\n         FOR UPDATE",
+  "query": "SELECT\n            leaderboard_entry_id, leaderboard_id, battlesnake_id,\n            mu, sigma, display_score, games_played, first_place_finishes, non_first_finishes,\n            disabled_at, disabled_reason, created_at, updated_at\n         FROM leaderboard_entries\n         WHERE leaderboard_id = $1 AND battlesnake_id = $2\n         FOR UPDATE",
   "describe": {
     "columns": [
       {
@@ -55,11 +55,16 @@
       },
       {
         "ordinal": 10,
+        "name": "disabled_reason",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 11,
         "name": "created_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 11,
+        "ordinal": 12,
         "name": "updated_at",
         "type_info": "Timestamptz"
       }
@@ -81,9 +86,10 @@
       false,
       false,
       true,
+      true,
       false,
       false
     ]
   },
-  "hash": "d89a8ce0b52e9d9a3e8b3e353eab4b8462457a389f19f2d211282f4f406f662d"
+  "hash": "08b3bb8493b4f5d90f4264b3ff02559bd89c5b5b281911327eb2d18aa107752c"
 }

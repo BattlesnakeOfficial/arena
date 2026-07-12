@@ -203,6 +203,7 @@ mod tests {
             first_place_finishes: 0,
             non_first_finishes: 0,
             disabled_at: None,
+            disabled_reason: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }

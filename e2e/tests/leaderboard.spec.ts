@@ -53,9 +53,70 @@ test.describe('Leaderboard Pages', () => {
     // Select the snake and join
     await authenticatedPage.getByRole('button', { name: 'Join' }).click();
 
-    // After joining, should see the snake listed as Active
+    // After joining, should see the snake listed as Active, with feedback
     await expect(authenticatedPage.getByRole('cell', { name: snakeName })).toBeVisible();
     await expect(authenticatedPage.getByText('Active')).toBeVisible();
+    await expect(
+      authenticatedPage.locator('.flash-message[data-flash-type="success"]')
+    ).toContainText('matchmaking rotation');
+  });
+
+  test('resuming a health-paused snake clears its failure streak', async ({
+    authenticatedPage,
+  }) => {
+    const snakeName = `LB Health Snake ${Date.now()}`;
+
+    // Create a public battlesnake and join the seeded leaderboard
+    await authenticatedPage.goto('/battlesnakes/new');
+    await authenticatedPage.getByLabel('Name').fill(snakeName);
+    await authenticatedPage.getByLabel('URL').fill('https://example.com/lb-health');
+    await authenticatedPage.getByLabel('Visibility').selectOption('public');
+    await authenticatedPage.getByRole('button', { name: 'Create Battlesnake' }).click();
+
+    const leaderboards = await query<{ leaderboard_id: string }>(
+      "SELECT leaderboard_id FROM leaderboards WHERE name = 'Standard 11x11'"
+    );
+    const leaderboardId = leaderboards[0].leaderboard_id;
+    await authenticatedPage.goto(`/leaderboards/${leaderboardId}`);
+    await authenticatedPage.getByRole('button', { name: 'Join' }).click();
+    await expect(authenticatedPage.getByRole('cell', { name: snakeName })).toBeVisible();
+
+    // Simulate the health sweeper pulling the snake after 3 failed probes
+    const snakes = await query<{ battlesnake_id: string }>(
+      'SELECT battlesnake_id FROM battlesnakes WHERE name = $1',
+      [snakeName]
+    );
+    const snakeId = snakes[0].battlesnake_id;
+    await query(
+      `UPDATE leaderboard_entries
+       SET disabled_at = NOW(), disabled_reason = 'health'
+       WHERE battlesnake_id = $1`,
+      [snakeId]
+    );
+    await query(
+      `INSERT INTO snake_health_status (battlesnake_id, consecutive_failures, deactivated_at, last_failure)
+       VALUES ($1, 3, NOW(), 'POST /move: request timed out')`,
+      [snakeId]
+    );
+
+    // The rail names the auto-pause instead of a generic "Paused"
+    await authenticatedPage.reload();
+    await expect(authenticatedPage.getByText('Auto-paused')).toBeVisible();
+
+    // Resume from the rail — must clear the sweeper's failure streak too,
+    // otherwise the next sweep instantly re-pauses the snake
+    await authenticatedPage.getByRole('button', { name: `Resume ${snakeName}` }).click();
+    await expect(authenticatedPage.getByText('Active')).toBeVisible();
+    await expect(
+      authenticatedPage.locator('.flash-message[data-flash-type="success"]')
+    ).toContainText('matchmaking rotation');
+
+    const health = await query<{ consecutive_failures: number; deactivated_at: string | null }>(
+      'SELECT consecutive_failures, deactivated_at FROM snake_health_status WHERE battlesnake_id = $1',
+      [snakeId]
+    );
+    expect(health[0].consecutive_failures).toBe(0);
+    expect(health[0].deactivated_at).toBeNull();
   });
 
   test('can pause and resume a snake in a leaderboard', async ({ authenticatedPage }) => {
