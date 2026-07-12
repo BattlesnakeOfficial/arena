@@ -1,13 +1,63 @@
-# Arena
+# Battlesnake Arena
 
-A Battlesnake platform for running games and tournaments, with GitHub OAuth authentication.
+The platform behind [arena.battlesnake.com](https://arena.battlesnake.com) — a competitive
+programming game where your web server is the player. Write a server that speaks the
+[Battlesnake API](https://docs.battlesnake.com), register it, and the arena runs ranked
+games around the clock: automated leaderboards, tournaments with live brackets, and a
+game theater for watching matches — even while you sleep.
+
+Arena is the Rust rewrite of play.battlesnake.com: an Axum monolith with server-rendered
+Maud templates, PostgreSQL, and a built-in game engine that simulates matches by calling
+each snake's `/move` endpoint in parallel.
+
+## Screenshots
+
+Taken from the live site on a schedule by the [Screenshots workflow](.github/workflows/screenshots.yml)
+and committed under [`screenshots/`](screenshots/).
+
+| Home | Leaderboard |
+| --- | --- |
+| ![Home page](screenshots/home-light.png) | ![Leaderboard detail](screenshots/leaderboard-detail.png) |
+
+| Tournaments | Customizations |
+| --- | --- |
+| ![Tournaments](screenshots/tournaments.png) | ![Customizations](screenshots/customizations.png) |
+
+<details>
+<summary>More: dark theme, mobile, game theater</summary>
+
+| Dark theme | Game theater |
+| --- | --- |
+| ![Home in dark theme](screenshots/home-dark.png) | ![Game theater](screenshots/game-theater.png) |
+
+<img src="screenshots/home-mobile.png" alt="Home on mobile" width="375">
+
+</details>
+
+## What's in the box
+
+- **Ranked leaderboards** — register a snake, and the matchmaker starts games every few
+  minutes. Ratings use Weng-Lin (OpenSkill), not Elo; displayed rating is `μ − 3σ`.
+- **Tournaments** — single-elimination brackets with seeding, best-of-N matches, live
+  round tracking, and a champion's trophy.
+- **Game engine** — Rust rules crate simulating Standard games on 7x7 / 11x11 / 19x19
+  boards, persisting every turn as a JSONB frame and streaming to viewers over WebSockets.
+- **Game theater** — games render in the board viewer with a two-axis theme system: the
+  site theme (system / light / dark) and an independent theater preference.
+- **Customizations** — snake heads and tails, including partner and community art, with
+  per-account unlocks.
+- **Play migration** — players from the old play.battlesnake.com can claim their accounts
+  by password or email recovery, bringing snakes and unlocks with them.
+- **API + CLI** — token-authenticated REST API for snakes, games, and leaderboards
+  (used by `arena-cli`).
 
 ## Setup
 
 ### Prerequisites
 
-- Rust 1.72 or later
-- PostgreSQL 12 or later
+- Rust (stable, via [rustup](https://rustup.rs))
+- PostgreSQL 14 or later
+- `cargo install sqlx-cli` for database commands
 
 ### Environment Variables
 
@@ -24,7 +74,7 @@ If you're using [direnv](https://direnv.net/), run `direnv allow` to load these 
 
 ### Creating a GitHub App
 
-If you want to create a GitHub App instead of an OAuth App:
+Sign-in is GitHub OAuth only, so local development needs an app:
 
 1. Go to [GitHub Developer Settings](https://github.com/settings/developers)
 2. Click on "New GitHub App"
@@ -32,11 +82,7 @@ If you want to create a GitHub App instead of an OAuth App:
    - **GitHub App name**: Arena (or any name you prefer)
    - **Homepage URL**: http://localhost:3000
    - **Callback URL**: http://localhost:3000/auth/github/callback
-   - **Setup URL**: (Optional) Leave blank
-   - **Webhook URL**: (Optional) Leave blank for local development
-   - **Webhook secret**: (Optional) Leave blank for local development
-   - **Permissions**: Set the following permissions:
-     - **User permissions**: Read access to email addresses and profile information
+   - **Permissions**: User permissions → read access to email addresses and profile information
    - **Where can this GitHub App be installed?**: Any account
 4. Click "Create GitHub App"
 5. On the next page, note your **Client ID**
@@ -45,16 +91,12 @@ If you want to create a GitHub App instead of an OAuth App:
 
 ### Database Setup
 
-Run the following commands to set up the database:
-
 ```bash
 cargo sqlx db create
 cargo sqlx migrate run
 ```
 
 ### Running the Application
-
-To run the application:
 
 ```bash
 cargo run
@@ -82,7 +124,7 @@ The application will be available at http://localhost:3000
 - Revert latest migration: `cargo sqlx mig revert`
 - Create new migration: `cargo sqlx migrate add --source migrations <migration_name>`
 - Recreate DB from scratch: `cargo sqlx db drop -y && cargo sqlx db create && cargo sqlx migrate run`
-- Update query cache: `DATABASE_URL="postgresql://localhost:5432/arena" cargo sqlx prepare --workspace`
+- Update query cache: `DATABASE_URL="postgresql://localhost:5432/arena" cargo sqlx prepare --workspace -- --all-targets`
 
 Note: Always ensure the DATABASE_URL environment variable is set when working with SQLx commands, especially for migration reversion: `DATABASE_URL="postgresql://localhost:5432/arena" cargo sqlx mig revert`
 
@@ -126,6 +168,14 @@ npm run test:ui
 ```
 
 Note: Tests automatically start the server using `cargo run` with the test database. The first run may take longer due to compilation.
+
+### Live Screenshots
+
+The [Screenshots workflow](.github/workflows/screenshots.yml) runs weekly (and on demand
+via `workflow_dispatch`), captures the pages defined in [`live.shots.yml`](live.shots.yml)
+from the live site with [shot-scraper](https://github.com/simonw/shot-scraper), optimizes
+them with oxipng, and commits changes to `screenshots/`. Detail pages (leaderboard, game
+theater) are discovered from the live site at run time since their IDs aren't stable.
 
 ### Spec-to-Code Tracing with Tracey
 
