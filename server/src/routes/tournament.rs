@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 use crate::{
     components::page_factory::PageFactory,
+    customizations::chip_color,
     errors::{ServerResult, WithStatus},
     models::{
         battlesnake,
@@ -365,7 +366,7 @@ fn bracket_team_row(
     html! {
         div .team .w[is_winner] .l[is_loser] .tbd[is_tbd] {
             @if let Some(color) = p.snake_color.as_deref().filter(|c| !c.is_empty()) {
-                span class="chip" style={"background:"(color)} {}
+                span class="chip" style={"background:"(chip_color(color))} {}
             } @else {
                 span class="chip tbd" {}
             }
@@ -535,12 +536,13 @@ fn bracket_section(
     static EMPTY_GAMES: Vec<MatchGame> = Vec::new();
 
     html! {
+        h2 class="vh" { "Bracket" }
         div class="bracket-note" {
             (matches.iter().filter(|m| m.status == MatchStatus::Completed).count())
             " of " (matches.len()) " matches played · "
             (total_rounds) @if total_rounds == 1 { " round" } @else { " rounds" }
         }
-        div class="bracket-scroll" {
+        div class="bracket-scroll" tabindex="0" role="region" aria-label="Tournament bracket" {
             div style={"min-width: "(min_width)"px;"} {
                 div class="round-labels" style={"grid-template-columns: "(grid_cols)";"} {
                     @for round in 1..=total_rounds {
@@ -586,12 +588,12 @@ fn bracket_section(
                             style={"grid-column: "(champ_col - 1)"; grid-row: "(frow)" / "(frow + 2)";"} {}
                         div .champ .crowned[champion.is_some()]
                             style={"grid-column: "(champ_col)"; grid-row: "(frow)" / "(frow + 2)";"} {
-                            div class="glyph" { "🏆" }
+                            div class="glyph" aria-hidden="true" { "🏆" }
                             div class="label" { "Champion" }
                             div class="who" {
                                 @if let Some((name, color)) = &champion {
                                     @if let Some(color) = color {
-                                        span class="chip" style={"background:"(color)"; display:inline-block; vertical-align:-2px; margin-right:8px;"} {}
+                                        span class="chip champ-chip" style={"background:"(chip_color(color))} {}
                                     }
                                     (name)
                                 } @else {
@@ -791,7 +793,7 @@ pub async fn list_tournaments(
                 }
                 div class="spacer" {}
                 @if viewer.is_some() {
-                    a href="/tournaments/new" class="btn solid" style="margin-bottom: 12px;" { "Create Tournament" }
+                    a href="/tournaments/new" class="btn solid head-cta" { "Create Tournament" }
                 }
             }
 
@@ -1080,12 +1082,12 @@ pub async fn show_tournament(
                 }
                 div class="spacer" {}
                 @if t.status == TournamentStatus::InProgress {
-                    span class="live-pill" {
+                    span class="round-pill" {
                         span class="live-dot" {}
                         "LIVE · ROUND " (t.current_round) " OF " (total_rounds)
                     }
                 } @else {
-                    span style="margin-bottom: 14px;" { (status_badge(t.status)) }
+                    span class="head-status" { (status_badge(t.status)) }
                 }
             }
             @if let Some(ref description) = t.description {
@@ -1157,7 +1159,7 @@ pub async fn show_tournament(
                                             td class="rank" { (format!("{:02}", reg.seed)) }
                                             td {
                                                 div class="snake-cell" {
-                                                    span class="chip" style={"background:"(reg.snake_color)} {}
+                                                    span class="chip" style={"background:"(chip_color(&reg.snake_color))} {}
                                                     span {
                                                         a class="name" href={"/battlesnakes/"(reg.battlesnake_id)"/profile"} { (reg.snake_name) }
                                                         span class="owner" { "by " (reg.owner_login) }
@@ -1166,7 +1168,7 @@ pub async fn show_tournament(
                                             }
                                             @if can_edit_registrations && viewer.is_some() {
                                                 td {
-                                                    div class="row-actions" {
+                                                    div class="reg-actions" {
                                                         @if is_owner {
                                                             form class="seed-form" action={"/tournaments/"(t.tournament_id)"/seed"} method="post" {
                                                                 input type="hidden" name="registration_id" value=(reg.registration_id);

@@ -421,13 +421,17 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
 /* --- page: tournaments (slice 8) -------------------------------------------- */
 
 .page-head .spacer { flex: 1; }
-.badge.live { color: var(--pink); background: var(--pink-wash); }
+.vh { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.head-cta { margin-bottom: 12px; }
+.head-status { margin-bottom: 14px; }
+.champ-chip { display: inline-block; vertical-align: -2px; margin-right: 8px; }
+.badge.live { color: var(--pink-deep); background: var(--pink-wash); }
 
-.live-pill {
+.round-pill {
   font-family: var(--mono);
   font-size: 11.5px;
   font-weight: 600;
-  color: var(--pink);
+  color: var(--pink-deep);
   border: 1px solid var(--pink);
   background: var(--pink-wash);
   border-radius: 999px;
@@ -439,7 +443,7 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
   margin-bottom: 12px;
   white-space: nowrap;
 }
-.live-pill .live-dot { width: 7px; height: 7px; flex-shrink: 0; }
+.round-pill .live-dot { width: 7px; height: 7px; flex-shrink: 0; }
 
 .tourney-desc { margin-top: 16px; max-width: 70ch; font-size: 15.5px; }
 
@@ -505,7 +509,7 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
 }
 .bracket .team .score { font-family: var(--mono); font-size: 13.5px; color: var(--muted); }
 .bracket .team.w .name { font-weight: 700; }
-.bracket .team.w .score { color: var(--pink); font-weight: 600; }
+.bracket .team.w .score { color: var(--pink-deep); font-weight: 600; }
 .bracket .team.l .name, .bracket .team.l .score { color: var(--muted); }
 .bracket .team.tbd .name { color: var(--muted); font-style: italic; }
 
@@ -590,7 +594,7 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
 .bracket .champ.crowned .who { color: var(--ink); font-size: 17px; }
 
 /* registered snakes: seed move + unregister row actions */
-.row-actions { display: flex; gap: 8px; align-items: center; justify-content: flex-end; flex-wrap: wrap; }
+.reg-actions { display: flex; gap: 8px; align-items: center; justify-content: flex-end; flex-wrap: wrap; }
 .seed-form { display: inline-flex; gap: 6px; align-items: center; }
 .seed-form input {
   width: 64px;
@@ -649,7 +653,7 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
 
 @media (max-width: 640px) {
   .bracket-scroll { margin-left: -20px; margin-right: -20px; padding-left: 20px; padding-right: 20px; }
-  .row-actions .btn.sm, .owner-actions .btn.sm { padding: 10px 16px; }
+  .reg-actions .btn.sm, .owner-actions .btn.sm { padding: 10px 16px; }
   .seed-form input { padding: 10px 8px; }
 }
 
