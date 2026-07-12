@@ -49,8 +49,9 @@ jobs:
         run: shot-scraper multi live.shots.yml --retina
 
       # Detail pages have unstable UUIDs, so discover them from the live
-      # site each run instead of hardcoding. Skipped gracefully when the
-      # site has no data to link to.
+      # site each run instead of hardcoding: leaderboard list -> detail ->
+      # first entry -> a recent game. Skipped gracefully when the site has
+      # no data to link to.
       - name: Take detail-page shots
         run: |
           BASE=https://arena.battlesnake.com
@@ -58,7 +59,11 @@ jobs:
           {
             if [ -n "$LB" ]; then
               printf -- '- url: %s%s\n  output: screenshots/leaderboard-detail.png\n  width: 1280\n  height: 900\n  wait: 3000\n' "$BASE" "$LB"
-              GAME=$(curl -sf "$BASE$LB" | grep -oE '/games/[0-9a-f-]{36}' | head -1 || true)
+              ENTRY=$(curl -sf "$BASE$LB" | grep -oE '/leaderboards/[0-9a-f-]{36}/entries/[0-9a-f-]{36}' | head -1 || true)
+              GAME=""
+              if [ -n "$ENTRY" ]; then
+                GAME=$(curl -sf "$BASE$ENTRY" | grep -oE '/games/[0-9a-f-]{36}' | head -1 || true)
+              fi
               if [ -n "$GAME" ]; then
                 printf -- '- url: %s%s\n  output: screenshots/game-theater.png\n  width: 1280\n  height: 900\n  wait: 5000\n' "$BASE" "$GAME"
               fi
@@ -73,15 +78,14 @@ jobs:
       - name: Optimize PNGs
         run: oxipng -o 4 -i 0 --strip safe screenshots/*.png
 
-      - name: Commit and push if there are changes
+      # main is ruleset-protected (PRs only), so screenshots live on a
+      # dedicated branch — one orphan commit, force-pushed each run. The
+      # README references them via raw.githubusercontent.com URLs.
+      - name: Push to the screenshots branch
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add screenshots
-          if git diff --staged --quiet; then
-            echo "No screenshot changes — nothing to commit"
-          else
-            git commit -m "Update live screenshots — $(date +'%Y-%m-%d')"
-            git pull --rebase origin main
-            git push
-          fi
+          git switch --orphan screenshots-update
+          git add -f screenshots
+          git commit -m "Live screenshots — $(date +'%Y-%m-%d')"
+          git push --force origin HEAD:screenshots

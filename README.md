@@ -13,24 +13,24 @@ each snake's `/move` endpoint in parallel.
 ## Screenshots
 
 Taken from the live site on a schedule by the [Screenshots workflow](.github/workflows/screenshots.yml)
-and committed under [`screenshots/`](screenshots/).
+and pushed to the [`screenshots` branch](https://github.com/BattlesnakeOfficial/arena/tree/screenshots).
 
 | Home | Leaderboard |
 | --- | --- |
-| ![Home page](screenshots/home-light.png) | ![Leaderboard detail](screenshots/leaderboard-detail.png) |
+| ![Home page](https://raw.githubusercontent.com/BattlesnakeOfficial/arena/screenshots/screenshots/home-light.png) | ![Leaderboard detail](https://raw.githubusercontent.com/BattlesnakeOfficial/arena/screenshots/screenshots/leaderboard-detail.png) |
 
 | Tournaments | Customizations |
 | --- | --- |
-| ![Tournaments](screenshots/tournaments.png) | ![Customizations](screenshots/customizations.png) |
+| ![Tournaments](https://raw.githubusercontent.com/BattlesnakeOfficial/arena/screenshots/screenshots/tournaments.png) | ![Customizations](https://raw.githubusercontent.com/BattlesnakeOfficial/arena/screenshots/screenshots/customizations.png) |
 
 <details>
 <summary>More: dark theme, mobile, game theater</summary>
 
 | Dark theme | Game theater |
 | --- | --- |
-| ![Home in dark theme](screenshots/home-dark.png) | ![Game theater](screenshots/game-theater.png) |
+| ![Home in dark theme](https://raw.githubusercontent.com/BattlesnakeOfficial/arena/screenshots/screenshots/home-dark.png) | ![Game theater](https://raw.githubusercontent.com/BattlesnakeOfficial/arena/screenshots/screenshots/game-theater.png) |
 
-<img src="screenshots/home-mobile.png" alt="Home on mobile" width="375">
+<img src="https://raw.githubusercontent.com/BattlesnakeOfficial/arena/screenshots/screenshots/home-mobile.png" alt="Home on mobile" width="375">
 
 </details>
 
@@ -174,8 +174,10 @@ Note: Tests automatically start the server using `cargo run` with the test datab
 The [Screenshots workflow](.github/workflows/screenshots.yml) runs weekly (and on demand
 via `workflow_dispatch`), captures the pages defined in [`live.shots.yml`](live.shots.yml)
 from the live site with [shot-scraper](https://github.com/simonw/shot-scraper), optimizes
-them with oxipng, and commits changes to `screenshots/`. Detail pages (leaderboard, game
-theater) are discovered from the live site at run time since their IDs aren't stable.
+them with oxipng, and force-pushes a single commit to the `screenshots` branch (main is
+ruleset-protected, and PNG churn stays out of its history). Detail pages (leaderboard,
+game theater) are discovered from the live site at run time: leaderboard list → detail →
+first entry → a recent game, since those IDs aren't stable across seasons.
 
 ### Spec-to-Code Tracing with Tracey
 
