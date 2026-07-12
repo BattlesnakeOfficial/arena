@@ -283,115 +283,90 @@ async fn profile_page(
     Ok(page_factory.create_page_with_flash(
         "My Profile".to_string(),
         Box::new(html! {
-            div {
+            div class="page-head" {
                 h1 { "My Profile" }
+                div class="sub" { "How you appear across the Arena — and the account behind it." }
+            }
 
-                @if let Some(message) = flash.message() {
-                    div class=(flash.class()) {
-                        p { (message) }
+            header class="profile-head" {
+                img class="avatar" src=(user.github_avatar_url.clone().unwrap_or_default()) alt="";
+                div class="who" {
+                    @if let Some(name) = user.display_name.as_ref().filter(|n| !n.is_empty()) {
+                        h2 { (name) }
+                    } @else {
+                        h2 { (user.github_login) }
+                    }
+                    div class="meta" {
+                        "@" (user.github_login)
+                        @if !user.pronouns.is_empty() { " · " (user.pronouns) }
+                        @if !user.country.is_empty() { " · " (user.country) }
+                        " · joined " (user.created_at.format("%b %Y"))
+                    }
+                    @if !user.backstory.is_empty() {
+                        p class="bio" { (user.backstory) }
+                    }
+                }
+            }
+
+            div class="profile-actions" {
+                a href="/battlesnakes" class="btn" { "Manage Battlesnakes" }
+                a href="/games/new" class="btn" { "Create New Game" }
+                a href="/" class="btn" { "Back to Home" }
+                a href="/auth/logout" class="btn" { "Logout" }
+            }
+
+            div class="grid" {
+                div {
+                    h2 { "Edit Profile" }
+                    form class="form-stack" action="/me" method="post" {
+                        div class="field" {
+                            label for="display_name" { "Display Name" }
+                            input type="text" id="display_name" name="display_name" maxlength="100"
+                                value=(user.display_name.as_deref().unwrap_or(""));
+                            p class="help" { "Shown instead of your GitHub login" }
+                        }
+
+                        div class="field" {
+                            label for="pronouns" { "Pronouns" }
+                            input type="text" id="pronouns" name="pronouns" maxlength="50"
+                                value=(user.pronouns);
+                            p class="help" { "Max 50 characters" }
+                        }
+
+                        div class="field" {
+                            label for="country" { "Country" }
+                            input type="text" id="country" name="country" maxlength="100"
+                                value=(user.country);
+                            p class="help" { "Max 100 characters" }
+                        }
+
+                        div class="field" {
+                            label for="backstory" { "Backstory" }
+                            textarea id="backstory" name="backstory" maxlength="2000" { (user.backstory) }
+                            p class="help" { "Max 2000 characters. Plain text, no markdown." }
+                        }
+
+                        div class="form-cta" {
+                            button type="submit" class="btn solid" { "Save Changes" }
+                        }
                     }
                 }
 
-                div class="profile-card" style="border: 1px solid #ddd; border-radius: 8px; padding: 20px; margin: 20px 0; max-width: 600px;" {
-                    div class="profile-header" style="display: flex; align-items: center; margin-bottom: 20px;" {
-                        img src=(user.github_avatar_url.unwrap_or_default()) alt="Avatar" style="width: 100px; height: 100px; border-radius: 50%; margin-right: 20px;" {}
-
-                        div {
-                            @if let Some(name) = user.display_name.as_ref().filter(|n| !n.is_empty()) {
-                                h2 style="margin: 0 0 10px 0;" { (name) }
-                            } @else {
-                                h2 style="margin: 0 0 10px 0;" { (user.github_login) }
-                            }
+                aside class="rail" {
+                    div class="block" {
+                        h3 { "Account Details" }
+                        dl class="meta-list" {
                             @if let Some(name) = user.github_name.as_ref() {
-                                p style="margin: 0; color: #666;" { (name) }
+                                div { dt { "Name:" } dd { (name) } }
                             }
                             @if let Some(email) = user.github_email.as_ref() {
-                                p style="margin: 0; color: #666;" { (email) }
+                                div { dt { "Email:" } dd { (email) } }
                             }
-                            @if !user.pronouns.is_empty() {
-                                p style="margin: 0; color: #666;" { (user.pronouns) }
-                            }
-                            @if !user.country.is_empty() {
-                                p style="margin: 0; color: #666;" { (user.country) }
-                            }
+                            div { dt { "GitHub ID:" } dd { (user.external_github_id) } }
+                            div { dt { "Account created:" } dd { (user.created_at.format("%Y-%m-%d")) } }
+                            div { dt { "Last updated:" } dd { (user.updated_at.format("%Y-%m-%d")) } }
                         }
                     }
-
-                    @if !user.backstory.is_empty() {
-                        div class="profile-backstory" style="margin-bottom: 20px;" {
-                            h3 { "About" }
-                            p style="white-space: pre-wrap; overflow-wrap: break-word;" { (user.backstory) }
-                        }
-                    }
-
-                    div class="profile-details" {
-                        h3 { "Account Details" }
-                        p { "GitHub ID: " (user.external_github_id) }
-                        p { "Account created: " (user.created_at.format("%Y-%m-%d %H:%M:%S")) }
-                        p { "Last updated: " (user.updated_at.format("%Y-%m-%d %H:%M:%S")) }
-                    }
-                }
-
-                // Edit form
-                div class="profile-edit" style="border: 1px solid #ddd; border-radius: 8px; padding: 20px; margin: 20px 0; max-width: 600px;" {
-                    h3 { "Edit Profile" }
-                    form action="/me" method="post" {
-                        div class="form-group" style="margin-bottom: 12px;" {
-                            label for="display_name" { "Display Name" }
-                            br;
-                            input type="text" id="display_name" name="display_name" maxlength="100"
-                                class="form-control" style="width: 100%; padding: 8px;"
-                                value=(user.display_name.as_deref().unwrap_or("")) {}
-                            small class="form-text text-muted" { "Shown instead of your GitHub login" }
-                        }
-
-                        div class="form-group" style="margin-bottom: 12px;" {
-                            label for="pronouns" { "Pronouns" }
-                            br;
-                            input type="text" id="pronouns" name="pronouns" maxlength="50"
-                                class="form-control" style="width: 100%; padding: 8px;"
-                                value=(user.pronouns) {}
-                            small class="form-text text-muted" { "Max 50 characters" }
-                        }
-
-                        div class="form-group" style="margin-bottom: 12px;" {
-                            label for="country" { "Country" }
-                            br;
-                            input type="text" id="country" name="country" maxlength="100"
-                                class="form-control" style="width: 100%; padding: 8px;"
-                                value=(user.country) {}
-                            small class="form-text text-muted" { "Max 100 characters" }
-                        }
-
-                        div class="form-group" style="margin-bottom: 12px;" {
-                            label for="backstory" { "Backstory" }
-                            br;
-                            textarea id="backstory" name="backstory" maxlength="2000"
-                                class="form-control" style="width: 100%; padding: 8px; min-height: 100px;"
-                                { (user.backstory) }
-                            small class="form-text text-muted" { "Max 2000 characters. Plain text, no markdown." }
-                        }
-
-                        button type="submit" class="btn btn-primary" { "Save Changes" }
-                    }
-                }
-
-                div class="profile-actions" style="margin-top: 20px;" {
-                    h3 { "Your Battlesnakes" }
-                    p { "Manage your Battlesnake collection." }
-                    a href="/battlesnakes" class="btn btn-primary" { "Manage Battlesnakes" }
-
-                    h3 class="mt-4" { "Games" }
-                    p { "Create and view games with your Battlesnakes." }
-                    div {
-                        a href="/games/new" class="btn btn-primary" { "Create New Game" }
-                    }
-                }
-
-                div class="nav" style="margin-top: 20px;" {
-                    a href="/" { "Back to Home" }
-                    span { " | " }
-                    a href="/auth/logout" { "Logout" }
                 }
             }
         }),

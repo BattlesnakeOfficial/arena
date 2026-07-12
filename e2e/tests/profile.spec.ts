@@ -11,7 +11,7 @@ test.describe('Profile Page', () => {
     await expect(authenticatedPage.getByRole('heading', { name: mockUser.login })).toBeVisible();
 
     // Should show avatar image
-    const avatar = authenticatedPage.locator('img[alt="Avatar"]');
+    const avatar = authenticatedPage.locator('.profile-head img.avatar');
     await expect(avatar).toBeVisible();
 
     // Should show Account Details section

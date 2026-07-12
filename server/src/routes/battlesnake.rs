@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 use crate::{
     components::page_factory::PageFactory,
+    customizations::chip_color,
     errors::{ServerResult, WithStatus},
     models::battlesnake::{self, CreateBattlesnake, UpdateBattlesnake, Visibility},
     models::game_battlesnake,
@@ -41,49 +42,52 @@ pub async fn list_battlesnakes(
     Ok(page_factory.create_page_with_flash(
         "Your Battlesnakes".to_string(),
         Box::new(html! {
-            div class="container" {
+            div class="crumb" { a href="/me" { "My Profile" } " / battlesnakes" }
+            div class="page-head" {
                 h1 { "Your Battlesnakes" }
-
-                @if let Some(message) = flash.message() {
-                    div class=(flash.class()) {
-                        p { (message) }
-                    }
+                div class="sub" { "The snake servers the Arena calls when your games run." }
+                div class="head-actions" {
+                    a href="/battlesnakes/new" class="btn solid" { "Add New Battlesnake" }
                 }
+            }
 
-                @if battlesnakes.is_empty() {
-                    div class="empty-state" {
-                        p { "You don't have any battlesnakes yet." }
-                    }
-                } @else {
-                    div class="battlesnakes-list" {
-                        table class="table" {
-                            thead {
-                                tr {
-                                    th { "Name" }
-                                    th { "URL" }
-                                    th { "Visibility" }
-                                    th { "Actions" }
-                                }
+            @if battlesnakes.is_empty() {
+                p class="empty" { "You don't have any battlesnakes yet." }
+            } @else {
+                div class="section" {
+                    table class="data" {
+                        thead {
+                            tr {
+                                th { "Snake" }
+                                th class="hide-sm" { "URL" }
+                                th { "Visibility" }
+                                th class="r" { "Actions" }
                             }
-                            tbody {
-                                @for snake in &battlesnakes {
-                                    tr {
-                                        td { (snake.name) }
-                                        td {
-                                            a href=(snake.url) target="_blank" { (snake.url) }
+                        }
+                        tbody {
+                            @for snake in &battlesnakes {
+                                tr {
+                                    td {
+                                        div class="snake-cell" {
+                                            span class="chip" style={"background:" (chip_color(&snake.color))} {}
+                                            a class="name" href={"/battlesnakes/"(snake.battlesnake_id)"/profile"} { (snake.name) }
                                         }
-                                        td {
-                                            @if snake.visibility == Visibility::Public {
-                                                span class="badge bg-success text-white" { "Public" }
-                                            } @else {
-                                                span class="badge bg-secondary text-white" { "Private" }
-                                            }
+                                    }
+                                    td class="url-cell hide-sm" {
+                                        a href=(snake.url) target="_blank" rel="noopener" { (snake.url) }
+                                    }
+                                    td {
+                                        @if snake.visibility == Visibility::Public {
+                                            span class="badge ok" { "Public" }
+                                        } @else {
+                                            span class="badge" { "Private" }
                                         }
-                                        td class="actions" {
-                                            a href={"/battlesnakes/"(snake.battlesnake_id)"/profile"} class="btn btn-sm btn-info" { "View" }
-                                            a href={"/battlesnakes/"(snake.battlesnake_id)"/edit"} class="btn btn-sm btn-primary" { "Edit" }
-                                            form action={"/battlesnakes/"(snake.battlesnake_id)"/delete"} method="post" style="display: inline;" {
-                                                button type="submit" class="btn btn-sm btn-danger" onclick="return confirm('Are you sure you want to delete this battlesnake?');" { "Delete" }
+                                    }
+                                    td class="r" {
+                                        div class="row-actions" {
+                                            a href={"/battlesnakes/"(snake.battlesnake_id)"/edit"} class="btn sm" { "Edit" }
+                                            form action={"/battlesnakes/"(snake.battlesnake_id)"/delete"} method="post" {
+                                                button type="submit" class="btn sm danger" onclick="return confirm('Are you sure you want to delete this battlesnake?');" { "Delete" }
                                             }
                                         }
                                     }
@@ -91,11 +95,6 @@ pub async fn list_battlesnakes(
                             }
                         }
                     }
-                }
-
-                div class="actions" style="margin-top: 20px;" {
-                    a href="/battlesnakes/new" class="btn btn-primary" { "Add New Battlesnake" }
-                    a href="/me" class="btn btn-secondary" { "Back to Profile" }
                 }
             }
         }),
@@ -114,40 +113,36 @@ pub async fn new_battlesnake(
     Ok(page_factory.create_page_with_flash(
         "Add New Battlesnake".to_string(),
         Box::new(html! {
-            div class="container" {
+            div class="crumb" { a href="/battlesnakes" { "Your Battlesnakes" } " / new" }
+            div class="page-head" {
                 h1 { "Add New Battlesnake" }
+                div class="sub" { "Point the Arena at your snake server and pick who can play it." }
+            }
 
-                @if let Some(message) = flash.message() {
-                    div class=(flash.class()) {
-                        p { (message) }
-                    }
+            form class="form-stack" action="/battlesnakes" method="post" {
+                div class="field" {
+                    label for="name" { "Name" }
+                    input type="text" id="name" name="name" required;
                 }
 
-                form action="/battlesnakes" method="post" {
-                    div class="form-group" {
-                        label for="name" { "Name" }
-                        input type="text" id="name" name="name" class="form-control" required {}
-                    }
+                div class="field" {
+                    label for="url" { "URL" }
+                    input type="url" id="url" name="url" required placeholder="https://your-battlesnake-server.com";
+                    p class="help" { "The URL of your Battlesnake server" }
+                }
 
-                    div class="form-group" {
-                        label for="url" { "URL" }
-                        input type="url" id="url" name="url" class="form-control" required placeholder="https://your-battlesnake-server.com" {}
-                        small class="form-text text-muted" { "The URL of your Battlesnake server" }
+                div class="field" {
+                    label for="visibility" { "Visibility" }
+                    select id="visibility" name="visibility" required {
+                        option value="public" selected { "Public (Available to all users)" }
+                        option value="private" { "Private (Only available to you)" }
                     }
+                    p class="help" { "Control who can add this snake to games" }
+                }
 
-                    div class="form-group" {
-                        label for="visibility" { "Visibility" }
-                        select id="visibility" name="visibility" class="form-control" required {
-                            option value="public" selected { "Public (Available to all users)" }
-                            option value="private" { "Private (Only available to you)" }
-                        }
-                        small class="form-text text-muted" { "Control who can add this snake to games" }
-                    }
-
-                    div class="form-group" style="margin-top: 20px;" {
-                        button type="submit" class="btn btn-primary" { "Create Battlesnake" }
-                        a href="/battlesnakes" class="btn btn-secondary" { "Cancel" }
-                    }
+                div class="form-cta" {
+                    button type="submit" class="btn solid" { "Create Battlesnake" }
+                    a href="/battlesnakes" class="btn" { "Cancel" }
                 }
             }
         }),
@@ -246,40 +241,35 @@ pub async fn edit_battlesnake(
     Ok(page_factory.create_page_with_flash(
         format!("Edit Battlesnake: {}", battlesnake.name),
         Box::new(html! {
-            div class="container" {
+            div class="crumb" { a href="/battlesnakes" { "Your Battlesnakes" } " / edit" }
+            div class="page-head" {
                 h1 { "Edit Battlesnake: " (battlesnake.name) }
+            }
 
-                @if let Some(message) = flash.message() {
-                    div class=(flash.class()) {
-                        p { (message) }
-                    }
+            form class="form-stack" action={"/battlesnakes/"(battlesnake_id)"/update"} method="post" {
+                div class="field" {
+                    label for="name" { "Name" }
+                    input type="text" id="name" name="name" required value=(battlesnake.name);
                 }
 
-                form action={"/battlesnakes/"(battlesnake_id)"/update"} method="post" {
-                    div class="form-group" {
-                        label for="name" { "Name" }
-                        input type="text" id="name" name="name" class="form-control" required value=(battlesnake.name) {}
-                    }
+                div class="field" {
+                    label for="url" { "URL" }
+                    input type="url" id="url" name="url" required value=(battlesnake.url);
+                    p class="help" { "The URL of your Battlesnake server" }
+                }
 
-                    div class="form-group" {
-                        label for="url" { "URL" }
-                        input type="url" id="url" name="url" class="form-control" required value=(battlesnake.url) {}
-                        small class="form-text text-muted" { "The URL of your Battlesnake server" }
+                div class="field" {
+                    label for="visibility" { "Visibility" }
+                    select id="visibility" name="visibility" required {
+                        option value="public" selected[battlesnake.visibility == Visibility::Public] { "Public (Available to all users)" }
+                        option value="private" selected[battlesnake.visibility == Visibility::Private] { "Private (Only available to you)" }
                     }
+                    p class="help" { "Control who can add this snake to games" }
+                }
 
-                    div class="form-group" {
-                        label for="visibility" { "Visibility" }
-                        select id="visibility" name="visibility" class="form-control" required {
-                            option value="public" selected=(battlesnake.visibility == Visibility::Public) { "Public (Available to all users)" }
-                            option value="private" selected=(battlesnake.visibility == Visibility::Private) { "Private (Only available to you)" }
-                        }
-                        small class="form-text text-muted" { "Control who can add this snake to games" }
-                    }
-
-                    div class="form-group" style="margin-top: 20px;" {
-                        button type="submit" class="btn btn-primary" { "Update Battlesnake" }
-                        a href="/battlesnakes" class="btn btn-secondary" { "Cancel" }
-                    }
+                div class="form-cta" {
+                    button type="submit" class="btn solid" { "Update Battlesnake" }
+                    a href="/battlesnakes" class="btn" { "Cancel" }
                 }
             }
         }),
