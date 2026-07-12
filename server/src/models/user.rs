@@ -19,9 +19,16 @@ pub struct User {
     pub country: String,
     pub backstory: String,
     pub is_admin: bool,
+    pub site_theme: String,
+    pub theater_theme: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
+
+/// Valid values for `users.site_theme` (mirrors the DB CHECK constraint).
+pub const SITE_THEMES: [&str; 3] = ["system", "light", "dark"];
+/// Valid values for `users.theater_theme` (mirrors the DB CHECK constraint).
+pub const THEATER_THEMES: [&str; 3] = ["match", "dark", "light"];
 
 // Database functions for user management
 pub async fn get_user_by_id(pool: &PgPool, user_id: Uuid) -> cja::Result<Option<User>> {
@@ -40,6 +47,8 @@ pub async fn get_user_by_id(pool: &PgPool, user_id: Uuid) -> cja::Result<Option<
             country,
             backstory,
             is_admin,
+            site_theme,
+            theater_theme,
             created_at,
             updated_at
         FROM users
@@ -97,6 +106,8 @@ pub async fn create_or_update_user(
             country,
             backstory,
             is_admin,
+            site_theme,
+            theater_theme,
             created_at,
             updated_at
         "#,
@@ -186,6 +197,33 @@ pub async fn update_profile_fields(
     Ok(())
 }
 
+/// Persist the two-axis appearance preference. Values must already be
+/// validated against `SITE_THEMES` / `THEATER_THEMES` (the DB CHECK
+/// constraint is the backstop).
+pub async fn update_theme_preferences(
+    pool: &PgPool,
+    user_id: Uuid,
+    site_theme: &str,
+    theater_theme: &str,
+) -> cja::Result<()> {
+    sqlx::query!(
+        r#"
+        UPDATE users
+        SET site_theme = $2,
+            theater_theme = $3
+        WHERE user_id = $1
+        "#,
+        user_id,
+        site_theme,
+        theater_theme,
+    )
+    .execute(pool)
+    .await
+    .wrap_err("Failed to update theme preferences")?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -232,6 +270,30 @@ mod tests {
         assert_eq!(user.pronouns, "");
         assert_eq!(user.country, "");
         assert_eq!(user.backstory, "");
+
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn theme_preferences_default_and_update(pool: PgPool) -> cja::Result<()> {
+        let user_id = create_user(&pool, 9002).await?;
+
+        let user = get_user_by_id(&pool, user_id).await?.unwrap();
+        assert_eq!(user.site_theme, "system");
+        assert_eq!(user.theater_theme, "dark");
+
+        update_theme_preferences(&pool, user_id, "dark", "match").await?;
+
+        let user = get_user_by_id(&pool, user_id).await?.unwrap();
+        assert_eq!(user.site_theme, "dark");
+        assert_eq!(user.theater_theme, "match");
+
+        // The CHECK constraint rejects values outside the allowed sets.
+        assert!(
+            update_theme_preferences(&pool, user_id, "hotdog", "match")
+                .await
+                .is_err()
+        );
 
         Ok(())
     }

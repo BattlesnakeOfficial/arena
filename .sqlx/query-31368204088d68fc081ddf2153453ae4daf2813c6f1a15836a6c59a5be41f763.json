@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE users\n        SET site_theme = $2,\n            theater_theme = $3\n        WHERE user_id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "31368204088d68fc081ddf2153453ae4daf2813c6f1a15836a6c59a5be41f763"
+}
