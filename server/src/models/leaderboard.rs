@@ -1058,3 +1058,40 @@ pub async fn get_top_eaters(
 
     Ok(entries)
 }
+
+/// The user-independent slice of the homepage: featured ladder, its recent
+/// games (ticker + rail), and the top-five preview. Bundled so it can sit
+/// behind a single TTL cache entry.
+pub struct HomeFeed {
+    pub featured: Option<Leaderboard>,
+    pub activity: Vec<ActivityFeedEntry>,
+    pub top_entries: Vec<RankedEntry>,
+}
+
+pub async fn load_home_feed(pool: &sqlx::PgPool) -> cja::Result<HomeFeed> {
+    use color_eyre::eyre::Context as _;
+
+    let leaderboards = get_active_leaderboards(pool)
+        .await
+        .wrap_err("Failed to fetch leaderboards")?;
+    let featured = leaderboards.into_iter().next();
+
+    let (activity, top_entries) = if let Some(lb) = &featured {
+        let activity = get_activity_feed(pool, lb.leaderboard_id, 14)
+            .await
+            .wrap_err("Failed to fetch activity feed")?;
+        let top =
+            get_ranked_entries_paginated(pool, lb.leaderboard_id, 0, 5, LeaderboardSort::Rating)
+                .await
+                .wrap_err("Failed to fetch top entries")?;
+        (activity, top)
+    } else {
+        (Vec::new(), Vec::new())
+    };
+
+    Ok(HomeFeed {
+        featured,
+        activity,
+        top_entries,
+    })
+}

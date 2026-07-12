@@ -10,6 +10,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 mod backup;
+mod cache;
 mod config;
 mod cron;
 mod customizations;

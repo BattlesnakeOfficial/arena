@@ -27,6 +27,8 @@ pub struct AppState {
     pub discord: DiscordNotifier,
     /// Scoring algorithm registry
     pub scoring: std::sync::Arc<crate::scoring::ScoringRegistry>,
+    /// TTL memo for the anonymous-homepage feed (see HOME_FEED_CACHE_SECS)
+    pub home_feed_cache: Arc<crate::cache::TtlCell<crate::models::leaderboard::HomeFeed>>,
 }
 
 impl AppState {
@@ -144,6 +146,10 @@ impl AppState {
         scoring_registry.register(Box::new(crate::scoring::win_rate::WinRateScoring));
         scoring_registry.register(Box::new(crate::scoring::food_eaten::FoodEatenScoring));
 
+        let home_feed_cache = Arc::new(crate::cache::TtlCell::new(std::time::Duration::from_secs(
+            config.home_feed_cache_secs,
+        )));
+
         Ok(Self {
             config: Arc::new(config),
             db: pool,
@@ -154,6 +160,7 @@ impl AppState {
             mailer,
             discord,
             scoring: std::sync::Arc::new(scoring_registry),
+            home_feed_cache,
         })
     }
 }
@@ -174,6 +181,7 @@ impl AppState {
             mailer: crate::email::Mailer::disabled(),
             discord: crate::discord::DiscordNotifier::disabled(),
             scoring: std::sync::Arc::new(crate::scoring::ScoringRegistry::new()),
+            home_feed_cache: Arc::new(crate::cache::TtlCell::new(std::time::Duration::ZERO)),
         }
     }
 }

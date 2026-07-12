@@ -250,28 +250,18 @@ async fn root_page(
 ) -> ServerResult<impl IntoResponse, StatusCode> {
     // The home page features the first active leaderboard: its recent games
     // feed the ticker + rail, and its top five make the ladder preview.
-    let leaderboards = leaderboard_model::get_active_leaderboards(&state.db)
-        .await
-        .wrap_err("Failed to fetch leaderboards")?;
-    let featured = leaderboards.first();
-
-    let (activity, top_entries) = if let Some(lb) = featured {
-        let activity = leaderboard_model::get_activity_feed(&state.db, lb.leaderboard_id, 14)
-            .await
-            .wrap_err("Failed to fetch activity feed")?;
-        let top = leaderboard_model::get_ranked_entries_paginated(
-            &state.db,
-            lb.leaderboard_id,
-            0,
-            5,
-            leaderboard_model::LeaderboardSort::Rating,
-        )
-        .await
-        .wrap_err("Failed to fetch top entries")?;
-        (activity, top)
-    } else {
-        (Vec::new(), Vec::new())
+    // User-independent, so it sits behind a short TTL cache — this is the
+    // highest-traffic anonymous page.
+    let feed = match state.home_feed_cache.get() {
+        Some(feed) => feed,
+        None => state.home_feed_cache.put(
+            leaderboard_model::load_home_feed(&state.db)
+                .await
+                .wrap_err("Failed to load home feed")?,
+        ),
     };
+    let featured = feed.featured.as_ref();
+    let (activity, top_entries) = (&feed.activity, &feed.top_entries);
 
     let user_snakes = if let Some(user) = &user {
         battlesnake_model::get_battlesnakes_by_user_id(&state.db, user.user_id)
@@ -365,8 +355,8 @@ async fn root_page(
                 @if let (Some(lb), false) = (featured, activity.is_empty()) {
                     div class="strip" aria-hidden="true" {
                         div class="inner" {
-                            (home_ticker_items(&activity, &lb.name))
-                            (home_ticker_items(&activity, &lb.name))
+                            (home_ticker_items(activity, &lb.name))
+                            (home_ticker_items(activity, &lb.name))
                         }
                     }
                 }
@@ -406,7 +396,7 @@ async fn root_page(
                     }
                 }
 
-                (home_ladder_grid(featured, &top_entries, &activity))
+                (home_ladder_grid(featured, top_entries, activity))
 
                 @if user.is_none() {
                     section class="statement" {
