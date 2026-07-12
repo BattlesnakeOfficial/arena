@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        INSERT INTO users (\n            external_github_id,\n            github_login,\n            github_avatar_url,\n            github_name,\n            github_email,\n            github_access_token,\n            github_refresh_token,\n            github_token_expires_at\n        )\n        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)\n        ON CONFLICT (external_github_id) DO UPDATE SET\n            github_login = $2,\n            github_avatar_url = $3,\n            github_name = $4,\n            github_email = $5,\n            github_access_token = $6,\n            github_refresh_token = $7,\n            github_token_expires_at = $8\n        RETURNING\n            user_id,\n            external_github_id,\n            github_login,\n            github_avatar_url,\n            github_name,\n            github_email,\n            display_name,\n            pronouns,\n            country,\n            backstory,\n            is_admin,\n            created_at,\n            updated_at\n        ",
+  "query": "\n        INSERT INTO users (\n            external_github_id,\n            github_login,\n            github_avatar_url,\n            github_name,\n            github_email,\n            github_access_token,\n            github_refresh_token,\n            github_token_expires_at\n        )\n        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)\n        ON CONFLICT (external_github_id) DO UPDATE SET\n            github_login = $2,\n            github_avatar_url = $3,\n            github_name = $4,\n            github_email = $5,\n            github_access_token = $6,\n            github_refresh_token = $7,\n            github_token_expires_at = $8\n        RETURNING\n            user_id,\n            external_github_id,\n            github_login,\n            github_avatar_url,\n            github_name,\n            github_email,\n            display_name,\n            pronouns,\n            country,\n            backstory,\n            is_admin,\n            site_theme,\n            theater_theme,\n            created_at,\n            updated_at\n        ",
   "describe": {
     "columns": [
       {
@@ -60,11 +60,21 @@
       },
       {
         "ordinal": 11,
+        "name": "site_theme",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 12,
+        "name": "theater_theme",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 13,
         "name": "created_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 12,
+        "ordinal": 14,
         "name": "updated_at",
         "type_info": "Timestamptz"
       }
@@ -94,8 +104,10 @@
       false,
       false,
       false,
+      false,
+      false,
       false
     ]
   },
-  "hash": "b736bef4fe0899dae0c2bf4e0c88540aa11a69ab97d884f2b836315278e8d428"
+  "hash": "e8c1a1adbeaed28f2ad8a4195951d98bea90b50eff8b1c31c51368aa81304fad"
 }

@@ -201,6 +201,8 @@ pub async fn get_session_with_user(
             u.country as "country?",
             u.backstory as "backstory?",
             u.is_admin as "is_admin?",
+            u.site_theme as "site_theme?",
+            u.theater_theme as "theater_theme?",
             u.created_at as "user_created_at?",
             u.updated_at as "user_updated_at?"
         FROM sessions s
@@ -256,6 +258,8 @@ pub async fn get_session_with_user(
                     country: row.country.unwrap_or_default(),
                     backstory: row.backstory.unwrap_or_default(),
                     is_admin: row.is_admin.unwrap_or(false),
+                    site_theme: row.site_theme.unwrap_or_else(|| "system".to_string()),
+                    theater_theme: row.theater_theme.unwrap_or_else(|| "dark".to_string()),
                     created_at: user_created_at,
                     updated_at: user_updated_at,
                 })

@@ -31,6 +31,7 @@ pub mod game;
 pub mod github_auth;
 pub mod leaderboard;
 pub mod policy;
+pub mod settings;
 pub mod tournament;
 
 pub fn routes(app_state: AppState) -> axum::Router {
@@ -84,6 +85,8 @@ pub fn routes(app_state: AppState) -> axum::Router {
         .route("/terms", get(policy::terms_page))
         // Profile page - requires authentication
         .route("/me", get(profile_page).post(update_profile))
+        // Appearance (theme) preference - requires authentication
+        .route("/settings/appearance", post(settings::update_appearance))
         // GitHub OAuth routes
         .route("/auth/github", get(github_auth::github_auth))
         .route(
@@ -247,24 +250,17 @@ async fn root_page(
                         @if let Some(name) = user.github_name {
                             p { "Name: " (name) }
                         }
+                        // Section links live in the global nav now; only
+                        // actions the nav doesn't offer stay here.
                         div class="user-actions" style="margin-top: 10px;" {
-                            a href="/me" class="btn btn-primary" { "Profile" }
-                            a href="/battlesnakes" class="btn btn-primary" { "Battlesnakes" }
-                            a href="/leaderboards" class="btn btn-primary" { "Leaderboards" }
-                            a href="/tournaments" class="btn btn-primary" { "Tournaments" }
-                            a href="/customizations" class="btn btn-primary" { "Customizations" }
-                            a href="/auth/logout" class="btn btn-secondary" { "Logout" }
+                            a href="/me" class="btn" { "Profile" }
+                            a href="/auth/logout" class="btn" { "Logout" }
                         }
                     }
                 } @else {
                     div class="login" {
                         p { "You are not logged in." }
                         a href="/auth/github" { "Login with GitHub" }
-                    }
-                    div style="margin-top: 10px;" {
-                        a href="/leaderboards" class="btn btn-primary" { "Leaderboards" }
-                        a href="/tournaments" class="btn btn-primary" { "Tournaments" }
-                        a href="/customizations" class="btn btn-primary" { "Customizations" }
                     }
                 }
                 div class="content" style="margin-top: 20px;" {
