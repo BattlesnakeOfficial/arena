@@ -1298,6 +1298,7 @@ mod tests {
                 user_id: Uuid::new_v4(),
                 leaderboard_entry_id: None,
                 color: String::new(),
+                owner_login: "test-owner".to_string(),
                 head: String::new(),
                 tail: String::new(),
             },
@@ -1313,6 +1314,7 @@ mod tests {
                 user_id: Uuid::new_v4(),
                 leaderboard_entry_id: None,
                 color: String::new(),
+                owner_login: "test-owner".to_string(),
                 head: String::new(),
                 tail: String::new(),
             },
@@ -1366,6 +1368,7 @@ mod tests {
                 color: String::new(),
                 head: String::new(),
                 tail: String::new(),
+                owner_login: String::new(),
             })
             .collect()
     }

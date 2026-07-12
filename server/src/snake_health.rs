@@ -132,6 +132,8 @@ pub fn build_test_game(snake: &Battlesnake) -> (EngineGame, String) {
         user_id: snake.user_id,
         leaderboard_entry_id: None,
         color: snake.color.clone(),
+        // Synthetic health-check game; owner identity is never shown.
+        owner_login: String::new(),
         head: snake.head.clone(),
         tail: snake.tail.clone(),
     };
