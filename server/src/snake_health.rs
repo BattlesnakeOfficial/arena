@@ -136,7 +136,6 @@ pub fn build_test_game(snake: &Battlesnake) -> (EngineGame, String) {
         owner_login: String::new(),
         head: snake.head.clone(),
         tail: snake.tail.clone(),
-        visibility: snake.visibility,
     };
 
     let engine_game = crate::engine::create_initial_game(

@@ -521,8 +521,8 @@ pub async fn reactivate_battlesnake(
 }
 
 // View a battlesnake's profile with game history and stats.
-// Public for public snakes (like play.battlesnake.com); private snakes are
-// only visible to their owner and 404 for everyone else.
+// Public to everyone: visibility only controls whether a snake can be
+// matchmade against, not who can see it.
 #[allow(clippy::too_many_lines)]
 pub async fn view_battlesnake_profile(
     State(state): State<AppState>,
@@ -538,11 +538,6 @@ pub async fn view_battlesnake_profile(
         .with_status(StatusCode::NOT_FOUND)?;
 
     let is_owner = user.as_ref().is_some_and(|u| u.user_id == snake.user_id);
-
-    // Private snakes 404 (rather than 403) so their existence isn't leaked.
-    if snake.visibility != Visibility::Public && !is_owner {
-        Err("Battlesnake not found".to_string()).with_status(StatusCode::NOT_FOUND)?;
-    }
 
     // Fetch the owner user info
     let owner = get_user_by_id(&state.db, snake.user_id)

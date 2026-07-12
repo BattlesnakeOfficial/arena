@@ -1301,7 +1301,6 @@ mod tests {
                 owner_login: "test-owner".to_string(),
                 head: String::new(),
                 tail: String::new(),
-                visibility: crate::models::battlesnake::Visibility::Public,
             },
             GameBattlesnakeWithDetails {
                 game_battlesnake_id: Uuid::new_v4(),
@@ -1318,7 +1317,6 @@ mod tests {
                 owner_login: "test-owner".to_string(),
                 head: String::new(),
                 tail: String::new(),
-                visibility: crate::models::battlesnake::Visibility::Public,
             },
         ];
 
@@ -1371,7 +1369,6 @@ mod tests {
                 head: String::new(),
                 tail: String::new(),
                 owner_login: String::new(),
-                visibility: crate::models::battlesnake::Visibility::Public,
             })
             .collect()
     }

@@ -31,8 +31,9 @@ fn public_name(user: &User) -> &str {
 ///
 /// Everything here is visible to anonymous visitors, matching the public
 /// profiles on play.battlesnake.com: identity fields the user chose to share,
-/// their public snakes, and where those snakes sit on the leaderboards.
-/// Private snakes only appear when the owner views their own profile.
+/// their snakes, and where those snakes sit on the leaderboards. Snake
+/// visibility only controls matchmaking eligibility, not who can see it, so
+/// all snakes are listed (private ones badged).
 pub async fn show_user_profile(
     State(state): State<AppState>,
     OptionalUser(viewer): OptionalUser,
@@ -51,16 +52,9 @@ pub async fn show_user_profile(
         .await
         .wrap_err("Failed to fetch user's battlesnakes")?;
 
-    // Anonymous visitors and other users only see public snakes; the owner
-    // sees everything (with private ones badged).
-    let visible_snakes: Vec<_> = snakes
-        .into_iter()
-        .filter(|s| is_self || s.visibility == Visibility::Public)
-        .collect();
-
     // Snake counts per user are small, so per-snake entry lookups are fine.
-    let mut snakes_with_entries = Vec::with_capacity(visible_snakes.len());
-    for snake in visible_snakes {
+    let mut snakes_with_entries = Vec::with_capacity(snakes.len());
+    for snake in snakes {
         let entries = leaderboard::get_entries_for_battlesnake(&state.db, snake.battlesnake_id)
             .await
             .wrap_err("Failed to fetch leaderboard entries")?;
@@ -98,7 +92,7 @@ pub async fn show_user_profile(
             section class="section" {
                 h2 { "Battlesnakes" }
                 @if snakes_with_entries.is_empty() {
-                    p class="empty" { "No public snakes yet." }
+                    p class="empty" { "No snakes yet." }
                 } @else {
                     div class="snakes" {
                         @for (snake, entries) in &snakes_with_entries {
