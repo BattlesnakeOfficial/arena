@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT\n            r.registration_id,\n            r.battlesnake_id,\n            r.user_id,\n            r.seed,\n            b.name as snake_name,\n            u.github_login as owner_login\n        FROM tournament_registrations r\n        JOIN battlesnakes b ON r.battlesnake_id = b.battlesnake_id\n        JOIN users u ON r.user_id = u.user_id\n        WHERE r.tournament_id = $1\n        ORDER BY r.seed ASC\n        ",
+  "query": "\n        SELECT\n            r.registration_id,\n            r.battlesnake_id,\n            r.user_id,\n            r.seed,\n            b.name as snake_name,\n            b.color as snake_color,\n            u.github_login as owner_login\n        FROM tournament_registrations r\n        JOIN battlesnakes b ON r.battlesnake_id = b.battlesnake_id\n        JOIN users u ON r.user_id = u.user_id\n        WHERE r.tournament_id = $1\n        ORDER BY r.seed ASC\n        ",
   "describe": {
     "columns": [
       {
@@ -30,6 +30,11 @@
       },
       {
         "ordinal": 5,
+        "name": "snake_color",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
         "name": "owner_login",
         "type_info": "Text"
       }
@@ -45,8 +50,9 @@
       false,
       false,
       false,
+      false,
       false
     ]
   },
-  "hash": "fd1e578c222a344464cb554f0b6cfa70f3515b42aaa0e99e64fce640453a9417"
+  "hash": "99d54655abcb7c6f2e49eebe4bb9d011593f092685fb70d1977878fc6226ac12"
 }
