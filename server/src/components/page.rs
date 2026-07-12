@@ -106,9 +106,12 @@ impl Page {
                     }
                 }
                 button class="theme-btn" id="appearance-btn" type="button" title="Appearance settings" aria-label="Appearance settings" {
+                    // sliders icon — must read distinct from the sun/moon toggle next to it
                     svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true" {
-                        circle cx="8" cy="8" r="2.4" {}
-                        path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M12.6 3.4l-1.4 1.4M4.8 11.2l-1.4 1.4" {}
+                        path d="M2 4.5h12M2 8h12M2 11.5h12" {}
+                        circle cx="10.5" cy="4.5" r="1.7" fill="var(--card)" {}
+                        circle cx="5.5" cy="8" r="1.7" fill="var(--card)" {}
+                        circle cx="11" cy="11.5" r="1.7" fill="var(--card)" {}
                     }
                 }
             }
