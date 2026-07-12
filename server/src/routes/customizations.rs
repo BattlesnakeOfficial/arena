@@ -25,9 +25,9 @@ fn catalog_item(
     html! {
         div .cz-item .locked[locked] {
             div class="cz-swatch" {
-                img src=(image_url) alt=(def.display_name) loading="lazy";
+                img src=(image_url) alt="" loading="lazy";
             }
-            div class="cz-name" { (def.display_name) }
+            div class="cz-name" title=(def.display_name) { (def.display_name) }
             @if owned {
                 span class="badge ok" { "Owned" }
             } @else if free {
