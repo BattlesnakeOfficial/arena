@@ -58,6 +58,8 @@ export default defineConfig({
         GITHUB_REDIRECT_URI: `${BASE_URL}/auth/github/callback`,
         // Faster job polling for e2e tests (default is 60 seconds)
         JOB_POLL_INTERVAL_SECS: '2',
+        // Disable the homepage feed cache so seeded data is visible immediately
+        HOME_FEED_CACHE_SECS: '0',
       },
     },
   ],
