@@ -731,6 +731,7 @@ pub struct RegistrationWithDetails {
     pub user_id: Uuid,
     pub seed: i32,
     pub snake_name: String,
+    pub snake_color: String,
     pub owner_login: String,
 }
 
@@ -747,6 +748,7 @@ pub async fn get_registrations_with_details(
             r.user_id,
             r.seed,
             b.name as snake_name,
+            b.color as snake_color,
             u.github_login as owner_login
         FROM tournament_registrations r
         JOIN battlesnakes b ON r.battlesnake_id = b.battlesnake_id
@@ -1592,6 +1594,7 @@ pub struct BracketParticipant {
     pub match_id: Uuid,
     pub battlesnake_id: Option<Uuid>,
     pub snake_name: Option<String>,
+    pub snake_color: Option<String>,
 }
 
 /// All participants for every match in a tournament, with snake names, in one
@@ -1607,7 +1610,8 @@ pub async fn get_participants_with_names_for_tournament(
         SELECT
             mp.match_id,
             mp.battlesnake_id,
-            b.name as "snake_name?"
+            b.name as "snake_name?",
+            b.color as "snake_color?"
         FROM match_participants mp
         JOIN tournament_matches tm ON mp.match_id = tm.match_id
         LEFT JOIN battlesnakes b ON mp.battlesnake_id = b.battlesnake_id

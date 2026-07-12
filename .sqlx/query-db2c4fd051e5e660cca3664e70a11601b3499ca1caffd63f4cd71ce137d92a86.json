@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            mp.match_id,\n            mp.battlesnake_id,\n            b.name as \"snake_name?\",\n            b.color as \"snake_color?\"\n        FROM match_participants mp\n        JOIN tournament_matches tm ON mp.match_id = tm.match_id\n        LEFT JOIN battlesnakes b ON mp.battlesnake_id = b.battlesnake_id\n        WHERE tm.tournament_id = $1\n        ORDER BY mp.match_id ASC, mp.slot ASC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "match_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "battlesnake_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "snake_name?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "snake_color?",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "db2c4fd051e5e660cca3664e70a11601b3499ca1caffd63f4cd71ce137d92a86"
+}

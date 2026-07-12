@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 use crate::{
     components::page_factory::PageFactory,
+    customizations::chip_color,
     errors::{ServerResult, WithStatus},
     models::{
         battlesnake,
@@ -335,23 +336,13 @@ fn is_tie_game(winner_id: Option<Uuid>, has_later_game: bool, match_status: Matc
 
 fn status_badge(status: TournamentStatus) -> Markup {
     let (class, label) = match status {
-        TournamentStatus::Created => ("badge bg-secondary text-white", "Created"),
-        TournamentStatus::Registration => ("badge bg-info text-dark", "Registration Open"),
-        TournamentStatus::InProgress => ("badge bg-success text-white", "In Progress"),
-        TournamentStatus::Completed => ("badge bg-primary text-white", "Completed"),
-        TournamentStatus::Canceled => ("badge bg-danger text-white", "Canceled"),
+        TournamentStatus::Created => ("badge", "Draft"),
+        TournamentStatus::Registration => ("badge ok", "Registration open"),
+        TournamentStatus::InProgress => ("badge live", "In progress"),
+        TournamentStatus::Completed => ("badge", "Completed"),
+        TournamentStatus::Canceled => ("badge", "Canceled"),
     };
     html! { span class=(class) { (label) } }
-}
-
-/// Border color + badge for a match card, keyed off the match status.
-fn match_status_style(status: MatchStatus) -> (&'static str, &'static str, &'static str) {
-    match status {
-        MatchStatus::Scheduled => ("#6c757d", "badge bg-secondary text-white", "Scheduled"),
-        MatchStatus::InProgress => ("#ffc107", "badge bg-warning text-dark", "In Progress"),
-        MatchStatus::Completed => ("#28a745", "badge bg-success text-white", "Completed"),
-        MatchStatus::Canceled => ("#dc3545", "badge bg-danger text-white", "Canceled"),
-    }
 }
 
 /// Everything needed to render one match card in the bracket.
@@ -361,49 +352,108 @@ struct BracketMatchView<'a> {
     games: &'a [MatchGame],
 }
 
-/// One match card, placed on the bracket grid by its visual coordinates
-/// (rows are shifted down one to leave room for the round headers).
-fn bracket_match_card(view: &BracketMatchView, match_style: MatchStyle) -> Markup {
+/// One team row inside a match card: color chip, name, score cell.
+fn bracket_team_row(
+    p: &BracketParticipant,
+    m: &TournamentMatch,
+    game_winners: &[Option<Uuid>],
+    show_wins: bool,
+) -> Markup {
+    let is_winner = p.battlesnake_id.is_some() && p.battlesnake_id == m.winner_id;
+    let is_loser = m.winner_id.is_some() && p.battlesnake_id.is_some() && !is_winner;
+    let is_tbd = p.battlesnake_id.is_none();
+
+    html! {
+        div .team .w[is_winner] .l[is_loser] .tbd[is_tbd] {
+            @if let Some(color) = p.snake_color.as_deref().filter(|c| !c.is_empty()) {
+                span class="chip" style={"background:"(chip_color(color))} {}
+            } @else {
+                span class="chip tbd" {}
+            }
+            span class="name" {
+                @if let Some(name) = &p.snake_name { (name) } @else { "TBD" }
+            }
+            span class="score" {
+                @if show_wins {
+                    @if let Some(battlesnake_id) = p.battlesnake_id {
+                        (win_count(game_winners, battlesnake_id))
+                    } @else { "—" }
+                } @else if is_winner { "✓" }
+                @else { "—" }
+            }
+        }
+    }
+}
+
+/// One match card, placed on the bracket grid by its visual coordinates.
+/// Round columns are the odd grid columns (connectors live between); each
+/// match spans two grid rows so later rounds center between their feeders.
+fn bracket_match_card(
+    view: &BracketMatchView,
+    match_style: MatchStyle,
+    total_rounds: i32,
+) -> Markup {
     let m = view.tournament_match;
-    let (border_color, badge_class, badge_label) = match_status_style(m.status);
     let game_winners: Vec<Option<Uuid>> = view.games.iter().map(|g| g.winner_id).collect();
     let show_wins = match_style != MatchStyle::SingleGame;
     // Byes only have their single seeded participant persisted.
     let is_bye = m.round == 1 && view.participants.len() == 1;
+    let is_live = m.status == MatchStatus::InProgress;
+
+    let col = m.visual_column * 2 + 1;
+    let row = m.visual_row + 1;
+
+    let tag_label = if m.round == total_rounds {
+        "Final".to_string()
+    } else {
+        format!("R{} · M{}", m.round, m.position + 1)
+    };
+    let status_label = match m.status {
+        MatchStatus::Scheduled => {
+            if is_bye {
+                "bye"
+            } else {
+                "scheduled"
+            }
+        }
+        MatchStatus::InProgress => "live",
+        MatchStatus::Completed => "done",
+        MatchStatus::Canceled => "canceled",
+    };
+    // The game currently being played, for the theater strip.
+    let live_game = if is_live { view.games.last() } else { None };
 
     html! {
-        div class="card"
-            style={
-                "grid-column: "(m.visual_column + 1)"; grid-row: "(m.visual_row + 2)"; "
-                "align-self: center; border: 1px solid #ddd; border-left: 4px solid "(border_color)"; "
-                "border-radius: 6px; padding: 8px 12px; background: #fff;"
-            } {
-            div style="margin-bottom: 6px;" {
-                span class=(badge_class) { (badge_label) }
+        div .match .live[is_live]
+            style={"grid-column: "(col)"; grid-row: "(row)" / "(row + 2)";"} {
+            span class="tag" {
+                @if is_live { span class="live-dot" {} }
+                (tag_label) " · " (status_label)
+                @if let Some(game) = live_game { " · game " (game.game_number) }
             }
             @for p in view.participants {
-                @let is_winner = p.battlesnake_id.is_some() && p.battlesnake_id == m.winner_id;
-                div style=[is_winner.then_some("font-weight: bold; color: #28a745;")] {
-                    @if let Some(name) = &p.snake_name {
-                        (name)
-                    } @else {
-                        span style="color: #999; font-style: italic;" { "TBD" }
-                    }
-                    @if show_wins {
-                        @if let Some(battlesnake_id) = p.battlesnake_id {
-                            span style="color: #666; font-weight: normal;" {
-                                " (" (win_count(&game_winners, battlesnake_id)) ")"
-                            }
-                        }
-                    }
-                    @if is_winner { " ✓" }
-                }
+                (bracket_team_row(p, m, &game_winners, show_wins))
             }
             @if is_bye {
-                div style="color: #999; font-style: italic;" { "Bye" }
+                div class="team tbd" {
+                    span class="chip tbd" {}
+                    span class="name" { "Bye" }
+                    span class="score" { "—" }
+                }
+            }
+            @if let Some(game) = live_game {
+                a class="theater-strip" href={"/games/"(game.game_id)} {
+                    span class="play" {
+                        svg viewBox="0 0 8 8" fill="#1A0710" aria-hidden="true" {
+                            path d="M0.5 0l7 4-7 4z" {}
+                        }
+                    }
+                    span class="label" { "THEATER" }
+                    span class="go" { "watch live →" }
+                }
             }
             @if !view.games.is_empty() {
-                div class="d-flex" style="gap: 8px; flex-wrap: wrap; margin-top: 6px; font-size: 0.85em;" {
+                div class="mgames" {
                     @for (i, game) in view.games.iter().enumerate() {
                         a href={"/games/"(game.game_id)} {
                             "Game " (game.game_number)
@@ -418,10 +468,10 @@ fn bracket_match_card(view: &BracketMatchView, match_style: MatchStyle) -> Marku
     }
 }
 
-/// The bracket section of the detail page: a CSS grid laid out from each
-/// match's `visual_column`/`visual_row`, with round headers in the first grid
-/// row and a horizontal scroll container for small screens. When the
-/// tournament is completed, the champion (winner of the final) is called out.
+/// The bracket: rounds as columns on a shared CSS grid (odd columns hold
+/// matches, even columns hold the elbow connectors), a champion slot after
+/// the final, and a horizontal scroll container for small screens. Grid
+/// placement comes from each match's `visual_column`/`visual_row`.
 fn bracket_section(
     t: &Tournament,
     matches: &[TournamentMatch],
@@ -429,64 +479,126 @@ fn bracket_section(
     games_by_match: &HashMap<Uuid, Vec<MatchGame>>,
 ) -> Markup {
     let total_rounds = matches.iter().map(|m| m.round).max().unwrap_or(0);
+    // No matches means no grid: `repeat(0, ...)` is invalid CSS.
+    if total_rounds == 0 {
+        return html! {};
+    }
 
     // Champion: the winner of the final (highest round), named via that
     // match's participant rows. If the winning snake was deleted since (its
-    // participant row cascades away), still show the callout with a neutral
+    // participant row cascades away), still show the slot with a neutral
     // placeholder rather than silently dropping it.
-    let champion_name = (t.status == TournamentStatus::Completed)
+    let final_match = matches.iter().find(|m| m.round == total_rounds);
+    let champion = (t.status == TournamentStatus::Completed)
         .then(|| {
-            let final_match = matches.iter().find(|m| m.round == total_rounds)?;
+            let final_match = final_match?;
             let winner_id = final_match.winner_id?;
-            Some(
-                participants_by_match
-                    .get(&final_match.match_id)
-                    .and_then(|participants| {
-                        participants
-                            .iter()
-                            .find(|p| p.battlesnake_id == Some(winner_id))
-                    })
-                    .and_then(|p| p.snake_name.clone())
-                    .unwrap_or_else(|| "(deleted snake)".to_string()),
-            )
+            participants_by_match
+                .get(&final_match.match_id)
+                .and_then(|participants| {
+                    participants
+                        .iter()
+                        .find(|p| p.battlesnake_id == Some(winner_id))
+                })
+                .map(|p| {
+                    (
+                        p.snake_name
+                            .clone()
+                            .unwrap_or_else(|| "(deleted snake)".to_string()),
+                        p.snake_color.clone().filter(|c| !c.is_empty()),
+                    )
+                })
+                .or(Some(("(deleted snake)".to_string(), None)))
         })
         .flatten();
+
+    // Grid geometry. Matches sit in odd columns (1, 3, ...); the elbow
+    // connectors between rounds sit in the even columns; the champion slot
+    // takes the last odd column. Rows: a bracket of size 2^R needs 2^R rows,
+    // each match spanning two.
+    let grid_rows = 1_i32 << total_rounds;
+    let champ_col = total_rounds * 2 + 1;
+    let mut grid_cols = String::new();
+    for _ in 1..=total_rounds {
+        grid_cols.push_str("minmax(210px, 1fr) 28px ");
+    }
+    grid_cols.push_str("minmax(170px, 1fr)");
+    let min_width = total_rounds * 238 + 170;
+
+    // Feeder rows for connector placement: an elbow spans from the vertical
+    // center of one feeder match to the center of its sibling.
+    let row_of: HashMap<(i32, i32), i32> = matches
+        .iter()
+        .map(|m| ((m.round, m.position), m.visual_row))
+        .collect();
 
     static EMPTY_PARTICIPANTS: Vec<BracketParticipant> = Vec::new();
     static EMPTY_GAMES: Vec<MatchGame> = Vec::new();
 
     html! {
-        div class="card mb-4" {
-            div class="card-body" {
-                h2 { "Bracket" }
-                @if let Some(name) = &champion_name {
-                    div class="alert alert-success" style="margin: 12px 0;" {
-                        h3 style="margin: 0;" { "🏆 Champion: " (name) }
+        h2 class="vh" { "Bracket" }
+        div class="bracket-note" {
+            (matches.iter().filter(|m| m.status == MatchStatus::Completed).count())
+            " of " (matches.len()) " matches played · "
+            (total_rounds) @if total_rounds == 1 { " round" } @else { " rounds" }
+        }
+        div class="bracket-scroll" tabindex="0" role="region" aria-label="Tournament bracket" {
+            div style={"min-width: "(min_width)"px;"} {
+                div class="round-labels" style={"grid-template-columns: "(grid_cols)";"} {
+                    @for round in 1..=total_rounds {
+                        span style={"grid-column: "(round * 2 - 1)";"} {
+                            (round_label(round, total_rounds))
+                        }
                     }
+                    span style={"grid-column: "(champ_col)";"} { "Champion" }
                 }
-                // No matches means no grid: `repeat(0, ...)` is invalid CSS,
-                // so skip the layout entirely for an empty bracket.
-                @if total_rounds > 0 {
-                    div style="overflow-x: auto; padding-bottom: 8px;" {
-                        div style={
-                            "display: grid; "
-                            "grid-template-columns: repeat("(total_rounds)", 240px); "
-                            "column-gap: 24px; row-gap: 8px; width: max-content;"
-                        } {
-                            @for round in 1..=total_rounds {
-                                div style={"grid-column: "(round)"; grid-row: 1; font-weight: bold; text-align: center;"} {
-                                    (round_label(round, total_rounds))
-                                }
+                div class="bracket"
+                    style={
+                        "grid-template-columns: "(grid_cols)"; "
+                        "grid-template-rows: repeat("(grid_rows)", minmax(44px, auto));"
+                    } {
+                    @for m in matches {
+                        @let view = BracketMatchView {
+                            tournament_match: m,
+                            participants: participants_by_match
+                                .get(&m.match_id)
+                                .unwrap_or(&EMPTY_PARTICIPANTS),
+                            games: games_by_match.get(&m.match_id).unwrap_or(&EMPTY_GAMES),
+                        };
+                        (bracket_match_card(&view, t.match_style, total_rounds))
+
+                        // Elbow connector from this match's two feeders.
+                        @if m.round > 1 {
+                            @let top = row_of.get(&(m.round - 1, m.position * 2));
+                            @let bottom = row_of.get(&(m.round - 1, m.position * 2 + 1));
+                            @if let (Some(top), Some(bottom)) = (top, bottom) {
+                                div class="conn"
+                                    style={
+                                        "grid-column: "(m.round * 2 - 2)"; "
+                                        "grid-row: "(top + 2)" / "(bottom + 2)";"
+                                    } {}
                             }
-                            @for m in matches {
-                                @let view = BracketMatchView {
-                                    tournament_match: m,
-                                    participants: participants_by_match
-                                        .get(&m.match_id)
-                                        .unwrap_or(&EMPTY_PARTICIPANTS),
-                                    games: games_by_match.get(&m.match_id).unwrap_or(&EMPTY_GAMES),
-                                };
-                                (bracket_match_card(&view, t.match_style))
+                        }
+                    }
+
+                    // Champion slot, fed by the final.
+                    @if let Some(final_match) = final_match {
+                        @let frow = final_match.visual_row + 1;
+                        div class="conn-h"
+                            style={"grid-column: "(champ_col - 1)"; grid-row: "(frow)" / "(frow + 2)";"} {}
+                        div .champ .crowned[champion.is_some()]
+                            style={"grid-column: "(champ_col)"; grid-row: "(frow)" / "(frow + 2)";"} {
+                            div class="glyph" aria-hidden="true" { "🏆" }
+                            div class="label" { "Champion" }
+                            div class="who" {
+                                @if let Some((name, color)) = &champion {
+                                    @if let Some(color) = color {
+                                        span class="chip champ-chip" style={"background:"(chip_color(color))} {}
+                                    }
+                                    (name)
+                                } @else {
+                                    "To be decided"
+                                }
                             }
                         }
                     }
@@ -513,73 +625,73 @@ fn tournament_form_fields(current: Option<&Tournament>) -> Markup {
     let required_participants = current.map_or(2, |t| t.required_participants);
 
     html! {
-        div class="form-group" {
+        div class="field" {
             label for="name" { "Name" }
-            input type="text" id="name" name="name" class="form-control" required value=(name) {}
+            input type="text" id="name" name="name" required value=(name) {}
         }
 
-        div class="form-group" {
+        div class="field" {
             label for="description" { "Description" }
-            textarea id="description" name="description" class="form-control" rows="3" { (description) }
+            textarea id="description" name="description" rows="3" { (description) }
         }
 
-        div class="form-group" {
+        div class="field" {
             label for="game_type" { "Game Type" }
-            select id="game_type" name="game_type" class="form-control" required {
+            select id="game_type" name="game_type" required {
                 option value="Standard" selected[game_type == GameType::Standard] { "Standard" }
                 option value="Royale" selected[game_type == GameType::Royale] { "Royale" }
                 option value="Constrictor" selected[game_type == GameType::Constrictor] { "Constrictor" }
                 option value="Snail Mode" selected[game_type == GameType::SnailMode] { "Snail Mode" }
             }
-            small class="form-text text-muted" { "Cannot be changed once snakes have registered" }
+            div class="hint" { "Cannot be changed once snakes have registered" }
         }
 
-        div class="form-group" {
+        div class="field" {
             label for="board_size" { "Board Size" }
-            select id="board_size" name="board_size" class="form-control" required {
+            select id="board_size" name="board_size" required {
                 option value="7x7" selected[board_size == GameBoardSize::Small] { "7x7 (Small)" }
                 option value="11x11" selected[board_size == GameBoardSize::Medium] { "11x11 (Medium)" }
                 option value="19x19" selected[board_size == GameBoardSize::Large] { "19x19 (Large)" }
             }
-            small class="form-text text-muted" { "Cannot be changed once snakes have registered" }
+            div class="hint" { "Cannot be changed once snakes have registered" }
         }
 
-        div class="form-group" {
+        div class="field" {
             label for="match_style" { "Match Style" }
-            select id="match_style" name="match_style" class="form-control" required {
+            select id="match_style" name="match_style" required {
                 option value="single_game" selected[match_style == MatchStyle::SingleGame] { "Single Game" }
                 option value="best_of_3" selected[match_style == MatchStyle::BestOf3] { "Best of 3" }
                 option value="first_to_3" selected[match_style == MatchStyle::FirstTo3] { "First to 3" }
             }
         }
 
-        div class="form-group" {
+        div class="field" {
             label for="registration_status" { "Registration" }
-            select id="registration_status" name="registration_status" class="form-control" required {
+            select id="registration_status" name="registration_status" required {
                 option value="open" selected[registration_status == RegistrationStatus::Open] { "Open (anyone can register)" }
                 option value="closed" selected[registration_status == RegistrationStatus::Closed] { "Closed (no registrations)" }
                 option value="owner_only" selected[registration_status == RegistrationStatus::OwnerOnly] { "Owner Only" }
             }
         }
 
-        div class="form-group" {
+        div class="field" {
             label for="visibility" { "Visibility" }
-            select id="visibility" name="visibility" class="form-control" required {
+            select id="visibility" name="visibility" required {
                 option value="public" selected[visibility == TournamentVisibility::Public] { "Public" }
                 option value="participants_only" selected[visibility == TournamentVisibility::ParticipantsOnly] { "Participants Only" }
             }
         }
 
-        div class="form-group" {
+        div class="field" {
             label for="max_snakes_per_user" { "Max Snakes per User" }
             input type="number" id="max_snakes_per_user" name="max_snakes_per_user"
-                class="form-control" min="1" required value=(max_snakes_per_user) {}
+                min="1" required value=(max_snakes_per_user) {}
         }
 
-        div class="form-group" {
+        div class="field" {
             label for="required_participants" { "Required Participants" }
             input type="number" id="required_participants" name="required_participants"
-                class="form-control" min="2" required value=(required_participants) {}
+                min="2" required value=(required_participants) {}
         }
     }
 }
@@ -668,59 +780,59 @@ pub async fn list_tournaments(
         .await
         .wrap_err("Failed to list tournaments")?;
 
-    let flash = page_factory.flash.clone();
-
-    Ok(page_factory.create_page_with_flash(
+    Ok(page_factory.create_page(
         "Tournaments".to_string(),
         Box::new(html! {
-            div class="container" {
-                h1 { "Tournaments" }
-
-                @if let Some(message) = flash.message() {
-                    div class=(flash.class()) {
-                        p { (message) }
+            div class="page-head" {
+                div {
+                    h1 { "Tournaments" }
+                    div class="sub" {
+                        "Single-elimination brackets. Register your snakes, "
+                        "seed the field, and play it out round by round."
                     }
                 }
-
+                div class="spacer" {}
                 @if viewer.is_some() {
-                    div style="margin-bottom: 20px;" {
-                        a href="/tournaments/new" class="btn btn-primary" { "Create Tournament" }
-                    }
+                    a href="/tournaments/new" class="btn solid head-cta" { "Create Tournament" }
                 }
+            }
 
-                @if tournaments.is_empty() {
-                    div class="empty-state" {
-                        p { "No tournaments yet." }
-                    }
-                } @else {
-                    div class="tournaments-list" {
-                        @for t in &tournaments {
-                            div class="card" style="border: 1px solid #ddd; border-radius: 8px; padding: 20px; margin-bottom: 16px;" {
-                                div class="d-flex justify-content-between align-items-center" {
-                                    div {
-                                        h2 style="margin-bottom: 4px;" {
-                                            a href={"/tournaments/"(t.tournament_id)} { (t.name) }
+            @if tournaments.is_empty() {
+                p class="empty" { "No tournaments yet." }
+            } @else {
+                div class="section" {
+                    table class="data" {
+                        thead {
+                            tr {
+                                th { "Tournament" }
+                                th { "Status" }
+                                th class="r" { "Snakes" }
+                                th class="r hide-sm" { "Game" }
+                                th class="r hide-sm" { "Created" }
+                            }
+                        }
+                        tbody {
+                            @for t in &tournaments {
+                                tr {
+                                    td {
+                                        div class="snake-cell" {
+                                            span {
+                                                a class="name" href={"/tournaments/"(t.tournament_id)} { (t.name) }
+                                                span class="owner" { "by " (t.owner_login) }
+                                            }
                                         }
-                                        span style="color: #666;" { "by " (t.owner_login) }
                                     }
-                                    (status_badge(t.status))
-                                }
-                                div class="d-flex" style="gap: 24px; margin-top: 12px; flex-wrap: wrap; color: #444;" {
-                                    span { strong { "Game: " } (t.game_type.as_str()) }
-                                    span { strong { "Snakes: " } (t.registration_count) }
-                                    span { strong { "Created: " } (t.created_at.format("%Y-%m-%d")) }
+                                    td { (status_badge(t.status)) }
+                                    td class="r num" { (t.registration_count) }
+                                    td class="r num hide-sm" { (t.game_type.as_str()) }
+                                    td class="r num hide-sm" { (t.created_at.format("%b %-d, %Y")) }
                                 }
                             }
                         }
                     }
                 }
-
-                div class="nav" style="margin-top: 20px;" {
-                    a href="/" { "Back to Home" }
-                }
             }
         }),
-        flash,
     ))
 }
 
@@ -729,31 +841,32 @@ pub async fn new_tournament(
     CurrentUser(_): CurrentUser,
     page_factory: PageFactory,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
-    let flash = page_factory.flash.clone();
-
-    Ok(page_factory.create_page_with_flash(
+    Ok(page_factory.create_page(
         "Create Tournament".to_string(),
         Box::new(html! {
-            div class="container" {
-                h1 { "Create Tournament" }
-
-                @if let Some(message) = flash.message() {
-                    div class=(flash.class()) {
-                        p { (message) }
-                    }
-                }
-
-                form action="/tournaments" method="post" {
-                    (tournament_form_fields(None))
-
-                    div class="form-group" style="margin-top: 20px;" {
-                        button type="submit" class="btn btn-primary" { "Create Tournament" }
-                        a href="/tournaments" class="btn btn-secondary" { "Cancel" }
+            div class="crumb" {
+                a href="/tournaments" { "Tournaments" }
+                " / New"
+            }
+            div class="page-head" {
+                div {
+                    h1 { "Create Tournament" }
+                    div class="sub" {
+                        "Pick the game rules and registration policy — you can "
+                        "tweak everything until the bracket is generated."
                     }
                 }
             }
+
+            form class="tform" action="/tournaments" method="post" {
+                (tournament_form_fields(None))
+
+                div class="actions" {
+                    button type="submit" class="btn solid" { "Create Tournament" }
+                    a href="/tournaments" class="btn" { "Cancel" }
+                }
+            }
         }),
-        flash,
     ))
 }
 
@@ -928,187 +1041,249 @@ pub async fn show_tournament(
 
     let can_edit_registrations = registrations_editable(t.status);
     let max_seed = registrations.len();
-    let flash = page_factory.flash.clone();
 
-    Ok(page_factory.create_page_with_flash(
+    // Stat band numbers, cheap from data already fetched.
+    let (total_rounds, total_matches, completed_matches) = bracket_data
+        .as_ref()
+        .map(|(matches, _, _)| {
+            (
+                matches.iter().map(|m| m.round).max().unwrap_or(0),
+                matches.len(),
+                matches
+                    .iter()
+                    .filter(|m| m.status == MatchStatus::Completed)
+                    .count(),
+            )
+        })
+        .unwrap_or((0, 0, 0));
+
+    let style_label = match t.match_style {
+        MatchStyle::SingleGame => "Single game",
+        MatchStyle::BestOf3 => "Best of 3",
+        MatchStyle::FirstTo3 => "First to 3",
+    };
+
+    Ok(page_factory.create_page(
         format!("Tournament: {}", t.name),
         Box::new(html! {
-            div class="container" {
-                @if let Some(message) = flash.message() {
-                    div class=(flash.class()) {
-                        p { (message) }
+            div class="crumb" {
+                a href="/tournaments" { "Tournaments" }
+                " / " (t.name)
+            }
+            div class="page-head" {
+                div {
+                    h1 { (t.name) }
+                    div class="sub" {
+                        "by " (owner_login)
+                        " · " (t.game_type.as_str())
+                        " · " (t.board_size.as_str())
+                        " · " (style_label)
                     }
                 }
+                div class="spacer" {}
+                @if t.status == TournamentStatus::InProgress {
+                    span class="round-pill" {
+                        span class="live-dot" {}
+                        "LIVE · ROUND " (t.current_round) " OF " (total_rounds)
+                    }
+                } @else {
+                    span class="head-status" { (status_badge(t.status)) }
+                }
+            }
+            @if let Some(ref description) = t.description {
+                p class="tourney-desc" { (description) }
+            }
 
-                // Info header
-                div class="card mb-4" {
-                    div class="card-body" {
-                        div class="d-flex justify-content-between align-items-center" {
-                            div {
-                                h1 class="mb-2" { (t.name) }
-                                span style="color: #666;" { "by " (owner_login) }
+            div class="stats" style="margin-top: 34px;" {
+                div class="stat" {
+                    div class="label" { "Registered snakes" }
+                    div class="value" {
+                        (registrations.len())
+                        @if can_edit_registrations {
+                            small { "of " (t.required_participants) " needed" }
+                        }
+                    }
+                }
+                div class="stat" {
+                    div class="label" { "Rounds" }
+                    div class="value" {
+                        @if total_rounds > 0 { (total_rounds) } @else { "—" }
+                    }
+                }
+                div class="stat" {
+                    div class="label" { "Matches played" }
+                    div class="value" {
+                        @if total_matches > 0 {
+                            @if t.status == TournamentStatus::InProgress {
+                                span class="live" { (completed_matches) }
+                            } @else {
+                                (completed_matches)
                             }
-                            (status_badge(t.status))
-                        }
-                        @if let Some(ref description) = t.description {
-                            p style="margin-top: 12px;" { (description) }
-                        }
-                        div class="d-flex" style="gap: 24px; margin-top: 12px; flex-wrap: wrap; color: #444;" {
-                            span { strong { "Game: " } (t.game_type.as_str()) }
-                            span { strong { "Board: " } (t.board_size.as_str()) }
-                            span { strong { "Match Style: " } (t.match_style.as_str()) }
-                            span { strong { "Registration: " } (t.registration_status.as_str()) }
-                            span { strong { "Visibility: " } (t.visibility.as_str()) }
-                            span { strong { "Max Snakes/User: " } (t.max_snakes_per_user) }
-                            span { strong { "Required Participants: " } (t.required_participants) }
-                            span { strong { "Created: " } (t.created_at.format("%Y-%m-%d")) }
+                            small { "of " (total_matches) }
+                        } @else { "—" }
+                    }
+                }
+                div class="stat" {
+                    div class="label" { "Format" }
+                    div class="value sm" {
+                        (style_label) " · " (t.board_size.as_str()) " " (t.game_type.as_str())
+                    }
+                }
+            }
+
+            // Bracket (in_progress / completed only)
+            @if let Some((matches, participants_by_match, games_by_match)) = &bracket_data {
+                (bracket_section(&t, matches, participants_by_match, games_by_match))
+            }
+
+            div class="grid" {
+                div {
+                    div class="section" style="margin-top: 0;" {
+                        h2 { "Registered Snakes" }
+                        @if registrations.is_empty() {
+                            p class="empty" { "No snakes registered yet." }
+                        } @else {
+                            table class="data" {
+                                thead {
+                                    tr {
+                                        th { "Seed" }
+                                        th { "Battlesnake" }
+                                        @if can_edit_registrations && viewer.is_some() {
+                                            th class="r" { "Actions" }
+                                        }
+                                    }
+                                }
+                                tbody {
+                                    @for reg in &registrations {
+                                        tr {
+                                            td class="rank" { (format!("{:02}", reg.seed)) }
+                                            td {
+                                                div class="snake-cell" {
+                                                    span class="chip" style={"background:"(chip_color(&reg.snake_color))} {}
+                                                    span {
+                                                        a class="name" href={"/battlesnakes/"(reg.battlesnake_id)"/profile"} { (reg.snake_name) }
+                                                        span class="owner" { "by " (reg.owner_login) }
+                                                    }
+                                                }
+                                            }
+                                            @if can_edit_registrations && viewer.is_some() {
+                                                td {
+                                                    div class="reg-actions" {
+                                                        @if is_owner {
+                                                            form class="seed-form" action={"/tournaments/"(t.tournament_id)"/seed"} method="post" {
+                                                                input type="hidden" name="registration_id" value=(reg.registration_id);
+                                                                input type="number" name="new_seed" aria-label="New seed"
+                                                                    min="1" max=(max_seed) value=(reg.seed) {}
+                                                                button type="submit" class="btn sm" { "Move" }
+                                                            }
+                                                        }
+                                                        @if is_owner || viewer_id == Some(reg.user_id) {
+                                                            form action={"/tournaments/"(t.tournament_id)"/unregister"} method="post" {
+                                                                input type="hidden" name="registration_id" value=(reg.registration_id);
+                                                                button type="submit" class="btn sm danger"
+                                                                    onclick="return confirm('Remove this snake from the tournament?');" { "Unregister" }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
 
-                // Owner controls
-                @if is_owner {
-                    div class="card mb-4" {
-                        div class="card-body" {
+                aside class="rail" {
+                    @if is_owner {
+                        div class="block" {
                             h3 { "Owner Controls" }
-                            div class="d-flex" style="gap: 8px; flex-wrap: wrap; align-items: center;" {
+                            div class="owner-actions" {
                                 @if t.status == TournamentStatus::Created {
-                                    form action={"/tournaments/"(t.tournament_id)"/status"} method="post" style="display: inline;" {
+                                    form action={"/tournaments/"(t.tournament_id)"/status"} method="post" {
                                         input type="hidden" name="action" value="open_registration";
-                                        button type="submit" class="btn btn-success" { "Open Registration" }
+                                        button type="submit" class="btn sm solid" { "Open Registration" }
                                     }
                                 }
                                 @if t.status == TournamentStatus::Registration {
-                                    form action={"/tournaments/"(t.tournament_id)"/start"} method="post" style="display: inline;" {
-                                        button type="submit" class="btn btn-success" { "Start Tournament" }
+                                    form action={"/tournaments/"(t.tournament_id)"/start"} method="post" {
+                                        button type="submit" class="btn sm solid" { "Start Tournament" }
                                     }
                                 }
                                 @if t.status == TournamentStatus::InProgress {
-                                    form action={"/tournaments/"(t.tournament_id)"/run-round"} method="post" style="display: inline;" {
-                                        button type="submit" class="btn btn-success" { "Run Round " (t.current_round) }
+                                    form action={"/tournaments/"(t.tournament_id)"/run-round"} method="post" {
+                                        button type="submit" class="btn sm solid" { "Run Round " (t.current_round) }
                                     }
-                                    form action={"/tournaments/"(t.tournament_id)"/reset"} method="post" style="display: inline;" {
-                                        button type="submit" class="btn btn-warning"
+                                    form action={"/tournaments/"(t.tournament_id)"/reset"} method="post" {
+                                        button type="submit" class="btn sm"
                                             onclick="return confirm('Reset this tournament? The bracket and all match results will be deleted. Registrations are kept. Any games still running will finish on their own but won\'t count.');" { "Reset Tournament" }
                                     }
                                 }
+                                @if can_edit_registrations {
+                                    a href={"/tournaments/"(t.tournament_id)"/edit"} class="btn sm" { "Edit Settings" }
+                                }
                                 @if t.status.can_transition_to(TournamentStatus::Canceled) {
-                                    form action={"/tournaments/"(t.tournament_id)"/status"} method="post" style="display: inline;" {
+                                    form action={"/tournaments/"(t.tournament_id)"/status"} method="post" {
                                         input type="hidden" name="action" value="cancel";
-                                        button type="submit" class="btn btn-danger"
+                                        button type="submit" class="btn sm danger"
                                             onclick="return confirm('Are you sure you want to cancel this tournament?');" { "Cancel Tournament" }
                                     }
                                 }
-                                @if can_edit_registrations {
-                                    a href={"/tournaments/"(t.tournament_id)"/edit"} class="btn btn-primary" { "Edit Settings" }
-                                }
                             }
+                        }
 
-                            @if !leaderboards.is_empty() {
-                                div style="margin-top: 16px;" {
-                                    h4 { "Import from Leaderboard" }
-                                    p style="color: #666;" {
-                                        "Register the top-ranked snakes from a leaderboard, seeded by rank."
-                                    }
-                                    form action={"/tournaments/"(t.tournament_id)"/import-leaderboard"} method="post"
-                                        class="d-flex" style="gap: 8px; align-items: center; flex-wrap: wrap;" {
-                                        select name="leaderboard_id" class="form-control" style="width: auto;" {
-                                            @for lb in &leaderboards {
-                                                option value=(lb.leaderboard_id) { (lb.name) }
-                                            }
+                        @if !leaderboards.is_empty() {
+                            div class="block" {
+                                h3 { "Import from Leaderboard" }
+                                p class="railp" {
+                                    "Register the top-ranked snakes from a leaderboard, seeded by rank."
+                                }
+                                form class="rail-form" action={"/tournaments/"(t.tournament_id)"/import-leaderboard"} method="post" {
+                                    select name="leaderboard_id" aria-label="Leaderboard" {
+                                        @for lb in &leaderboards {
+                                            option value=(lb.leaderboard_id) { (lb.name) }
                                         }
-                                        label for="import_count" { "Top" }
-                                        input type="number" id="import_count" name="count" class="form-control"
-                                            style="width: 90px;" min="1" max=(MAX_IMPORT_COUNT) value="8" {}
-                                        button type="submit" class="btn btn-primary" { "Import" }
                                     }
+                                    label class="lbl" for="import_count" { "Top" }
+                                    input type="number" id="import_count" name="count"
+                                        min="1" max=(MAX_IMPORT_COUNT) value="8" {}
+                                    button type="submit" class="btn sm" { "Import" }
                                 }
                             }
                         }
                     }
-                }
 
-                // Bracket (in_progress / completed only)
-                @if let Some((matches, participants_by_match, games_by_match)) = &bracket_data {
-                    (bracket_section(&t, matches, participants_by_match, games_by_match))
-                }
-
-                // Registered snakes
-                h2 { "Registered Snakes (" (registrations.len()) ")" }
-                @if registrations.is_empty() {
-                    p { "No snakes registered yet." }
-                } @else {
-                    table class="table" {
-                        thead {
-                            tr {
-                                th { "Seed" }
-                                th { "Snake" }
-                                th { "Owner" }
-                                @if can_edit_registrations && viewer.is_some() {
-                                    th { "Actions" }
-                                }
-                            }
-                        }
-                        tbody {
-                            @for reg in &registrations {
-                                tr {
-                                    td { (reg.seed) }
-                                    td {
-                                        a href={"/battlesnakes/"(reg.battlesnake_id)"/profile"} { (reg.snake_name) }
-                                    }
-                                    td { (reg.owner_login) }
-                                    @if can_edit_registrations && viewer.is_some() {
-                                        td class="actions" {
-                                            @if is_owner {
-                                                form action={"/tournaments/"(t.tournament_id)"/seed"} method="post"
-                                                    style="display: inline-flex; gap: 4px; align-items: center;" {
-                                                    input type="hidden" name="registration_id" value=(reg.registration_id);
-                                                    input type="number" name="new_seed" class="form-control"
-                                                        style="width: 80px;" min="1" max=(max_seed) value=(reg.seed) {}
-                                                    button type="submit" class="btn btn-sm btn-secondary" { "Move" }
-                                                }
-                                            }
-                                            @if is_owner || viewer_id == Some(reg.user_id) {
-                                                form action={"/tournaments/"(t.tournament_id)"/unregister"} method="post" style="display: inline;" {
-                                                    input type="hidden" name="registration_id" value=(reg.registration_id);
-                                                    button type="submit" class="btn btn-sm btn-danger"
-                                                        onclick="return confirm('Remove this snake from the tournament?');" { "Unregister" }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Register form
-                @if !registerable_snakes.is_empty() {
-                    div class="card mb-4" style="margin-top: 20px;" {
-                        div class="card-body" {
+                    @if !registerable_snakes.is_empty() {
+                        div class="block" {
                             h3 { "Register a Snake" }
-                            form action={"/tournaments/"(t.tournament_id)"/register"} method="post"
-                                class="d-flex" style="gap: 8px; align-items: center;" {
-                                select name="battlesnake_id" class="form-control" style="width: auto;" {
+                            form class="rail-form" action={"/tournaments/"(t.tournament_id)"/register"} method="post" {
+                                select name="battlesnake_id" aria-label="Battlesnake" {
                                     @for snake in &registerable_snakes {
                                         option value=(snake.battlesnake_id) { (snake.name) }
                                     }
                                 }
-                                button type="submit" class="btn btn-primary" { "Register" }
+                                button type="submit" class="btn sm solid" { "Register" }
                             }
                         }
                     }
-                }
 
-                div class="nav" style="margin-top: 20px;" {
-                    a href="/tournaments" { "Back to Tournaments" }
-                    span { " | " }
-                    a href="/" { "Home" }
+                    div class="block" {
+                        h3 { "Format" }
+                        dl class="meta-list" {
+                            div { dt { "Game" } dd { (t.game_type.as_str()) } }
+                            div { dt { "Board" } dd { (t.board_size.as_str()) } }
+                            div { dt { "Series" } dd { (style_label) } }
+                            div { dt { "Registration" } dd { (t.registration_status.as_str()) } }
+                            div { dt { "Visibility" } dd { (t.visibility.as_str()) } }
+                            div { dt { "Max snakes / user" } dd { (t.max_snakes_per_user) } }
+                            div { dt { "Required to start" } dd { (t.required_participants) } }
+                            div { dt { "Created" } dd { (t.created_at.format("%b %-d, %Y")) } }
+                        }
+                    }
                 }
             }
         }),
-        flash,
     ))
 }
 
@@ -1139,39 +1314,37 @@ pub async fn edit_tournament(
         .await
         .wrap_err("Failed to count registrations")?;
 
-    let flash = page_factory.flash.clone();
-
-    Ok(page_factory.create_page_with_flash(
+    Ok(page_factory.create_page(
         format!("Edit Tournament: {}", t.name),
         Box::new(html! {
-            div class="container" {
-                h1 { "Edit Tournament: " (t.name) }
-
-                @if let Some(message) = flash.message() {
-                    div class=(flash.class()) {
-                        p { (message) }
-                    }
+            div class="crumb" {
+                a href="/tournaments" { "Tournaments" }
+                " / "
+                a href={"/tournaments/"(tournament_id)} { (t.name) }
+                " / Edit"
+            }
+            div class="page-head" {
+                div {
+                    h1 { "Edit Tournament" }
+                    div class="sub" { (t.name) }
                 }
+            }
 
-                @if registration_count > 0 {
-                    div class="alert alert-info" {
-                        p {
-                            (registration_count) " snake(s) are registered — game type and board size can no longer be changed."
-                        }
-                    }
+            @if registration_count > 0 {
+                p class="empty" {
+                    (registration_count) " snake(s) are registered — game type and board size can no longer be changed."
                 }
+            }
 
-                form action={"/tournaments/"(tournament_id)"/settings"} method="post" {
-                    (tournament_form_fields(Some(&t)))
+            form class="tform" action={"/tournaments/"(tournament_id)"/settings"} method="post" {
+                (tournament_form_fields(Some(&t)))
 
-                    div class="form-group" style="margin-top: 20px;" {
-                        button type="submit" class="btn btn-primary" { "Update Tournament" }
-                        a href={"/tournaments/"(tournament_id)} class="btn btn-secondary" { "Cancel" }
-                    }
+                div class="actions" {
+                    button type="submit" class="btn solid" { "Update Tournament" }
+                    a href={"/tournaments/"(tournament_id)} class="btn" { "Cancel" }
                 }
             }
         }),
-        flash,
     ))
 }
 

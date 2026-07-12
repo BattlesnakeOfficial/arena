@@ -472,6 +472,243 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
 
 /* --- page: tournaments (slice 8) -------------------------------------------- */
 
+.page-head .spacer { flex: 1; }
+.vh { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.head-cta { margin-bottom: 12px; }
+.head-status { margin-bottom: 14px; }
+.champ-chip { display: inline-block; vertical-align: -2px; margin-right: 8px; }
+.badge.live { color: var(--pink-deep); background: var(--pink-wash); }
+
+.round-pill {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--pink-deep);
+  border: 1px solid var(--pink);
+  background: var(--pink-wash);
+  border-radius: 999px;
+  padding: 5px 14px;
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  letter-spacing: .04em;
+  margin-bottom: 12px;
+  white-space: nowrap;
+}
+.round-pill .live-dot { width: 7px; height: 7px; flex-shrink: 0; }
+
+.tourney-desc { margin-top: 16px; max-width: 70ch; font-size: 15.5px; }
+
+/* bracket */
+.bracket-note {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--muted);
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  margin-top: 44px;
+}
+.bracket-scroll { overflow-x: auto; margin-top: 10px; padding-bottom: 8px; }
+.round-labels { display: grid; border-bottom: 1px solid var(--hairline); padding-bottom: 10px; }
+.round-labels span {
+  font-family: var(--mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .14em;
+  color: var(--muted);
+}
+.bracket { display: grid; margin-top: 18px; }
+
+.bracket .match {
+  border: 1px solid var(--hairline-dark);
+  border-radius: 12px;
+  background: var(--card);
+  align-self: center;
+  width: 100%;
+  min-width: 0;
+  padding: 8px 12px;
+  position: relative;
+}
+.bracket .match .tag {
+  position: absolute;
+  top: -8px;
+  left: 12px;
+  background: var(--paper);
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--muted);
+  padding: 0 6px;
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  white-space: nowrap;
+}
+.bracket .team { display: flex; align-items: center; gap: 10px; padding: 7px 2px; font-size: 14.5px; }
+.bracket .team + .team { border-top: 1px solid var(--hairline); }
+.bracket .team .chip { width: 24px; height: 16px; border-radius: 4px 9px 9px 4px; }
+.bracket .team .chip::after { width: 3px; height: 3px; right: 4px; top: 4px; }
+.bracket .chip.tbd { border: 1px dashed var(--hairline-dark); background: none; box-shadow: none; }
+.bracket .chip.tbd::after { display: none; }
+.bracket .team .name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  letter-spacing: -.01em;
+}
+.bracket .team .score { font-family: var(--mono); font-size: 13.5px; color: var(--muted); }
+.bracket .team.w .name { font-weight: 700; }
+.bracket .team.w .score { color: var(--pink-deep); font-weight: 600; }
+.bracket .team.l .name, .bracket .team.l .score { color: var(--muted); }
+.bracket .team.tbd .name { color: var(--muted); font-style: italic; }
+
+.bracket .conn {
+  border-top: 1px solid var(--hairline-dark);
+  border-right: 1px solid var(--hairline-dark);
+  border-bottom: 1px solid var(--hairline-dark);
+}
+.bracket .conn-h { align-self: center; height: 1px; background: var(--hairline-dark); }
+
+.bracket .match.live {
+  border-color: var(--pink);
+  box-shadow: 0 0 0 3px var(--pink-wash), 0 12px 30px -18px rgba(232, 37, 109, .5);
+}
+.bracket .match.live .tag { color: var(--pink); font-weight: 600; }
+.bracket .match.live .tag .live-dot { width: 5px; height: 5px; }
+.bracket .match.live .team .score { color: var(--ink); font-weight: 600; }
+
+.bracket .mgames {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+  padding: 5px 2px 2px;
+  border-top: 1px solid var(--hairline);
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: .04em;
+}
+.bracket .mgames a { color: var(--muted); }
+.bracket .mgames a:hover { color: var(--pink); }
+
+/* intentionally dark in both themes: a sliver of the game theater */
+.theater-strip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+  background:
+    linear-gradient(rgba(244, 239, 234, .05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(244, 239, 234, .05) 1px, transparent 1px),
+    #161115;
+  background-size: 9px 9px, 9px 9px, auto;
+  border-radius: 8px;
+  padding: 8px 12px;
+  transition: filter .15s;
+}
+.theater-strip:hover { filter: brightness(1.25); }
+.theater-strip .play {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #FF3D8A;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  box-shadow: 0 0 12px -2px rgba(255, 61, 138, .8);
+}
+.theater-strip .play svg { width: 8px; height: 8px; display: block; margin-left: 1px; }
+.theater-strip .label { font-family: var(--mono); font-size: 10px; letter-spacing: .16em; color: #9C8F99; }
+.theater-strip .go { margin-left: auto; font-family: var(--mono); font-size: 11px; color: #FF3D8A; white-space: nowrap; }
+
+.bracket .champ {
+  align-self: center;
+  width: 100%;
+  border: 1.5px dashed var(--hairline-dark);
+  border-radius: 12px;
+  padding: 18px 16px;
+  text-align: center;
+}
+.bracket .champ.crowned { border: 1.5px solid var(--pink); background: var(--pink-wash); }
+.bracket .champ .glyph { font-size: 20px; line-height: 1; }
+.bracket .champ .label {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: .16em;
+  color: var(--muted);
+  text-transform: uppercase;
+  margin-top: 8px;
+}
+.bracket .champ .who { font-family: var(--display); font-weight: 700; font-size: 15px; color: var(--muted); margin-top: 4px; }
+.bracket .champ.crowned .who { color: var(--ink); font-size: 17px; }
+
+/* registered snakes: seed move + unregister row actions */
+.reg-actions { display: flex; gap: 8px; align-items: center; justify-content: flex-end; flex-wrap: wrap; }
+.seed-form { display: inline-flex; gap: 6px; align-items: center; }
+.seed-form input {
+  width: 64px;
+  font-family: var(--mono);
+  font-size: 13px;
+  padding: 6px 8px;
+  border: 1px solid var(--hairline-dark);
+  border-radius: 8px;
+  background: var(--card);
+  color: var(--ink);
+}
+
+/* rail forms (owner controls, import, register) */
+.owner-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.owner-actions form { display: inline; }
+.rail-form { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; align-items: center; }
+.rail-form select, .rail-form input {
+  font-family: var(--body);
+  font-size: 14px;
+  padding: 8px 10px;
+  border: 1px solid var(--hairline-dark);
+  border-radius: 10px;
+  background: var(--card);
+  color: var(--ink);
+}
+.rail-form select { flex: 1; min-width: 0; }
+.rail-form input[type="number"] { width: 76px; font-family: var(--mono); }
+.rail-form .lbl { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+
+/* create / edit forms */
+.tform { max-width: 560px; margin-top: 34px; }
+.tform .field { margin-bottom: 22px; }
+.tform label {
+  display: block;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  text-transform: uppercase;
+  letter-spacing: .12em;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+.tform input, .tform select, .tform textarea {
+  width: 100%;
+  font-family: var(--body);
+  font-size: 15px;
+  padding: 10px 12px;
+  border: 1px solid var(--hairline-dark);
+  border-radius: 10px;
+  background: var(--card);
+  color: var(--ink);
+}
+.tform textarea { resize: vertical; line-height: 1.5; }
+.tform input:focus, .tform select:focus, .tform textarea:focus { outline: 2px solid var(--pink); outline-offset: 0; border-color: var(--pink); }
+.tform .hint { font-size: 12.5px; color: var(--muted); margin-top: 5px; }
+.tform .actions { display: flex; gap: 10px; margin-top: 30px; }
+
+@media (max-width: 640px) {
+  .bracket-scroll { margin-left: -20px; margin-right: -20px; padding-left: 20px; padding-right: 20px; }
+  .reg-actions .btn.sm, .owner-actions .btn.sm { padding: 10px 16px; }
+  .seed-form input { padding: 10px 8px; }
+}
+
 /* --- responsive ---------------------------------------------------------- */
 @media (max-width: 980px) {
   .grid { grid-template-columns: 1fr; }
