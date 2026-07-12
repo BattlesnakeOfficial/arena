@@ -409,6 +409,181 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
    ========================================================================== */
 
 /* --- page: home (slice 4) ------------------------------------------------ */
+/* hero (logged out) */
+.home .hero {
+  display: grid;
+  grid-template-columns: 1.1fr .9fr;
+  gap: 64px;
+  align-items: center;
+  padding: 28px 0 24px;
+}
+.home .kicker {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--pink);
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 22px;
+}
+.home .kicker::before { content: ""; width: 28px; height: 1.5px; background: var(--pink); }
+.home .hero h1 { font-size: clamp(42px, 5vw, 64px); line-height: 1.02; }
+.home .hero h1 em, .home .statement h2 em { font-style: normal; color: var(--pink); }
+.home .hero .lede { margin-top: 26px; font-size: 19px; color: var(--muted); max-width: 44ch; }
+.home .cta-row { margin-top: 36px; display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+.home .cta-row .btn { padding: 11px 24px; }
+.home .cta-note { font-size: 13.5px; color: var(--muted); margin-top: 16px; font-family: var(--mono); }
+
+/* decorative board — intentionally dark-framed in both themes */
+.home .board-frame { position: relative; }
+.home .board {
+  display: grid;
+  grid-template-columns: repeat(11, 1fr);
+  grid-template-rows: repeat(11, 1fr);
+  aspect-ratio: 1;
+  gap: 4px;
+  padding: 14px;
+  background: linear-gradient(180deg, #1A141A, #171217);
+  border: 1px solid #322A31;
+  border-radius: 20px;
+  box-shadow: 0 24px 60px -24px rgba(23, 20, 26, .5), 0 0 80px -36px rgba(232, 37, 109, .5);
+}
+.home .board .cell { background: #241C23; border-radius: 4px; position: relative; }
+.home .board .seg { border-radius: 4px; }
+.home .board .seg.head { border-radius: 7px; }
+.home .board .seg.head::after {
+  content: "";
+  position: absolute;
+  width: 18%;
+  height: 18%;
+  background: #161115;
+  border-radius: 50%;
+  top: 24%;
+  right: 24%;
+}
+.home .board .food::after {
+  content: "";
+  position: absolute;
+  inset: 26%;
+  background: #FF5F6D;
+  border-radius: 50%;
+  box-shadow: 0 0 9px rgba(255, 95, 109, .55);
+}
+.home .board-caption {
+  position: absolute;
+  bottom: -12px;
+  left: 50%;
+  transform: translate(-50%, 100%);
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--muted);
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  white-space: nowrap;
+}
+
+/* recent-games ticker strip */
+.home .strip {
+  border-top: 1px solid var(--hairline);
+  border-bottom: 1px solid var(--hairline);
+  margin-top: 64px;
+  overflow: hidden;
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--muted);
+  padding: 12px 0;
+}
+.home .strip .inner { display: inline-block; animation: home-ticker 42s linear infinite; }
+.home .strip b { font-weight: 600; color: var(--ink); }
+.home .strip .win { color: var(--pink); font-weight: 600; }
+.home .strip .lose { color: var(--muted); font-weight: 600; }
+.home .strip .sep { margin: 0 26px; color: var(--hairline-dark); }
+@keyframes home-ticker { from { transform: translateX(0); } to { transform: translateX(-50%); } }
+@media (prefers-reduced-motion: reduce) {
+  .home .strip .inner { animation: none; }
+}
+
+/* editorial features (logged out) */
+.home .features { padding: 72px 0 16px; display: grid; grid-template-columns: repeat(3, 1fr); }
+.home .feature { padding: 8px 36px 8px 0; }
+.home .feature + .feature { border-left: 1px solid var(--hairline); padding-left: 36px; }
+.home .feature .num { font-family: var(--mono); font-size: 12.5px; color: var(--pink); font-weight: 600; }
+.home .feature h3 { font-size: 21px; letter-spacing: -.01em; margin: 14px 0 10px; }
+.home .feature p { font-size: 15px; color: var(--muted); }
+.home a.more { display: inline-block; margin-top: 14px; font-size: 14px; font-weight: 600; color: var(--pink); padding: 4px 0; }
+.home a.more:hover { color: var(--pink-deep); }
+
+/* closing statement (logged out) */
+.home .statement { padding: 88px 0 24px; text-align: center; }
+.home .statement h2 {
+  font-weight: 800;
+  letter-spacing: -.03em;
+  font-size: clamp(30px, 3.6vw, 46px);
+  line-height: 1.12;
+  max-width: 21ch;
+  margin: 0 auto;
+}
+.home .statement p { color: var(--muted); margin: 22px auto 0; max-width: 52ch; }
+.home .statement .btn { margin-top: 34px; display: inline-block; }
+
+/* welcome band (logged in) */
+.home .welcome { display: flex; gap: 20px; align-items: center; flex-wrap: wrap; padding-top: 6px; }
+.home .welcome img { width: 64px; height: 64px; border-radius: 50%; border: 1px solid var(--hairline-dark); flex-shrink: 0; }
+.home .welcome h1 { font-size: clamp(30px, 3.4vw, 40px); }
+.home .welcome .sub { color: var(--muted); font-size: 15.5px; margin-top: 4px; }
+.home .welcome .cta-row { margin: 0 0 0 auto; }
+
+/* snake quick-status rows (logged in) */
+.home .snakes .rows { margin-top: 16px; border-top: 1px solid var(--hairline-dark); }
+.home .srow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 4px;
+  min-height: 44px;
+  border-bottom: 1px solid var(--hairline);
+}
+.home .srow:hover { background: var(--hover); }
+.home .srow .sname { font-weight: 600; letter-spacing: -.01em; }
+.home .srow:hover .sname { color: var(--pink); }
+.home .srow .surl {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--muted);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.home .srow .badge { margin-left: auto; }
+.home .srow .surl + .badge { margin-left: 0; }
+
+/* ladder preview + recent games rail */
+.home .grid { margin-top: 56px; }
+.home .ladder-sub { color: var(--muted); font-size: 14.5px; margin-top: 2px; }
+.home .ladder table.data { margin-top: 18px; }
+.home .ladder a.more { margin-top: 18px; }
+
+@media (max-width: 900px) {
+  .home .hero { grid-template-columns: 1fr; gap: 56px; padding-top: 12px; }
+  .home .features { grid-template-columns: 1fr; gap: 32px; padding: 56px 0 8px; }
+  .home .feature { padding: 0; }
+  .home .feature + .feature { border-left: none; border-top: 1px solid var(--hairline); padding: 32px 0 0; }
+  .home .welcome .cta-row { margin-left: 0; width: 100%; }
+}
+@media (max-width: 640px) {
+  .home .hero { gap: 44px; }
+  .home .strip { margin-top: 48px; }
+  .home .strip .sep { margin: 0 18px; }
+  .home .board { gap: 3px; padding: 10px; border-radius: 16px; }
+  .home .statement { padding: 64px 0 16px; }
+  .home .srow .badge { display: none; }
+}
 
 /* --- page: game theater (slice 3) ---------------------------------------- */
 

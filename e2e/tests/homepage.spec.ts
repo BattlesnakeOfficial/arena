@@ -28,7 +28,7 @@ test.describe('Homepage - Authenticated User', () => {
   test('does not show login link when authenticated', async ({ authenticatedPage }) => {
     await authenticatedPage.goto('/');
 
-    // Login link should NOT be visible
-    await expect(authenticatedPage.getByRole('link', { name: 'Login with GitHub' })).not.toBeVisible();
+    // Sign-in link should NOT be visible anywhere for authenticated users
+    await expect(authenticatedPage.getByRole('link', { name: 'Sign in with GitHub' })).not.toBeVisible();
   });
 });
