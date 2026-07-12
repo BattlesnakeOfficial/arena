@@ -2272,6 +2272,7 @@ mod tests {
             mu: 25.0,
             sigma: 8.333,
             snake_name: "ranked-snake".to_string(),
+            snake_color: "#888888".to_string(),
             owner_login: "ranked-owner".to_string(),
         }
     }

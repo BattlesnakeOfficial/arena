@@ -76,6 +76,7 @@ pub struct RankedEntry {
     pub mu: f64,
     pub sigma: f64,
     pub snake_name: String,
+    pub snake_color: String,
     pub owner_login: String,
 }
 
@@ -218,6 +219,7 @@ pub async fn get_ranked_entries(
                     le.mu,
                     le.sigma,
                     b.name as snake_name,
+                    b.color as snake_color,
                     u.github_login as owner_login
                  FROM leaderboard_entries le
                  JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id
@@ -247,6 +249,7 @@ pub async fn get_ranked_entries(
                     le.mu,
                     le.sigma,
                     b.name as snake_name,
+                    b.color as snake_color,
                     u.github_login as owner_login
                  FROM leaderboard_entries le
                  JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id
@@ -287,6 +290,7 @@ pub async fn get_placement_entries(
             le.mu,
             le.sigma,
             b.name as snake_name,
+            b.color as snake_color,
             u.github_login as owner_login
          FROM leaderboard_entries le
          JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id
@@ -628,6 +632,7 @@ pub async fn get_ranked_entries_paginated(
                     le.mu,
                     le.sigma,
                     b.name as snake_name,
+                    b.color as snake_color,
                     u.github_login as owner_login
                  FROM leaderboard_entries le
                  JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id
@@ -659,6 +664,7 @@ pub async fn get_ranked_entries_paginated(
                     le.mu,
                     le.sigma,
                     b.name as snake_name,
+                    b.color as snake_color,
                     u.github_login as owner_login
                  FROM leaderboard_entries le
                  JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id
@@ -897,6 +903,7 @@ pub async fn get_leaderboard_status(
 #[derive(Debug, FromRow)]
 pub struct ActivityFeedEntry {
     pub snake_name: String,
+    pub snake_color: String,
     pub owner_login: String,
     pub leaderboard_entry_id: Uuid,
     pub placement: i32,
@@ -914,6 +921,7 @@ pub async fn get_activity_feed(
         ActivityFeedEntry,
         r#"SELECT
             b.name as snake_name,
+            b.color as snake_color,
             u.github_login as owner_login,
             lgr.leaderboard_entry_id,
             lgr.placement,
@@ -1014,6 +1022,7 @@ pub struct TopEater {
     pub leaderboard_entry_id: Uuid,
     pub food_score: i64,
     pub snake_name: String,
+    pub snake_color: String,
     pub owner_login: String,
 }
 
@@ -1029,6 +1038,7 @@ pub async fn get_top_eaters(
             le.leaderboard_entry_id,
             fes.food_score,
             b.name as snake_name,
+            b.color as snake_color,
             u.github_login as owner_login
          FROM leaderboard_entries le
          JOIN food_eaten_stats fes ON le.leaderboard_entry_id = fes.leaderboard_entry_id

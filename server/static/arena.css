@@ -317,10 +317,42 @@ table.data td.rating { font-family: var(--mono); font-weight: 600; font-size: 15
 .feed li { display: flex; gap: 12px; padding: 9px 0; font-size: 13.5px; align-items: baseline; }
 .feed .t { font-family: var(--mono); font-size: 11px; color: var(--muted); white-space: nowrap; width: 52px; flex-shrink: 0; }
 .feed b { font-weight: 600; }
+.feed .place { font-family: var(--mono); font-size: 12px; }
+.feed .p1 { color: var(--pink); font-weight: 600; }
+.feed .p4 { color: var(--muted); }
 .meta-list { margin-top: 14px; font-size: 14px; }
 .meta-list div { display: flex; justify-content: space-between; padding: 7px 0; }
 .meta-list dt { color: var(--muted); }
 .meta-list dd { font-family: var(--mono); font-size: 13px; }
+
+/* table + rail layout */
+.grid { display: grid; grid-template-columns: 1fr 320px; gap: 56px; margin-top: 44px; align-items: start; }
+
+/* small variants & badges */
+.stat .value.sm { font-family: var(--mono); font-weight: 500; font-size: 17px; padding-top: 9px; }
+.btn.sm { padding: 5px 14px; font-size: 13px; }
+.badge { font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; background: var(--pill); color: var(--muted); padding: 2px 9px; border-radius: 999px; white-space: nowrap; }
+.badge.ok { color: var(--up); }
+.section { margin-top: 48px; }
+.section h2 { margin-bottom: 4px; }
+.section table.data { margin-top: 16px; }
+p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
+
+/* sort bar above data tables */
+.sortbar { display: flex; gap: 14px; align-items: baseline; margin-bottom: 12px; font-family: var(--mono); font-size: 12px; color: var(--muted); }
+.sortbar span:first-child { text-transform: uppercase; letter-spacing: .12em; font-size: 10.5px; }
+.sortbar a:hover { color: var(--ink); }
+.sortbar .on { color: var(--pink); font-weight: 600; }
+
+/* rail: user snake rows + join form */
+.rail .mine { display: flex; align-items: center; gap: 10px; margin-top: 14px; }
+.rail .mine .mname { font-weight: 600; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rail .mine form { display: inline; }
+.rail .mstats { font-family: var(--mono); font-size: 12px; color: var(--muted); margin: 4px 0 0 44px; }
+.rail .railp { font-size: 14px; color: var(--muted); margin-top: 10px; }
+.owner-inline { color: var(--muted); font-size: 12.5px; }
+.join-form { display: flex; gap: 8px; margin-top: 16px; }
+.join-form select { flex: 1; min-width: 0; font-family: var(--body); font-size: 14px; padding: 8px 10px; border: 1px solid var(--hairline-dark); border-radius: 10px; background: var(--card); color: var(--ink); }
 
 /* --- flash message ------------------------------------------------------ */
 .flash-message {
@@ -371,8 +403,27 @@ table.data td.rating { font-family: var(--mono); font-weight: 600; font-size: 15
 .activity-feed-item { padding: 6px 0; border-bottom: 1px solid var(--hairline); }
 .activity-feed-item:last-child { border-bottom: none; }
 
+/* ==========================================================================
+   Per-page sections. Each redesign slice owns exactly one block below and
+   must not edit outside it — keeps parallel slice PRs conflict-free.
+   ========================================================================== */
+
+/* --- page: home (slice 4) ------------------------------------------------ */
+
+/* --- page: game theater (slice 3) ---------------------------------------- */
+
+/* --- page: profile + snakes (slice 5) ------------------------------------ */
+
+/* --- page: customizations (slice 6) --------------------------------------- */
+
+/* --- page: claim/import (slice 7) ------------------------------------------ */
+
+/* --- page: tournaments (slice 8) -------------------------------------------- */
+
 /* --- responsive ---------------------------------------------------------- */
 @media (max-width: 980px) {
+  .grid { grid-template-columns: 1fr; }
+  .hide-md { display: none; }
   .site-nav .links { display: none; }
   .mobile-menu { display: block; }
   .stats { grid-template-columns: repeat(2, 1fr); }
@@ -380,6 +431,7 @@ table.data td.rating { font-family: var(--mono); font-weight: 600; font-size: 15
   .stat:nth-child(even) { border-left: 1px solid var(--hairline); padding-left: 28px; }
 }
 @media (max-width: 640px) {
+  .hide-sm { display: none; }
   .site-nav { gap: 12px; padding: 18px 20px; }
   /* sign-in moves into the mobile menu sheet; avatar stays for logged-in */
   .site-nav > .btn.solid { display: none; }

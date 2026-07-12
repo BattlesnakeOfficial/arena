@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT\n                    le.leaderboard_entry_id,\n                    le.battlesnake_id,\n                    b.user_id,\n                    le.display_score,\n                    le.games_played,\n                    le.first_place_finishes,\n                    le.non_first_finishes,\n                    le.mu,\n                    le.sigma,\n                    b.name as snake_name,\n                    u.github_login as owner_login\n                 FROM leaderboard_entries le\n                 JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id\n                 JOIN users u ON b.user_id = u.user_id\n                 LEFT JOIN food_eaten_stats fes ON le.leaderboard_entry_id = fes.leaderboard_entry_id\n                 WHERE le.leaderboard_id = $1\n                   AND le.disabled_at IS NULL\n                   AND le.games_played >= $2\n                 ORDER BY COALESCE(fes.food_score, 0) DESC\n                 LIMIT $3 OFFSET $4",
+  "query": "SELECT\n                    le.leaderboard_entry_id,\n                    le.battlesnake_id,\n                    b.user_id,\n                    le.display_score,\n                    le.games_played,\n                    le.first_place_finishes,\n                    le.non_first_finishes,\n                    le.mu,\n                    le.sigma,\n                    b.name as snake_name,\n                    b.color as snake_color,\n                    u.github_login as owner_login\n                 FROM leaderboard_entries le\n                 JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id\n                 JOIN users u ON b.user_id = u.user_id\n                 WHERE le.leaderboard_id = $1\n                   AND le.disabled_at IS NULL\n                   AND le.games_played >= $2\n                 ORDER BY le.display_score DESC\n                 LIMIT 100",
   "describe": {
     "columns": [
       {
@@ -55,6 +55,11 @@
       },
       {
         "ordinal": 10,
+        "name": "snake_color",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 11,
         "name": "owner_login",
         "type_info": "Text"
       }
@@ -62,9 +67,7 @@
     "parameters": {
       "Left": [
         "Uuid",
-        "Int4",
-        "Int8",
-        "Int8"
+        "Int4"
       ]
     },
     "nullable": [
@@ -78,8 +81,9 @@
       false,
       false,
       false,
+      false,
       false
     ]
   },
-  "hash": "528b6e4f5649bc32951bd01ccbc71f2b177f5928b447f584b57155bdb433c120"
+  "hash": "ab7724b57fef431bc7a140fb9ba7a9b28a90932f297986ee167d25986c398b39"
 }
