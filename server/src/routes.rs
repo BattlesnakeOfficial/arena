@@ -12,6 +12,7 @@ use tower_http::cors::{Any, CorsLayer};
 
 use crate::{
     components::page_factory::PageFactory,
+    customizations::chip_color,
     errors::ServerResult,
     models::{
         battlesnake as battlesnake_model,
@@ -286,7 +287,7 @@ async fn root_page(
             div class="home" {
                 @if let Some(user) = &user {
                     section class="welcome" {
-                        img src=(user.github_avatar_url.clone().unwrap_or_default()) alt="Avatar" width="64" height="64";
+                        img src=(user.github_avatar_url.clone().unwrap_or_default()) alt="" width="64" height="64";
                         div class="who" {
                             h1 { "Welcome, " (user.github_login) "!" }
                             p class="sub" {
@@ -318,7 +319,7 @@ async fn root_page(
                             div class="rows" {
                                 @for snake in &user_snakes {
                                     a class="srow" href={"/battlesnakes/"(snake.battlesnake_id)"/profile"} {
-                                        span class="chip" style={"background:"(snake.color)} {}
+                                        span class="chip" style={"background:"(chip_color(&snake.color))} {}
                                         span class="sname" { (snake.name) }
                                         span class="surl hide-sm" { (snake.url) }
                                         @if snake.visibility == battlesnake_model::Visibility::Public {
@@ -345,7 +346,7 @@ async fn root_page(
                                 a class="btn solid" href="/auth/github" { "Sign in with GitHub" }
                                 a class="btn" href="/leaderboards" { "Browse leaderboards" }
                             }
-                            div class="cta-note" { "$ curl -X POST your-server.dev/move → {\"move\": \"up\"}" }
+                            div class="cta-note" { code { "$ curl -X POST your-server.dev/move → {\"move\": \"up\"}" } }
                         }
                         div class="board-frame" {
                             (home_board())
@@ -374,7 +375,7 @@ async fn root_page(
                     section class="features" {
                         div class="feature" {
                             div class="num" { "01" }
-                            h3 { "Automated leaderboards" }
+                            h2 { "Automated leaderboards" }
                             p {
                                 "Ranked matches run continuously. Your snake earns its rating in "
                                 "thousands of games against developers worldwide, not a handful of "
@@ -384,7 +385,7 @@ async fn root_page(
                         }
                         div class="feature" {
                             div class="num" { "02" }
-                            h3 { "Any language, any stack" }
+                            h2 { "Any language, any stack" }
                             p {
                                 "If it can answer an HTTP request in 500ms, it can play. Rust, "
                                 "Python, TypeScript, COBOL if you're feeling dangerous — starter "
@@ -394,7 +395,7 @@ async fn root_page(
                         }
                         div class="feature" {
                             div class="num" { "03" }
-                            h3 { "Tournaments & community" }
+                            h2 { "Tournaments & community" }
                             p {
                                 "Compete in seasonal championships, run brackets for your team or "
                                 "classroom, and replay any game move-by-move to study exactly where "
@@ -519,7 +520,7 @@ fn home_ladder_grid(
                                     td class="rank" { "#" (i + 1) }
                                     td {
                                         div class="snake-cell" {
-                                            span class="chip" style={"background:"(entry.snake_color)} {}
+                                            span class="chip" style={"background:"(chip_color(&entry.snake_color))} {}
                                             span {
                                                 @if let Some(lb) = featured {
                                                     a class="name" href={"/leaderboards/"(lb.leaderboard_id)"/entries/"(entry.leaderboard_entry_id)} { (entry.snake_name) }
@@ -590,12 +591,14 @@ fn home_fmt_ago(t: chrono::DateTime<chrono::Utc>) -> String {
 }
 
 fn home_ordinal(n: i32) -> String {
-    match n {
-        1 => "1st".to_string(),
-        2 => "2nd".to_string(),
-        3 => "3rd".to_string(),
-        _ => format!("{n}th"),
-    }
+    let suffix = match (n % 10, n % 100) {
+        (_, 11..=13) => "th",
+        (1, _) => "st",
+        (2, _) => "nd",
+        (3, _) => "rd",
+        _ => "th",
+    };
+    format!("{n}{suffix}")
 }
 
 /// Profile page that requires authentication

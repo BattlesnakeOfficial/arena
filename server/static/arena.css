@@ -436,6 +436,7 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
 .home .cta-row { margin-top: 36px; display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
 .home .cta-row .btn { padding: 11px 24px; }
 .home .cta-note { font-size: 13.5px; color: var(--muted); margin-top: 16px; font-family: var(--mono); }
+.home .cta-note code { font: inherit; }
 
 /* decorative board — intentionally dark-framed in both themes */
 .home .board-frame { position: relative; }
@@ -484,6 +485,9 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
   gap: 8px;
   align-items: center;
   white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* recent-games ticker strip */
@@ -500,7 +504,7 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
 }
 .home .strip .inner { display: inline-block; animation: home-ticker 42s linear infinite; }
 .home .strip b { font-weight: 600; color: var(--ink); }
-.home .strip .win { color: var(--pink); font-weight: 600; }
+.home .strip .win { color: var(--pink-deep); font-weight: 600; }
 .home .strip .lose { color: var(--muted); font-weight: 600; }
 .home .strip .sep { margin: 0 26px; color: var(--hairline-dark); }
 @keyframes home-ticker { from { transform: translateX(0); } to { transform: translateX(-50%); } }
@@ -513,7 +517,7 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
 .home .feature { padding: 8px 36px 8px 0; }
 .home .feature + .feature { border-left: 1px solid var(--hairline); padding-left: 36px; }
 .home .feature .num { font-family: var(--mono); font-size: 12.5px; color: var(--pink); font-weight: 600; }
-.home .feature h3 { font-size: 21px; letter-spacing: -.01em; margin: 14px 0 10px; }
+.home .feature h2 { font-size: 21px; letter-spacing: -.01em; margin: 14px 0 10px; }
 .home .feature p { font-size: 15px; color: var(--muted); }
 .home a.more { display: inline-block; margin-top: 14px; font-size: 14px; font-weight: 600; color: var(--pink); padding: 4px 0; }
 .home a.more:hover { color: var(--pink-deep); }
