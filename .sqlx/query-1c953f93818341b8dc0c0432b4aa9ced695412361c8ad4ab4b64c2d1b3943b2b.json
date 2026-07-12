@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id)\n         VALUES ($1, $2)\n         ON CONFLICT (leaderboard_id, battlesnake_id) DO UPDATE\n            SET disabled_at = NULL, disabled_reason = NULL, updated_at = NOW()\n         RETURNING\n            leaderboard_entry_id, leaderboard_id, battlesnake_id,\n            mu, sigma, display_score, games_played, first_place_finishes, non_first_finishes,\n            disabled_at, created_at, updated_at",
+  "query": "INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id)\n         VALUES ($1, $2)\n         ON CONFLICT (leaderboard_id, battlesnake_id) DO UPDATE\n            SET disabled_at = NULL, disabled_reason = NULL, updated_at = NOW()\n         RETURNING\n            leaderboard_entry_id, leaderboard_id, battlesnake_id,\n            mu, sigma, display_score, games_played, first_place_finishes, non_first_finishes,\n            disabled_at, disabled_reason, created_at, updated_at",
   "describe": {
     "columns": [
       {
@@ -55,11 +55,16 @@
       },
       {
         "ordinal": 10,
+        "name": "disabled_reason",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 11,
         "name": "created_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 11,
+        "ordinal": 12,
         "name": "updated_at",
         "type_info": "Timestamptz"
       }
@@ -81,9 +86,10 @@
       false,
       false,
       true,
+      true,
       false,
       false
     ]
   },
-  "hash": "35a015096f8e1518b914d5082e709e788561fb7e09c17b3ba0ad440621c7d1e0"
+  "hash": "1c953f93818341b8dc0c0432b4aa9ced695412361c8ad4ab4b64c2d1b3943b2b"
 }

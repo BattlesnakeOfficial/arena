@@ -147,6 +147,7 @@ impl ScoringAlgorithm for WengLinScoring {
                 leaderboard_entry_id: result.leaderboard_entry_id,
                 leaderboard_id: event.leaderboard_id,
                 battlesnake_id: result.battlesnake_id,
+                disabled_reason: None,
                 mu,
                 sigma,
                 display_score: mu - 3.0 * sigma,
@@ -284,6 +285,7 @@ mod tests {
             first_place_finishes: 2,
             non_first_finishes: 3,
             disabled_at: None,
+            disabled_reason: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }

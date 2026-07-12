@@ -16,6 +16,7 @@ use crate::{
     cron::MATCHMAKER_INTERVAL_SECS,
     customizations::chip_color,
     errors::{ServerResult, WithRedirect},
+    models::snake_health_status,
     models::{
         battlesnake::{self, Visibility},
         leaderboard::{self, MIN_GAMES_FOR_RANKING},
@@ -428,7 +429,14 @@ pub async fn show_leaderboard(
                                         span class="chip" style={"background:"(chip_color(&snake.color))} {}
                                         span class="mname" { (snake.name) }
                                         @if entry.disabled_at.is_some() {
-                                            span class="badge" { "Paused" }
+                                            @if entry.disabled_reason.as_deref() == Some(snake_health_status::DISABLED_REASON_HEALTH) {
+                                                a class="badge warn" href={"/battlesnakes/"(snake.battlesnake_id)"/profile"}
+                                                    title="Automatically paused: this snake is failing health checks. Resume re-tests it — details on its profile." {
+                                                    "Auto-paused"
+                                                }
+                                            } @else {
+                                                span class="badge" { "Paused" }
+                                            }
                                             form action={"/leaderboards/"(leaderboard_id)"/join"} method="post" {
                                                 input type="hidden" name="battlesnake_id" value=(snake.battlesnake_id);
                                                 button type="submit" class="btn sm" aria-label={"Resume " (snake.name)} { "Resume" }
@@ -915,6 +923,7 @@ pub struct LeaveForm {
 pub async fn join_leaderboard(
     State(state): State<AppState>,
     CurrentUser(user): CurrentUser,
+    flasher: crate::flasher::Flasher,
     Path(leaderboard_id): Path<Uuid>,
     Form(form): Form<JoinLeaveForm>,
 ) -> ServerResult<impl IntoResponse, Redirect> {
@@ -934,10 +943,12 @@ pub async fn join_leaderboard(
     })?;
 
     if lb.disabled_at.is_some() {
-        return Err(crate::errors::ServerError(
-            color_eyre::eyre::eyre!("Leaderboard is not active"),
-            redirect,
-        ));
+        flasher
+            .error("That leaderboard is no longer active.")
+            .await
+            .wrap_err("Failed to flash")
+            .with_redirect(redirect.clone())?;
+        return Ok(redirect);
     }
 
     // Verify snake belongs to user and is public
@@ -960,16 +971,31 @@ pub async fn join_leaderboard(
     }
 
     if snake.visibility != Visibility::Public {
-        return Err(crate::errors::ServerError(
-            color_eyre::eyre::eyre!("Only public snakes can join leaderboards"),
-            redirect,
-        ));
+        flasher
+            .error(format!(
+                "{} is private — only public snakes can join leaderboards. \
+                 Make it public on its edit page first.",
+                snake.name
+            ))
+            .await
+            .wrap_err("Failed to flash")
+            .with_redirect(redirect.clone())?;
+        return Ok(redirect);
     }
 
     // Opt-in (or resume if paused)
     let entry = leaderboard::get_or_create_entry(&state.db, leaderboard_id, form.battlesnake_id)
         .await
         .wrap_err("Failed to join leaderboard")
+        .with_redirect(redirect.clone())?;
+
+    // A snake the health sweeper pulled keeps its failure streak until it's
+    // reactivated, so resuming only the entry would get re-paused on the
+    // very next sweep. Resume means "put my snake back in rotation": clear
+    // the streak too, exactly like the profile page's Resume Matchmaking.
+    snake_health_status::reactivate(&state.db, form.battlesnake_id)
+        .await
+        .wrap_err("Failed to reset snake health status")
         .with_redirect(redirect.clone())?;
 
     // Initialize scoring algorithm entries
@@ -979,6 +1005,15 @@ pub async fn join_leaderboard(
             .wrap_err("Failed to initialize scoring")
             .with_redirect(redirect.clone())?;
     }
+
+    flasher
+        .success(format!(
+            "{} is in the matchmaking rotation on {} — it'll be picked up in upcoming games.",
+            snake.name, lb.name
+        ))
+        .await
+        .wrap_err("Failed to flash")
+        .with_redirect(redirect.clone())?;
 
     Ok(redirect)
 }

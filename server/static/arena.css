@@ -333,6 +333,7 @@ table.data td.rating { font-family: var(--mono); font-weight: 600; font-size: 15
 .btn.sm { padding: 5px 14px; font-size: 13px; }
 .badge { font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; background: var(--pill); color: var(--muted); padding: 2px 9px; border-radius: 999px; white-space: nowrap; }
 .badge.ok { color: var(--up); }
+.badge.warn { color: var(--down); }
 .section { margin-top: 48px; }
 .section h2 { margin-bottom: 4px; }
 .section table.data { margin-top: 16px; }

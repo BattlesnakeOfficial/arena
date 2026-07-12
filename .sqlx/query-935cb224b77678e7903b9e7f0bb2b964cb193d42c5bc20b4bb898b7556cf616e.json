@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT\n            leaderboard_entry_id, leaderboard_id, battlesnake_id,\n            mu, sigma, display_score, games_played, first_place_finishes, non_first_finishes,\n            disabled_at, created_at, updated_at\n         FROM leaderboard_entries\n         WHERE leaderboard_entry_id = $1\n         FOR UPDATE",
+  "query": "SELECT\n            le.leaderboard_entry_id, le.leaderboard_id, le.battlesnake_id,\n            le.mu, le.sigma, le.display_score, le.games_played, le.first_place_finishes, le.non_first_finishes,\n            le.disabled_at, le.disabled_reason, le.created_at, le.updated_at\n         FROM leaderboard_entries le\n         JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id\n         WHERE le.leaderboard_id = $1 AND b.user_id = $2\n         ORDER BY le.display_score DESC",
   "describe": {
     "columns": [
       {
@@ -55,17 +55,23 @@
       },
       {
         "ordinal": 10,
+        "name": "disabled_reason",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 11,
         "name": "created_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 11,
+        "ordinal": 12,
         "name": "updated_at",
         "type_info": "Timestamptz"
       }
     ],
     "parameters": {
       "Left": [
+        "Uuid",
         "Uuid"
       ]
     },
@@ -80,9 +86,10 @@
       false,
       false,
       true,
+      true,
       false,
       false
     ]
   },
-  "hash": "c817610ec5e9282d091d43bc574604f72a2a9c2c0dd3cd394dbbd0469e051e3a"
+  "hash": "935cb224b77678e7903b9e7f0bb2b964cb193d42c5bc20b4bb898b7556cf616e"
 }

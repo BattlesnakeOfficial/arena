@@ -31,6 +31,7 @@ pub struct LeaderboardEntry {
     pub first_place_finishes: i32,
     pub non_first_finishes: i32,
     pub disabled_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub disabled_reason: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
@@ -164,7 +165,7 @@ pub async fn get_or_create_entry(
          RETURNING
             leaderboard_entry_id, leaderboard_id, battlesnake_id,
             mu, sigma, display_score, games_played, first_place_finishes, non_first_finishes,
-            disabled_at, created_at, updated_at"#,
+            disabled_at, disabled_reason, created_at, updated_at"#,
         leaderboard_id,
         battlesnake_id
     )
@@ -185,7 +186,7 @@ pub async fn get_active_entries(
         r#"SELECT
             leaderboard_entry_id, leaderboard_id, battlesnake_id,
             mu, sigma, display_score, games_played, first_place_finishes, non_first_finishes,
-            disabled_at, created_at, updated_at
+            disabled_at, disabled_reason, created_at, updated_at
          FROM leaderboard_entries
          WHERE leaderboard_id = $1 AND disabled_at IS NULL
          ORDER BY display_score DESC"#,
@@ -321,7 +322,7 @@ pub async fn get_entry(
         r#"SELECT
             leaderboard_entry_id, leaderboard_id, battlesnake_id,
             mu, sigma, display_score, games_played, first_place_finishes, non_first_finishes,
-            disabled_at, created_at, updated_at
+            disabled_at, disabled_reason, created_at, updated_at
          FROM leaderboard_entries
          WHERE leaderboard_id = $1 AND battlesnake_id = $2"#,
         leaderboard_id,
@@ -349,7 +350,7 @@ where
         r#"SELECT
             leaderboard_entry_id, leaderboard_id, battlesnake_id,
             mu, sigma, display_score, games_played, first_place_finishes, non_first_finishes,
-            disabled_at, created_at, updated_at
+            disabled_at, disabled_reason, created_at, updated_at
          FROM leaderboard_entries
          WHERE leaderboard_id = $1 AND battlesnake_id = $2
          FOR UPDATE"#,
@@ -379,7 +380,7 @@ where
         r#"SELECT
             leaderboard_entry_id, leaderboard_id, battlesnake_id,
             mu, sigma, display_score, games_played, first_place_finishes, non_first_finishes,
-            disabled_at, created_at, updated_at
+            disabled_at, disabled_reason, created_at, updated_at
          FROM leaderboard_entries
          WHERE leaderboard_entry_id = $1
          FOR UPDATE"#,
@@ -402,7 +403,7 @@ pub async fn get_entry_by_id(
         r#"SELECT
             leaderboard_entry_id, leaderboard_id, battlesnake_id,
             mu, sigma, display_score, games_played, first_place_finishes, non_first_finishes,
-            disabled_at, created_at, updated_at
+            disabled_at, disabled_reason, created_at, updated_at
          FROM leaderboard_entries
          WHERE leaderboard_entry_id = $1"#,
         leaderboard_entry_id
@@ -482,7 +483,7 @@ pub async fn get_user_entries(
         r#"SELECT
             le.leaderboard_entry_id, le.leaderboard_id, le.battlesnake_id,
             le.mu, le.sigma, le.display_score, le.games_played, le.first_place_finishes, le.non_first_finishes,
-            le.disabled_at, le.created_at, le.updated_at
+            le.disabled_at, le.disabled_reason, le.created_at, le.updated_at
          FROM leaderboard_entries le
          JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id
          WHERE le.leaderboard_id = $1 AND b.user_id = $2
