@@ -1,0 +1,47 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n            le.leaderboard_entry_id,\n            fes.food_score,\n            b.name as snake_name,\n            b.color as snake_color,\n            u.github_login as owner_login\n         FROM leaderboard_entries le\n         JOIN food_eaten_stats fes ON le.leaderboard_entry_id = fes.leaderboard_entry_id\n         JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id\n         JOIN users u ON b.user_id = u.user_id\n         WHERE le.leaderboard_id = $1\n           AND le.disabled_at IS NULL\n           AND fes.food_score > 0\n         ORDER BY fes.food_score DESC\n         LIMIT $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "leaderboard_entry_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "food_score",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "snake_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "snake_color",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "owner_login",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "41cc97058ba62fd00a46150d13261636ed51467a7db6470949a2148247d94d35"
+}

@@ -14,6 +14,7 @@ use uuid::Uuid;
 use crate::{
     components::page_factory::PageFactory,
     cron::MATCHMAKER_INTERVAL_SECS,
+    customizations::chip_color,
     errors::{ServerResult, WithRedirect},
     models::{
         battlesnake::{self, Visibility},
@@ -46,30 +47,45 @@ pub async fn list_leaderboards(
     Ok(page_factory.create_page(
         "Leaderboards".to_string(),
         Box::new(html! {
-            div class="container" {
+            div class="page-head" {
                 h1 { "Leaderboards" }
+                div class="sub" {
+                    "Ranked ladders, one per game mode. Join with a public snake and the matchmaker takes it from there."
+                }
+            }
 
-                @if leaderboards.is_empty() {
-                    p { "No leaderboards available yet." }
-                } @else {
-                    div class="leaderboards-list" {
-                        @for lb in &leaderboards {
-                            div class="card" style="border: 1px solid #ddd; border-radius: 8px; padding: 20px; margin-bottom: 16px;" {
-                                h2 {
-                                    a href={"/leaderboards/"(lb.leaderboard_id)} { (lb.name) }
-                                }
-                                @if lb.disabled_at.is_some() {
-                                    span class="badge bg-secondary text-white" { "Inactive" }
-                                } @else {
-                                    span class="badge bg-success text-white" { "Active" }
+            @if leaderboards.is_empty() {
+                p class="empty" { "No leaderboards available yet." }
+            } @else {
+                div class="section" {
+                    table class="data" {
+                        thead {
+                            tr {
+                                th { "Leaderboard" }
+                                th class="r" { "Status" }
+                            }
+                        }
+                        tbody {
+                            @for lb in &leaderboards {
+                                tr {
+                                    td {
+                                        div class="snake-cell" {
+                                            span {
+                                                a class="name" href={"/leaderboards/"(lb.leaderboard_id)} { (lb.name) }
+                                            }
+                                        }
+                                    }
+                                    td class="r" {
+                                        @if lb.disabled_at.is_some() {
+                                            span class="badge" { "Inactive" }
+                                        } @else {
+                                            span class="badge ok" { "Active" }
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
-                }
-
-                div class="nav" style="margin-top: 20px;" {
-                    a href="/" { "Back to Home" }
                 }
             }
         }),
@@ -94,6 +110,10 @@ pub async fn show_leaderboard(
                 StatusCode::NOT_FOUND,
             )
         })?;
+
+    let all_leaderboards = leaderboard::get_all_leaderboards(&state.db)
+        .await
+        .wrap_err("Failed to fetch leaderboards")?;
 
     let per_page: i64 = 50;
 
@@ -160,6 +180,11 @@ pub async fn show_leaderboard(
 
     let rank_start = page * per_page;
     let sort_param = pagination.sort.as_str();
+    // The active sort's score column stays visible on narrow screens.
+    let active_algo_key = match pagination.sort {
+        leaderboard::LeaderboardSort::Rating => "weng_lin",
+        leaderboard::LeaderboardSort::FoodEaten => "food_eaten",
+    };
 
     // Collect entry IDs from the current page for scoring lookups
     let entry_ids: Vec<Uuid> = ranked
@@ -183,168 +208,210 @@ pub async fn show_leaderboard(
     }
 
     Ok(page_factory.create_page(
-        format!("Leaderboard: {}", lb.name),
+        lb.name.clone(),
         Box::new(html! {
-            div class="container" {
-                h1 { "Leaderboard: " (lb.name) }
+            div class="crumb" {
+                a href="/leaderboards" { "Leaderboards" }
+                " / " (lb.name)
+            }
+            div class="page-head" {
+                h1 { (lb.name) }
+                div class="sub" {
+                    "Ranked play — register a public snake, join the ladder, and the "
+                    "matchmaker starts new games every few minutes."
+                }
+            }
 
-                // Matchmaker status
-                @if status.total_games > 0 {
-                    div style="margin-bottom: 20px; padding: 16px; background: #f8f9fa; border: 1px solid #ddd; border-radius: 8px;" {
-                        h3 { "Matchmaker Status" }
-                        div class="d-flex" style="gap: 24px; flex-wrap: wrap;" {
-                            div {
-                                strong { "Last games created: " }
-                                @if let Some(last) = status.last_game_created_at {
-                                    (HumanTime::from(last).to_string())
-                                } @else {
-                                    "No games yet"
-                                }
-                            }
-                            div {
-                                strong { "Games in progress: " }
-                                (status.games_in_progress)
-                            }
-                            div {
-                                strong { "Next matchmaker run: " }
-                                @if let Some(ref next) = next_run_str {
-                                    "~" (next)
-                                } @else {
-                                    "Waiting for first run"
-                                }
-                            }
-                            div {
-                                strong { "Total games played: " }
-                                (status.total_games)
-                            }
+            @if all_leaderboards.len() > 1 {
+                nav class="modes" aria-label="Game modes" {
+                    @for other in &all_leaderboards {
+                        @if other.leaderboard_id == leaderboard_id {
+                            span class="mode on" aria-current="page" { (other.name) }
+                        } @else {
+                            a class="mode" href={"/leaderboards/"(other.leaderboard_id)} { (other.name) }
                         }
                     }
                 }
+            }
 
-                // Top 3 Eaters
-                @if !top_eaters.is_empty() {
-                    div style="margin-bottom: 20px; padding: 16px; background: #f8f9fa; border: 1px solid #ddd; border-radius: 8px;" {
-                        h3 { "Top Eaters" }
-                        @for (i, eater) in top_eaters.iter().enumerate() {
-                            div style="display: flex; gap: 8px; align-items: center; margin-bottom: 4px;" {
-                                span { (i + 1) ". " }
-                                a href={"/leaderboards/"(leaderboard_id)"/entries/"(eater.leaderboard_entry_id)} {
-                                    (eater.snake_name)
-                                }
-                                span style="color: #666;" { " (" (eater.owner_login) ")" }
-                                span style="font-weight: bold;" { (eater.food_score) " food" }
-                            }
+            div class="stats" {
+                div class="stat" {
+                    div class="label" { "Ranked snakes" }
+                    div class="value" { (total_ranked) }
+                }
+                div class="stat" {
+                    div class="label" { "Games played" }
+                    div class="value" { (status.total_games) }
+                }
+                div class="stat" {
+                    div class="label" { "In progress" }
+                    div class="value" {
+                        span class="live" { (status.games_in_progress) }
+                        small { "live now" }
+                    }
+                }
+                div class="stat" {
+                    div class="label" { "Next matchmaker run" }
+                    div class="value sm" {
+                        @if let Some(ref next) = next_run_str {
+                            (next)
+                        } @else {
+                            "waiting for first games"
                         }
                     }
                 }
+            }
 
-                // Join/leave section for logged-in users
-                @if user.is_some() {
-                    div style="margin-bottom: 20px; padding: 16px; border: 1px solid #ddd; border-radius: 8px;" {
-                        h3 { "Your Snakes" }
-
-                        // Show currently joined snakes with leave button
-                        @for entry in &user_entries {
-                            @if let Some(snake) = user_snakes.iter().find(|s| s.battlesnake_id == entry.battlesnake_id) {
-                                div style="display: flex; align-items: center; gap: 10px; margin-bottom: 8px;" {
-                                    span { (snake.name) }
-                                    @if entry.disabled_at.is_some() {
-                                        span class="badge bg-secondary text-white" { "Paused" }
-                                        form action={"/leaderboards/"(leaderboard_id)"/join"} method="post" style="display: inline;" {
-                                            input type="hidden" name="battlesnake_id" value=(snake.battlesnake_id);
-                                            button type="submit" class="btn btn-sm btn-success" { "Resume" }
-                                        }
-                                    } @else {
-                                        span class="badge bg-success text-white" { "Active" }
-                                        form action={"/leaderboards/"(leaderboard_id)"/leave"} method="post" style="display: inline;" {
-                                            input type="hidden" name="leaderboard_entry_id" value=(entry.leaderboard_entry_id);
-                                            button type="submit" class="btn btn-sm btn-warning" { "Pause" }
-                                        }
-                                    }
-                                    span style="color: #666;" {
-                                        "Score: " (format!("{:.1}", entry.display_score))
-                                        " | Games: " (entry.games_played)
-                                    }
-                                }
-                            }
+            div class="grid" {
+                div {
+                    div class="sortbar" {
+                        span { "sort" }
+                        @if pagination.sort == leaderboard::LeaderboardSort::Rating {
+                            span class="on" aria-current="true" { "Rating" }
+                        } @else {
+                            a href={"/leaderboards/"(leaderboard_id)"?sort=rating"} { "Rating" }
                         }
-
-                        // Show joinable snakes (public, not already joined)
-                        @let joinable: Vec<_> = user_snakes.iter()
-                            .filter(|s| s.visibility == Visibility::Public)
-                            .collect();
-                        @if !joinable.is_empty() {
-                            form action={"/leaderboards/"(leaderboard_id)"/join"} method="post" style="margin-top: 10px;" {
-                                label { "Join with: " }
-                                select name="battlesnake_id" {
-                                    @for snake in joinable {
-                                        option value=(snake.battlesnake_id) { (snake.name) }
-                                    }
-                                }
-                                button type="submit" class="btn btn-sm btn-primary" style="margin-left: 8px;" { "Join" }
-                            }
+                        @if pagination.sort == leaderboard::LeaderboardSort::FoodEaten {
+                            span class="on" aria-current="true" { "Food eaten" }
+                        } @else {
+                            a href={"/leaderboards/"(leaderboard_id)"?sort=food_eaten"} { "Food eaten" }
                         }
                     }
-                }
 
-                // Rankings table
-                h2 { "Rankings" }
-                div style="margin-bottom: 12px;" {
-                    "Sort by: "
-                    @if pagination.sort == leaderboard::LeaderboardSort::Rating {
-                        strong { "Rating" }
+                    @if ranked.is_empty() {
+                        p class="empty" {
+                            "No snakes have completed enough games to be ranked yet. "
+                            "(Minimum: " (MIN_GAMES_FOR_RANKING) " games)"
+                        }
                     } @else {
-                        a href={"/leaderboards/"(leaderboard_id)"?sort=rating"} { "Rating" }
-                    }
-                    " | "
-                    @if pagination.sort == leaderboard::LeaderboardSort::FoodEaten {
-                        strong { "Food Eaten" }
-                    } @else {
-                        a href={"/leaderboards/"(leaderboard_id)"?sort=food_eaten"} { "Food Eaten" }
-                    }
-                }
-                @if ranked.is_empty() {
-                    p { "No snakes have completed enough games to be ranked yet. (Minimum: " (MIN_GAMES_FOR_RANKING) " games)" }
-                } @else {
-                    p style="color: #666;" {
-                        "Showing " (rank_start + 1) "-" (rank_start + ranked.len() as i64) " of " (total_ranked) " ranked snakes"
-                    }
-                    table class="table" {
-                        thead {
-                            tr {
-                                th { "Rank" }
-                                th { "Snake" }
-                                th { "Owner" }
-                                @for (_key, col_name, _map) in &algo_scores {
-                                    th { (col_name) }
-                                }
-                                th { "Games" }
-                                th { "1st Place %" }
-                            }
-                        }
-                        tbody {
-                            @for (i, entry) in ranked.iter().enumerate() {
+                        table class="data" {
+                            thead {
                                 tr {
-                                    td { (rank_start + i as i64 + 1) }
-                                    td {
-                                        a href={"/leaderboards/"(leaderboard_id)"/entries/"(entry.leaderboard_entry_id)} { (entry.snake_name) }
+                                    th { "#" }
+                                    th { "Battlesnake" }
+                                    @for (key, col_name, _map) in &algo_scores {
+                                        th .r .hide-sm[*key != active_algo_key] { (col_name) }
                                     }
-                                    td { (entry.owner_login) }
-                                    @for (_key, _col_name, map) in &algo_scores {
+                                    th class="r hide-md" { "Games" }
+                                    th class="r hide-sm" { "1st place %" }
+                                }
+                            }
+                            tbody {
+                                @for (i, entry) in ranked.iter().enumerate() {
+                                    @let rank = rank_start + i as i64 + 1;
+                                    @let is_you = user.as_ref().is_some_and(|u| u.user_id == entry.user_id);
+                                    tr .top[rank <= 3] .you[is_you] {
+                                        td class="rank" { (format!("{rank:02}")) }
                                         td {
-                                            @if let Some(score) = map.get(&entry.leaderboard_entry_id) {
-                                                (format!("{:.1}", score.score))
+                                            div class="snake-cell" {
+                                                span class="chip" style={"background:"(chip_color(&entry.snake_color))} {}
+                                                span {
+                                                    a class="name" href={"/leaderboards/"(leaderboard_id)"/entries/"(entry.leaderboard_entry_id)} {
+                                                        (entry.snake_name)
+                                                    }
+                                                    span class="owner" {
+                                                        "by " (entry.owner_login)
+                                                        @if is_you { " — you" }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        @for (key, _col_name, map) in &algo_scores {
+                                            td .r .rating .hide-sm[*key != active_algo_key] {
+                                                @if let Some(score) = map.get(&entry.leaderboard_entry_id) {
+                                                    (format!("{:.1}", score.score))
+                                                } @else {
+                                                    "—"
+                                                }
+                                            }
+                                        }
+                                        td class="r num hide-md" { (entry.games_played) }
+                                        td class="r num hide-sm" {
+                                            @if entry.games_played > 0 {
+                                                (format!("{:.0}%", (entry.first_place_finishes as f64 / entry.games_played as f64) * 100.0))
                                             } @else {
-                                                "-"
+                                                "N/A"
                                             }
                                         }
                                     }
-                                    td { (entry.games_played) }
-                                    td {
-                                        @if entry.games_played > 0 {
-                                            (format!("{:.0}%", (entry.first_place_finishes as f64 / entry.games_played as f64) * 100.0))
-                                        } @else {
-                                            "N/A"
+                                }
+                            }
+                        }
+
+                        div class="pager" {
+                            @if page > 0 {
+                                a href={"/leaderboards/"(leaderboard_id)"?sort="(sort_param)"&page="(page - 1)} { "‹ Prev" }
+                            }
+                            @if total_pages > 1 {
+                                span class="cur" { "Page " (page + 1) " of " (total_pages) }
+                            }
+                            @if page < total_pages - 1 {
+                                a href={"/leaderboards/"(leaderboard_id)"?sort="(sort_param)"&page="(page + 1)} { "Next ›" }
+                            }
+                            span class="spacer" {}
+                            span {
+                                "Showing " (rank_start + 1) "–" (rank_start + ranked.len() as i64)
+                                " of " (total_ranked) " ranked snakes"
+                            }
+                        }
+                    }
+
+                    @if !placement.is_empty() {
+                        div class="section" {
+                            h2 { "In Placement" }
+                            p class="empty" { "These snakes need more games before appearing in rankings." }
+                            table class="data" {
+                                thead {
+                                    tr {
+                                        th { "Battlesnake" }
+                                        th class="r" { "Games played" }
+                                        th class="r" { "Games remaining" }
+                                    }
+                                }
+                                tbody {
+                                    @for entry in &placement {
+                                        tr {
+                                            td {
+                                                div class="snake-cell" {
+                                                    span class="chip" style={"background:"(chip_color(&entry.snake_color))} {}
+                                                    span {
+                                                        a class="name" href={"/leaderboards/"(leaderboard_id)"/entries/"(entry.leaderboard_entry_id)} {
+                                                            (entry.snake_name)
+                                                        }
+                                                        span class="owner" { "by " (entry.owner_login) }
+                                                    }
+                                                }
+                                            }
+                                            td class="r num" { (entry.games_played) }
+                                            td class="r num" { (MIN_GAMES_FOR_RANKING - entry.games_played) }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                aside class="rail" {
+                    @if !activity.is_empty() {
+                        div class="block" {
+                            h3 { span class="live-dot" {} "Recent games" }
+                            ul class="feed" {
+                                @for event in &activity {
+                                    li {
+                                        span class="t" { (fmt_ago(event.created_at)) }
+                                        span {
+                                            a href={"/leaderboards/"(leaderboard_id)"/entries/"(event.leaderboard_entry_id)} {
+                                                b { (event.snake_name) }
+                                            }
+                                            " "
+                                            span class={"place p"(event.placement)} { (ordinal(event.placement)) }
+                                            " "
+                                            @if event.display_score_change >= 0.0 {
+                                                span class="delta up" { (format!("{:+.1}", event.display_score_change)) }
+                                            } @else {
+                                                span class="delta down" { (format!("{:+.1}", event.display_score_change)) }
+                                            }
                                         }
                                     }
                                 }
@@ -352,87 +419,87 @@ pub async fn show_leaderboard(
                         }
                     }
 
-                    // Pagination
-                    @if total_pages > 1 {
-                        div class="pagination" {
-                            @if page > 0 {
-                                a href={"/leaderboards/"(leaderboard_id)"?sort="(sort_param)"&page="(page - 1)} { "Previous" }
-                            } @else {
-                                span class="disabled" { "Previous" }
-                            }
-                            span class="current" { "Page " (page + 1) " of " (total_pages) }
-                            @if page < total_pages - 1 {
-                                a href={"/leaderboards/"(leaderboard_id)"?sort="(sort_param)"&page="(page + 1)} { "Next" }
-                            } @else {
-                                span class="disabled" { "Next" }
-                            }
-                        }
-                    }
-                }
-
-                // Placement section
-                @if !placement.is_empty() {
-                    h2 { "In Placement" }
-                    p style="color: #666;" { "These snakes need more games before appearing in rankings." }
-                    table class="table" {
-                        thead {
-                            tr {
-                                th { "Snake" }
-                                th { "Owner" }
-                                th { "Games Played" }
-                                th { "Games Remaining" }
-                            }
-                        }
-                        tbody {
-                            @for entry in &placement {
-                                tr {
-                                    td {
-                                        a href={"/leaderboards/"(leaderboard_id)"/entries/"(entry.leaderboard_entry_id)} { (entry.snake_name) }
+                    @if user.is_some() {
+                        div class="block" {
+                            h3 { "Your Snakes" }
+                            @for entry in &user_entries {
+                                @if let Some(snake) = user_snakes.iter().find(|s| s.battlesnake_id == entry.battlesnake_id) {
+                                    div class="mine" {
+                                        span class="chip" style={"background:"(chip_color(&snake.color))} {}
+                                        span class="mname" { (snake.name) }
+                                        @if entry.disabled_at.is_some() {
+                                            span class="badge" { "Paused" }
+                                            form action={"/leaderboards/"(leaderboard_id)"/join"} method="post" {
+                                                input type="hidden" name="battlesnake_id" value=(snake.battlesnake_id);
+                                                button type="submit" class="btn sm" aria-label={"Resume " (snake.name)} { "Resume" }
+                                            }
+                                        } @else {
+                                            span class="badge ok" { "Active" }
+                                            form action={"/leaderboards/"(leaderboard_id)"/leave"} method="post" {
+                                                input type="hidden" name="leaderboard_entry_id" value=(entry.leaderboard_entry_id);
+                                                button type="submit" class="btn sm" aria-label={"Pause " (snake.name)} { "Pause" }
+                                            }
+                                        }
                                     }
-                                    td { (entry.owner_login) }
-                                    td { (entry.games_played) }
-                                    td { (MIN_GAMES_FOR_RANKING - entry.games_played) }
+                                    div class="mstats" {
+                                        "score " (format!("{:.1}", entry.display_score))
+                                        " · games " (entry.games_played)
+                                    }
+                                }
+                            }
+
+                            @let joinable: Vec<_> = user_snakes.iter()
+                                .filter(|s| s.visibility == Visibility::Public)
+                                .collect();
+                            @if !joinable.is_empty() {
+                                form class="join-form" action={"/leaderboards/"(leaderboard_id)"/join"} method="post" {
+                                    select name="battlesnake_id" aria-label="Snake to join with" {
+                                        @for snake in joinable {
+                                            option value=(snake.battlesnake_id) { (snake.name) }
+                                        }
+                                    }
+                                    button type="submit" class="btn solid sm" { "Join" }
+                                }
+                            } @else if user_entries.is_empty() {
+                                p class="railp" {
+                                    "You need a public snake to join. "
+                                    a href="/battlesnakes/new" style="color:var(--pink)" { "Register one" }
                                 }
                             }
                         }
                     }
-                }
 
-                // Activity Feed
-                @if !activity.is_empty() {
-                    h2 { "Recent Activity" }
-                    div class="activity-feed" {
-                        @for event in &activity {
-                            div class="activity-feed-item" {
-                                a href={"/leaderboards/"(leaderboard_id)"/entries/"(event.leaderboard_entry_id)} {
-                                    (event.snake_name)
-                                }
-                                " placed "
-                                @match event.placement {
-                                    1 => span { "🥇 1st" },
-                                    2 => span { "🥈 2nd" },
-                                    3 => span { "🥉 3rd" },
-                                    _ => span { (event.placement) "th" },
-                                }
-                                " ("
-                                @if event.display_score_change >= 0.0 {
-                                    span class="rating-positive" { (format!("{:+.1}", event.display_score_change)) }
-                                } @else {
-                                    span class="rating-negative" { (format!("{:+.1}", event.display_score_change)) }
-                                }
-                                ") "
-                                span style="color: #999; font-size: 0.9em;" {
-                                    (HumanTime::from(event.created_at).to_string())
+                    @if !top_eaters.is_empty() {
+                        div class="block" {
+                            h3 { "Top eaters" }
+                            ul class="feed" {
+                                @for (i, eater) in top_eaters.iter().enumerate() {
+                                    li {
+                                        span class="t" { "#" (i + 1) }
+                                        span {
+                                            a href={"/leaderboards/"(leaderboard_id)"/entries/"(eater.leaderboard_entry_id)} {
+                                                b { (eater.snake_name) }
+                                            }
+                                            span class="owner-inline" { " by " (eater.owner_login) }
+                                            " · "
+                                            span class="place" { (eater.food_score) " food" }
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
-                }
 
-                div class="nav" style="margin-top: 20px;" {
-                    a href="/leaderboards" { "Back to Leaderboards" }
-                    span { " | " }
-                    a href="/" { "Home" }
+                    @if user.is_none() {
+                        div class="block" {
+                            h3 { "Your snake here" }
+                            p class="railp" {
+                                "Deploy a server, register your snake, and the matchmaker "
+                                "takes it from there — new ranked games every few minutes."
+                            }
+                            a class="btn solid sm" style="margin-top:14px; display:inline-block" href="/auth/github" { "Sign in to join" }
+                        }
+                    }
                 }
             }
         }),
@@ -974,4 +1041,24 @@ pub async fn leave_leaderboard(
     .with_redirect(redirect.clone())?;
 
     Ok(redirect)
+}
+
+/// Compact relative time for rail feeds ("2m ago"), where HumanTime is too wordy.
+fn fmt_ago(t: chrono::DateTime<chrono::Utc>) -> String {
+    let secs = (chrono::Utc::now() - t).num_seconds().max(0);
+    match secs {
+        0..=59 => format!("{secs}s ago"),
+        60..=3599 => format!("{}m ago", secs / 60),
+        3600..=86399 => format!("{}h ago", secs / 3600),
+        _ => format!("{}d ago", secs / 86400),
+    }
+}
+
+fn ordinal(n: i32) -> String {
+    match n {
+        1 => "1st".to_string(),
+        2 => "2nd".to_string(),
+        3 => "3rd".to_string(),
+        _ => format!("{n}th"),
+    }
 }

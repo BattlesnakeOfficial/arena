@@ -21,8 +21,9 @@ test.describe('Leaderboard Pages', () => {
 
     await authenticatedPage.goto(`/leaderboards/${leaderboardId}`);
 
-    await expect(authenticatedPage.getByRole('heading', { name: /Leaderboard: Standard 11x11/ })).toBeVisible();
-    await expect(authenticatedPage.getByRole('heading', { name: 'Rankings' })).toBeVisible();
+    await expect(authenticatedPage.getByRole('heading', { name: 'Standard 11x11' })).toBeVisible();
+    // Stat band replaces the old "Rankings" heading in the redesign
+    await expect(authenticatedPage.getByText('Ranked snakes')).toBeVisible();
     // With no participants, should show the minimum games message
     await expect(authenticatedPage.getByText(/Minimum: 10 games/)).toBeVisible();
   });
