@@ -9,7 +9,6 @@ use maud::html;
 use uuid::Uuid;
 
 use crate::{
-    components::flash::Flash,
     components::page_factory::PageFactory,
     errors::{ServerResult, WithStatus},
     models::game::GameStatus,
@@ -18,14 +17,13 @@ use crate::{
     state::AppState,
 };
 
-// Display game details
+// Display game details in the game theater (themed by the theater axis)
 #[debug_handler]
 pub async fn view_game(
     State(state): State<AppState>,
     OptionalUser(user): OptionalUser,
     Path(game_id): Path<Uuid>,
     page_factory: PageFactory,
-    flash: Flash,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
     // Get the game with its battlesnakes
     let (game, battlesnakes) = game_battlesnake::get_game_with_battlesnakes(&state.db, game_id)
@@ -33,116 +31,115 @@ pub async fn view_game(
         .wrap_err("Failed to get game details")
         .with_status(StatusCode::NOT_FOUND)?;
 
-    // Render the game details page
-    Ok(page_factory.create_page_with_flash(
-        format!("Game Details: {}", game_id),
+    let finished = game.status == GameStatus::Finished;
+
+    Ok(page_factory.create_theater_page(
+        format!("Game {game_id}"),
         Box::new(html! {
-            div class="container" {
-                h1 { "Game Details" }
-
-                @if let Some(message) = flash.message() {
-                    div class=(flash.class()) {
-                        p { (message) }
-                    }
+            div class="crumb" {
+                a href="/leaderboards" { "Leaderboards" }
+                " / " span { "Game " (game_id) }
+                @match game.status {
+                    GameStatus::Waiting => span class="live-pill quiet" { "Waiting" },
+                    GameStatus::Running => span class="live-pill" { span class="live-dot" {} "Live" },
+                    GameStatus::Finished => span class="live-pill quiet" { "Replay" },
                 }
+            }
 
-                div class="card mb-4" {
-                    div class="card-header d-flex justify-content-between align-items-center" {
-                        h2 class="mb-0" { "Game " (game_id) }
-                        @match game.status {
-                            GameStatus::Waiting => span class="badge bg-secondary" { "Waiting" },
-                            GameStatus::Running => span class="badge bg-primary" { "Running..." },
-                            GameStatus::Finished => span class="badge bg-success" { "Finished" },
-                        }
-                    }
-                    div class="card-body" {
-                        // Board viewer iframe - always show, it handles waiting/empty games gracefully
-                        // Default aspect-ratio is 16/9; the board sends a RESIZE postMessage with its actual dimensions
-                        div #board-viewer-container class="board-viewer-container mb-4" style="width: 100%; max-width: 600px; aspect-ratio: 16 / 9;" {
+            @if game.status == GameStatus::Waiting {
+                p class="empty" {
+                    "This game is waiting to start. "
+                    a href="" onclick="location.reload(); return false;" style="color:var(--pink)" { "Refresh" }
+                    " to check for updates."
+                }
+            }
+
+            div class="theater" {
+                div {
+                    div class="board-wrap" {
+                        // Board viewer iframe - always show, it handles waiting/empty games
+                        // gracefully. Default aspect-ratio is 16/9; the board sends a RESIZE
+                        // postMessage with its actual dimensions.
+                        div #board-viewer-container style="width: 100%; aspect-ratio: 16 / 9;" {
                             iframe
                                 id="board-viewer"
                                 src={ "https://board.battlesnake.com/?engine=" (format!("{}/api", state.config.base_url)) "&game=" (game_id) }
-                                style="width: 100%; height: 100%; border: 1px solid #ccc; border-radius: 8px;"
                                 title="Battlesnake Board Viewer"
                                 allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
                                 allowfullscreen {}
                         }
+                    }
 
-                        script {
-                            "window.addEventListener('message', function(e) {"
-                                "if (e.origin !== 'https://board.battlesnake.com') return;"
-                                "var evt = e.data;"
-                                "if (evt.event === 'RESIZE') {"
-                                    "document.getElementById('board-viewer-container').style"
-                                        ".setProperty('aspect-ratio', evt.data.width + ' / ' + evt.data.height);"
-                                "}"
-                            "});"
-                        }
+                    script {
+                        "window.addEventListener('message', function(e) {"
+                            "if (e.origin !== 'https://board.battlesnake.com') return;"
+                            "var evt = e.data;"
+                            "if (evt.event === 'RESIZE') {"
+                                "document.getElementById('board-viewer-container').style"
+                                    ".setProperty('aspect-ratio', evt.data.width + ' / ' + evt.data.height);"
+                            "}"
+                        "});"
+                    }
 
-                        div class="game-info" {
-                            p { "Board Size: " (game.board_size.as_str()) }
-                            p { "Game Type: " (game.game_type.as_str()) }
-                            p { "Status: " (game.status.as_str()) }
-                            p { "Created: " (game.created_at.format("%Y-%m-%d %H:%M:%S")) }
+                    div class="theater-actions" {
+                        @if user.is_some() {
+                            a href="/games/new" class="btn" { "Create Another Game" }
+                            a href="/me" class="btn" { "Back to Profile" }
+                        } @else {
+                            a href="/leaderboards" class="btn" { "View Leaderboards" }
+                            a href="/" class="btn" { "Back to Home" }
                         }
                     }
                 }
 
-                @if game.status == GameStatus::Waiting {
-                    div class="alert alert-info mb-4" {
-                        p class="mb-0" {
-                            "This game is waiting to start. "
-                            a href="" onclick="location.reload(); return false;" { "Refresh" }
-                            " to check for updates."
-                        }
+                aside {
+                    h2 class="theater-rail-head" {
+                        "Game Results"
+                        span class="sub-count" { (battlesnakes.len()) " snakes" }
                     }
-                }
-
-                h3 { "Game Results" }
-
-                div class="table-responsive" {
-                    table class="table table-striped" {
-                        thead {
-                            tr {
-                                th { "Place" }
-                                th { "Snake Name" }
-                                th { "Owner" }
-                            }
-                        }
-                        tbody {
-                            @for battlesnake in battlesnakes {
-                                tr {
-                                    td {
+                    div class="snakes" {
+                        @for battlesnake in &battlesnakes {
+                            div .scard .p1[battlesnake.placement == Some(1)] {
+                                div class="top" {
+                                    span class="chip" style={"background:"(battlesnake.color)} {}
+                                    div {
+                                        div class="name" { (battlesnake.name) }
+                                        div class="owner" { "by " (battlesnake.owner_login) }
+                                    }
+                                    div class="place" {
                                         @if let Some(placement) = battlesnake.placement {
-                                            @match placement {
-                                                1 => span class="badge bg-warning text-dark" { "🥇 1st Place" },
-                                                2 => span class="badge bg-secondary text-white" { "🥈 2nd Place" },
-                                                3 => span class="badge bg-danger text-white" { "🥉 3rd Place" },
-                                                _ => span class="badge bg-dark text-white" { (placement) "th Place" },
-                                            }
+                                            (ordinal_place(placement))
+                                        } @else if finished {
+                                            "—"
                                         } @else {
-                                            span class="badge bg-info text-dark" { "In Progress" }
+                                            "In Progress"
                                         }
                                     }
-                                    td { (battlesnake.name) }
-                                    td { "User " (battlesnake.user_id) }
                                 }
                             }
                         }
                     }
-                }
 
-                div class="mt-4" {
-                    @if user.is_some() {
-                        a href="/games/new" class="btn btn-primary" { "Create Another Game" }
-                        a href="/me" class="btn btn-secondary ms-2" { "Back to Profile" }
-                    } @else {
-                        a href="/leaderboards" class="btn btn-primary" { "View Leaderboards" }
-                        a href="/" class="btn btn-secondary ms-2" { "Back to Home" }
+                    div class="gmeta" {
+                        h3 { "Game details" }
+                        dl class="meta-list" {
+                            div { dt { "Board" } dd { (game.board_size.as_str()) } }
+                            div { dt { "Mode" } dd { (game.game_type.as_str()) } }
+                            div { dt { "Status" } dd { (game.status.as_str()) } }
+                            div { dt { "Created" } dd { (game.created_at.format("%Y-%m-%d %H:%M UTC")) } }
+                        }
                     }
                 }
             }
         }),
-        flash,
     ))
+}
+
+fn ordinal_place(n: i32) -> String {
+    match n {
+        1 => "1st Place".to_string(),
+        2 => "2nd Place".to_string(),
+        3 => "3rd Place".to_string(),
+        _ => format!("{n}th Place"),
+    }
 }
