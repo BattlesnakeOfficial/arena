@@ -181,6 +181,19 @@ pub fn normalize_color(declared: &str) -> String {
     }
 }
 
+/// Sanitize a stored snake color for direct interpolation into an inline
+/// `style` attribute. Imported play-era rows can hold arbitrary strings (and
+/// the column defaults to ''), so anything that is not strict `#rrggbb` falls
+/// back to a neutral gray rather than injecting CSS onto public pages.
+pub fn chip_color(declared: &str) -> String {
+    let normalized = normalize_color(declared);
+    if normalized.is_empty() {
+        "#888888".to_string()
+    } else {
+        normalized
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,5 +328,12 @@ mod tests {
         assert_eq!(normalize_color("#ff88001"), "");
         assert_eq!(normalize_color("#gg8800"), "");
         assert_eq!(normalize_color("red"), "");
+    }
+
+    #[test]
+    fn chip_color_falls_back_on_invalid() {
+        assert_eq!(chip_color("#FF8800"), "#ff8800");
+        assert_eq!(chip_color(""), "#888888");
+        assert_eq!(chip_color("red;position:fixed"), "#888888");
     }
 }

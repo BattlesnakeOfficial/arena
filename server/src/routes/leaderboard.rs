@@ -14,6 +14,7 @@ use uuid::Uuid;
 use crate::{
     components::page_factory::PageFactory,
     cron::MATCHMAKER_INTERVAL_SECS,
+    customizations::chip_color,
     errors::{ServerResult, WithRedirect},
     models::{
         battlesnake::{self, Visibility},
@@ -222,10 +223,10 @@ pub async fn show_leaderboard(
             }
 
             @if all_leaderboards.len() > 1 {
-                div class="modes" {
+                nav class="modes" aria-label="Game modes" {
                     @for other in &all_leaderboards {
                         @if other.leaderboard_id == leaderboard_id {
-                            span class="mode on" { (other.name) }
+                            span class="mode on" aria-current="page" { (other.name) }
                         } @else {
                             a class="mode" href={"/leaderboards/"(other.leaderboard_id)} { (other.name) }
                         }
@@ -266,12 +267,12 @@ pub async fn show_leaderboard(
                     div class="sortbar" {
                         span { "sort" }
                         @if pagination.sort == leaderboard::LeaderboardSort::Rating {
-                            span class="on" { "Rating" }
+                            span class="on" aria-current="true" { "Rating" }
                         } @else {
                             a href={"/leaderboards/"(leaderboard_id)"?sort=rating"} { "Rating" }
                         }
                         @if pagination.sort == leaderboard::LeaderboardSort::FoodEaten {
-                            span class="on" { "Food eaten" }
+                            span class="on" aria-current="true" { "Food eaten" }
                         } @else {
                             a href={"/leaderboards/"(leaderboard_id)"?sort=food_eaten"} { "Food eaten" }
                         }
@@ -303,7 +304,7 @@ pub async fn show_leaderboard(
                                         td class="rank" { (format!("{rank:02}")) }
                                         td {
                                             div class="snake-cell" {
-                                                span class="chip" style={"background:"(entry.snake_color)} {}
+                                                span class="chip" style={"background:"(chip_color(&entry.snake_color))} {}
                                                 span {
                                                     a class="name" href={"/leaderboards/"(leaderboard_id)"/entries/"(entry.leaderboard_entry_id)} {
                                                         (entry.snake_name)
@@ -372,7 +373,7 @@ pub async fn show_leaderboard(
                                         tr {
                                             td {
                                                 div class="snake-cell" {
-                                                    span class="chip" style={"background:"(entry.snake_color)} {}
+                                                    span class="chip" style={"background:"(chip_color(&entry.snake_color))} {}
                                                     span {
                                                         a class="name" href={"/leaderboards/"(leaderboard_id)"/entries/"(entry.leaderboard_entry_id)} {
                                                             (entry.snake_name)
@@ -424,19 +425,19 @@ pub async fn show_leaderboard(
                             @for entry in &user_entries {
                                 @if let Some(snake) = user_snakes.iter().find(|s| s.battlesnake_id == entry.battlesnake_id) {
                                     div class="mine" {
-                                        span class="chip" style={"background:"(snake.color)} {}
+                                        span class="chip" style={"background:"(chip_color(&snake.color))} {}
                                         span class="mname" { (snake.name) }
                                         @if entry.disabled_at.is_some() {
                                             span class="badge" { "Paused" }
                                             form action={"/leaderboards/"(leaderboard_id)"/join"} method="post" {
                                                 input type="hidden" name="battlesnake_id" value=(snake.battlesnake_id);
-                                                button type="submit" class="btn sm" { "Resume" }
+                                                button type="submit" class="btn sm" aria-label={"Resume " (snake.name)} { "Resume" }
                                             }
                                         } @else {
                                             span class="badge ok" { "Active" }
                                             form action={"/leaderboards/"(leaderboard_id)"/leave"} method="post" {
                                                 input type="hidden" name="leaderboard_entry_id" value=(entry.leaderboard_entry_id);
-                                                button type="submit" class="btn sm" { "Pause" }
+                                                button type="submit" class="btn sm" aria-label={"Pause " (snake.name)} { "Pause" }
                                             }
                                         }
                                     }
