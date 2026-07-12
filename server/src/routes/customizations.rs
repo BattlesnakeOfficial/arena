@@ -23,19 +23,17 @@ fn catalog_item(
     let locked = !owned && !free;
 
     html! {
-        div style={
-            "border: 1px solid #ddd; border-radius: 8px; padding: 12px; width: 140px; text-align: center;"
-            @if locked { " opacity: 0.5;" }
-        } {
-            img src=(image_url) alt=(def.display_name)
-                style="width: 64px; height: 64px;" loading="lazy";
-            div style="font-weight: bold; margin-top: 8px;" { (def.display_name) }
+        div .cz-item .locked[locked] {
+            div class="cz-swatch" {
+                img src=(image_url) alt=(def.display_name) loading="lazy";
+            }
+            div class="cz-name" { (def.display_name) }
             @if owned {
-                span class="badge bg-success text-white" { "Owned" }
+                span class="badge ok" { "Owned" }
             } @else if free {
-                span class="badge bg-secondary text-white" { "Free" }
+                span class="badge" { "Free" }
             } @else {
-                span class="badge bg-secondary text-white" { "Locked" }
+                span class="badge" { "Locked" }
             }
         }
     }
@@ -57,31 +55,46 @@ pub async fn list_customizations(
     Ok(page_factory.create_page(
         "Customizations".to_string(),
         Box::new(html! {
-            div class="container" {
+            div class="page-head" {
                 h1 { "Customizations" }
-                p {
-                    "Heads and tails your snakes can wear. Your snake declares its "
-                    "customizations in the response from its root endpoint; anything "
-                    "you don't have access to falls back to the default."
+                div class="sub" {
+                    "Heads and tails your snakes can wear. A snake declares its "
+                    "customizations from its root endpoint; anything you don't have "
+                    "access to falls back to the default."
                 }
+            }
 
-                @for group in Group::ALL {
-                    @if group.availability() != Availability::Hidden {
-                        @let heads: Vec<_> = Head::ALL.iter().filter(|h| h.def().group == *group).collect();
-                        @let tails: Vec<_> = Tail::ALL.iter().filter(|t| t.def().group == *group).collect();
-                        @if !heads.is_empty() || !tails.is_empty() {
-                            h2 style="margin-top: 24px;" { (group.title()) }
+            @if user.is_none() {
+                p class="cz-note" {
+                    "Browsing as a guest — "
+                    a href="/auth/github" { "sign in" }
+                    " to see which cosmetics your account has unlocked."
+                }
+            }
+
+            @for group in Group::ALL {
+                @if group.availability() != Availability::Hidden {
+                    @let heads: Vec<_> = Head::ALL.iter().filter(|h| h.def().group == *group).collect();
+                    @let tails: Vec<_> = Tail::ALL.iter().filter(|t| t.def().group == *group).collect();
+                    @if !heads.is_empty() || !tails.is_empty() {
+                        section class="cz-group" {
+                            div class="cz-group-head" {
+                                h2 { (group.title()) }
+                                span class="cz-count" {
+                                    (heads.len() + tails.len()) " items"
+                                }
+                            }
                             @if !heads.is_empty() {
-                                h3 { "Heads" }
-                                div style="display: flex; flex-wrap: wrap; gap: 12px;" {
+                                h3 class="cz-kind" { "Heads" }
+                                div class="cz-grid" {
                                     @for head in &heads {
                                         (catalog_item(Head::KIND, head.slug(), &head.image_url(), &head.def(), &granted))
                                     }
                                 }
                             }
                             @if !tails.is_empty() {
-                                h3 { "Tails" }
-                                div style="display: flex; flex-wrap: wrap; gap: 12px;" {
+                                h3 class="cz-kind" { "Tails" }
+                                div class="cz-grid" {
                                     @for tail in &tails {
                                         (catalog_item(Tail::KIND, tail.slug(), &tail.image_url(), &tail.def(), &granted))
                                     }
@@ -89,10 +102,6 @@ pub async fn list_customizations(
                             }
                         }
                     }
-                }
-
-                div class="nav" style="margin-top: 20px;" {
-                    a href="/" { "Back to Home" }
                 }
             }
         }),
