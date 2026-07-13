@@ -49,8 +49,6 @@ pub struct Battlesnake {
     pub color: String,
     pub head: String,
     pub tail: String,
-    pub language: String,
-    pub platform: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
@@ -61,10 +59,6 @@ pub struct CreateBattlesnake {
     pub name: String,
     pub url: String,
     pub visibility: Visibility,
-    #[serde(default)]
-    pub language: String,
-    #[serde(default)]
-    pub platform: String,
 }
 
 // For updating an existing battlesnake
@@ -73,29 +67,6 @@ pub struct UpdateBattlesnake {
     pub name: String,
     pub url: String,
     pub visibility: Visibility,
-    #[serde(default)]
-    pub language: String,
-    #[serde(default)]
-    pub platform: String,
-}
-
-pub const MAX_LANGUAGE_LEN: usize = 50;
-pub const MAX_PLATFORM_LEN: usize = 50;
-
-/// Validate the language/platform tag lengths. Call after trimming.
-/// Returns `Err(message)` on the first field that exceeds its limit.
-pub fn validate_tag_fields(language: &str, platform: &str) -> Result<(), String> {
-    if language.chars().count() > MAX_LANGUAGE_LEN {
-        return Err(format!(
-            "Language must be {MAX_LANGUAGE_LEN} characters or fewer"
-        ));
-    }
-    if platform.chars().count() > MAX_PLATFORM_LEN {
-        return Err(format!(
-            "Platform must be {MAX_PLATFORM_LEN} characters or fewer"
-        ));
-    }
-    Ok(())
 }
 
 // Database functions for battlesnake management
@@ -117,8 +88,6 @@ pub async fn get_battlesnakes_by_user_id(
             color,
             head,
             tail,
-            language,
-            platform,
             created_at,
             updated_at
         FROM battlesnakes
@@ -151,8 +120,6 @@ pub async fn get_battlesnake_by_id(
             color,
             head,
             tail,
-            language,
-            platform,
             created_at,
             updated_at
         FROM battlesnakes
@@ -182,11 +149,9 @@ pub async fn create_battlesnake(
             user_id,
             name,
             url,
-            visibility,
-            language,
-            platform
+            visibility
         )
-        VALUES ($1, $2, $3, $4, $5, $6)
+        VALUES ($1, $2, $3, $4)
         RETURNING
             battlesnake_id,
             user_id,
@@ -196,17 +161,13 @@ pub async fn create_battlesnake(
             color,
             head,
             tail,
-            language,
-            platform,
             created_at,
             updated_at
         "#,
         user_id,
         data.name,
         data.url,
-        visibility_str,
-        data.language,
-        data.platform
+        visibility_str
     )
     .fetch_one(pool)
     .await;
@@ -247,9 +208,7 @@ pub async fn update_battlesnake(
         SET
             name = $3,
             url = $4,
-            visibility = $5,
-            language = $6,
-            platform = $7
+            visibility = $5
         WHERE
             battlesnake_id = $1
             AND user_id = $2
@@ -262,8 +221,6 @@ pub async fn update_battlesnake(
             color,
             head,
             tail,
-            language,
-            platform,
             created_at,
             updated_at
         "#,
@@ -271,9 +228,7 @@ pub async fn update_battlesnake(
         user_id,
         data.name,
         data.url,
-        visibility_str,
-        data.language,
-        data.platform
+        visibility_str
     )
     .fetch_one(pool)
     .await;
@@ -361,8 +316,6 @@ pub async fn get_public_battlesnakes(pool: &PgPool) -> cja::Result<Vec<Battlesna
             color,
             head,
             tail,
-            language,
-            platform,
             created_at,
             updated_at
         FROM battlesnakes
@@ -394,8 +347,6 @@ pub async fn get_available_battlesnakes(
             color,
             head,
             tail,
-            language,
-            platform,
             created_at,
             updated_at
         FROM battlesnakes
@@ -433,39 +384,4 @@ pub async fn update_battlesnake_customizations(
     .await
     .wrap_err("Failed to update battlesnake customizations")?;
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn tag_validation_rejects_over_limit() {
-        assert!(validate_tag_fields("Rust", "Fly.io").is_ok());
-
-        let long_language = "x".repeat(51);
-        assert!(validate_tag_fields(&long_language, "ok").is_err());
-
-        let long_platform = "x".repeat(51);
-        assert!(validate_tag_fields("ok", &long_platform).is_err());
-    }
-
-    #[test]
-    fn tag_validation_counts_characters_not_bytes() {
-        // 40 emoji = 160 bytes but only 40 chars — under the 50-char
-        // limit; byte-based validation would wrongly reject it.
-        let emoji_language = "\u{1F40D}".repeat(40);
-        assert!(validate_tag_fields(&emoji_language, "ok").is_ok());
-
-        let too_many = "\u{1F40D}".repeat(51);
-        assert!(validate_tag_fields("ok", &too_many).is_err());
-    }
-
-    #[test]
-    fn tag_validation_accepts_at_limit_and_empty() {
-        let max_language = "x".repeat(50);
-        let max_platform = "x".repeat(50);
-        assert!(validate_tag_fields(&max_language, &max_platform).is_ok());
-        assert!(validate_tag_fields("", "").is_ok());
-    }
 }

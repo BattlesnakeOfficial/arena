@@ -453,8 +453,6 @@ mod tests {
             color: "#ff0000".to_string(),
             head: "default".to_string(),
             tail: "default".to_string(),
-            language: String::new(),
-            platform: String::new(),
             created_at: now,
             updated_at: now,
         }

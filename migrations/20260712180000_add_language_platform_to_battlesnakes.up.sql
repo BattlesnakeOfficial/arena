@@ -1,3 +1,0 @@
-ALTER TABLE battlesnakes
-    ADD COLUMN language TEXT NOT NULL DEFAULT '',
-    ADD COLUMN platform TEXT NOT NULL DEFAULT '';

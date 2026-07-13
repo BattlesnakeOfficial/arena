@@ -272,8 +272,6 @@ impl GameCreationFlow {
                     color,
                     head,
                     tail,
-                    language,
-                    platform,
                     created_at,
                     updated_at
                 FROM battlesnakes
@@ -317,8 +315,6 @@ impl GameCreationFlow {
                 color,
                 head,
                 tail,
-                language,
-                platform,
                 created_at,
                 updated_at
             FROM battlesnakes

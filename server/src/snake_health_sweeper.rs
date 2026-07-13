@@ -64,8 +64,6 @@ async fn snakes_in_matchmaking(pool: &sqlx::PgPool) -> cja::Result<Vec<Battlesna
             b.color,
             b.head,
             b.tail,
-            b.language,
-            b.platform,
             b.created_at,
             b.updated_at
          FROM battlesnakes b
