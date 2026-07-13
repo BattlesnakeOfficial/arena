@@ -152,6 +152,10 @@ pub fn routes(app_state: AppState) -> axum::Router {
         // Game routes
         .route("/games/new", get(game::new_game))
         .route("/games/{id}", get(game::view_game))
+        .route(
+            "/games/{id}/rematch",
+            axum::routing::post(game::rematch_game),
+        )
         .route("/games/flow/{id}", get(game::show_game_flow))
         .route(
             "/games/flow/{id}/reset",
