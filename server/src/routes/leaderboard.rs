@@ -208,6 +208,11 @@ pub async fn show_leaderboard(
         algo_scores.push((algo.key(), algo.score_column_name(), map));
     }
 
+    let description = format!(
+        "{} leaderboard on Battlesnake Arena — {} ranked snakes, {} games played.",
+        lb.name, total_ranked, status.total_games
+    );
+
     Ok(page_factory.create_page(
         lb.name.clone(),
         Box::new(html! {
@@ -518,7 +523,8 @@ pub async fn show_leaderboard(
                 }
             }
         }),
-    ))
+    )
+    .with_description(description))
 }
 
 /// GET /leaderboards/:id/entries/:entry_id — snake detail on leaderboard
@@ -691,6 +697,11 @@ pub async fn show_leaderboard_entry(
             .wrap_err_with(|| format!("Failed to fetch {} entry score", algo.key()))?;
         algo_entry_scores.push((algo.key(), algo.display_name(), score));
     }
+
+    let description = format!(
+        "{} by {} on the {} leaderboard — rating {:.1}, {} games played.",
+        snake.name, owner_login, lb.name, entry.display_score, entry.games_played
+    );
 
     Ok(page_factory.create_page(
         format!("{} - {}", snake.name, lb.name),
@@ -919,7 +930,8 @@ pub async fn show_leaderboard_entry(
                 }
             }
         }),
-    ))
+    )
+    .with_description(description))
 }
 
 #[derive(serde::Deserialize)]

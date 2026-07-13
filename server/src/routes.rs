@@ -474,6 +474,10 @@ async fn root_page(
                 }
             }
         }),
+    )
+    .with_description(
+        "Write your own Battlesnake, join ranked leaderboards, and watch your \
+         code battle other snakes around the clock.",
     ))
 }
 

@@ -32,6 +32,27 @@ pub struct BoardParams {
     title: Option<String>,
 }
 
+#[derive(Deserialize, Default)]
+pub struct ViewGameParams {
+    /// Opt-in winner reveal for social embeds: a bare `?showSpoilers` or any
+    /// value other than false/0/no/off counts as on. String (not bool) so a
+    /// bare param doesn't 400 the whole page.
+    #[serde(rename = "showSpoilers")]
+    show_spoilers: Option<String>,
+}
+
+impl ViewGameParams {
+    fn show_spoilers(&self) -> bool {
+        match self.show_spoilers.as_deref() {
+            None => false,
+            Some(v) => !matches!(
+                v.to_ascii_lowercase().as_str(),
+                "false" | "0" | "no" | "off"
+            ),
+        }
+    }
+}
+
 // Display game details in the game theater (themed by the theater axis)
 #[debug_handler]
 pub async fn view_game(
@@ -39,6 +60,7 @@ pub async fn view_game(
     OptionalUser(user): OptionalUser,
     Path(game_id): Path<Uuid>,
     Query(board_params): Query<BoardParams>,
+    Query(params): Query<ViewGameParams>,
     page_factory: PageFactory,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
     // Get the game with its battlesnakes
@@ -50,7 +72,31 @@ pub async fn view_game(
     let finished = game.status == GameStatus::Finished;
 
     let iframe_src = board_iframe_src(&state.config.base_url, game_id, &board_params);
-    let share_url = share_url(&state.config.base_url, game_id, &board_params);
+    // A copied ?showSpoilers link keeps the reveal: sharing the spoiler
+    // version is an explicit choice, so the share URL preserves it.
+    let share_url = append_show_spoilers(
+        share_url(&state.config.base_url, game_id, &board_params),
+        params.show_spoilers(),
+    );
+
+    // Social-embed description. No winner by default — half the fun of a
+    // shared replay is finding out who won by watching it — but sharers can
+    // opt into the reveal with ?showSpoilers.
+    let winner = battlesnakes.iter().find(|b| b.placement == Some(1));
+    let description = match winner {
+        Some(winner) if finished && params.show_spoilers() => format!(
+            "{} game on a {} board — {} won. Watch the replay on Battlesnake Arena.",
+            game.game_type.as_str(),
+            game.board_size.as_str(),
+            winner.name,
+        ),
+        _ => format!(
+            "{} game on a {} board with {} snakes — watch the replay on Battlesnake Arena.",
+            game.game_type.as_str(),
+            game.board_size.as_str(),
+            battlesnakes.len(),
+        ),
+    };
 
     Ok(page_factory.create_theater_page(
         format!("Game {game_id}"),
@@ -195,7 +241,8 @@ pub async fn view_game(
                 }
             }
         }),
-    ))
+    )
+    .with_description(description))
 }
 
 /// Query-string suffix (each param prefixed with `&`) for the optional board
@@ -248,6 +295,15 @@ fn share_url(base_url: &str, game_id: Uuid, params: &BoardParams) -> String {
         // suffix starts with '&'; swap the first separator for '?'
         format!("{base_url}/games/{game_id}?{}", &suffix[1..])
     }
+}
+
+/// Append the opt-in spoiler flag to a share URL, normalized to `=true`.
+fn append_show_spoilers(url: String, show_spoilers: bool) -> String {
+    if !show_spoilers {
+        return url;
+    }
+    let sep = if url.contains('?') { '&' } else { '?' };
+    format!("{url}{sep}showSpoilers=true")
 }
 
 fn ordinal_place(n: i32) -> String {
@@ -363,6 +419,46 @@ mod tests {
         assert_eq!(
             url,
             "https://arena.example.com/games/6f9422eb-cd95-4a17-b0a2-a3fefe4f47b1?turn=143&autoplay=true"
+        );
+    }
+
+    fn params(value: Option<&str>) -> ViewGameParams {
+        ViewGameParams {
+            show_spoilers: value.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn spoilers_off_by_default() {
+        assert!(!params(None).show_spoilers());
+    }
+
+    #[test]
+    fn bare_or_truthy_param_enables_spoilers() {
+        // A bare ?showSpoilers deserializes as an empty string
+        assert!(params(Some("")).show_spoilers());
+        assert!(params(Some("true")).show_spoilers());
+        assert!(params(Some("1")).show_spoilers());
+    }
+
+    #[test]
+    fn explicit_falsy_values_disable_spoilers() {
+        for v in ["false", "0", "no", "off", "FALSE", "No"] {
+            assert!(!params(Some(v)).show_spoilers(), "{v} should be falsy");
+        }
+    }
+
+    #[test]
+    fn share_url_preserves_show_spoilers() {
+        let plain = append_show_spoilers("https://a.example/games/x".to_string(), false);
+        assert_eq!(plain, "https://a.example/games/x");
+        let bare = append_show_spoilers("https://a.example/games/x".to_string(), true);
+        assert_eq!(bare, "https://a.example/games/x?showSpoilers=true");
+        let with_params =
+            append_show_spoilers("https://a.example/games/x?turn=3".to_string(), true);
+        assert_eq!(
+            with_params,
+            "https://a.example/games/x?turn=3&showSpoilers=true"
         );
     }
 }
