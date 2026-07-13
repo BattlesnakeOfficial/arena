@@ -5,7 +5,7 @@ use axum::{
     response::{IntoResponse, Redirect},
 };
 use color_eyre::eyre::Context as _;
-use maud::html;
+use maud::{Markup, html};
 use uuid::Uuid;
 
 use crate::{
@@ -23,6 +23,63 @@ use crate::{
     snake_health,
     state::AppState,
 };
+
+// Datalist suggestions for the language/platform tag inputs. Free text is
+// still allowed — these just seed the browser's autocomplete dropdown.
+const LANGUAGE_SUGGESTIONS: [&str; 10] = [
+    "Python",
+    "Rust",
+    "Go",
+    "TypeScript",
+    "JavaScript",
+    "Java",
+    "C#",
+    "Elixir",
+    "Ruby",
+    "Kotlin",
+];
+
+const PLATFORM_SUGGESTIONS: [&str; 10] = [
+    "AWS",
+    "GCP",
+    "Azure",
+    "Fly.io",
+    "Railway",
+    "Render",
+    "Cloudflare",
+    "Self-hosted",
+    "Raspberry Pi",
+    "Heroku",
+];
+
+// Shared Language/Platform inputs for the new + edit battlesnake forms
+fn tag_form_fields(language: &str, platform: &str) -> Markup {
+    html! {
+        div class="field" {
+            label for="language" { "Language" }
+            input type="text" id="language" name="language" maxlength="50"
+                list="language-suggestions" value=(language);
+            datalist id="language-suggestions" {
+                @for suggestion in LANGUAGE_SUGGESTIONS {
+                    option value=(suggestion) {}
+                }
+            }
+            p class="help" { "What language is this snake written in? Optional, max 50 characters" }
+        }
+
+        div class="field" {
+            label for="platform" { "Platform" }
+            input type="text" id="platform" name="platform" maxlength="50"
+                list="platform-suggestions" value=(platform);
+            datalist id="platform-suggestions" {
+                @for suggestion in PLATFORM_SUGGESTIONS {
+                    option value=(suggestion) {}
+                }
+            }
+            p class="help" { "Where is this snake hosted? Optional, max 50 characters" }
+        }
+    }
+}
 
 // List all battlesnakes for the current user
 pub async fn list_battlesnakes(
@@ -140,6 +197,8 @@ pub async fn new_battlesnake(
                     p class="help" { "Control who can add this snake to games" }
                 }
 
+                (tag_form_fields("", ""))
+
                 div class="form-cta" {
                     button type="submit" class="btn solid" { "Create Battlesnake" }
                     a href="/battlesnakes" class="btn" { "Cancel" }
@@ -162,6 +221,25 @@ pub async fn create_battlesnake(
         user.user_id,
         session.flash_message.is_some()
     );
+
+    // Trim the optional tag fields and enforce their length limits
+    let mut create_data = create_data;
+    create_data.language = create_data.language.trim().to_string();
+    create_data.platform = create_data.platform.trim().to_string();
+
+    if let Err(msg) = battlesnake::validate_tag_fields(&create_data.language, &create_data.platform)
+    {
+        session::set_flash_message(
+            &state.db,
+            session.session_id,
+            msg,
+            session::FLASH_TYPE_ERROR,
+        )
+        .await
+        .wrap_err("Failed to set flash message")?;
+
+        return Ok(Redirect::to("/battlesnakes/new").into_response());
+    }
 
     // Create the new battlesnake in the database
     let battlesnake_result =
@@ -267,6 +345,8 @@ pub async fn edit_battlesnake(
                     p class="help" { "Control who can add this snake to games" }
                 }
 
+                (tag_form_fields(&battlesnake.language, &battlesnake.platform))
+
                 div class="form-cta" {
                     button type="submit" class="btn solid" { "Update Battlesnake" }
                     a href="/battlesnakes" class="btn" { "Cancel" }
@@ -292,6 +372,25 @@ pub async fn update_battlesnake(
     if !exists {
         return Err("Battlesnake not found or you don't have permission to update it".to_string())
             .with_status(StatusCode::FORBIDDEN);
+    }
+
+    // Trim the optional tag fields and enforce their length limits
+    let mut update_data = update_data;
+    update_data.language = update_data.language.trim().to_string();
+    update_data.platform = update_data.platform.trim().to_string();
+
+    if let Err(msg) = battlesnake::validate_tag_fields(&update_data.language, &update_data.platform)
+    {
+        session::set_flash_message(
+            &state.db,
+            session.session_id,
+            msg,
+            session::FLASH_TYPE_ERROR,
+        )
+        .await
+        .wrap_err("Failed to set flash message")?;
+
+        return Ok(Redirect::to(&format!("/battlesnakes/{battlesnake_id}/edit")).into_response());
     }
 
     // Update the battlesnake
@@ -641,6 +740,19 @@ pub async fn view_battlesnake_profile(
                                         style="max-width:320px;height:auto;display:block;margin-bottom:4px;" {}
                                     span class="text-muted small" {
                                         "Head: " (display_head) " · Tail: " (display_tail) " · Color: " (raw_color)
+                                    }
+                                }
+                                @if !snake.language.is_empty() || !snake.platform.is_empty() {
+                                    div class="mt-2" {
+                                        @if !snake.language.is_empty() {
+                                            span class="badge bg-info text-dark" { "Language: " (snake.language) }
+                                        }
+                                        @if !snake.language.is_empty() && !snake.platform.is_empty() {
+                                            " "
+                                        }
+                                        @if !snake.platform.is_empty() {
+                                            span class="badge bg-info text-dark" { "Platform: " (snake.platform) }
+                                        }
                                     }
                                 }
                                 @if is_owner {

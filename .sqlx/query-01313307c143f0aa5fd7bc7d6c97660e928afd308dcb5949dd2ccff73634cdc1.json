@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            SELECT\n                battlesnake_id,\n                user_id,\n                name,\n                url,\n                visibility as \"visibility: _\",\n                color,\n                head,\n                tail,\n                created_at,\n                updated_at\n            FROM battlesnakes\n            WHERE battlesnake_id = ANY($1)\n            ORDER BY name ASC\n            ",
+  "query": "SELECT DISTINCT\n            b.battlesnake_id,\n            b.user_id,\n            b.name,\n            b.url,\n            b.visibility as \"visibility: Visibility\",\n            b.color,\n            b.head,\n            b.tail,\n            b.language,\n            b.platform,\n            b.created_at,\n            b.updated_at\n         FROM battlesnakes b\n         JOIN leaderboard_entries le ON le.battlesnake_id = b.battlesnake_id\n         JOIN leaderboards l ON l.leaderboard_id = le.leaderboard_id\n         WHERE le.disabled_at IS NULL\n           AND l.disabled_at IS NULL\n         ORDER BY b.battlesnake_id",
   "describe": {
     "columns": [
       {
@@ -25,7 +25,7 @@
       },
       {
         "ordinal": 4,
-        "name": "visibility: _",
+        "name": "visibility: Visibility",
         "type_info": "Text"
       },
       {
@@ -45,21 +45,31 @@
       },
       {
         "ordinal": 8,
+        "name": "language",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "platform",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 10,
         "name": "created_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 9,
+        "ordinal": 11,
         "name": "updated_at",
         "type_info": "Timestamptz"
       }
     ],
     "parameters": {
-      "Left": [
-        "UuidArray"
-      ]
+      "Left": []
     },
     "nullable": [
+      false,
+      false,
       false,
       false,
       false,
@@ -72,5 +82,5 @@
       false
     ]
   },
-  "hash": "217d066eff3ec77c8e4bc525d98230f7746038ae48f33fe451b05d5c77fb7fa7"
+  "hash": "01313307c143f0aa5fd7bc7d6c97660e928afd308dcb5949dd2ccff73634cdc1"
 }

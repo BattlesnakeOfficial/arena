@@ -104,6 +104,8 @@ pub async fn create_snake(
         } else {
             Visibility::Private
         },
+        language: String::new(),
+        platform: String::new(),
     };
 
     let snake = battlesnake::create_battlesnake(&state.db, user.user_id, create_data)
@@ -193,6 +195,8 @@ pub async fn update_snake(
             Some(false) => Visibility::Private,
             None => existing.visibility,
         },
+        language: existing.language,
+        platform: existing.platform,
     };
 
     let snake = battlesnake::update_battlesnake(&state.db, snake_id, user.user_id, update_data)

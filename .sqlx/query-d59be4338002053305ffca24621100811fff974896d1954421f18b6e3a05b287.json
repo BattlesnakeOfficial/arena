@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        UPDATE battlesnakes\n        SET\n            name = $3,\n            url = $4,\n            visibility = $5\n        WHERE\n            battlesnake_id = $1\n            AND user_id = $2\n        RETURNING\n            battlesnake_id,\n            user_id,\n            name,\n            url,\n            visibility as \"visibility: Visibility\",\n            color,\n            head,\n            tail,\n            created_at,\n            updated_at\n        ",
+  "query": "\n            SELECT\n                battlesnake_id,\n                user_id,\n                name,\n                url,\n                visibility as \"visibility: _\",\n                color,\n                head,\n                tail,\n                language,\n                platform,\n                created_at,\n                updated_at\n            FROM battlesnakes\n            WHERE battlesnake_id = ANY($1)\n            ORDER BY name ASC\n            ",
   "describe": {
     "columns": [
       {
@@ -25,7 +25,7 @@
       },
       {
         "ordinal": 4,
-        "name": "visibility: Visibility",
+        "name": "visibility: _",
         "type_info": "Text"
       },
       {
@@ -45,22 +45,28 @@
       },
       {
         "ordinal": 8,
+        "name": "language",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "platform",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 10,
         "name": "created_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 9,
+        "ordinal": 11,
         "name": "updated_at",
         "type_info": "Timestamptz"
       }
     ],
     "parameters": {
       "Left": [
-        "Uuid",
-        "Uuid",
-        "Text",
-        "Text",
-        "Text"
+        "UuidArray"
       ]
     },
     "nullable": [
@@ -73,8 +79,10 @@
       false,
       false,
       false,
+      false,
+      false,
       false
     ]
   },
-  "hash": "fef155d1db69e531835c9966c400bc9413c65cf9dab851b5c0bb891e3d36fc5a"
+  "hash": "d59be4338002053305ffca24621100811fff974896d1954421f18b6e3a05b287"
 }
