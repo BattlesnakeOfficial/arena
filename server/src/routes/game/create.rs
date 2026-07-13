@@ -16,7 +16,8 @@ use crate::{
     components::page_factory::PageFactory,
     errors::{ServerResult, WithStatus},
     models::flow::GameCreationFlow,
-    models::game::{GameBoardSize, GameType},
+    models::game::{self, GameBoardSize, GameType},
+    models::game_battlesnake,
     models::rate_limit,
     models::session,
     routes::auth::{CurrentUser, CurrentUserWithSession},
@@ -35,6 +36,49 @@ pub async fn new_game(
         .wrap_err("Failed to create game flow")?;
 
     // Redirect to the flow page
+    Ok(Redirect::to(&format!("/games/flow/{}", flow.flow_id)).into_response())
+}
+
+// Rematch - create a new flow pre-filled from an existing game's snakes and
+// settings, then send the user through the normal builder for confirmation
+// (which reuses the flow's validation and the create-time rate limits).
+#[debug_handler]
+pub async fn rematch_game(
+    State(state): State<AppState>,
+    CurrentUser(user): CurrentUser,
+    Path(game_id): Path<Uuid>,
+) -> ServerResult<impl IntoResponse, StatusCode> {
+    // Get the source game for its board size and game type
+    let game = game::get_game_by_id(&state.db, game_id)
+        .await
+        .wrap_err("Failed to get game")?
+        .ok_or_else(|| "Game not found".to_string())
+        .with_status(StatusCode::NOT_FOUND)?;
+
+    // Get the source game's participants. The query joins against the
+    // battlesnakes table, so snakes deleted since the game ran are skipped
+    // gracefully; duplicates of the same snake are preserved as separate rows.
+    let battlesnakes = game_battlesnake::get_battlesnakes_by_game_id(&state.db, game_id)
+        .await
+        .wrap_err("Failed to get game battlesnakes")?;
+
+    // Create a new flow for this user and pre-fill it
+    let mut flow = GameCreationFlow::create_for_user(&state.db, user.user_id)
+        .await
+        .wrap_err("Failed to create game flow")?;
+
+    flow.board_size = game.board_size;
+    flow.game_type = game.game_type;
+    for battlesnake in &battlesnakes {
+        // add_battlesnake enforces the 4-snake cap, matching the flow's rules
+        flow.add_battlesnake(battlesnake.battlesnake_id);
+    }
+
+    flow.update(&state.db)
+        .await
+        .wrap_err("Failed to update game flow")?;
+
+    // Redirect to the flow page so the user confirms through the builder
     Ok(Redirect::to(&format!("/games/flow/{}", flow.flow_id)).into_response())
 }
 

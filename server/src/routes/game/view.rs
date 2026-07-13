@@ -85,6 +85,11 @@ pub async fn view_game(
 
                     div class="theater-actions" {
                         @if user.is_some() {
+                            @if finished {
+                                form action={"/games/"(game_id)"/rematch"} method="post" style="display: inline;" {
+                                    button type="submit" class="btn" { "Rematch" }
+                                }
+                            }
                             a href="/games/new" class="btn" { "Create Another Game" }
                             a href="/me" class="btn" { "Back to Profile" }
                         } @else {
