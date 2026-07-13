@@ -1,11 +1,12 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
 };
 use axum_macros::debug_handler;
 use color_eyre::eyre::Context as _;
 use maud::html;
+use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::{
@@ -18,12 +19,26 @@ use crate::{
     state::AppState,
 };
 
+/// Optional viewer params forwarded to the board.battlesnake.com iframe so
+/// shared links can jump to a turn, autoplay, etc. Only params that were
+/// actually provided are passed through.
+#[derive(Debug, Default, Deserialize)]
+pub struct BoardParams {
+    turn: Option<u32>,
+    // Bool-ish: play accepted autoplay=true/1/etc. Kept as a string so
+    // `?autoplay` variants don't 400 the whole page; normalized on output.
+    autoplay: Option<String>,
+    fps: Option<u32>,
+    title: Option<String>,
+}
+
 // Display game details in the game theater (themed by the theater axis)
 #[debug_handler]
 pub async fn view_game(
     State(state): State<AppState>,
     OptionalUser(user): OptionalUser,
     Path(game_id): Path<Uuid>,
+    Query(board_params): Query<BoardParams>,
     page_factory: PageFactory,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
     // Get the game with its battlesnakes
@@ -33,6 +48,9 @@ pub async fn view_game(
         .with_status(StatusCode::NOT_FOUND)?;
 
     let finished = game.status == GameStatus::Finished;
+
+    let iframe_src = board_iframe_src(&state.config.base_url, game_id, &board_params);
+    let share_url = share_url(&state.config.base_url, game_id, &board_params);
 
     Ok(page_factory.create_theater_page(
         format!("Game {game_id}"),
@@ -65,7 +83,7 @@ pub async fn view_game(
                         div #board-viewer-container style="width: 100%; aspect-ratio: 16 / 9;" {
                             iframe
                                 id="board-viewer"
-                                src={ "https://board.battlesnake.com/?engine=" (format!("{}/api", state.config.base_url)) "&game=" (game_id) }
+                                src=(iframe_src)
                                 title="Battlesnake Board Viewer"
                                 allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
                                 allowfullscreen {}
@@ -143,10 +161,93 @@ pub async fn view_game(
                             div { dt { "Created" } dd { (game.created_at.format("%Y-%m-%d %H:%M UTC")) } }
                         }
                     }
+
+                    div class="gmeta" {
+                        h3 { "Share" }
+                        div class="share-row" {
+                            input #share-url type="text" readonly value=(share_url) aria-label="Shareable game link";
+                            button #share-copy class="btn sm" type="button" { "Copy Link" }
+                        }
+                    }
+
+                    script {
+                        "(function() {"
+                            "var btn = document.getElementById('share-copy');"
+                            "var input = document.getElementById('share-url');"
+                            "function done() {"
+                                "btn.textContent = 'Copied!';"
+                                "setTimeout(function() { btn.textContent = 'Copy Link'; }, 1500);"
+                            "}"
+                            "function fallback() {"
+                                "input.focus();"
+                                "input.select();"
+                                "try { document.execCommand('copy'); done(); } catch (e) {}"
+                            "}"
+                            "btn.addEventListener('click', function() {"
+                                "if (navigator.clipboard && navigator.clipboard.writeText) {"
+                                    "navigator.clipboard.writeText(input.value).then(done, fallback);"
+                                "} else {"
+                                    "fallback();"
+                                "}"
+                            "});"
+                        "})();"
+                    }
                 }
             }
         }),
     ))
+}
+
+/// Query-string suffix (each param prefixed with `&`) for the optional board
+/// viewer params. Shared by the iframe src and the share URL so both stay in
+/// sync. Values are URL-encoded; only provided params are emitted.
+fn board_query_suffix(params: &BoardParams) -> String {
+    let mut suffix = String::new();
+    if let Some(turn) = params.turn {
+        suffix.push_str(&format!("&turn={turn}"));
+    }
+    if let Some(autoplay) = &params.autoplay
+        && autoplay_is_truthy(autoplay)
+    {
+        suffix.push_str("&autoplay=true");
+    }
+    if let Some(fps) = params.fps {
+        suffix.push_str(&format!("&fps={fps}"));
+    }
+    if let Some(title) = &params.title {
+        suffix.push_str(&format!("&title={}", urlencoding::encode(title)));
+    }
+    suffix
+}
+
+/// Bool-ish parse matching how play treated autoplay: present and not an
+/// explicit "off" value means on.
+fn autoplay_is_truthy(value: &str) -> bool {
+    !matches!(
+        value.to_ascii_lowercase().as_str(),
+        "false" | "0" | "no" | "off"
+    )
+}
+
+/// Build the board.battlesnake.com iframe src, forwarding any provided
+/// viewer params onto the board.
+fn board_iframe_src(base_url: &str, game_id: Uuid, params: &BoardParams) -> String {
+    format!(
+        "https://board.battlesnake.com/?engine={base_url}/api&game={game_id}{}",
+        board_query_suffix(params)
+    )
+}
+
+/// Canonical shareable URL for this game page, including any viewer params
+/// that were provided on the current request.
+fn share_url(base_url: &str, game_id: Uuid, params: &BoardParams) -> String {
+    let suffix = board_query_suffix(params);
+    if suffix.is_empty() {
+        format!("{base_url}/games/{game_id}")
+    } else {
+        // suffix starts with '&'; swap the first separator for '?'
+        format!("{base_url}/games/{game_id}?{}", &suffix[1..])
+    }
 }
 
 fn ordinal_place(n: i32) -> String {
@@ -165,5 +266,103 @@ fn capitalize(s: &str) -> String {
     match chars.next() {
         Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
         None => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn game_id() -> Uuid {
+        Uuid::parse_str("6f9422eb-cd95-4a17-b0a2-a3fefe4f47b1").unwrap()
+    }
+
+    #[test]
+    fn iframe_src_without_params_matches_original_shape() {
+        let src = board_iframe_src(
+            "https://arena.example.com",
+            game_id(),
+            &BoardParams::default(),
+        );
+        assert_eq!(
+            src,
+            "https://board.battlesnake.com/?engine=https://arena.example.com/api&game=6f9422eb-cd95-4a17-b0a2-a3fefe4f47b1"
+        );
+    }
+
+    #[test]
+    fn iframe_src_forwards_provided_params() {
+        let params = BoardParams {
+            turn: Some(143),
+            autoplay: Some("true".to_string()),
+            fps: Some(10),
+            title: Some("Grand Final #3".to_string()),
+        };
+        let src = board_iframe_src("https://arena.example.com", game_id(), &params);
+        assert_eq!(
+            src,
+            "https://board.battlesnake.com/?engine=https://arena.example.com/api&game=6f9422eb-cd95-4a17-b0a2-a3fefe4f47b1&turn=143&autoplay=true&fps=10&title=Grand%20Final%20%233"
+        );
+    }
+
+    #[test]
+    fn iframe_src_omits_missing_params() {
+        let params = BoardParams {
+            turn: Some(7),
+            ..Default::default()
+        };
+        let src = board_iframe_src("https://arena.example.com", game_id(), &params);
+        assert!(src.ends_with("&turn=7"));
+        assert!(!src.contains("autoplay"));
+        assert!(!src.contains("fps"));
+        assert!(!src.contains("title"));
+    }
+
+    #[test]
+    fn title_is_url_encoded() {
+        let params = BoardParams {
+            title: Some("a&b=c?d".to_string()),
+            ..Default::default()
+        };
+        let suffix = board_query_suffix(&params);
+        assert_eq!(suffix, "&title=a%26b%3Dc%3Fd");
+    }
+
+    #[test]
+    fn autoplay_boolish_values() {
+        for on in ["true", "1", "yes", "TRUE", ""] {
+            assert!(autoplay_is_truthy(on), "{on:?} should be truthy");
+        }
+        for off in ["false", "0", "no", "off", "FALSE"] {
+            assert!(!autoplay_is_truthy(off), "{off:?} should be falsy");
+        }
+    }
+
+    #[test]
+    fn share_url_without_params_is_plain_game_url() {
+        let url = share_url(
+            "https://arena.example.com",
+            game_id(),
+            &BoardParams::default(),
+        );
+        assert_eq!(
+            url,
+            "https://arena.example.com/games/6f9422eb-cd95-4a17-b0a2-a3fefe4f47b1"
+        );
+    }
+
+    #[test]
+    fn share_url_includes_provided_params() {
+        let params = BoardParams {
+            turn: Some(143),
+            autoplay: Some("1".to_string()),
+            fps: None,
+            title: None,
+        };
+        let url = share_url("https://arena.example.com", game_id(), &params);
+        assert_eq!(
+            url,
+            "https://arena.example.com/games/6f9422eb-cd95-4a17-b0a2-a3fefe4f47b1?turn=143&autoplay=true"
+        );
     }
 }
