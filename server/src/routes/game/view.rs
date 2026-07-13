@@ -105,8 +105,15 @@ pub async fn view_game(
                                 div class="top" {
                                     span class="chip" style={"background:"(chip_color(&battlesnake.color))} {}
                                     div {
-                                        div class="name" { (battlesnake.name) }
-                                        div class="owner" { "by " (battlesnake.owner_login) }
+                                        div class="name" {
+                                            a href={"/battlesnakes/"(battlesnake.battlesnake_id)"/profile"} {
+                                                (battlesnake.name)
+                                            }
+                                        }
+                                        div class="owner" {
+                                            "by "
+                                            a href={"/users/"(battlesnake.owner_login)} { (battlesnake.owner_login) }
+                                        }
                                     }
                                     div class="place" {
                                         @if let Some(placement) = battlesnake.placement {

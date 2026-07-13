@@ -63,6 +63,40 @@ pub async fn get_user_by_id(pool: &PgPool, user_id: Uuid) -> cja::Result<Option<
     Ok(user)
 }
 
+/// Look up a user for the public profile page. GitHub logins are
+/// case-insensitive, so match accordingly.
+pub async fn get_user_by_github_login(pool: &PgPool, login: &str) -> cja::Result<Option<User>> {
+    let user = sqlx::query_as!(
+        User,
+        r#"
+        SELECT
+            user_id,
+            external_github_id,
+            github_login,
+            github_avatar_url,
+            github_name,
+            github_email,
+            display_name,
+            pronouns,
+            country,
+            backstory,
+            is_admin,
+            site_theme,
+            theater_theme,
+            created_at,
+            updated_at
+        FROM users
+        WHERE LOWER(github_login) = LOWER($1)
+        "#,
+        login
+    )
+    .fetch_optional(pool)
+    .await
+    .wrap_err("Failed to fetch user by login from database")?;
+
+    Ok(user)
+}
+
 pub async fn create_or_update_user(
     pool: &PgPool,
     github_user: GitHubUser,

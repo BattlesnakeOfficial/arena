@@ -311,7 +311,8 @@ pub async fn show_leaderboard(
                                                         (entry.snake_name)
                                                     }
                                                     span class="owner" {
-                                                        "by " (entry.owner_login)
+                                                        "by "
+                                                        a href={"/users/"(entry.owner_login)} { (entry.owner_login) }
                                                         @if is_you { " — you" }
                                                     }
                                                 }
@@ -379,7 +380,10 @@ pub async fn show_leaderboard(
                                                         a class="name" href={"/leaderboards/"(leaderboard_id)"/entries/"(entry.leaderboard_entry_id)} {
                                                             (entry.snake_name)
                                                         }
-                                                        span class="owner" { "by " (entry.owner_login) }
+                                                        span class="owner" {
+                                                            "by "
+                                                            a href={"/users/"(entry.owner_login)} { (entry.owner_login) }
+                                                        }
                                                     }
                                                 }
                                             }
@@ -488,7 +492,10 @@ pub async fn show_leaderboard(
                                             a href={"/leaderboards/"(leaderboard_id)"/entries/"(eater.leaderboard_entry_id)} {
                                                 b { (eater.snake_name) }
                                             }
-                                            span class="owner-inline" { " by " (eater.owner_login) }
+                                            span class="owner-inline" {
+                                                " by "
+                                                a href={"/users/"(eater.owner_login)} { (eater.owner_login) }
+                                            }
                                             " · "
                                             span class="place" { (eater.food_score) " food" }
                                         }
@@ -697,8 +704,14 @@ pub async fn show_leaderboard_entry(
                                 img src=(avatar_url) alt="Avatar" style="width: 48px; height: 48px; border-radius: 50%;" {}
                             }
                             div {
-                                h1 class="mb-1" { (snake.name) }
-                                span style="color: #666;" { (owner_login) }
+                                h1 class="mb-1" {
+                                    a href={"/battlesnakes/"(snake.battlesnake_id)"/profile"} { (snake.name) }
+                                }
+                                @if owner.is_some() {
+                                    a href={"/users/"(owner_login)} style="color: #666;" { (owner_login) }
+                                } @else {
+                                    span style="color: #666;" { (owner_login) }
+                                }
                                 span { " on " }
                                 a href={"/leaderboards/"(leaderboard_id)} { (lb.name) }
                             }

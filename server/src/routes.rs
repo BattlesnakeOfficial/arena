@@ -43,6 +43,7 @@ pub mod policy;
 pub mod redirects;
 pub mod settings;
 pub mod tournament;
+pub mod users;
 
 pub fn routes(app_state: AppState) -> axum::Router {
     // CORS layer for API routes - allows board.battlesnake.com to access our API
@@ -94,6 +95,8 @@ pub fn routes(app_state: AppState) -> axum::Router {
         .route("/conduct", get(policy::conduct_page))
         .route("/privacy", get(policy::privacy_page))
         .route("/terms", get(policy::terms_page))
+        // Public user profiles
+        .route("/users/{login}", get(users::show_user_profile))
         // Profile page - requires authentication
         .route("/me", get(profile_page).post(update_profile))
         // Appearance (theme) preference - requires authentication
@@ -682,6 +685,7 @@ async fn profile_page(
             }
 
             div class="profile-actions" {
+                a href={"/users/"(user.github_login)} class="btn" { "View Public Profile" }
                 a href="/battlesnakes" class="btn" { "Manage Battlesnakes" }
                 a href="/games/new" class="btn" { "Create New Game" }
                 a href="/" class="btn" { "Back to Home" }
