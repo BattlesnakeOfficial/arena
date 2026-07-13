@@ -15,6 +15,7 @@ use crate::{
     errors::{ServerResult, WithStatus},
     models::game::GameStatus,
     models::game_battlesnake,
+    models::saved_game,
     routes::auth::OptionalUser,
     state::AppState,
 };
@@ -96,6 +97,15 @@ pub async fn view_game(
             game.board_size.as_str(),
             battlesnakes.len(),
         ),
+    };
+
+    // The viewer's existing saved-game row, if any: pre-fills the save form
+    // in the aside so re-saving updates the title.
+    let saved = match &user {
+        Some(u) => saved_game::get_saved_game_for_user_and_game(&state.db, u.user_id, game_id)
+            .await
+            .wrap_err("Failed to fetch saved game")?,
+        None => None,
     };
 
     Ok(page_factory.create_theater_page(
@@ -237,6 +247,28 @@ pub async fn view_game(
                                 "}"
                             "});"
                         "})();"
+                    }
+
+                    @if user.is_some() {
+                        div class="gmeta" {
+                            @if saved.is_some() {
+                                h3 { "Saved to Your Profile" }
+                            } @else {
+                                h3 { "Save Game" }
+                            }
+                            form action={"/games/"(game_id)"/save"} method="post" {
+                                input
+                                    type="text"
+                                    name="title"
+                                    maxlength="100"
+                                    placeholder="Title (optional)"
+                                    value=[saved.as_ref().map(|s| s.title.as_str())];
+                                " "
+                                button type="submit" class="btn" {
+                                    @if saved.is_some() { "Update" } @else { "Save Game" }
+                                }
+                            }
+                        }
                     }
                 }
             }

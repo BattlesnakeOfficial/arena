@@ -11,7 +11,7 @@ use crate::{
     errors::{ServerResult, WithStatus},
     models::{
         battlesnake::{self, Visibility},
-        leaderboard,
+        leaderboard, saved_game,
         user::{self, User},
     },
     routes::auth::OptionalUser,
@@ -60,6 +60,10 @@ pub async fn show_user_profile(
             .wrap_err("Failed to fetch leaderboard entries")?;
         snakes_with_entries.push((snake, entries));
     }
+
+    let saved_games = saved_game::list_saved_games_for_user(&state.db, user.user_id)
+        .await
+        .wrap_err("Failed to fetch saved games")?;
 
     let name = public_name(&user).to_string();
 
@@ -129,6 +133,35 @@ pub async fn show_user_profile(
                                                     }
                                                 }
                                             }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            section class="section" {
+                h2 { "Saved Games" }
+                @if saved_games.is_empty() {
+                    p class="empty" { "No saved games yet." }
+                } @else {
+                    dl class="meta-list" {
+                        @for saved in &saved_games {
+                            div {
+                                dt {
+                                    a href={"/games/"(saved.game_id)} { (saved.display_title()) }
+                                }
+                                dd {
+                                    (saved.game_created_at.format("%b %-d, %Y"))
+                                    @if is_self {
+                                        " "
+                                        form
+                                            action={"/saved-games/"(saved.saved_game_id)"/delete"}
+                                            method="post"
+                                            style="display:inline" {
+                                            button type="submit" class="btn" { "Remove" }
                                         }
                                     }
                                 }

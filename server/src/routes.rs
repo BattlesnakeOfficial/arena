@@ -41,6 +41,7 @@ pub mod github_auth;
 pub mod leaderboard;
 pub mod policy;
 pub mod redirects;
+pub mod saved_games;
 pub mod settings;
 pub mod tournament;
 pub mod users;
@@ -157,6 +158,14 @@ pub fn routes(app_state: AppState) -> axum::Router {
         .route(
             "/games/{id}/rematch",
             axum::routing::post(game::rematch_game),
+        )
+        .route(
+            "/games/{id}/save",
+            axum::routing::post(saved_games::save_game),
+        )
+        .route(
+            "/saved-games/{id}/delete",
+            axum::routing::post(saved_games::delete_saved_game),
         )
         .route("/games/flow/{id}", get(game::show_game_flow))
         .route(
