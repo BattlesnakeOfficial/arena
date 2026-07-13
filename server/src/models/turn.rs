@@ -38,6 +38,44 @@ pub async fn get_turns_by_game_id(pool: &PgPool, game_id: Uuid) -> cja::Result<V
     Ok(turns)
 }
 
+/// Get a page of turns (with frame data) for a game, ordered by turn number.
+///
+/// Used by the engine-compatible frames API. Games can have up to ~5000
+/// turns, so the limit MUST always be applied in SQL — never load all turns
+/// unbounded. Turns without frame data are filtered out in SQL so that
+/// `offset` indexes stably into the sequence of renderable frames (a short
+/// page signals "no more frames" to clients like the GIF exporter).
+pub async fn get_turn_frames_page(
+    pool: &PgPool,
+    game_id: Uuid,
+    offset: i64,
+    limit: i64,
+) -> cja::Result<Vec<Turn>> {
+    let turns = sqlx::query_as::<_, Turn>(
+        r#"
+        SELECT
+            turn_id,
+            game_id,
+            turn_number,
+            frame_data,
+            created_at
+        FROM turns
+        WHERE game_id = $1 AND frame_data IS NOT NULL
+        ORDER BY turn_number ASC
+        OFFSET $2
+        LIMIT $3
+        "#,
+    )
+    .bind(game_id)
+    .bind(offset)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .wrap_err("Failed to fetch turn frames page from database")?;
+
+    Ok(turns)
+}
+
 /// Get turns for a game starting from a specific turn number
 /// Used for reconnection catch-up
 pub async fn get_turns_from(

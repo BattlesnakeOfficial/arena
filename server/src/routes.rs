@@ -56,6 +56,8 @@ pub fn routes(app_state: AppState) -> axum::Router {
     let api_routes = axum::Router::new()
         .route("/games/{id}", get(game::get_game_info))
         .route("/games/{id}/events", get(game::game_events_websocket))
+        // Engine-compatible frame history (public, used by the GIF exporter)
+        .route("/games/{id}/frames", get(game::get_game_frames))
         .route("/tokens", post(api::tokens::create_token))
         .route("/tokens", get(api::tokens::list_tokens))
         .route("/tokens/{id}", delete(api::tokens::revoke_token))
