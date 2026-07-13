@@ -58,6 +58,7 @@ impl PageFactory {
             user: self.user,
             current_path: self.path,
             theater,
+            description: None,
         }
     }
 }

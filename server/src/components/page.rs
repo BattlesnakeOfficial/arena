@@ -7,6 +7,10 @@ use crate::{models::user::User, static_assets::asset_url};
 /// attributes (logged-in account setting) win over localStorage (anonymous).
 const THEME_BOOTSTRAP_JS: &str = r#"(function(){var d=document.documentElement;function p(a,f){return d.getAttribute("data-bs-"+a)||localStorage.getItem("bs-"+a)||f}var site=p("site","system");var th=p("theater","dark");var sys=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";var s=site==="system"?sys:site;d.setAttribute("data-app-theme",d.hasAttribute("data-theater-page")?(th==="match"?s:th):s);})();"#;
 
+/// Site-wide fallback for social embeds (OpenGraph/Twitter) when a page
+/// doesn't set its own description.
+const DEFAULT_DESCRIPTION: &str = "A competitive arena where your code battles other Battlesnakes.";
+
 const GOOGLE_FONTS_HREF: &str = "https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,300;12..96,500;12..96,600;12..96,700;12..96,800&family=Instrument+Sans:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap";
 
 /// Primary nav links: (label, href). Battlesnakes is only shown logged in
@@ -29,6 +33,9 @@ pub struct Page {
     /// Theater pages (game live/replay) resolve their theme from the
     /// theater axis instead of the site axis.
     pub theater: bool,
+    /// Page-specific description for social embeds (OpenGraph/Twitter).
+    /// Falls back to a site-wide default when unset.
+    pub description: Option<String>,
 }
 
 impl Page {
@@ -41,7 +48,19 @@ impl Page {
             user: None,
             current_path: "/".to_string(),
             theater: false,
+            description: None,
         }
+    }
+
+    /// Set a page-specific social-embed description (builder style, so it
+    /// chains off `PageFactory::create_page` / `create_theater_page`).
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+
+    fn description(&self) -> &str {
+        self.description.as_deref().unwrap_or(DEFAULT_DESCRIPTION)
     }
 
     /// Server-rendered initial theme, when it can be known without JS.
@@ -209,6 +228,12 @@ impl Render for Page {
                     meta charset="utf-8";
                     meta name="viewport" content="width=device-width, initial-scale=1.0";
                     title { (self.title) " — Battlesnake" }
+                    meta name="description" content=(self.description());
+                    meta property="og:site_name" content="Battlesnake Arena";
+                    meta property="og:title" content=(self.title);
+                    meta property="og:type" content="website";
+                    meta property="og:description" content=(self.description());
+                    meta name="twitter:card" content="summary";
                     link rel="preconnect" href="https://fonts.googleapis.com";
                     link rel="preconnect" href="https://fonts.gstatic.com" crossorigin;
                     link href=(GOOGLE_FONTS_HREF) rel="stylesheet";
@@ -244,5 +269,55 @@ impl Render for Page {
 impl axum::response::IntoResponse for Page {
     fn into_response(self) -> axum::response::Response {
         self.render().into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_page() -> Page {
+        Page::new(
+            "Test Title".to_string(),
+            Box::new(html! { p { "content" } }),
+            None,
+        )
+    }
+
+    #[test]
+    fn head_contains_baseline_og_tags() {
+        let html = test_page().render().into_string();
+        assert!(html.contains(r#"<meta property="og:site_name" content="Battlesnake Arena">"#));
+        assert!(html.contains(r#"<meta property="og:title" content="Test Title">"#));
+        assert!(html.contains(r#"<meta property="og:type" content="website">"#));
+        assert!(html.contains(&format!(
+            r#"<meta property="og:description" content="{DEFAULT_DESCRIPTION}">"#
+        )));
+        assert!(html.contains(r#"<meta name="twitter:card" content="summary">"#));
+        assert!(html.contains(&format!(
+            r#"<meta name="description" content="{DEFAULT_DESCRIPTION}">"#
+        )));
+    }
+
+    #[test]
+    fn custom_description_overrides_default() {
+        let html = test_page()
+            .with_description("Standard game on an 11x11 board — watch the replay")
+            .render()
+            .into_string();
+        assert!(html.contains(
+            r#"<meta property="og:description" content="Standard game on an 11x11 board — watch the replay">"#
+        ));
+        assert!(!html.contains(DEFAULT_DESCRIPTION));
+    }
+
+    #[test]
+    fn description_is_html_escaped() {
+        let html = test_page()
+            .with_description(r#"<script>"quotes" & snakes</script>"#)
+            .render()
+            .into_string();
+        assert!(html.contains("&lt;script&gt;&quot;quotes&quot; &amp; snakes&lt;/script&gt;"));
+        assert!(!html.contains(r#"<script>"quotes""#));
     }
 }
