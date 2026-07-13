@@ -1,11 +1,10 @@
 use axum::{
-    Form,
-    extract::{Path, State},
+    extract::{Path, RawForm, State},
     http::StatusCode,
     response::{IntoResponse, Redirect},
 };
 use color_eyre::eyre::Context as _;
-use maud::html;
+use maud::{Markup, html};
 use uuid::Uuid;
 
 use crate::{
@@ -17,12 +16,96 @@ use crate::{
     models::leaderboard,
     models::session,
     models::snake_health_status,
+    models::tag,
     models::tournament,
     models::user::get_user_by_id,
     routes::auth::{CurrentUser, CurrentUserWithSession, OptionalUser},
     snake_health,
     state::AppState,
 };
+
+// Parsed new/edit battlesnake form. Parsed by hand from the urlencoded body
+// because the tag checkboxes submit a repeated `tags` key, which
+// `axum::Form` (serde_urlencoded) can't deserialize into a Vec.
+struct BattlesnakeFormData {
+    name: String,
+    url: String,
+    visibility: Visibility,
+    tag_ids: Vec<Uuid>,
+}
+
+fn parse_battlesnake_form(bytes: &[u8]) -> Result<BattlesnakeFormData, String> {
+    let mut name = None;
+    let mut url = None;
+    let mut visibility = None;
+    let mut tag_ids = Vec::new();
+
+    for (key, value) in url::form_urlencoded::parse(bytes) {
+        match key.as_ref() {
+            "name" => name = Some(value.into_owned()),
+            "url" => url = Some(value.into_owned()),
+            "visibility" => {
+                visibility = Some(
+                    value
+                        .parse::<Visibility>()
+                        .map_err(|_| format!("Invalid visibility: {value}"))?,
+                );
+            }
+            "tags" => tag_ids
+                .push(Uuid::parse_str(&value).map_err(|_| "Invalid tag selection".to_string())?),
+            _ => {}
+        }
+    }
+
+    Ok(BattlesnakeFormData {
+        name: name
+            .filter(|n| !n.is_empty())
+            .ok_or_else(|| "Name is required".to_string())?,
+        url: url
+            .filter(|u| !u.is_empty())
+            .ok_or_else(|| "URL is required".to_string())?,
+        visibility: visibility.ok_or_else(|| "Visibility is required".to_string())?,
+        tag_ids,
+    })
+}
+
+// One category's worth of tag checkboxes for the new/edit forms
+fn tag_checkbox_group(title: &str, tags: &[tag::Tag], selected: &[Uuid]) -> Markup {
+    html! {
+        div {
+            strong { (title) }
+            div style="display:flex; flex-wrap:wrap; gap:6px 16px; margin:6px 0 12px;" {
+                @for t in tags {
+                    label style="display:inline-flex; align-items:center; gap:6px; font-weight:normal; margin:0;" {
+                        input type="checkbox" name="tags" value=(t.tag_id)
+                            checked[selected.contains(&t.tag_id)];
+                        (t.name)
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Shared tag picker for the new + edit battlesnake forms: checkbox chips
+// from the curated tag catalog, grouped by category. Multiple selections in
+// the same category are fine (e.g. a snake written in two languages).
+fn tag_form_fields(catalog: &tag::TagCatalog, selected: &[Uuid]) -> Markup {
+    html! {
+        div class="field" {
+            label { "Tags" }
+            (tag_checkbox_group("Language", &catalog.languages, selected))
+            (tag_checkbox_group("Platform", &catalog.platforms, selected))
+            p class="help" {
+                "Pick up to " (tag::MAX_TAGS_PER_SNAKE)
+                " tags — choosing several from one category is fine if your snake uses more than one. "
+                "Missing a tag? "
+                a href="/discord" { "Request it on Discord" }
+                "."
+            }
+        }
+    }
+}
 
 // List all battlesnakes for the current user
 pub async fn list_battlesnakes(
@@ -104,9 +187,14 @@ pub async fn list_battlesnakes(
 
 // Show the form to create a new battlesnake
 pub async fn new_battlesnake(
+    State(state): State<AppState>,
     CurrentUser(_): CurrentUser,
     page_factory: PageFactory,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
+    let catalog = tag::get_tag_catalog(&state.db)
+        .await
+        .wrap_err("Failed to get tag catalog")?;
+
     // Use flash from page_factory (already extracted and cleared from DB)
     let flash = page_factory.flash.clone();
 
@@ -140,6 +228,8 @@ pub async fn new_battlesnake(
                     p class="help" { "Control who can add this snake to games" }
                 }
 
+                (tag_form_fields(&catalog, &[]))
+
                 div class="form-cta" {
                     button type="submit" class="btn solid" { "Create Battlesnake" }
                     a href="/battlesnakes" class="btn" { "Cancel" }
@@ -154,7 +244,7 @@ pub async fn new_battlesnake(
 pub async fn create_battlesnake(
     State(state): State<AppState>,
     CurrentUserWithSession { user, session }: CurrentUserWithSession,
-    Form(create_data): Form<CreateBattlesnake>,
+    RawForm(form_bytes): RawForm,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
     tracing::info!(
         "create_battlesnake: session_id={}, user_id={}, has_flash={:?}",
@@ -163,12 +253,41 @@ pub async fn create_battlesnake(
         session.flash_message.is_some()
     );
 
+    let form = parse_battlesnake_form(&form_bytes).with_status(StatusCode::BAD_REQUEST)?;
+
+    // Enforce the tag cap before creating anything
+    if form.tag_ids.len() > tag::MAX_TAGS_PER_SNAKE {
+        session::set_flash_message(
+            &state.db,
+            session.session_id,
+            format!(
+                "A battlesnake can have at most {} tags",
+                tag::MAX_TAGS_PER_SNAKE
+            ),
+            session::FLASH_TYPE_ERROR,
+        )
+        .await
+        .wrap_err("Failed to set flash message")?;
+
+        return Ok(Redirect::to("/battlesnakes/new").into_response());
+    }
+
+    let create_data = CreateBattlesnake {
+        name: form.name,
+        url: form.url,
+        visibility: form.visibility,
+    };
+
     // Create the new battlesnake in the database
     let battlesnake_result =
         battlesnake::create_battlesnake(&state.db, user.user_id, create_data.clone()).await;
 
     match battlesnake_result {
         Ok(snake) => {
+            tag::set_tags_for_battlesnake(&state.db, snake.battlesnake_id, &form.tag_ids)
+                .await
+                .wrap_err("Failed to set battlesnake tags")?;
+
             if snake.visibility == Visibility::Public {
                 state
                     .discord
@@ -235,6 +354,16 @@ pub async fn edit_battlesnake(
             .with_status(StatusCode::FORBIDDEN);
     }
 
+    let catalog = tag::get_tag_catalog(&state.db)
+        .await
+        .wrap_err("Failed to get tag catalog")?;
+    let selected_tag_ids: Vec<Uuid> = tag::get_tags_for_battlesnake(&state.db, battlesnake_id)
+        .await
+        .wrap_err("Failed to get battlesnake tags")?
+        .iter()
+        .map(|t| t.tag_id)
+        .collect();
+
     // Use flash from page_factory (already extracted and cleared from DB)
     let flash = page_factory.flash.clone();
 
@@ -267,6 +396,8 @@ pub async fn edit_battlesnake(
                     p class="help" { "Control who can add this snake to games" }
                 }
 
+                (tag_form_fields(&catalog, &selected_tag_ids))
+
                 div class="form-cta" {
                     button type="submit" class="btn solid" { "Update Battlesnake" }
                     a href="/battlesnakes" class="btn" { "Cancel" }
@@ -282,7 +413,7 @@ pub async fn update_battlesnake(
     State(state): State<AppState>,
     CurrentUserWithSession { user, session }: CurrentUserWithSession,
     Path(battlesnake_id): Path<Uuid>,
-    Form(update_data): Form<UpdateBattlesnake>,
+    RawForm(form_bytes): RawForm,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
     // First check if the battlesnake exists and belongs to the user
     let exists = battlesnake::belongs_to_user(&state.db, battlesnake_id, user.user_id)
@@ -293,6 +424,31 @@ pub async fn update_battlesnake(
         return Err("Battlesnake not found or you don't have permission to update it".to_string())
             .with_status(StatusCode::FORBIDDEN);
     }
+
+    let form = parse_battlesnake_form(&form_bytes).with_status(StatusCode::BAD_REQUEST)?;
+
+    // Enforce the tag cap before writing anything
+    if form.tag_ids.len() > tag::MAX_TAGS_PER_SNAKE {
+        session::set_flash_message(
+            &state.db,
+            session.session_id,
+            format!(
+                "A battlesnake can have at most {} tags",
+                tag::MAX_TAGS_PER_SNAKE
+            ),
+            session::FLASH_TYPE_ERROR,
+        )
+        .await
+        .wrap_err("Failed to set flash message")?;
+
+        return Ok(Redirect::to(&format!("/battlesnakes/{battlesnake_id}/edit")).into_response());
+    }
+
+    let update_data = UpdateBattlesnake {
+        name: form.name,
+        url: form.url,
+        visibility: form.visibility,
+    };
 
     // Update the battlesnake
     let update_result = battlesnake::update_battlesnake(
@@ -305,6 +461,10 @@ pub async fn update_battlesnake(
 
     match update_result {
         Ok(_) => {
+            tag::set_tags_for_battlesnake(&state.db, battlesnake_id, &form.tag_ids)
+                .await
+                .wrap_err("Failed to set battlesnake tags")?;
+
             // Flash message for success and redirect
             session::set_flash_message(
                 &state.db,
@@ -559,6 +719,11 @@ pub async fn view_battlesnake_profile(
         .await
         .wrap_err("Failed to get snake health status")?;
 
+    // Curated language/platform tags for this snake
+    let snake_tags = tag::get_tags_for_battlesnake(&state.db, battlesnake_id)
+        .await
+        .wrap_err("Failed to get battlesnake tags")?;
+
     let flash = page_factory.flash.clone();
 
     // Compute stats
@@ -647,6 +812,17 @@ pub async fn view_battlesnake_profile(
                                         style="max-width:320px;height:auto;display:block;margin-bottom:4px;" {}
                                     span class="text-muted small" {
                                         "Head: " (display_head) " · Tail: " (display_tail) " · Color: " (raw_color)
+                                    }
+                                }
+                                @if !snake_tags.is_empty() {
+                                    div class="mt-2" {
+                                        @for t in &snake_tags {
+                                            @if t.category == tag::TagCategory::Language {
+                                                span class="badge bg-info text-dark" style="margin-right: 4px;" { (t.name) }
+                                            } @else {
+                                                span class="badge bg-secondary text-white" style="margin-right: 4px;" { (t.name) }
+                                            }
+                                        }
                                     }
                                 }
                                 @if is_owner {

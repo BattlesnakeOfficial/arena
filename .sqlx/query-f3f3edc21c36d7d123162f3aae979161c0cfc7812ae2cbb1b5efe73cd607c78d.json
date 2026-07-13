@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO battlesnake_tags (battlesnake_id, tag_id)\n            SELECT $1, tag_id\n            FROM UNNEST($2::uuid[]) AS t(tag_id)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "UuidArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f3f3edc21c36d7d123162f3aae979161c0cfc7812ae2cbb1b5efe73cd607c78d"
+}
