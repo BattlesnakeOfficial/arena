@@ -1,6 +1,7 @@
 pub mod board;
 pub mod food;
 pub mod royale;
+pub mod snail;
 pub mod standard;
 pub mod types;
 

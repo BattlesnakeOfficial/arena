@@ -64,6 +64,21 @@ pub struct BoardState {
     pub hazards: Vec<Point>,
 }
 
+impl BoardState {
+    /// Hazard entries that are actually on the board.
+    ///
+    /// Snail Mode (see [`crate::snail`]) stores pending-trail bookkeeping as
+    /// out-of-bounds points inside `hazards` (Go map parity). Anything
+    /// user-facing -- snake /move payloads, board-viewer frames -- must use
+    /// this view instead of raw `hazards` so bookkeeping points never leak.
+    /// Duplicates (stacked hazards) are preserved.
+    pub fn on_board_hazards(&self) -> impl Iterator<Item = &Point> {
+        self.hazards
+            .iter()
+            .filter(|p| p.x >= 0 && p.x < self.width && p.y >= 0 && p.y < self.height)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
     Up,
