@@ -250,6 +250,20 @@ pub fn apply_turn(game: &mut EngineGame, moves: &[(String, Direction)]) {
     }
 }
 
+/// Spawn food for the next turn in modes that spawn food.
+///
+/// Food spawning lives outside the per-turn rules pipeline (matching the Go
+/// engine, where the game loop spawns food between turns), so every caller of
+/// `apply_turn` must also call this. Constrictor games never spawn food; all
+/// other modes use the standard chance/minimum settings.
+pub fn spawn_food(game: &mut EngineGame) {
+    if game.meta.ruleset_name == "constrictor" {
+        return;
+    }
+    let mut rng = rand::thread_rng();
+    rules::food::maybe_spawn_food(&mut rng, &mut game.board, &game.meta.settings);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1273,6 +1287,38 @@ mod tests {
             },
             snake_names,
         }
+    }
+
+    #[test]
+    fn test_spawn_food_standard_respects_minimum_food() {
+        let mut game = create_test_game(2);
+        game.board.food.clear();
+
+        spawn_food(&mut game);
+
+        // minimum_food is 1, so an empty board must get food back.
+        assert!(
+            !game.board.food.is_empty(),
+            "standard games must respawn food up to minimum_food"
+        );
+    }
+
+    #[test]
+    fn test_spawn_food_constrictor_never_spawns() {
+        let mut game = create_test_game(2);
+        game.meta.ruleset_name = "constrictor".to_string();
+        game.board.food.clear();
+
+        // food_spawn_chance is probabilistic; run enough iterations that a
+        // broken guard would virtually always spawn at least once.
+        for _ in 0..100 {
+            spawn_food(&mut game);
+        }
+
+        assert!(
+            game.board.food.is_empty(),
+            "constrictor games must never spawn food"
+        );
     }
 
     /// Test that create_initial_game assigns unique IDs when the same battlesnake
