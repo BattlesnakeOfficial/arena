@@ -47,7 +47,9 @@ fn engine_status(status: GameStatus) -> &'static str {
     match status {
         GameStatus::Waiting => "pending",
         GameStatus::Running => "running",
-        GameStatus::Finished => "complete",
+        // "complete" for failed games too: the board's only concern is
+        // whether more frames are coming, and they never are.
+        GameStatus::Finished | GameStatus::Failed => "complete",
     }
 }
 
@@ -415,6 +417,7 @@ mod tests {
         assert_eq!(engine_status(GameStatus::Waiting), "pending");
         assert_eq!(engine_status(GameStatus::Running), "running");
         assert_eq!(engine_status(GameStatus::Finished), "complete");
+        assert_eq!(engine_status(GameStatus::Failed), "complete");
     }
 
     #[test]
