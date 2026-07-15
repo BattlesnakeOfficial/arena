@@ -270,7 +270,9 @@ pub async fn show_leaderboard(
                     div class="label" { "Next matchmaker run" }
                     div class="value sm" {
                         @if enabled_count < leaderboard::MIN_MATCH_SIZE {
-                            "paused — needs at least "
+                            // "waiting", not "paused": entry status badges say
+                            // "Paused" and e2e locators match text loosely.
+                            "waiting for at least "
                             (leaderboard::MIN_MATCH_SIZE)
                             " healthy snakes ("
                             (enabled_count)
