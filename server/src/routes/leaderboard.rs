@@ -173,11 +173,21 @@ pub async fn show_leaderboard(
         vec![]
     };
 
-    // Compute next matchmaker run time
-    let next_run_str = status.last_game_created_at.map(|last| {
-        let next_run = last + chrono::Duration::seconds(MATCHMAKER_INTERVAL_SECS as i64);
-        HumanTime::from(next_run).to_string()
-    });
+    // Compute next matchmaker run time. When the ladder is starved the
+    // matchmaker no-ops, so "last game + interval" would show an ever-staler
+    // past timestamp — say why matchmaking is paused instead.
+    let enabled_count = leaderboard::get_active_entries(&state.db, leaderboard_id)
+        .await
+        .wrap_err("Failed to fetch active entries")?
+        .len();
+    let next_run_str = if enabled_count < leaderboard::MIN_MATCH_SIZE {
+        None
+    } else {
+        status.last_game_created_at.map(|last| {
+            let next_run = last + chrono::Duration::seconds(MATCHMAKER_INTERVAL_SECS as i64);
+            HumanTime::from(next_run).to_string()
+        })
+    };
 
     let rank_start = page * per_page;
     let sort_param = pagination.sort.as_str();
@@ -259,7 +269,13 @@ pub async fn show_leaderboard(
                 div class="stat" {
                     div class="label" { "Next matchmaker run" }
                     div class="value sm" {
-                        @if let Some(ref next) = next_run_str {
+                        @if enabled_count < leaderboard::MIN_MATCH_SIZE {
+                            "paused — needs at least "
+                            (leaderboard::MIN_MATCH_SIZE)
+                            " healthy snakes ("
+                            (enabled_count)
+                            " enabled)"
+                        } @else if let Some(ref next) = next_run_str {
                             (next)
                         } @else {
                             "waiting for first games"
