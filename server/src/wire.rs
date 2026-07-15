@@ -215,11 +215,22 @@ impl Game {
 
         let settings = &engine_game.meta.settings;
 
+        // Internal `meta.ruleset_name` drives engine dispatch; the wire
+        // protocol mirrors play.battlesnake.com. Snail Mode upstream is a
+        // community *map* on the standard ruleset, so snakes see
+        // `ruleset.name = "standard"` with `game.map = "snail_mode"`
+        // (existing community snakes key off `game.map`). Other modes keep
+        // their ruleset name and an empty map, unchanged.
+        let (wire_ruleset_name, wire_map) = match engine_game.meta.ruleset_name.as_str() {
+            "snail_mode" => ("standard".to_string(), "snail_mode".to_string()),
+            name => (name.to_string(), String::new()),
+        };
+
         Game {
             game: NestedGame {
                 id: engine_game.meta.game_id.clone(),
                 ruleset: Ruleset {
-                    name: engine_game.meta.ruleset_name.clone(),
+                    name: wire_ruleset_name,
                     version: "v1.0.0".to_string(),
                     settings: RulesetSettings {
                         food_spawn_chance: settings.food_spawn_chance,
@@ -245,7 +256,7 @@ impl Game {
                     },
                 },
                 timeout: engine_game.meta.timeout,
-                map: String::new(),
+                map: wire_map,
                 source: String::new(),
             },
             turn: engine_game.board.turn,
@@ -259,10 +270,12 @@ impl Game {
                     .iter()
                     .map(&convert_snake)
                     .collect(),
+                // Snail Mode stores pending-trail bookkeeping as off-board
+                // points inside `board.hazards`; snakes must only ever see
+                // real, on-board hazards (stacked duplicates included).
                 hazards: engine_game
                     .board
-                    .hazards
-                    .iter()
+                    .on_board_hazards()
                     .map(Position::from)
                     .collect(),
             },
@@ -468,6 +481,84 @@ mod tests {
             "royale games must serialize their real shrink cadence"
         );
         assert_eq!(settings["hazardDamagePerTurn"], 14);
+    }
+
+    /// Snail Mode wire parity with play.battlesnake.com: upstream it is a
+    /// community map on the standard ruleset, so snakes must see ruleset
+    /// "standard" with `game.map = "snail_mode"` (community snakes key off
+    /// `game.map`), even though the engine dispatches on the internal
+    /// ruleset name "snail_mode".
+    #[test]
+    fn test_snail_mode_wire_sends_standard_ruleset_and_snail_map() {
+        let mut engine_game = create_test_engine_game();
+        engine_game.meta.ruleset_name = "snail_mode".to_string();
+        engine_game.meta.settings.hazard_damage_per_turn = 14;
+
+        let contexts = HashMap::new();
+        let customizations = HashMap::new();
+        let wire = Game::from_engine_game(&engine_game, "s1", &contexts, &customizations);
+        let json: Value = serde_json::to_value(&wire).unwrap();
+
+        assert_eq!(json["game"]["ruleset"]["name"], "standard");
+        assert_eq!(json["game"]["map"], "snail_mode");
+        let settings = &json["game"]["ruleset"]["settings"];
+        assert_eq!(settings["hazardDamagePerTurn"], 14);
+        assert_eq!(settings["royale"]["shrinkEveryNTurns"], 0);
+    }
+
+    /// Other modes are unchanged by the map-field wiring: ruleset name
+    /// passes through and the map stays empty.
+    #[test]
+    fn test_non_snail_modes_keep_ruleset_name_and_empty_map() {
+        for ruleset in ["standard", "royale"] {
+            let mut engine_game = create_test_engine_game();
+            engine_game.meta.ruleset_name = ruleset.to_string();
+
+            let contexts = HashMap::new();
+            let customizations = HashMap::new();
+            let wire = Game::from_engine_game(&engine_game, "s1", &contexts, &customizations);
+            let json: Value = serde_json::to_value(&wire).unwrap();
+
+            assert_eq!(json["game"]["ruleset"]["name"], ruleset);
+            assert_eq!(json["game"]["map"], "");
+        }
+    }
+
+    /// HARD requirement: snakes must never receive out-of-bounds hazard
+    /// points in /move payloads. Snail Mode's pending-trail bookkeeping
+    /// lives as off-board points in `board.hazards` and must be filtered
+    /// out, while on-board stacked duplicates pass through intact.
+    #[test]
+    fn test_off_board_hazard_bookkeeping_never_reaches_snakes() {
+        let mut engine_game = create_test_engine_game();
+        engine_game.meta.ruleset_name = "snail_mode".to_string();
+        engine_game.board.hazards = vec![
+            rules::Point::new(2, 3),
+            rules::Point::new(2, 3),
+            rules::Point::new(2, 3),
+            // Pending tails stored at y + height (board is 11x11).
+            rules::Point::new(2, 14),
+            rules::Point::new(2, 14),
+            rules::Point::new(2, 14),
+        ];
+
+        let contexts = HashMap::new();
+        let customizations = HashMap::new();
+        let wire = Game::from_engine_game(&engine_game, "s1", &contexts, &customizations);
+
+        assert_eq!(
+            wire.board.hazards.len(),
+            3,
+            "only on-board hazard entries may be serialized"
+        );
+        for h in &wire.board.hazards {
+            assert!(
+                h.x >= 0 && h.x < 11 && h.y >= 0 && h.y < 11,
+                "out-of-bounds hazard ({}, {}) leaked to the wire",
+                h.x,
+                h.y
+            );
+        }
     }
 
     #[test]

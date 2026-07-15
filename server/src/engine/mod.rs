@@ -83,8 +83,10 @@ pub fn create_initial_game(
 
     // Hazard damage: the arena has historically used 15 for standard games
     // (where it is inert -- standard boards never spawn hazards), and we keep
-    // that unchanged. Royale uses 14, the default in the canonical Go rules
-    // (`hazardDamagePerTurn` in BattlesnakeOfficial/rules cli).
+    // that unchanged. Royale and Snail Mode use 14, the default in the
+    // canonical Go rules (`hazardDamagePerTurn` in BattlesnakeOfficial/rules
+    // cli, which is what map-driven hazards like snail_mode ran with on
+    // play.battlesnake.com).
     let (ruleset_name, settings, royale) = match game_type {
         GameType::Royale => (
             "royale",
@@ -98,7 +100,19 @@ pub fn create_initial_game(
                 seed: game_seed(game_id),
             }),
         ),
-        // Constrictor / Snail Mode / Other currently run standard rules.
+        // Internal name only: on the wire snakes see ruleset "standard" with
+        // game.map = "snail_mode", matching play.battlesnake.com where Snail
+        // Mode was a community map on the standard ruleset (see wire.rs).
+        GameType::SnailMode => (
+            "snail_mode",
+            StandardSettings {
+                food_spawn_chance: 15,
+                minimum_food: 1,
+                hazard_damage_per_turn: 14,
+            },
+            None,
+        ),
+        // Constrictor / Other currently run standard rules.
         _ => (
             "standard",
             StandardSettings {
@@ -175,11 +189,19 @@ pub fn run_game_with_random_moves(mut game: EngineGame) -> GameResult {
             .collect();
 
         // Apply the turn
-        let _game_over = match &game.meta.royale {
-            Some(royale) => {
+        let _game_over = match game.meta.ruleset_name.as_str() {
+            "royale" => {
+                let royale = game
+                    .meta
+                    .royale
+                    .as_ref()
+                    .expect("royale games carry RoyaleSettings");
                 rules::royale::execute_turn(&mut game.board, &moves, &game.meta.settings, royale)
             }
-            None => rules::standard::execute_turn(&mut game.board, &moves, &game.meta.settings),
+            "snail_mode" => {
+                rules::snail::execute_turn(&mut game.board, &moves, &game.meta.settings)
+            }
+            _ => rules::standard::execute_turn(&mut game.board, &moves, &game.meta.settings),
         }
         .expect("execute_turn failed");
 
@@ -240,13 +262,23 @@ pub fn apply_turn(game: &mut EngineGame, moves: &[(String, Direction)]) {
     rules::standard::feed_snakes(&mut game.board);
     let _ = rules::standard::eliminate_snakes(&mut game.board);
 
-    // Royale: spawn/grow hazards for the next turn (matches Go's
-    // StageSpawnHazardsShrinkMap, which runs after elimination). Uses
-    // `board.turn + 1` internally, so this must run before the caller
-    // increments `board.turn`.
-    if let Some(royale) = &game.meta.royale {
-        rules::royale::populate_hazards(&mut game.board, royale)
-            .expect("royale hazard population failed: invalid shrink frequency");
+    // Mode-specific post-turn hazard updates.
+    match game.meta.ruleset_name.as_str() {
+        // Royale: spawn/grow hazards for the next turn (matches Go's
+        // StageSpawnHazardsShrinkMap, which runs after elimination). Uses
+        // `board.turn + 1` internally, so this must run before the caller
+        // increments `board.turn`.
+        "royale" => {
+            if let Some(royale) = &game.meta.royale {
+                rules::royale::populate_hazards(&mut game.board, royale)
+                    .expect("royale hazard population failed: invalid shrink frequency");
+            }
+        }
+        // Snail Mode: decay hazard trails and record vacated tail squares
+        // (matches Go's SnailModeMap.PostUpdateBoard, which runs after all
+        // ruleset stages).
+        "snail_mode" => rules::snail::post_update_board(&mut game.board),
+        _ => {}
     }
 }
 
@@ -1575,5 +1607,129 @@ mod tests {
         };
 
         assert_eq!(run(game_id), run(game_id));
+    }
+
+    // === Snail Mode wiring tests ===
+
+    #[test]
+    fn test_create_initial_game_snail_mode_settings() {
+        let battlesnakes = make_battlesnake_details(2);
+        let game = create_initial_game(
+            Uuid::new_v4(),
+            GameBoardSize::Medium,
+            GameType::SnailMode,
+            &battlesnakes,
+        );
+
+        assert_eq!(game.meta.ruleset_name, "snail_mode");
+        assert_eq!(
+            game.meta.settings.hazard_damage_per_turn, 14,
+            "snail mode uses the Go rules default hazard damage"
+        );
+        assert_eq!(game.meta.settings.food_spawn_chance, 15);
+        assert_eq!(game.meta.settings.minimum_food, 1);
+        assert!(game.meta.royale.is_none());
+        assert!(game.board.hazards.is_empty());
+    }
+
+    /// Snail Mode through the LIVE game path (`apply_turn`, as driven by
+    /// game_runner): trails appear in board-viewer frames one turn after the
+    /// tail square is recorded, stacked to snake length, and the off-board
+    /// bookkeeping points never reach a frame.
+    #[test]
+    fn test_snail_game_trails_appear_in_frames_without_bookkeeping_points() {
+        let battlesnakes = make_battlesnake_details(2);
+        let mut game = create_initial_game(
+            Uuid::new_v4(),
+            GameBoardSize::Medium,
+            GameType::SnailMode,
+            &battlesnakes,
+        );
+
+        // Deterministic fixture: two straight snakes walking up, no food.
+        let ids: Vec<String> = game.board.snakes.iter().map(|s| s.id.clone()).collect();
+        game.board.snakes[0].body = vec![Point::new(2, 5), Point::new(2, 4), Point::new(2, 3)];
+        game.board.snakes[1].body = vec![Point::new(8, 5), Point::new(8, 4), Point::new(8, 3)];
+        game.board.food.clear();
+
+        let count_at = |frame: &frame::EngineGameFrame, x: i32, y: i32| {
+            frame
+                .hazards
+                .iter()
+                .filter(|h| h.x == x && h.y == y)
+                .count()
+        };
+
+        for i in 0..4 {
+            let moves = vec![
+                (ids[0].clone(), Direction::Up),
+                (ids[1].clone(), Direction::Up),
+            ];
+            apply_turn(&mut game, &moves);
+            game.board.turn += 1;
+
+            let frame = frame::game_to_frame(&game, &[], &[], &std::collections::HashMap::new());
+            for h in &frame.hazards {
+                assert!(
+                    h.x >= 0 && h.x < 11 && h.y >= 0 && h.y < 11,
+                    "off-board bookkeeping point ({}, {}) leaked into a frame",
+                    h.x,
+                    h.y
+                );
+            }
+
+            match i {
+                0 => {
+                    // Tails recorded off-board only: engine state has
+                    // hazards, the frame shows none.
+                    assert!(frame.hazards.is_empty());
+                    assert!(!game.board.hazards.is_empty());
+                }
+                1 => {
+                    // Each vacated tail square lands with stack = length 3.
+                    assert_eq!(count_at(&frame, 2, 4), 3);
+                    assert_eq!(count_at(&frame, 8, 4), 3);
+                    assert_eq!(frame.hazards.len(), 6);
+                }
+                2 => {
+                    // First squares decay to 2; next squares land at 3.
+                    assert_eq!(count_at(&frame, 2, 4), 2);
+                    assert_eq!(count_at(&frame, 2, 5), 3);
+                    assert_eq!(count_at(&frame, 8, 4), 2);
+                    assert_eq!(count_at(&frame, 8, 5), 3);
+                    assert_eq!(frame.hazards.len(), 10);
+                }
+                _ => {
+                    // 1 / 2 / 3 fading trail behind each snake.
+                    assert_eq!(count_at(&frame, 2, 4), 1);
+                    assert_eq!(count_at(&frame, 2, 5), 2);
+                    assert_eq!(count_at(&frame, 2, 6), 3);
+                    assert_eq!(frame.hazards.len(), 12);
+                }
+            }
+        }
+    }
+
+    /// Snail Mode games complete under the random-move runner (dispatch is
+    /// wired, no panics, all snakes placed).
+    #[test]
+    fn test_run_full_snail_mode_game() {
+        for _ in 0..5 {
+            let battlesnakes = make_battlesnake_details(4);
+            let game = create_initial_game(
+                Uuid::new_v4(),
+                GameBoardSize::Medium,
+                GameType::SnailMode,
+                &battlesnakes,
+            );
+            let result = run_game_with_random_moves(game);
+
+            assert_eq!(result.placements.len(), 4);
+            let mut ids = result.placements.clone();
+            ids.sort();
+            ids.dedup();
+            assert_eq!(ids.len(), 4);
+            assert!(result.final_turn > 0 && result.final_turn <= MAX_TURNS);
+        }
     }
 }
