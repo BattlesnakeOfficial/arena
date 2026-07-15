@@ -236,6 +236,9 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
         // Apply the moves using the engine
         crate::engine::apply_turn(&mut engine_game, &moves);
         engine_game.board.turn += 1;
+        // Spawn food for the next turn before the frame is recorded, so the
+        // viewer and the snakes' next /move requests both see it.
+        crate::engine::spawn_food(&mut engine_game);
 
         // Track newly eliminated snakes
         for snake in &engine_game.board.snakes {
