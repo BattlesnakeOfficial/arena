@@ -183,7 +183,13 @@ pub fn game_to_frame(
             })
             .collect(),
         food: game.board.food.iter().map(|p| (*p).into()).collect(),
-        hazards: game.board.hazards.iter().map(|p| (*p).into()).collect(),
+        // Snail Mode stores pending-trail bookkeeping as off-board points
+        // inside `board.hazards`. Frames feed the board viewer (which should
+        // only show real, on-board hazards -- stacked duplicates included)
+        // and are never read back into engine state (`run_game` retries wipe
+        // partial turns and replay from turn 0), so bookkeeping points are
+        // excluded from persistence.
+        hazards: game.board.on_board_hazards().map(|p| (*p).into()).collect(),
     }
 }
 
@@ -387,6 +393,35 @@ mod tests {
         assert_eq!(frame.hazards.len(), 2);
         assert_eq!(frame.hazards[0].x, 0);
         assert_eq!(frame.hazards[0].y, 0);
+    }
+
+    /// Snail Mode keeps pending-trail bookkeeping as off-board points in
+    /// `board.hazards`. Frames must only carry real on-board hazards --
+    /// including stacked duplicates -- and never the bookkeeping points.
+    #[test]
+    fn test_game_to_frame_excludes_off_board_bookkeeping_hazards() {
+        let mut game = create_test_game();
+        game.board.hazards = vec![
+            Point::new(4, 4),
+            Point::new(4, 4),
+            Point::new(4, 4),
+            // Off-board pending tails (y + height) and other out-of-bounds.
+            Point::new(4, 15),
+            Point::new(4, 15),
+            Point::new(0, 11),
+            Point::new(-1, 5),
+        ];
+
+        let frame = game_to_frame(&game, &[], &[], &std::collections::HashMap::new());
+
+        assert_eq!(
+            frame.hazards.len(),
+            3,
+            "only the stacked on-board hazards belong in the frame"
+        );
+        for h in &frame.hazards {
+            assert_eq!((h.x, h.y), (4, 4));
+        }
     }
 
     #[test]
