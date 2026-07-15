@@ -58,6 +58,9 @@ pub struct AppConfig {
     /// Consecutive failed health probes before the sweeper pulls a snake
     /// from leaderboard matchmaking (BS-3534).
     pub snake_health_failure_threshold: i32,
+    /// Consecutive healthy probes of a deactivated snake before the sweeper
+    /// puts it back into matchmaking on its own.
+    pub snake_health_recovery_threshold: i32,
 
     /// Max transactional emails one recipient address may receive per hour,
     /// across all purposes (BS-7e38). Play's safety net against logic bugs
@@ -133,6 +136,7 @@ impl AppConfig {
             )
             .max(1),
             snake_health_failure_threshold: parse_env("SNAKE_HEALTH_FAILURE_THRESHOLD", 3).max(1),
+            snake_health_recovery_threshold: parse_env("SNAKE_HEALTH_RECOVERY_THRESHOLD", 2).max(1),
             email_per_recipient_hourly_limit: parse_env("EMAIL_PER_RECIPIENT_HOURLY_LIMIT", 5)
                 .max(1),
 
@@ -176,6 +180,7 @@ impl AppConfig {
             game_creation_rate_limit: 20,
             game_creation_rate_limit_window_minutes: 10,
             snake_health_failure_threshold: 3,
+            snake_health_recovery_threshold: 2,
             email_per_recipient_hourly_limit: 5,
             home_feed_cache_secs: 0,
             tokio_worker_multiplier: 2,
