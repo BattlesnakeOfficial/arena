@@ -56,6 +56,18 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
             crate::models::game::reset_game_state_for_retry(pool, game_id).await?;
         }
         GameStatus::Waiting => {}
+        GameStatus::Failed => {
+            // Terminal: an operator (or the stuck-game sweeper) declared
+            // this game dead. A straggling retry must not resurrect it —
+            // its snakes may have moved on and its "live" window is long
+            // gone.
+            tracing::warn!(
+                game_id = %game_id,
+                "Game is marked failed; skipping re-run"
+            );
+            game_channels.cleanup(game_id).await;
+            return Ok(());
+        }
     }
 
     // Emit queue_wait metric if enqueued_at is available
@@ -561,6 +573,28 @@ mod tests {
         run_game(&app_state, game_id).await?;
 
         // Not a leaderboard or tournament game: nothing to enqueue.
+        assert_eq!(count_jobs(&pool, "LeaderboardRatingUpdateJob").await?, 0);
+        assert_eq!(count_jobs(&pool, "RunMatchJob").await?, 0);
+
+        Ok(())
+    }
+
+    /// A retry on a failed game must not resurrect it: no re-run, no
+    /// post-completion hooks, status stays failed. The fixture game has no
+    /// battlesnakes, so reaching the normal run path would fail loudly —
+    /// returning Ok proves the short-circuit.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn failed_game_is_terminal_and_skips_rerun(pool: PgPool) -> cja::Result<()> {
+        let app_state = crate::state::AppState::test_from_pool(pool.clone());
+        let game_id = fixture_game(&pool, "failed").await?;
+
+        run_game(&app_state, game_id).await?;
+
+        let status: String = sqlx::query_scalar("SELECT status FROM games WHERE game_id = $1")
+            .bind(game_id)
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(status, "failed");
         assert_eq!(count_jobs(&pool, "LeaderboardRatingUpdateJob").await?, 0);
         assert_eq!(count_jobs(&pool, "RunMatchJob").await?, 0);
 
