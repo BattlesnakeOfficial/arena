@@ -934,7 +934,7 @@ pub async fn get_activity_feed(
          JOIN users u ON b.user_id = u.user_id
          JOIN leaderboard_games lg ON lgr.leaderboard_game_id = lg.leaderboard_game_id
          WHERE lg.leaderboard_id = $1
-         ORDER BY lgr.created_at DESC
+         ORDER BY lgr.created_at DESC, lgr.leaderboard_game_id DESC, lgr.placement ASC
          LIMIT $2"#,
         leaderboard_id,
         limit
