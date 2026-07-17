@@ -24,6 +24,14 @@ pub struct JobConfig {
     pub workers: usize,
 }
 
+/// Eyes telemetry (<https://eyes.coreyja.com>) identifiers. Present only
+/// when both `EYES_ORG_ID` and `EYES_APP_ID` are set to valid UUIDs.
+#[derive(Clone, Copy, Debug)]
+pub struct EyesConfig {
+    pub org_id: uuid::Uuid,
+    pub app_id: uuid::Uuid,
+}
+
 /// Which long-running components to start. Driven by `<FEATURE>_DISABLED`
 /// env vars (a feature is on unless explicitly disabled).
 #[derive(Clone, Copy, Debug)]
@@ -73,6 +81,8 @@ pub struct AppConfig {
     pub gcp_logging: bool,
     pub gcp_project_id: Option<String>,
     pub rust_log: String,
+    /// Eyes telemetry, enabled when `EYES_ORG_ID` + `EYES_APP_ID` are set.
+    pub eyes: Option<EyesConfig>,
 
     pub job: JobConfig,
     pub features: FeatureFlags,
@@ -141,6 +151,7 @@ impl AppConfig {
             gcp_logging: std::env::var("GCP_LOGGING").is_ok(),
             gcp_project_id: optional_env("GCP_PROJECT_ID"),
             rust_log: std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
+            eyes: eyes_config_from_env()?,
 
             job: JobConfig {
                 poll_interval_ms: parse_env("ARENA_JOB_POLL_INTERVAL_MS", 60_000),
@@ -182,6 +193,7 @@ impl AppConfig {
             gcp_logging: false,
             gcp_project_id: None,
             rust_log: "info".to_string(),
+            eyes: None,
             job: JobConfig {
                 poll_interval_ms: 60_000,
                 lock_timeout_secs: 7200,
@@ -216,6 +228,30 @@ fn github_config_from_env() -> Option<GitHubOAuthConfig> {
         api_url: std::env::var("GITHUB_API_URL")
             .unwrap_or_else(|_| "https://api.github.com".to_string()),
     })
+}
+
+/// Build the Eyes telemetry config. `None` when neither ID is set (Eyes is
+/// simply off); a lone half-configured ID logs a note and stays off; an
+/// invalid UUID is a hard error so a typo doesn't silently drop telemetry.
+fn eyes_config_from_env() -> cja::Result<Option<EyesConfig>> {
+    match (optional_env("EYES_ORG_ID"), optional_env("EYES_APP_ID")) {
+        (Some(org_id), Some(app_id)) => {
+            let org_id = uuid::Uuid::parse_str(&org_id)
+                .map_err(|e| cja::color_eyre::eyre::eyre!("Invalid EYES_ORG_ID {org_id:?}: {e}"))?;
+            let app_id = uuid::Uuid::parse_str(&app_id)
+                .map_err(|e| cja::color_eyre::eyre::eyre!("Invalid EYES_APP_ID {app_id:?}: {e}"))?;
+            Ok(Some(EyesConfig { org_id, app_id }))
+        }
+        (None, None) => Ok(None),
+        (Some(_), None) => {
+            eprintln!("Skipping Eyes: EYES_ORG_ID set but EYES_APP_ID missing");
+            Ok(None)
+        }
+        (None, Some(_)) => {
+            eprintln!("Skipping Eyes: EYES_APP_ID set but EYES_ORG_ID missing");
+            Ok(None)
+        }
+    }
 }
 
 /// Build the Mailgun config, or `None` when `MAILGUN_API_KEY` is unset

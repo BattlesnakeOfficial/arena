@@ -89,7 +89,7 @@ fn main() -> color_eyre::Result<()> {
 async fn run_application(config: config::AppConfig) -> cja::Result<()> {
     // Initialize tracing (returns Eyes shutdown handle if configured)
     let eyes_shutdown_handle = if config.gcp_logging {
-        telemetry::setup_gcp_tracing(&config.rust_log)?
+        telemetry::setup_gcp_tracing(&config.rust_log, config.eyes.as_ref())?
     } else {
         setup_tracing("arent")?
     };

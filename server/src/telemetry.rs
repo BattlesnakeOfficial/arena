@@ -125,16 +125,41 @@ impl tracing::field::Visit for JsonVisitor {
     }
 }
 
-/// Sets up GCP-compatible structured JSON logging.
+/// Sets up GCP-compatible structured JSON logging, plus the Eyes telemetry
+/// layer when configured (see `AppConfig::eyes`).
 ///
-/// Returns `Ok(None)` for the Eyes shutdown handle (not used with GCP logging),
-/// maintaining type compatibility with `cja::setup::setup_tracing`.
-pub fn setup_gcp_tracing(rust_log: &str) -> color_eyre::Result<Option<EyesShutdownHandle>> {
+/// Returns the Eyes shutdown handle when Eyes is enabled, maintaining type
+/// compatibility with `cja::setup::setup_tracing` (the non-GCP path, which
+/// wires the same layer itself).
+pub fn setup_gcp_tracing(
+    rust_log: &str,
+    eyes: Option<&crate::config::EyesConfig>,
+) -> color_eyre::Result<Option<EyesShutdownHandle>> {
     use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
     let env_filter = EnvFilter::builder().parse(rust_log).map_err(|e| {
         color_eyre::eyre::eyre!("Couldn't create env filter from {}: {}", rust_log, e)
     })?;
+
+    let (eyes_layer, eyes_shutdown_handle) = match eyes {
+        Some(eyes) => {
+            // The server URL and transport come from EYES_URL / EYES_TRANSPORT,
+            // read inside the eyes-subscriber library itself — identical
+            // behavior to the `cja::setup::setup_tracing` path.
+            let (layer, handle) =
+                eyes_subscriber::EyesSubscriberBuilder::build_from_env(eyes.org_id, eyes.app_id)
+                    .map_err(|e| color_eyre::eyre::eyre!("Failed to build Eyes subscriber: {e}"))?;
+            println!(
+                "Eyes layer configured (org: {}, app: {})",
+                eyes.org_id, eyes.app_id
+            );
+            (Some(layer), Some(handle))
+        }
+        None => {
+            println!("Skipping Eyes layer");
+            (None, None)
+        }
+    };
 
     tracing_subscriber::registry()
         .with(env_filter)
@@ -143,9 +168,10 @@ pub fn setup_gcp_tracing(rust_log: &str) -> color_eyre::Result<Option<EyesShutdo
                 .event_format(GcpJsonFormatter)
                 .with_ansi(false),
         )
+        .with(eyes_layer)
         .try_init()?;
 
-    Ok(None)
+    Ok(eyes_shutdown_handle)
 }
 
 /// Parse the `X-Cloud-Trace-Context` header value and return a GCP trace path.

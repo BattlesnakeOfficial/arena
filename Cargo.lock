@@ -178,6 +178,7 @@ dependencies = [
  "color-eyre",
  "colored",
  "dirs",
+ "eyes-subscriber",
  "futures",
  "google-cloud-storage",
  "hex",
