@@ -2009,6 +2009,7 @@ pub async fn run_round(
             "Owner ran round {} of tournament {tournament_id}",
             t.current_round
         ),
+        None,
     )
     .await
     .wrap_err("Failed to enqueue round job")?;

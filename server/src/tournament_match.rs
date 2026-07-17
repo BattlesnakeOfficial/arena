@@ -137,6 +137,7 @@ pub async fn run_match(app_state: &AppState, match_id: Uuid) -> cja::Result<()> 
             },
             app_state.clone(),
             format!("Match {match_id} already completed; ensuring round progression"),
+            None,
         )
         .await
         .wrap_err("Failed to enqueue tournament status update")?;
@@ -209,6 +210,7 @@ pub async fn run_match(app_state: &AppState, match_id: Uuid) -> cja::Result<()> 
                 },
                 app_state.clone(),
                 format!("Stalled game {} for match {match_id}", match_game.game_id),
+                None,
             )
             .await
             .wrap_err("Failed to re-enqueue stalled game runner")?;
@@ -347,6 +349,7 @@ pub async fn run_match(app_state: &AppState, match_id: Uuid) -> cja::Result<()> 
         },
         app_state.clone(),
         format!("Tournament match {match_id} game {game_number}"),
+        None,
     )
     .await
     .wrap_err("Failed to enqueue game runner job")?;
@@ -411,6 +414,7 @@ pub async fn run_round(app_state: &AppState, tournament_id: Uuid, round: i32) ->
                 "Tournament {tournament_id} round {} match {}",
                 tournament_match.round, tournament_match.position
             ),
+            None,
         )
         .await
         .wrap_err("Failed to enqueue match job")?;
@@ -514,6 +518,7 @@ async fn complete_and_advance(
         },
         app_state.clone(),
         format!("Match {match_id} completed"),
+        None,
     )
     .await
     .wrap_err("Failed to enqueue tournament status update")?;
@@ -586,6 +591,7 @@ pub async fn sweep_stuck_matches(app_state: &AppState) -> cja::Result<()> {
             crate::jobs::RunMatchJob { match_id },
             app_state.clone(),
             format!("Stuck-match sweep for match {match_id}"),
+            None,
         )
         .await
         .wrap_err("Failed to enqueue swept match evaluation")?;

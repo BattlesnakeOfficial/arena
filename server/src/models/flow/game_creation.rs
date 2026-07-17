@@ -236,6 +236,7 @@ impl GameCreationFlow {
             job,
             app_state,
             format!("Game {} created via flow", game.game_id),
+            None,
         )
         .await
         .wrap_err("Failed to enqueue game runner job")?;

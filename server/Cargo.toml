@@ -19,7 +19,7 @@ tracing-subscriber = { version = "0.3.16", features = ["env-filter"] }
 tracing-tree = "0.3.0"
 # Same version cja uses; needed directly to wire the Eyes layer into the
 # GCP logging path (cja's setup_tracing only wires it in the non-GCP path).
-eyes-subscriber = "0.1.4"
+eyes-subscriber = "0.2.0"
 opentelemetry-otlp = { version = "0.15.0", features = [
   "http-proto",
   "reqwest-rustls",
