@@ -287,15 +287,20 @@ pub async fn create_game(
     let job = GameRunnerJob {
         game_id: game.game_id,
     };
-    cja::jobs::Job::enqueue(job, state, format!("Game {} created via API", game.game_id))
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to enqueue game runner job: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to start game".to_string(),
-            )
-        })?;
+    cja::jobs::Job::enqueue(
+        job,
+        state,
+        format!("Game {} created via API", game.game_id),
+        None,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to enqueue game runner job: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to start game".to_string(),
+        )
+    })?;
 
     tracing::info!(
         event_type = "game_created",

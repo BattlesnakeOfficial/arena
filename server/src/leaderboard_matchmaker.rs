@@ -122,6 +122,7 @@ async fn run_matchmaker_for_leaderboard(
             job,
             app_state.clone(),
             format!("Leaderboard game {}", game.game_id),
+            None,
         )
         .await
         .wrap_err("Failed to enqueue game runner job")?;

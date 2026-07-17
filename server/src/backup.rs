@@ -265,7 +265,11 @@ pub async fn run_backup_discovery(app_state: &AppState) -> Result<(), BackupErro
             engine_game_id: game_row.id.clone(),
             batch_id: None,
         }
-        .enqueue(app_state.clone(), format!("backup game {}", game_row.id))
+        .enqueue(
+            app_state.clone(),
+            format!("backup game {}", game_row.id),
+            None,
+        )
         .await
         .wrap_err_with(|| format!("Failed to enqueue backup job for game {}", game_row.id))?;
 
@@ -397,6 +401,7 @@ pub async fn start_historical_backfill(app_state: &AppState) -> Result<(), Backu
     .enqueue(
         app_state.clone(),
         "historical backup discovery (initial)".to_string(),
+        None,
     )
     .await
     .wrap_err("Failed to enqueue initial historical discovery job")?;
@@ -469,7 +474,11 @@ async fn handle_batch_completion(app_state: &AppState, batch_id: i32) -> cja::Re
             after_created: result.next_cursor_created,
             after_id: result.next_cursor_id,
         }
-        .enqueue(app_state.clone(), "historical backup discovery".to_string())
+        .enqueue(
+            app_state.clone(),
+            "historical backup discovery".to_string(),
+            None,
+        )
         .await
         .wrap_err("Failed to enqueue next historical discovery job")?;
     }
@@ -603,7 +612,11 @@ pub async fn run_historical_backup_discovery(
             after_created: Some(last.created),
             after_id: Some(last.id.clone()),
         }
-        .enqueue(app_state.clone(), "historical backup discovery".to_string())
+        .enqueue(
+            app_state.clone(),
+            "historical backup discovery".to_string(),
+            None,
+        )
         .await
         .wrap_err("Failed to enqueue next historical discovery job")?;
         return Ok(());
@@ -642,7 +655,7 @@ pub async fn run_historical_backup_discovery(
             engine_game_id: game.id.clone(),
             batch_id: Some(batch_id),
         }
-        .enqueue(app_state.clone(), format!("backup game {}", game.id))
+        .enqueue(app_state.clone(), format!("backup game {}", game.id), None)
         .await
         .wrap_err_with(|| format!("Failed to enqueue backup job for game {}", game.id))?;
     }

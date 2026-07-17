@@ -471,6 +471,7 @@ async fn enqueue_post_completion_jobs(app_state: &AppState, game_id: Uuid) -> cj
             job,
             app_state.clone(),
             format!("Rate leaderboard game {game_id}"),
+            None,
         )
         .await
         .wrap_err("Failed to enqueue leaderboard rating update job")?;
@@ -494,6 +495,7 @@ async fn enqueue_post_completion_jobs(app_state: &AppState, game_id: Uuid) -> cj
             },
             app_state.clone(),
             format!("Game {game_id} finished for match {}", match_game.match_id),
+            None,
         )
         .await
         .wrap_err("Failed to enqueue match evaluation after game completion")?;
