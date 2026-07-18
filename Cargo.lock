@@ -178,7 +178,7 @@ dependencies = [
  "color-eyre",
  "colored",
  "dirs",
- "eyes-subscriber",
+ "eyes-subscriber 0.2.0",
  "futures",
  "google-cloud-storage",
  "hex",
@@ -568,7 +568,7 @@ dependencies = [
 [[package]]
 name = "cja"
 version = "0.0.0"
-source = "git+https://github.com/coreyja/cja?branch=main#cec5e6682ebc219f667cc85c5adc93070bb07d23"
+source = "git+https://github.com/coreyja/cja?branch=main#ad028ff68b6d86b46f7211017ca95485fab06514"
 dependencies = [
  "async-trait",
  "axum",
@@ -577,7 +577,7 @@ dependencies = [
  "chrono-tz",
  "color-eyre",
  "cron",
- "eyes-subscriber",
+ "eyes-subscriber 0.3.0",
  "futures",
  "http 1.3.1",
  "listenfd",
@@ -691,7 +691,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "117725a109d387c937a1533ce01b450cbde6b88abceea8473c4d7a85853cda3c"
 dependencies = [
  "lazy_static",
- "windows-sys 0.48.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1003,6 +1003,27 @@ name = "eyes-subscriber"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4c02b6b5dff985809ab4d6bb0836b882324c60028d4523ddaac06e1ed01a9732"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "futures-util",
+ "reqwest 0.12.15",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-tungstenite 0.24.0",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "eyes-subscriber"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "76e57398dba5c4c41c08b2d778c97e363bfddec1915e9662b28ec1ed70b1867c"
 dependencies = [
  "async-trait",
  "chrono",
@@ -5737,7 +5758,7 @@ version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf221c93e13a30d793f7645a0e7762c55d169dbb0a49671918a2319d289b10bb"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
