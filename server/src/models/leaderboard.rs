@@ -5,6 +5,10 @@ use uuid::Uuid;
 
 /// Application constants for leaderboard configuration
 pub const MATCH_SIZE: usize = 4;
+/// Smallest game the matchmaker will create when fewer than MATCH_SIZE
+/// snakes are enabled. Below this the ladder is starved and matchmaking
+/// pauses entirely.
+pub const MIN_MATCH_SIZE: usize = 2;
 pub const MIN_GAMES_FOR_RANKING: i32 = 10;
 pub const GAMES_PER_DAY: i32 = 100;
 

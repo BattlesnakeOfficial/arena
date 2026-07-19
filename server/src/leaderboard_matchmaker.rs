@@ -6,7 +6,7 @@ use crate::{
     jobs::GameRunnerJob,
     models::{
         game::{self, CreateGame, GameBoardSize, GameType},
-        leaderboard::{self, GAMES_PER_DAY, LeaderboardEntry, MATCH_SIZE},
+        leaderboard::{self, GAMES_PER_DAY, LeaderboardEntry, MATCH_SIZE, MIN_MATCH_SIZE},
     },
     state::AppState,
 };
@@ -43,15 +43,19 @@ async fn run_matchmaker_for_leaderboard(
         .await
         .wrap_err("Failed to fetch active entries")?;
 
-    if entries.len() < MATCH_SIZE {
-        tracing::debug!(
+    // Play short-handed (down to MIN_MATCH_SIZE) rather than freezing the
+    // ladder when snakes drop out — a health-disabled snake once starved
+    // matchmaking for 10 days because this was a silent 4-or-nothing check.
+    if entries.len() < MIN_MATCH_SIZE {
+        tracing::warn!(
             leaderboard_id = %leaderboard_id,
             active_snakes = entries.len(),
-            "Not enough active snakes for matchmaking (need {})",
-            MATCH_SIZE
+            "Matchmaking starved: not enough active snakes (need at least {})",
+            MIN_MATCH_SIZE
         );
         return Ok(());
     }
+    let match_size = entries.len().min(MATCH_SIZE);
 
     // Calculate how many games to create this run
     // Derived from shared cron interval constant to avoid manual sync bugs
@@ -61,13 +65,14 @@ async fn run_matchmaker_for_leaderboard(
     tracing::info!(
         leaderboard_id = %leaderboard_id,
         active_snakes = entries.len(),
+        match_size,
         games_to_create = games_per_run,
         "Running matchmaker"
     );
 
     for _ in 0..games_per_run {
-        let selected = select_match(&mut rand::thread_rng(), &entries, MATCH_SIZE);
-        if selected.len() < MATCH_SIZE {
+        let selected = select_match(&mut rand::thread_rng(), &entries, match_size);
+        if selected.len() < match_size {
             break;
         }
 
@@ -228,6 +233,21 @@ mod tests {
         assert!(selected.is_empty());
     }
 
+    /// The matchmaker passes `min(pool, MATCH_SIZE)` — a 3-snake pool plays
+    /// 3-snake games instead of freezing the ladder.
+    #[test]
+    fn test_select_match_short_handed() {
+        for pool in MIN_MATCH_SIZE..MATCH_SIZE {
+            let entries: Vec<LeaderboardEntry> =
+                (0..pool).map(|i| make_entry(i as f64 * 5.0)).collect();
+            let selected = select_match(&mut seeded_rng(), &entries, pool.min(MATCH_SIZE));
+            assert_eq!(selected.len(), pool);
+            let unique: std::collections::HashSet<Uuid> =
+                selected.iter().map(|e| e.battlesnake_id).collect();
+            assert_eq!(unique.len(), pool, "short-handed picks must be unique");
+        }
+    }
+
     #[test]
     fn test_select_match_exactly_enough() {
         let entries: Vec<LeaderboardEntry> = (0..4).map(|i| make_entry(i as f64 * 5.0)).collect();
@@ -242,5 +262,75 @@ mod tests {
         let ids: Vec<Uuid> = selected.iter().map(|e| e.battlesnake_id).collect();
         let unique: std::collections::HashSet<Uuid> = ids.iter().copied().collect();
         assert_eq!(ids.len(), unique.len(), "Selected snakes should be unique");
+    }
+
+    async fn leaderboard_with_snakes(pool: &sqlx::PgPool, snake_count: usize) -> cja::Result<Uuid> {
+        let user_id = sqlx::query_scalar!(
+            "INSERT INTO users (external_github_id, github_login, github_access_token)
+             VALUES (88001, 'mm-owner', 'test-token')
+             RETURNING user_id",
+        )
+        .fetch_one(pool)
+        .await?;
+        let leaderboard_id = sqlx::query_scalar!(
+            "INSERT INTO leaderboards (name) VALUES ('mm-test') RETURNING leaderboard_id",
+        )
+        .fetch_one(pool)
+        .await?;
+        for i in 0..snake_count {
+            let battlesnake_id = sqlx::query_scalar!(
+                "INSERT INTO battlesnakes (user_id, name, url)
+                 VALUES ($1, $2, 'http://example.com/snake')
+                 RETURNING battlesnake_id",
+                user_id,
+                format!("mm-snake-{i}"),
+            )
+            .fetch_one(pool)
+            .await?;
+            leaderboard::get_or_create_entry(pool, leaderboard_id, battlesnake_id).await?;
+        }
+        Ok(leaderboard_id)
+    }
+
+    async fn game_sizes(pool: &sqlx::PgPool, leaderboard_id: Uuid) -> cja::Result<Vec<i64>> {
+        // Matchmaker rows carry leaderboard_entry_id only (battlesnake_id
+        // stays NULL and is resolved via JOIN), so count rows, not that column.
+        let sizes = sqlx::query_scalar!(
+            r#"SELECT COUNT(*) as "size!"
+             FROM leaderboard_games lg
+             JOIN game_battlesnakes gb ON gb.game_id = lg.game_id
+             WHERE lg.leaderboard_id = $1
+             GROUP BY lg.game_id"#,
+            leaderboard_id,
+        )
+        .fetch_all(pool)
+        .await?;
+        Ok(sizes)
+    }
+
+    /// A pool short of MATCH_SIZE still gets games — sized to the pool.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn matchmaker_creates_short_handed_games(pool: sqlx::PgPool) -> cja::Result<()> {
+        let app_state = crate::state::AppState::test_from_pool(pool.clone());
+        let leaderboard_id = leaderboard_with_snakes(&pool, 3).await?;
+
+        run_matchmaker_for_leaderboard(&app_state, leaderboard_id).await?;
+
+        let sizes = game_sizes(&pool, leaderboard_id).await?;
+        assert!(!sizes.is_empty(), "3 enabled snakes must produce games");
+        assert!(sizes.iter().all(|&s| s == 3), "games use the whole pool");
+        Ok(())
+    }
+
+    /// Below MIN_MATCH_SIZE the matchmaker pauses instead of erroring.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn matchmaker_pauses_below_min_match_size(pool: sqlx::PgPool) -> cja::Result<()> {
+        let app_state = crate::state::AppState::test_from_pool(pool.clone());
+        let leaderboard_id = leaderboard_with_snakes(&pool, 1).await?;
+
+        run_matchmaker_for_leaderboard(&app_state, leaderboard_id).await?;
+
+        assert!(game_sizes(&pool, leaderboard_id).await?.is_empty());
+        Ok(())
     }
 }
