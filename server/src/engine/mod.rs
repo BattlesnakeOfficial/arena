@@ -73,7 +73,7 @@ pub fn create_initial_game(
         .collect();
 
     let mut rng = rand::thread_rng();
-    let board = rules::board::create_default_board_state(&mut rng, width, height, &snake_ids)
+    let mut board = rules::board::create_default_board_state(&mut rng, width, height, &snake_ids)
         .expect("Failed to create initial board state");
 
     let mut snake_names = std::collections::HashMap::new();
@@ -84,7 +84,9 @@ pub fn create_initial_game(
     // Hazard damage: the arena has historically used 15 for standard games
     // (where it is inert -- standard boards never spawn hazards), and we keep
     // that unchanged. Royale uses 14, the default in the canonical Go rules
-    // (`hazardDamagePerTurn` in BattlesnakeOfficial/rules cli).
+    // (`hazardDamagePerTurn` in BattlesnakeOfficial/rules cli). Constrictor
+    // advertises no food spawning (chance 0 / minimum 0) on the wire; its
+    // hazard damage is inert like standard's.
     let (ruleset_name, settings, royale) = match game_type {
         GameType::Royale => (
             "royale",
@@ -98,7 +100,16 @@ pub fn create_initial_game(
                 seed: game_seed(game_id),
             }),
         ),
-        // Constrictor / Snail Mode / Other currently run standard rules.
+        GameType::Constrictor => (
+            "constrictor",
+            StandardSettings {
+                food_spawn_chance: 0,
+                minimum_food: 0,
+                hazard_damage_per_turn: 15,
+            },
+            None,
+        ),
+        // Snail Mode / Other currently run standard rules.
         _ => (
             "standard",
             StandardSettings {
@@ -109,6 +120,15 @@ pub fn create_initial_game(
             None,
         ),
     };
+
+    if ruleset_name == "constrictor" {
+        // Match the Go engine's initialization pass (the constrictor
+        // pipeline runs once with no moves at game start): strip all food
+        // and pin snakes at max health. Initial bodies are stacked, so no
+        // growth happens here.
+        rules::constrictor::modify_initial_board(&mut board)
+            .expect("constrictor initial board modification failed: zero-length snake");
+    }
 
     EngineGame {
         board,
@@ -174,17 +194,27 @@ pub fn run_game_with_random_moves(mut game: EngineGame) -> GameResult {
             })
             .collect();
 
-        // Apply the turn
-        let _game_over = match &game.meta.royale {
-            Some(royale) => {
-                rules::royale::execute_turn(&mut game.board, &moves, &game.meta.settings, royale)
+        // Apply the turn. Dispatch on the ruleset name so each mode's arm
+        // stays independent (parallel game-mode PRs union their arms here).
+        let _game_over = match game.meta.ruleset_name.as_str() {
+            "royale" => {
+                let royale = game.meta.royale.clone().unwrap_or_default();
+                rules::royale::execute_turn(&mut game.board, &moves, &game.meta.settings, &royale)
             }
-            None => rules::standard::execute_turn(&mut game.board, &moves, &game.meta.settings),
+            "constrictor" => {
+                rules::constrictor::execute_turn(&mut game.board, &moves, &game.meta.settings)
+            }
+            _ => rules::standard::execute_turn(&mut game.board, &moves, &game.meta.settings),
         }
         .expect("execute_turn failed");
 
-        // Spawn food after turn
-        rules::food::maybe_spawn_food(&mut rng, &mut game.board, &game.meta.settings);
+        // Spawn food after turn. Constrictor games never spawn food (their
+        // settings are food_spawn_chance=0 / minimum_food=0, which would make
+        // this a no-op anyway, but skip it outright to keep the invariant
+        // explicit).
+        if game.meta.ruleset_name != "constrictor" {
+            rules::food::maybe_spawn_food(&mut rng, &mut game.board, &game.meta.settings);
+        }
 
         // Track newly eliminated snakes
         for snake in &game.board.snakes {
@@ -240,13 +270,28 @@ pub fn apply_turn(game: &mut EngineGame, moves: &[(String, Direction)]) {
     rules::standard::feed_snakes(&mut game.board);
     let _ = rules::standard::eliminate_snakes(&mut game.board);
 
-    // Royale: spawn/grow hazards for the next turn (matches Go's
-    // StageSpawnHazardsShrinkMap, which runs after elimination). Uses
-    // `board.turn + 1` internally, so this must run before the caller
-    // increments `board.turn`.
-    if let Some(royale) = &game.meta.royale {
-        rules::royale::populate_hazards(&mut game.board, royale)
-            .expect("royale hazard population failed: invalid shrink frequency");
+    // Mode-specific post-elimination stages. Dispatch on the ruleset name so
+    // each mode's arm stays independent (parallel game-mode PRs union their
+    // arms here).
+    match game.meta.ruleset_name.as_str() {
+        // Royale: spawn/grow hazards for the next turn (matches Go's
+        // StageSpawnHazardsShrinkMap, which runs after elimination). Uses
+        // `board.turn + 1` internally, so this must run before the caller
+        // increments `board.turn`.
+        "royale" => {
+            let royale = game.meta.royale.clone().unwrap_or_default();
+            rules::royale::populate_hazards(&mut game.board, &royale)
+                .expect("royale hazard population failed: invalid shrink frequency");
+        }
+        // Constrictor: clear all food and grow every snake (matches Go's
+        // StageSpawnFoodNoFood + StageModifySnakesAlwaysGrow, which run after
+        // elimination).
+        "constrictor" => {
+            rules::constrictor::remove_food(&mut game.board);
+            rules::constrictor::grow_snakes(&mut game.board)
+                .expect("constrictor growth failed: zero-length snake");
+        }
+        _ => {}
     }
 }
 
@@ -1575,5 +1620,188 @@ mod tests {
         };
 
         assert_eq!(run(game_id), run(game_id));
+    }
+
+    // === Constrictor wiring tests ===
+
+    #[test]
+    fn test_create_initial_game_constrictor_settings() {
+        let battlesnakes = make_battlesnake_details(2);
+        let game = create_initial_game(
+            Uuid::new_v4(),
+            GameBoardSize::Medium,
+            GameType::Constrictor,
+            &battlesnakes,
+        );
+
+        assert_eq!(game.meta.ruleset_name, "constrictor");
+        assert_eq!(
+            game.meta.settings.food_spawn_chance, 0,
+            "constrictor never spawns food"
+        );
+        assert_eq!(game.meta.settings.minimum_food, 0);
+        assert_eq!(game.meta.settings.hazard_damage_per_turn, 15);
+        assert!(game.meta.royale.is_none());
+    }
+
+    /// The constrictor initial board matches Go's initialization pass: the
+    /// standard board's food is stripped, snakes are at max health, and the
+    /// stacked starting bodies have not grown yet.
+    #[test]
+    fn test_create_initial_game_constrictor_board_modified() {
+        let battlesnakes = make_battlesnake_details(3);
+        let game = create_initial_game(
+            Uuid::new_v4(),
+            GameBoardSize::Medium,
+            GameType::Constrictor,
+            &battlesnakes,
+        );
+
+        assert!(
+            game.board.food.is_empty(),
+            "initial food must be stripped for constrictor"
+        );
+        assert!(game.board.hazards.is_empty());
+        for snake in &game.board.snakes {
+            assert_eq!(snake.health, SNAKE_MAX_HEALTH);
+            assert_eq!(
+                snake.body.len(),
+                rules::SNAKE_START_SIZE,
+                "stacked starting bodies must not grow at init"
+            );
+            let head = snake.head();
+            assert!(snake.body.iter().all(|p| *p == head));
+        }
+    }
+
+    /// Live-loop parity: drive `apply_turn` the way `game_runner` does and
+    /// check the constrictor invariants turn by turn -- no food ever, health
+    /// pinned at 100, snakes growing once the starting stack unwinds.
+    #[test]
+    fn test_constrictor_game_no_food_and_growth_in_frames() {
+        let battlesnakes = make_battlesnake_details(2);
+        let mut game = create_initial_game(
+            Uuid::new_v4(),
+            GameBoardSize::Medium,
+            GameType::Constrictor,
+            &battlesnakes,
+        );
+
+        // Deterministic setup: two snakes walking up/down opposite columns.
+        let (id_a, id_b) = (
+            game.board.snakes[0].id.clone(),
+            game.board.snakes[1].id.clone(),
+        );
+        game.board.snakes[0].body = vec![Point::new(2, 1); 3];
+        game.board.snakes[1].body = vec![Point::new(8, 9); 3];
+
+        // Turn 1 keeps the stacked start at length 3; every later turn grows.
+        let expected_lengths = [3usize, 4, 5, 6, 7, 8];
+        for (i, expected_len) in expected_lengths.iter().enumerate() {
+            let moves = vec![
+                (id_a.clone(), Direction::Up),
+                (id_b.clone(), Direction::Down),
+            ];
+            apply_turn(&mut game, &moves);
+            game.board.turn += 1;
+
+            let frame = frame::game_to_frame(&game, &[], &[], &std::collections::HashMap::new());
+            assert!(
+                frame.food.is_empty(),
+                "constrictor frames must never contain food (turn {})",
+                frame.turn
+            );
+            assert!(frame.hazards.is_empty());
+
+            for snake in &game.board.snakes {
+                assert!(
+                    !snake.eliminated_cause.is_eliminated(),
+                    "snake died unexpectedly on turn {}",
+                    frame.turn
+                );
+                assert_eq!(
+                    snake.health, SNAKE_MAX_HEALTH,
+                    "health must be pinned at 100 (turn {})",
+                    frame.turn
+                );
+                // Note: apply_turn's create_initial_game start puts snakes on
+                // turn 0 with stacked bodies; growth starts on turn 2.
+                assert_eq!(
+                    snake.body.len(),
+                    *expected_len,
+                    "unexpected length on turn {}",
+                    i + 1
+                );
+            }
+        }
+    }
+
+    /// Eliminated snakes are still grown and health-pinned by the live loop
+    /// (Go parity: GrowSnakesConstrictor does not skip eliminated snakes).
+    #[test]
+    fn test_constrictor_eliminated_snakes_still_grown() {
+        let battlesnakes = make_battlesnake_details(2);
+        let mut game = create_initial_game(
+            Uuid::new_v4(),
+            GameBoardSize::Medium,
+            GameType::Constrictor,
+            &battlesnakes,
+        );
+
+        let (id_a, id_b) = (
+            game.board.snakes[0].id.clone(),
+            game.board.snakes[1].id.clone(),
+        );
+        // Equal-length snakes swapping through each other: mutual collision.
+        game.board.snakes[0].body = vec![Point::new(1, 1), Point::new(2, 1)];
+        game.board.snakes[0].health = 99;
+        game.board.snakes[1].body = vec![Point::new(1, 2), Point::new(2, 2)];
+        game.board.snakes[1].health = 99;
+
+        let moves = vec![
+            (id_a.clone(), Direction::Up),
+            (id_b.clone(), Direction::Down),
+        ];
+        apply_turn(&mut game, &moves);
+        game.board.turn += 1;
+
+        assert!(game.board.food.is_empty());
+        for snake in &game.board.snakes {
+            assert!(snake.eliminated_cause.is_eliminated());
+            assert_eq!(snake.eliminated_cause, EliminationCause::Collision);
+            assert_eq!(
+                snake.health, SNAKE_MAX_HEALTH,
+                "eliminated snakes still end at max health"
+            );
+            assert_eq!(
+                snake.body.len(),
+                3,
+                "eliminated snakes still grow this turn"
+            );
+        }
+        assert_eq!(game.board.snakes[0].eliminated_by, id_b);
+        assert_eq!(game.board.snakes[1].eliminated_by, id_a);
+    }
+
+    /// Full random-move constrictor games terminate within MAX_TURNS.
+    #[test]
+    fn test_run_full_constrictor_game() {
+        for _ in 0..10 {
+            let battlesnakes = make_battlesnake_details(4);
+            let game = create_initial_game(
+                Uuid::new_v4(),
+                GameBoardSize::Medium,
+                GameType::Constrictor,
+                &battlesnakes,
+            );
+            let result = run_game_with_random_moves(game);
+
+            assert_eq!(result.placements.len(), 4);
+            assert!(result.final_turn > 0);
+            assert!(
+                result.final_turn <= MAX_TURNS,
+                "constrictor game must terminate"
+            );
+        }
     }
 }

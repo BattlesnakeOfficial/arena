@@ -470,6 +470,42 @@ mod tests {
         assert_eq!(settings["hazardDamagePerTurn"], 14);
     }
 
+    /// Constrictor games announce themselves on the wire exactly like the
+    /// official engine: `ruleset.name = "constrictor"`, no food spawning
+    /// (foodSpawnChance/minimumFood = 0), and default royale/squad blocks.
+    #[test]
+    fn test_constrictor_game_serializes_constrictor_ruleset() {
+        let mut engine_game = create_test_engine_game();
+        engine_game.meta.ruleset_name = "constrictor".to_string();
+        engine_game.meta.settings = StandardSettings {
+            food_spawn_chance: 0,
+            minimum_food: 0,
+            hazard_damage_per_turn: 15,
+        };
+        engine_game.board.food.clear();
+
+        let contexts = HashMap::new();
+        let customizations = HashMap::new();
+        let wire = Game::from_engine_game(&engine_game, "s1", &contexts, &customizations);
+        let json: Value = serde_json::to_value(&wire).unwrap();
+
+        assert_eq!(json["game"]["ruleset"]["name"], "constrictor");
+        let settings = &json["game"]["ruleset"]["settings"];
+        assert_eq!(settings["foodSpawnChance"], 0);
+        assert_eq!(settings["minimumFood"], 0);
+        assert_eq!(settings["hazardDamagePerTurn"], 15);
+        assert_eq!(
+            settings["royale"]["shrinkEveryNTurns"], 0,
+            "constrictor games serialize the default royale block"
+        );
+        assert!(settings.get("squad").is_some());
+        assert_eq!(
+            json["board"]["food"].as_array().map(|a| a.len()),
+            Some(0),
+            "constrictor boards never contain food"
+        );
+    }
+
     #[test]
     fn test_missing_engine_fields_produce_defaults() {
         let engine_game = create_test_engine_game();
