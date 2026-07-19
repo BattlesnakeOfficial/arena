@@ -1000,9 +1000,9 @@ dependencies = [
 
 [[package]]
 name = "eyes-subscriber"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76e57398dba5c4c41c08b2d778c97e363bfddec1915e9662b28ec1ed70b1867c"
+checksum = "6cf4341a2daed57db9b400d8dd0abc3444153120a2ad07851a28d2e8bfabf789"
 dependencies = [
  "async-trait",
  "chrono",
