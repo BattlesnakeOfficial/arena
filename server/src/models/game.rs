@@ -98,7 +98,13 @@ impl FromStr for GameType {
 pub enum GameStatus {
     Waiting,
     Running,
+    /// Terminal success: the game ran to completion and has results.
     Finished,
+    /// Terminal failure: the runner died and never finished the game (e.g.
+    /// OOM-killed worker whose job exhausted its retries). Failed games have
+    /// no results and never affect ratings; without this state they sat in
+    /// `running` forever and counted as live.
+    Failed,
 }
 
 impl GameStatus {
@@ -107,6 +113,7 @@ impl GameStatus {
             GameStatus::Waiting => "waiting",
             GameStatus::Running => "running",
             GameStatus::Finished => "finished",
+            GameStatus::Failed => "failed",
         }
     }
 }
@@ -119,6 +126,7 @@ impl FromStr for GameStatus {
             "waiting" => Ok(GameStatus::Waiting),
             "running" => Ok(GameStatus::Running),
             "finished" => Ok(GameStatus::Finished),
+            "failed" => Ok(GameStatus::Failed),
             _ => Err(color_eyre::eyre::eyre!("Invalid game status: {}", s)),
         }
     }
@@ -564,6 +572,19 @@ pub async fn set_game_enqueued_at_tx(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn game_status_round_trips_through_strings() {
+        for status in [
+            GameStatus::Waiting,
+            GameStatus::Running,
+            GameStatus::Finished,
+            GameStatus::Failed,
+        ] {
+            assert_eq!(GameStatus::from_str(status.as_str()).unwrap(), status);
+        }
+        assert!(GameStatus::from_str("exploded").is_err());
+    }
 
     #[test]
     fn game_type_from_str_case_insensitive() {
