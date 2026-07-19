@@ -167,6 +167,20 @@ async fn spawn_application_tasks(app_state: AppState) -> cja::Result<Vec<NamedTa
     let features = app_state.config.features;
     let job = &app_state.config.job;
 
+    // Build the cron registry once so we can both report it to Eyes and hand
+    // it to the cron worker. Built unconditionally so the boot manifest
+    // reflects the full deployed shape even when CRON is disabled for this
+    // process.
+    let cron_registry = cron::cron_registry();
+
+    // Emit the Eyes boot manifest describing this app's jobs and cron. This is
+    // a no-op unless EYES_ORG_ID/EYES_APP_ID are configured.
+    cja::eyes_manifest::send_boot_manifest::<jobs::Jobs, AppState>(
+        Some(env!("CARGO_PKG_VERSION")),
+        option_env!("VERGEN_GIT_SHA"),
+        Some(&cron_registry),
+    );
+
     if features.server {
         info!("Server Enabled");
         tasks.push(NamedTask::spawn(
@@ -204,7 +218,10 @@ async fn spawn_application_tasks(app_state: AppState) -> cja::Result<Vec<NamedTa
 
     if features.cron {
         info!("Cron Enabled");
-        tasks.push(NamedTask::spawn("cron", cron::run_cron(app_state.clone())));
+        tasks.push(NamedTask::spawn(
+            "cron",
+            cron::run_cron(app_state.clone(), cron_registry),
+        ));
     } else {
         info!("Cron Disabled");
     }

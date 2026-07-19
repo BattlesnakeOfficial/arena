@@ -16,7 +16,7 @@ pub const MATCHMAKER_INTERVAL_SECS: u64 = 15 * 60;
 /// a broken snake is pulled from matchmaking after ~90 minutes.
 pub const SNAKE_HEALTH_SWEEP_INTERVAL_SECS: u64 = 30 * 60;
 
-fn cron_registry() -> CronRegistry<AppState> {
+pub(crate) fn cron_registry() -> CronRegistry<AppState> {
     let mut registry = CronRegistry::new();
 
     // Game backup discovery: runs every hour, enqueues backup jobs for games from the last 4 hours
@@ -60,8 +60,11 @@ fn cron_registry() -> CronRegistry<AppState> {
     registry
 }
 
-pub(crate) async fn run_cron(app_state: AppState) -> cja::Result<()> {
-    Ok(Worker::new(app_state, cron_registry())
+pub(crate) async fn run_cron(
+    app_state: AppState,
+    registry: CronRegistry<AppState>,
+) -> cja::Result<()> {
+    Ok(Worker::new(app_state, registry)
         .run(CancellationToken::new())
         .await?)
 }
