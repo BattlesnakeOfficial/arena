@@ -110,6 +110,26 @@ impl Mailer {
         );
     }
 
+    /// Notify a snake's owner that the sweeper put their recovered snake
+    /// back into matchmaking automatically. Fire-and-forget like
+    /// [`Mailer::notify_matchmaking_deactivated`].
+    pub fn notify_matchmaking_reactivated(
+        &self,
+        pool: &sqlx::PgPool,
+        hourly_limit: i64,
+        to_email: &str,
+        snake_name: &str,
+        profile_url: &str,
+    ) {
+        let message = messages::matchmaking_reactivated(to_email, snake_name, profile_url);
+        self.spawn_limited_send(
+            pool.clone(),
+            hourly_limit,
+            "matchmaking_reactivated",
+            message,
+        );
+    }
+
     /// Send the email-recovery magic link. Fire-and-forget on purpose: the
     /// requesting handler must respond identically whether or not the email
     /// matched an account, so it can never wait on (or fail with) the

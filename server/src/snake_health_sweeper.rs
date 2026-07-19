@@ -8,10 +8,17 @@
 //! `disabled_reason = 'health'` — and the owner is emailed once, with a link
 //! back to the profile page where they can resume.
 //!
+//! Deactivated snakes aren't abandoned: each sweep also probes them, and a
+//! snake that stays healthy for
+//! [`crate::config::AppConfig::snake_health_recovery_threshold`] consecutive
+//! sweeps is put back into matchmaking automatically (the owner's Resume
+//! button still works for an immediate manual return).
+//!
 //! Re-entrancy (cja jobs retry, and duplicate enqueues are routine): every
-//! step is an idempotent upsert/update, and the notification email is gated
-//! by the compare-and-set inside [`snake_health_status::deactivate`], so a
-//! retried sweep can never double-send.
+//! step is an idempotent upsert/update, and the notification emails are
+//! gated by the compare-and-sets inside [`snake_health_status::deactivate`]
+//! and [`snake_health_status::reactivate`], so a retried sweep can never
+//! double-send.
 
 use reqwest::Client;
 
@@ -49,7 +56,7 @@ fn summarize(report: &HealthCheckReport) -> ProbeOutcome {
 /// retired board is matched in zero games — probing (let alone
 /// deactivating and emailing about) it would be pure noise. Snakes the
 /// sweeper already pulled have no enabled entries, so they naturally drop
-/// out of the sweep until the owner reactivates them.
+/// out of this population and into [`snakes_health_disabled`].
 async fn snakes_in_matchmaking(pool: &sqlx::PgPool) -> cja::Result<Vec<Battlesnake>> {
     use color_eyre::eyre::Context as _;
 
@@ -80,15 +87,56 @@ async fn snakes_in_matchmaking(pool: &sqlx::PgPool) -> cja::Result<Vec<Battlesna
     Ok(snakes)
 }
 
+/// Snakes the sweeper pulled from matchmaking: distinct snakes whose only
+/// presence on enabled leaderboards is entries disabled with
+/// `disabled_reason = 'health'`. These get recovery probes so a fixed
+/// server finds its own way back. Manual pauses (NULL reason) are the
+/// owner's business and are never probed.
+async fn snakes_health_disabled(pool: &sqlx::PgPool) -> cja::Result<Vec<Battlesnake>> {
+    use color_eyre::eyre::Context as _;
+
+    let snakes = sqlx::query_as!(
+        Battlesnake,
+        r#"SELECT DISTINCT
+            b.battlesnake_id,
+            b.user_id,
+            b.name,
+            b.url,
+            b.visibility as "visibility: Visibility",
+            b.color,
+            b.head,
+            b.tail,
+            b.created_at,
+            b.updated_at
+         FROM battlesnakes b
+         JOIN leaderboard_entries le ON le.battlesnake_id = b.battlesnake_id
+         JOIN leaderboards l ON l.leaderboard_id = le.leaderboard_id
+         WHERE le.disabled_at IS NOT NULL
+           AND le.disabled_reason = 'health'
+           AND l.disabled_at IS NULL
+         ORDER BY b.battlesnake_id"#,
+    )
+    .fetch_all(pool)
+    .await
+    .wrap_err("Failed to fetch health-disabled snakes")?;
+
+    Ok(snakes)
+}
+
 /// Run one full sweep. Called from the cron-scheduled
 /// [`crate::jobs::SnakeHealthSweeperJob`].
 pub async fn run_sweep(app_state: &AppState) -> cja::Result<()> {
-    let snakes = snakes_in_matchmaking(&app_state.db).await?;
-    if snakes.is_empty() {
+    let active = snakes_in_matchmaking(&app_state.db).await?;
+    let recovering = snakes_health_disabled(&app_state.db).await?;
+    if active.is_empty() && recovering.is_empty() {
         return Ok(());
     }
 
-    tracing::info!(snake_count = snakes.len(), "Starting snake health sweep");
+    tracing::info!(
+        snake_count = active.len(),
+        recovering_count = recovering.len(),
+        "Starting snake health sweep"
+    );
 
     // Same generous per-call budget as the on-demand test; sequential probes
     // keep the sweep from hammering shared snake hosts, and the population
@@ -98,20 +146,8 @@ pub async fn run_sweep(app_state: &AppState) -> cja::Result<()> {
         .build()
         .map_err(|e| cja::color_eyre::eyre::eyre!("Failed to build health check client: {e}"))?;
 
-    for snake in &snakes {
-        let (engine_game, snake_id) = snake_health::build_test_game(snake);
-        // AbortOnFailure keeps a dead snake at one timeout (~5s) instead of
-        // four, bounding how far a sweep full of dead snakes can stretch.
-        let report = snake_health::run_health_check(
-            &client,
-            &snake.url,
-            &engine_game,
-            &snake_id,
-            snake_health::FailureMode::AbortOnFailure,
-        )
-        .await;
-        let outcome = summarize(&report);
-
+    for snake in &active {
+        let outcome = probe(&client, snake).await;
         if let Err(e) = apply_probe_outcome(app_state, snake, &outcome).await {
             // One snake's bookkeeping failing shouldn't abort the sweep for
             // the rest; the next run retries it.
@@ -123,7 +159,34 @@ pub async fn run_sweep(app_state: &AppState) -> cja::Result<()> {
         }
     }
 
+    for snake in &recovering {
+        let outcome = probe(&client, snake).await;
+        if let Err(e) = apply_recovery_probe_outcome(app_state, snake, &outcome).await {
+            tracing::error!(
+                battlesnake_id = %snake.battlesnake_id,
+                error = %e,
+                "Failed to record recovery probe outcome"
+            );
+        }
+    }
+
     Ok(())
+}
+
+/// One four-call health probe, summarized.
+async fn probe(client: &Client, snake: &Battlesnake) -> ProbeOutcome {
+    let (engine_game, snake_id) = snake_health::build_test_game(snake);
+    // AbortOnFailure keeps a dead snake at one timeout (~5s) instead of
+    // four, bounding how far a sweep full of dead snakes can stretch.
+    let report = snake_health::run_health_check(
+        client,
+        &snake.url,
+        &engine_game,
+        &snake_id,
+        snake_health::FailureMode::AbortOnFailure,
+    )
+    .await;
+    summarize(&report)
 }
 
 /// Record a probe outcome and deactivate + notify when the failure streak
@@ -197,6 +260,72 @@ async fn apply_probe_outcome(
                 "Snake deactivated but owner has no known email; skipping notification"
             );
         }
+    }
+
+    Ok(())
+}
+
+/// Record a recovery probe of a health-disabled snake and reactivate + notify
+/// when the healthy streak crosses the recovery threshold.
+async fn apply_recovery_probe_outcome(
+    app_state: &AppState,
+    snake: &Battlesnake,
+    outcome: &ProbeOutcome,
+) -> cja::Result<()> {
+    if !outcome.healthy {
+        snake_health_status::record_recovery_failure(
+            &app_state.db,
+            snake.battlesnake_id,
+            &outcome.failure_summary,
+        )
+        .await?;
+        return Ok(());
+    }
+
+    let successes =
+        snake_health_status::record_recovery_success(&app_state.db, snake.battlesnake_id).await?;
+
+    let threshold = app_state.config.snake_health_recovery_threshold;
+    tracing::info!(
+        battlesnake_id = %snake.battlesnake_id,
+        snake_name = %snake.name,
+        consecutive_successes = successes,
+        threshold,
+        "Deactivated snake passed recovery probe"
+    );
+
+    if successes < threshold {
+        return Ok(());
+    }
+
+    let newly_reactivated =
+        snake_health_status::reactivate(&app_state.db, snake.battlesnake_id).await?;
+
+    if !newly_reactivated {
+        return Ok(());
+    }
+
+    tracing::info!(
+        battlesnake_id = %snake.battlesnake_id,
+        snake_name = %snake.name,
+        "Reactivated recovered snake into leaderboard matchmaking"
+    );
+
+    let profile_url = format!(
+        "{}/battlesnakes/{}/profile",
+        app_state.config.base_url, snake.battlesnake_id
+    );
+
+    if let Some(email) =
+        snake_health_status::owner_notification_email(&app_state.db, snake.battlesnake_id).await?
+    {
+        app_state.mailer.notify_matchmaking_reactivated(
+            &app_state.db,
+            app_state.config.email_per_recipient_hourly_limit,
+            &email,
+            &snake.name,
+            &profile_url,
+        );
     }
 
     Ok(())
@@ -280,6 +409,20 @@ mod tests {
         server
     }
 
+    /// A snake server that answers every probe call successfully.
+    async fn healthy_snake_server() -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"apiversion":"1"}"#))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"move":"up"}"#))
+            .mount(&server)
+            .await;
+        server
+    }
+
     #[sqlx::test(migrations = "../migrations")]
     async fn sweep_deactivates_after_threshold_consecutive_failures(
         pool: PgPool,
@@ -315,13 +458,108 @@ mod tests {
         assert!(status.deactivated_at.is_some());
         assert!(status.last_failure.is_some());
 
-        // Deactivated snakes have no enabled entries, so further sweeps skip
-        // them entirely: the streak stays frozen at the threshold.
+        // Further sweeps probe it for recovery, but the server is still
+        // broken: failure streak stays frozen, recovery streak stays zero,
+        // and the snake stays out of matchmaking.
         run_sweep(&app_state).await?;
         let status = snake_health_status::get(&pool, battlesnake_id)
             .await?
             .expect("row exists");
         assert_eq!(status.consecutive_failures, threshold);
+        assert_eq!(status.consecutive_successes, 0);
+        assert!(status.deactivated_at.is_some());
+
+        Ok(())
+    }
+
+    /// A deactivated snake whose server comes back is reactivated on its
+    /// own after the recovery threshold — no owner action needed — and a
+    /// pre-existing manual pause is left alone.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn sweep_reactivates_recovered_snake_after_threshold(pool: PgPool) -> cja::Result<()> {
+        let server = healthy_snake_server().await;
+        let (battlesnake_id, entry_id) = create_snake_on_leaderboard(&pool, &server.uri()).await?;
+        let app_state = AppState::test_from_pool(pool.clone());
+        let threshold = app_state.config.snake_health_recovery_threshold;
+        assert!(threshold >= 2, "test assumes a multi-sweep threshold");
+
+        // The sweeper pulled this snake while its server was down.
+        snake_health_status::record_failure(&pool, battlesnake_id, "was down").await?;
+        assert!(snake_health_status::deactivate(&pool, battlesnake_id).await?);
+        assert_eq!(
+            entry_disabled(&pool, entry_id).await?.as_deref(),
+            Some(snake_health_status::DISABLED_REASON_HEALTH)
+        );
+
+        // Healthy sweeps below the threshold build the streak but don't
+        // reactivate. (Age the last check between sweeps: recovery counting
+        // is spacing-gated exactly like failure counting.)
+        for expected_successes in 1..threshold {
+            age_last_check(&pool, battlesnake_id).await?;
+            run_sweep(&app_state).await?;
+            let status = snake_health_status::get(&pool, battlesnake_id)
+                .await?
+                .expect("row exists");
+            assert_eq!(status.consecutive_successes, expected_successes);
+            assert!(status.deactivated_at.is_some());
+            assert_eq!(
+                entry_disabled(&pool, entry_id).await?.as_deref(),
+                Some(snake_health_status::DISABLED_REASON_HEALTH)
+            );
+        }
+
+        // A piled-up sweep inside the spacing window must not fake the last
+        // step of the streak.
+        run_sweep(&app_state).await?;
+        let status = snake_health_status::get(&pool, battlesnake_id)
+            .await?
+            .expect("row exists");
+        assert_eq!(status.consecutive_successes, threshold - 1);
+        assert!(status.deactivated_at.is_some());
+
+        // The spaced sweep that reaches the threshold puts it back.
+        age_last_check(&pool, battlesnake_id).await?;
+        run_sweep(&app_state).await?;
+        assert_eq!(entry_disabled(&pool, entry_id).await?, None);
+        let status = snake_health_status::get(&pool, battlesnake_id)
+            .await?
+            .expect("row exists");
+        assert!(status.deactivated_at.is_none());
+        assert_eq!(status.consecutive_successes, 0);
+        assert_eq!(status.consecutive_failures, 0);
+
+        Ok(())
+    }
+
+    /// A failed recovery probe restarts the healthy streak from zero.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn failed_recovery_probe_resets_the_streak(pool: PgPool) -> cja::Result<()> {
+        let server = broken_snake_server().await;
+        let (battlesnake_id, entry_id) = create_snake_on_leaderboard(&pool, &server.uri()).await?;
+        let app_state = AppState::test_from_pool(pool.clone());
+
+        snake_health_status::record_failure(&pool, battlesnake_id, "was down").await?;
+        assert!(snake_health_status::deactivate(&pool, battlesnake_id).await?);
+
+        // One healthy-looking streak step recorded earlier…
+        age_last_check(&pool, battlesnake_id).await?;
+        assert_eq!(
+            snake_health_status::record_recovery_success(&pool, battlesnake_id).await?,
+            1
+        );
+
+        // …then a sweep against the still-broken server wipes it.
+        age_last_check(&pool, battlesnake_id).await?;
+        run_sweep(&app_state).await?;
+        let status = snake_health_status::get(&pool, battlesnake_id)
+            .await?
+            .expect("row exists");
+        assert_eq!(status.consecutive_successes, 0);
+        assert!(status.deactivated_at.is_some());
+        assert_eq!(
+            entry_disabled(&pool, entry_id).await?.as_deref(),
+            Some(snake_health_status::DISABLED_REASON_HEALTH)
+        );
 
         Ok(())
     }

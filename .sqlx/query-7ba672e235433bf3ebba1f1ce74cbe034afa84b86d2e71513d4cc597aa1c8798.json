@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE snake_health_status\n         SET consecutive_successes = CASE\n                 WHEN last_checked_at <= NOW() - make_interval(mins => $2)\n                 THEN consecutive_successes + 1\n                 ELSE GREATEST(consecutive_successes, 1)\n             END,\n             last_checked_at = NOW(),\n             updated_at = NOW()\n         WHERE battlesnake_id = $1 AND deactivated_at IS NOT NULL\n         RETURNING consecutive_successes",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "consecutive_successes",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "7ba672e235433bf3ebba1f1ce74cbe034afa84b86d2e71513d4cc597aa1c8798"
+}
