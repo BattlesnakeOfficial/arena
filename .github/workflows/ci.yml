@@ -83,7 +83,27 @@ jobs:
           docker push ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ secrets.GCP_ARTIFACT_REGISTRY }}/arena:latest
 
       - name: Deploy to Cloud Run
+        env:
+          EYES_ORG_ID: ${{ secrets.EYES_ORG_ID }}
+          EYES_APP_ID: ${{ secrets.EYES_APP_ID }}
         run: |
+          # Eyes telemetry is keyed by these two UUIDs. They live in repo
+          # secrets rather than this file because the Eyes ingest endpoint is
+          # unauthenticated -- the (org, app) pair is what authorizes writes,
+          # and this repo is public.
+          #
+          # --update-env-vars *merges*; --set-env-vars would wipe DATABASE_URL,
+          # GCP_LOGGING and friends off the service. Only pass the flag when
+          # both secrets are present: arena treats an empty EYES_* as unset and
+          # runs with Eyes off, so a fork or an unconfigured repo still deploys.
+          eyes_args=()
+          if [ -n "$EYES_ORG_ID" ] && [ -n "$EYES_APP_ID" ]; then
+            eyes_args+=(--update-env-vars "EYES_ORG_ID=$EYES_ORG_ID,EYES_APP_ID=$EYES_APP_ID")
+          else
+            echo "::warning::EYES_ORG_ID/EYES_APP_ID not set -- deploying without Eyes telemetry"
+          fi
+
           gcloud run services update ${{ secrets.GCP_CLOUD_RUN_SERVICE }} \
             --region ${{ secrets.GCP_REGION }} \
-            --image ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ secrets.GCP_ARTIFACT_REGISTRY }}/arena:${{ github.sha }}
+            --image ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ secrets.GCP_ARTIFACT_REGISTRY }}/arena:${{ github.sha }} \
+            "${eyes_args[@]}"

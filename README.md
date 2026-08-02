@@ -72,6 +72,20 @@ export GITHUB_REDIRECT_URI="http://localhost:3000/auth/github/callback"
 
 If you're using [direnv](https://direnv.net/), run `direnv allow` to load these environment variables.
 
+#### Optional: Eyes telemetry
+
+Setting **both** `EYES_ORG_ID` and `EYES_APP_ID` to valid UUIDs turns on the
+[Eyes](https://eyes.coreyja.com) tracing layer, which streams spans and events
+alongside the normal log output. Leaving either unset (or empty) simply runs
+without it — the default for local development. Setting only one logs a note
+and stays off; setting an ID that isn't a UUID is a hard startup error, so a
+typo can't silently drop telemetry.
+
+`EYES_URL` overrides the ingest endpoint and defaults to
+`https://eyes.coreyja.com`. In production these are set on the Cloud Run
+service by the deploy workflow from the `EYES_ORG_ID` / `EYES_APP_ID` repo
+secrets.
+
 ### Creating a GitHub App
 
 Sign-in is GitHub OAuth only, so local development needs an app:
