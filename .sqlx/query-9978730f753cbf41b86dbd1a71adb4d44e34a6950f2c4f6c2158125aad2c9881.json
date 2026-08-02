@@ -1,0 +1,41 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            b.battlesnake_id,\n            b.name,\n            b.color,\n            u.github_login AS owner_login\n        FROM battlesnakes b\n        JOIN users u ON b.user_id = u.user_id\n        WHERE b.visibility = 'public'\n        ORDER BY b.name ASC, b.battlesnake_id ASC\n        LIMIT $1 OFFSET $2\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "battlesnake_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "color",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "owner_login",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "9978730f753cbf41b86dbd1a71adb4d44e34a6950f2c4f6c2158125aad2c9881"
+}

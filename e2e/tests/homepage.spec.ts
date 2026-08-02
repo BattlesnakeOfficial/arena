@@ -18,11 +18,22 @@ test.describe('Homepage - Authenticated User', () => {
     // Profile link is visible
     await expect(authenticatedPage.getByRole('link', { name: 'Profile' })).toBeVisible();
 
-    // Battlesnakes link is visible
-    await expect(authenticatedPage.getByRole('link', { name: 'Battlesnakes' })).toBeVisible();
+    // Both snake directories are in the nav. Scoped to the nav (and exact) so
+    // they don't match the homepage's own "My snakes" CTA.
+    const nav = authenticatedPage.locator('nav.site-nav');
+    await expect(nav.getByRole('link', { name: 'My Snakes', exact: true })).toBeVisible();
+    await expect(nav.getByRole('link', { name: 'Snakes', exact: true })).toBeVisible();
 
     // Logout link is visible
     await expect(authenticatedPage.getByRole('link', { name: 'Logout' })).toBeVisible();
+  });
+
+  test('shows the public snakes link but not My Snakes when anonymous', async ({ page }) => {
+    await page.goto('/');
+
+    const nav = page.locator('nav.site-nav');
+    await expect(nav.getByRole('link', { name: 'Snakes', exact: true })).toBeVisible();
+    await expect(nav.getByRole('link', { name: 'My Snakes', exact: true })).toHaveCount(0);
   });
 
   test('does not show login link when authenticated', async ({ authenticatedPage }) => {

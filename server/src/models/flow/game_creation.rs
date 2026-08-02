@@ -59,6 +59,48 @@ impl GameCreationFlow {
         Ok(flow.into())
     }
 
+    // Create a new flow with a single snake already selected, for the
+    // "Challenge" action on the public snakes directory. Single-statement so
+    // a failure can't leave an orphaned empty flow behind.
+    pub async fn create_for_challenge(
+        pool: &PgPool,
+        user_id: Uuid,
+        battlesnake_id: Uuid,
+    ) -> cja::Result<Self> {
+        let flow = sqlx::query_as!(
+            GameCreationFlowRaw,
+            r#"
+            INSERT INTO game_flows (
+                user_id,
+                board_size,
+                game_type,
+                selected_battlesnakes,
+                search_query
+            )
+            VALUES ($1, $2, $3, $4, $5)
+            RETURNING
+                flow_id,
+                board_size,
+                game_type,
+                selected_battlesnakes,
+                search_query,
+                user_id,
+                created_at,
+                updated_at
+            "#,
+            user_id,
+            GameBoardSize::Medium.as_str(),
+            GameType::Standard.as_str(),
+            &vec![battlesnake_id],
+            None::<String>
+        )
+        .fetch_one(pool)
+        .await
+        .wrap_err("Failed to create challenge game flow")?;
+
+        Ok(flow.into())
+    }
+
     // Get a flow by ID, ensuring it belongs to the user
     pub async fn get_by_id(
         pool: &PgPool,
@@ -489,5 +531,46 @@ mod tests {
         let request = flow.to_create_game_request().unwrap();
         assert_eq!(request.battlesnake_ids.len(), 3);
         assert!(request.battlesnake_ids.iter().all(|&id| id == snake_id));
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn create_for_challenge_preselects_the_snake(pool: PgPool) -> cja::Result<()> {
+        let user = sqlx::query!(
+            "INSERT INTO users (external_github_id, github_login, github_access_token)
+             VALUES (7301, 'challenge-user', 'test-token')
+             RETURNING user_id"
+        )
+        .fetch_one(&pool)
+        .await?;
+
+        let snake = sqlx::query!(
+            "INSERT INTO battlesnakes (user_id, name, url, visibility)
+             VALUES ($1, 'Challenged Snake', 'http://localhost:8000', 'public')
+             RETURNING battlesnake_id",
+            user.user_id
+        )
+        .fetch_one(&pool)
+        .await?;
+
+        let flow =
+            GameCreationFlow::create_for_challenge(&pool, user.user_id, snake.battlesnake_id)
+                .await?;
+
+        assert_eq!(flow.selected_battlesnake_ids, vec![snake.battlesnake_id]);
+        assert_eq!(flow.board_size, GameBoardSize::Medium);
+        assert_eq!(flow.game_type, GameType::Standard);
+
+        // And the same is true of what actually landed in the database.
+        let persisted = GameCreationFlow::get_by_id(&pool, flow.flow_id, user.user_id)
+            .await?
+            .expect("flow should be persisted");
+        assert_eq!(
+            persisted.selected_battlesnake_ids,
+            vec![snake.battlesnake_id]
+        );
+        assert_eq!(persisted.board_size, GameBoardSize::Medium);
+        assert_eq!(persisted.game_type, GameType::Standard);
+
+        Ok(())
     }
 }

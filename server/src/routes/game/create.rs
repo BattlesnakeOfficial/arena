@@ -15,6 +15,7 @@ use crate::{
     components::flash::Flash,
     components::page_factory::PageFactory,
     errors::{ServerResult, WithStatus},
+    models::battlesnake::{self, Visibility},
     models::flow::GameCreationFlow,
     models::game::{self, GameBoardSize, GameType},
     models::game_battlesnake,
@@ -79,6 +80,36 @@ pub async fn rematch_game(
         .wrap_err("Failed to update game flow")?;
 
     // Redirect to the flow page so the user confirms through the builder
+    Ok(Redirect::to(&format!("/games/flow/{}", flow.flow_id)).into_response())
+}
+
+/// POST /battlesnakes/{id}/challenge — start a flow with this public snake selected.
+///
+/// Visibility is re-checked here: the listing that surfaced this snake is not
+/// an authorization boundary (a snake can go private between the page load and
+/// the POST, and the request can be hand-crafted).
+#[debug_handler]
+pub async fn challenge_battlesnake(
+    State(state): State<AppState>,
+    CurrentUser(user): CurrentUser,
+    Path(battlesnake_id): Path<Uuid>,
+) -> ServerResult<impl IntoResponse, StatusCode> {
+    let snake = battlesnake::get_battlesnake_by_id(&state.db, battlesnake_id)
+        .await
+        .wrap_err("Failed to get battlesnake")?;
+
+    // Missing and non-public collapse to the same 404 — don't leak which.
+    let snake = snake
+        .filter(|snake| snake.visibility == Visibility::Public)
+        .ok_or_else(|| "Public battlesnake not found".to_string())
+        .with_status(StatusCode::NOT_FOUND)?;
+
+    let flow =
+        GameCreationFlow::create_for_challenge(&state.db, user.user_id, snake.battlesnake_id)
+            .await
+            .wrap_err("Failed to create challenge game flow")?;
+
+    // Send the user through the normal builder to pick settings and confirm
     Ok(Redirect::to(&format!("/games/flow/{}", flow.flow_id)).into_response())
 }
 
