@@ -113,24 +113,42 @@ pub struct PlayerDirectoryEntry {
 /// least one enabled leaderboard entry — there is no snake-level active flag,
 /// so pausing a snake (manually or via the health sweeper) is expressed as
 /// `leaderboard_entries.disabled_at`.
+///
+/// The two modes are separate statements rather than one query gated on a
+/// bind parameter. Writing the filter as `NOT $1 OR EXISTS (...)` keeps the
+/// sublink inside an `OR`, which stops Postgres pulling it up into a semi-join
+/// — it stays a `SubPlan` costed as if it re-ran per user row, and past a few
+/// thousand users that estimate crosses `jit_above_cost` and every request
+/// pays for LLVM compilation. A bare top-level `EXISTS` plans as a hash
+/// semi-join instead.
 pub async fn count_players(pool: &PgPool, active_only: bool) -> cja::Result<i64> {
-    let count = sqlx::query_scalar!(
-        r#"
-        SELECT COUNT(*) AS "count!"
-        FROM users u
-        WHERE NOT $1 OR EXISTS (
-            SELECT 1
-            FROM battlesnakes b
-            JOIN leaderboard_entries le
-              ON le.battlesnake_id = b.battlesnake_id
-            WHERE b.user_id = u.user_id
-              AND le.disabled_at IS NULL
+    let count = if active_only {
+        sqlx::query_scalar!(
+            r#"
+            SELECT COUNT(*) AS "count!"
+            FROM users u
+            WHERE EXISTS (
+                SELECT 1
+                FROM battlesnakes b
+                JOIN leaderboard_entries le
+                  ON le.battlesnake_id = b.battlesnake_id
+                WHERE b.user_id = u.user_id
+                  AND le.disabled_at IS NULL
+            )
+            "#
         )
-        "#,
-        active_only
-    )
-    .fetch_one(pool)
-    .await
+        .fetch_one(pool)
+        .await
+    } else {
+        sqlx::query_scalar!(
+            r#"
+            SELECT COUNT(*) AS "count!"
+            FROM users
+            "#
+        )
+        .fetch_one(pool)
+        .await
+    }
     .wrap_err("Failed to count players in database")?;
 
     Ok(count)
@@ -139,6 +157,8 @@ pub async fn count_players(pool: &PgPool, active_only: bool) -> cja::Result<i64>
 /// One page of the player directory. Ordering is fixed (not user-facing sort):
 /// displayed name, then login, both case-insensitive, with `user_id` as the
 /// final tie-breaker so equal names can't shuffle rows between pages.
+///
+/// Split by mode for the same planner reason as [`count_players`].
 pub async fn get_players_paginated(
     pool: &PgPool,
     active_only: bool,
@@ -147,34 +167,55 @@ pub async fn get_players_paginated(
 ) -> cja::Result<Vec<PlayerDirectoryEntry>> {
     let offset = page * per_page;
 
-    let players = sqlx::query_as!(
-        PlayerDirectoryEntry,
-        r#"
-        SELECT
-            u.user_id,
-            u.github_login,
-            COALESCE(NULLIF(u.display_name, ''), u.github_login) AS "public_name!"
-        FROM users u
-        WHERE NOT $1 OR EXISTS (
-            SELECT 1
-            FROM battlesnakes b
-            JOIN leaderboard_entries le
-              ON le.battlesnake_id = b.battlesnake_id
-            WHERE b.user_id = u.user_id
-              AND le.disabled_at IS NULL
+    let players = if active_only {
+        sqlx::query_as!(
+            PlayerDirectoryEntry,
+            r#"
+            SELECT
+                u.user_id,
+                u.github_login,
+                COALESCE(NULLIF(u.display_name, ''), u.github_login) AS "public_name!"
+            FROM users u
+            WHERE EXISTS (
+                SELECT 1
+                FROM battlesnakes b
+                JOIN leaderboard_entries le
+                  ON le.battlesnake_id = b.battlesnake_id
+                WHERE b.user_id = u.user_id
+                  AND le.disabled_at IS NULL
+            )
+            ORDER BY
+                LOWER(COALESCE(NULLIF(u.display_name, ''), u.github_login)) ASC,
+                LOWER(u.github_login) ASC,
+                u.user_id ASC
+            LIMIT $1 OFFSET $2
+            "#,
+            per_page,
+            offset
         )
-        ORDER BY
-            LOWER(COALESCE(NULLIF(u.display_name, ''), u.github_login)) ASC,
-            LOWER(u.github_login) ASC,
-            u.user_id ASC
-        LIMIT $2 OFFSET $3
-        "#,
-        active_only,
-        per_page,
-        offset
-    )
-    .fetch_all(pool)
-    .await
+        .fetch_all(pool)
+        .await
+    } else {
+        sqlx::query_as!(
+            PlayerDirectoryEntry,
+            r#"
+            SELECT
+                u.user_id,
+                u.github_login,
+                COALESCE(NULLIF(u.display_name, ''), u.github_login) AS "public_name!"
+            FROM users u
+            ORDER BY
+                LOWER(COALESCE(NULLIF(u.display_name, ''), u.github_login)) ASC,
+                LOWER(u.github_login) ASC,
+                u.user_id ASC
+            LIMIT $1 OFFSET $2
+            "#,
+            per_page,
+            offset
+        )
+        .fetch_all(pool)
+        .await
+    }
     .wrap_err("Failed to fetch paginated players from database")?;
 
     Ok(players)

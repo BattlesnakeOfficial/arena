@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT COUNT(*) AS \"count!\"\n            FROM users u\n            WHERE EXISTS (\n                SELECT 1\n                FROM battlesnakes b\n                JOIN leaderboard_entries le\n                  ON le.battlesnake_id = b.battlesnake_id\n                WHERE b.user_id = u.user_id\n                  AND le.disabled_at IS NULL\n            )\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "5763e649735684828e116f0475d98368871a7fcdf653f00f9ef313f06033dde8"
+}

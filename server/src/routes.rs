@@ -39,6 +39,7 @@ pub mod customizations;
 pub mod game;
 pub mod github_auth;
 pub mod leaderboard;
+pub mod pagination;
 pub mod policy;
 pub mod redirects;
 pub mod saved_games;

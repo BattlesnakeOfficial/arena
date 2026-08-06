@@ -16,6 +16,7 @@ use crate::{
         user::{self, PlayerDirectoryEntry, User},
     },
     routes::auth::OptionalUser,
+    routes::pagination::resolve_page,
     state::AppState,
 };
 
@@ -32,8 +33,10 @@ fn public_name(user: &User) -> &str {
 ///
 /// `users.github_login` is not unique (GitHub logins can be renamed and
 /// reused, and lookup is case-insensitive), so this route can be ambiguous.
-/// It is kept for compatibility and for hand-typed URLs; anything the site
-/// links to should use the stable `/users/{login}/{user_id}` form instead.
+/// It is kept for compatibility and for hand-typed URLs. New links should
+/// prefer the stable `/users/{login}/{user_id}` form; the `/snakes` directory,
+/// the snake profile page, and "View Public Profile" on `/me` still emit
+/// login-only URLs and are worth converting in a follow-up.
 pub async fn show_user_profile(
     State(state): State<AppState>,
     OptionalUser(viewer): OptionalUser,
@@ -220,23 +223,27 @@ pub struct PlayerDirectoryParams {
     #[serde(default)]
     pub page: Option<i64>,
     /// Restrict the listing to players with at least one active snake.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_lenient_bool")]
     pub active: bool,
 }
 
-/// Resolve a requested (zero-based) page number against the total number of
-/// players. Returns `(page, total_pages)`. Missing/negative requests clamp to
-/// the first page, oversized ones to the last. An empty directory still
-/// reports one logical page so the clamp stays in range.
-fn resolve_players_page(requested: Option<i64>, total: i64) -> (i64, i64) {
-    let total_pages = if total > 0 {
-        (total + PLAYERS_PER_PAGE - 1) / PLAYERS_PER_PAGE
-    } else {
-        1
-    };
-    let page = requested.unwrap_or(0).clamp(0, total_pages - 1);
+/// Deserialize `?active=…` leniently. This is a public, crawlable, linkable
+/// page, so a hand-edited `?active=1` or a bare `?active` should show a page
+/// rather than a plain-text 400. Anything unrecognised reads as "off".
+fn de_lenient_bool<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize as _;
 
-    (page, total_pages)
+    // `?active` with no `=` deserializes as an empty string, which reads the
+    // same way an HTML checkbox's presence does: on.
+    let raw = String::deserialize(deserializer)?;
+
+    Ok(matches!(
+        raw.trim().to_ascii_lowercase().as_str(),
+        "" | "true" | "t" | "1" | "yes" | "y" | "on"
+    ))
 }
 
 /// Base URL for the directory in a given filter mode. Switching filters always
@@ -284,16 +291,20 @@ fn render_player_directory(
             }
         }
 
+        @if total == 0 {
+            @if active_only {
+                p class="empty" { "No players currently have an active snake." }
+            } @else {
+                p class="empty" { "No players have joined yet." }
+            }
+        } @else {
         div class="section" {
             @if players.is_empty() {
-                // Covers both a genuinely empty directory and the rare case
-                // where the count and the page fetch race and this page has
-                // been emptied out from under us.
-                @if active_only {
-                    p class="empty" { "No players currently have an active snake." }
-                } @else {
-                    p class="empty" { "No players have joined yet." }
-                }
+                // The count and the page fetch are separate statements, so a
+                // player can drop out of the filter between them and empty
+                // this page. Keep the pager so the visitor can step back to a
+                // page that still has rows.
+                p class="empty" { "No players remain on this page." }
             } @else {
                 table class="data" {
                     thead {
@@ -315,27 +326,26 @@ fn render_player_directory(
                 }
             }
 
-            @if total > 0 {
-                div class="pager" {
-                    @if page > 0 {
-                        a href=(players_page_href(active_only, page - 1)) { "‹ Prev" }
-                    }
-                    @if total_pages > 1 {
-                        span class="cur" { "Page " (page + 1) " of " (total_pages) }
-                    }
-                    @if page < total_pages - 1 {
-                        a href=(players_page_href(active_only, page + 1)) { "Next ›" }
-                    }
-                    @if !players.is_empty() {
-                        span class="spacer" {}
-                        span {
-                            "Showing " (page * PLAYERS_PER_PAGE + 1)
-                            "–" (page * PLAYERS_PER_PAGE + players.len() as i64)
-                            " of " (total) " players"
-                        }
+            div class="pager" {
+                @if page > 0 {
+                    a href=(players_page_href(active_only, page - 1)) { "‹ Prev" }
+                }
+                @if total_pages > 1 {
+                    span class="cur" { "Page " (page + 1) " of " (total_pages) }
+                }
+                @if page < total_pages - 1 {
+                    a href=(players_page_href(active_only, page + 1)) { "Next ›" }
+                }
+                @if !players.is_empty() {
+                    span class="spacer" {}
+                    span {
+                        "Showing " (page * PLAYERS_PER_PAGE + 1)
+                        "–" (page * PLAYERS_PER_PAGE + players.len() as i64)
+                        " of " (total) " players"
                     }
                 }
             }
+        }
         }
     }
 }
@@ -351,7 +361,7 @@ pub async fn list_players(
     let total = user::count_players(&state.db, active_only)
         .await
         .wrap_err("Failed to count players")?;
-    let (page, total_pages) = resolve_players_page(params.page, total);
+    let (page, total_pages) = resolve_page(params.page, total, PLAYERS_PER_PAGE);
     let players = user::get_players_paginated(&state.db, active_only, page, PLAYERS_PER_PAGE)
         .await
         .wrap_err("Failed to fetch players")?;
@@ -413,16 +423,32 @@ mod tests {
         }
     }
 
-    #[test]
-    fn player_pages_clamp_into_range() {
-        // An empty directory is still one logical page.
-        assert_eq!(resolve_players_page(None, 0), (0, 1));
-        assert_eq!(resolve_players_page(Some(7), 0), (0, 1));
+    /// Parse a query string through the same extractor the route uses.
+    fn parse_params(query: &str) -> PlayerDirectoryParams {
+        let uri: axum::http::Uri = format!("/players?{query}")
+            .parse()
+            .expect("test URI should parse");
 
-        assert_eq!(resolve_players_page(None, 50), (0, 1));
-        assert_eq!(resolve_players_page(Some(1), 51), (1, 2));
-        assert_eq!(resolve_players_page(Some(-3), 120), (0, 3));
-        assert_eq!(resolve_players_page(Some(99), 120), (2, 3));
+        Query::<PlayerDirectoryParams>::try_from_uri(&uri)
+            .expect("query should deserialize")
+            .0
+    }
+
+    #[test]
+    fn active_filter_accepts_the_shapes_people_actually_type() {
+        assert!(!parse_params("").active);
+        assert!(parse_params("active=true").active);
+
+        // A public page shouldn't 400 on a plausible hand-edit.
+        assert!(parse_params("active=1").active);
+        assert!(parse_params("active=yes").active);
+        assert!(parse_params("active=On").active);
+        assert!(parse_params("active").active);
+
+        // Anything else reads as "off" rather than rejecting the request.
+        assert!(!parse_params("active=false").active);
+        assert!(!parse_params("active=0").active);
+        assert!(!parse_params("active=maybe").active);
     }
 
     #[test]
@@ -461,10 +487,28 @@ mod tests {
         let all = render_player_directory(&[], false, 0, 1, 0).into_string();
         assert!(all.contains("No players have joined yet."));
         assert!(!all.contains("Showing"));
+        assert!(!all.contains("<table"));
+        assert!(!all.contains(r#"class="pager""#));
 
         let active = render_player_directory(&[], true, 0, 1, 0).into_string();
         assert!(active.contains("No players currently have an active snake."));
         assert!(!active.contains("Showing"));
+
+        // Both modes still offer the toggle, so a visitor who filtered
+        // themselves into an empty listing can get back out.
+        assert!(active.contains(r#"href="/players">All players</a>"#));
+    }
+
+    #[test]
+    fn a_page_emptied_by_a_racing_count_keeps_its_pager() {
+        // The count said 101 players, but by the time the page was fetched
+        // they'd dropped out of the filter. That is not "nobody has joined".
+        let html = render_player_directory(&[], true, 1, 3, 101).into_string();
+
+        assert!(html.contains("No players remain on this page."));
+        assert!(!html.contains("No players currently have an active snake."));
+        assert!(html.contains(r#"href="/players?active=true&amp;page=0""#));
+        assert!(!html.contains("Showing"));
     }
 
     #[test]

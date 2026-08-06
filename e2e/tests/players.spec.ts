@@ -142,7 +142,11 @@ test.describe.serial('Player Directory', () => {
     // Sorts after every other spec's `testuser_*` rows, so the whole seeded
     // block stays contiguous in the directory's fixed ordering.
     const prefix = `zzplayer-${Date.now()}`;
-    const idBase = Date.now() * 1000;
+    // `createMockUser` allocates `Date.now() * 1000 + random(0..999)`, and
+    // `external_github_id` is BIGINT UNIQUE. Start well clear of that band so
+    // a spec minting a mock user in the same millisecond can't collide with
+    // this seed under `fullyParallel`.
+    const idBase = Date.now() * 1000 + 500_000;
 
     try {
       const activeId = await insertUser(idBase + 1, `${prefix}-a-active`, `${prefix}-a-active`);
