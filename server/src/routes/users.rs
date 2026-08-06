@@ -1,18 +1,19 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
 };
 use color_eyre::eyre::Context as _;
-use maud::html;
+use maud::{Markup, html};
+use uuid::Uuid;
 
 use crate::{
-    components::page_factory::PageFactory,
+    components::{page::Page, page_factory::PageFactory},
     errors::{ServerResult, WithStatus},
     models::{
         battlesnake::{self, Visibility},
         leaderboard, saved_game,
-        user::{self, User},
+        user::{self, PlayerDirectoryEntry, User},
     },
     routes::auth::OptionalUser,
     state::AppState,
@@ -27,13 +28,12 @@ fn public_name(user: &User) -> &str {
         .unwrap_or(&user.github_login)
 }
 
-/// GET /users/{login} — public user profile.
+/// GET /users/{login} — public user profile, looked up by GitHub login.
 ///
-/// Everything here is visible to anonymous visitors, matching the public
-/// profiles on play.battlesnake.com: identity fields the user chose to share,
-/// their snakes, and where those snakes sit on the leaderboards. Snake
-/// visibility only controls matchmaking eligibility, not who can see it, so
-/// all snakes are listed (private ones badged).
+/// `users.github_login` is not unique (GitHub logins can be renamed and
+/// reused, and lookup is case-insensitive), so this route can be ambiguous.
+/// It is kept for compatibility and for hand-typed URLs; anything the site
+/// links to should use the stable `/users/{login}/{user_id}` form instead.
 pub async fn show_user_profile(
     State(state): State<AppState>,
     OptionalUser(viewer): OptionalUser,
@@ -46,6 +46,44 @@ pub async fn show_user_profile(
         .ok_or_else(|| "User not found".to_string())
         .with_status(StatusCode::NOT_FOUND)?;
 
+    render_user_profile(&state, viewer, user, page_factory).await
+}
+
+/// GET /users/{login}/{user_id} — public user profile addressed by its stable
+/// UUID.
+///
+/// The `_login` segment is cosmetic: it keeps the URL readable and shareable,
+/// but the UUID is authoritative. A stale or differently-cased slug still
+/// resolves to the right person rather than 404ing or picking a namesake.
+pub async fn show_user_profile_by_id(
+    State(state): State<AppState>,
+    OptionalUser(viewer): OptionalUser,
+    Path((_login, user_id)): Path<(String, Uuid)>,
+    page_factory: PageFactory,
+) -> ServerResult<impl IntoResponse, StatusCode> {
+    let user = user::get_user_by_id(&state.db, user_id)
+        .await
+        .wrap_err("Failed to fetch user")?
+        .ok_or_else(|| "User not found".to_string())
+        .with_status(StatusCode::NOT_FOUND)?;
+
+    render_user_profile(&state, viewer, user, page_factory).await
+}
+
+/// Render the public profile of an already-resolved user. Shared by both
+/// profile routes so the login and stable-ID URLs can never drift apart.
+///
+/// Everything here is visible to anonymous visitors, matching the public
+/// profiles on play.battlesnake.com: identity fields the user chose to share,
+/// their snakes, and where those snakes sit on the leaderboards. Snake
+/// visibility only controls matchmaking eligibility, not who can see it, so
+/// all snakes are listed (private ones badged).
+async fn render_user_profile(
+    state: &AppState,
+    viewer: Option<User>,
+    user: User,
+    page_factory: PageFactory,
+) -> ServerResult<Page, StatusCode> {
     let is_self = viewer.as_ref().is_some_and(|v| v.user_id == user.user_id);
 
     let snakes = battlesnake::get_battlesnakes_by_user_id(&state.db, user.user_id)
@@ -174,6 +212,164 @@ pub async fn show_user_profile(
     ))
 }
 
+/// Rows per page in the public `/players` directory.
+const PLAYERS_PER_PAGE: i64 = 50;
+
+#[derive(Debug, serde::Deserialize)]
+pub struct PlayerDirectoryParams {
+    #[serde(default)]
+    pub page: Option<i64>,
+    /// Restrict the listing to players with at least one active snake.
+    #[serde(default)]
+    pub active: bool,
+}
+
+/// Resolve a requested (zero-based) page number against the total number of
+/// players. Returns `(page, total_pages)`. Missing/negative requests clamp to
+/// the first page, oversized ones to the last. An empty directory still
+/// reports one logical page so the clamp stays in range.
+fn resolve_players_page(requested: Option<i64>, total: i64) -> (i64, i64) {
+    let total_pages = if total > 0 {
+        (total + PLAYERS_PER_PAGE - 1) / PLAYERS_PER_PAGE
+    } else {
+        1
+    };
+    let page = requested.unwrap_or(0).clamp(0, total_pages - 1);
+
+    (page, total_pages)
+}
+
+/// Base URL for the directory in a given filter mode. Switching filters always
+/// drops `page`, since page N of "all players" has nothing to do with page N
+/// of "active players".
+fn players_filter_href(active_only: bool) -> &'static str {
+    if active_only {
+        "/players?active=true"
+    } else {
+        "/players"
+    }
+}
+
+/// Pager link for a page within the current filter mode.
+fn players_page_href(active_only: bool, page: i64) -> String {
+    if active_only {
+        format!("/players?active=true&page={page}")
+    } else {
+        format!("/players?page={page}")
+    }
+}
+
+fn render_player_directory(
+    players: &[PlayerDirectoryEntry],
+    active_only: bool,
+    page: i64,
+    total_pages: i64,
+    total: i64,
+) -> Markup {
+    html! {
+        div class="page-head" {
+            h1 { "Players" }
+            div class="sub" {
+                "Everyone who has joined the arena. Follow a name through to see their snakes."
+            }
+        }
+
+        nav class="modes" aria-label="Player filter" {
+            @if active_only {
+                a class="mode" href=(players_filter_href(false)) { "All players" }
+                span class="mode on" aria-current="page" { "With active snakes" }
+            } @else {
+                span class="mode on" aria-current="page" { "All players" }
+                a class="mode" href=(players_filter_href(true)) { "With active snakes" }
+            }
+        }
+
+        div class="section" {
+            @if players.is_empty() {
+                // Covers both a genuinely empty directory and the rare case
+                // where the count and the page fetch race and this page has
+                // been emptied out from under us.
+                @if active_only {
+                    p class="empty" { "No players currently have an active snake." }
+                } @else {
+                    p class="empty" { "No players have joined yet." }
+                }
+            } @else {
+                table class="data" {
+                    thead {
+                        tr { th { "Player" } }
+                    }
+                    tbody {
+                        @for player in players {
+                            tr {
+                                td {
+                                    div class="snake-cell" {
+                                        a class="name" href={"/users/"(player.github_login)"/"(player.user_id)} {
+                                            (player.public_name)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            @if total > 0 {
+                div class="pager" {
+                    @if page > 0 {
+                        a href=(players_page_href(active_only, page - 1)) { "‹ Prev" }
+                    }
+                    @if total_pages > 1 {
+                        span class="cur" { "Page " (page + 1) " of " (total_pages) }
+                    }
+                    @if page < total_pages - 1 {
+                        a href=(players_page_href(active_only, page + 1)) { "Next ›" }
+                    }
+                    @if !players.is_empty() {
+                        span class="spacer" {}
+                        span {
+                            "Showing " (page * PLAYERS_PER_PAGE + 1)
+                            "–" (page * PLAYERS_PER_PAGE + players.len() as i64)
+                            " of " (total) " players"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// GET /players — browsable directory of everyone in the arena.
+pub async fn list_players(
+    State(state): State<AppState>,
+    Query(params): Query<PlayerDirectoryParams>,
+    page_factory: PageFactory,
+) -> ServerResult<impl IntoResponse, StatusCode> {
+    let active_only = params.active;
+
+    let total = user::count_players(&state.db, active_only)
+        .await
+        .wrap_err("Failed to count players")?;
+    let (page, total_pages) = resolve_players_page(params.page, total);
+    let players = user::get_players_paginated(&state.db, active_only, page, PLAYERS_PER_PAGE)
+        .await
+        .wrap_err("Failed to fetch players")?;
+
+    Ok(page_factory
+        .create_page(
+            "Players".to_string(),
+            Box::new(render_player_directory(
+                &players,
+                active_only,
+                page,
+                total_pages,
+                total,
+            )),
+        )
+        .with_description("Browse the players competing in the Battlesnake arena."))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,5 +403,100 @@ mod tests {
     fn public_name_falls_back_to_login_when_unset_or_empty() {
         assert_eq!(public_name(&test_user(None)), "coreyja");
         assert_eq!(public_name(&test_user(Some(""))), "coreyja");
+    }
+
+    fn directory_entry(user_id: Uuid, login: &str, public_name: &str) -> PlayerDirectoryEntry {
+        PlayerDirectoryEntry {
+            user_id,
+            github_login: login.to_string(),
+            public_name: public_name.to_string(),
+        }
+    }
+
+    #[test]
+    fn player_pages_clamp_into_range() {
+        // An empty directory is still one logical page.
+        assert_eq!(resolve_players_page(None, 0), (0, 1));
+        assert_eq!(resolve_players_page(Some(7), 0), (0, 1));
+
+        assert_eq!(resolve_players_page(None, 50), (0, 1));
+        assert_eq!(resolve_players_page(Some(1), 51), (1, 2));
+        assert_eq!(resolve_players_page(Some(-3), 120), (0, 3));
+        assert_eq!(resolve_players_page(Some(99), 120), (2, 3));
+    }
+
+    #[test]
+    fn rows_link_by_stable_uuid_even_when_logins_collide() {
+        // Two distinct accounts whose logins differ only by case: the login
+        // alone can't tell them apart, so the UUID has to.
+        let first = Uuid::from_u128(1);
+        let second = Uuid::from_u128(2);
+        let players = vec![
+            directory_entry(first, "twin", "First Twin"),
+            directory_entry(second, "TWIN", "Second Twin"),
+        ];
+
+        let html = render_player_directory(&players, false, 0, 1, 2).into_string();
+
+        assert!(html.contains(&format!(r#"href="/users/twin/{first}""#)));
+        assert!(html.contains(&format!(r#"href="/users/TWIN/{second}""#)));
+        assert!(html.contains("First Twin"));
+        assert!(html.contains("Second Twin"));
+    }
+
+    #[test]
+    fn rows_label_with_the_public_name_fallback() {
+        // The model already collapses NULL/empty display names to the login;
+        // the row just renders whatever it was handed.
+        let players = vec![directory_entry(Uuid::from_u128(3), "nameless", "nameless")];
+
+        let html = render_player_directory(&players, false, 0, 1, 1).into_string();
+
+        assert!(html.contains(r#"class="name""#));
+        assert!(html.contains(">nameless</a>"));
+    }
+
+    #[test]
+    fn empty_states_are_mode_specific_and_omit_a_row_range() {
+        let all = render_player_directory(&[], false, 0, 1, 0).into_string();
+        assert!(all.contains("No players have joined yet."));
+        assert!(!all.contains("Showing"));
+
+        let active = render_player_directory(&[], true, 0, 1, 0).into_string();
+        assert!(active.contains("No players currently have an active snake."));
+        assert!(!active.contains("Showing"));
+    }
+
+    #[test]
+    fn filter_toggle_switches_modes_and_drops_the_page() {
+        let all = render_player_directory(&[], false, 0, 1, 0).into_string();
+        assert!(all.contains(r#"<span class="mode on" aria-current="page">All players</span>"#));
+        assert!(all.contains(r#"href="/players?active=true"#));
+        assert!(!all.contains("active=true&amp;page="));
+
+        let active = render_player_directory(&[], true, 0, 1, 0).into_string();
+        assert!(
+            active
+                .contains(r#"<span class="mode on" aria-current="page">With active snakes</span>"#)
+        );
+        assert!(active.contains(r#"href="/players">All players</a>"#));
+    }
+
+    #[test]
+    fn pager_links_preserve_the_active_filter() {
+        let players = vec![directory_entry(Uuid::from_u128(4), "middle", "Middle")];
+
+        // Page 1 of 3, active mode: both Prev and Next carry `active=true`.
+        // Maud escapes the query separator, so expect `&amp;`.
+        let html = render_player_directory(&players, true, 1, 3, 101).into_string();
+        assert!(html.contains(r#"href="/players?active=true&amp;page=0""#));
+        assert!(html.contains(r#"href="/players?active=true&amp;page=2""#));
+        assert!(html.contains("Page 2 of 3"));
+        assert!(html.contains("Showing 51–51 of 101 players"));
+
+        // The same page in "all" mode has no filter to carry.
+        let html = render_player_directory(&players, false, 1, 3, 101).into_string();
+        assert!(html.contains(r#"href="/players?page=0""#));
+        assert!(html.contains(r#"href="/players?page=2""#));
     }
 }

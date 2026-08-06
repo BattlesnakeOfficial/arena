@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO leaderboards (name) VALUES ('Duplicated Board')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "23f2e11ba62336f84e3b1d734e15367e972919578539bd37873d2c09d65e6537"
+}

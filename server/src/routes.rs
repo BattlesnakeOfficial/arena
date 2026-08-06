@@ -98,8 +98,16 @@ pub fn routes(app_state: AppState) -> axum::Router {
         .route("/conduct", get(policy::conduct_page))
         .route("/privacy", get(policy::privacy_page))
         .route("/terms", get(policy::terms_page))
-        // Public user profiles
+        // Public player directory
+        .route("/players", get(users::list_players))
+        // Public user profiles. The two-segment form is the stable one — the
+        // UUID is authoritative and the login is a cosmetic slug — while the
+        // login-only form stays for compatibility and hand-typed URLs.
         .route("/users/{login}", get(users::show_user_profile))
+        .route(
+            "/users/{login}/{user_id}",
+            get(users::show_user_profile_by_id),
+        )
         // Profile page - requires authentication
         .route("/me", get(profile_page).post(update_profile))
         // Appearance (theme) preference - requires authentication

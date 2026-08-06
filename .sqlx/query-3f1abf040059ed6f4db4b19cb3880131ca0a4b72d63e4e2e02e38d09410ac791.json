@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id, disabled_at)\n             SELECT leaderboard_id, $2, $3 FROM leaderboards WHERE name = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Uuid",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "3f1abf040059ed6f4db4b19cb3880131ca0a4b72d63e4e2e02e38d09410ac791"
+}
