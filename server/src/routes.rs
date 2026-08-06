@@ -122,6 +122,12 @@ pub fn routes(app_state: AppState) -> axum::Router {
             "/claim/email/verify",
             get(claim::email_claim_verify_page).post(claim::complete_email_claim),
         )
+        // Public snake directory (browse + challenge)
+        .route("/snakes", get(battlesnake::list_public_battlesnakes))
+        .route(
+            "/battlesnakes/{id}/challenge",
+            post(game::challenge_battlesnake),
+        )
         .route("/battlesnakes", get(battlesnake::list_battlesnakes))
         .route("/battlesnakes/new", get(battlesnake::new_battlesnake))
         .route(

@@ -13,12 +13,14 @@ const DEFAULT_DESCRIPTION: &str = "A competitive arena where your code battles o
 
 const GOOGLE_FONTS_HREF: &str = "https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,300;12..96,500;12..96,600;12..96,700;12..96,800&family=Instrument+Sans:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap";
 
-/// Primary nav links: (label, href). Battlesnakes is only shown logged in
-/// (it lists your own snakes).
-const NAV_LINKS: [(&str, &str, bool); 4] = [
+/// Primary nav links: (label, href, authed_only). "Snakes" is the public
+/// directory of every public snake; "My Snakes" manages your own and is only
+/// shown logged in.
+const NAV_LINKS: [(&str, &str, bool); 5] = [
     ("Leaderboards", "/leaderboards", false),
     ("Tournaments", "/tournaments", false),
-    ("Battlesnakes", "/battlesnakes", true),
+    ("Snakes", "/snakes", false),
+    ("My Snakes", "/battlesnakes", true),
     ("Customizations", "/customizations", false),
 ];
 
