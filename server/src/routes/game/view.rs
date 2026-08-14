@@ -119,6 +119,7 @@ pub async fn view_game(
                     GameStatus::Waiting => span class="live-pill quiet" { "Waiting" },
                     GameStatus::Running => span class="live-pill" { span class="live-dot" {} "Live" },
                     GameStatus::Finished => span class="live-pill quiet" { "Replay" },
+                    GameStatus::Failed => span class="live-pill quiet" { "Incomplete" },
                 }
             }
 
@@ -127,6 +128,13 @@ pub async fn view_game(
                     "This game is waiting to start. "
                     a href="" onclick="location.reload(); return false;" class="refresh-link" { "Refresh" }
                     " to check for updates."
+                }
+            }
+
+            @if game.status == GameStatus::Failed {
+                p class="empty" {
+                    "This game never finished — its runner died partway "
+                    "through. It has no results and didn't affect any ratings."
                 }
             }
 
