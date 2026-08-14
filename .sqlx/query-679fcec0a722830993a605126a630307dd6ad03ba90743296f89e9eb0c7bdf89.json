@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT\n            b.name as snake_name,\n            b.color as snake_color,\n            u.github_login as owner_login,\n            lgr.leaderboard_entry_id,\n            lgr.placement,\n            lgr.display_score_change,\n            lgr.created_at\n         FROM leaderboard_game_results lgr\n         JOIN leaderboard_entries le ON lgr.leaderboard_entry_id = le.leaderboard_entry_id\n         JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id\n         JOIN users u ON b.user_id = u.user_id\n         JOIN leaderboard_games lg ON lgr.leaderboard_game_id = lg.leaderboard_game_id\n         WHERE lg.leaderboard_id = $1\n         ORDER BY lgr.created_at DESC\n         LIMIT $2",
+  "query": "SELECT\n            b.name as snake_name,\n            b.color as snake_color,\n            u.github_login as owner_login,\n            lgr.leaderboard_entry_id,\n            lgr.placement,\n            lgr.display_score_change,\n            lgr.created_at\n         FROM leaderboard_game_results lgr\n         JOIN leaderboard_entries le ON lgr.leaderboard_entry_id = le.leaderboard_entry_id\n         JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id\n         JOIN users u ON b.user_id = u.user_id\n         JOIN leaderboard_games lg ON lgr.leaderboard_game_id = lg.leaderboard_game_id\n         WHERE lg.leaderboard_id = $1\n         ORDER BY lgr.created_at DESC, lgr.leaderboard_game_id DESC, lgr.placement ASC\n         LIMIT $2",
   "describe": {
     "columns": [
       {
@@ -55,5 +55,5 @@
       false
     ]
   },
-  "hash": "8fc82e6e3aacf11766b22cbdf309a33de929de51f62e40f4a9b4f9497ba5e639"
+  "hash": "679fcec0a722830993a605126a630307dd6ad03ba90743296f89e9eb0c7bdf89"
 }
