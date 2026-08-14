@@ -21,6 +21,7 @@ use crate::{
     models::tournament,
     models::user::get_user_by_id,
     routes::auth::{CurrentUser, CurrentUserWithSession, OptionalUser},
+    routes::pagination::resolve_page,
     snake_health,
     state::AppState,
 };
@@ -117,21 +118,6 @@ pub struct PublicBattlesnakePagination {
     pub page: Option<i64>,
 }
 
-/// Resolve a requested (zero-based) page number against the total number of
-/// public snakes. Returns `(page, total_pages)`. Missing/negative requests
-/// clamp to the first page, oversized ones to the last. An empty directory
-/// still reports one logical page so the clamp stays in range.
-fn resolve_public_snakes_page(requested: Option<i64>, total: i64) -> (i64, i64) {
-    let total_pages = if total > 0 {
-        (total + PUBLIC_SNAKES_PER_PAGE - 1) / PUBLIC_SNAKES_PER_PAGE
-    } else {
-        1
-    };
-    let page = requested.unwrap_or(0).clamp(0, total_pages - 1);
-
-    (page, total_pages)
-}
-
 struct PublicBattlesnakePage {
     snakes: Vec<battlesnake::PublicBattlesnakeListItem>,
     page: i64,
@@ -146,7 +132,7 @@ async fn load_public_battlesnake_page(
     requested: Option<i64>,
 ) -> cja::Result<PublicBattlesnakePage> {
     let total = battlesnake::count_public_battlesnakes(pool).await?;
-    let (page, total_pages) = resolve_public_snakes_page(requested, total);
+    let (page, total_pages) = resolve_page(requested, total, PUBLIC_SNAKES_PER_PAGE);
     let snakes =
         battlesnake::get_public_battlesnakes_paginated(pool, page, PUBLIC_SNAKES_PER_PAGE).await?;
 
@@ -1356,21 +1342,8 @@ mod public_list_tests {
         }
     }
 
-    #[test]
-    fn page_resolution_clamps_requested_page() {
-        // No public snakes: one logical page, page 0.
-        assert_eq!(resolve_public_snakes_page(None, 0), (0, 1));
-        assert_eq!(resolve_public_snakes_page(Some(7), 0), (0, 1));
-
-        // A partial page still counts as a page.
-        assert_eq!(resolve_public_snakes_page(None, 1), (0, 1));
-        assert_eq!(resolve_public_snakes_page(None, 50), (0, 1));
-        assert_eq!(resolve_public_snakes_page(Some(1), 51), (1, 2));
-
-        // Out-of-range requests clamp to the first/last page.
-        assert_eq!(resolve_public_snakes_page(Some(-3), 120), (0, 3));
-        assert_eq!(resolve_public_snakes_page(Some(99), 120), (2, 3));
-    }
+    // Page-number clamping is covered by `routes::pagination`'s own tests;
+    // this module only covers what the directory renders.
 
     #[test]
     fn empty_directory_renders_message_without_table_or_pager() {
