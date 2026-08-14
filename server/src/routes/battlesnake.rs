@@ -1,10 +1,11 @@
 use axum::{
-    extract::{Path, RawForm, State},
+    extract::{Path, Query, RawForm, State},
     http::StatusCode,
     response::{IntoResponse, Redirect},
 };
 use color_eyre::eyre::Context as _;
 use maud::{Markup, html};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{
@@ -20,6 +21,7 @@ use crate::{
     models::tournament,
     models::user::get_user_by_id,
     routes::auth::{CurrentUser, CurrentUserWithSession, OptionalUser},
+    routes::pagination::resolve_page,
     snake_health,
     state::AppState,
 };
@@ -105,6 +107,163 @@ fn tag_form_fields(catalog: &tag::TagCatalog, selected: &[Uuid]) -> Markup {
             }
         }
     }
+}
+
+/// Rows per page in the public `/snakes` directory.
+const PUBLIC_SNAKES_PER_PAGE: i64 = 50;
+
+#[derive(Debug, serde::Deserialize)]
+pub struct PublicBattlesnakePagination {
+    #[serde(default)]
+    pub page: Option<i64>,
+}
+
+struct PublicBattlesnakePage {
+    snakes: Vec<battlesnake::PublicBattlesnakeListItem>,
+    page: i64,
+    total_pages: i64,
+    total: i64,
+}
+
+/// Count public snakes, resolve the requested page against that count, and
+/// fetch the matching batch.
+async fn load_public_battlesnake_page(
+    pool: &PgPool,
+    requested: Option<i64>,
+) -> cja::Result<PublicBattlesnakePage> {
+    let total = battlesnake::count_public_battlesnakes(pool).await?;
+    let (page, total_pages) = resolve_page(requested, total, PUBLIC_SNAKES_PER_PAGE);
+    let snakes =
+        battlesnake::get_public_battlesnakes_paginated(pool, page, PUBLIC_SNAKES_PER_PAGE).await?;
+
+    Ok(PublicBattlesnakePage {
+        snakes,
+        page,
+        total_pages,
+        total,
+    })
+}
+
+fn render_public_battlesnake_list(
+    snakes: &[battlesnake::PublicBattlesnakeListItem],
+    is_authenticated: bool,
+    page: i64,
+    total_pages: i64,
+    total: i64,
+) -> Markup {
+    html! {
+        div class="page-head" {
+            h1 { "Public Battlesnakes" }
+            div class="sub" {
+                "Every snake its owner has made public. Pick one and challenge it to a match."
+            }
+        }
+
+        @if total == 0 {
+            p class="empty" { "No public battlesnakes are available yet." }
+        } @else {
+            div class="section" {
+                @if snakes.is_empty() {
+                    // The count and the page fetch can race (a snake going
+                    // private between them). Keep the pager so the visitor
+                    // can step back to a page that still has rows.
+                    p class="empty" { "No public battlesnakes remain on this page." }
+                } @else {
+                    table class="data" {
+                        thead {
+                            tr {
+                                th { "Battlesnake" }
+                                th class="r" { "Actions" }
+                            }
+                        }
+                        tbody {
+                            @for snake in snakes {
+                                tr {
+                                    td {
+                                        div class="snake-cell" {
+                                            span class="chip" style={"background:"(chip_color(&snake.color))} {}
+                                            span {
+                                                a class="name" href={"/battlesnakes/"(snake.battlesnake_id)"/profile"} {
+                                                    (snake.name)
+                                                }
+                                                span class="owner" {
+                                                    "by "
+                                                    a href={"/users/"(snake.owner_login)} { (snake.owner_login) }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    td class="r" {
+                                        div class="row-actions" {
+                                            @if is_authenticated {
+                                                form action={"/battlesnakes/"(snake.battlesnake_id)"/challenge"} method="post" {
+                                                    button type="submit" class="btn sm solid" { "Challenge" }
+                                                }
+                                            } @else {
+                                                a href="/auth/github" class="btn sm" { "Sign in to challenge" }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                div class="pager" {
+                    @if page > 0 {
+                        a href={"/snakes?page="(page - 1)} { "‹ Prev" }
+                    }
+                    @if total_pages > 1 {
+                        span class="cur" { "Page " (page + 1) " of " (total_pages) }
+                    }
+                    @if page < total_pages - 1 {
+                        a href={"/snakes?page="(page + 1)} { "Next ›" }
+                    }
+                    @if !snakes.is_empty() {
+                        span class="spacer" {}
+                        span {
+                            "Showing " (page * PUBLIC_SNAKES_PER_PAGE + 1)
+                            "–" (page * PUBLIC_SNAKES_PER_PAGE + snakes.len() as i64)
+                            " of " (total) " public snakes"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// GET /snakes — browse public battlesnakes.
+pub async fn list_public_battlesnakes(
+    State(state): State<AppState>,
+    Query(pagination): Query<PublicBattlesnakePagination>,
+    page_factory: PageFactory,
+) -> ServerResult<impl IntoResponse, StatusCode> {
+    let PublicBattlesnakePage {
+        snakes,
+        page,
+        total_pages,
+        total,
+    } = load_public_battlesnake_page(&state.db, pagination.page)
+        .await
+        .wrap_err("Failed to load public battlesnakes page")?;
+
+    // Captured before `page_factory` is consumed by `create_page`.
+    let is_authenticated = page_factory.user.is_some();
+
+    Ok(page_factory
+        .create_page(
+            "Public Battlesnakes".to_string(),
+            Box::new(render_public_battlesnake_list(
+                &snakes,
+                is_authenticated,
+                page,
+                total_pages,
+                total,
+            )),
+        )
+        .with_description("Browse public Battlesnakes and challenge an opponent to a match."))
 }
 
 // List all battlesnakes for the current user
@@ -1167,4 +1326,163 @@ pub async fn test_battlesnake(
             }
         }),
     ))
+}
+
+#[cfg(test)]
+mod public_list_tests {
+    use super::*;
+    use battlesnake::PublicBattlesnakeListItem;
+
+    fn item(name: &str, owner: &str) -> PublicBattlesnakeListItem {
+        PublicBattlesnakeListItem {
+            battlesnake_id: Uuid::nil(),
+            name: name.to_string(),
+            color: "#ff0000".to_string(),
+            owner_login: owner.to_string(),
+        }
+    }
+
+    // Page-number clamping is covered by `routes::pagination`'s own tests;
+    // this module only covers what the directory renders.
+
+    #[test]
+    fn empty_directory_renders_message_without_table_or_pager() {
+        let html = render_public_battlesnake_list(&[], true, 0, 1, 0).into_string();
+
+        assert!(html.contains("No public battlesnakes are available yet."));
+        assert!(!html.contains("<table"));
+        assert!(!html.contains("pager"));
+    }
+
+    #[test]
+    fn raced_empty_page_keeps_pager_navigation() {
+        let html = render_public_battlesnake_list(&[], true, 1, 2, 60).into_string();
+
+        assert!(html.contains("No public battlesnakes remain on this page."));
+        assert!(html.contains(r#"href="/snakes?page=0""#));
+        // No row range to show when the batch came back empty.
+        assert!(!html.contains("Showing"));
+    }
+
+    #[test]
+    fn rows_link_to_snake_profile_and_owner() {
+        let mut snake = item("Solid Snake", "kojima");
+        snake.battlesnake_id = Uuid::from_u128(1);
+
+        let html = render_public_battlesnake_list(&[snake], true, 0, 1, 1).into_string();
+
+        assert!(html.contains(&format!(
+            r#"href="/battlesnakes/{}/profile""#,
+            Uuid::from_u128(1)
+        )));
+        assert!(html.contains(r#"href="/users/kojima""#));
+        assert!(html.contains("Solid Snake"));
+        assert!(html.contains("Showing 1–1 of 1 public snakes"));
+    }
+
+    #[test]
+    fn authenticated_rows_post_a_challenge_form() {
+        let mut snake = item("Challenger", "owner");
+        snake.battlesnake_id = Uuid::from_u128(2);
+
+        let html = render_public_battlesnake_list(&[snake], true, 0, 1, 1).into_string();
+
+        assert!(html.contains(&format!(
+            r#"action="/battlesnakes/{}/challenge" method="post""#,
+            Uuid::from_u128(2)
+        )));
+        assert!(html.contains("Challenge"));
+        assert!(!html.contains("Sign in to challenge"));
+    }
+
+    #[test]
+    fn anonymous_rows_offer_a_sign_in_link() {
+        let html = render_public_battlesnake_list(&[item("Challenger", "owner")], false, 0, 1, 1)
+            .into_string();
+
+        assert!(html.contains(r#"href="/auth/github""#));
+        assert!(html.contains("Sign in to challenge"));
+        assert!(!html.contains("/challenge"));
+    }
+
+    #[test]
+    fn middle_page_renders_both_prev_and_next_links() {
+        let html = render_public_battlesnake_list(&[item("Middle", "owner")], true, 1, 3, 120)
+            .into_string();
+
+        assert!(html.contains(r#"href="/snakes?page=0""#));
+        assert!(html.contains(r#"href="/snakes?page=2""#));
+        assert!(html.contains("Page 2 of 3"));
+        assert!(html.contains("Showing 51–51 of 120 public snakes"));
+    }
+
+    async fn seed_public_snakes(pool: &PgPool, count: usize) -> cja::Result<Uuid> {
+        let user = sqlx::query!(
+            "INSERT INTO users (external_github_id, github_login, github_access_token)
+             VALUES (9001, 'loader-owner', 'test-token')
+             RETURNING user_id"
+        )
+        .fetch_one(pool)
+        .await?;
+
+        for i in 0..count {
+            sqlx::query!(
+                "INSERT INTO battlesnakes (user_id, name, url, visibility)
+                 VALUES ($1, $2, 'http://localhost:8000', 'public')",
+                user.user_id,
+                format!("Loader Snake {i:03}")
+            )
+            .execute(pool)
+            .await?;
+        }
+
+        Ok(user.user_id)
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn loader_resolves_pages_against_public_snake_count(pool: PgPool) -> cja::Result<()> {
+        let user_id = seed_public_snakes(&pool, 55).await?;
+        sqlx::query!(
+            "INSERT INTO battlesnakes (user_id, name, url, visibility)
+             VALUES ($1, 'Loader Hidden', 'http://localhost:8000', 'private')",
+            user_id
+        )
+        .execute(&pool)
+        .await?;
+
+        let second = load_public_battlesnake_page(&pool, Some(1)).await?;
+        assert_eq!(second.total, 55);
+        assert_eq!((second.page, second.total_pages), (1, 2));
+        let names: Vec<String> = second.snakes.iter().map(|s| s.name.clone()).collect();
+        assert_eq!(
+            names,
+            (50..55)
+                .map(|i| format!("Loader Snake {i:03}"))
+                .collect::<Vec<_>>()
+        );
+
+        // Negative requests fall back to the first page.
+        let negative = load_public_battlesnake_page(&pool, Some(-1)).await?;
+        assert_eq!(negative.page, 0);
+        assert_eq!(negative.snakes.len(), 50);
+        assert_eq!(negative.snakes[0].name, "Loader Snake 000");
+
+        // Oversized requests land on the final page.
+        let oversized = load_public_battlesnake_page(&pool, Some(9_999)).await?;
+        assert_eq!(oversized.page, 1);
+        assert_eq!(oversized.snakes.len(), 5);
+
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn loader_handles_an_empty_directory(pool: PgPool) -> cja::Result<()> {
+        let empty = load_public_battlesnake_page(&pool, Some(4)).await?;
+
+        assert_eq!(empty.total, 0);
+        assert_eq!((empty.page, empty.total_pages), (0, 1));
+        assert!(empty.snakes.is_empty());
+
+        Ok(())
+    }
 }

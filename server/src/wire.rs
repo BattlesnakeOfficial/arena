@@ -483,6 +483,42 @@ mod tests {
         assert_eq!(settings["hazardDamagePerTurn"], 14);
     }
 
+    /// Constrictor games announce themselves on the wire exactly like the
+    /// official engine: `ruleset.name = "constrictor"`, no food spawning
+    /// (foodSpawnChance/minimumFood = 0), and default royale/squad blocks.
+    #[test]
+    fn test_constrictor_game_serializes_constrictor_ruleset() {
+        let mut engine_game = create_test_engine_game();
+        engine_game.meta.ruleset_name = "constrictor".to_string();
+        engine_game.meta.settings = StandardSettings {
+            food_spawn_chance: 0,
+            minimum_food: 0,
+            hazard_damage_per_turn: 15,
+        };
+        engine_game.board.food.clear();
+
+        let contexts = HashMap::new();
+        let customizations = HashMap::new();
+        let wire = Game::from_engine_game(&engine_game, "s1", &contexts, &customizations);
+        let json: Value = serde_json::to_value(&wire).unwrap();
+
+        assert_eq!(json["game"]["ruleset"]["name"], "constrictor");
+        let settings = &json["game"]["ruleset"]["settings"];
+        assert_eq!(settings["foodSpawnChance"], 0);
+        assert_eq!(settings["minimumFood"], 0);
+        assert_eq!(settings["hazardDamagePerTurn"], 15);
+        assert_eq!(
+            settings["royale"]["shrinkEveryNTurns"], 0,
+            "constrictor games serialize the default royale block"
+        );
+        assert!(settings.get("squad").is_some());
+        assert_eq!(
+            json["board"]["food"].as_array().map(|a| a.len()),
+            Some(0),
+            "constrictor boards never contain food"
+        );
+    }
+
     /// Snail Mode wire parity with play.battlesnake.com: upstream it is a
     /// community map on the standard ruleset, so snakes must see ruleset
     /// "standard" with `game.map = "snail_mode"` (community snakes key off
@@ -510,7 +546,7 @@ mod tests {
     /// passes through and the map stays empty.
     #[test]
     fn test_non_snail_modes_keep_ruleset_name_and_empty_map() {
-        for ruleset in ["standard", "royale"] {
+        for ruleset in ["standard", "royale", "constrictor"] {
             let mut engine_game = create_test_engine_game();
             engine_game.meta.ruleset_name = ruleset.to_string();
 

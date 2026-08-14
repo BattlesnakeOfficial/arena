@@ -1,0 +1,35 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT\n                u.user_id,\n                u.github_login,\n                COALESCE(NULLIF(u.display_name, ''), u.github_login) AS \"public_name!\"\n            FROM users u\n            WHERE EXISTS (\n                SELECT 1\n                FROM battlesnakes b\n                JOIN leaderboard_entries le\n                  ON le.battlesnake_id = b.battlesnake_id\n                WHERE b.user_id = u.user_id\n                  AND le.disabled_at IS NULL\n            )\n            ORDER BY\n                LOWER(COALESCE(NULLIF(u.display_name, ''), u.github_login)) ASC,\n                LOWER(u.github_login) ASC,\n                u.user_id ASC\n            LIMIT $1 OFFSET $2\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "github_login",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "public_name!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "0d29824aac1231f43c8d37ec72a722de8577cd17f6f81f1589e8b58fd1f31bcf"
+}

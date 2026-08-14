@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "UPDATE snake_health_status\n         SET deactivated_at = NOW(), updated_at = NOW()\n         WHERE battlesnake_id = $1 AND deactivated_at IS NULL\n         RETURNING battlesnake_id",
+  "query": "INSERT INTO battlesnakes (user_id, name, url, visibility)\n             VALUES ($1, 'Challenged Snake', 'http://localhost:8000', 'public')\n             RETURNING battlesnake_id",
   "describe": {
     "columns": [
       {
@@ -18,5 +18,5 @@
       false
     ]
   },
-  "hash": "e8b463a0dffb85dabb8fb2065870495f2bfc50d8dff139f86c9f99fae08ea477"
+  "hash": "8601be2d91bb21e05b6e52372bf9740e7636cc1abbc19f7883581acdea2e2461"
 }

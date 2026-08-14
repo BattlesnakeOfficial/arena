@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO leaderboards (name, disabled_at) VALUES ('Retired Board', NOW())",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "38e43d9f426504553bc357fb96a8518dd964191ead46af47fd28b7a60a9f5d96"
+}

@@ -13,12 +13,15 @@ const DEFAULT_DESCRIPTION: &str = "A competitive arena where your code battles o
 
 const GOOGLE_FONTS_HREF: &str = "https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,300;12..96,500;12..96,600;12..96,700;12..96,800&family=Instrument+Sans:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap";
 
-/// Primary nav links: (label, href). Battlesnakes is only shown logged in
-/// (it lists your own snakes).
-const NAV_LINKS: [(&str, &str, bool); 4] = [
+/// Primary nav links: (label, href, authed_only). "Snakes" is the public
+/// directory of every public snake and "Players" the directory of the people
+/// behind them; "My Snakes" manages your own and is only shown logged in.
+const NAV_LINKS: [(&str, &str, bool); 6] = [
     ("Leaderboards", "/leaderboards", false),
     ("Tournaments", "/tournaments", false),
-    ("Battlesnakes", "/battlesnakes", true),
+    ("Snakes", "/snakes", false),
+    ("Players", "/players", false),
+    ("My Snakes", "/battlesnakes", true),
     ("Customizations", "/customizations", false),
 ];
 
@@ -309,6 +312,25 @@ mod tests {
             r#"<meta property="og:description" content="Standard game on an 11x11 board — watch the replay">"#
         ));
         assert!(!html.contains(DEFAULT_DESCRIPTION));
+    }
+
+    #[test]
+    fn players_directory_is_in_the_anonymous_nav() {
+        let html = test_page().render().into_string();
+        // Rendered twice: the desktop link row and the mobile menu sheet.
+        assert_eq!(html.matches(r#"href="/players">Players</a>"#).count(), 2);
+    }
+
+    #[test]
+    fn players_nav_link_is_active_on_the_directory() {
+        let mut page = test_page();
+        page.current_path = "/players".to_string();
+        let html = page.render().into_string();
+        assert_eq!(
+            html.matches(r#"<a class="active" href="/players">Players</a>"#)
+                .count(),
+            2
+        );
     }
 
     #[test]

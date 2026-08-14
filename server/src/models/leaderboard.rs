@@ -5,6 +5,10 @@ use uuid::Uuid;
 
 /// Application constants for leaderboard configuration
 pub const MATCH_SIZE: usize = 4;
+/// Smallest game the matchmaker will create when fewer than MATCH_SIZE
+/// snakes are enabled. Below this the ladder is starved and matchmaking
+/// pauses entirely.
+pub const MIN_MATCH_SIZE: usize = 2;
 pub const MIN_GAMES_FOR_RANKING: i32 = 10;
 pub const GAMES_PER_DAY: i32 = 100;
 
@@ -875,10 +879,12 @@ pub async fn get_leaderboard_status(
     .await
     .wrap_err("Failed to fetch last game created_at")?;
 
+    // Positive list, not "!= 'finished'": failed games are terminal and
+    // must never count as live.
     let games_in_progress = sqlx::query_scalar!(
         r#"SELECT COUNT(*) as "count!" FROM leaderboard_games lg
          JOIN games g ON lg.game_id = g.game_id
-         WHERE lg.leaderboard_id = $1 AND g.status != 'finished'"#,
+         WHERE lg.leaderboard_id = $1 AND g.status IN ('waiting', 'running')"#,
         leaderboard_id
     )
     .fetch_one(pool)
@@ -934,7 +940,7 @@ pub async fn get_activity_feed(
          JOIN users u ON b.user_id = u.user_id
          JOIN leaderboard_games lg ON lgr.leaderboard_game_id = lg.leaderboard_game_id
          WHERE lg.leaderboard_id = $1
-         ORDER BY lgr.created_at DESC
+         ORDER BY lgr.created_at DESC, lgr.leaderboard_game_id DESC, lgr.placement ASC
          LIMIT $2"#,
         leaderboard_id,
         limit
@@ -1095,4 +1101,50 @@ pub async fn load_home_feed(pool: &sqlx::PgPool) -> cja::Result<HomeFeed> {
         activity,
         top_entries,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn leaderboard_game_with_status(
+        pool: &PgPool,
+        leaderboard_id: Uuid,
+        status: &str,
+    ) -> cja::Result<()> {
+        let game_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO games (board_size, game_type, status)
+             VALUES ('11x11', 'Standard', $1) RETURNING game_id",
+        )
+        .bind(status)
+        .fetch_one(pool)
+        .await?;
+        sqlx::query("INSERT INTO leaderboard_games (leaderboard_id, game_id) VALUES ($1, $2)")
+            .bind(leaderboard_id)
+            .bind(game_id)
+            .execute(pool)
+            .await?;
+        Ok(())
+    }
+
+    /// "In progress" means waiting or running — terminal states (finished,
+    /// failed) must never show as live on the leaderboard page.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn games_in_progress_counts_only_live_states(pool: PgPool) -> cja::Result<()> {
+        let leaderboard_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO leaderboards (name) VALUES ('status-test') RETURNING leaderboard_id",
+        )
+        .fetch_one(&pool)
+        .await?;
+
+        for status in ["waiting", "running", "finished", "failed"] {
+            leaderboard_game_with_status(&pool, leaderboard_id, status).await?;
+        }
+
+        let status = get_leaderboard_status(&pool, leaderboard_id).await?;
+        assert_eq!(status.games_in_progress, 2);
+        assert_eq!(status.total_games, 4);
+
+        Ok(())
+    }
 }
