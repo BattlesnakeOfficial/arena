@@ -7,6 +7,12 @@
 //! stamp is a compare-and-set: only the transition from NULL "wins", which is
 //! what gates the owner notification email to once per deactivation no matter
 //! how often the job retries.
+//!
+//! Deactivated snakes keep getting probed: `consecutive_successes` climbs on
+//! healthy probes (spacing-gated the same way as failures) and the sweeper
+//! auto-reactivates once it crosses the recovery threshold — the mirror image
+//! of the deactivation flow, gated by the NOW() -> NULL transition on
+//! `deactivated_at`.
 
 use color_eyre::eyre::Context as _;
 use sqlx::PgPool;
@@ -20,6 +26,7 @@ pub const DISABLED_REASON_HEALTH: &str = "health";
 pub struct SnakeHealthStatus {
     pub battlesnake_id: Uuid,
     pub consecutive_failures: i32,
+    pub consecutive_successes: i32,
     pub last_checked_at: chrono::DateTime<chrono::Utc>,
     pub last_failure: Option<String>,
     pub deactivated_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -29,7 +36,7 @@ pub struct SnakeHealthStatus {
 pub async fn get(pool: &PgPool, battlesnake_id: Uuid) -> cja::Result<Option<SnakeHealthStatus>> {
     sqlx::query_as!(
         SnakeHealthStatus,
-        r#"SELECT battlesnake_id, consecutive_failures, last_checked_at, last_failure, deactivated_at
+        r#"SELECT battlesnake_id, consecutive_failures, consecutive_successes, last_checked_at, last_failure, deactivated_at
          FROM snake_health_status
          WHERE battlesnake_id = $1"#,
         battlesnake_id
@@ -67,18 +74,19 @@ pub async fn record_success(pool: &PgPool, battlesnake_id: Uuid) -> cja::Result<
     Ok(())
 }
 
-/// Minimum spacing between counted failures. The cron enqueues a sweep
-/// every 30 minutes with no dedup or completion check, so sweeps can pile
-/// up and drain back-to-back (or overlap with `workers > 1`); without this
-/// gate a snake down for one short window could burn its whole failure
-/// budget in minutes. Half the sweep interval: real consecutive sweeps
-/// always count, piled-up ones don't.
-const FAILURE_COUNT_SPACING_MINUTES: i32 = 15;
+/// Minimum spacing between counted probes (failures and recovery
+/// successes alike). The cron enqueues a sweep every 30 minutes with no
+/// dedup or completion check, so sweeps can pile up and drain back-to-back
+/// (or overlap with `workers > 1`); without this gate a snake down for one
+/// short window could burn its whole failure budget in minutes — or bounce
+/// back into matchmaking off a burst of piled-up probes. Half the sweep
+/// interval: real consecutive sweeps always count, piled-up ones don't.
+const PROBE_COUNT_SPACING_MINUTES: i32 = 15;
 
 /// Record a failed probe and return the consecutive-failure count.
 ///
 /// The count only increments when the previous check is at least
-/// [`FAILURE_COUNT_SPACING_MINUTES`] old — back-to-back probes from
+/// [`PROBE_COUNT_SPACING_MINUTES`] old — back-to-back probes from
 /// piled-up or concurrent sweeps update `last_failure` but don't inflate
 /// the streak, keeping "N consecutive failures" meaning N separate sweep
 /// windows (~N × 30 min), as the threshold design assumes.
@@ -103,13 +111,71 @@ pub async fn record_failure(
          RETURNING consecutive_failures"#,
         battlesnake_id,
         failure_summary,
-        FAILURE_COUNT_SPACING_MINUTES,
+        PROBE_COUNT_SPACING_MINUTES,
     )
     .fetch_one(pool)
     .await
     .wrap_err("Failed to record snake health failure")?;
 
     Ok(row.consecutive_failures)
+}
+
+/// Record a healthy probe of a *deactivated* snake and return the
+/// consecutive-success count. Unlike [`record_success`] this must NOT clear
+/// `deactivated_at` — recovery is gated on a streak, and the reactivation
+/// itself (entries + stamp + notification) happens in [`reactivate`] once
+/// the caller sees the streak cross the threshold.
+///
+/// Spacing-gated like [`record_failure`], so piled-up sweeps can't fake a
+/// recovery streak in minutes.
+///
+/// Returns 0 when the snake has no health row — a health-disabled entry
+/// without one shouldn't be possible, but if it happens the streak simply
+/// starts counting from the next probe.
+pub async fn record_recovery_success(pool: &PgPool, battlesnake_id: Uuid) -> cja::Result<i32> {
+    let count = sqlx::query_scalar!(
+        r#"UPDATE snake_health_status
+         SET consecutive_successes = CASE
+                 WHEN last_checked_at <= NOW() - make_interval(mins => $2)
+                 THEN consecutive_successes + 1
+                 ELSE GREATEST(consecutive_successes, 1)
+             END,
+             last_checked_at = NOW(),
+             updated_at = NOW()
+         WHERE battlesnake_id = $1 AND deactivated_at IS NOT NULL
+         RETURNING consecutive_successes"#,
+        battlesnake_id,
+        PROBE_COUNT_SPACING_MINUTES,
+    )
+    .fetch_optional(pool)
+    .await
+    .wrap_err("Failed to record recovery success")?;
+
+    Ok(count.unwrap_or(0))
+}
+
+/// Record a failed probe of a *deactivated* snake: the recovery streak
+/// starts over. No spacing gate — any failure genuinely breaks the streak.
+pub async fn record_recovery_failure(
+    pool: &PgPool,
+    battlesnake_id: Uuid,
+    failure_summary: &str,
+) -> cja::Result<()> {
+    sqlx::query!(
+        r#"UPDATE snake_health_status
+         SET consecutive_successes = 0,
+             last_checked_at = NOW(),
+             last_failure = $2,
+             updated_at = NOW()
+         WHERE battlesnake_id = $1 AND deactivated_at IS NOT NULL"#,
+        battlesnake_id,
+        failure_summary,
+    )
+    .execute(pool)
+    .await
+    .wrap_err("Failed to record recovery failure")?;
+
+    Ok(())
 }
 
 /// Pull a snake from matchmaking: disable its active leaderboard entries
@@ -135,7 +201,7 @@ pub async fn deactivate(pool: &PgPool, battlesnake_id: Uuid) -> cja::Result<bool
 
     let newly_deactivated = sqlx::query_scalar!(
         r#"UPDATE snake_health_status
-         SET deactivated_at = NOW(), updated_at = NOW()
+         SET deactivated_at = NOW(), consecutive_successes = 0, updated_at = NOW()
          WHERE battlesnake_id = $1 AND deactivated_at IS NULL
          RETURNING battlesnake_id"#,
         battlesnake_id
@@ -152,11 +218,31 @@ pub async fn deactivate(pool: &PgPool, battlesnake_id: Uuid) -> cja::Result<bool
     Ok(newly_deactivated)
 }
 
-/// Owner-initiated recovery: re-enable exactly the entries the sweeper
-/// disabled (manual pauses stay paused), clear the deactivation stamp, and
-/// reset the failure streak so the next sweep starts fresh.
-pub async fn reactivate(pool: &PgPool, battlesnake_id: Uuid) -> cja::Result<()> {
+/// Recovery (owner-initiated or sweeper auto-recovery): re-enable exactly
+/// the entries the sweeper disabled (manual pauses stay paused), clear the
+/// deactivation stamp, and reset both streaks so the next sweep starts
+/// fresh.
+///
+/// Returns `true` only when this call performed the NOW() -> NULL
+/// transition on `deactivated_at` — the sweeper sends the "back in
+/// matchmaking" notification exactly on that `true`, mirroring how
+/// [`deactivate`] gates its email.
+pub async fn reactivate(pool: &PgPool, battlesnake_id: Uuid) -> cja::Result<bool> {
     let mut tx = pool.begin().await.wrap_err("Failed to begin transaction")?;
+
+    // Lock the row so concurrent sweeps can't both observe the NOW() ->
+    // NULL transition and double-notify.
+    let was_deactivated = sqlx::query_scalar!(
+        r#"SELECT deactivated_at FROM snake_health_status
+         WHERE battlesnake_id = $1
+         FOR UPDATE"#,
+        battlesnake_id
+    )
+    .fetch_optional(&mut *tx)
+    .await
+    .wrap_err("Failed to lock snake health status")?
+    .flatten()
+    .is_some();
 
     sqlx::query!(
         r#"UPDATE leaderboard_entries
@@ -171,7 +257,7 @@ pub async fn reactivate(pool: &PgPool, battlesnake_id: Uuid) -> cja::Result<()> 
 
     sqlx::query!(
         r#"UPDATE snake_health_status
-         SET deactivated_at = NULL, consecutive_failures = 0, last_failure = NULL, updated_at = NOW()
+         SET deactivated_at = NULL, consecutive_failures = 0, consecutive_successes = 0, last_failure = NULL, updated_at = NOW()
          WHERE battlesnake_id = $1"#,
         battlesnake_id
     )
@@ -183,7 +269,7 @@ pub async fn reactivate(pool: &PgPool, battlesnake_id: Uuid) -> cja::Result<()> 
         .await
         .wrap_err("Failed to commit reactivation")?;
 
-    Ok(())
+    Ok(was_deactivated)
 }
 
 /// The owner's best notification address: their GitHub email when present,

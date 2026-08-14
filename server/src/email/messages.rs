@@ -80,6 +80,36 @@ pub fn matchmaking_deactivated(
     }
 }
 
+/// Sent when the health sweeper puts a previously deactivated snake back
+/// into matchmaking on its own, after enough consecutive healthy probes.
+/// Closes the loop on [`matchmaking_deactivated`] so the owner isn't left
+/// thinking they still need to press Resume.
+pub fn matchmaking_reactivated(
+    to_email: &str,
+    snake_name: &str,
+    profile_url: &str,
+) -> EmailMessage {
+    let text = format!(
+        "Hi,\n\
+         \n\
+         Good news — your Battlesnake \"{snake_name}\" is responding again \
+         and has been put back into Arena leaderboard matchmaking \
+         automatically. No action needed.\n\
+         \n\
+         You can see its status any time on its profile page:\n\
+         \n\
+         {profile_url}\n\
+         \n\
+         — Battlesnake Arena\n"
+    );
+
+    EmailMessage {
+        to: to_email.to_string(),
+        subject: format!("{snake_name} is back in Arena matchmaking"),
+        text,
+    }
+}
+
 /// The email-recovery claim link (BS-7e38): sent to a play account's
 /// address when a logged-in arena user asks to claim it without a usable
 /// password. Clicking the link (while logged in as the requester) completes
@@ -127,6 +157,23 @@ mod tests {
         assert_eq!(msg.subject, "Hissy was paused from Arena matchmaking");
         assert!(msg.text.contains("\"Hissy\""));
         assert!(msg.text.contains("POST /move: request timed out"));
+        assert!(
+            msg.text
+                .contains("https://arena.example.com/battlesnakes/abc/profile")
+        );
+    }
+
+    #[test]
+    fn matchmaking_reactivated_renders_snake_and_profile_link() {
+        let msg = matchmaking_reactivated(
+            "owner@example.com",
+            "Hissy",
+            "https://arena.example.com/battlesnakes/abc/profile",
+        );
+        assert_eq!(msg.to, "owner@example.com");
+        assert_eq!(msg.subject, "Hissy is back in Arena matchmaking");
+        assert!(msg.text.contains("\"Hissy\""));
+        assert!(msg.text.contains("automatically"));
         assert!(
             msg.text
                 .contains("https://arena.example.com/battlesnakes/abc/profile")
