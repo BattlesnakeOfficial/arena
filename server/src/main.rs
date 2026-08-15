@@ -36,6 +36,7 @@ mod snake_health;
 mod snake_health_sweeper;
 mod state;
 mod static_assets;
+mod stuck_game_sweeper;
 mod telemetry;
 mod tournament_bracket;
 mod tournament_match;
