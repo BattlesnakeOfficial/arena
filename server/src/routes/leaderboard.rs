@@ -12,7 +12,7 @@ use maud::html;
 use uuid::Uuid;
 
 use crate::{
-    components::page_factory::PageFactory,
+    components::{page_factory::PageFactory, snake_tags::snake_tag_chips},
     cron::MATCHMAKER_INTERVAL_SECS,
     customizations::chip_color,
     errors::{ServerResult, WithRedirect},
@@ -20,7 +20,7 @@ use crate::{
     models::{
         battlesnake::{self, Visibility},
         leaderboard::{self, MIN_GAMES_FOR_RANKING},
-        user,
+        tag, user,
     },
     routes::auth::{CurrentUser, OptionalUser},
     scoring::EntryScore,
@@ -204,6 +204,17 @@ pub async fn show_leaderboard(
         .map(|e| e.leaderboard_entry_id)
         .collect();
 
+    // Batch-load tags for the snakes visible on this page (ranked +
+    // placement only). Untagged snakes are absent from the map.
+    let visible_snake_ids: Vec<Uuid> = ranked
+        .iter()
+        .chain(placement.iter())
+        .map(|e| e.battlesnake_id)
+        .collect();
+    let snake_tags = tag::get_tags_for_battlesnakes(&state.db, &visible_snake_ids)
+        .await
+        .wrap_err("Failed to fetch battlesnake tags")?;
+
     // Fetch per-algorithm scores for only the visible entries
     let mut algo_scores: Vec<(&str, &str, HashMap<Uuid, EntryScore>)> = vec![];
     for algo in state.scoring.algorithms() {
@@ -329,7 +340,7 @@ pub async fn show_leaderboard(
                                         td {
                                             div class="snake-cell" {
                                                 span class="chip" style={"background:"(chip_color(&entry.snake_color))} {}
-                                                span {
+                                                div class="snake-details" {
                                                     a class="name" href={"/leaderboards/"(leaderboard_id)"/entries/"(entry.leaderboard_entry_id)} {
                                                         (entry.snake_name)
                                                     }
@@ -338,6 +349,7 @@ pub async fn show_leaderboard(
                                                         a href={"/users/"(entry.owner_login)} { (entry.owner_login) }
                                                         @if is_you { " — you" }
                                                     }
+                                                    (snake_tag_chips(snake_tags.get(&entry.battlesnake_id).map(Vec::as_slice).unwrap_or(&[])))
                                                 }
                                             }
                                         }
@@ -399,7 +411,7 @@ pub async fn show_leaderboard(
                                             td {
                                                 div class="snake-cell" {
                                                     span class="chip" style={"background:"(chip_color(&entry.snake_color))} {}
-                                                    span {
+                                                    div class="snake-details" {
                                                         a class="name" href={"/leaderboards/"(leaderboard_id)"/entries/"(entry.leaderboard_entry_id)} {
                                                             (entry.snake_name)
                                                         }
@@ -407,6 +419,7 @@ pub async fn show_leaderboard(
                                                             "by "
                                                             a href={"/users/"(entry.owner_login)} { (entry.owner_login) }
                                                         }
+                                                        (snake_tag_chips(snake_tags.get(&entry.battlesnake_id).map(Vec::as_slice).unwrap_or(&[])))
                                                     }
                                                 }
                                             }

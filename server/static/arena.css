@@ -295,6 +295,10 @@ table.data td.rating { font-family: var(--mono); font-weight: 600; font-size: 15
 .snake-cell .name { font-weight: 600; letter-spacing: -.01em; }
 .snake-cell .name:hover { color: var(--pink); }
 .snake-cell .owner { font-size: 12.5px; color: var(--muted); display: block; margin-top: -2px; }
+.snake-details { min-width: 0; }
+.snake-tags { display: flex; flex-wrap: wrap; gap: 4px 6px; margin-top: 4px; }
+/* No text-transform/letter-spacing here on purpose: tag names are mixed case ("Fly.io", "C#"). */
+.snake-tag { display: inline-flex; align-items: center; font-family: var(--mono); font-size: 11px; background: var(--pill); color: var(--muted); padding: 2px 9px; border-radius: 999px; white-space: nowrap; }
 
 .delta { font-family: var(--mono); font-size: 12px; margin-left: 8px; }
 .delta.up { color: var(--up); }

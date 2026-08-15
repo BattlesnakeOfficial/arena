@@ -8,11 +8,11 @@ use maud::{Markup, html};
 use uuid::Uuid;
 
 use crate::{
-    components::{page::Page, page_factory::PageFactory},
+    components::{page::Page, page_factory::PageFactory, snake_tags::snake_tag_chips},
     errors::{ServerResult, WithStatus},
     models::{
         battlesnake::{self, Visibility},
-        leaderboard, saved_game,
+        leaderboard, saved_game, tag,
         user::{self, PlayerDirectoryEntry, User},
     },
     routes::auth::OptionalUser,
@@ -99,7 +99,10 @@ async fn render_user_profile(
         let entries = leaderboard::get_entries_for_battlesnake(&state.db, snake.battlesnake_id)
             .await
             .wrap_err("Failed to fetch leaderboard entries")?;
-        snakes_with_entries.push((snake, entries));
+        let tags = tag::get_tags_for_battlesnake(&state.db, snake.battlesnake_id)
+            .await
+            .wrap_err("Failed to fetch battlesnake tags")?;
+        snakes_with_entries.push((snake, entries, tags));
     }
 
     let saved_games = saved_game::list_saved_games_for_user(&state.db, user.user_id)
@@ -140,7 +143,7 @@ async fn render_user_profile(
                     p class="empty" { "No snakes yet." }
                 } @else {
                     div class="snakes" {
-                        @for (snake, entries) in &snakes_with_entries {
+                        @for (snake, entries, tags) in &snakes_with_entries {
                             div class="scard" {
                                 div class="top" {
                                     div {
@@ -153,6 +156,7 @@ async fn render_user_profile(
                                                 span class="live-pill quiet" { "Private" }
                                             }
                                         }
+                                        (snake_tag_chips(tags))
                                     }
                                 }
                                 @if entries.is_empty() {

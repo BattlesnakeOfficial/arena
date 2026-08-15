@@ -47,6 +47,7 @@ mod components {
     pub mod flash;
     pub mod page;
     pub mod page_factory;
+    pub mod snake_tags;
 }
 
 fn main() -> color_eyre::Result<()> {

@@ -9,7 +9,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{
-    components::page_factory::PageFactory,
+    components::{page_factory::PageFactory, snake_tags::snake_tag_chips},
     customizations::chip_color,
     errors::{ServerResult, WithStatus},
     models::battlesnake::{self, CreateBattlesnake, UpdateBattlesnake, Visibility},
@@ -973,17 +973,7 @@ pub async fn view_battlesnake_profile(
                                         "Head: " (display_head) " · Tail: " (display_tail) " · Color: " (raw_color)
                                     }
                                 }
-                                @if !snake_tags.is_empty() {
-                                    div class="mt-2" {
-                                        @for t in &snake_tags {
-                                            @if t.category == tag::TagCategory::Language {
-                                                span class="badge bg-info text-dark" style="margin-right: 4px;" { (t.name) }
-                                            } @else {
-                                                span class="badge bg-secondary text-white" style="margin-right: 4px;" { (t.name) }
-                                            }
-                                        }
-                                    }
-                                }
+                                (snake_tag_chips(&snake_tags))
                                 @if is_owner {
                                     p class="mt-2" {
                                         "URL: "
