@@ -29,6 +29,7 @@ pub async fn run_sweep(app_state: &AppState) -> cja::Result<()> {
     tracing::info!(
         max_age_hours,
         failed_count = failed.len(),
+        failed_ids = ?failed,
         "Stuck-game sweep complete"
     );
 
