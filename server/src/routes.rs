@@ -38,6 +38,7 @@ pub mod claim;
 pub mod customizations;
 pub mod game;
 pub mod github_auth;
+pub mod health;
 pub mod leaderboard;
 pub mod pagination;
 pub mod policy;
@@ -95,6 +96,7 @@ pub fn routes(app_state: AppState) -> axum::Router {
         // Public pages
         .route("/", get(root_page))
         .route("/robots.txt", get(robots_txt))
+        .route("/health", get(health::health))
         // Policy pages
         .route("/conduct", get(policy::conduct_page))
         .route("/privacy", get(policy::privacy_page))
