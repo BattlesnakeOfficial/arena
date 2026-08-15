@@ -197,6 +197,13 @@ pub async fn view_game(
                             a href="/leaderboards" class="btn" { "View Leaderboards" }
                             a href="/" class="btn" { "Back to Home" }
                         }
+                        @if finished {
+                            a
+                                href=(export_gif_url(&state.config.base_url, game_id))
+                                class="btn"
+                                target="_blank"
+                                rel="noopener" { "Export GIF" }
+                        }
                     }
                 }
 
@@ -383,6 +390,14 @@ fn append_show_spoilers(url: String, show_spoilers: bool) -> String {
     format!("{url}{sep}showSpoilers=true")
 }
 
+/// Build the exporter.battlesnake.com GIF URL for a game. The exporter
+/// fetches frame history from `{base_url}/api/games/{game_id}/frames`, so the
+/// `/api` suffix is load-bearing: dropping it silently sends the exporter to
+/// its default engine, which contains no Arena games.
+fn export_gif_url(base_url: &str, game_id: Uuid) -> String {
+    format!("https://exporter.battlesnake.com/games/{game_id}/gif?engine_url={base_url}/api")
+}
+
 fn ordinal_place(n: i32) -> String {
     let suffix = match (n % 10, n % 100) {
         (_, 11..=13) => "th",
@@ -525,6 +540,15 @@ mod tests {
         assert_eq!(
             url,
             "https://arena.example.com/games/6f9422eb-cd95-4a17-b0a2-a3fefe4f47b1?turn=143&autoplay=true"
+        );
+    }
+
+    #[test]
+    fn export_gif_url_is_full_exporter_url_with_api_engine() {
+        let url = export_gif_url("https://arena.example.com", game_id());
+        assert_eq!(
+            url,
+            "https://exporter.battlesnake.com/games/6f9422eb-cd95-4a17-b0a2-a3fefe4f47b1/gif?engine_url=https://arena.example.com/api"
         );
     }
 
