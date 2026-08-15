@@ -8,7 +8,7 @@ use axum::{
 };
 use chrono_humanize::HumanTime;
 use color_eyre::eyre::Context as _;
-use maud::html;
+use maud::{Markup, html};
 use uuid::Uuid;
 
 use crate::{
@@ -435,11 +435,7 @@ pub async fn show_leaderboard(
                                             " "
                                             span class={"place p"(event.placement)} { (ordinal(event.placement)) }
                                             " "
-                                            @if event.display_score_change >= 0.0 {
-                                                span class="delta up" { (format!("{:+.1}", event.display_score_change)) }
-                                            } @else {
-                                                span class="delta down" { (format!("{:+.1}", event.display_score_change)) }
-                                            }
+                                            (render_score_delta(event.display_score_change, "delta up", "delta down"))
                                         }
                                     }
                                 }
@@ -908,11 +904,7 @@ pub async fn show_leaderboard_entry(
                                         }
                                     }
                                     td {
-                                        @if game.display_score_change >= 0.0 {
-                                            span class="rating-positive" { (format!("{:+.1}", game.display_score_change)) }
-                                        } @else {
-                                            span class="rating-negative" { (format!("{:+.1}", game.display_score_change)) }
-                                        }
+                                        (render_score_delta(game.display_score_change, "rating-positive", "rating-negative"))
                                     }
                                     td { (game.food_eaten) }
                                     td {
@@ -1138,5 +1130,86 @@ fn ordinal(n: i32) -> String {
         2 => "2nd".to_string(),
         3 => "3rd".to_string(),
         _ => format!("{n}th"),
+    }
+}
+
+/// Rating delta chip: one decimal when the change is meaningful (|Δ| >= 0.05),
+/// a directional glyph with the exact value in the hover title when the change
+/// is sub-threshold, and nothing at all for an exact zero. Class names are
+/// caller-supplied because the rail and the history table style deltas
+/// differently ("delta up"/"delta down" vs "rating-positive"/"rating-negative").
+fn render_score_delta(delta: f64, up_class: &str, down_class: &str) -> Markup {
+    if delta == 0.0 {
+        return html! {};
+    }
+    let class = if delta > 0.0 { up_class } else { down_class };
+    html! {
+        @if delta.abs() >= 0.05 {
+            span class=(class) { (format!("{delta:+.1}")) }
+        } @else {
+            span class=(class) title=(format!("{delta:+.3}")) {
+                @if delta > 0.0 { "▲" } @else { "▼" }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_score_delta;
+
+    #[test]
+    fn meaningful_delta_keeps_one_decimal() {
+        assert_eq!(
+            render_score_delta(1.26, "delta up", "delta down").into_string(),
+            r#"<span class="delta up">+1.3</span>"#
+        );
+        assert_eq!(
+            render_score_delta(-1.26, "delta up", "delta down").into_string(),
+            r#"<span class="delta down">-1.3</span>"#
+        );
+    }
+
+    #[test]
+    fn tiny_delta_renders_glyph_with_exact_title() {
+        assert_eq!(
+            render_score_delta(0.004, "delta up", "delta down").into_string(),
+            r#"<span class="delta up" title="+0.004">▲</span>"#
+        );
+        assert_eq!(
+            render_score_delta(-0.004, "rating-positive", "rating-negative").into_string(),
+            r#"<span class="rating-negative" title="-0.004">▼</span>"#
+        );
+    }
+
+    #[test]
+    fn zero_delta_renders_nothing() {
+        assert_eq!(
+            render_score_delta(0.0, "delta up", "delta down").into_string(),
+            ""
+        );
+        // IEEE: -0.0 == 0.0, so negative zero also renders nothing.
+        assert_eq!(
+            render_score_delta(-0.0, "delta up", "delta down").into_string(),
+            ""
+        );
+    }
+
+    #[test]
+    fn threshold_boundary_uses_one_decimal() {
+        assert_eq!(
+            render_score_delta(0.05, "delta up", "delta down").into_string(),
+            r#"<span class="delta up">+0.1</span>"#
+        );
+        assert_eq!(
+            render_score_delta(-0.05, "rating-positive", "rating-negative").into_string(),
+            r#"<span class="rating-negative">-0.1</span>"#
+        );
+        // Just below the threshold takes the glyph path.
+        assert!(
+            render_score_delta(0.049, "delta up", "delta down")
+                .into_string()
+                .contains(r#"title="+0.049""#)
+        );
     }
 }
