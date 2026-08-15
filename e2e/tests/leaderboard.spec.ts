@@ -59,6 +59,65 @@ test.describe('Leaderboard Pages', () => {
     await expect(
       authenticatedPage.locator('.flash-message[data-flash-type="success"]')
     ).toContainText('matchmaking rotation');
+
+    // Flash messages are functional motion — they must still animate
+    const flashAnim = await authenticatedPage.$eval(
+      '.flash-message[data-flash-type="success"]',
+      (el) => getComputedStyle(el).animationName
+    );
+    expect(flashAnim).toContain('flash-in');
+  });
+
+  test('recent games rail caps at 8 entries', async ({ authenticatedPage }) => {
+    const snakeName = `LB Feed Snake ${Date.now()}`;
+
+    // Create a public battlesnake
+    await authenticatedPage.goto('/battlesnakes/new');
+    await authenticatedPage.getByLabel('Name').fill(snakeName);
+    await authenticatedPage.getByLabel('URL').fill('https://example.com/lb-feed');
+    await authenticatedPage.getByLabel('Visibility').selectOption('public');
+    await authenticatedPage.getByRole('button', { name: 'Create Battlesnake' }).click();
+
+    // Seed 12 finished games so the feed overflows the 8-item cap
+    const [snake] = await query<{ battlesnake_id: string }>(
+      'SELECT battlesnake_id FROM battlesnakes WHERE name = $1',
+      [snakeName]
+    );
+    const [leaderboard] = await query<{ leaderboard_id: string }>(
+      "SELECT leaderboard_id FROM leaderboards WHERE name = 'Standard 11x11'"
+    );
+    const [entry] = await query<{ leaderboard_entry_id: string }>(
+      `INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id)
+       VALUES ($1, $2) RETURNING leaderboard_entry_id`,
+      [leaderboard.leaderboard_id, snake.battlesnake_id]
+    );
+    for (let i = 0; i < 12; i++) {
+      const [game] = await query<{ game_id: string }>(
+        `INSERT INTO games (board_size, game_type, status)
+         VALUES ('11x11', 'Standard', 'finished') RETURNING game_id`
+      );
+      const [lg] = await query<{ leaderboard_game_id: string }>(
+        `INSERT INTO leaderboard_games (leaderboard_id, game_id)
+         VALUES ($1, $2) RETURNING leaderboard_game_id`,
+        [leaderboard.leaderboard_id, game.game_id]
+      );
+      await query(
+        `INSERT INTO leaderboard_game_results
+           (leaderboard_game_id, leaderboard_entry_id, placement,
+            mu_before, mu_after, sigma_before, sigma_after, display_score_change)
+         VALUES ($1, $2, 1, 25, 25.5, 8.333, 8.333, 1.5)`,
+        [lg.leaderboard_game_id, entry.leaderboard_entry_id]
+      );
+    }
+
+    await authenticatedPage.goto(`/leaderboards/${leaderboard.leaderboard_id}`);
+
+    // Scope to the "Recent games" rail block; the rail's "Top eaters" block
+    // also renders a ul.feed
+    const block = authenticatedPage.locator('.rail .block', {
+      has: authenticatedPage.getByRole('heading', { name: 'Recent games' }),
+    });
+    await expect(block.locator('ul.feed li')).toHaveCount(8);
   });
 
   test('resuming a health-paused snake clears its failure streak', async ({
