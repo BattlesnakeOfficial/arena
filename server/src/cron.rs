@@ -5,7 +5,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::jobs::{
     GameBackupJob, LeaderboardMatchmakerJob, RateLimitPruneJob, SnakeHealthSweeperJob,
-    StuckMatchSweeperJob,
+    StuckGameSweeperJob, StuckMatchSweeperJob,
 };
 use crate::state::AppState;
 
@@ -15,6 +15,10 @@ pub const MATCHMAKER_INTERVAL_SECS: u64 = 15 * 60;
 /// Snake health sweep interval. With the default failure threshold of 3,
 /// a broken snake is pulled from matchmaking after ~90 minutes.
 pub const SNAKE_HEALTH_SWEEP_INTERVAL_SECS: u64 = 30 * 60;
+
+/// Stuck-game sweep interval. Fails non-tournament games left in
+/// waiting/running past the configured max age.
+pub const STUCK_GAME_SWEEP_INTERVAL_SECS: u64 = 30 * 60;
 
 pub(crate) fn cron_registry() -> CronRegistry<AppState> {
     let mut registry = CronRegistry::new();
@@ -55,6 +59,14 @@ pub(crate) fn cron_registry() -> CronRegistry<AppState> {
         SnakeHealthSweeperJob,
         Some("Health-check leaderboard snakes and deactivate broken ones"),
         Duration::from_secs(SNAKE_HEALTH_SWEEP_INTERVAL_SECS),
+    );
+
+    // Stuck-game sweeper: every 30 min, fails non-tournament games left in
+    // waiting/running past STUCK_GAME_MAX_AGE_HOURS
+    registry.register_job(
+        StuckGameSweeperJob,
+        Some("Fail non-tournament games stuck in waiting/running"),
+        Duration::from_secs(STUCK_GAME_SWEEP_INTERVAL_SECS),
     );
 
     registry

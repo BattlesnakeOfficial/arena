@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO match_games (match_id, game_id, game_number) VALUES ($1, $2, 1)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ef8439b7c3c6b3777f1cf7e032983d0e1eb6cb7a83cf636ba0677ce6c8163646"
+}

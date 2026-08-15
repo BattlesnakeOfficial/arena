@@ -235,6 +235,22 @@ impl Job<AppState> for SnakeHealthSweeperJob {
     }
 }
 
+/// Cron job that fails non-tournament games stuck in `waiting`/`running` past
+/// [`crate::config::AppConfig::stuck_game_max_age_hours`]. Idempotent and safe
+/// to retry; see [`crate::stuck_game_sweeper`].
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct StuckGameSweeperJob;
+
+#[async_trait::async_trait]
+impl Job<AppState> for StuckGameSweeperJob {
+    const NAME: &'static str = "StuckGameSweeperJob";
+
+    async fn run(&self, app_state: AppState) -> cja::Result<()> {
+        crate::stuck_game_sweeper::run_sweep(&app_state).await?;
+        Ok(())
+    }
+}
+
 cja::impl_job_registry!(
     AppState,
     NoopJob,
@@ -249,5 +265,6 @@ cja::impl_job_registry!(
     UpdateTournamentStatusJob,
     StuckMatchSweeperJob,
     RateLimitPruneJob,
-    SnakeHealthSweeperJob
+    SnakeHealthSweeperJob,
+    StuckGameSweeperJob
 );

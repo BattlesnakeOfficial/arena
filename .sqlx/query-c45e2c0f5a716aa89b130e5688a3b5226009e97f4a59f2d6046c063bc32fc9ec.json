@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE games\n           SET status = 'failed', updated_at = NOW()\n           WHERE status IN ('waiting', 'running')\n             AND created_at < NOW() - make_interval(hours => $1)\n             AND game_id NOT IN (SELECT game_id FROM match_games)\n           RETURNING game_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "game_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int4"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "c45e2c0f5a716aa89b130e5688a3b5226009e97f4a59f2d6046c063bc32fc9ec"
+}

@@ -69,6 +69,10 @@ pub struct AppConfig {
     /// Consecutive healthy probes of a deactivated snake before the sweeper
     /// puts it back into matchmaking on its own.
     pub snake_health_recovery_threshold: i32,
+    /// Max age (from `created_at`) a non-tournament game may sit in
+    /// `waiting`/`running` before the stuck-game sweeper marks it `failed`.
+    /// Env `STUCK_GAME_MAX_AGE_HOURS`, default 2h, clamped to >= 1.
+    pub stuck_game_max_age_hours: i32,
 
     /// Max transactional emails one recipient address may receive per hour,
     /// across all purposes (BS-7e38). Play's safety net against logic bugs
@@ -147,6 +151,7 @@ impl AppConfig {
             .max(1),
             snake_health_failure_threshold: parse_env("SNAKE_HEALTH_FAILURE_THRESHOLD", 3).max(1),
             snake_health_recovery_threshold: parse_env("SNAKE_HEALTH_RECOVERY_THRESHOLD", 2).max(1),
+            stuck_game_max_age_hours: parse_env("STUCK_GAME_MAX_AGE_HOURS", 2).max(1),
             email_per_recipient_hourly_limit: parse_env("EMAIL_PER_RECIPIENT_HOURLY_LIMIT", 5)
                 .max(1),
 
@@ -192,6 +197,7 @@ impl AppConfig {
             game_creation_rate_limit_window_minutes: 10,
             snake_health_failure_threshold: 3,
             snake_health_recovery_threshold: 2,
+            stuck_game_max_age_hours: 2,
             email_per_recipient_hourly_limit: 5,
             home_feed_cache_secs: 0,
             tokio_worker_multiplier: 2,
@@ -332,6 +338,7 @@ mod tests {
         assert!(c.gcs_bucket.is_none());
         assert!(c.gcp_project_id.is_none());
         assert_eq!(c.job.workers, 1);
+        assert_eq!(c.stuck_game_max_age_hours, 2);
         assert!(c.features.server && c.features.jobs && c.features.cron);
     }
 }
