@@ -646,6 +646,72 @@ mod tests {
         Ok(())
     }
 
+    /// A finished Solo game's frames flow through the unchanged endpoint
+    /// with the full progression: ordered from turn 0 through the final
+    /// death frame, with the death cause present on the last frame only.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn frames_endpoint_serves_full_solo_progression(pool: PgPool) -> cja::Result<()> {
+        let state = crate::state::AppState::test_from_pool(pool.clone());
+        let game_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO games (board_size, game_type, status)
+             VALUES ('11x11', 'Solo', 'finished') RETURNING game_id",
+        )
+        .fetch_one(&pool)
+        .await?;
+
+        let solo_frame = |turn: i32, death: Option<&str>| {
+            serde_json::json!({
+                "Turn": turn,
+                "Snakes": [{
+                    "ID": "snake-1",
+                    "Death": death.map(|c| serde_json::json!({"Cause": c, "Turn": turn})),
+                }],
+                "Food": [],
+                "Hazards": [],
+            })
+        };
+        for turn in 0..3 {
+            fixture_turn(&pool, game_id, turn, Some(solo_frame(turn, None))).await?;
+        }
+        fixture_turn(
+            &pool,
+            game_id,
+            3,
+            Some(solo_frame(3, Some("out-of-health"))),
+        )
+        .await?;
+
+        let response = get_game_frames(
+            State(state),
+            Path(game_id),
+            Query(FramesQuery {
+                offset: Some(0),
+                limit: Some(100),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_response();
+
+        let json = response_json(response).await;
+        let frames = json["frames"].as_array().unwrap();
+        assert_eq!(json["count"], 4);
+        assert_eq!(frames[0]["Turn"], 0, "progression starts at turn 0");
+        for (i, frame) in frames.iter().enumerate() {
+            assert_eq!(frame["Turn"], i, "frames stay ordered");
+        }
+        let last = frames.last().unwrap();
+        assert_eq!(last["Snakes"][0]["Death"]["Cause"], "out-of-health");
+        for frame in &frames[..frames.len() - 1] {
+            assert!(
+                frame["Snakes"][0]["Death"].is_null(),
+                "no death before the end"
+            );
+        }
+
+        Ok(())
+    }
+
     #[sqlx::test(migrations = "../migrations")]
     async fn game_info_includes_id_and_status(pool: PgPool) -> cja::Result<()> {
         let state = crate::state::AppState::test_from_pool(pool.clone());

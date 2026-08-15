@@ -123,6 +123,20 @@ pub fn create_initial_game(
             },
             None,
         ),
+        // Solo: single-snake survival. Runs the standard pipeline with
+        // standard food settings; only the game-over predicate differs
+        // (see `is_game_over` and `rules::solo`). Kept as an explicit arm --
+        // folding it into the catch-all below would silently give it
+        // "standard" rules and the standard game-over check.
+        GameType::Solo => (
+            "solo",
+            StandardSettings {
+                food_spawn_chance: 15,
+                minimum_food: 1,
+                hazard_damage_per_turn: 15,
+            },
+            None,
+        ),
         // Other currently runs standard rules.
         _ => (
             "standard",
@@ -162,7 +176,7 @@ pub fn run_game_with_random_moves(mut game: EngineGame) -> GameResult {
     let mut rng = rand::thread_rng();
     let mut elimination_order: Vec<String> = Vec::new();
 
-    while !rules::standard::is_game_over(&game.board) && game.board.turn < MAX_TURNS {
+    while !is_game_over(&game) && game.board.turn < MAX_TURNS {
         // Build random moves for each alive snake
         let moves: Vec<SnakeMove> = game
             .board
@@ -221,6 +235,7 @@ pub fn run_game_with_random_moves(mut game: EngineGame) -> GameResult {
             "snail_mode" => {
                 rules::snail::execute_turn(&mut game.board, &moves, &game.meta.settings)
             }
+            "solo" => rules::solo::execute_turn(&mut game.board, &moves, &game.meta.settings),
             _ => rules::standard::execute_turn(&mut game.board, &moves, &game.meta.settings),
         }
         .expect("execute_turn failed");
@@ -261,9 +276,15 @@ pub fn run_game_with_random_moves(mut game: EngineGame) -> GameResult {
     }
 }
 
-/// Check if the game is over (1 or fewer snakes alive)
+/// Check if the game is over.
+///
+/// Mode-aware: Solo games (ruleset "solo") end only when no snake is alive;
+/// every other mode ends when 1 or fewer snakes remain alive.
 pub fn is_game_over(game: &EngineGame) -> bool {
-    rules::standard::is_game_over(&game.board)
+    match game.meta.ruleset_name.as_str() {
+        "solo" => rules::solo::is_game_over(&game.board),
+        _ => rules::standard::is_game_over(&game.board),
+    }
 }
 
 /// Apply a single turn: move snakes, reduce health, feed, eliminate
@@ -1946,6 +1967,100 @@ mod tests {
             ids.sort();
             ids.dedup();
             assert_eq!(ids.len(), 4);
+            assert!(result.final_turn > 0 && result.final_turn <= MAX_TURNS);
+        }
+    }
+
+    // === Solo wiring tests ===
+
+    #[test]
+    fn test_create_initial_game_solo_settings() {
+        let battlesnakes = make_battlesnake_details(1);
+        let game = create_initial_game(
+            Uuid::new_v4(),
+            GameBoardSize::Medium,
+            GameType::Solo,
+            &battlesnakes,
+        );
+
+        assert_eq!(game.meta.ruleset_name, "solo");
+        // Standard food settings: spawning behavior identical to Standard.
+        assert_eq!(game.meta.settings.food_spawn_chance, 15);
+        assert_eq!(game.meta.settings.minimum_food, 1);
+        assert_eq!(game.meta.settings.hazard_damage_per_turn, 15);
+        assert!(game.meta.royale.is_none());
+        assert_eq!(game.board.snakes.len(), 1);
+    }
+
+    /// The core Solo property: a one-snake game is NOT over at turn 0 and
+    /// keeps running past turn 1 (standard rules would end it immediately).
+    #[test]
+    fn test_solo_game_runs_past_turn_one_and_ends_on_death() {
+        let battlesnakes = make_battlesnake_details(1);
+        let mut game = create_initial_game(
+            Uuid::new_v4(),
+            GameBoardSize::Medium,
+            GameType::Solo,
+            &battlesnakes,
+        );
+        assert!(!is_game_over(&game), "turn 0 with one live snake");
+
+        // Starve the snake deterministically: health 1 means it dies on the
+        // first processed turn.
+        game.board.snakes[0].health = 1;
+
+        let moves = vec![(game.board.snakes[0].id.clone(), Direction::Up)];
+        apply_turn(&mut game, &moves);
+        game.board.turn += 1;
+
+        assert!(game.board.snakes[0].eliminated_cause.is_eliminated());
+        assert!(is_game_over(&game));
+    }
+
+    /// A Solo fixture already at MAX_TURNS exits the random runner at
+    /// exactly the cap with the still-alive snake placed 1 (survival
+    /// success, no fabricated elimination).
+    #[test]
+    fn test_solo_game_alive_at_max_turns_caps_with_placement_one() {
+        let battlesnakes = make_battlesnake_details(1);
+        let mut game = create_initial_game(
+            Uuid::new_v4(),
+            GameBoardSize::Medium,
+            GameType::Solo,
+            &battlesnakes,
+        );
+        game.board.turn = MAX_TURNS;
+
+        let result = run_game_with_random_moves(game);
+        assert_eq!(result.final_turn, MAX_TURNS);
+        assert_eq!(result.placements.len(), 1);
+    }
+
+    /// Standard regression: two snakes with one eliminated is still over
+    /// immediately (the standard `alive <= 1` predicate is untouched).
+    #[test]
+    fn test_standard_one_alive_snake_still_over() {
+        let mut game = create_test_game(2);
+        assert_eq!(game.meta.ruleset_name, "standard");
+        game.board.snakes[0].eliminated_cause = EliminationCause::OutOfHealth;
+        assert!(is_game_over(&game));
+    }
+
+    /// Solo games complete under the random-move runner with exactly their
+    /// one snake placed.
+    #[test]
+    fn test_run_full_solo_game() {
+        for _ in 0..10 {
+            let battlesnakes = make_battlesnake_details(1);
+            let game = create_initial_game(
+                Uuid::new_v4(),
+                GameBoardSize::Medium,
+                GameType::Solo,
+                &battlesnakes,
+            );
+            let result = run_game_with_random_moves(game);
+
+            assert_eq!(result.placements.len(), 1);
             assert!(result.final_turn > 0 && result.final_turn <= MAX_TURNS);
         }
     }

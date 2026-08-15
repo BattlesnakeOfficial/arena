@@ -159,6 +159,50 @@ pub async fn update_turn_frame_data(
     Ok(())
 }
 
+/// Survival stats for a finished Solo game, read from its final persisted
+/// frame (`turns.frame_data`). `turns_survived` is the final frame's turn
+/// number verbatim; `cause_of_death` is the wire-protocol elimination slug
+/// from the frame's `Snakes[0].Death.Cause` (None for a snake still alive
+/// at the MAX_TURNS cap, where `Death` serializes as JSON null).
+#[derive(Debug, PartialEq, Eq)]
+pub struct SoloGameStats {
+    pub turns_survived: i32,
+    pub cause_of_death: Option<String>,
+}
+
+/// Get the survival stats for a finished Solo game from its final frame.
+///
+/// Returns `Ok(None)` when the game has no persisted frames (archived or
+/// imported finished games store their frames elsewhere). Reads the last
+/// turn row by `turn_number DESC`: snakes are never removed from a board,
+/// so `Snakes[0]` is the game's only snake. The nested `Death.Cause` path
+/// (not the flat `EliminatedCause`, which is `""` for a live snake)
+/// distinguishes "starved on turn N" from "alive at the turn cap".
+pub async fn get_solo_game_stats(
+    pool: &PgPool,
+    game_id: Uuid,
+) -> cja::Result<Option<SoloGameStats>> {
+    let row = sqlx::query_as!(
+        SoloGameStats,
+        r#"
+        SELECT
+            turn_number AS "turns_survived!",
+            frame_data #>> '{Snakes,0,Death,Cause}' AS "cause_of_death?"
+        FROM turns
+        WHERE game_id = $1
+          AND frame_data IS NOT NULL
+        ORDER BY turn_number DESC
+        LIMIT 1
+        "#,
+        game_id
+    )
+    .fetch_optional(pool)
+    .await
+    .wrap_err("Failed to fetch solo game stats")?;
+
+    Ok(row)
+}
+
 /// A snake's move for a specific turn
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SnakeTurn {
@@ -170,7 +214,6 @@ pub struct SnakeTurn {
     pub timed_out: bool,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
-
 /// Create a snake turn record
 pub async fn create_snake_turn(
     pool: &PgPool,
@@ -354,5 +397,95 @@ mod tests {
         };
         assert!(snake_turn.timed_out);
         assert!(snake_turn.latency_ms.is_none());
+    }
+
+    // --- Solo stats (get_solo_game_stats) ---
+
+    /// Insert a bare finished Solo game row (no snakes), mirroring what
+    /// `GameType::as_str()` writes for real Solo games.
+    async fn fixture_solo_game(pool: &sqlx::PgPool) -> cja::Result<Uuid> {
+        let game_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO games (board_size, game_type, status)
+             VALUES ('11x11', 'Solo', 'finished') RETURNING game_id",
+        )
+        .fetch_one(pool)
+        .await?;
+        Ok(game_id)
+    }
+
+    async fn fixture_turn(
+        pool: &sqlx::PgPool,
+        game_id: Uuid,
+        turn_number: i32,
+        frame_data: Option<serde_json::Value>,
+    ) -> cja::Result<()> {
+        sqlx::query("INSERT INTO turns (game_id, turn_number, frame_data) VALUES ($1, $2, $3)")
+            .bind(game_id)
+            .bind(turn_number)
+            .bind(frame_data)
+            .execute(pool)
+            .await?;
+        Ok(())
+    }
+
+    fn frame(turn: i32, death_cause: Option<&str>) -> serde_json::Value {
+        let death = match death_cause {
+            Some(cause) => serde_json::json!({"Cause": cause, "Turn": turn, "EliminatedBy": ""}),
+            None => serde_json::Value::Null,
+        };
+        serde_json::json!({
+            "Turn": turn,
+            "Snakes": [{
+                "ID": "snake-1",
+                "Name": "Solo Snake",
+                "Body": [{"X": 5, "Y": 5}],
+                "Health": 0,
+                "Death": death,
+                "EliminatedCause": death_cause.unwrap_or(""),
+                "EliminatedBy": "",
+            }],
+            "Food": [],
+            "Hazards": [],
+        })
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn solo_stats_reads_death_cause_from_final_frame(pool: sqlx::PgPool) -> cja::Result<()> {
+        let game_id = fixture_solo_game(&pool).await?;
+        fixture_turn(&pool, game_id, 0, Some(frame(0, None))).await?;
+        fixture_turn(&pool, game_id, 41, Some(frame(41, None))).await?;
+        fixture_turn(&pool, game_id, 42, Some(frame(42, Some("out-of-health")))).await?;
+
+        let stats = get_solo_game_stats(&pool, game_id)
+            .await?
+            .expect("stats present");
+        assert_eq!(stats.turns_survived, 42);
+        assert_eq!(stats.cause_of_death.as_deref(), Some("out-of-health"));
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn solo_stats_max_turns_frame_has_no_death_cause(pool: sqlx::PgPool) -> cja::Result<()> {
+        let game_id = fixture_solo_game(&pool).await?;
+        fixture_turn(&pool, game_id, 5000, Some(frame(5000, None))).await?;
+
+        let stats = get_solo_game_stats(&pool, game_id)
+            .await?
+            .expect("stats present");
+        assert_eq!(stats.turns_survived, 5000);
+        assert_eq!(
+            stats.cause_of_death, None,
+            "alive at the cap: Death is null"
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn solo_stats_missing_frames_returns_none(pool: sqlx::PgPool) -> cja::Result<()> {
+        let game_id = fixture_solo_game(&pool).await?;
+
+        let stats = get_solo_game_stats(&pool, game_id).await?;
+        assert_eq!(stats, None);
+        Ok(())
     }
 }

@@ -12,7 +12,6 @@ use std::str::FromStr;
 use uuid::Uuid;
 
 use crate::{
-    components::flash::Flash,
     components::page_factory::PageFactory,
     errors::{ServerResult, WithStatus},
     models::battlesnake::{self, Visibility},
@@ -120,8 +119,11 @@ pub async fn show_game_flow(
     CurrentUser(user): CurrentUser,
     Path(flow_id): Path<Uuid>,
     page_factory: PageFactory,
-    flash: Flash,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
+    // Use flash from page_factory (already extracted and cleared from DB;
+    // a separate Flash extractor arg would read an already-cleared flash)
+    let flash = page_factory.flash.clone();
+
     // Get the flow state, ensuring it belongs to the current user
     let flow = GameCreationFlow::get_by_id(&state.db, flow_id, user.user_id)
         .await
@@ -171,6 +173,7 @@ pub async fn show_game_flow(
                             option value="Royale" selected[flow.game_type == GameType::Royale] { "Royale" }
                             option value="Constrictor" selected[flow.game_type == GameType::Constrictor] { "Constrictor" }
                             option value="Snail Mode" selected[flow.game_type == GameType::SnailMode] { "Snail Mode" }
+                            option value="Solo" selected[flow.game_type == GameType::Solo] { "Solo" }
                         }
                     }
 

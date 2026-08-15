@@ -560,6 +560,29 @@ mod tests {
         }
     }
 
+    /// Solo games serialize the canonical snake-facing shape: ruleset name
+    /// "solo" (community snakes key off it), empty map, and the standard
+    /// food/hazard settings set by `create_initial_game`. Snail Mode remains
+    /// the only mode translated to standard-plus-map.
+    #[test]
+    fn test_solo_game_serializes_solo_ruleset_and_empty_map() {
+        let mut engine_game = create_test_engine_game();
+        engine_game.meta.ruleset_name = "solo".to_string();
+
+        let contexts = HashMap::new();
+        let customizations = HashMap::new();
+        let wire = Game::from_engine_game(&engine_game, "s1", &contexts, &customizations);
+        let json: Value = serde_json::to_value(&wire).unwrap();
+
+        assert_eq!(json["game"]["ruleset"]["name"], "solo");
+        assert_eq!(json["game"]["map"], "");
+        let settings = &json["game"]["ruleset"]["settings"];
+        assert_eq!(settings["foodSpawnChance"], 15);
+        assert_eq!(settings["minimumFood"], 1);
+        assert_eq!(settings["hazardDamagePerTurn"], 15);
+        assert_eq!(settings["royale"]["shrinkEveryNTurns"], 0);
+    }
+
     /// HARD requirement: snakes must never receive out-of-bounds hazard
     /// points in /move payloads. Snail Mode's pending-trail bookkeeping
     /// lives as off-board points in `board.hazards` and must be filtered

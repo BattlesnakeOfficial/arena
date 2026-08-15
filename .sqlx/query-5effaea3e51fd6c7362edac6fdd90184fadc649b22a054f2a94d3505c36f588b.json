@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            turn_number AS \"turns_survived!\",\n            frame_data #>> '{Snakes,0,Death,Cause}' AS \"cause_of_death?\"\n        FROM turns\n        WHERE game_id = $1\n          AND frame_data IS NOT NULL\n        ORDER BY turn_number DESC\n        LIMIT 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "turns_survived!",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 1,
+        "name": "cause_of_death?",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      null
+    ]
+  },
+  "hash": "5effaea3e51fd6c7362edac6fdd90184fadc649b22a054f2a94d3505c36f588b"
+}

@@ -152,8 +152,9 @@ test.describe('Create Game', () => {
     await authenticatedPage.getByLabel('Visibility').selectOption('public');
     await authenticatedPage.getByRole('button', { name: 'Create Battlesnake' }).click();
 
-    // Test each game type
-    const gameTypes = ['Standard', 'Royale', 'Constrictor', 'Snail Mode'];
+    // Test each game type (Solo passes exactly-one validation since the
+    // loop adds one snake per iteration)
+    const gameTypes = ['Standard', 'Royale', 'Constrictor', 'Snail Mode', 'Solo'];
 
     for (const gameType of gameTypes) {
       await authenticatedPage.goto('/games/new');
@@ -163,6 +164,43 @@ test.describe('Create Game', () => {
       await authenticatedPage.getByRole('button', { name: 'Create Game' }).click();
       await expect(authenticatedPage.locator('.gmeta').getByText(gameType, { exact: true })).toBeVisible();
     }
+  });
+
+  test('solo game with two snakes is rejected, one succeeds', async ({ authenticatedPage }) => {
+    const snakeNames = [`Solo Flow 1 ${Date.now()}`, `Solo Flow 2 ${Date.now()}`];
+
+    // Create two battlesnakes
+    for (const name of snakeNames) {
+      await authenticatedPage.goto('/battlesnakes/new');
+      await authenticatedPage.getByLabel('Name').fill(name);
+      await authenticatedPage.getByLabel('URL').fill('https://example.com/solo-flow');
+      await authenticatedPage.getByLabel('Visibility').selectOption('public');
+      await authenticatedPage.getByRole('button', { name: 'Create Battlesnake' }).click();
+    }
+
+    // Select both, choose Solo, submit
+    await authenticatedPage.goto('/games/new');
+    for (const name of snakeNames) {
+      const snakeCard = authenticatedPage.locator('.card', { hasText: name });
+      await snakeCard.getByRole('button', { name: 'Add to Game' }).click();
+    }
+    await authenticatedPage.getByLabel('Game Type').selectOption('Solo');
+    await authenticatedPage.getByRole('button', { name: 'Create Game' }).click();
+
+    // Remains on the flow page with the validation flash (scoped to main:
+    // the page frame renders the same message a second time)
+    await expect(authenticatedPage).toHaveURL(/\/games\/flow\//);
+    await expect(
+      authenticatedPage.getByRole('main').getByText('Solo games require exactly one battlesnake')
+    ).toBeVisible();
+
+    // Reduce selection to one snake and create successfully
+    const removeCard = authenticatedPage.locator('.card', { hasText: snakeNames[1] });
+    await removeCard.getByRole('button', { name: 'Remove' }).first().click();
+    await authenticatedPage.getByRole('button', { name: 'Create Game' }).click();
+
+    await expect(authenticatedPage).toHaveURL(/\/games\/[0-9a-f-]+$/);
+    await expect(authenticatedPage.getByRole('heading', { name: 'Game Details' })).toBeVisible();
   });
 
   test('shows warning when user has no battlesnakes', async ({ authenticatedPage }) => {

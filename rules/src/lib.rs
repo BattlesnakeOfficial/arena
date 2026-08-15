@@ -3,6 +3,7 @@ pub mod constrictor;
 pub mod food;
 pub mod royale;
 pub mod snail;
+pub mod solo;
 pub mod standard;
 pub mod types;
 

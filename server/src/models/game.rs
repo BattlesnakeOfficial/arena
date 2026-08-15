@@ -64,6 +64,7 @@ pub enum GameType {
     Royale,
     Constrictor,
     SnailMode,
+    Solo,
     Other(String),
 }
 
@@ -74,6 +75,7 @@ impl GameType {
             GameType::Royale => "Royale",
             GameType::Constrictor => "Constrictor",
             GameType::SnailMode => "Snail Mode",
+            GameType::Solo => "Solo",
             GameType::Other(s) => s,
         }
     }
@@ -88,6 +90,7 @@ impl FromStr for GameType {
             "royale" => Ok(GameType::Royale),
             "constrictor" => Ok(GameType::Constrictor),
             "snail mode" | "snail_mode" => Ok(GameType::SnailMode),
+            "solo" => Ok(GameType::Solo),
             _ => Ok(GameType::Other(s.to_string())),
         }
     }
@@ -157,6 +160,33 @@ pub struct CreateGameWithSnakes {
     pub board_size: GameBoardSize,
     pub game_type: GameType,
     pub battlesnake_ids: Vec<Uuid>,
+}
+
+/// Validate the number of battlesnakes for a game type.
+///
+/// Shared by the web flow, the API handler, and the transactional create
+/// path. Solo games require exactly one battlesnake (survival mode); every
+/// other mode requires 1-4.
+pub fn validate_battlesnake_count(game_type: &GameType, count: usize) -> cja::Result<()> {
+    if count == 0 {
+        return Err(cja::color_eyre::eyre::eyre!(
+            "At least one battlesnake is required for a game"
+        ));
+    }
+
+    if matches!(game_type, GameType::Solo) && count != 1 {
+        return Err(cja::color_eyre::eyre::eyre!(
+            "Solo games require exactly one battlesnake"
+        ));
+    }
+
+    if count > 4 {
+        return Err(cja::color_eyre::eyre::eyre!(
+            "A maximum of 4 battlesnakes are allowed in a game"
+        ));
+    }
+
+    Ok(())
 }
 
 // Database functions for game management
@@ -248,18 +278,8 @@ pub async fn create_game_with_snakes_tx(
     conn: &mut sqlx::PgConnection,
     data: CreateGameWithSnakes,
 ) -> cja::Result<Game> {
-    // Validate number of battlesnakes
-    if data.battlesnake_ids.is_empty() {
-        return Err(cja::color_eyre::eyre::eyre!(
-            "At least one battlesnake is required for a game"
-        ));
-    }
-
-    if data.battlesnake_ids.len() > 4 {
-        return Err(cja::color_eyre::eyre::eyre!(
-            "A maximum of 4 battlesnakes are allowed in a game"
-        ));
-    }
+    // Validate number of battlesnakes for this game type
+    validate_battlesnake_count(&data.game_type, data.battlesnake_ids.len())?;
 
     // Create the game
     let game = create_game(
@@ -613,14 +633,14 @@ mod tests {
             GameType::from_str("SNAIL_MODE").unwrap(),
             GameType::SnailMode
         );
+        assert_eq!(GameType::from_str("solo").unwrap(), GameType::Solo);
+        assert_eq!(GameType::from_str("Solo").unwrap(), GameType::Solo);
+        assert_eq!(GameType::from_str("SOLO").unwrap(), GameType::Solo);
+        assert_eq!(GameType::Solo.as_str(), "Solo");
     }
 
     #[test]
     fn game_type_from_str_unknown_returns_other() {
-        assert_eq!(
-            GameType::from_str("solo").unwrap(),
-            GameType::Other("solo".to_string())
-        );
         assert_eq!(
             GameType::from_str("wrapped").unwrap(),
             GameType::Other("wrapped".to_string())
@@ -629,6 +649,73 @@ mod tests {
             GameType::from_str("").unwrap(),
             GameType::Other("".to_string())
         );
+    }
+
+    #[test]
+    fn validate_battlesnake_count_solo_requires_exactly_one() {
+        // Solo: 0, 2, and 4 are all invalid; only exactly 1 passes.
+        assert!(validate_battlesnake_count(&GameType::Solo, 0).is_err());
+        assert!(validate_battlesnake_count(&GameType::Solo, 1).is_ok());
+        assert!(validate_battlesnake_count(&GameType::Solo, 2).is_err());
+        assert!(validate_battlesnake_count(&GameType::Solo, 4).is_err());
+
+        // Error message distinguishes empty (rule order: empty wins) from
+        // wrong-count Solo.
+        let err = validate_battlesnake_count(&GameType::Solo, 0).unwrap_err();
+        assert!(err.to_string().contains("At least one battlesnake"));
+        let err = validate_battlesnake_count(&GameType::Solo, 2).unwrap_err();
+        assert!(err.to_string().contains("exactly one battlesnake"));
+    }
+
+    #[test]
+    fn validate_battlesnake_count_standard_allows_one_to_four() {
+        assert!(validate_battlesnake_count(&GameType::Standard, 0).is_err());
+        assert!(validate_battlesnake_count(&GameType::Standard, 1).is_ok());
+        assert!(validate_battlesnake_count(&GameType::Standard, 4).is_ok());
+        assert!(validate_battlesnake_count(&GameType::Standard, 5).is_err());
+
+        let err = validate_battlesnake_count(&GameType::Standard, 5).unwrap_err();
+        assert!(err.to_string().contains("maximum of 4 battlesnakes"));
+    }
+
+    /// End-to-end DB round trip: a created Solo game reads back as
+    /// `GameType::Solo` (not `Other("Solo")`), proving the hand-mapped
+    /// text read path covers the new variant.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn solo_game_round_trips_through_db(pool: sqlx::PgPool) -> cja::Result<()> {
+        let user_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO users (external_github_id, github_login, github_access_token)
+             VALUES (7302, 'solo-user', 'test-token') RETURNING user_id",
+        )
+        .fetch_one(&pool)
+        .await?;
+
+        let battlesnake_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO battlesnakes (user_id, name, url, visibility)
+             VALUES ($1, 'Solo Snake', 'http://localhost:8000', 'public')
+             RETURNING battlesnake_id",
+        )
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await?;
+
+        let created = create_game_with_snakes(
+            &pool,
+            CreateGameWithSnakes {
+                board_size: GameBoardSize::Medium,
+                game_type: GameType::Solo,
+                battlesnake_ids: vec![battlesnake_id],
+            },
+        )
+        .await?;
+        assert_eq!(created.game_type, GameType::Solo);
+
+        let reread = get_game_by_id(&pool, created.game_id)
+            .await?
+            .expect("game should be persisted");
+        assert_eq!(reread.game_type, GameType::Solo);
+
+        Ok(())
     }
 
     #[test]

@@ -231,19 +231,7 @@ impl GameCreationFlow {
 
     // Validate the flow state before creating a game
     pub fn validate(&self) -> cja::Result<()> {
-        if self.selected_battlesnake_ids.is_empty() {
-            return Err(cja::color_eyre::eyre::eyre!(
-                "At least one battlesnake is required"
-            ));
-        }
-
-        if self.selected_battlesnake_ids.len() > 4 {
-            return Err(cja::color_eyre::eyre::eyre!(
-                "Maximum of 4 battlesnakes allowed"
-            ));
-        }
-
-        Ok(())
+        game::validate_battlesnake_count(&self.game_type, self.selected_battlesnake_ids.len())
     }
 
     // Convert the flow to a CreateGameWithSnakes request
@@ -517,6 +505,40 @@ mod tests {
         let mut flow_with_snake = create_test_flow();
         flow_with_snake.add_battlesnake(Uuid::new_v4());
         assert!(flow_with_snake.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_solo_requires_exactly_one_snake() {
+        let mut flow = create_test_flow();
+        flow.game_type = GameType::Solo;
+
+        // No snakes selected: the shared empty-selection rule applies.
+        assert!(flow.validate().is_err());
+
+        // Exactly one: valid.
+        flow.add_battlesnake(Uuid::new_v4());
+        assert!(flow.validate().is_ok());
+
+        // Two entries (a duplicate counts as its own participant): invalid.
+        flow.add_battlesnake(flow.selected_battlesnake_ids[0]);
+        assert!(flow.validate().is_err());
+        assert!(
+            flow.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("exactly one battlesnake")
+        );
+    }
+
+    #[test]
+    fn test_validate_duplicates_still_valid_for_standard() {
+        let mut flow = create_test_flow();
+        let snake_id = Uuid::new_v4();
+
+        for _ in 0..4 {
+            flow.add_battlesnake(snake_id);
+        }
+        assert!(flow.validate().is_ok());
     }
 
     #[test]

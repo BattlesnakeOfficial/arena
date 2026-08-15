@@ -147,11 +147,18 @@ fn validate_settings_update(
 }
 
 /// Parse a game type from a form value, rejecting anything outside the
-/// supported dropdown options (GameType::from_str is a catch-all).
+/// supported dropdown options (GameType::from_str is a catch-all). Tournaments
+/// are multi-snake competitions: Solo is a custom-game-only mode and is
+/// explicitly not allowed here.
 fn parse_game_type(s: &str) -> Result<GameType, String> {
     match GameType::from_str(s) {
-        Ok(GameType::Other(_)) | Err(_) => Err(format!("Invalid game type: {s}")),
-        Ok(game_type) => Ok(game_type),
+        Ok(
+            gt @ (GameType::Standard
+            | GameType::Royale
+            | GameType::Constrictor
+            | GameType::SnailMode),
+        ) => Ok(gt),
+        _ => Err(format!("Invalid game type: {s}")),
     }
 }
 
@@ -2571,6 +2578,7 @@ mod tests {
             GameType::Constrictor
         );
         assert_eq!(parse_game_type("Snail Mode").unwrap(), GameType::SnailMode);
+        assert!(parse_game_type("Solo").is_err());
         assert!(parse_game_type("Wrapped").is_err());
         assert!(parse_game_type("").is_err());
     }
