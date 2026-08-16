@@ -49,6 +49,28 @@ mod components {
     pub mod page_factory;
 }
 
+/// Public origin Eyes uses to resolve root-relative uptime monitor targets.
+/// Hardcoded (not `config.base_url`) because prod Cloud Run does not set
+/// `BASE_URL` yet, and the config fallback (`http://localhost:3000`) would
+/// fail Eyes' monitor-target validation and silently disarm the monitor.
+const ARENA_BASE_URL: &str = "https://arena.battlesnake.com";
+
+/// Build the Eyes boot manifest: job/cron registries plus the HTTP uptime
+/// monitor declarations Eyes should start checking.
+fn eyes_boot_manifest(
+    cron_registry: &cja::cron::CronRegistry<AppState>,
+) -> cja::eyes_manifest::AppManifest {
+    cja::eyes_manifest::build_boot_manifest::<jobs::Jobs, AppState>(
+        Some(env!("CARGO_PKG_VERSION")),
+        option_env!("VERGEN_GIT_SHA"),
+        Some(cron_registry),
+    )
+    .base_url(ARENA_BASE_URL)
+    .monitors(vec![cja::eyes_manifest::HttpMonitor::new(
+        "health", "/health",
+    )])
+}
+
 fn main() -> color_eyre::Result<()> {
     // Initialize Sentry for error tracking
     let _sentry_guard = setup_sentry();
@@ -174,13 +196,9 @@ async fn spawn_application_tasks(app_state: AppState) -> cja::Result<Vec<NamedTa
     // process.
     let cron_registry = cron::cron_registry();
 
-    // Emit the Eyes boot manifest describing this app's jobs and cron. This is
-    // a no-op unless EYES_ORG_ID/EYES_APP_ID are configured.
-    cja::eyes_manifest::send_boot_manifest::<jobs::Jobs, AppState>(
-        Some(env!("CARGO_PKG_VERSION")),
-        option_env!("VERGEN_GIT_SHA"),
-        Some(&cron_registry),
-    );
+    // Emit the Eyes boot manifest describing this app's jobs, cron, and HTTP
+    // uptime monitors. No-op unless EYES_ORG_ID/EYES_APP_ID are configured.
+    cja::eyes_manifest::send_manifest(eyes_boot_manifest(&cron_registry));
 
     if features.server {
         info!("Server Enabled");
@@ -229,4 +247,29 @@ async fn spawn_application_tasks(app_state: AppState) -> cja::Result<Vec<NamedTa
 
     info!("All application tasks spawned successfully");
     Ok(tasks)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn boot_manifest_declares_exactly_one_health_monitor() {
+        let registry = cron::cron_registry();
+        let manifest = eyes_boot_manifest(&registry);
+
+        assert_eq!(manifest.base_url.as_deref(), Some(ARENA_BASE_URL));
+
+        let monitors = manifest.monitors.expect("monitors declared");
+        assert_eq!(monitors.len(), 1);
+        let monitor = &monitors[0];
+        assert_eq!(monitor.id, "health");
+        assert!(monitor.enabled);
+        assert_eq!(monitor.method, cja::eyes_manifest::HttpMethod::Get);
+
+        let resolved =
+            eyes_subscriber::resolve_monitor_target(manifest.base_url.as_deref(), &monitor.target)
+                .expect("monitor target resolves against base_url");
+        assert_eq!(resolved.as_str(), "https://arena.battlesnake.com/health");
+    }
 }

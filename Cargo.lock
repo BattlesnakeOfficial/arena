@@ -568,7 +568,7 @@ dependencies = [
 [[package]]
 name = "cja"
 version = "0.0.0"
-source = "git+https://github.com/coreyja/cja?branch=main#ad028ff68b6d86b46f7211017ca95485fab06514"
+source = "git+https://github.com/coreyja/cja?branch=main#5e52c7777725ca14059807d63f23dc5b8e52b62d"
 dependencies = [
  "async-trait",
  "axum",
@@ -1000,9 +1000,9 @@ dependencies = [
 
 [[package]]
 name = "eyes-subscriber"
-version = "0.3.1"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6cf4341a2daed57db9b400d8dd0abc3444153120a2ad07851a28d2e8bfabf789"
+checksum = "2455a105b9b15e61a64f3444e4dcb3a81d66768011f2e83308857f3184e9d04a"
 dependencies = [
  "async-trait",
  "chrono",
