@@ -445,7 +445,6 @@ async fn root_page(
                     div class="strip" aria-hidden="true" {
                         div class="inner" {
                             (home_ticker_items(activity, &lb.name))
-                            (home_ticker_items(activity, &lb.name))
                         }
                     }
                 }
@@ -550,7 +549,7 @@ fn home_board() -> Markup {
     }
 }
 
-/// One pass of ticker copy; rendered twice so the -50% loop is seamless.
+/// One pass of ticker copy for the static homepage strip (truncates on overflow).
 fn home_ticker_items(activity: &[ActivityFeedEntry], leaderboard_name: &str) -> Markup {
     html! {
         @for event in activity {

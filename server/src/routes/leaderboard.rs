@@ -147,7 +147,7 @@ pub async fn show_leaderboard(
         .await
         .wrap_err("Failed to fetch leaderboard status")?;
 
-    let activity = leaderboard::get_activity_feed(&state.db, leaderboard_id, 20)
+    let activity = leaderboard::get_activity_feed(&state.db, leaderboard_id, 8)
         .await
         .wrap_err("Failed to fetch activity feed")?;
 

@@ -1067,7 +1067,7 @@ pub async fn get_top_eaters(
 }
 
 /// The user-independent slice of the homepage: featured ladder, its recent
-/// games (ticker + rail), and the top-five preview. Bundled so it can sit
+/// games (strip + rail), and the top-five preview. Bundled so it can sit
 /// behind a single TTL cache entry.
 pub struct HomeFeed {
     pub featured: Option<Leaderboard>,
@@ -1084,7 +1084,7 @@ pub async fn load_home_feed(pool: &sqlx::PgPool) -> cja::Result<HomeFeed> {
     let featured = leaderboards.into_iter().next();
 
     let (activity, top_entries) = if let Some(lb) = &featured {
-        let activity = get_activity_feed(pool, lb.leaderboard_id, 14)
+        let activity = get_activity_feed(pool, lb.leaderboard_id, 8)
             .await
             .wrap_err("Failed to fetch activity feed")?;
         let top =
