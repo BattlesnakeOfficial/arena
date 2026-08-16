@@ -13,6 +13,44 @@ test.describe('Public Game Viewing', () => {
     return result[0].game_id;
   }
 
+  // Helper: a finished Solo game with final frame stats.
+  // game_type mirrors what GameType::as_str() writes for real Solo games.
+  async function createSoloGameViaDb(finalTurn: number, deathCause: string | null): Promise<string> {
+    const game = await query<{ game_id: string }>(
+      `INSERT INTO games (board_size, game_type, status, created_at, updated_at)
+       VALUES ('11x11', 'Solo', 'finished', NOW(), NOW())
+       RETURNING game_id::text AS game_id`
+    );
+    const gameId = game[0].game_id;
+
+    const death = deathCause
+      ? JSON.stringify({ Cause: deathCause, Turn: finalTurn, EliminatedBy: '' })
+      : 'null';
+    const frame = JSON.stringify({
+      Turn: finalTurn,
+      Snakes: [
+        {
+          ID: 'solo-snake',
+          Name: 'Solo Snake',
+          Body: [{ X: 5, Y: 5 }],
+          Health: 0,
+          Death: JSON.parse(death),
+          EliminatedCause: deathCause ?? '',
+          EliminatedBy: ''
+        }
+      ],
+      Food: [],
+      Hazards: []
+    });
+
+    await query(
+      `INSERT INTO turns (game_id, turn_number, frame_data)
+       VALUES ($1::uuid, $2, $3::jsonb)`,
+      [gameId, String(finalTurn), frame]
+    );
+    return gameId;
+  }
+
   test('unauthenticated user can view a game page directly', async ({ page }) => {
     const gameId = await createGameViaDb();
 
@@ -69,6 +107,38 @@ test.describe('Public Game Viewing', () => {
     // Iframe src should contain the game ID
     const src = await iframe.getAttribute('src');
     expect(src).toContain(gameId);
+  });
+
+  test('finished solo game shows survival stats and cause of death', async ({ page }) => {
+    const gameId = await createSoloGameViaDb(42, 'out-of-health');
+
+    await page.goto(`/games/${gameId}`);
+
+    const meta = page.locator('.gmeta .meta-list');
+    await expect(meta.getByText('Turns Survived', { exact: true })).toBeVisible();
+    await expect(meta.getByText('42', { exact: true })).toBeVisible();
+    await expect(meta.getByText('Cause of Death', { exact: true })).toBeVisible();
+    await expect(meta.getByText('Starved', { exact: true })).toBeVisible();
+
+    // Progression viewer regression: the board iframe still renders for solo games
+    const iframe = page.locator('#board-viewer');
+    await expect(iframe).toBeVisible();
+    const src = await iframe.getAttribute('src');
+    expect(src).toContain(gameId);
+  });
+
+  test('finished solo game at the turn cap shows the survival outcome', async ({ page }) => {
+    const gameId = await createSoloGameViaDb(5000, null);
+
+    await page.goto(`/games/${gameId}`);
+
+    const meta = page.locator('.gmeta .meta-list');
+    await expect(meta.getByText('Turns Survived', { exact: true })).toBeVisible();
+    await expect(meta.getByText('5000', { exact: true })).toBeVisible();
+    // No death cause: the cap outcome row appears instead
+    await expect(meta.getByText('Outcome', { exact: true })).toBeVisible();
+    await expect(meta.getByText('Survived to the 5,000-turn limit')).toBeVisible();
+    await expect(meta.getByText('Cause of Death', { exact: true })).not.toBeVisible();
   });
 });
 

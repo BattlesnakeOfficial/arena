@@ -21,12 +21,12 @@ use crate::{
 /// Request body for creating a game
 #[derive(Debug, Deserialize)]
 pub struct CreateGameRequest {
-    /// Snake IDs to include in the game (1-4 required)
+    /// Snake IDs to include in the game (1-4 required; Solo requires exactly 1)
     pub snakes: Vec<Uuid>,
     /// Board size: "7x7", "11x11", or "19x19" (default: "11x11")
     #[serde(default = "default_board")]
     pub board: String,
-    /// Game type: "standard", "royale", "constrictor", or "snail" (default: "standard")
+    /// Game type: "standard", "royale", "constrictor", "snail", or "solo" (default: "standard")
     #[serde(default = "default_game_type")]
     pub game_type: String,
 }
@@ -46,7 +46,8 @@ fn parse_game_type(s: &str) -> Result<GameType, &'static str> {
         "royale" => Ok(GameType::Royale),
         "constrictor" => Ok(GameType::Constrictor),
         "snail" | "snailmode" | "snail_mode" | "snail mode" => Ok(GameType::SnailMode),
-        _ => Err("Invalid game type. Use standard, royale, constrictor, or snail"),
+        "solo" => Ok(GameType::Solo),
+        _ => Err("Invalid game type. Use standard, royale, constrictor, snail, or solo"),
     }
 }
 
@@ -198,19 +199,9 @@ pub async fn create_game(
     let game_type = parse_game_type(&request.game_type)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
-    // Validate snake count
-    if request.snakes.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "At least one snake is required".to_string(),
-        ));
-    }
-    if request.snakes.len() > 4 {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Maximum of 4 snakes allowed".to_string(),
-        ));
-    }
+    // Validate snake count for this game type (shared with the web flow)
+    game::validate_battlesnake_count(&game_type, request.snakes.len())
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
     // Get unique snake IDs to validate (duplicates are allowed but we only need to check each once)
     let unique_snake_ids: Vec<Uuid> = {
@@ -642,6 +633,11 @@ mod tests {
             parse_game_type("Snail Mode"),
             Ok(GameType::SnailMode)
         ));
+
+        // Solo
+        assert!(matches!(parse_game_type("solo"), Ok(GameType::Solo)));
+        assert!(matches!(parse_game_type("Solo"), Ok(GameType::Solo)));
+        assert!(matches!(parse_game_type("SOLO"), Ok(GameType::Solo)));
 
         // Invalid
         assert!(parse_game_type("invalid").is_err());

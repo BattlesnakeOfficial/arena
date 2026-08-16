@@ -119,7 +119,7 @@ test.describe('Games API', () => {
       const snakeId = snakes[0].battlesnake_id;
 
       // Test each game type (case-insensitive)
-      for (const gameType of ['standard', 'ROYALE', 'Constrictor', 'snail']) {
+      for (const gameType of ['standard', 'ROYALE', 'Constrictor', 'snail', 'SOLO']) {
         const response = await authenticatedPage.request.post('/api/games', {
           data: {
             snakes: [snakeId],
@@ -134,6 +134,48 @@ test.describe('Games API', () => {
       }
     });
 
+    test('rejects solo game with zero or two snakes', async ({ authenticatedPage }) => {
+      const timestamp = Date.now();
+      const snakeNames = [`Solo Reject 1 ${timestamp}`, `Solo Reject 2 ${timestamp}`];
+      const snakeIds: string[] = [];
+
+      for (const name of snakeNames) {
+        await authenticatedPage.goto('/battlesnakes/new');
+        await authenticatedPage.getByLabel('Name').fill(name);
+        await authenticatedPage.getByLabel('URL').fill('https://example.com/solo-reject');
+        await authenticatedPage.getByLabel('Visibility').selectOption('public');
+        await authenticatedPage.getByRole('button', { name: 'Create Battlesnake' }).click();
+
+        const snakes = await query<{ battlesnake_id: string }>(
+          "SELECT battlesnake_id FROM battlesnakes WHERE name = $1",
+          [name]
+        );
+        snakeIds.push(snakes[0].battlesnake_id);
+      }
+
+      // Zero snakes: the shared empty-selection rule applies.
+      const zeroResponse = await authenticatedPage.request.post('/api/games', {
+        data: {
+          snakes: [],
+          board: '11x11',
+          game_type: 'solo'
+        }
+      });
+      expect(zeroResponse.status()).toBe(400);
+      expect(await zeroResponse.text()).toContain('At least one battlesnake is required for a game');
+
+      // Two snakes: Solo requires exactly one.
+      const twoResponse = await authenticatedPage.request.post('/api/games', {
+        data: {
+          snakes: snakeIds,
+          board: '11x11',
+          game_type: 'solo'
+        }
+      });
+      expect(twoResponse.status()).toBe(400);
+      expect(await twoResponse.text()).toContain('Solo games require exactly one battlesnake');
+    });
+
     test('rejects game with no snakes', async ({ authenticatedPage }) => {
       const response = await authenticatedPage.request.post('/api/games', {
         data: {
@@ -145,7 +187,7 @@ test.describe('Games API', () => {
 
       expect(response.status()).toBe(400);
       const body = await response.text();
-      expect(body).toContain('At least one snake is required');
+      expect(body).toContain('At least one battlesnake is required for a game');
     });
 
     test('rejects game with more than 4 snakes', async ({ authenticatedPage }) => {
@@ -178,7 +220,7 @@ test.describe('Games API', () => {
 
       expect(response.status()).toBe(400);
       const body = await response.text();
-      expect(body).toContain('Maximum of 4 snakes allowed');
+      expect(body).toContain('A maximum of 4 battlesnakes are allowed in a game');
     });
 
     test('allows game with duplicate snake IDs (same snake multiple times)', async ({ authenticatedPage }) => {

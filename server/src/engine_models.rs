@@ -77,6 +77,7 @@ fn normalize_game_type(engine_type: &str) -> String {
         "royale" => "Royale".to_string(),
         "constrictor" => "Constrictor".to_string(),
         "snail_mode" | "snail mode" => "Snail Mode".to_string(),
+        "solo" => "Solo".to_string(),
         _ => engine_type.to_string(),
     }
 }
@@ -264,11 +265,12 @@ mod tests {
         assert_eq!(normalize_game_type("constrictor"), "Constrictor");
         assert_eq!(normalize_game_type("snail_mode"), "Snail Mode");
         assert_eq!(normalize_game_type("STANDARD"), "Standard");
+        assert_eq!(normalize_game_type("solo"), "Solo");
+        assert_eq!(normalize_game_type("Solo"), "Solo");
     }
 
     #[test]
     fn normalize_game_type_unknown_preserved() {
-        assert_eq!(normalize_game_type("solo"), "solo");
         assert_eq!(normalize_game_type("wrapped"), "wrapped");
         assert_eq!(normalize_game_type("custom_ruleset"), "custom_ruleset");
     }

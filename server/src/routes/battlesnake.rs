@@ -725,7 +725,7 @@ struct BattlesnakeStats {
 }
 
 fn compute_stats(history: &[game_battlesnake::GameHistoryEntry]) -> BattlesnakeStats {
-    use crate::models::game::GameStatus;
+    use crate::models::game::{GameStatus, GameType};
 
     let total_games = history.len();
     let mut finished_games = 0usize;
@@ -737,6 +737,14 @@ fn compute_stats(history: &[game_battlesnake::GameHistoryEntry]) -> BattlesnakeS
     let mut placement_count = 0usize;
 
     for entry in history {
+        // Solo games are single-snake survival runs: placement is always 1 by
+        // construction, so counting them would make every Solo run a free win.
+        // They stay in `total_games` and the history table; they don't feed the
+        // competitive accumulators.
+        if entry.game_type == GameType::Solo {
+            continue;
+        }
+
         if entry.status == GameStatus::Finished {
             finished_games += 1;
             if let Some(placement) = entry.placement {
@@ -1474,5 +1482,70 @@ mod public_list_tests {
         assert!(empty.snakes.is_empty());
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod stats_tests {
+    use super::compute_stats;
+    use crate::models::game::{GameBoardSize, GameStatus, GameType};
+    use crate::models::game_battlesnake::GameHistoryEntry;
+
+    fn entry(game_type: GameType, placement: Option<i32>) -> GameHistoryEntry {
+        GameHistoryEntry {
+            game_id: uuid::Uuid::new_v4(),
+            board_size: GameBoardSize::Medium,
+            game_type,
+            status: GameStatus::Finished,
+            placement,
+            snake_count: 1,
+            winner_name: None,
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn mixed_history_excludes_solo_from_competitive_stats() {
+        let history = vec![
+            entry(GameType::Solo, Some(1)),
+            entry(GameType::Standard, Some(3)),
+        ];
+
+        let stats = compute_stats(&history);
+        assert_eq!(stats.total_games, 2, "total_games still counts Solo");
+        assert_eq!(stats.finished_games, 1);
+        assert_eq!(stats.wins, 0);
+        assert_eq!(stats.win_rate, 0.0);
+        assert_eq!(stats.average_placement, 3.0);
+    }
+
+    #[test]
+    fn solo_only_history_has_no_competitive_games() {
+        let history = vec![
+            entry(GameType::Solo, Some(1)),
+            entry(GameType::Solo, Some(1)),
+        ];
+
+        let stats = compute_stats(&history);
+        assert_eq!(stats.total_games, history.len());
+        assert_eq!(stats.finished_games, 0);
+        assert_eq!(stats.wins, 0);
+        assert_eq!(stats.win_rate, 0.0);
+    }
+
+    #[test]
+    fn standard_only_history_unchanged() {
+        let history = vec![
+            entry(GameType::Standard, Some(1)),
+            entry(GameType::Standard, Some(2)),
+        ];
+
+        let stats = compute_stats(&history);
+        assert_eq!(stats.total_games, 2);
+        assert_eq!(stats.finished_games, 2);
+        assert_eq!(stats.wins, 1);
+        assert_eq!(stats.win_rate, 50.0);
+        assert_eq!(stats.average_placement, 1.5);
+        assert_eq!(stats.second_places, 1);
     }
 }

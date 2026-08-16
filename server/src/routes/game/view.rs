@@ -13,9 +13,10 @@ use crate::{
     components::page_factory::PageFactory,
     customizations::chip_color,
     errors::{ServerResult, WithStatus},
-    models::game::GameStatus,
+    models::game::{GameStatus, GameType},
     models::game_battlesnake,
     models::saved_game,
+    models::turn::{SoloGameStats, get_solo_game_stats},
     routes::auth::OptionalUser,
     state::AppState,
 };
@@ -71,6 +72,24 @@ pub async fn view_game(
         .with_status(StatusCode::NOT_FOUND)?;
 
     let finished = game.status == GameStatus::Finished;
+
+    // Survival stats for finished Solo games, read from the final persisted
+    // frame. Waiting/running games may lack a final frame and other modes
+    // have no survival semantics, so only finished Solo games query. A
+    // finished Solo game with no frames (archived/imported) yields None and
+    // the stats rows are simply omitted.
+    let solo_stats: Option<SoloGameStats> = if finished && game.game_type == GameType::Solo {
+        get_solo_game_stats(&state.db, game_id)
+            .await
+            .wrap_err("Failed to get Solo game stats")?
+    } else {
+        None
+    };
+    // Bind the borrowed cause before the markup block: the value must
+    // outlive the whole `html!` expression.
+    let solo_cause: Option<&str> = solo_stats
+        .as_ref()
+        .and_then(|s| s.cause_of_death.as_deref());
 
     let iframe_src = board_iframe_src(&state.config.base_url, game_id, &board_params);
     // A copied ?showSpoilers link keeps the reveal: sharing the spoiler
@@ -223,6 +242,24 @@ pub async fn view_game(
                             div { dt { "Mode" } dd { (game.game_type.as_str()) } }
                             div { dt { "Status" } dd { (capitalize(game.status.as_str())) } }
                             div { dt { "Created" } dd { (game.created_at.format("%Y-%m-%d %H:%M UTC")) } }
+                            @if let Some(stats) = &solo_stats {
+                                // "Turns Survived" is the final frame's turn
+                                // number verbatim: the same number the board
+                                // viewer's turn counter shows on the last frame.
+                                div { dt { "Turns Survived" } dd { (stats.turns_survived) } }
+                                @if let Some(cause) = solo_cause {
+                                    div { dt { "Cause of Death" } dd { (death_cause_copy(cause)) } }
+                                } @else if stats.turns_survived >= crate::engine::MAX_TURNS {
+                                    div {
+                                        dt { "Outcome" }
+                                        dd {
+                                            "Survived to the "
+                                            (comma_separate(crate::engine::MAX_TURNS))
+                                            "-turn limit"
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
 
@@ -365,6 +402,35 @@ fn capitalize(s: &str) -> String {
     }
 }
 
+/// Wire-protocol elimination slugs (see `game_runner::elimination_cause_label`)
+/// rendered as display copy. Total by construction: unknown slugs pass through
+/// unchanged so imported/legacy rows never panic.
+fn death_cause_copy(slug: &str) -> &str {
+    match slug {
+        "out-of-health" => "Starved",
+        "wall-collision" => "Hit a wall",
+        "self-collision" => "Collided with itself",
+        other => other,
+    }
+}
+
+/// Thousands-separate a non-negative number (e.g. `5000` -> `"5,000"`),
+/// for displaying the turn cap in the Solo Outcome row.
+fn comma_separate(n: i32) -> String {
+    debug_assert!(n >= 0);
+    let digits = n.unsigned_abs().to_string();
+    let bytes = digits.as_bytes();
+    let len = bytes.len();
+    let mut out = String::with_capacity(len + len / 3);
+    for (i, b) in bytes.iter().enumerate() {
+        if i > 0 && (len - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(*b as char);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -500,5 +566,24 @@ mod tests {
             with_params,
             "https://a.example/games/x?turn=3&showSpoilers=true"
         );
+    }
+
+    #[test]
+    fn death_cause_copy_maps_known_slugs_and_passes_others_through() {
+        assert_eq!(death_cause_copy("out-of-health"), "Starved");
+        assert_eq!(death_cause_copy("wall-collision"), "Hit a wall");
+        assert_eq!(death_cause_copy("self-collision"), "Collided with itself");
+        // Total function: unknown/imported slugs pass through unchanged.
+        assert_eq!(death_cause_copy("mystery-mode"), "mystery-mode");
+        assert_eq!(death_cause_copy(""), "");
+    }
+
+    #[test]
+    fn comma_separate_groups_thousands() {
+        assert_eq!(comma_separate(5000), "5,000");
+        assert_eq!(comma_separate(1000), "1,000");
+        assert_eq!(comma_separate(999), "999");
+        assert_eq!(comma_separate(1234567), "1,234,567");
+        assert_eq!(comma_separate(0), "0");
     }
 }
