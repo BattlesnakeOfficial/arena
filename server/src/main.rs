@@ -47,6 +47,7 @@ mod components {
     pub mod flash;
     pub mod page;
     pub mod page_factory;
+    pub mod snake_tags;
 }
 
 /// Public origin Eyes uses to resolve root-relative uptime monitor targets.

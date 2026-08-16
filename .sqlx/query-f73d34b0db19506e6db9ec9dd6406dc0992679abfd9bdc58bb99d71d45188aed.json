@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            bt.battlesnake_id as \"battlesnake_id!\",\n            t.tag_id,\n            t.name,\n            t.category as \"category: TagCategory\",\n            t.created_at,\n            t.updated_at\n        FROM battlesnake_tags bt\n        JOIN tags t ON t.tag_id = bt.tag_id\n        WHERE bt.battlesnake_id = ANY($1)\n        ORDER BY bt.battlesnake_id, t.category ASC, t.name ASC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "battlesnake_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "tag_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "category: TagCategory",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 5,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "f73d34b0db19506e6db9ec9dd6406dc0992679abfd9bdc58bb99d71d45188aed"
+}
