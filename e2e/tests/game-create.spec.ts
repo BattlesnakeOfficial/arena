@@ -184,14 +184,14 @@ test.describe('Create Game', () => {
       const snakeCard = authenticatedPage.locator('.card', { hasText: name });
       await snakeCard.getByRole('button', { name: 'Add to Game' }).click();
     }
-    await authenticatedPage.getByLabel('Game Type').selectOption('Solo');
+    await authenticatedPage.getByLabel('Game Type', { exact: true }).selectOption('Solo');
     await authenticatedPage.getByRole('button', { name: 'Create Game' }).click();
 
-    // Remains on the flow page with the validation flash (scoped to main:
-    // the page frame renders the same message a second time)
+    // Remains on the flow page with the validation flash (rendered once,
+    // by the page shell above <main>)
     await expect(authenticatedPage).toHaveURL(/\/games\/flow\//);
     await expect(
-      authenticatedPage.getByRole('main').getByText('Solo games require exactly one battlesnake')
+      authenticatedPage.getByText('Solo games require exactly one battlesnake')
     ).toBeVisible();
 
     // Reduce selection to one snake and create successfully
