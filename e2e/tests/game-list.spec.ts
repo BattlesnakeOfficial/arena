@@ -54,8 +54,8 @@ test.describe('Game Details', () => {
     await authenticatedPage.goto('/games/new');
     const snakeCard = authenticatedPage.locator('.card', { hasText: snakeName });
     await snakeCard.getByRole('button', { name: 'Add to Game' }).click();
-    await authenticatedPage.getByLabel('Board Size').selectOption('7x7');
-    await authenticatedPage.getByLabel('Game Type').selectOption('Constrictor');
+    await authenticatedPage.getByLabel('Board Size', { exact: true }).selectOption('7x7');
+    await authenticatedPage.getByLabel('Game Type', { exact: true }).selectOption('Constrictor');
     await authenticatedPage.getByRole('button', { name: 'Create Game' }).click();
 
     // Verify details page shows correct config

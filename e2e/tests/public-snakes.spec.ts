@@ -121,7 +121,7 @@ test.describe('Public Snakes Directory', () => {
       authenticatedPage.getByText('You have selected 1 of 4 possible battlesnakes.'),
     ).toBeVisible();
 
-    const selected = authenticatedPage.locator('ul.list-group li');
+    const selected = authenticatedPage.locator('.gc-slot:not(.empty)');
     await expect(selected).toHaveCount(1);
     await expect(selected).toContainText(snakeName);
   });

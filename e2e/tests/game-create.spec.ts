@@ -129,7 +129,7 @@ test.describe('Create Game', () => {
     await authenticatedPage.goto('/games/new');
     let snakeCard = authenticatedPage.locator('.card', { hasText: snakeName });
     await snakeCard.getByRole('button', { name: 'Add to Game' }).click();
-    await authenticatedPage.getByLabel('Board Size').selectOption('7x7');
+    await authenticatedPage.getByLabel('Board Size', { exact: true }).selectOption('7x7');
     await authenticatedPage.getByRole('button', { name: 'Create Game' }).click();
     await expect(authenticatedPage.locator('.gmeta').getByText('7x7', { exact: true })).toBeVisible();
 
@@ -137,7 +137,7 @@ test.describe('Create Game', () => {
     await authenticatedPage.goto('/games/new');
     snakeCard = authenticatedPage.locator('.card', { hasText: snakeName });
     await snakeCard.getByRole('button', { name: 'Add to Game' }).click();
-    await authenticatedPage.getByLabel('Board Size').selectOption('19x19');
+    await authenticatedPage.getByLabel('Board Size', { exact: true }).selectOption('19x19');
     await authenticatedPage.getByRole('button', { name: 'Create Game' }).click();
     await expect(authenticatedPage.locator('.gmeta').getByText('19x19', { exact: true })).toBeVisible();
   });
@@ -160,7 +160,7 @@ test.describe('Create Game', () => {
       await authenticatedPage.goto('/games/new');
       const snakeCard = authenticatedPage.locator('.card', { hasText: snakeName });
       await snakeCard.getByRole('button', { name: 'Add to Game' }).click();
-      await authenticatedPage.getByLabel('Game Type').selectOption(gameType);
+      await authenticatedPage.getByLabel('Game Type', { exact: true }).selectOption(gameType);
       await authenticatedPage.getByRole('button', { name: 'Create Game' }).click();
       await expect(authenticatedPage.locator('.gmeta').getByText(gameType, { exact: true })).toBeVisible();
     }
