@@ -217,6 +217,12 @@ pub async fn show_game_flow(
                         }
                         @if selected_count > 0 {
                             p class="gc-hint" { "You have selected " (selected_count) " of 4 possible battlesnakes." }
+                            @if selected_count == 1 {
+                                p class="gc-hint gc-solo-warn" {
+                                    "A lone snake wins the moment the game starts — add an "
+                                    "opponent below for a real match."
+                                }
+                            }
                             form action={"/games/flow/"(flow_id)"/reset"} method="post" class="gc-reset" {
                                 button type="submit" class="btn sm" { "Reset Selection" }
                             }

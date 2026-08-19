@@ -444,6 +444,14 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
 }
 .field input[type="url"] { font-family: var(--mono); font-size: 13.5px; }
 .field input[type="number"] { font-family: var(--mono); }
+.field input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  min-height: 0;
+  padding: 0;
+  accent-color: var(--pink);
+  flex-shrink: 0;
+}
 .field textarea { min-height: 130px; resize: vertical; line-height: 1.55; }
 .field .help { font-size: 12.5px; color: var(--muted); margin-top: 6px; }
 .form-cta { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 4px; }
@@ -1094,4 +1102,18 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
   .gc-actions form { flex: 1; }
   .gc-actions .btn { width: 100%; padding: 10px 14px; }
   .gc-search { max-width: none; }
+}
+.gc-solo-warn { color: var(--pink-deep); }
+
+/* game view: queued-game placeholder (board viewer has no frames to show yet) */
+.board-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: #9C8F99;
+  font-family: var(--mono);
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: .12em;
 }

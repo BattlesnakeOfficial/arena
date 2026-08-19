@@ -144,9 +144,28 @@ pub async fn view_game(
 
             @if game.status == GameStatus::Waiting {
                 p class="empty" {
-                    "This game is waiting to start. "
+                    "This game is queued and will start shortly — the page refreshes "
+                    "automatically. "
                     a href="" onclick="location.reload(); return false;" class="refresh-link" { "Refresh" }
-                    " to check for updates."
+                    " to check manually."
+                }
+                // Poll until the runner picks the game up, then reload to show
+                // the live board (no-JS fallback: the manual refresh link above).
+                script {
+                    "(function() {"
+                        "var timer = setInterval(function() {"
+                            "fetch('/api/games/" (game_id) "')"
+                                ".then(function(r) { return r.json(); })"
+                                ".then(function(body) {"
+                                    // Nested ifs: maud escapes '&&' inside script text
+                                    "if (body.Game) { if (body.Game.Status !== 'pending') {"
+                                        "clearInterval(timer);"
+                                        "location.reload();"
+                                    "} }"
+                                "})"
+                                ".catch(function() {});"
+                        "}, 2000);"
+                    "})();"
                 }
             }
 
@@ -160,16 +179,24 @@ pub async fn view_game(
             div class="theater" {
                 div {
                     div class="board-wrap" {
-                        // Board viewer iframe - always show, it handles waiting/empty games
-                        // gracefully. Default aspect-ratio is 16/9; the board sends a RESIZE
-                        // postMessage with its actual dimensions.
-                        div #board-viewer-container style="width: 100%; aspect-ratio: 16 / 9;" {
-                            iframe
-                                id="board-viewer"
-                                src=(iframe_src)
-                                title="Battlesnake Board Viewer"
-                                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-                                allowfullscreen {}
+                        @if game.status == GameStatus::Waiting {
+                            // No frames exist yet, so the board viewer would just show a
+                            // fetch error — hold its place until the game starts.
+                            div class="board-placeholder" style="width: 100%; aspect-ratio: 16 / 9;" {
+                                span class="live-dot" {}
+                                "Waiting for the game to start"
+                            }
+                        } @else {
+                            // Default aspect-ratio is 16/9; the board sends a RESIZE
+                            // postMessage with its actual dimensions.
+                            div #board-viewer-container style="width: 100%; aspect-ratio: 16 / 9;" {
+                                iframe
+                                    id="board-viewer"
+                                    src=(iframe_src)
+                                    title="Battlesnake Board Viewer"
+                                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                                    allowfullscreen {}
+                            }
                         }
                     }
 
@@ -203,7 +230,10 @@ pub async fn view_game(
                 aside {
                     h2 class="theater-rail-head" {
                         "Game Results"
-                        span class="sub-count" { (battlesnakes.len()) " snakes" }
+                        span class="sub-count" {
+                            (battlesnakes.len())
+                            @if battlesnakes.len() == 1 { " snake" } @else { " snakes" }
+                        }
                     }
                     div class="snakes" {
                         @for battlesnake in &battlesnakes {

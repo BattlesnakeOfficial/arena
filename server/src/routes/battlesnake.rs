@@ -327,6 +327,9 @@ pub async fn list_battlesnakes(
                                     }
                                     td class="r" {
                                         div class="row-actions" {
+                                            form action={"/battlesnakes/"(snake.battlesnake_id)"/test"} method="post" {
+                                                button type="submit" class="btn sm" { "Test" }
+                                            }
                                             a href={"/battlesnakes/"(snake.battlesnake_id)"/edit"} class="btn sm" { "Edit" }
                                             form action={"/battlesnakes/"(snake.battlesnake_id)"/delete"} method="post" {
                                                 button type="submit" class="btn sm danger" onclick="return confirm('Are you sure you want to delete this battlesnake?');" { "Delete" }
@@ -389,6 +392,22 @@ pub async fn new_battlesnake(
 
                 (tag_form_fields(&catalog, &[]))
 
+                // The url input rejects bare hostnames before the server can help,
+                // so add the scheme as soon as the field loses focus.
+                script {
+                    (maud::PreEscaped(r#"
+                    (function() {
+                      var el = document.getElementById('url');
+                      el.addEventListener('change', function() {
+                        var v = el.value.trim();
+                        if (v && v.indexOf('://') === -1) {
+                          el.value = 'https://' + v;
+                        }
+                      });
+                    })();
+                    "#))
+                }
+
                 div class="form-cta" {
                     button type="submit" class="btn solid" { "Create Battlesnake" }
                     a href="/battlesnakes" class="btn" { "Cancel" }
@@ -400,6 +419,17 @@ pub async fn new_battlesnake(
 }
 
 // Handle the creation of a new battlesnake
+/// Users regularly paste a bare hostname ("mysnake.fly.dev"). Assume https
+/// instead of bouncing them off the form with a URL validation error.
+fn normalize_snake_url(url: &str) -> String {
+    let url = url.trim();
+    if url.is_empty() || url.contains("://") {
+        url.to_string()
+    } else {
+        format!("https://{url}")
+    }
+}
+
 pub async fn create_battlesnake(
     State(state): State<AppState>,
     CurrentUserWithSession { user, session }: CurrentUserWithSession,
@@ -433,7 +463,7 @@ pub async fn create_battlesnake(
 
     let create_data = CreateBattlesnake {
         name: form.name,
-        url: form.url,
+        url: normalize_snake_url(&form.url),
         visibility: form.visibility,
     };
 
@@ -557,6 +587,22 @@ pub async fn edit_battlesnake(
 
                 (tag_form_fields(&catalog, &selected_tag_ids))
 
+                // The url input rejects bare hostnames before the server can help,
+                // so add the scheme as soon as the field loses focus.
+                script {
+                    (maud::PreEscaped(r#"
+                    (function() {
+                      var el = document.getElementById('url');
+                      el.addEventListener('change', function() {
+                        var v = el.value.trim();
+                        if (v && v.indexOf('://') === -1) {
+                          el.value = 'https://' + v;
+                        }
+                      });
+                    })();
+                    "#))
+                }
+
                 div class="form-cta" {
                     button type="submit" class="btn solid" { "Update Battlesnake" }
                     a href="/battlesnakes" class="btn" { "Cancel" }
@@ -605,7 +651,7 @@ pub async fn update_battlesnake(
 
     let update_data = UpdateBattlesnake {
         name: form.name,
-        url: form.url,
+        url: normalize_snake_url(&form.url),
         visibility: form.visibility,
     };
 
@@ -1271,9 +1317,9 @@ pub async fn test_battlesnake(
                                 td { code { (call.name) } }
                                 td {
                                     @if call.ok {
-                                        span class="badge bg-success text-white" { "OK" }
+                                        span class="badge ok" { "OK" }
                                     } @else {
-                                        span class="badge bg-danger text-white" { "Failed" }
+                                        span class="badge warn" { "Failed" }
                                     }
                                 }
                                 td {

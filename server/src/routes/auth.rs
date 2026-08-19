@@ -67,6 +67,12 @@ impl FromRequestParts<AppState> for CurrentSession {
                     Cookie::new(SESSION_COOKIE_NAME, new_session.session_id.to_string());
                 cookie.set_http_only(true);
                 cookie.set_secure(true);
+                // Without an explicit path, RFC 6265 scopes the cookie to the
+                // directory of whatever request created the session. A visitor
+                // whose first request is /auth/github gets a session pinned to
+                // /auth — the authenticated session is then never sent for
+                // normal pages and login silently doesn't stick.
+                cookie.set_path("/");
                 cookie.set_same_site(cja::server::cookies::SameSite::Lax);
                 cookie.set_max_age(time::Duration::seconds(SESSION_EXPIRATION_SECONDS));
                 cookie_jar.add(cookie);
@@ -102,6 +108,12 @@ impl FromRequestParts<AppState> for CurrentSession {
                     Cookie::new(SESSION_COOKIE_NAME, new_session.session_id.to_string());
                 cookie.set_http_only(true);
                 cookie.set_secure(true);
+                // Without an explicit path, RFC 6265 scopes the cookie to the
+                // directory of whatever request created the session. A visitor
+                // whose first request is /auth/github gets a session pinned to
+                // /auth — the authenticated session is then never sent for
+                // normal pages and login silently doesn't stick.
+                cookie.set_path("/");
                 cookie.set_same_site(cja::server::cookies::SameSite::Lax);
                 cookie.set_max_age(time::Duration::seconds(SESSION_EXPIRATION_SECONDS));
                 cookie_jar.add(cookie);
