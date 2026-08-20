@@ -172,11 +172,10 @@ impl FromRequestParts<AppState> for CurrentUser {
         let session = CurrentSession::from_request_parts(parts, state).await?;
 
         // Check if user is logged in
-        let user = session.user.ok_or_else(|| {
-            ServerError(eyre!("Not authenticated"), StatusCode::UNAUTHORIZED).into_response()
-        })?;
-
-        Ok(CurrentUser(user))
+        match session.user {
+            Some(user) => Ok(CurrentUser(user)),
+            None => Err(sign_in_required_response(parts, state).await),
+        }
     }
 }
 
@@ -209,14 +208,51 @@ impl FromRequestParts<AppState> for CurrentUserWithSession {
         let current_session = CurrentSession::from_request_parts(parts, state).await?;
 
         // Check if user is logged in
-        let user = current_session.user.ok_or_else(|| {
-            ServerError(eyre!("Not authenticated"), StatusCode::UNAUTHORIZED).into_response()
-        })?;
+        match current_session.user {
+            Some(user) => Ok(CurrentUserWithSession {
+                user,
+                session: current_session.session,
+            }),
+            None => Err(sign_in_required_response(parts, state).await),
+        }
+    }
+}
 
-        Ok(CurrentUserWithSession {
-            user,
-            session: current_session.session,
-        })
+/// Response for an unauthenticated request to a page that requires sign-in.
+///
+/// Renders the branded "sign in required" page (with a GitHub sign-in CTA)
+/// instead of a bare `401` with an empty body — which rendered as a blank
+/// white screen for a signed-out visitor hitting `/me`, `/games/new`,
+/// `/battlesnakes`, etc. The `401` status is preserved, so htmx/API callers
+/// (which check the status, not the body) are unaffected.
+async fn sign_in_required_response(parts: &mut Parts, state: &AppState) -> Response {
+    use crate::components::page_factory::PageFactory;
+
+    match PageFactory::from_request_parts(parts, state).await {
+        Ok(page_factory) => (
+            StatusCode::UNAUTHORIZED,
+            page_factory.create_page(
+                "Sign in required".to_string(),
+                Box::new(maud::html! {
+                    div class="home" {
+                        section class="section" {
+                            h1 { "Sign in required" }
+                            p class="empty" {
+                                "You need to sign in to view this page."
+                            }
+                            div class="cta-row" {
+                                a class="btn solid" href="/auth/github" { "Sign in with GitHub" }
+                                a class="btn" href="/" { "Back to Home" }
+                            }
+                        }
+                    }
+                }),
+            ),
+        )
+            .into_response(),
+        // If the page shell itself can't be built, fall back to a bare 401
+        // rather than surfacing a 500 on an already-unauthenticated request.
+        Err(_) => ServerError(eyre!("Not authenticated"), StatusCode::UNAUTHORIZED).into_response(),
     }
 }
 

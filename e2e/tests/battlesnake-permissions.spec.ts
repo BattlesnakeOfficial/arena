@@ -51,6 +51,20 @@ test.describe('Battlesnake Permissions', () => {
     expect(response?.status()).toBe(401);
   });
 
+  test('unauthenticated page shows a branded sign-in page, not a blank 401', async ({ page }) => {
+    // Regression: the 401 used to have an empty body — a blank white screen
+    // for a signed-out visitor. It must render the branded "Sign in required"
+    // page with a GitHub sign-in CTA (status stays 401 for API/htmx callers).
+    const response = await page.goto('/battlesnakes/new');
+    expect(response?.status()).toBe(401);
+    await expect(page.getByRole('heading', { name: 'Sign in required' })).toBeVisible();
+    // Scope to the page body — the nav also has a "Sign in with GitHub" link
+    // when logged out, so an unscoped locator matches two elements.
+    await expect(
+      page.getByRole('main').getByRole('link', { name: 'Sign in with GitHub' })
+    ).toBeVisible();
+  });
+
   test('edit page requires authentication', async ({ page }) => {
     const response = await page.goto('/battlesnakes/00000000-0000-0000-0000-000000000000/edit');
     expect(response?.status()).toBe(401);
