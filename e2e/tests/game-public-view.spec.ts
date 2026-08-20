@@ -3,12 +3,15 @@ import { query } from '../fixtures/db';
 
 test.describe('Public Game Viewing', () => {
   // Helper: create a game via the API using an authenticated page, return game_id
-  async function createGameViaDb(): Promise<string> {
+  async function createGameViaDb(
+    status: 'waiting' | 'running' | 'finished' | 'failed' = 'finished'
+  ): Promise<string> {
     // Insert a minimal game directly in the DB for testing view access
     const result = await query<{ game_id: string }>(
       `INSERT INTO games (board_size, game_type, status, created_at, updated_at)
-       VALUES ('small', 'standard', 'finished', NOW(), NOW())
-       RETURNING game_id::text AS game_id`
+       VALUES ('small', 'standard', $1, NOW(), NOW())
+       RETURNING game_id::text AS game_id`,
+      [status]
     );
     return result[0].game_id;
   }
@@ -139,6 +142,33 @@ test.describe('Public Game Viewing', () => {
     await expect(meta.getByText('Outcome', { exact: true })).toBeVisible();
     await expect(meta.getByText('Survived to the 5,000-turn limit')).toBeVisible();
     await expect(meta.getByText('Cause of Death', { exact: true })).not.toBeVisible();
+  });
+
+  test('finished game page shows an Export GIF link pointing at the exporter', async ({ page }) => {
+    const gameId = await createGameViaDb();
+
+    await page.goto(`/games/${gameId}`);
+
+    // The e2e server env does not set BASE_URL, so the app falls back to its
+    // default origin — the exporter href embeds that default.
+    const link = page.getByRole('link', { name: 'Export GIF' });
+    await expect(link).toHaveCount(1);
+    await expect(link).toHaveAttribute(
+      'href',
+      `https://exporter.battlesnake.com/games/${gameId}/gif?engine_url=http://localhost:3000/api`
+    );
+    await expect(link).toHaveAttribute('target', '_blank');
+    await expect(link).toHaveAttribute('rel', 'noopener');
+  });
+
+  test('unfinished game pages show no Export GIF link', async ({ page }) => {
+    for (const status of ['waiting', 'running', 'failed'] as const) {
+      const gameId = await createGameViaDb(status);
+
+      await page.goto(`/games/${gameId}`);
+
+      await expect(page.getByRole('link', { name: 'Export GIF' })).toHaveCount(0);
+    }
   });
 });
 
