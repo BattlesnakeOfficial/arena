@@ -402,7 +402,19 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
 .rating-positive { color: var(--up); font-weight: 600; }
 .rating-negative { color: var(--down); font-weight: 600; }
 .rating-neutral { color: var(--muted); }
-.rating-chart-container { margin: 16px 0; padding: 8px; }
+.rating-chart-container { margin: 16px 0; }
+.rating-chart { border: 1px solid var(--hairline); border-radius: 8px; display: block; }
+.rating-chart .grid { stroke: var(--hairline); }
+.rating-chart .line { stroke: var(--pink); }
+.rating-chart .lbl { fill: var(--muted); font-family: var(--mono); font-size: 11px; }
+
+/* Leaderboard entry page */
+.entry-avatar { width: 44px; height: 44px; border-radius: 50%; align-self: center; }
+.stat .formrow { margin-top: 8px; font-size: 15px; letter-spacing: 2px; }
+
+/* Empty-state block with CTAs (tournaments, future empty listings) */
+.empty-state { margin: 28px 0 8px; }
+.empty-state .cta-row { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; margin-top: 4px; }
 .activity-feed { max-height: 300px; overflow-y: auto; border: 1px solid var(--hairline); border-radius: 12px; padding: 12px; }
 .activity-feed-item { padding: 6px 0; border-bottom: 1px solid var(--hairline); }
 .activity-feed-item:last-child { border-bottom: none; }

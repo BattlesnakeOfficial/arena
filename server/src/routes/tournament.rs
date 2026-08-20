@@ -806,7 +806,21 @@ pub async fn list_tournaments(
             }
 
             @if tournaments.is_empty() {
-                p class="empty" { "No tournaments yet." }
+                div class="empty-state" {
+                    p class="empty" {
+                        "No tournaments yet — the first community brackets are still "
+                        "taking shape. The leaderboards run around the clock in the "
+                        "meantime."
+                    }
+                    div class="cta-row" {
+                        @if viewer.is_some() {
+                            a class="btn solid" href="/tournaments/new" { "Create the First Tournament" }
+                        } @else {
+                            a class="btn solid" href="/leaderboards" { "Watch the Leaderboards" }
+                        }
+                        a class="btn" href="/snakes" { "Browse Snakes" }
+                    }
+                }
             } @else {
                 div class="section" {
                     table class="data" {

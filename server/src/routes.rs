@@ -625,10 +625,9 @@ fn home_ticker_items(activity: &[ActivityFeedEntry], leaderboard_name: &str) -> 
             }
             (leaderboard_name)
             " "
-            @if event.display_score_change >= 0.0 {
-                span class="win" { (format!("{:+.1}", event.display_score_change)) }
-            } @else {
-                span class="lose" { (format!("{:+.1}", event.display_score_change)) }
+            @match home_delta(event.display_score_change) {
+                (true, delta) => span class="win" { (delta) },
+                (false, delta) => span class="lose" { (delta) },
             }
             span class="sep" { "/" }
         }
@@ -709,10 +708,9 @@ fn home_ladder_grid(
                                         " "
                                         span class={"place p"(event.placement)} { (home_ordinal(event.placement)) }
                                         " "
-                                        @if event.display_score_change >= 0.0 {
-                                            span class="delta up" { (format!("{:+.1}", event.display_score_change)) }
-                                        } @else {
-                                            span class="delta down" { (format!("{:+.1}", event.display_score_change)) }
+                                        @match home_delta(event.display_score_change) {
+                                            (true, delta) => span class="delta up" { (delta) },
+                                            (false, delta) => span class="delta down" { (delta) },
                                         }
                                     }
                                 }
@@ -745,6 +743,19 @@ fn home_ordinal(n: i32) -> String {
         _ => "th",
     };
     format!("{n}{suffix}")
+}
+
+/// Rating delta for the home ticker and activity rail, rounded to display
+/// precision *before* the sign check so a −0.04 change can't render as a red
+/// "-0.0". Returns the up/down flag alongside the formatted string so the CSS
+/// class always agrees with the printed sign.
+fn home_delta(change: f64) -> (bool, String) {
+    let rounded = (change * 10.0).round() / 10.0;
+    // -0.0 == 0.0, so a change that rounds to zero counts as up; normalize
+    // the value too so it formats as "+0.0", never "-0.0".
+    let up = rounded >= 0.0;
+    let value = if rounded == 0.0 { 0.0 } else { rounded };
+    (up, format!("{value:+.1}"))
 }
 
 /// Profile page that requires authentication
@@ -965,5 +976,26 @@ async fn version_page() -> impl IntoResponse {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod home_delta_tests {
+    use super::home_delta;
+
+    #[test]
+    fn tiny_negative_never_renders_minus_zero() {
+        // -0.04 rounds to zero at display precision: must show "+0.0" with
+        // the up styling, not a red "-0.0".
+        assert_eq!(home_delta(-0.04), (true, "+0.0".to_string()));
+        assert_eq!(home_delta(0.04), (true, "+0.0".to_string()));
+        assert_eq!(home_delta(0.0), (true, "+0.0".to_string()));
+    }
+
+    #[test]
+    fn real_changes_keep_sign_and_class() {
+        assert_eq!(home_delta(1.26), (true, "+1.3".to_string()));
+        assert_eq!(home_delta(-0.05), (false, "-0.1".to_string()));
+        assert_eq!(home_delta(-2.34), (false, "-2.3".to_string()));
     }
 }

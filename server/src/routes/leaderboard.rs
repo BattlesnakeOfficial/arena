@@ -697,11 +697,22 @@ pub async fn show_leaderboard_entry(
             .map(|i| format!("{:.0}", 10.0 + (i as f64 / grid_count as f64) * 200.0))
             .collect();
 
+        // Tick precision follows the visible span: a ladder that only moved
+        // half a point would otherwise render every gridline as the same
+        // integer (five ticks all reading "49").
+        let span = y_max - y_min;
+        let tick_decimals: usize = if span < 0.5 {
+            2
+        } else if span < 3.0 {
+            1
+        } else {
+            0
+        };
         let labels: Vec<(String, String)> = (0..=grid_count)
             .map(|i| {
                 let score = y_max - (i as f64 / grid_count as f64) * (y_max - y_min);
                 let y_pos = format!("{:.0}", 10.0 + (i as f64 / grid_count as f64) * 200.0 + 4.0);
-                (format!("{score:.0}"), y_pos)
+                (format!("{score:.tick_decimals$}"), y_pos)
             })
             .collect();
 
@@ -734,161 +745,147 @@ pub async fn show_leaderboard_entry(
     Ok(page_factory.create_page(
         format!("{} - {}", snake.name, lb.name),
         Box::new(html! {
-            div class="container" {
-                // Header
-                div class="card mb-4" {
-                    div class="card-body" {
-                        div class="d-flex align-items-center" style="gap: 16px;" {
-                            @if let Some(ref avatar_url) = owner_avatar {
-                                img src=(avatar_url) alt="Avatar" style="width: 48px; height: 48px; border-radius: 50%;" {}
-                            }
-                            div {
-                                h1 class="mb-1" {
-                                    a href={"/battlesnakes/"(snake.battlesnake_id)"/profile"} { (snake.name) }
-                                }
-                                @if owner.is_some() {
-                                    a href={"/users/"(owner_login)} style="color: #666;" { (owner_login) }
-                                } @else {
-                                    span style="color: #666;" { (owner_login) }
-                                }
-                                span { " on " }
-                                a href={"/leaderboards/"(leaderboard_id)} { (lb.name) }
-                            }
+            div class="crumb" {
+                a href="/leaderboards" { "Leaderboards" }
+                " / "
+                a href={"/leaderboards/"(leaderboard_id)} { (lb.name) }
+                " / " span { (snake.name) }
+            }
+
+            div class="page-head" {
+                @if let Some(ref avatar_url) = owner_avatar {
+                    img class="entry-avatar" src=(avatar_url) alt="" {}
+                }
+                div {
+                    h1 {
+                        a href={"/battlesnakes/"(snake.battlesnake_id)"/profile"} { (snake.name) }
+                    }
+                    div class="sub" {
+                        "by "
+                        @if owner.is_some() {
+                            a href={"/users/"(owner_login)} { (owner_login) }
+                        } @else {
+                            (owner_login)
                         }
-                        div style="margin-top: 12px; display: flex; gap: 16px; align-items: center;" {
-                            span style="font-size: 1.5em; font-weight: bold;" {
-                                "Rating: " (format!("{:.1}", entry.display_score))
-                            }
-                            span {
-                                "Rank: "
-                                @if let Some(r) = rank {
-                                    "#" (r)
-                                } @else {
-                                    "In Placement"
-                                }
-                            }
-                            a href={"/battlesnakes/"(entry.battlesnake_id)"/profile"} class="btn btn-sm btn-secondary" { "Snake Profile" }
-                        }
+                        " on "
+                        a href={"/leaderboards/"(leaderboard_id)} { (lb.name) }
                     }
                 }
+                div class="spacer" {}
+                a href={"/battlesnakes/"(entry.battlesnake_id)"/profile"} class="btn head-cta" { "Snake Profile" }
+            }
 
-                // Summary Stats
-                h2 { "Summary" }
-                div class="d-flex" style="gap: 16px; flex-wrap: wrap; margin-bottom: 20px;" {
-                    div class="card" style="flex: 1; min-width: 120px;" {
-                        div class="card-body" {
-                            h5 { "Games" }
-                            p style="font-size: 2em; margin: 0;" { (entry.games_played) }
-                        }
+            div class="stats" {
+                div class="stat" {
+                    div class="label" { "Rating" }
+                    div class="value" { (format!("{:.1}", entry.display_score)) }
+                }
+                div class="stat" {
+                    div class="label" { "Rank" }
+                    @if let Some(r) = rank {
+                        div class="value" { "#" (r) }
+                    } @else {
+                        div class="value sm" { "In Placement" }
                     }
-                    div class="card" style="flex: 1; min-width: 120px;" {
-                        div class="card-body" {
-                            h5 { "1st Place" }
-                            p style="font-size: 2em; margin: 0;" { (entry.first_place_finishes) }
-                        }
+                }
+                div class="stat" {
+                    div class="label" { "Games" }
+                    div class="value" {
+                        (entry.games_played)
+                        small { (entry.first_place_finishes) " won" }
                     }
-                    div class="card" style="flex: 1; min-width: 120px;" {
-                        div class="card-body" {
-                            h5 { "Other" }
-                            p style="font-size: 2em; margin: 0;" { (entry.non_first_finishes) }
-                        }
-                    }
-                    div class="card" style="flex: 1; min-width: 120px;" {
-                        div class="card-body" {
-                            h5 { "Win Rate" }
-                            p style="font-size: 2em; margin: 0;" {
-                                @if entry.games_played > 0 {
-                                    (format!("{:.0}%", entry.first_place_finishes as f64 / entry.games_played as f64 * 100.0))
-                                } @else {
-                                    "N/A"
-                                }
-                            }
-                        }
-                    }
-                    div class="card" style="flex: 1; min-width: 120px;" {
-                        div class="card-body" {
-                            h5 { "Rating" }
-                            p style="font-size: 2em; margin: 0;" { (format!("{:.1}", entry.display_score)) }
-                        }
-                    }
-                    div class="card" style="flex: 1; min-width: 120px;" {
-                        div class="card-body" {
-                            h5 { "Recent Form" }
-                            p style="font-size: 1.5em; margin: 0;" {
-                                @for p in &recent_form {
-                                    @match *p {
-                                        1 => span { "🥇" },
-                                        2 => span { "🥈" },
-                                        3 => span { "🥉" },
-                                        _ => span { "📍" },
-                                    }
-                                }
-                                @if recent_form.is_empty() {
-                                    span style="color: #999;" { "-" }
+                    @if !recent_form.is_empty() {
+                        div class="formrow" title="Recent form, newest first" {
+                            @for p in &recent_form {
+                                @match *p {
+                                    1 => span { "🥇" },
+                                    2 => span { "🥈" },
+                                    3 => span { "🥉" },
+                                    _ => span { "▪️" },
                                 }
                             }
                         }
                     }
                 }
-
-                // Scores by Algorithm
-                h2 { "Scores by Algorithm" }
-                div class="d-flex" style="gap: 16px; flex-wrap: wrap; margin-bottom: 20px;" {
-                    @for (_key, display_name, score) in &algo_entry_scores {
-                        div class="card" style="flex: 1; min-width: 200px;" {
-                            div class="card-body" {
-                                h5 { (display_name) }
-                                @if let Some(s) = score {
-                                    p style="font-size: 2em; margin: 0;" { (format!("{:.1}", s.score)) }
-                                    @for (detail_name, detail_value) in &s.details {
-                                        p style="margin: 2px 0; color: #666; font-size: 0.9em;" {
-                                            (detail_name) ": " (detail_value)
-                                        }
-                                    }
-                                } @else {
-                                    p style="color: #999;" { "No data" }
-                                }
-                            }
+                div class="stat" {
+                    div class="label" { "Win Rate" }
+                    div class="value" {
+                        @if entry.games_played > 0 {
+                            (format!("{:.0}%", entry.first_place_finishes as f64 / entry.games_played as f64 * 100.0))
+                        } @else {
+                            "—"
                         }
                     }
                 }
+            }
 
-                // Rating Chart
+            div class="section" {
                 h2 { "Rating Trajectory" }
                 div class="rating-chart-container" {
                     @if rating_points.len() >= 2 {
-                        svg width="100%" viewBox="0 0 620 220" style="border: 1px solid #ddd; border-radius: 8px;" {
-                            rect x="0" y="0" width="620" height="220" fill="#fafafa" {}
+                        svg class="rating-chart" width="100%" viewBox="0 0 620 220" {
                             @for y_line in &grid_y_positions {
-                                line x1="40" y1=(y_line) x2="600" y2=(y_line)
-                                     stroke="#eee" stroke-width="1" {}
+                                line class="grid" x1="40" y1=(y_line) x2="600" y2=(y_line) stroke-width="1" {}
                             }
-                            polyline
-                                points=(points_str)
-                                fill="none" stroke="#4a90d9" stroke-width="2" {}
+                            polyline class="line" points=(points_str) fill="none" stroke-width="2" {}
                             @for (label, y_pos) in &y_labels {
-                                text x="35" y=(y_pos) text-anchor="end" font-size="11" fill="#666" { (label) }
+                                text class="lbl" x="35" y=(y_pos) text-anchor="end" { (label) }
                             }
                         }
                     } @else {
-                        p { "Not enough data for chart" }
+                        p class="empty" { "Not enough games yet to chart a trajectory." }
                     }
                 }
+            }
 
-                // Game History
+            div class="section" {
+                h2 { "Scores by Algorithm" }
+                table class="data" {
+                    thead {
+                        tr {
+                            th { "Algorithm" }
+                            th class="r" { "Score" }
+                            th class="hide-sm" { "Details" }
+                        }
+                    }
+                    tbody {
+                        @for (_key, display_name, score) in &algo_entry_scores {
+                            tr {
+                                td { (display_name) }
+                                @if let Some(s) = score {
+                                    td class="r num" { (format!("{:.1}", s.score)) }
+                                    td class="hide-sm" {
+                                        span class="sub" {
+                                            @for (j, (detail_name, detail_value)) in s.details.iter().enumerate() {
+                                                @if j > 0 { " · " }
+                                                (detail_name) " " (detail_value)
+                                            }
+                                        }
+                                    }
+                                } @else {
+                                    td class="r num" { "—" }
+                                    td class="hide-sm" { span class="sub" { "No data" } }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            div class="section" {
                 h2 { "Game History" }
                 @if history.is_empty() {
-                    p { "No games played yet." }
+                    p class="empty" { "No games played yet." }
                 } @else {
-                    table class="table" {
+                    table class="data" {
                         thead {
                             tr {
                                 th { "Date" }
                                 th { "Opponents" }
-                                th { "Placement" }
-                                th { "Rating Change" }
-                                th { "Food" }
-                                th { "Replay" }
+                                th class="r" { "Placement" }
+                                th class="r" { "Rating" }
+                                th class="r hide-sm" { "Food" }
+                                th class="r" { "Replay" }
                             }
                         }
                         tbody {
@@ -906,23 +903,24 @@ pub async fn show_leaderboard_entry(
                                                 }
                                             }
                                         } @else {
-                                            span style="color: #999;" { "-" }
+                                            span class="sub" { "—" }
                                         }
                                     }
-                                    td {
+                                    td class="r" {
                                         @match game.placement {
-                                            1 => span class="badge bg-warning text-dark" { "🥇 1st" },
-                                            2 => span class="badge bg-secondary text-white" { "🥈 2nd" },
-                                            3 => span class="badge bg-danger text-white" { "🥉 3rd" },
-                                            _ => span class="badge bg-dark text-white" { (game.placement) "th" },
+                                            1 => span class="badge ok" { "🥇 1st" },
+                                            2 => span class="badge" { "🥈 2nd" },
+                                            3 => span class="badge" { "🥉 3rd" },
+                                            // 4+ (max 4 snakes/game) — "th" is always right
+                                            p => span class="badge" { (p) "th" },
                                         }
                                     }
-                                    td {
+                                    td class="r num" {
                                         (render_score_delta(game.display_score_change, "rating-positive", "rating-negative"))
                                     }
-                                    td { (game.food_eaten) }
-                                    td {
-                                        a href={"/games/"(game.game_id)} class="btn btn-sm btn-primary" { "Watch" }
+                                    td class="r num hide-sm" { (game.food_eaten) }
+                                    td class="r" {
+                                        a href={"/games/"(game.game_id)} class="btn sm" { "Watch" }
                                     }
                                 }
                             }
@@ -945,12 +943,6 @@ pub async fn show_leaderboard_entry(
                             }
                         }
                     }
-                }
-
-                div class="nav" style="margin-top: 20px;" {
-                    a href={"/leaderboards/"(leaderboard_id)} { "Back to Leaderboard" }
-                    span { " | " }
-                    a href="/leaderboards" { "All Leaderboards" }
                 }
             }
         }),
