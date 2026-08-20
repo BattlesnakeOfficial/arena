@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Query, State},
     http::StatusCode,
     response::IntoResponse,
 };
@@ -17,6 +17,7 @@ use crate::{
     models::game_battlesnake,
     models::saved_game,
     models::turn::{SoloGameStats, get_solo_game_stats},
+    routes::UuidPath,
     routes::auth::OptionalUser,
     state::AppState,
 };
@@ -87,7 +88,7 @@ impl ViewGameParams {
 pub async fn view_game(
     State(state): State<AppState>,
     OptionalUser(user): OptionalUser,
-    Path(game_id): Path<Uuid>,
+    UuidPath(game_id): UuidPath,
     Query(board_params): Query<BoardParams>,
     Query(params): Query<ViewGameParams>,
     page_factory: PageFactory,

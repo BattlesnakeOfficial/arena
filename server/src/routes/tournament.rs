@@ -27,6 +27,7 @@ use crate::{
         },
         user,
     },
+    routes::UuidPath,
     routes::auth::{CurrentUser, CurrentUserWithSession, OptionalUser},
     state::AppState,
     tournament_bracket::persist_bracket,
@@ -943,7 +944,7 @@ pub async fn create_tournament(
 pub async fn show_tournament(
     State(state): State<AppState>,
     OptionalUser(viewer): OptionalUser,
-    Path(tournament_id): Path<Uuid>,
+    UuidPath(tournament_id): UuidPath,
     page_factory: PageFactory,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
     let t = tournament::get_tournament_by_id(&state.db, tournament_id)

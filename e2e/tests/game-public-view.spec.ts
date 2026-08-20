@@ -197,6 +197,20 @@ test.describe('Public Game Viewing', () => {
     const clipboard = await page.evaluate(() => navigator.clipboard.readText());
     expect(clipboard).toContain(`/games/${gameId}`);
   });
+
+  test('malformed game id renders the branded 404 page, not a raw parse error', async ({
+    page,
+  }) => {
+    // A truncated/fat-fingered share link (segment isn't a UUID) must land on
+    // the friendly 404 page, not axum's raw "Invalid URL: Cannot parse ..."
+    // plaintext. Regression guard for the UuidPath extractor.
+    const response = await page.goto('/games/not-a-uuid');
+
+    expect(response?.status()).toBe(404);
+    await expect(page.getByRole('heading', { name: '404 — Page not found' })).toBeVisible();
+    // The raw framework rejection must never reach the user.
+    await expect(page.locator('body')).not.toContainText('Cannot parse');
+  });
 });
 
 test.describe('Homepage Leaderboard Link for Unauthenticated Users', () => {
