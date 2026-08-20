@@ -241,6 +241,7 @@ impl Render for Page {
                     link rel="preconnect" href="https://fonts.gstatic.com" crossorigin;
                     link href=(GOOGLE_FONTS_HREF) rel="stylesheet";
                     link rel="stylesheet" href=(asset_url("arena.css"));
+                    link rel="icon" href=(asset_url("favicon.svg")) type="image/svg+xml";
                     script { (PreEscaped(THEME_BOOTSTRAP_JS)) }
                     script src=(asset_url("viewTransition.js")) {}
                     script src=(asset_url("theme.js")) defer {}

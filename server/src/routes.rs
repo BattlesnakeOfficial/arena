@@ -97,6 +97,7 @@ pub fn routes(app_state: AppState) -> axum::Router {
         .route("/", get(root_page))
         .route("/robots.txt", get(robots_txt))
         .route("/health", get(health::health))
+        .route("/favicon.ico", get(crate::static_assets::serve_favicon))
         // Policy pages
         .route("/conduct", get(policy::conduct_page))
         .route("/privacy", get(policy::privacy_page))

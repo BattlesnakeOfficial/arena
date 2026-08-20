@@ -68,3 +68,24 @@ pub async fn serve_static_file(Path(path): Path<String>) -> impl IntoResponse {
         StatusCode::NOT_FOUND.into_response()
     }
 }
+
+/// Serve `/favicon.ico` from the embedded SVG. Browsers request this path by
+/// convention (before parsing the `<link rel="icon">`), so answering here
+/// stops the 404 that otherwise appears in the console on every page. Modern
+/// browsers render an SVG served with an image/svg+xml content-type fine.
+pub async fn serve_favicon() -> impl IntoResponse {
+    match STATIC_DIR.get_file("favicon.svg") {
+        Some(file) => (
+            [
+                (header::CONTENT_TYPE, "image/svg+xml".to_string()),
+                (
+                    header::CACHE_CONTROL,
+                    "public, max-age=31536000".to_string(),
+                ),
+            ],
+            file.contents().to_vec(),
+        )
+            .into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
