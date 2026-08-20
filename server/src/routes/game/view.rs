@@ -5,7 +5,7 @@ use axum::{
 };
 use axum_macros::debug_handler;
 use color_eyre::eyre::Context as _;
-use maud::html;
+use maud::{PreEscaped, html};
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -20,6 +20,33 @@ use crate::{
     routes::auth::OptionalUser,
     state::AppState,
 };
+
+/// "Copy Link" button behavior for the share panel. Rendered via
+/// [`PreEscaped`] because maud HTML-escapes string content inside `script {}`
+/// blocks — without it, the `&&` below serializes as `&amp;&amp;`, which is a
+/// JavaScript syntax error that silently kills the whole handler (the button
+/// then does nothing). Keep any JS with `&`, `<`, `>` or `"` in a constant
+/// like this, not inline maud strings.
+const SHARE_COPY_JS: &str = r#"(function() {
+    var btn = document.getElementById('share-copy');
+    var input = document.getElementById('share-url');
+    function done() {
+        btn.textContent = 'Copied!';
+        setTimeout(function() { btn.textContent = 'Copy Link'; }, 1500);
+    }
+    function fallback() {
+        input.focus();
+        input.select();
+        try { document.execCommand('copy'); done(); } catch (e) {}
+    }
+    btn.addEventListener('click', function() {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(input.value).then(done, fallback);
+        } else {
+            fallback();
+        }
+    });
+})();"#;
 
 /// Optional viewer params forwarded to the board.battlesnake.com iframe so
 /// shared links can jump to a turn, autoplay, etc. Only params that were
@@ -308,28 +335,7 @@ pub async fn view_game(
                         }
                     }
 
-                    script {
-                        "(function() {"
-                            "var btn = document.getElementById('share-copy');"
-                            "var input = document.getElementById('share-url');"
-                            "function done() {"
-                                "btn.textContent = 'Copied!';"
-                                "setTimeout(function() { btn.textContent = 'Copy Link'; }, 1500);"
-                            "}"
-                            "function fallback() {"
-                                "input.focus();"
-                                "input.select();"
-                                "try { document.execCommand('copy'); done(); } catch (e) {}"
-                            "}"
-                            "btn.addEventListener('click', function() {"
-                                "if (navigator.clipboard && navigator.clipboard.writeText) {"
-                                    "navigator.clipboard.writeText(input.value).then(done, fallback);"
-                                "} else {"
-                                    "fallback();"
-                                "}"
-                            "});"
-                        "})();"
-                    }
+                    script { (PreEscaped(SHARE_COPY_JS)) }
 
                     @if user.is_some() {
                         div class="gmeta" {
