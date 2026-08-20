@@ -170,6 +170,33 @@ test.describe('Public Game Viewing', () => {
       await expect(page.getByRole('link', { name: 'Export GIF' })).toHaveCount(0);
     }
   });
+
+  test('Copy Link button copies the share URL (share script is not HTML-escaped)', async ({
+    page,
+    context,
+    baseURL,
+  }) => {
+    // Regression: maud HTML-escapes `&&` inside script{} blocks, so the share
+    // script used to serialize as `navigator.clipboard &amp;&amp; ...` — a JS
+    // SyntaxError that silently killed the click handler, so Copy Link did
+    // nothing on every game page. If the handler is attached, clicking flips
+    // the label to "Copied!".
+    await context.grantPermissions(['clipboard-read', 'clipboard-write'], {
+      origin: baseURL,
+    });
+
+    const gameId = await createGameViaDb();
+    await page.goto(`/games/${gameId}`);
+
+    const copyBtn = page.locator('#share-copy');
+    await expect(copyBtn).toHaveText('Copy Link');
+    await copyBtn.click();
+    await expect(copyBtn).toHaveText('Copied!');
+
+    // And the clipboard actually holds the share URL.
+    const clipboard = await page.evaluate(() => navigator.clipboard.readText());
+    expect(clipboard).toContain(`/games/${gameId}`);
+  });
 });
 
 test.describe('Homepage Leaderboard Link for Unauthenticated Users', () => {
