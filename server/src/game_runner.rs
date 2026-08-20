@@ -120,6 +120,19 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
     let mut customizations: HashMap<String, SnakeCustomizations> = HashMap::new();
     for bs in &battlesnakes {
         let snake_id = bs.game_battlesnake_id.to_string();
+        // The owner login always goes in, even when the snake's /info fetch
+        // fails below: the board scoreboard renders "by {Author}" from frame
+        // data, and empty visual fields fall back to defaults in
+        // game_to_frame.
+        customizations.insert(
+            snake_id.clone(),
+            SnakeCustomizations {
+                color: String::new(),
+                head: String::new(),
+                tail: String::new(),
+                author: bs.owner_login.clone(),
+            },
+        );
         if let Some(info) = info_results.get(&snake_id) {
             let color = customizations::normalize_color(
                 &info
@@ -160,7 +173,15 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
                 );
             }
 
-            customizations.insert(snake_id, SnakeCustomizations { color, head, tail });
+            customizations.insert(
+                snake_id,
+                SnakeCustomizations {
+                    color,
+                    head,
+                    tail,
+                    author: bs.owner_login.clone(),
+                },
+            );
         }
     }
 

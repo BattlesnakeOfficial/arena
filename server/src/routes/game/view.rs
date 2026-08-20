@@ -119,7 +119,12 @@ pub async fn view_game(
         .as_ref()
         .and_then(|s| s.cause_of_death.as_deref());
 
-    let iframe_src = board_iframe_src(&state.config.base_url, game_id, &board_params);
+    let iframe_src = board_iframe_src(
+        &state.config.base_url,
+        game_id,
+        &board_params,
+        board_theme(user.as_ref()),
+    );
     // A copied ?showSpoilers link keeps the reveal: sharing the spoiler
     // version is an explicit choice, so the share URL preserves it.
     let share_url = append_show_spoilers(
@@ -399,11 +404,30 @@ fn autoplay_is_truthy(value: &str) -> bool {
 
 /// Build the board.battlesnake.com iframe src, forwarding any provided
 /// viewer params onto the board.
-fn board_iframe_src(base_url: &str, game_id: Uuid, params: &BoardParams) -> String {
+fn board_iframe_src(base_url: &str, game_id: Uuid, params: &BoardParams, theme: &str) -> String {
     format!(
-        "https://board.battlesnake.com/?engine={base_url}/api&game={game_id}{}",
+        "https://board.battlesnake.com/?engine={base_url}/api&game={game_id}&theme={theme}{}",
         board_query_suffix(params)
     )
+}
+
+/// Theme param for the board iframe, mirroring the theater-axis resolution in
+/// `Page::initial_theme` / the theme bootstrap script. Without it the board
+/// defaults to `system`, so a light-OS visitor gets a light board inside
+/// arena's dark-default theater. Anonymous visitors get the theater default
+/// ("dark"); a signed-in "match"+"system" user gets "system" so the board
+/// resolves prefers-color-scheme exactly like the surrounding page.
+fn board_theme(user: Option<&crate::models::user::User>) -> &'static str {
+    let Some(u) = user else { return "dark" };
+    let axis = match u.theater_theme.as_str() {
+        "match" => u.site_theme.as_str(),
+        explicit => explicit,
+    };
+    match axis {
+        "light" => "light",
+        "dark" => "dark",
+        _ => "system",
+    }
 }
 
 /// Canonical shareable URL for this game page, including any viewer params
@@ -497,10 +521,11 @@ mod tests {
             "https://arena.example.com",
             game_id(),
             &BoardParams::default(),
+            "dark",
         );
         assert_eq!(
             src,
-            "https://board.battlesnake.com/?engine=https://arena.example.com/api&game=6f9422eb-cd95-4a17-b0a2-a3fefe4f47b1"
+            "https://board.battlesnake.com/?engine=https://arena.example.com/api&game=6f9422eb-cd95-4a17-b0a2-a3fefe4f47b1&theme=dark"
         );
     }
 
@@ -512,10 +537,10 @@ mod tests {
             fps: Some(10),
             title: Some("Grand Final #3".to_string()),
         };
-        let src = board_iframe_src("https://arena.example.com", game_id(), &params);
+        let src = board_iframe_src("https://arena.example.com", game_id(), &params, "dark");
         assert_eq!(
             src,
-            "https://board.battlesnake.com/?engine=https://arena.example.com/api&game=6f9422eb-cd95-4a17-b0a2-a3fefe4f47b1&turn=143&autoplay=true&fps=10&title=Grand%20Final%20%233"
+            "https://board.battlesnake.com/?engine=https://arena.example.com/api&game=6f9422eb-cd95-4a17-b0a2-a3fefe4f47b1&theme=dark&turn=143&autoplay=true&fps=10&title=Grand%20Final%20%233"
         );
     }
 
@@ -525,11 +550,68 @@ mod tests {
             turn: Some(7),
             ..Default::default()
         };
-        let src = board_iframe_src("https://arena.example.com", game_id(), &params);
+        let src = board_iframe_src("https://arena.example.com", game_id(), &params, "light");
+        assert!(src.contains("&theme=light"));
         assert!(src.ends_with("&turn=7"));
         assert!(!src.contains("autoplay"));
         assert!(!src.contains("fps"));
         assert!(!src.contains("title"));
+    }
+
+    fn user_with_themes(theater: &str, site: &str) -> crate::models::user::User {
+        crate::models::user::User {
+            user_id: game_id(),
+            external_github_id: 1,
+            github_login: "tester".to_string(),
+            github_avatar_url: None,
+            github_name: None,
+            github_email: None,
+            display_name: None,
+            pronouns: String::new(),
+            country: String::new(),
+            backstory: String::new(),
+            is_admin: false,
+            site_theme: site.to_string(),
+            theater_theme: theater.to_string(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn board_theme_defaults_dark_for_anonymous() {
+        // Matches the theater axis default in the theme bootstrap script.
+        assert_eq!(board_theme(None), "dark");
+    }
+
+    #[test]
+    fn board_theme_uses_explicit_theater_theme() {
+        assert_eq!(
+            board_theme(Some(&user_with_themes("light", "dark"))),
+            "light"
+        );
+        assert_eq!(
+            board_theme(Some(&user_with_themes("dark", "light"))),
+            "dark"
+        );
+    }
+
+    #[test]
+    fn board_theme_match_follows_site_axis() {
+        assert_eq!(
+            board_theme(Some(&user_with_themes("match", "light"))),
+            "light"
+        );
+        assert_eq!(
+            board_theme(Some(&user_with_themes("match", "dark"))),
+            "dark"
+        );
+        // "match" + "system": the board resolves prefers-color-scheme itself,
+        // exactly like the surrounding page.
+        assert_eq!(
+            board_theme(Some(&user_with_themes("match", "system"))),
+            "system"
+        );
     }
 
     #[test]

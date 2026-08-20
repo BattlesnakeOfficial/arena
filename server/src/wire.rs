@@ -419,6 +419,7 @@ mod tests {
                 color: "#ff8800".to_string(),
                 head: "beluga".to_string(),
                 tail: "bolt".to_string(),
+                author: "byte-owner".to_string(),
             },
         );
         let wire2 = Game::from_engine_game(&engine_game, "s1", &contexts, &customizations);
