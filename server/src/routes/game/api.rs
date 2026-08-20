@@ -16,9 +16,64 @@ use uuid::Uuid;
 use crate::{
     errors::ServerResult,
     models::game::{GameStatus, get_game_by_id},
+    models::game_battlesnake::get_battlesnakes_by_game_id,
     models::turn::{get_turn_frames_page, get_turns_by_game_id},
     state::AppState,
 };
+
+/// Snake-ID → owner-login map for filling in frame `Author` fields.
+///
+/// Frames persisted before authors were threaded through the game runner have
+/// `Author: ""`, which the board viewer's scoreboard renders as a dangling
+/// "by ". Frame snake IDs are `game_battlesnake_id` strings, so this joins
+/// back to the owner at serve time. Games without `game_battlesnakes` rows
+/// (archived imports) yield an empty map and enrichment is a no-op.
+async fn frame_author_map(
+    db: &sqlx::PgPool,
+    game_id: Uuid,
+) -> std::collections::HashMap<String, String> {
+    match get_battlesnakes_by_game_id(db, game_id).await {
+        Ok(snakes) => snakes
+            .into_iter()
+            .map(|bs| (bs.game_battlesnake_id.to_string(), bs.owner_login))
+            .collect(),
+        Err(e) => {
+            // Author enrichment is cosmetic; never fail a frames request over it.
+            tracing::warn!(error = ?e, %game_id, "Failed to load authors for frame enrichment");
+            std::collections::HashMap::new()
+        }
+    }
+}
+
+/// Fill in missing/empty `Author` fields on a persisted frame's `Snakes`.
+fn fill_frame_authors(
+    frame: &mut serde_json::Value,
+    authors: &std::collections::HashMap<String, String>,
+) {
+    if authors.is_empty() {
+        return;
+    }
+    let Some(snakes) = frame.get_mut("Snakes").and_then(|s| s.as_array_mut()) else {
+        return;
+    };
+    for snake in snakes {
+        let has_author = snake
+            .get("Author")
+            .and_then(|a| a.as_str())
+            .is_some_and(|a| !a.is_empty());
+        if has_author {
+            continue;
+        }
+        let Some(author) = snake
+            .get("ID")
+            .and_then(|id| id.as_str())
+            .and_then(|id| authors.get(id))
+        else {
+            continue;
+        };
+        snake["Author"] = serde_json::Value::String(author.clone());
+    }
+}
 
 /// Response format for the board viewer's game info endpoint
 /// Uses PascalCase to match the Battlesnake board viewer expectations
@@ -141,7 +196,12 @@ pub async fn get_game_frames(
         .await
         .wrap_err("Failed to fetch turn frames")?;
 
-    let frames: Vec<serde_json::Value> = turns.into_iter().filter_map(|t| t.frame_data).collect();
+    let authors = frame_author_map(&state.db, game_id).await;
+    let mut frames: Vec<serde_json::Value> =
+        turns.into_iter().filter_map(|t| t.frame_data).collect();
+    for frame in &mut frames {
+        fill_frame_authors(frame, &authors);
+    }
 
     Ok(Json(GameFramesResponse {
         count: frames.len(),
@@ -246,9 +306,14 @@ async fn handle_game_websocket(socket: WebSocket, state: AppState, game_id: Uuid
     // Track the last turn we sent
     let mut last_sent_turn = -1i32;
 
+    // Owner logins for filling in `Author` on frames persisted before the
+    // game runner threaded authors through (see fill_frame_authors).
+    let authors = frame_author_map(&state.db, game_id).await;
+
     // Send all existing frames
     for turn in existing_turns {
-        if let Some(frame_data) = turn.frame_data {
+        if let Some(mut frame_data) = turn.frame_data {
+            fill_frame_authors(&mut frame_data, &authors);
             let frame_msg = WebSocketMessage {
                 message_type: "frame".to_string(),
                 data: frame_data,
@@ -325,7 +390,8 @@ async fn handle_game_websocket(socket: WebSocket, state: AppState, game_id: Uuid
                                 if turn.turn_number <= last_sent_turn {
                                     continue;
                                 }
-                                if let Some(frame_data) = turn.frame_data {
+                                if let Some(mut frame_data) = turn.frame_data {
+                                    fill_frame_authors(&mut frame_data, &authors);
                                     let frame_msg = WebSocketMessage {
                                         message_type: "frame".to_string(),
                                         data: frame_data,
@@ -730,5 +796,47 @@ mod tests {
         assert_eq!(json["Game"]["Height"], 11);
 
         Ok(())
+    }
+
+    #[test]
+    fn fill_frame_authors_fills_empty_and_missing_only() {
+        let mut authors = std::collections::HashMap::new();
+        authors.insert("gb-1".to_string(), "corey".to_string());
+        authors.insert("gb-2".to_string(), "brandi".to_string());
+
+        let mut frame = serde_json::json!({
+            "Turn": 3,
+            "Snakes": [
+                {"ID": "gb-1", "Author": ""},          // legacy empty → filled
+                {"ID": "gb-2"},                          // missing → filled
+                {"ID": "gb-3", "Author": ""},          // unknown ID → untouched
+                {"ID": "gb-1", "Author": "already"},   // present → preserved
+            ]
+        });
+        fill_frame_authors(&mut frame, &authors);
+
+        assert_eq!(frame["Snakes"][0]["Author"], "corey");
+        assert_eq!(frame["Snakes"][1]["Author"], "brandi");
+        assert_eq!(frame["Snakes"][2]["Author"], "");
+        assert_eq!(frame["Snakes"][3]["Author"], "already");
+    }
+
+    #[test]
+    fn fill_frame_authors_tolerates_shapeless_frames() {
+        let mut authors = std::collections::HashMap::new();
+        authors.insert("gb-1".to_string(), "corey".to_string());
+
+        // No Snakes key, wrong type, empty map: all must be silent no-ops.
+        let mut no_snakes = serde_json::json!({"Turn": 0});
+        fill_frame_authors(&mut no_snakes, &authors);
+        assert_eq!(no_snakes, serde_json::json!({"Turn": 0}));
+
+        let mut wrong_type = serde_json::json!({"Snakes": "nope"});
+        fill_frame_authors(&mut wrong_type, &authors);
+        assert_eq!(wrong_type, serde_json::json!({"Snakes": "nope"}));
+
+        let mut frame = serde_json::json!({"Snakes": [{"ID": "gb-1"}]});
+        fill_frame_authors(&mut frame, &std::collections::HashMap::new());
+        assert_eq!(frame, serde_json::json!({"Snakes": [{"ID": "gb-1"}]}));
     }
 }

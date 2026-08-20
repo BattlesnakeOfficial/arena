@@ -80,6 +80,10 @@ pub struct SnakeCustomizations {
     pub color: String,
     pub head: String,
     pub tail: String,
+    /// The snake owner's login, shown as "by {author}" in the board viewer's
+    /// scoreboard. Not a visual customization, but it rides in this per-snake
+    /// display-metadata map so every frame consumer gets it for free.
+    pub author: String,
 }
 
 use crate::snake_client::MoveResult;
@@ -175,7 +179,10 @@ pub fn game_to_frame(
                     shout,
                     squad: "".to_string(),
                     api_version: "1".to_string(),
-                    author: "".to_string(),
+                    author: customizations
+                        .get(&s.id)
+                        .map(|c| c.author.clone())
+                        .unwrap_or_default(),
                     death,
                     eliminated_cause,
                     eliminated_by,
@@ -633,6 +640,7 @@ mod tests {
                 color: "#ff0000".to_string(),
                 head: "bendr".to_string(),
                 tail: "fat-rattle".to_string(),
+                author: "byte-owner".to_string(),
             },
         );
         let frame = game_to_frame(&game, &[], &[], &custom);
@@ -678,6 +686,7 @@ mod tests {
                 color: "".to_string(),
                 head: "".to_string(),
                 tail: "".to_string(),
+                author: "byte-owner".to_string(),
             },
         );
         let frame = game_to_frame(&game, &[], &[], &custom);
@@ -710,6 +719,7 @@ mod tests {
                 color: "#00ff00".to_string(),
                 head: "".to_string(),
                 tail: "curled".to_string(),
+                author: "byte-owner".to_string(),
             },
         );
         let frame = game_to_frame(&game, &[], &[], &custom);
@@ -738,6 +748,7 @@ mod tests {
                 color: "#ff0000".to_string(),
                 head: "bendr".to_string(),
                 tail: "fat-rattle".to_string(),
+                author: "byte-owner".to_string(),
             },
         );
         let frame = game_to_frame(&game, &[], &[], &custom);
