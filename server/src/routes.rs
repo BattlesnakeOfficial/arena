@@ -194,6 +194,10 @@ pub fn routes(app_state: AppState) -> axum::Router {
             axum::routing::post(game::create_game),
         )
         .route(
+            "/games/flow/{id}/configure",
+            axum::routing::post(game::configure_game),
+        )
+        .route(
             "/games/flow/{id}/add-snake/{snake_id}",
             axum::routing::post(game::add_battlesnake),
         )

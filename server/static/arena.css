@@ -444,6 +444,14 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
 }
 .field input[type="url"] { font-family: var(--mono); font-size: 13.5px; }
 .field input[type="number"] { font-family: var(--mono); }
+.field input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  min-height: 0;
+  padding: 0;
+  accent-color: var(--pink);
+  flex-shrink: 0;
+}
 .field textarea { min-height: 130px; resize: vertical; line-height: 1.55; }
 .field .help { font-size: 12.5px; color: var(--muted); margin-top: 6px; }
 .form-cta { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 4px; }
@@ -977,4 +985,135 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
   .mode { white-space: nowrap; }
   table.data th, table.data td { padding-left: 8px; padding-right: 8px; }
   .site-footer .inner { padding: 24px 20px; }
+}
+
+/* --- page: create game --------------------------------------------------- */
+
+.gc.grid { margin-top: 40px; }
+.gc .rail { position: sticky; top: 28px; }
+.gc-section h2 { margin-bottom: 2px; }
+.gc-sub { color: var(--muted); font-size: 14.5px; }
+
+/* selectable snake rows (own snakes + search results) */
+.gc-rows { margin-top: 16px; }
+.gc-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  border: 1px solid var(--hairline);
+  background: var(--card);
+  border-radius: 14px;
+  padding: 13px 16px;
+  margin-top: 10px;
+  transition: border-color .15s;
+}
+.gc-row:hover { border-color: var(--hairline-dark); }
+.gc-row.sel { border-color: var(--pink); }
+.gc-row .gc-who { min-width: 0; flex: 1; }
+.gc-row .gc-name { display: flex; align-items: center; gap: 10px; font-weight: 600; letter-spacing: -.01em; flex-wrap: wrap; }
+.gc-row .gc-url {
+  display: block;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.gc-actions { display: flex; gap: 8px; align-items: center; flex-shrink: 0; }
+.gc-actions form { display: inline; margin: 0; }
+.gc-empty { margin-top: 16px; }
+.gc-empty .btn { display: inline-block; margin-top: 14px; }
+.gc-empty p:first-child { font-weight: 600; }
+
+/* public snake search */
+.gc-search { display: flex; gap: 8px; margin-top: 16px; max-width: 480px; }
+.gc-search input {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--body);
+  font-size: 15px;
+  color: var(--ink);
+  background: var(--card);
+  border: 1px solid var(--hairline-dark);
+  border-radius: 12px;
+  padding: 10px 14px;
+}
+.gc-search input:hover { border-color: var(--muted); }
+.gc-search input:focus-visible { outline: none; border-color: var(--pink); box-shadow: 0 0 0 3px var(--pink-wash); }
+.gc-results-head { margin-top: 26px; }
+.gc-none { color: var(--muted); font-size: 14.5px; margin-top: 18px; }
+
+/* lineup rail */
+.gc-slots { margin-top: 14px; }
+.gc-slot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--hairline);
+  background: var(--card);
+  border-radius: 12px;
+  padding: 9px 12px;
+  margin-top: 8px;
+  min-height: 46px;
+}
+.gc-slot-name { font-weight: 600; font-size: 14.5px; letter-spacing: -.01em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gc-slot form { display: inline; margin-left: auto; }
+.gc-slot .badge { flex-shrink: 0; }
+.gc-slot.empty {
+  border-style: dashed;
+  border-color: var(--hairline-dark);
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  text-transform: uppercase;
+  letter-spacing: .12em;
+  justify-content: center;
+}
+.gc-x {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  cursor: pointer;
+}
+.gc-x:hover { background: var(--pink-wash); color: var(--pink-deep); }
+.gc-hint { font-size: 13.5px; color: var(--muted); margin-top: 12px; }
+.gc-reset { margin-top: 10px; }
+
+/* settings + CTA */
+.gc-settings { max-width: none; gap: 16px; margin-top: 16px; }
+.gc-settings > .btn { align-self: stretch; text-align: center; margin-top: 8px; padding: 11px 24px; }
+
+@media (max-width: 980px) {
+  .gc.grid { grid-template-columns: 1fr; gap: 8px; }
+  .gc .rail { position: static; }
+}
+@media (max-width: 640px) {
+  .gc-row { flex-wrap: wrap; padding: 14px 16px; }
+  .gc-row .gc-who { flex-basis: calc(100% - 40px); }
+  .gc-actions { width: 100%; }
+  .gc-actions form { flex: 1; }
+  .gc-actions .btn { width: 100%; padding: 10px 14px; }
+  .gc-search { max-width: none; }
+}
+.gc-solo-warn { color: var(--pink-deep); }
+
+/* game view: queued-game placeholder (board viewer has no frames to show yet) */
+.board-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: #9C8F99;
+  font-family: var(--mono);
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: .12em;
 }

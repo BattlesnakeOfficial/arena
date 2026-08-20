@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 use crate::{
     components::page_factory::PageFactory,
+    customizations::chip_color,
     errors::{ServerResult, WithStatus},
     models::battlesnake::{self, Visibility},
     models::flow::GameCreationFlow,
@@ -143,154 +144,183 @@ pub async fn show_game_flow(
         .await
         .wrap_err("Failed to get selected battlesnakes")?;
 
+    let selected_count = flow.selected_count();
+
     // Render the game creation form
     Ok(page_factory.create_page_with_flash(
         "Create New Game".to_string(),
         Box::new(html! {
-            div class="container" {
+            div class="crumb" { a href="/me" { "My Profile" } " / new game" }
+            div class="page-head" {
                 h1 { "Create New Game" }
+                div class="sub" { "Pick up to four battlesnakes, choose the board and rules, then send them in." }
+            }
 
-                @if let Some(message) = flash.message() {
-                    div class=(flash.class()) {
-                        p { (message) }
-                    }
-                }
+            div class="grid gc" {
+                div {
+                    div class="section gc-section" {
+                        h2 { "Your Battlesnakes" }
 
-                form action={"/games/flow/"(flow_id)"/create"} method="post" class="mb-4" {
-                    div class="form-group mb-3" {
-                        label for="board_size" { "Board Size" }
-                        select id="board_size" name="board_size" class="form-control" required {
-                            option value="7x7" selected[flow.board_size == GameBoardSize::Small] { "Small (7x7)" }
-                            option value="11x11" selected[flow.board_size == GameBoardSize::Medium] { "Medium (11x11)" }
-                            option value="19x19" selected[flow.board_size == GameBoardSize::Large] { "Large (19x19)" }
-                        }
-                    }
-
-                    div class="form-group mb-3" {
-                        label for="game_type" { "Game Type" }
-                        select id="game_type" name="game_type" class="form-control" required {
-                            option value="Standard" selected[flow.game_type == GameType::Standard] { "Standard" }
-                            option value="Royale" selected[flow.game_type == GameType::Royale] { "Royale" }
-                            option value="Constrictor" selected[flow.game_type == GameType::Constrictor] { "Constrictor" }
-                            option value="Snail Mode" selected[flow.game_type == GameType::SnailMode] { "Snail Mode" }
-                            option value="Solo" selected[flow.game_type == GameType::Solo] { "Solo" }
-                        }
-                    }
-
-                    // Display current selection count if any
-                    @if flow.selected_count() > 0 {
-                        div class="alert alert-info mb-3" {
-                            p { "You have selected " (flow.selected_count()) " of 4 possible battlesnakes." }
-
-                            // Display the selected battlesnakes with their counts
-                            @if !selected_battlesnakes.is_empty() {
-                                div class="mt-2" {
-                                    p class="mb-1 fw-bold" { "Selected Battlesnakes:" }
-                                    ul class="list-group" {
-                                        @for snake in &selected_battlesnakes {
-                                            @let count = flow.battlesnake_count(&snake.battlesnake_id);
-                                            li class="list-group-item d-flex justify-content-between align-items-center" {
-                                                span {
-                                                    (snake.name)
-                                                    @if count > 1 {
-                                                        " "
-                                                        span class="badge bg-secondary" { "×" (count) }
-                                                    }
-                                                }
-                                                form action={"/games/flow/"(flow_id)"/remove-snake/"(snake.battlesnake_id)} method="post" class="d-inline" {
-                                                    button type="submit" class="btn btn-sm btn-danger" { "Remove" }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
+                        @if user_battlesnakes.is_empty() {
+                            div class="gc-empty" {
+                                p { "You don't have any battlesnakes yet." }
+                                p class="gc-sub" { "Point the Arena at your snake server first — then it can play." }
+                                a href="/battlesnakes/new" class="btn solid" { "Create a Battlesnake" }
                             }
-
-                            div class="mt-3" {
-                                button type="submit" class="btn btn-success me-2" { "Create Game" }
-
-                                form action={"/games/flow/"(flow_id)"/reset"} method="post" class="d-inline" {
-                                    button type="submit" class="btn btn-secondary" { "Reset Selection" }
+                        } @else {
+                            div class="gc-rows" {
+                                @for snake in &user_battlesnakes {
+                                    (snake_row(&flow, snake))
                                 }
                             }
                         }
-                    } @else {
-                        div class="alert alert-warning mb-3" {
-                            p { "Please select at least one battlesnake to create a game." }
+                    }
+
+                    div class="section gc-section" {
+                        h2 { "Public Battlesnakes" }
+                        p class="gc-sub" { "Search the community's public snakes to fill out the board." }
+
+                        form action={"/games/flow/"(flow_id)"/search"} method="get" class="gc-search" {
+                            input type="search" name="q" placeholder="Search by name..." aria-label="Search public battlesnakes" value=(flow.search_query.as_deref().unwrap_or(""));
+                            button type="submit" class="btn" { "Search" }
                         }
-                    }
-                }
 
-                h2 class="mt-4" { "Your Battlesnakes" }
-
-                @if user_battlesnakes.is_empty() {
-                    div class="alert alert-warning" {
-                        p { "You don't have any battlesnakes yet." }
-                        a href="/battlesnakes/new" class="btn btn-primary" { "Create a Battlesnake" }
-                    }
-                } @else {
-                    div class="row row-cols-1 row-cols-md-3 g-4 mb-4" {
-                        @for snake in &user_battlesnakes {
-                            @let count = flow.battlesnake_count(&snake.battlesnake_id);
-                            @let can_add = flow.selected_count() < 4;
-                            div class="col" {
-                                div class=(format!("card h-100 {}", if count > 0 { "border-primary" } else { "" })) {
-                                    div class="card-body" {
-                                        h5 class="card-title" {
-                                            (snake.name)
-                                            @if count > 0 {
-                                                " "
-                                                span class="badge bg-primary" { "×" (count) }
-                                            }
-                                        }
-                                    }
-                                    div class="card-footer d-flex gap-2" {
-                                        // Always show Add button if under 4 total snakes
-                                        @if can_add {
-                                            form action={"/games/flow/"(flow_id)"/add-snake/"(snake.battlesnake_id)} method="post" class="flex-grow-1" {
-                                                button type="submit" class="btn btn-primary w-100" { "Add to Game" }
-                                            }
-                                        }
-                                        // Show Remove button if this snake is selected
-                                        @if count > 0 {
-                                            form action={"/games/flow/"(flow_id)"/remove-snake/"(snake.battlesnake_id)} method="post" class="flex-grow-1" {
-                                                button type="submit" class="btn btn-danger w-100" { "Remove" }
-                                            }
-                                        }
-                                        // If can't add and not selected, show disabled state
-                                        @if !can_add && count == 0 {
-                                            button type="button" class="btn btn-secondary w-100" disabled { "Max reached" }
-                                        }
-                                    }
-                                }
+                        // If we have search results from other users, show them
+                        @if let Some(query) = &flow.search_query {
+                            @if !query.is_empty() {
+                                (render_search_results(&flow, &state.db).await)
                             }
                         }
                     }
                 }
 
-                h2 class="mt-4" { "Search for Public Battlesnakes" }
+                aside class="rail" {
+                    div class="block" {
+                        h3 { "Lineup" }
+                        div class="gc-slots" {
+                            @for snake in &selected_battlesnakes {
+                                @let count = flow.battlesnake_count(&snake.battlesnake_id);
+                                div class="gc-slot" {
+                                    span class="chip" style={"background:" (chip_color(&snake.color))} {}
+                                    span class="gc-slot-name" { (snake.name) }
+                                    @if count > 1 {
+                                        span class="badge" { "×" (count) }
+                                    }
+                                    form action={"/games/flow/"(flow_id)"/remove-snake/"(snake.battlesnake_id)} method="post" {
+                                        button type="submit" class="gc-x" aria-label={"Remove " (snake.name) " from lineup"} title="Remove from lineup" { "✕" }
+                                    }
+                                }
+                            }
+                            @for _ in selected_count..4 {
+                                div class="gc-slot empty" { "Open slot" }
+                            }
+                        }
+                        @if selected_count > 0 {
+                            p class="gc-hint" { "You have selected " (selected_count) " of 4 possible battlesnakes." }
+                            @if selected_count == 1 && flow.game_type != GameType::Solo {
+                                p class="gc-hint gc-solo-warn" {
+                                    "A lone snake wins the moment the game starts — add an "
+                                    "opponent below, or switch the game type to Solo for a "
+                                    "survival run."
+                                }
+                            }
+                            form action={"/games/flow/"(flow_id)"/reset"} method="post" class="gc-reset" {
+                                button type="submit" class="btn sm" { "Reset Selection" }
+                            }
+                        } @else {
+                            p class="gc-hint" { "Please select at least one battlesnake to create a game." }
+                        }
+                    }
 
-                form action={"/games/flow/"(flow_id)"/search"} method="get" class="mb-3" {
-                    div class="input-group" {
-                        input type="text" name="q" class="form-control" placeholder="Search by name..." value=(flow.search_query.as_deref().unwrap_or("")) {}
-                        button type="submit" class="btn btn-outline-secondary" { "Search" }
+                    div class="block" {
+                        h3 { "Game Settings" }
+                        form id="game-settings" action={"/games/flow/"(flow_id)"/create"} method="post"
+                            class="form-stack gc-settings" data-configure-url={"/games/flow/"(flow_id)"/configure"} {
+                            div class="field" {
+                                label for="board_size" { "Board Size" }
+                                select id="board_size" name="board_size" required {
+                                    option value="7x7" selected[flow.board_size == GameBoardSize::Small] { "Small (7x7)" }
+                                    option value="11x11" selected[flow.board_size == GameBoardSize::Medium] { "Medium (11x11)" }
+                                    option value="19x19" selected[flow.board_size == GameBoardSize::Large] { "Large (19x19)" }
+                                }
+                            }
+                            div class="field" {
+                                label for="game_type" { "Game Type" }
+                                select id="game_type" name="game_type" required {
+                                    option value="Standard" selected[flow.game_type == GameType::Standard] { "Standard" }
+                                    option value="Royale" selected[flow.game_type == GameType::Royale] { "Royale" }
+                                    option value="Constrictor" selected[flow.game_type == GameType::Constrictor] { "Constrictor" }
+                                    option value="Snail Mode" selected[flow.game_type == GameType::SnailMode] { "Snail Mode" }
+                                    option value="Solo" selected[flow.game_type == GameType::Solo] { "Solo" }
+                                }
+                            }
+                            @if selected_count > 0 {
+                                button type="submit" class="btn solid" { "Create Game" }
+                            }
+                        }
                     }
                 }
+            }
 
-                // If we have search results from other users, show them
-                @if let Some(query) = &flow.search_query {
-                    @if !query.is_empty() {
-                        (render_search_results(&flow, &state.db).await)
-                    }
-                }
-
-                div class="mt-4" {
-                    a href="/me" class="btn btn-secondary" { "Back to Profile" }
-                }
+            // Persist settings changes immediately so they survive the
+            // add/remove/search page reloads (no-JS fallback: the create
+            // form still posts both fields).
+            script {
+                (maud::PreEscaped(r#"
+                (function () {
+                  var form = document.getElementById('game-settings');
+                  if (!form) return;
+                  form.querySelectorAll('select').forEach(function (el) {
+                    el.addEventListener('change', function () {
+                      fetch(form.dataset.configureUrl, {
+                        method: 'POST',
+                        body: new URLSearchParams(new FormData(form)),
+                        keepalive: true,
+                      });
+                    });
+                  });
+                })();
+                "#))
             }
         }),
         flash,
     ))
+}
+
+/// One selectable snake row — shared by "Your Battlesnakes" and search
+/// results. The `card` class is load-bearing: e2e specs locate rows by it.
+fn snake_row(flow: &GameCreationFlow, snake: &battlesnake::Battlesnake) -> maud::Markup {
+    let count = flow.battlesnake_count(&snake.battlesnake_id);
+    let can_add = flow.selected_count() < 4;
+    html! {
+        div class={"card gc-row" @if count > 0 { " sel" }} {
+            span class="chip" style={"background:" (chip_color(&snake.color))} {}
+            div class="gc-who" {
+                span class="gc-name" {
+                    (snake.name)
+                    @if count > 0 {
+                        span class="badge live" { "In lineup" @if count > 1 { " ×" (count) } }
+                    }
+                }
+                span class="gc-url" { (snake.url) }
+            }
+            div class="gc-actions" {
+                @if can_add {
+                    form action={"/games/flow/"(flow.flow_id)"/add-snake/"(snake.battlesnake_id)} method="post" {
+                        button type="submit" class="btn sm" { "Add to Game" }
+                    }
+                }
+                @if count > 0 {
+                    form action={"/games/flow/"(flow.flow_id)"/remove-snake/"(snake.battlesnake_id)} method="post" {
+                        button type="submit" class="btn sm danger" { "Remove" }
+                    }
+                }
+                @if !can_add && count == 0 {
+                    button type="button" class="btn sm" disabled { "Max reached" }
+                }
+            }
+        }
+    }
 }
 
 // Configure the game (board size and game type)
@@ -299,6 +329,37 @@ pub struct ConfigureGameForm {
     // Optional parameters since they might not be provided in the form
     pub board_size: String,
     pub game_type: String,
+}
+
+// Persist settings changes without creating the game. Called by the
+// settings form's change listener so board size / game type survive the
+// full-page reloads that add/remove/search cause.
+#[debug_handler]
+pub async fn configure_game(
+    State(state): State<AppState>,
+    CurrentUser(user): CurrentUser,
+    Path(flow_id): Path<Uuid>,
+    Form(data): Form<ConfigureGameForm>,
+) -> ServerResult<impl IntoResponse, StatusCode> {
+    let mut flow = GameCreationFlow::get_by_id(&state.db, flow_id, user.user_id)
+        .await
+        .wrap_err("Failed to get game flow")?
+        .ok_or_else(|| "Game flow not found".to_string())
+        .with_status(StatusCode::NOT_FOUND)?;
+
+    if let Ok(board_size) = GameBoardSize::from_str(&data.board_size) {
+        flow.board_size = board_size;
+    }
+
+    if let Ok(game_type) = GameType::from_str(&data.game_type) {
+        flow.game_type = game_type;
+    }
+
+    flow.update(&state.db)
+        .await
+        .wrap_err("Failed to update game flow")?;
+
+    Ok(Redirect::to(&format!("/games/flow/{}", flow_id)).into_response())
 }
 
 // Reset the snake selections in the flow
@@ -555,49 +616,14 @@ async fn render_search_results(flow: &GameCreationFlow, db: &sqlx::PgPool) -> ma
         .await
         .unwrap_or_default();
 
-    let can_add = flow.selected_count() < 4;
-
     html! {
         @if search_results.is_empty() {
-            div class="alert alert-info" {
-                "No public battlesnakes found matching your search."
-            }
+            p class="gc-none" { "No public battlesnakes found matching your search." }
         } @else {
-            h3 { "Search Results" }
-            div class="row row-cols-1 row-cols-md-3 g-4" {
+            h3 class="gc-results-head" { "Search Results" }
+            div class="gc-rows" {
                 @for snake in &search_results {
-                    @let count = flow.battlesnake_count(&snake.battlesnake_id);
-                    div class="col" {
-                        div class=(format!("card h-100 {}", if count > 0 { "border-primary" } else { "" })) {
-                            div class="card-body" {
-                                h5 class="card-title" {
-                                    (snake.name)
-                                    @if count > 0 {
-                                        " "
-                                        span class="badge bg-primary" { "×" (count) }
-                                    }
-                                }
-                            }
-                            div class="card-footer d-flex gap-2" {
-                                // Always show Add button if under 4 total snakes
-                                @if can_add {
-                                    form action={"/games/flow/"(flow.flow_id)"/add-snake/"(snake.battlesnake_id)} method="post" class="flex-grow-1" {
-                                        button type="submit" class="btn btn-primary w-100" { "Add to Game" }
-                                    }
-                                }
-                                // Show Remove button if this snake is selected
-                                @if count > 0 {
-                                    form action={"/games/flow/"(flow.flow_id)"/remove-snake/"(snake.battlesnake_id)} method="post" class="flex-grow-1" {
-                                        button type="submit" class="btn btn-danger w-100" { "Remove" }
-                                    }
-                                }
-                                // If can't add and not selected, show disabled state
-                                @if !can_add && count == 0 {
-                                    button type="button" class="btn btn-secondary w-100" disabled { "Max reached" }
-                                }
-                            }
-                        }
-                    }
+                    (snake_row(flow, snake))
                 }
             }
         }
