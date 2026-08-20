@@ -23,6 +23,7 @@ use crate::{
         tag, user,
     },
     routes::auth::{CurrentUser, OptionalUser},
+    routes::{UuidPath, UuidPath2},
     scoring::EntryScore,
     state::AppState,
 };
@@ -98,7 +99,7 @@ pub async fn list_leaderboards(
 pub async fn show_leaderboard(
     State(state): State<AppState>,
     OptionalUser(user): OptionalUser,
-    Path(leaderboard_id): Path<Uuid>,
+    UuidPath(leaderboard_id): UuidPath,
     Query(pagination): Query<PaginationParams>,
     page_factory: PageFactory,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
@@ -559,7 +560,7 @@ pub async fn show_leaderboard(
 pub async fn show_leaderboard_entry(
     State(state): State<AppState>,
     OptionalUser(_user): OptionalUser,
-    Path((leaderboard_id, entry_id)): Path<(Uuid, Uuid)>,
+    UuidPath2(leaderboard_id, entry_id): UuidPath2,
     Query(pagination): Query<PaginationParams>,
     page_factory: PageFactory,
 ) -> ServerResult<impl IntoResponse, StatusCode> {

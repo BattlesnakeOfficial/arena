@@ -291,6 +291,13 @@ pub fn routes(app_state: AppState) -> axum::Router {
 }
 
 async fn not_found_page(page_factory: PageFactory) -> impl IntoResponse {
+    render_not_found(page_factory)
+}
+
+/// Render the branded 404 page. Shared by the router fallback (unknown paths)
+/// and the [`UuidPath`] extractor (malformed `{id}` segments) so a bad URL
+/// always lands on the same friendly page instead of a raw framework error.
+pub fn render_not_found(page_factory: PageFactory) -> axum::response::Response {
     (
         StatusCode::NOT_FOUND,
         page_factory.create_page(
@@ -312,6 +319,58 @@ async fn not_found_page(page_factory: PageFactory) -> impl IntoResponse {
             }),
         ),
     )
+        .into_response()
+}
+
+/// Path extractor for a single `{id}` UUID segment on user-facing HTML pages.
+///
+/// Behaves like [`axum::extract::Path<Uuid>`] on success, but when the segment
+/// isn't a valid UUID it renders the branded 404 page instead of axum's raw
+/// `Invalid URL: Cannot parse ...` plaintext (which a player sees whenever a
+/// shared link is truncated or a URL is fat-fingered). Use this on GET routes
+/// that render a page; the JSON `/api` routes keep `Path<Uuid>` since a
+/// plaintext 400 is the right answer for API clients.
+pub struct UuidPath(pub uuid::Uuid);
+
+impl axum::extract::FromRequestParts<AppState> for UuidPath {
+    type Rejection = axum::response::Response;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        match axum::extract::Path::<uuid::Uuid>::from_request_parts(parts, state).await {
+            Ok(axum::extract::Path(id)) => Ok(UuidPath(id)),
+            Err(_) => {
+                let page_factory = PageFactory::from_request_parts(parts, state).await?;
+                Err(render_not_found(page_factory))
+            }
+        }
+    }
+}
+
+/// Two-segment variant of [`UuidPath`] for routes like
+/// `/leaderboards/{id}/entries/{battlesnake_id}`. Renders the branded 404 when
+/// either segment isn't a valid UUID.
+pub struct UuidPath2(pub uuid::Uuid, pub uuid::Uuid);
+
+impl axum::extract::FromRequestParts<AppState> for UuidPath2 {
+    type Rejection = axum::response::Response;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        match axum::extract::Path::<(uuid::Uuid, uuid::Uuid)>::from_request_parts(parts, state)
+            .await
+        {
+            Ok(axum::extract::Path((a, b))) => Ok(UuidPath2(a, b)),
+            Err(_) => {
+                let page_factory = PageFactory::from_request_parts(parts, state).await?;
+                Err(render_not_found(page_factory))
+            }
+        }
+    }
 }
 
 /// Crawlers are welcome on the public pages; keep them out of auth flows,
