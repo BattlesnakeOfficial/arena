@@ -49,6 +49,22 @@ const SHARE_COPY_JS: &str = r#"(function() {
     });
 })();"#;
 
+/// Syncs the board iframe's `theme` param with the theme the pre-paint
+/// bootstrap actually resolved (`data-app-theme` on <html>). The server can
+/// only see signed-in preferences; an anonymous visitor who toggled the
+/// theater to light lives in localStorage, which only the bootstrap sees.
+/// Runs synchronously right after the iframe tag, so a rewrite lands before
+/// the board app boots; when server and client agree (the common case) the
+/// src is untouched and no reload happens. PreEscaped: contains `&&`.
+const BOARD_THEME_SYNC_JS: &str = r#"(function() {
+    var frame = document.getElementById('board-viewer');
+    var theme = document.documentElement.getAttribute('data-app-theme');
+    if (!frame || !theme) return;
+    if (frame.src.indexOf('theme=' + theme) === -1) {
+        frame.src = frame.src.replace(/theme=[a-z]+/, 'theme=' + theme);
+    }
+})();"#;
+
 /// Optional viewer params forwarded to the board.battlesnake.com iframe so
 /// shared links can jump to a turn, autoplay, etc. Only params that were
 /// actually provided are passed through.
@@ -229,6 +245,7 @@ pub async fn view_game(
                                     title="Battlesnake Board Viewer"
                                     allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
                                     allowfullscreen {}
+                                script { (PreEscaped(BOARD_THEME_SYNC_JS)) }
                             }
                         }
                     }
