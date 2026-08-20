@@ -700,10 +700,12 @@ pub async fn show_leaderboard_entry(
         // Tick precision follows the visible span: a ladder that only moved
         // half a point would otherwise render every gridline as the same
         // integer (five ticks all reading "49").
+        // Integer ticks need span >= grid_count so adjacent gridlines can't
+        // round to the same value (step = span/4 must be >= 1.0).
         let span = y_max - y_min;
         let tick_decimals: usize = if span < 0.5 {
             2
-        } else if span < 3.0 {
+        } else if span < 4.0 {
             1
         } else {
             0
