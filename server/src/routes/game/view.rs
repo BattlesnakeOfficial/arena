@@ -538,6 +538,7 @@ fn game_page_title<'a>(names: impl IntoIterator<Item = &'a str>) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
 
     #[test]
     fn game_page_title_joins_snake_names() {
@@ -550,7 +551,6 @@ mod tests {
     fn game_page_title_falls_back_without_snakes() {
         assert_eq!(game_page_title(std::iter::empty()), "Game");
     }
-    use super::*;
 
     fn game_id() -> Uuid {
         Uuid::parse_str("6f9422eb-cd95-4a17-b0a2-a3fefe4f47b1").unwrap()
