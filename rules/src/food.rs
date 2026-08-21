@@ -17,17 +17,16 @@ use crate::types::*;
 /// RNG returns 0).
 pub fn maybe_spawn_food(rng: &mut impl Rng, board: &mut BoardState, settings: &StandardSettings) {
     let current_food = board.food.len() as i32;
-    let food_needed;
 
-    if current_food < settings.minimum_food {
-        food_needed = settings.minimum_food - current_food;
+    let food_needed = if current_food < settings.minimum_food {
+        settings.minimum_food - current_food
     } else if settings.food_spawn_chance > 0
         && (100 - rng.gen_range(0..100)) < settings.food_spawn_chance
     {
-        food_needed = 1;
+        1
     } else {
         return;
-    }
+    };
 
     let mut unoccupied = get_unoccupied_points(board, false, false);
     unoccupied.shuffle(rng);
