@@ -78,7 +78,7 @@ pub async fn create_snake(
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     // Validate URL
     if let Err(e) = battlesnake::validate_url(&request.url) {
-        return Err((StatusCode::BAD_REQUEST, e));
+        return Err((StatusCode::BAD_REQUEST, e.to_string()));
     }
     let name =
         battlesnake::validate_name(&request.name).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
@@ -167,9 +167,9 @@ pub async fn update_snake(
     // Build update with existing values as defaults
     let new_url = request.url.unwrap_or(existing.url);
 
-    // Validate URL if it changed
+    // Validate the effective URL (new or existing)
     if let Err(e) = battlesnake::validate_url(&new_url) {
-        return Err((StatusCode::BAD_REQUEST, e));
+        return Err((StatusCode::BAD_REQUEST, e.to_string()));
     }
 
     let name = match request.name {

@@ -55,11 +55,11 @@ pub struct Battlesnake {
 
 /// Validate that a snake URL parses and uses http or https. Shared by the
 /// web form (after hostname normalization) and the JSON API.
-pub fn validate_url(url: &str) -> Result<(), String> {
+pub fn validate_url(url: &str) -> Result<(), &'static str> {
     match url::Url::parse(url) {
         Ok(parsed) if parsed.scheme() == "http" || parsed.scheme() == "https" => Ok(()),
-        Ok(_) => Err("URL must use HTTP or HTTPS scheme".to_string()),
-        Err(_) => Err("Invalid URL format".to_string()),
+        Ok(_) => Err("URL must use HTTP or HTTPS scheme"),
+        Err(_) => Err("Invalid URL format"),
     }
 }
 
@@ -477,6 +477,7 @@ pub async fn update_battlesnake_customizations(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
 
     #[test]
     fn validate_url_accepts_http_and_https() {
@@ -519,7 +520,6 @@ mod tests {
         // Multi-byte characters count as one character each.
         assert!(validate_name(&"é".repeat(MAX_NAME_LEN)).is_ok());
     }
-    use super::*;
 
     async fn create_user(pool: &PgPool, github_id: i64, login: &str) -> cja::Result<Uuid> {
         let row = sqlx::query!(

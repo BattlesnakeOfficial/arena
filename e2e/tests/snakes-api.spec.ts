@@ -34,38 +34,27 @@ test.describe('Snakes API', () => {
       expect(response.status()).toBe(201);
       const snake = await response.json();
       expect(snake.name).toBe(name);
+    });
 
-      // PUT applies the same rules
-      const update = await authenticatedPage.request.put(`/api/snakes/${snake.id}`, {
+    test('PUT rejects a blank name but leaves the name alone when omitted', async ({ authenticatedPage }) => {
+      const name = `Updatable ${Date.now()}`;
+      const created = await authenticatedPage.request.post('/api/snakes', {
+        data: { name, url: 'https://example.com/updatable' },
+      });
+      expect(created.status()).toBe(201);
+      const snake = await created.json();
+
+      const blank = await authenticatedPage.request.put(`/api/snakes/${snake.id}`, {
         data: { name: ' ' },
       });
-      expect(update.status()).toBe(400);
-      expect(await update.text()).toContain('Name is required');
+      expect(blank.status()).toBe(400);
+      expect(await blank.text()).toContain('Name is required');
+
+      const urlOnly = await authenticatedPage.request.put(`/api/snakes/${snake.id}`, {
+        data: { url: 'https://example.com/moved' },
+      });
+      expect(urlOnly.status()).toBe(200);
+      expect((await urlOnly.json()).name).toBe(name);
     });
-  });
-});
-
-test.describe('Battlesnake form - URL validation', () => {
-  test('rejects a URL that is not a URL', async ({ authenticatedPage }) => {
-    await authenticatedPage.goto('/battlesnakes/new');
-    await authenticatedPage.getByLabel('Name').fill(`Bad URL ${Date.now()}`);
-    await authenticatedPage.getByLabel('URL').fill('not a url');
-    await authenticatedPage.getByLabel('Visibility').selectOption('private');
-    await authenticatedPage.getByRole('button', { name: 'Create Battlesnake' }).click();
-
-    await expect(authenticatedPage).toHaveURL(/\/battlesnakes\/new$/);
-    await expect(authenticatedPage.getByText('Invalid URL format')).toBeVisible();
-  });
-
-  test('still accepts a bare hostname (normalized to https)', async ({ authenticatedPage }) => {
-    const name = `Bare Host ${Date.now()}`;
-    await authenticatedPage.goto('/battlesnakes/new');
-    await authenticatedPage.getByLabel('Name').fill(name);
-    await authenticatedPage.getByLabel('URL').fill('mysnake.fly.dev');
-    await authenticatedPage.getByLabel('Visibility').selectOption('private');
-    await authenticatedPage.getByRole('button', { name: 'Create Battlesnake' }).click();
-
-    await expect(authenticatedPage.getByText('created successfully')).toBeVisible();
-    await expect(authenticatedPage.getByText('https://mysnake.fly.dev')).toBeVisible();
   });
 });

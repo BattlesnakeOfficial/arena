@@ -3,7 +3,7 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Redirect},
 };
-use color_eyre::eyre::Context as _;
+use color_eyre::eyre::{Context as _, eyre};
 use maud::{Markup, html};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -60,7 +60,7 @@ fn parse_battlesnake_form(bytes: &[u8]) -> Result<BattlesnakeFormData, String> {
     }
 
     Ok(BattlesnakeFormData {
-        name: battlesnake::validate_name(name.as_deref().unwrap_or_default())?,
+        name: name.ok_or_else(|| "Name is required".to_string())?,
         url: url
             .filter(|u| !u.is_empty())
             .ok_or_else(|| "URL is required".to_string())?,
@@ -370,7 +370,7 @@ pub async fn new_battlesnake(
             form class="form-stack" action="/battlesnakes" method="post" {
                 div class="field" {
                     label for="name" { "Name" }
-                    input type="text" id="name" name="name" required;
+                    input type="text" id="name" name="name" required maxlength=(battlesnake::MAX_NAME_LEN);
                 }
 
                 div class="field" {
@@ -428,6 +428,21 @@ fn normalize_snake_url(url: &str) -> String {
     }
 }
 
+/// Set an error flash and bounce back to `to` — the web form's channel for
+/// every validation failure (name, URL, tag cap), so the user never lands on
+/// a bare error page.
+async fn flash_and_redirect(
+    pool: &PgPool,
+    session_id: Uuid,
+    message: String,
+    to: &str,
+) -> cja::Result<axum::response::Response> {
+    session::set_flash_message(pool, session_id, message, session::FLASH_TYPE_ERROR)
+        .await
+        .wrap_err("Failed to set flash message")?;
+    Ok(Redirect::to(to).into_response())
+}
+
 pub async fn create_battlesnake(
     State(state): State<AppState>,
     CurrentUserWithSession { user, session }: CurrentUserWithSession,
@@ -442,39 +457,39 @@ pub async fn create_battlesnake(
 
     let form = parse_battlesnake_form(&form_bytes).with_status(StatusCode::BAD_REQUEST)?;
 
+    let name = match battlesnake::validate_name(&form.name) {
+        Ok(name) => name,
+        Err(msg) => {
+            return Ok(
+                flash_and_redirect(&state.db, session.session_id, msg, "/battlesnakes/new").await?,
+            );
+        }
+    };
+
     // Enforce the tag cap before creating anything
     if form.tag_ids.len() > tag::MAX_TAGS_PER_SNAKE {
-        session::set_flash_message(
-            &state.db,
-            session.session_id,
-            format!(
-                "A battlesnake can have at most {} tags",
-                tag::MAX_TAGS_PER_SNAKE
-            ),
-            session::FLASH_TYPE_ERROR,
-        )
-        .await
-        .wrap_err("Failed to set flash message")?;
-
-        return Ok(Redirect::to("/battlesnakes/new").into_response());
+        let msg = format!(
+            "A battlesnake can have at most {} tags",
+            tag::MAX_TAGS_PER_SNAKE
+        );
+        return Ok(
+            flash_and_redirect(&state.db, session.session_id, msg, "/battlesnakes/new").await?,
+        );
     }
 
     let url = normalize_snake_url(&form.url);
     if let Err(msg) = battlesnake::validate_url(&url) {
-        session::set_flash_message(
+        return Ok(flash_and_redirect(
             &state.db,
             session.session_id,
-            msg,
-            session::FLASH_TYPE_ERROR,
+            msg.to_string(),
+            "/battlesnakes/new",
         )
-        .await
-        .wrap_err("Failed to set flash message")?;
-
-        return Ok(Redirect::to("/battlesnakes/new").into_response());
+        .await?);
     }
 
     let create_data = CreateBattlesnake {
-        name: form.name,
+        name,
         url,
         visibility: form.visibility,
     };
@@ -579,7 +594,7 @@ pub async fn edit_battlesnake(
             form class="form-stack" action={"/battlesnakes/"(battlesnake_id)"/update"} method="post" {
                 div class="field" {
                     label for="name" { "Name" }
-                    input type="text" id="name" name="name" required value=(battlesnake.name);
+                    input type="text" id="name" name="name" required maxlength=(battlesnake::MAX_NAME_LEN) value=(battlesnake.name);
                 }
 
                 div class="field" {
@@ -643,40 +658,48 @@ pub async fn update_battlesnake(
     }
 
     let form = parse_battlesnake_form(&form_bytes).with_status(StatusCode::BAD_REQUEST)?;
+    let edit_path = format!("/battlesnakes/{battlesnake_id}/edit");
+
+    // Snakes created before name validation existed may have names that
+    // wouldn't pass it today. Leaving the name untouched must still let the
+    // owner edit everything else, so only validate when it actually changes.
+    let existing = battlesnake::get_battlesnake_by_id(&state.db, battlesnake_id)
+        .await
+        .wrap_err("Failed to fetch battlesnake")?
+        .ok_or_else(|| {
+            eyre!("Battlesnake {battlesnake_id} vanished between ownership check and update")
+        })?;
+    let name = if form.name == existing.name {
+        existing.name
+    } else {
+        match battlesnake::validate_name(&form.name) {
+            Ok(name) => name,
+            Err(msg) => {
+                return Ok(
+                    flash_and_redirect(&state.db, session.session_id, msg, &edit_path).await?,
+                );
+            }
+        }
+    };
 
     // Enforce the tag cap before writing anything
     if form.tag_ids.len() > tag::MAX_TAGS_PER_SNAKE {
-        session::set_flash_message(
-            &state.db,
-            session.session_id,
-            format!(
-                "A battlesnake can have at most {} tags",
-                tag::MAX_TAGS_PER_SNAKE
-            ),
-            session::FLASH_TYPE_ERROR,
-        )
-        .await
-        .wrap_err("Failed to set flash message")?;
-
-        return Ok(Redirect::to(&format!("/battlesnakes/{battlesnake_id}/edit")).into_response());
+        let msg = format!(
+            "A battlesnake can have at most {} tags",
+            tag::MAX_TAGS_PER_SNAKE
+        );
+        return Ok(flash_and_redirect(&state.db, session.session_id, msg, &edit_path).await?);
     }
 
     let url = normalize_snake_url(&form.url);
     if let Err(msg) = battlesnake::validate_url(&url) {
-        session::set_flash_message(
-            &state.db,
-            session.session_id,
-            msg,
-            session::FLASH_TYPE_ERROR,
-        )
-        .await
-        .wrap_err("Failed to set flash message")?;
-
-        return Ok(Redirect::to(&format!("/battlesnakes/{battlesnake_id}/edit")).into_response());
+        return Ok(
+            flash_and_redirect(&state.db, session.session_id, msg.to_string(), &edit_path).await?,
+        );
     }
 
     let update_data = UpdateBattlesnake {
-        name: form.name,
+        name,
         url,
         visibility: form.visibility,
     };
