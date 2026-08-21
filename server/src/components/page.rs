@@ -99,7 +99,7 @@ impl Page {
                     rect x="2" y="13" width="9" height="9" rx="2.5" fill="currentColor" opacity=".2" {}
                     rect x="13" y="13" width="9" height="9" rx="2.5" fill="var(--pink)" opacity=".45" {}
                 }
-                "Battlesnake"
+                span class="wordmark-text" { "Battlesnake" }
             }
         }
     }
