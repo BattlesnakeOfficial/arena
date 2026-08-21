@@ -112,7 +112,7 @@ h3 { font-weight: 700; font-size: 16px; }
 .btn.danger:hover { background: var(--down); border-color: var(--down); color: #fff; }
 
 .nav-user { display: flex; align-items: center; gap: 10px; font-size: 14.5px; font-weight: 600; }
-.nav-user img { width: 34px; height: 34px; border-radius: 50%; border: 1.5px solid var(--hairline-dark); }
+.nav-user img { width: 34px; height: 34px; border-radius: 50%; border: 1.5px solid var(--hairline-dark); flex-shrink: 0; }
 .nav-user:hover img { border-color: var(--pink); }
 
 /* theme controls */
@@ -605,7 +605,9 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
 /* welcome band (logged in) */
 .home .welcome { display: flex; gap: 20px; align-items: center; flex-wrap: wrap; padding-top: 6px; }
 .home .welcome img { width: 64px; height: 64px; border-radius: 50%; border: 1px solid var(--hairline-dark); flex-shrink: 0; }
-.home .welcome h1 { font-size: clamp(30px, 3.4vw, 40px); }
+.home .welcome .who { min-width: 0; }
+/* GitHub logins run to 39 chars; never let the welcome heading push the page wide. */
+.home .welcome h1 { font-size: clamp(30px, 3.4vw, 40px); overflow-wrap: anywhere; }
 .home .welcome .sub { color: var(--muted); font-size: 15.5px; margin-top: 4px; }
 .home .welcome .cta-row { margin: 0 0 0 auto; }
 
@@ -997,6 +999,11 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
   .mode { white-space: nowrap; }
   table.data th, table.data td { padding-left: 8px; padding-right: 8px; }
   .site-footer .inner { padding: 24px 20px; }
+}
+/* Narrow phones: logged-in nav is glyph + 2 theme buttons + menu + avatar.
+   With the wordmark text that sums past 375px and the avatar clips. */
+@media (max-width: 420px) {
+  .wordmark-text { display: none; }
 }
 
 /* --- page: create game --------------------------------------------------- */
