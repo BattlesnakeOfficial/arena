@@ -177,7 +177,7 @@ pub async fn view_game(
     };
 
     Ok(page_factory.create_theater_page(
-        format!("Game {game_id}"),
+        game_page_title(battlesnakes.iter().map(|b| b.name.as_str())),
         Box::new(html! {
             h1 class="vh" { "Game Details" }
             div class="crumb" {
@@ -524,8 +524,32 @@ fn comma_separate(n: i32) -> String {
     out
 }
 
+/// Page/OG title for a game: the snakes' names joined with " vs ", so a
+/// shared link reads "Bob vs Rusty" instead of a bare UUID. Falls back to
+/// "Game" when the game has no snakes (shouldn't happen, but stays valid).
+fn game_page_title<'a>(names: impl IntoIterator<Item = &'a str>) -> String {
+    let title = names.into_iter().collect::<Vec<_>>().join(" vs ");
+    if title.is_empty() {
+        "Game".to_string()
+    } else {
+        title
+    }
+}
+
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn game_page_title_joins_snake_names() {
+        assert_eq!(game_page_title(["Bob", "Rusty"]), "Bob vs Rusty");
+        assert_eq!(game_page_title(["Solo Snake"]), "Solo Snake");
+        assert_eq!(game_page_title(["A", "B", "C", "D"]), "A vs B vs C vs D");
+    }
+
+    #[test]
+    fn game_page_title_falls_back_without_snakes() {
+        assert_eq!(game_page_title(std::iter::empty()), "Game");
+    }
     use super::*;
 
     fn game_id() -> Uuid {
