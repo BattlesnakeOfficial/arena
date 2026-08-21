@@ -382,10 +382,10 @@ pub async fn new_battlesnake(
                 div class="field" {
                     label for="visibility" { "Visibility" }
                     select id="visibility" name="visibility" required {
-                        option value="public" selected { "Public (Available to all users)" }
-                        option value="private" { "Private (Only available to you)" }
+                        option value="public" selected { "Public — anyone can add it to their games" }
+                        option value="private" { "Private — only you can add it to games" }
                     }
-                    p class="help" { "Control who can add this snake to games" }
+                    p class="help" { "Only controls who can pick this snake in Create Game. It always shows on your profile and in the games it plays, and you can still enter it in leaderboards and tournaments." }
                 }
 
                 (tag_form_fields(&catalog, &[]))
@@ -606,10 +606,10 @@ pub async fn edit_battlesnake(
                 div class="field" {
                     label for="visibility" { "Visibility" }
                     select id="visibility" name="visibility" required {
-                        option value="public" selected[battlesnake.visibility == Visibility::Public] { "Public (Available to all users)" }
-                        option value="private" selected[battlesnake.visibility == Visibility::Private] { "Private (Only available to you)" }
+                        option value="public" selected[battlesnake.visibility == Visibility::Public] { "Public — anyone can add it to their games" }
+                        option value="private" selected[battlesnake.visibility == Visibility::Private] { "Private — only you can add it to games" }
                     }
-                    p class="help" { "Control who can add this snake to games" }
+                    p class="help" { "Only controls who can pick this snake in Create Game. It always shows on your profile and in the games it plays, and you can still enter it in leaderboards and tournaments." }
                 }
 
                 (tag_form_fields(&catalog, &selected_tag_ids))
