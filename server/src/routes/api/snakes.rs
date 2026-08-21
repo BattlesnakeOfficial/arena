@@ -5,7 +5,6 @@ use axum::{
     response::IntoResponse,
 };
 use serde::{Deserialize, Serialize};
-use url::Url;
 use uuid::Uuid;
 
 use crate::{
@@ -55,20 +54,6 @@ pub struct UpdateSnakeRequest {
     pub is_public: Option<bool>,
 }
 
-/// Validate that a URL is a valid HTTP or HTTPS URL
-fn validate_url(url: &str) -> Result<(), &'static str> {
-    match Url::parse(url) {
-        Ok(parsed) => {
-            if parsed.scheme() == "http" || parsed.scheme() == "https" {
-                Ok(())
-            } else {
-                Err("URL must use HTTP or HTTPS scheme")
-            }
-        }
-        Err(_) => Err("Invalid URL format"),
-    }
-}
-
 /// GET /api/snakes - List user's snakes
 pub async fn list_snakes(
     State(state): State<AppState>,
@@ -92,8 +77,8 @@ pub async fn create_snake(
     Json(request): Json<CreateSnakeRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     // Validate URL
-    if let Err(e) = validate_url(&request.url) {
-        return Err((StatusCode::BAD_REQUEST, e.to_string()));
+    if let Err(e) = battlesnake::validate_url(&request.url) {
+        return Err((StatusCode::BAD_REQUEST, e));
     }
     let name =
         battlesnake::validate_name(&request.name).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
@@ -183,8 +168,8 @@ pub async fn update_snake(
     let new_url = request.url.unwrap_or(existing.url);
 
     // Validate URL if it changed
-    if let Err(e) = validate_url(&new_url) {
-        return Err((StatusCode::BAD_REQUEST, e.to_string()));
+    if let Err(e) = battlesnake::validate_url(&new_url) {
+        return Err((StatusCode::BAD_REQUEST, e));
     }
 
     let name = match request.name {

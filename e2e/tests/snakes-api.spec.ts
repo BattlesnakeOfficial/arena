@@ -44,3 +44,28 @@ test.describe('Snakes API', () => {
     });
   });
 });
+
+test.describe('Battlesnake form - URL validation', () => {
+  test('rejects a URL that is not a URL', async ({ authenticatedPage }) => {
+    await authenticatedPage.goto('/battlesnakes/new');
+    await authenticatedPage.getByLabel('Name').fill(`Bad URL ${Date.now()}`);
+    await authenticatedPage.getByLabel('URL').fill('not a url');
+    await authenticatedPage.getByLabel('Visibility').selectOption('private');
+    await authenticatedPage.getByRole('button', { name: 'Create Battlesnake' }).click();
+
+    await expect(authenticatedPage).toHaveURL(/\/battlesnakes\/new$/);
+    await expect(authenticatedPage.getByText('Invalid URL format')).toBeVisible();
+  });
+
+  test('still accepts a bare hostname (normalized to https)', async ({ authenticatedPage }) => {
+    const name = `Bare Host ${Date.now()}`;
+    await authenticatedPage.goto('/battlesnakes/new');
+    await authenticatedPage.getByLabel('Name').fill(name);
+    await authenticatedPage.getByLabel('URL').fill('mysnake.fly.dev');
+    await authenticatedPage.getByLabel('Visibility').selectOption('private');
+    await authenticatedPage.getByRole('button', { name: 'Create Battlesnake' }).click();
+
+    await expect(authenticatedPage.getByText('created successfully')).toBeVisible();
+    await expect(authenticatedPage.getByText('https://mysnake.fly.dev')).toBeVisible();
+  });
+});

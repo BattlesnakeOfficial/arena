@@ -53,6 +53,16 @@ pub struct Battlesnake {
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// Validate that a snake URL parses and uses http or https. Shared by the
+/// web form (after hostname normalization) and the JSON API.
+pub fn validate_url(url: &str) -> Result<(), String> {
+    match url::Url::parse(url) {
+        Ok(parsed) if parsed.scheme() == "http" || parsed.scheme() == "https" => Ok(()),
+        Ok(_) => Err("URL must use HTTP or HTTPS scheme".to_string()),
+        Err(_) => Err("Invalid URL format".to_string()),
+    }
+}
+
 /// Maximum length of a battlesnake name, in characters.
 pub const MAX_NAME_LEN: usize = 64;
 
@@ -467,6 +477,25 @@ pub async fn update_battlesnake_customizations(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn validate_url_accepts_http_and_https() {
+        assert!(validate_url("https://snake.example.com/v1").is_ok());
+        assert!(validate_url("http://localhost:8000").is_ok());
+    }
+
+    #[test]
+    fn validate_url_rejects_garbage_and_other_schemes() {
+        assert_eq!(
+            validate_url("https://not a url").unwrap_err(),
+            "Invalid URL format"
+        );
+        assert_eq!(validate_url("not a url").unwrap_err(), "Invalid URL format");
+        assert_eq!(
+            validate_url("ftp://snake.example.com").unwrap_err(),
+            "URL must use HTTP or HTTPS scheme"
+        );
+    }
 
     #[test]
     fn validate_name_trims_and_accepts() {

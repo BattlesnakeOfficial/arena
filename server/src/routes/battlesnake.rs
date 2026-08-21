@@ -459,9 +459,23 @@ pub async fn create_battlesnake(
         return Ok(Redirect::to("/battlesnakes/new").into_response());
     }
 
+    let url = normalize_snake_url(&form.url);
+    if let Err(msg) = battlesnake::validate_url(&url) {
+        session::set_flash_message(
+            &state.db,
+            session.session_id,
+            msg,
+            session::FLASH_TYPE_ERROR,
+        )
+        .await
+        .wrap_err("Failed to set flash message")?;
+
+        return Ok(Redirect::to("/battlesnakes/new").into_response());
+    }
+
     let create_data = CreateBattlesnake {
         name: form.name,
-        url: normalize_snake_url(&form.url),
+        url,
         visibility: form.visibility,
     };
 
@@ -647,9 +661,23 @@ pub async fn update_battlesnake(
         return Ok(Redirect::to(&format!("/battlesnakes/{battlesnake_id}/edit")).into_response());
     }
 
+    let url = normalize_snake_url(&form.url);
+    if let Err(msg) = battlesnake::validate_url(&url) {
+        session::set_flash_message(
+            &state.db,
+            session.session_id,
+            msg,
+            session::FLASH_TYPE_ERROR,
+        )
+        .await
+        .wrap_err("Failed to set flash message")?;
+
+        return Ok(Redirect::to(&format!("/battlesnakes/{battlesnake_id}/edit")).into_response());
+    }
+
     let update_data = UpdateBattlesnake {
         name: form.name,
-        url: normalize_snake_url(&form.url),
+        url,
         visibility: form.visibility,
     };
 
