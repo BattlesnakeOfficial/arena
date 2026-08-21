@@ -95,9 +95,11 @@ pub async fn create_snake(
     if let Err(e) = validate_url(&request.url) {
         return Err((StatusCode::BAD_REQUEST, e.to_string()));
     }
+    let name =
+        battlesnake::validate_name(&request.name).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
     let create_data = CreateBattlesnake {
-        name: request.name,
+        name,
         url: request.url,
         visibility: if request.is_public {
             Visibility::Public
@@ -185,8 +187,15 @@ pub async fn update_snake(
         return Err((StatusCode::BAD_REQUEST, e.to_string()));
     }
 
+    let name = match request.name {
+        Some(name) => {
+            battlesnake::validate_name(&name).map_err(|e| (StatusCode::BAD_REQUEST, e))?
+        }
+        None => existing.name,
+    };
+
     let update_data = UpdateBattlesnake {
-        name: request.name.unwrap_or(existing.name),
+        name,
         url: new_url,
         visibility: match request.is_public {
             Some(true) => Visibility::Public,

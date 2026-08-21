@@ -60,9 +60,7 @@ fn parse_battlesnake_form(bytes: &[u8]) -> Result<BattlesnakeFormData, String> {
     }
 
     Ok(BattlesnakeFormData {
-        name: name
-            .filter(|n| !n.is_empty())
-            .ok_or_else(|| "Name is required".to_string())?,
+        name: battlesnake::validate_name(name.as_deref().unwrap_or_default())?,
         url: url
             .filter(|u| !u.is_empty())
             .ok_or_else(|| "URL is required".to_string())?,

@@ -53,6 +53,25 @@ pub struct Battlesnake {
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// Maximum length of a battlesnake name, in characters.
+pub const MAX_NAME_LEN: usize = 64;
+
+/// Validate and normalize a user-supplied battlesnake name.
+///
+/// Trims surrounding whitespace, rejects empty names, and enforces
+/// [`MAX_NAME_LEN`]. Shared by the web form and the JSON API so both
+/// surfaces accept exactly the same names.
+pub fn validate_name(name: &str) -> Result<String, String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("Name is required".to_string());
+    }
+    if trimmed.chars().count() > MAX_NAME_LEN {
+        return Err(format!("Name must be {MAX_NAME_LEN} characters or fewer"));
+    }
+    Ok(trimmed.to_string())
+}
+
 // For creating a new battlesnake
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CreateBattlesnake {
@@ -448,6 +467,29 @@ pub async fn update_battlesnake_customizations(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn validate_name_trims_and_accepts() {
+        assert_eq!(validate_name("  Bob  ").unwrap(), "Bob");
+        assert_eq!(
+            validate_name(&"x".repeat(MAX_NAME_LEN)).unwrap().len(),
+            MAX_NAME_LEN
+        );
+    }
+
+    #[test]
+    fn validate_name_rejects_empty_and_whitespace() {
+        assert_eq!(validate_name("").unwrap_err(), "Name is required");
+        assert_eq!(validate_name("   ").unwrap_err(), "Name is required");
+    }
+
+    #[test]
+    fn validate_name_rejects_overlong() {
+        let err = validate_name(&"x".repeat(MAX_NAME_LEN + 1)).unwrap_err();
+        assert!(err.contains("64 characters"), "{err}");
+        // Multi-byte characters count as one character each.
+        assert!(validate_name(&"é".repeat(MAX_NAME_LEN)).is_ok());
+    }
     use super::*;
 
     async fn create_user(pool: &PgPool, github_id: i64, login: &str) -> cja::Result<Uuid> {
