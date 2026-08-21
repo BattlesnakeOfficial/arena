@@ -112,7 +112,7 @@ h3 { font-weight: 700; font-size: 16px; }
 .btn.danger:hover { background: var(--down); border-color: var(--down); color: #fff; }
 
 .nav-user { display: flex; align-items: center; gap: 10px; font-size: 14.5px; font-weight: 600; }
-.nav-user img { width: 34px; height: 34px; border-radius: 50%; border: 1.5px solid var(--hairline-dark); }
+.nav-user img { width: 34px; height: 34px; border-radius: 50%; border: 1.5px solid var(--hairline-dark); flex-shrink: 0; }
 .nav-user:hover img { border-color: var(--pink); }
 
 /* theme controls */
@@ -605,7 +605,9 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
 /* welcome band (logged in) */
 .home .welcome { display: flex; gap: 20px; align-items: center; flex-wrap: wrap; padding-top: 6px; }
 .home .welcome img { width: 64px; height: 64px; border-radius: 50%; border: 1px solid var(--hairline-dark); flex-shrink: 0; }
-.home .welcome h1 { font-size: clamp(30px, 3.4vw, 40px); }
+.home .welcome .who { min-width: 0; }
+/* GitHub logins run to 39 chars; never let the welcome heading push the page wide. */
+.home .welcome h1 { font-size: clamp(30px, 3.4vw, 40px); overflow-wrap: anywhere; }
 .home .welcome .sub { color: var(--muted); font-size: 15.5px; margin-top: 4px; }
 .home .welcome .cta-row { margin: 0 0 0 auto; }
 
@@ -984,11 +986,10 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
 }
 @media (max-width: 640px) {
   .hide-sm { display: none; }
-  .site-nav { gap: 10px; padding: 18px 20px; }
+  .site-nav { gap: 12px; padding: 18px 20px; }
   /* sign-in moves into the mobile menu sheet; avatar stays for logged-in */
   .site-nav > .btn.solid { display: none; }
   .nav-user span { display: none; }
-  .nav-user img { flex-shrink: 0; }
   .theme-btn { width: 44px; height: 44px; }
   .appearance { right: 16px; left: 16px; width: auto; top: 80px; }
   .page { padding: 28px 20px 96px; }
@@ -1004,9 +1005,6 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
 @media (max-width: 420px) {
   .wordmark-text { display: none; }
 }
-/* GitHub logins run to 39 chars; never let the welcome heading push the page wide. */
-.who { min-width: 0; }
-.who h1 { overflow-wrap: anywhere; }
 
 /* --- page: create game --------------------------------------------------- */
 
