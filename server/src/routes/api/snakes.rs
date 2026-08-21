@@ -5,7 +5,6 @@ use axum::{
     response::IntoResponse,
 };
 use serde::{Deserialize, Serialize};
-use url::Url;
 use uuid::Uuid;
 
 use crate::{
@@ -55,20 +54,6 @@ pub struct UpdateSnakeRequest {
     pub is_public: Option<bool>,
 }
 
-/// Validate that a URL is a valid HTTP or HTTPS URL
-fn validate_url(url: &str) -> Result<(), &'static str> {
-    match Url::parse(url) {
-        Ok(parsed) => {
-            if parsed.scheme() == "http" || parsed.scheme() == "https" {
-                Ok(())
-            } else {
-                Err("URL must use HTTP or HTTPS scheme")
-            }
-        }
-        Err(_) => Err("Invalid URL format"),
-    }
-}
-
 /// GET /api/snakes - List user's snakes
 pub async fn list_snakes(
     State(state): State<AppState>,
@@ -92,12 +77,14 @@ pub async fn create_snake(
     Json(request): Json<CreateSnakeRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     // Validate URL
-    if let Err(e) = validate_url(&request.url) {
+    if let Err(e) = battlesnake::validate_url(&request.url) {
         return Err((StatusCode::BAD_REQUEST, e.to_string()));
     }
+    let name =
+        battlesnake::validate_name(&request.name).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
     let create_data = CreateBattlesnake {
-        name: request.name,
+        name,
         url: request.url,
         visibility: if request.is_public {
             Visibility::Public
@@ -180,13 +167,20 @@ pub async fn update_snake(
     // Build update with existing values as defaults
     let new_url = request.url.unwrap_or(existing.url);
 
-    // Validate URL if it changed
-    if let Err(e) = validate_url(&new_url) {
+    // Validate the effective URL (new or existing)
+    if let Err(e) = battlesnake::validate_url(&new_url) {
         return Err((StatusCode::BAD_REQUEST, e.to_string()));
     }
 
+    let name = match request.name {
+        Some(name) => {
+            battlesnake::validate_name(&name).map_err(|e| (StatusCode::BAD_REQUEST, e))?
+        }
+        None => existing.name,
+    };
+
     let update_data = UpdateBattlesnake {
-        name: request.name.unwrap_or(existing.name),
+        name,
         url: new_url,
         visibility: match request.is_public {
             Some(true) => Visibility::Public,

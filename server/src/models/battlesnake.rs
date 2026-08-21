@@ -53,6 +53,35 @@ pub struct Battlesnake {
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// Validate that a snake URL parses and uses http or https. Shared by the
+/// web form (after hostname normalization) and the JSON API.
+pub fn validate_url(url: &str) -> Result<(), &'static str> {
+    match url::Url::parse(url) {
+        Ok(parsed) if parsed.scheme() == "http" || parsed.scheme() == "https" => Ok(()),
+        Ok(_) => Err("URL must use HTTP or HTTPS scheme"),
+        Err(_) => Err("Invalid URL format"),
+    }
+}
+
+/// Maximum length of a battlesnake name, in characters.
+pub const MAX_NAME_LEN: usize = 64;
+
+/// Validate and normalize a user-supplied battlesnake name.
+///
+/// Trims surrounding whitespace, rejects empty names, and enforces
+/// [`MAX_NAME_LEN`]. Shared by the web form and the JSON API so both
+/// surfaces accept exactly the same names.
+pub fn validate_name(name: &str) -> Result<String, String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("Name is required".to_string());
+    }
+    if trimmed.chars().count() > MAX_NAME_LEN {
+        return Err(format!("Name must be {MAX_NAME_LEN} characters or fewer"));
+    }
+    Ok(trimmed.to_string())
+}
+
 // For creating a new battlesnake
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CreateBattlesnake {
@@ -449,6 +478,48 @@ pub async fn update_battlesnake_customizations(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validate_url_accepts_http_and_https() {
+        assert!(validate_url("https://snake.example.com/v1").is_ok());
+        assert!(validate_url("http://localhost:8000").is_ok());
+    }
+
+    #[test]
+    fn validate_url_rejects_garbage_and_other_schemes() {
+        assert_eq!(
+            validate_url("https://not a url").unwrap_err(),
+            "Invalid URL format"
+        );
+        assert_eq!(validate_url("not a url").unwrap_err(), "Invalid URL format");
+        assert_eq!(
+            validate_url("ftp://snake.example.com").unwrap_err(),
+            "URL must use HTTP or HTTPS scheme"
+        );
+    }
+
+    #[test]
+    fn validate_name_trims_and_accepts() {
+        assert_eq!(validate_name("  Bob  ").unwrap(), "Bob");
+        assert_eq!(
+            validate_name(&"x".repeat(MAX_NAME_LEN)).unwrap().len(),
+            MAX_NAME_LEN
+        );
+    }
+
+    #[test]
+    fn validate_name_rejects_empty_and_whitespace() {
+        assert_eq!(validate_name("").unwrap_err(), "Name is required");
+        assert_eq!(validate_name("   ").unwrap_err(), "Name is required");
+    }
+
+    #[test]
+    fn validate_name_rejects_overlong() {
+        let err = validate_name(&"x".repeat(MAX_NAME_LEN + 1)).unwrap_err();
+        assert!(err.contains("64 characters"), "{err}");
+        // Multi-byte characters count as one character each.
+        assert!(validate_name(&"é".repeat(MAX_NAME_LEN)).is_ok());
+    }
 
     async fn create_user(pool: &PgPool, github_id: i64, login: &str) -> cja::Result<Uuid> {
         let row = sqlx::query!(
