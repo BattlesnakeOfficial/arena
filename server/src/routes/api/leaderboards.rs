@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use crate::{
     models::{
-        battlesnake::{self, Visibility},
+        battlesnake,
         leaderboard::{self, MIN_GAMES_FOR_RANKING},
     },
     routes::auth::ApiUser,
@@ -233,7 +233,7 @@ pub async fn create_entry(
         ));
     }
 
-    // Verify snake belongs to user and is public
+    // Verify snake belongs to user
     let snake = battlesnake::get_battlesnake_by_id(&state.db, request.battlesnake_id)
         .await
         .map_err(|e| {
@@ -249,13 +249,6 @@ pub async fn create_entry(
         return Err((
             StatusCode::FORBIDDEN,
             "You don't own this battlesnake".to_string(),
-        ));
-    }
-
-    if snake.visibility != Visibility::Public {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Only public snakes can join leaderboards".to_string(),
         ));
     }
 
