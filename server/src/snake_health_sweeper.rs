@@ -631,6 +631,101 @@ mod tests {
         Ok(())
     }
 
+    /// Reproduce the production residue described by DEV-710 item 3: a snake
+    /// was deactivated, its owner resumed one board out of band (which clears
+    /// only that entry's `health` marker), and a later healthy sweep cleared
+    /// `deactivated_at` through `record_success`. The snake is left with an
+    /// enabled entry, an orphaned `health`-disabled entry, and NO deactivation
+    /// stamp.
+    async fn create_stale_health_entry_snake(
+        pool: &PgPool,
+        url: &str,
+    ) -> cja::Result<(Uuid, Uuid, Uuid)> {
+        let (battlesnake_id, stale_entry) = create_snake_on_leaderboard(pool, url).await?;
+        let active_entry = create_additional_enabled_entry(pool, battlesnake_id).await?;
+
+        snake_health_status::record_failure(pool, battlesnake_id, "was down").await?;
+        assert!(snake_health_status::deactivate(pool, battlesnake_id).await?);
+        // Owner resumes one board through the leaderboard page, which knows
+        // nothing about health state and clears only that entry's reason.
+        crate::models::leaderboard::set_disabled(pool, active_entry, None).await?;
+        // A healthy active-population sweep then cleared the stale stamp.
+        snake_health_status::record_success(pool, battlesnake_id).await?;
+
+        let status = snake_health_status::get(pool, battlesnake_id)
+            .await?
+            .expect("health row exists");
+        assert!(
+            status.deactivated_at.is_none(),
+            "precondition: this snake is NOT deactivated"
+        );
+        assert_eq!(
+            entry_disabled(pool, stale_entry).await?.as_deref(),
+            Some(snake_health_status::DISABLED_REASON_HEALTH),
+            "precondition: the orphaned entry still carries the health marker"
+        );
+        assert_eq!(
+            entry_disabled(pool, active_entry).await?,
+            None,
+            "precondition: the resumed entry is back in matchmaking"
+        );
+
+        Ok((battlesnake_id, stale_entry, active_entry))
+    }
+
+    /// A snake that is in matchmaking and NOT deactivated must follow the
+    /// documented failure-threshold contract: it takes
+    /// `snake_health_failure_threshold` consecutive failed sweeps to pull it,
+    /// regardless of whether some unrelated entry still carries a stale
+    /// `health` marker. One failed probe must not disable it.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn stale_health_entry_does_not_bypass_the_failure_threshold(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        let server = broken_snake_server().await;
+        let (_battlesnake_id, _stale_entry, active_entry) =
+            create_stale_health_entry_snake(&pool, &server.uri()).await?;
+        let app_state = AppState::test_from_pool(pool.clone());
+        assert!(
+            app_state.config.snake_health_failure_threshold >= 2,
+            "test assumes a multi-sweep threshold"
+        );
+
+        run_sweep(&app_state).await?;
+
+        assert_eq!(
+            entry_disabled(&pool, active_entry).await?,
+            None,
+            "a single failed probe must not pull a non-deactivated snake from matchmaking"
+        );
+        Ok(())
+    }
+
+    /// DEV-710 criterion 3: "a successful probe reactivates that snake's
+    /// health-disabled entries". That must hold for the mixed-state snake whose
+    /// deactivation stamp was already cleared, which is exactly the state the
+    /// bug being fixed produced in production.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn stale_health_entry_is_restored_by_healthy_probes(pool: PgPool) -> cja::Result<()> {
+        let server = healthy_snake_server().await;
+        let (battlesnake_id, stale_entry, _active_entry) =
+            create_stale_health_entry_snake(&pool, &server.uri()).await?;
+        let app_state = AppState::test_from_pool(pool.clone());
+        let threshold = app_state.config.snake_health_recovery_threshold;
+
+        for _ in 0..=threshold {
+            age_last_check(&pool, battlesnake_id).await?;
+            run_sweep(&app_state).await?;
+        }
+
+        assert_eq!(
+            entry_disabled(&pool, stale_entry).await?,
+            None,
+            "healthy sweeps must restore the orphaned health-disabled entry"
+        );
+        Ok(())
+    }
+
     async fn create_additional_enabled_entry(
         pool: &PgPool,
         battlesnake_id: Uuid,
