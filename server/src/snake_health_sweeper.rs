@@ -41,6 +41,7 @@ enum ProbeKind {
     Active,
     Recovering,
     Mixed,
+    StaleMixed,
 }
 
 fn summarize(report: &HealthCheckReport) -> ProbeOutcome {
@@ -95,11 +96,10 @@ async fn snakes_in_matchmaking(pool: &sqlx::PgPool) -> cja::Result<Vec<Battlesna
     Ok(snakes)
 }
 
-/// Snakes the sweeper pulled from matchmaking: distinct snakes whose only
-/// presence on enabled leaderboards is entries disabled with
-/// `disabled_reason = 'health'`. These get recovery probes so a fixed
-/// server finds its own way back. Manual pauses (NULL reason) are the
-/// owner's business and are never probed.
+/// Snakes with at least one `health`-disabled entry on an enabled
+/// leaderboard. A snake may also appear in [`snakes_in_matchmaking`];
+/// [`run_sweep`] reconciles that overlap against its actual health stamp.
+/// Manual pauses (NULL reason) are the owner's business and are never probed.
 async fn snakes_health_disabled(pool: &sqlx::PgPool) -> cja::Result<Vec<Battlesnake>> {
     use color_eyre::eyre::Context as _;
 
@@ -150,14 +150,28 @@ pub async fn run_sweep(app_state: &AppState) -> cja::Result<()> {
             .and_modify(|(kind, _)| *kind = ProbeKind::Mixed)
             .or_insert((ProbeKind::Recovering, snake));
     }
-    let recovering_count = candidates
+
+    // Set overlap alone cannot tell us whether a mixed snake is recovering:
+    // an out-of-band resume can clear the health stamp while leaving another
+    // entry health-disabled. Those snakes must retain the normal failure
+    // threshold and notification path.
+    for (kind, snake) in candidates.values_mut() {
+        if matches!(kind, ProbeKind::Mixed)
+            && !snake_health_status::get(&app_state.db, snake.battlesnake_id)
+                .await?
+                .is_some_and(|status| status.deactivated_at.is_some())
+        {
+            *kind = ProbeKind::StaleMixed;
+        }
+    }
+    let recovery_probe_count = candidates
         .values()
         .filter(|(kind, _)| matches!(kind, ProbeKind::Recovering | ProbeKind::Mixed))
         .count();
 
     tracing::info!(
-        snake_count = candidates.len(),
-        recovering_count,
+        probe_count = candidates.len(),
+        recovery_probe_count,
         "Starting snake health sweep"
     );
 
@@ -173,6 +187,20 @@ pub async fn run_sweep(app_state: &AppState) -> cja::Result<()> {
         let outcome = probe(&client, &snake).await;
         let result = match (kind, outcome.healthy) {
             (ProbeKind::Active, _) => apply_probe_outcome(app_state, &snake, &outcome).await,
+            (ProbeKind::StaleMixed, false) => {
+                apply_probe_outcome(app_state, &snake, &outcome).await
+            }
+            (ProbeKind::StaleMixed, true) => {
+                async {
+                    snake_health_status::record_success(&app_state.db, snake.battlesnake_id)
+                        .await?;
+                    // The stamp is already clear, so this repairs orphaned health
+                    // markers without winning (or notifying for) a transition.
+                    snake_health_status::reactivate(&app_state.db, snake.battlesnake_id).await?;
+                    Ok(())
+                }
+                .await
+            }
             (ProbeKind::Recovering, _) | (ProbeKind::Mixed, true) => {
                 apply_recovery_probe_outcome(app_state, &snake, &outcome).await
             }

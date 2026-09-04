@@ -172,21 +172,18 @@ pub fn create_initial_game(
     }
 }
 
-fn required_royale_settings(game: &EngineGame) -> cja::Result<Option<RoyaleSettings>> {
-    if game.meta.ruleset_name == "royale" {
-        return game
-            .meta
-            .royale
-            .clone()
-            .map(Some)
-            .ok_or_else(|| eyre!("missing Royale settings for royale game"));
-    }
-    Ok(None)
+fn royale_settings(game: &EngineGame) -> cja::Result<RoyaleSettings> {
+    game.meta
+        .royale
+        .clone()
+        .ok_or_else(|| eyre!("missing Royale settings for royale game"))
 }
 
 /// Run a complete game with random moves, returning placements
 pub fn run_game_with_random_moves(mut game: EngineGame) -> cja::Result<GameResult> {
-    let royale = required_royale_settings(&game)?;
+    let royale = (game.meta.ruleset_name == "royale")
+        .then(|| royale_settings(&game))
+        .transpose()?;
     let mut rng = rand::thread_rng();
     let mut elimination_order: Vec<String> = Vec::new();
 
@@ -239,14 +236,12 @@ pub fn run_game_with_random_moves(mut game: EngineGame) -> cja::Result<GameResul
         // Apply the turn. Dispatch on the ruleset name so each mode's arm
         // stays independent (parallel game-mode PRs union their arms here).
         let _game_over = match game.meta.ruleset_name.as_str() {
-            "royale" => rules::royale::execute_turn(
-                &mut game.board,
-                &moves,
-                &game.meta.settings,
-                royale
-                    .as_ref()
-                    .ok_or_else(|| eyre!("missing Royale settings for royale game"))?,
-            ),
+            "royale" => {
+                let Some(settings) = royale.as_ref() else {
+                    unreachable!("royale settings were validated before game execution")
+                };
+                rules::royale::execute_turn(&mut game.board, &moves, &game.meta.settings, settings)
+            }
             "constrictor" => {
                 rules::constrictor::execute_turn(&mut game.board, &moves, &game.meta.settings)
             }
@@ -316,7 +311,9 @@ pub fn is_game_over(game: &EngineGame) -> bool {
 /// `board.turn` internally -- the caller must do that (for compatibility with
 /// game_runner.rs which increments after recording frames).
 pub fn apply_turn(game: &mut EngineGame, moves: &[(String, Direction)]) -> cja::Result<()> {
-    let royale = required_royale_settings(game)?;
+    let royale = (game.meta.ruleset_name == "royale")
+        .then(|| royale_settings(game))
+        .transpose()?;
     let snake_moves: Vec<SnakeMove> = moves
         .iter()
         .map(|(id, dir)| SnakeMove {
@@ -341,13 +338,11 @@ pub fn apply_turn(game: &mut EngineGame, moves: &[(String, Direction)]) -> cja::
         // `board.turn + 1` internally, so this must run before the caller
         // increments `board.turn`.
         "royale" => {
-            rules::royale::populate_hazards(
-                &mut game.board,
-                royale
-                    .as_ref()
-                    .ok_or_else(|| eyre!("missing Royale settings for royale game"))?,
-            )
-            .map_err(|error| eyre!("royale hazard population failed: {error:?}"))?;
+            let Some(settings) = royale.as_ref() else {
+                unreachable!("royale settings were validated before turn application")
+            };
+            rules::royale::populate_hazards(&mut game.board, settings)
+                .map_err(|error| eyre!("royale hazard population failed: {error:?}"))?;
         }
         // Constrictor: clear all food and grow every snake (matches Go's
         // StageSpawnFoodNoFood + StageModifySnakesAlwaysGrow, which run after

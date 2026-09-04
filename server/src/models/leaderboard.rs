@@ -1210,6 +1210,17 @@ mod tests {
             .await?;
         }
 
+        let tied_at = chrono::Utc::now();
+        sqlx::query!(
+            "UPDATE leaderboard_game_results
+             SET created_at = $1
+             WHERE leaderboard_game_id = $2",
+            tied_at,
+            leaderboard_game_id,
+        )
+        .execute(&pool)
+        .await?;
+
         for _ in 0..5 {
             let feed = get_activity_feed(&pool, leaderboard_id, 2).await?;
             assert_eq!(
