@@ -446,6 +446,7 @@ pub async fn associate_user_with_session(
         SET
             user_id = $2,
             github_oauth_state = NULL,
+            pending_form_data = NULL,
             expires_at = NOW() + INTERVAL '30 days'
         WHERE session_id = $1
         RETURNING
@@ -481,6 +482,7 @@ pub async fn disassociate_user_from_session(
         SET
             user_id = NULL,
             github_oauth_state = NULL,
+            pending_form_data = NULL,
             is_cli_auth = FALSE,
             expires_at = NOW() + INTERVAL '1 hour'
         WHERE session_id = $1

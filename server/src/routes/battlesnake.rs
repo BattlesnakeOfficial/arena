@@ -29,23 +29,12 @@ use crate::{
 // Parsed new/edit battlesnake form. Parsed by hand from the urlencoded body
 // because the tag checkboxes submit a repeated `tags` key, which
 // `axum::Form` (serde_urlencoded) can't deserialize into a Vec.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 struct BattlesnakeFormData {
     name: String,
     url: String,
     visibility: Visibility,
     tag_ids: Vec<Uuid>,
-}
-
-impl Default for BattlesnakeFormData {
-    fn default() -> Self {
-        Self {
-            name: String::new(),
-            url: String::new(),
-            visibility: Visibility::Public,
-            tag_ids: Vec::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -60,10 +49,12 @@ enum BattlesnakeFormTarget {
     Edit(Uuid),
 }
 
+const MAX_DRAFT_URL_CHARS: usize = 2_048;
+
 fn bounded_form_copy(form: &BattlesnakeFormData) -> BattlesnakeFormData {
     BattlesnakeFormData {
         name: form.name.chars().take(battlesnake::MAX_NAME_LEN).collect(),
-        url: form.url.chars().take(2_048).collect(),
+        url: form.url.chars().take(MAX_DRAFT_URL_CHARS).collect(),
         visibility: form.visibility,
         tag_ids: form
             .tag_ids
@@ -1503,7 +1494,7 @@ pub async fn test_battlesnake(
 
 #[cfg(test)]
 mod form_tests {
-    use super::{BattlesnakeFormData, bounded_form_copy};
+    use super::{BattlesnakeFormData, MAX_DRAFT_URL_CHARS, bounded_form_copy};
     use crate::models::{battlesnake, battlesnake::Visibility, tag};
     use uuid::Uuid;
 
@@ -1526,7 +1517,7 @@ mod form_tests {
         let bounded = bounded_form_copy(&form);
 
         assert_eq!(bounded.name.chars().count(), battlesnake::MAX_NAME_LEN);
-        assert_eq!(bounded.url.chars().count(), 2_048);
+        assert_eq!(bounded.url.chars().count(), MAX_DRAFT_URL_CHARS);
         assert_eq!(bounded.tag_ids.len(), tag::MAX_TAGS_PER_SNAKE * 4);
         assert_eq!(
             bounded.name,
@@ -1534,7 +1525,10 @@ mod form_tests {
                 .take(battlesnake::MAX_NAME_LEN)
                 .collect::<String>()
         );
-        assert_eq!(bounded.url, url.chars().take(2_048).collect::<String>());
+        assert_eq!(
+            bounded.url,
+            url.chars().take(MAX_DRAFT_URL_CHARS).collect::<String>()
+        );
         assert_eq!(bounded.tag_ids, tag_ids[..tag::MAX_TAGS_PER_SNAKE * 4]);
         assert_eq!(bounded.visibility, Visibility::Private);
     }

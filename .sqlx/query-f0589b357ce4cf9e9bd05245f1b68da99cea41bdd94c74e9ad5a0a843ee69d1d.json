@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        UPDATE sessions\n        SET\n            user_id = NULL,\n            github_oauth_state = NULL,\n            is_cli_auth = FALSE,\n            expires_at = NOW() + INTERVAL '1 hour'\n        WHERE session_id = $1\n        RETURNING\n            session_id,\n            user_id,\n            github_oauth_state,\n            flash_message,\n            flash_type,\n            is_cli_auth,\n            created_at,\n            updated_at,\n            expires_at\n        ",
+  "query": "\n        UPDATE sessions\n        SET\n            user_id = NULL,\n            github_oauth_state = NULL,\n            pending_form_data = NULL,\n            is_cli_auth = FALSE,\n            expires_at = NOW() + INTERVAL '1 hour'\n        WHERE session_id = $1\n        RETURNING\n            session_id,\n            user_id,\n            github_oauth_state,\n            flash_message,\n            flash_type,\n            is_cli_auth,\n            created_at,\n            updated_at,\n            expires_at\n        ",
   "describe": {
     "columns": [
       {
@@ -66,5 +66,5 @@
       false
     ]
   },
-  "hash": "398a5e499c4053aab588944f8e9fc660a4c4797d916c29e1a8efad8e65f5d8b7"
+  "hash": "f0589b357ce4cf9e9bd05245f1b68da99cea41bdd94c74e9ad5a0a843ee69d1d"
 }

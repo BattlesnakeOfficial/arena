@@ -158,7 +158,7 @@ test.describe('Battlesnake Validation', () => {
     await expect(authenticatedPage.getByLabel('Visibility')).toHaveValue('private');
   });
 
-  test('server normalizes a bare hostname to https', async ({ authenticatedPage }) => {
+  test('client script normalizes a bare hostname before submit', async ({ authenticatedPage }) => {
     const name = `Bare Host ${Date.now()}`;
     await authenticatedPage.goto('/battlesnakes/new');
     await authenticatedPage.getByLabel('Name').fill(name);
@@ -169,6 +169,19 @@ test.describe('Battlesnake Validation', () => {
     await authenticatedPage.getByRole('button', { name: 'Create Battlesnake' }).click();
     await expect(authenticatedPage).toHaveURL('/battlesnakes');
     await expect(authenticatedPage.getByText('https://mysnake.fly.dev')).toBeVisible();
+  });
+
+  test('server normalizes a bare hostname to https', async ({ authenticatedPage }) => {
+    const name = `Server Bare Host ${Date.now()}`;
+    const res = await authenticatedPage.request.post('/battlesnakes', {
+      form: { name, url: 'server-snake.fly.dev', visibility: 'private' },
+      maxRedirects: 0,
+    });
+
+    expect(res.headers()['location']).toBe('/battlesnakes');
+    await authenticatedPage.goto('/battlesnakes');
+    await expect(authenticatedPage.getByText(name)).toBeVisible();
+    await expect(authenticatedPage.getByText('https://server-snake.fly.dev')).toBeVisible();
   });
 
   test('preserves all submitted values when create exceeds the tag cap', async ({ authenticatedPage }) => {
