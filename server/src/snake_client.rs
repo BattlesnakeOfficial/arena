@@ -14,6 +14,8 @@ use crate::engine::EngineGame;
 use crate::engine::frame::SnakeCustomizations;
 use crate::wire;
 
+pub(crate) const BODY_READ_CAP_BYTES: usize = 64 * 1024;
+
 /// Response from a snake's /move endpoint
 #[derive(Debug, Deserialize)]
 pub struct MoveResponse {
@@ -51,6 +53,40 @@ fn build_request_for_snake(
 /// results judge moves exactly like real games do.
 pub(crate) fn parse_direction(s: &str) -> Option<Direction> {
     s.parse().ok()
+}
+
+/// Read a response body chunk by chunk, stopping at `cap` bytes.
+///
+/// Once the cap is reached the remainder is discarded (we stop reading rather
+/// than draining the connection) and the body is marked as truncated, so a
+/// hostile server streaming hundreds of megabytes cannot exhaust memory.
+pub(crate) async fn read_body_capped(
+    mut response: reqwest::Response,
+    cap: usize,
+) -> Result<String, reqwest::Error> {
+    let mut buf: Vec<u8> = Vec::new();
+    let mut capped = false;
+    while let Some(chunk) = response.chunk().await? {
+        if accumulate_body_chunk(&mut buf, &chunk, cap) {
+            capped = true;
+            break;
+        }
+    }
+    let mut body = String::from_utf8_lossy(&buf).into_owned();
+    if capped {
+        body.push_str("… [body truncated at read cap]");
+    }
+    Ok(body)
+}
+
+/// Append `chunk` to `buf` without letting `buf` grow past `cap` bytes.
+///
+/// Returns `true` once the cap is reached, meaning the caller must stop
+/// reading and discard any remaining input.
+fn accumulate_body_chunk(buf: &mut Vec<u8>, chunk: &[u8], cap: usize) -> bool {
+    let remaining = cap.saturating_sub(buf.len());
+    buf.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+    buf.len() >= cap
 }
 
 /// Build a URL for a snake endpoint, properly handling query parameters
@@ -99,8 +135,8 @@ pub async fn request_move(
     let elapsed = start.elapsed().as_millis() as i64;
 
     match result {
-        Ok(Ok(response)) => {
-            match response.json::<MoveResponse>().await {
+        Ok(Ok(response)) => match read_body_capped(response, BODY_READ_CAP_BYTES).await {
+            Ok(body) => match serde_json::from_str::<MoveResponse>(&body) {
                 Ok(move_response) => {
                     let direction = parse_direction(&move_response.direction)
                         .unwrap_or_else(|| last_direction.unwrap_or(Direction::Up));
@@ -112,23 +148,10 @@ pub async fn request_move(
                         shout: move_response.shout,
                     }
                 }
-                Err(e) => {
-                    // JSON parse error - use fallback
-                    tracing::warn!(
-                        snake_id = %snake_id,
-                        error = %e,
-                        "Failed to parse move response, using fallback"
-                    );
-                    MoveResult {
-                        snake_id: snake_id.to_string(),
-                        direction: last_direction.unwrap_or(Direction::Up),
-                        latency_ms: Some(elapsed),
-                        timed_out: false,
-                        shout: None,
-                    }
-                }
-            }
-        }
+                Err(e) => invalid_move_response(snake_id, last_direction, elapsed, &e),
+            },
+            Err(e) => invalid_move_response(snake_id, last_direction, elapsed, &e),
+        },
         Ok(Err(e)) => {
             // Network error - continue in same direction
             tracing::warn!(
@@ -159,6 +182,26 @@ pub async fn request_move(
                 shout: None,
             }
         }
+    }
+}
+
+fn invalid_move_response(
+    snake_id: &str,
+    last_direction: Option<Direction>,
+    elapsed: i64,
+    error: &dyn std::fmt::Display,
+) -> MoveResult {
+    tracing::warn!(
+        snake_id = %snake_id,
+        error = %error,
+        "Failed to parse move response, using fallback"
+    );
+    MoveResult {
+        snake_id: snake_id.to_string(),
+        direction: last_direction.unwrap_or(Direction::Up),
+        latency_ms: Some(elapsed),
+        timed_out: false,
+        shout: None,
     }
 }
 
@@ -352,8 +395,14 @@ pub async fn request_info(
     timeout: Duration,
 ) -> Option<SnakeInfoResponse> {
     match tokio::time::timeout(timeout, client.get(url).send()).await {
-        Ok(Ok(response)) => match response.json::<SnakeInfoResponse>().await {
-            Ok(info) => Some(info),
+        Ok(Ok(response)) => match read_body_capped(response, BODY_READ_CAP_BYTES).await {
+            Ok(body) => match serde_json::from_str::<SnakeInfoResponse>(&body) {
+                Ok(info) => Some(info),
+                Err(e) => {
+                    tracing::warn!(url = %url, error = %e, "Failed to parse snake info response");
+                    None
+                }
+            },
             Err(e) => {
                 tracing::warn!(url = %url, error = %e, "Failed to parse snake info response");
                 None
@@ -399,6 +448,83 @@ mod tests {
     use super::*;
     use crate::wire;
     use proptest::prelude::*;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn body_chunks_under_cap_accumulate_losslessly() {
+        let mut buf = Vec::new();
+        assert!(!accumulate_body_chunk(&mut buf, b"hello ", 64));
+        assert!(!accumulate_body_chunk(&mut buf, b"world", 64));
+        assert_eq!(buf, b"hello world");
+    }
+
+    #[test]
+    fn body_chunk_exceeding_cap_is_cut_at_cap() {
+        let mut buf = Vec::new();
+        let big = vec![b'x'; BODY_READ_CAP_BYTES * 3];
+        assert!(accumulate_body_chunk(&mut buf, &big, BODY_READ_CAP_BYTES));
+        assert_eq!(buf.len(), BODY_READ_CAP_BYTES);
+    }
+
+    #[test]
+    fn body_chunk_landing_exactly_on_cap_stops_reading() {
+        let mut buf = vec![b'a'; 10];
+        assert!(accumulate_body_chunk(&mut buf, b"bbbbbb", 16));
+        assert_eq!(buf.len(), 16);
+        assert!(accumulate_body_chunk(&mut buf, b"ccc", 16));
+        assert_eq!(buf.len(), 16);
+    }
+
+    #[tokio::test]
+    async fn oversized_info_response_is_rejected() {
+        let server = MockServer::start().await;
+        let body = format!(
+            "{}{{\"color\":\"#ff00ff\"}}",
+            " ".repeat(BODY_READ_CAP_BYTES)
+        );
+        Mock::given(method("GET"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(body))
+            .mount(&server)
+            .await;
+
+        let result = request_info(&Client::new(), &server.uri(), Duration::from_secs(2)).await;
+
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn oversized_move_response_uses_fallback() {
+        let server = MockServer::start().await;
+        let body = format!(
+            "{}{{\"move\":\"up\",\"shout\":\"oops\"}}",
+            " ".repeat(BODY_READ_CAP_BYTES)
+        );
+        Mock::given(method("POST"))
+            .and(path("/move"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(body))
+            .mount(&server)
+            .await;
+        let game = create_test_engine_game_with_snakes(vec!["snake-1"]);
+
+        let result = request_move(
+            &Client::new(),
+            &server.uri(),
+            &game,
+            "snake-1",
+            Duration::from_secs(2),
+            Some(Direction::Left),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .await;
+
+        assert_eq!(result.direction, Direction::Left);
+        assert!(result.shout.is_none());
+        assert!(!result.timed_out);
+        assert!(result.latency_ms.is_some());
+    }
 
     #[test]
     fn test_build_endpoint_url_simple() {
