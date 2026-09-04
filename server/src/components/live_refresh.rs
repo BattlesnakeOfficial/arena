@@ -2,7 +2,7 @@ use maud::{Markup, PreEscaped, html};
 
 pub(crate) const LIVE_PAGE_REFRESH_JS: &str = r#"(() => {
   const script = document.currentScript;
-  const fallback = script.nextElementSibling;
+  const fallback = script.previousElementSibling;
   const revealFallback = () => { fallback.hidden = false; };
   const intervalMs = Number(script.dataset.intervalMs);
   const maxTicks = Number(script.dataset.maxTicks);
@@ -51,15 +51,15 @@ pub(crate) struct LiveRefreshConfig<'a> {
 
 pub(crate) fn live_page_refresh(config: &LiveRefreshConfig<'_>) -> Markup {
     html! {
+        div class="live-refresh-expired" data-live-page-refresh-expired hidden {
+            "Automatic refresh stopped. "
+            a href="" { "Refresh" }
+        }
         script data-live-page-refresh
             data-interval-ms=(config.interval_ms)
             data-max-ticks=(config.max_ticks)
             data-state-key=(config.state_key) {
             (PreEscaped(LIVE_PAGE_REFRESH_JS))
-        }
-        div data-live-page-refresh-expired hidden {
-            "Automatic refresh stopped. "
-            a href="" { "Refresh" }
         }
     }
 }
@@ -78,6 +78,9 @@ mod tests {
         .into_string();
 
         let script_body = markup
+            .split_once("<script ")
+            .unwrap()
+            .1
             .split_once('>')
             .unwrap()
             .1
@@ -87,6 +90,10 @@ mod tests {
         assert_eq!(script_body, LIVE_PAGE_REFRESH_JS);
         assert!(markup.contains("data-live-page-refresh"));
         assert!(markup.contains("data-live-page-refresh-expired"));
+        assert!(
+            markup.find("data-live-page-refresh-expired").unwrap()
+                < markup.find("<script data-live-page-refresh").unwrap()
+        );
         assert!(markup.contains("data-interval-ms=\"5000\""));
         assert!(markup.contains("data-max-ticks=\"120\""));
         assert!(markup.contains("state&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;"));

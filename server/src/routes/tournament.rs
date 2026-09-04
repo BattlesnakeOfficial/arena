@@ -1116,26 +1116,22 @@ pub async fn show_tournament(
         .as_ref()
         .map_or(&[][..], |(matches, _, _)| matches.as_slice());
     let refresh_tournament = should_refresh_tournament(&t, matches, watch_round);
-    let refresh_state_key = format!(
-        "tournament:{}:{}:{}:{}:{}",
-        t.current_round,
-        matches
-            .iter()
-            .filter(|tournament_match| tournament_match.status == MatchStatus::Scheduled)
-            .count(),
-        matches
-            .iter()
-            .filter(|tournament_match| tournament_match.status == MatchStatus::InProgress)
-            .count(),
-        matches
-            .iter()
-            .filter(|tournament_match| tournament_match.status == MatchStatus::Completed)
-            .count(),
-        matches
-            .iter()
-            .filter(|tournament_match| tournament_match.status == MatchStatus::Canceled)
-            .count(),
-    );
+    let refresh_state_key = refresh_tournament.then(|| {
+        let counts = matches.iter().fold([0; 4], |mut counts, tournament_match| {
+            let index = match tournament_match.status {
+                MatchStatus::Scheduled => 0,
+                MatchStatus::InProgress => 1,
+                MatchStatus::Completed => 2,
+                MatchStatus::Canceled => 3,
+            };
+            counts[index] += 1;
+            counts
+        });
+        format!(
+            "tournament:{}:{}:{}:{}:{}",
+            t.current_round, counts[0], counts[1], counts[2], counts[3]
+        )
+    });
 
     Ok(page_factory.create_page(
         format!("Tournament: {}", t.name),
@@ -1144,11 +1140,11 @@ pub async fn show_tournament(
                 a href="/tournaments" { "Tournaments" }
                 " / " (t.name)
             }
-            @if refresh_tournament {
+            @if let Some(refresh_state_key) = &refresh_state_key {
                 (live_page_refresh(&LiveRefreshConfig {
                     interval_ms: 5_000,
                     max_ticks: 120,
-                    state_key: &refresh_state_key,
+                    state_key: refresh_state_key,
                 }))
             }
             div class="page-head" {
