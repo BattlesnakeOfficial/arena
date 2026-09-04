@@ -18,7 +18,7 @@ use crate::{
     errors::{ServerResult, WithRedirect},
     models::snake_health_status,
     models::{
-        battlesnake::{self, Visibility},
+        battlesnake,
         leaderboard::{self, MIN_GAMES_FOR_RANKING},
         tag, user,
     },
@@ -52,7 +52,7 @@ pub async fn list_leaderboards(
             div class="page-head" {
                 h1 { "Leaderboards" }
                 div class="sub" {
-                    "Ranked ladders, one per game mode. Join with a public snake and the matchmaker takes it from there."
+                    "Ranked ladders, one per game mode. Join with one of your snakes and the matchmaker takes it from there."
                 }
             }
 
@@ -245,7 +245,7 @@ pub async fn show_leaderboard(
             div class="page-head" {
                 h1 { (lb.name) }
                 div class="sub" {
-                    "Ranked play — register a public snake, join the ladder, and the "
+                    "Ranked play — register a snake, join the ladder, and the "
                     "matchmaker starts new games every few minutes."
                 }
             }
@@ -493,9 +493,7 @@ pub async fn show_leaderboard(
                                 }
                             }
 
-                            @let joinable: Vec<_> = user_snakes.iter()
-                                .filter(|s| s.visibility == Visibility::Public)
-                                .collect();
+                            @let joinable: Vec<_> = user_snakes.iter().collect();
                             @if !joinable.is_empty() {
                                 form class="join-form" action={"/leaderboards/"(leaderboard_id)"/join"} method="post" {
                                     select name="battlesnake_id" aria-label="Snake to join with" {
@@ -507,7 +505,7 @@ pub async fn show_leaderboard(
                                 }
                             } @else if user_entries.is_empty() {
                                 p class="railp" {
-                                    "You need a public snake to join. "
+                                    "Register a snake to join. "
                                     a href="/battlesnakes/new" style="color:var(--pink)" { "Register one" }
                                 }
                             }
@@ -994,7 +992,7 @@ pub async fn join_leaderboard(
         return Ok(redirect);
     }
 
-    // Verify snake belongs to user and is public
+    // Verify snake belongs to user
     let snake = battlesnake::get_battlesnake_by_id(&state.db, form.battlesnake_id)
         .await
         .wrap_err("Failed to fetch battlesnake")
@@ -1011,19 +1009,6 @@ pub async fn join_leaderboard(
             color_eyre::eyre::eyre!("You don't own this battlesnake"),
             redirect,
         ));
-    }
-
-    if snake.visibility != Visibility::Public {
-        flasher
-            .error(format!(
-                "{} is private — only public snakes can join leaderboards. \
-                 Make it public on its edit page first.",
-                snake.name
-            ))
-            .await
-            .wrap_err("Failed to flash")
-            .with_redirect(redirect.clone())?;
-        return Ok(redirect);
     }
 
     // Opt-in (or resume if paused)

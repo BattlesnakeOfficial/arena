@@ -208,7 +208,7 @@ test.describe('Leaderboard Pages', () => {
     await expect(authenticatedPage.getByText('Active')).toBeVisible();
   });
 
-  test('private snakes cannot join leaderboard', async ({ authenticatedPage }) => {
+  test('private snakes can join leaderboard', async ({ authenticatedPage }) => {
     const snakeName = `LB Private Snake ${Date.now()}`;
 
     // Create a private battlesnake
@@ -224,18 +224,19 @@ test.describe('Leaderboard Pages', () => {
     );
     const leaderboardId = leaderboards[0].leaderboard_id;
 
-    // Visit leaderboard detail page - private snake should not appear in the join dropdown
+    // Visit leaderboard detail page - private snake should appear in the join dropdown
     await authenticatedPage.goto(`/leaderboards/${leaderboardId}`);
 
-    // The join form only shows public snakes, so the private snake name should NOT
-    // appear as an option. The join button might not be visible at all if no public snakes exist.
-    // We verify by checking the snake name is not in a select option.
-    const selectOptions = authenticatedPage.locator('select[name="battlesnake_id"] option');
-    const count = await selectOptions.count();
-    for (let i = 0; i < count; i++) {
-      const text = await selectOptions.nth(i).textContent();
-      expect(text).not.toBe(snakeName);
-    }
+    // Visibility only controls directory/search listing, not leaderboard entry —
+    // the owner's private snake is joinable just like a public one.
+    const joinSelect = authenticatedPage.locator('select[name="battlesnake_id"]');
+    await expect(joinSelect.locator('option', { hasText: snakeName })).toHaveCount(1);
+
+    await authenticatedPage.getByRole('button', { name: 'Join' }).click();
+
+    await expect(
+      authenticatedPage.locator('.flash-message[data-flash-type="success"]')
+    ).toContainText('matchmaking rotation');
   });
 
   test('placement entries show games remaining', async ({ authenticatedPage }) => {
@@ -376,7 +377,7 @@ test.describe('Leaderboard API', () => {
     expect(entries[0].disabled_at).not.toBeNull();
   });
 
-  test('cannot opt-in a private snake via API', async ({ authenticatedPage }) => {
+  test('can opt-in a private snake via API', async ({ authenticatedPage }) => {
     const snakeName = `API LB Private Snake ${Date.now()}`;
 
     // Create a private battlesnake
@@ -401,9 +402,10 @@ test.describe('Leaderboard API', () => {
       data: { battlesnake_id: snakeId }
     });
 
-    expect(response.status()).toBe(400);
-    const body = await response.text();
-    expect(body).toContain('public');
+    expect(response.status()).toBe(201);
+    const body = await response.json();
+    expect(body.battlesnake_id).toBe(snakeId);
+    expect(body.active).toBe(true);
   });
 
   test('cannot opt-in another user\'s snake via API', async ({ authenticatedPage, loginAsUser }) => {
