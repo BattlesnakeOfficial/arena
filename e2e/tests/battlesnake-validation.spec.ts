@@ -274,4 +274,46 @@ test.describe('Battlesnake Validation', () => {
     const after = await query<{ name: string; url: string }>('SELECT name, url FROM battlesnakes WHERE battlesnake_id = $1', [id]);
     expect(after[0]).toEqual({ name: legacyName, url: 'https://example.com/legacy-moved' });
   });
+
+  // A pending form draft is only cleared by a subsequent GET to the matching
+  // form (session::take_pending_form_data), never by the success path of
+  // create_battlesnake/update_battlesnake. Two direct POSTs to the same
+  // target with no intervening GET (a real pattern: manual-redirect clients,
+  // retried submissions) leave the failed draft in place, so the NEXT GET
+  // resurrects stale, already-superseded rejected input instead of the
+  // value that was actually just saved -- silently, with no error flash.
+  test('successful edit does not resurrect a stale pending draft on the next visit', async ({ authenticatedPage }) => {
+    const savedName = `Stale Draft Snake ${Date.now()}`;
+    await authenticatedPage.goto('/battlesnakes/new');
+    await authenticatedPage.getByLabel('Name').fill(savedName);
+    await authenticatedPage.getByLabel('URL').fill('https://example.com/stale-draft-initial');
+    await authenticatedPage.getByRole('button', { name: 'Create Battlesnake' }).click();
+
+    const snakeRow = authenticatedPage.locator('tr', { hasText: savedName });
+    await snakeRow.getByRole('link', { name: 'Edit', exact: true }).click();
+    const editUrl = authenticatedPage.url();
+    const battlesnakeId = editUrl.match(/battlesnakes\/([^/]+)\/edit/)?.[1];
+    const updatePath = `/battlesnakes/${battlesnakeId}/update`;
+
+    // A malformed URL fails validation and parks a draft targeted at this
+    // snake. Don't follow the redirect -- nothing consumes the draft yet.
+    await authenticatedPage.request.post(updatePath, {
+      form: { name: savedName, url: 'not a url', visibility: 'private' },
+      maxRedirects: 0,
+    });
+
+    // A second, valid submission succeeds, again without an intervening GET
+    // to the edit page.
+    const goodUrl = 'https://example.com/stale-draft-good-final';
+    await authenticatedPage.request.post(updatePath, {
+      form: { name: savedName, url: goodUrl, visibility: 'public' },
+      maxRedirects: 0,
+    });
+
+    // Visiting the edit page now must show what was actually saved, not the
+    // rejected draft from the failed attempt that preceded it.
+    await authenticatedPage.goto(editUrl);
+    await expect(authenticatedPage.getByLabel('URL')).toHaveValue(goodUrl);
+    await expect(authenticatedPage.getByLabel('Visibility')).toHaveValue('public');
+  });
 });
