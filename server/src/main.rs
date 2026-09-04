@@ -50,14 +50,9 @@ mod components {
     pub mod snake_tags;
 }
 
-/// Public origin Eyes uses to resolve root-relative uptime monitor targets.
-/// Hardcoded (not `config.base_url`) because prod Cloud Run does not set
-/// `BASE_URL` yet, and the config fallback (`http://localhost:3000`) would
-/// fail Eyes' monitor-target validation and silently disarm the monitor.
-const ARENA_BASE_URL: &str = "https://arena.battlesnake.com";
-
 /// Build the Eyes boot manifest: job/cron registries plus the HTTP uptime
-/// monitor declarations Eyes should start checking.
+/// monitor declarations Eyes should start checking. Eyes remains pinned to
+/// the production origin rather than runtime configuration.
 fn eyes_boot_manifest(
     cron_registry: &cja::cron::CronRegistry<AppState>,
 ) -> cja::eyes_manifest::AppManifest {
@@ -66,7 +61,7 @@ fn eyes_boot_manifest(
         option_env!("VERGEN_GIT_SHA"),
         Some(cron_registry),
     )
-    .base_url(ARENA_BASE_URL)
+    .base_url(config::ARENA_PUBLIC_BASE_URL)
     .monitors(vec![cja::eyes_manifest::HttpMonitor::new(
         "health", "/health",
     )])
@@ -259,7 +254,10 @@ mod tests {
         let registry = cron::cron_registry();
         let manifest = eyes_boot_manifest(&registry);
 
-        assert_eq!(manifest.base_url.as_deref(), Some(ARENA_BASE_URL));
+        assert_eq!(
+            manifest.base_url.as_deref(),
+            Some(config::ARENA_PUBLIC_BASE_URL)
+        );
 
         let monitors = manifest.monitors.expect("monitors declared");
         assert_eq!(monitors.len(), 1);

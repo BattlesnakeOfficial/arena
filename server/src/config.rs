@@ -15,6 +15,9 @@ use cja::jobs::worker::{DEFAULT_LOCK_TIMEOUT, DEFAULT_MAX_RETRIES};
 use crate::email::MailgunConfig;
 use crate::github::auth::GitHubOAuthConfig;
 
+pub const LOCAL_BASE_URL: &str = "http://localhost:3000";
+pub const ARENA_PUBLIC_BASE_URL: &str = "https://arena.battlesnake.com";
+
 /// Background job worker tuning.
 #[derive(Clone, Debug)]
 pub struct JobConfig {
@@ -121,18 +124,29 @@ fn non_empty(value: Option<String>) -> Option<String> {
     value.filter(|v| !v.is_empty())
 }
 
+fn resolve_base_url(configured: Option<String>, gcp_logging: bool) -> String {
+    non_empty(configured).unwrap_or_else(|| {
+        if gcp_logging {
+            ARENA_PUBLIC_BASE_URL
+        } else {
+            LOCAL_BASE_URL
+        }
+        .to_string()
+    })
+}
+
 impl AppConfig {
     /// Read all configuration from the environment. `DATABASE_URL` is the
     /// only hard requirement; everything else has a default or is optional.
     pub fn from_env() -> cja::Result<Self> {
         let database_url = std::env::var("DATABASE_URL")
             .map_err(|_| cja::color_eyre::eyre::eyre!("DATABASE_URL must be set"))?;
+        let gcp_logging = std::env::var("GCP_LOGGING").is_ok();
 
         Ok(Self {
             database_url,
             pg_max_connections: parse_env("ARENA_PG_MAX_CONNECTIONS", 5),
-            base_url: std::env::var("BASE_URL")
-                .unwrap_or_else(|_| "http://localhost:3000".to_string()),
+            base_url: resolve_base_url(optional_env("BASE_URL"), gcp_logging),
 
             engine_database_url: optional_env("ENGINE_DATABASE_URL"),
             gcs_bucket: optional_env("GCS_BUCKET"),
@@ -157,7 +171,7 @@ impl AppConfig {
 
             tokio_worker_multiplier: parse_env("ARENA_TOKIO_WORKER_MULTIPLIER", 2),
             home_feed_cache_secs: parse_env("HOME_FEED_CACHE_SECS", 30),
-            gcp_logging: std::env::var("GCP_LOGGING").is_ok(),
+            gcp_logging,
             gcp_project_id: optional_env("GCP_PROJECT_ID"),
             rust_log: std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
             eyes: eyes_config_from_env()?,
@@ -187,7 +201,7 @@ impl AppConfig {
         Self {
             database_url: String::new(),
             pg_max_connections: 5,
-            base_url: "http://localhost:3000".to_string(),
+            base_url: LOCAL_BASE_URL.to_string(),
             engine_database_url: None,
             gcs_bucket: None,
             github: None,
@@ -301,6 +315,23 @@ mod tests {
         assert_eq!(non_empty(None), None);
         assert_eq!(non_empty(Some(String::new())), None);
         assert_eq!(non_empty(Some("x".to_string())), Some("x".to_string()));
+    }
+
+    #[test]
+    fn base_url_resolution_honors_explicit_values_and_environment_defaults() {
+        for gcp_logging in [false, true] {
+            assert_eq!(
+                resolve_base_url(Some("https://example.com".to_string()), gcp_logging),
+                "https://example.com"
+            );
+        }
+        assert_eq!(resolve_base_url(None, false), LOCAL_BASE_URL);
+        assert_eq!(resolve_base_url(None, true), ARENA_PUBLIC_BASE_URL);
+        assert_eq!(resolve_base_url(Some(String::new()), false), LOCAL_BASE_URL);
+        assert_eq!(
+            resolve_base_url(Some(String::new()), true),
+            ARENA_PUBLIC_BASE_URL
+        );
     }
 
     #[test]

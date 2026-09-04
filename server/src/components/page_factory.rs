@@ -20,6 +20,8 @@ pub struct PageFactory {
     pub user: Option<User>,
     /// The request path, used for nav active states
     pub path: String,
+    /// Configured public origin for canonical and social image URLs
+    pub base_url: String,
 }
 
 impl PageFactory {
@@ -57,6 +59,7 @@ impl PageFactory {
             flash_type: self.flash.flash_type,
             user: self.user,
             current_path: self.path,
+            base_url: self.base_url,
             theater,
             description: None,
         }
@@ -73,6 +76,11 @@ impl FromRequestParts<AppState> for PageFactory {
         let path = parts.uri.path().to_string();
         let flash = Flash::from_request_parts(parts, state).await?;
         let OptionalUser(user) = OptionalUser::from_request_parts(parts, state).await?;
-        Ok(Self { flash, user, path })
+        Ok(Self {
+            flash,
+            user,
+            path,
+            base_url: state.config.base_url.clone(),
+        })
     }
 }

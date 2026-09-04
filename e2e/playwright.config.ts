@@ -48,6 +48,7 @@ export default defineConfig({
         RUST_BACKTRACE: '1',
         RUST_LOG: 'arena=debug',
         DATABASE_URL: DATABASE_URL,
+        BASE_URL: BASE_URL,
         // Configure app to use mock OAuth server
         GITHUB_OAUTH_URL: `${MOCK_GITHUB_URL}/login/oauth/authorize`,
         GITHUB_TOKEN_URL: `${MOCK_GITHUB_URL}/login/oauth/access_token`,

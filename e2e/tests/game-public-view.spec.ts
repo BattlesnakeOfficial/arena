@@ -144,18 +144,17 @@ test.describe('Public Game Viewing', () => {
     await expect(meta.getByText('Cause of Death', { exact: true })).not.toBeVisible();
   });
 
-  test('finished game page shows an Export GIF link pointing at the exporter', async ({ page }) => {
+  test('finished game page shows an Export GIF link pointing at the exporter', async ({ page, baseURL }) => {
     const gameId = await createGameViaDb();
 
     await page.goto(`/games/${gameId}`);
 
-    // The e2e server env does not set BASE_URL, so the app falls back to its
-    // default origin — the exporter href embeds that default.
+    // The exporter uses the explicitly configured public origin.
     const link = page.getByRole('link', { name: 'Export GIF' });
     await expect(link).toHaveCount(1);
     await expect(link).toHaveAttribute(
       'href',
-      `https://exporter.battlesnake.com/games/${gameId}/gif?engine_url=http://localhost:3000/api`
+      `https://exporter.battlesnake.com/games/${gameId}/gif?engine_url=${baseURL}/api`
     );
     await expect(link).toHaveAttribute('target', '_blank');
     await expect(link).toHaveAttribute('rel', 'noopener');
