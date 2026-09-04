@@ -1,6 +1,9 @@
 use maud::{DOCTYPE, Markup, PreEscaped, Render, html};
 
-use crate::{config::LOCAL_BASE_URL, models::user::User, static_assets::asset_url};
+use crate::{
+    components::avatar::user_avatar, config::LOCAL_BASE_URL, models::user::User,
+    static_assets::asset_url,
+};
 
 /// Resolves the two theme axes before first paint so there is no flash of
 /// the wrong theme. Mirrors the logic in /static/theme.js: html data
@@ -207,10 +210,8 @@ impl Page {
                 }
                 @if let Some(user) = &self.user {
                     a class="nav-user" href="/me" {
-                        @if let Some(avatar) = &user.github_avatar_url {
-                            img src=(avatar) alt="" width="34" height="34";
-                        }
-                        span { (user.display_name.as_deref().unwrap_or(&user.github_login)) }
+                        (user_avatar(user.github_avatar_url.as_deref(), &user.github_login, "nav-avatar"))
+                        span class="nav-user-name" { (user.display_name.as_deref().unwrap_or(&user.github_login)) }
                     }
                 } @else {
                     a class="btn solid" href="/auth/github" { "Sign in with GitHub" }

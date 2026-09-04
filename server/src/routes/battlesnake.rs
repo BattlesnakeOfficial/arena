@@ -9,7 +9,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{
-    components::{page_factory::PageFactory, snake_tags::snake_tag_chips},
+    components::{avatar::user_avatar, page_factory::PageFactory, snake_tags::snake_tag_chips},
     customizations::chip_color,
     errors::{ServerResult, WithStatus},
     models::battlesnake::{self, CreateBattlesnake, UpdateBattlesnake, Visibility},
@@ -996,10 +996,6 @@ pub async fn view_battlesnake_profile(
         .as_ref()
         .map(|o| o.github_login.clone())
         .unwrap_or_else(|| "Unknown User".to_string());
-    let owner_avatar = owner
-        .as_ref()
-        .and_then(|o| o.github_avatar_url.clone())
-        .unwrap_or_default();
     let owner_pronouns = owner
         .as_ref()
         .map(|o| o.pronouns.clone())
@@ -1046,7 +1042,11 @@ pub async fn view_battlesnake_profile(
                             div {
                                 h1 class="mb-2" { (snake.name) }
                                 div class="d-flex align-items-center mb-2" {
-                                    img src=(owner_avatar) alt="Owner avatar" style="width: 24px; height: 24px; border-radius: 50%; margin-right: 8px;" {}
+                                    (user_avatar(
+                                        owner.as_ref().and_then(|value| value.github_avatar_url.as_deref()),
+                                        &owner_login,
+                                        "owner-avatar",
+                                    ))
                                     @if owner.is_some() {
                                         a href={"/users/"(owner_login)} { (owner_login) }
                                     } @else {

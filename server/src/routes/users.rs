@@ -8,7 +8,9 @@ use maud::{Markup, html};
 use uuid::Uuid;
 
 use crate::{
-    components::{page::Page, page_factory::PageFactory, snake_tags::snake_tag_chips},
+    components::{
+        avatar::user_avatar, page::Page, page_factory::PageFactory, snake_tags::snake_tag_chips,
+    },
     errors::{ServerResult, WithStatus},
     models::{
         battlesnake::{self, Visibility},
@@ -115,7 +117,7 @@ async fn render_user_profile(
         name.clone(),
         Box::new(html! {
             header class="profile-head" {
-                img class="avatar" src=(user.github_avatar_url.clone().unwrap_or_default()) alt="";
+                (user_avatar(user.github_avatar_url.as_deref(), &user.github_login, "avatar"))
                 div class="who" {
                     h1 { (name) }
                     div class="meta" {
