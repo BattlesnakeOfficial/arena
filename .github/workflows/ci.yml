@@ -93,12 +93,10 @@ jobs:
           # and this repo is public.
           #
           # --update-env-vars *merges*; --set-env-vars would wipe DATABASE_URL,
-          # GCP_LOGGING and friends off the service. Only pass the flag when
-          # both secrets are present: arena treats an empty EYES_* as unset and
-          # runs with Eyes off, so a fork or an unconfigured repo still deploys.
-          eyes_args=()
+          # GCP_LOGGING and friends off the service.
+          update_env_vars="BASE_URL=https://arena.battlesnake.com"
           if [ -n "$EYES_ORG_ID" ] && [ -n "$EYES_APP_ID" ]; then
-            eyes_args+=(--update-env-vars "EYES_ORG_ID=$EYES_ORG_ID,EYES_APP_ID=$EYES_APP_ID")
+            update_env_vars="$update_env_vars,EYES_ORG_ID=$EYES_ORG_ID,EYES_APP_ID=$EYES_APP_ID"
           else
             echo "::warning::EYES_ORG_ID/EYES_APP_ID not set -- deploying without Eyes telemetry"
           fi
@@ -106,4 +104,4 @@ jobs:
           gcloud run services update ${{ secrets.GCP_CLOUD_RUN_SERVICE }} \
             --region ${{ secrets.GCP_REGION }} \
             --image ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ secrets.GCP_ARTIFACT_REGISTRY }}/arena:${{ github.sha }} \
-            "${eyes_args[@]}"
+            --update-env-vars "$update_env_vars"

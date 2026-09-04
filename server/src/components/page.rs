@@ -1,6 +1,6 @@
 use maud::{DOCTYPE, Markup, PreEscaped, Render, html};
 
-use crate::{models::user::User, static_assets::asset_url};
+use crate::{config::LOCAL_BASE_URL, models::user::User, static_assets::asset_url};
 
 /// Resolves the two theme axes before first paint so there is no flash of
 /// the wrong theme. Mirrors the logic in /static/theme.js: html data
@@ -33,6 +33,7 @@ pub struct Page {
     pub user: Option<User>,
     /// Request path, used to highlight the active nav link.
     pub current_path: String,
+    pub base_url: String,
     /// Theater pages (game live/replay) resolve their theme from the
     /// theater axis instead of the site axis.
     pub theater: bool,
@@ -50,6 +51,7 @@ impl Page {
             flash_type: None,
             user: None,
             current_path: "/".to_string(),
+            base_url: LOCAL_BASE_URL.to_string(),
             theater: false,
             description: None,
         }
@@ -64,6 +66,22 @@ impl Page {
 
     fn description(&self) -> &str {
         self.description.as_deref().unwrap_or(DEFAULT_DESCRIPTION)
+    }
+
+    fn canonical_url(&self) -> String {
+        format!(
+            "{}{}",
+            self.base_url.trim_end_matches('/'),
+            self.current_path
+        )
+    }
+
+    fn social_image_url(&self) -> String {
+        format!(
+            "{}{}",
+            self.base_url.trim_end_matches('/'),
+            asset_url("og-card.png")
+        )
     }
 
     /// Server-rendered initial theme, when it can be known without JS.
@@ -236,7 +254,15 @@ impl Render for Page {
                     meta property="og:title" content=(self.title);
                     meta property="og:type" content="website";
                     meta property="og:description" content=(self.description());
-                    meta name="twitter:card" content="summary";
+                    meta property="og:url" content=(self.canonical_url());
+                    meta property="og:image" content=(self.social_image_url());
+                    meta property="og:image:type" content="image/png";
+                    meta property="og:image:width" content="1200";
+                    meta property="og:image:height" content="630";
+                    meta property="og:image:alt" content="Battlesnake Arena";
+                    meta name="twitter:card" content="summary_large_image";
+                    meta name="twitter:image" content=(self.social_image_url());
+                    meta name="twitter:image:alt" content="Battlesnake Arena";
                     link rel="preconnect" href="https://fonts.googleapis.com";
                     link rel="preconnect" href="https://fonts.gstatic.com" crossorigin;
                     link href=(GOOGLE_FONTS_HREF) rel="stylesheet";
@@ -290,14 +316,36 @@ mod tests {
 
     #[test]
     fn head_contains_baseline_og_tags() {
-        let html = test_page().render().into_string();
+        let mut page = test_page();
+        page.base_url = "https://arena.battlesnake.com/".to_string();
+        page.current_path = "/games/example".to_string();
+        let html = page.render().into_string();
         assert!(html.contains(r#"<meta property="og:site_name" content="Battlesnake Arena">"#));
         assert!(html.contains(r#"<meta property="og:title" content="Test Title">"#));
         assert!(html.contains(r#"<meta property="og:type" content="website">"#));
         assert!(html.contains(&format!(
             r#"<meta property="og:description" content="{DEFAULT_DESCRIPTION}">"#
         )));
-        assert!(html.contains(r#"<meta name="twitter:card" content="summary">"#));
+        let image_url = format!("https://arena.battlesnake.com{}", asset_url("og-card.png"));
+        let expected = [
+            (
+                r#"property="og:url""#,
+                "https://arena.battlesnake.com/games/example",
+            ),
+            (r#"property="og:image""#, image_url.as_str()),
+            (r#"property="og:image:type""#, "image/png"),
+            (r#"property="og:image:width""#, "1200"),
+            (r#"property="og:image:height""#, "630"),
+            (r#"property="og:image:alt""#, "Battlesnake Arena"),
+            (r#"name="twitter:card""#, "summary_large_image"),
+            (r#"name="twitter:image""#, image_url.as_str()),
+            (r#"name="twitter:image:alt""#, "Battlesnake Arena"),
+        ];
+        for (selector, value) in expected {
+            assert_eq!(html.matches(selector).count(), 1, "{selector}");
+            assert!(html.contains(&format!(r#"{selector} content="{value}""#)));
+        }
+        assert!(!html.contains("arena.battlesnake.com//"));
         assert!(html.contains(&format!(
             r#"<meta name="description" content="{DEFAULT_DESCRIPTION}">"#
         )));
@@ -342,5 +390,19 @@ mod tests {
             .into_string();
         assert!(html.contains("&lt;script&gt;&quot;quotes&quot; &amp; snakes&lt;/script&gt;"));
         assert!(!html.contains(r#"<script>"quotes""#));
+    }
+
+    #[test]
+    fn og_card_generator_literals_match_page_constants() {
+        let generator = include_str!("../../../e2e/scripts/generate-og-card.mjs");
+        for (name, value) in [
+            ("GOOGLE_FONTS_HREF", GOOGLE_FONTS_HREF),
+            ("DEFAULT_DESCRIPTION", DEFAULT_DESCRIPTION),
+        ] {
+            assert!(
+                generator.contains(value),
+                "{name} changed; update the card generator when the Rust constants change"
+            );
+        }
     }
 }

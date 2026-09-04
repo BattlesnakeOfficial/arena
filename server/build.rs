@@ -4,6 +4,7 @@ use vergen::EmitBuilder;
 
 fn main() -> Result<(), Box<dyn Error>> {
     println!("cargo:rerun-if-changed=migrations");
+    println!("cargo:rerun-if-changed=static");
 
     EmitBuilder::builder()
         .all_build()
