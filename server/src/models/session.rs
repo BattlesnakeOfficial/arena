@@ -563,3 +563,73 @@ pub async fn clean_expired_sessions(pool: &PgPool) -> cja::Result<u64> {
 
     Ok(result.rows_affected())
 }
+
+#[cfg(test)]
+mod pending_form_data_tests {
+    use super::{
+        associate_user_with_session, create_session, disassociate_user_from_session,
+        set_error_flash_with_form_data, take_pending_form_data,
+    };
+    use sqlx::PgPool;
+    use uuid::Uuid;
+
+    async fn seed_user(pool: &PgPool, github_id: i64, login: &str) -> cja::Result<Uuid> {
+        let user_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO users (external_github_id, github_login, github_access_token)
+             VALUES ($1, $2, 'test-token')
+             RETURNING user_id",
+        )
+        .bind(github_id)
+        .bind(login)
+        .fetch_one(pool)
+        .await?;
+
+        Ok(user_id)
+    }
+
+    /// A logout does not delete the session row or the session cookie: it only
+    /// nulls `user_id`, and the next login re-associates the SAME row. A form
+    /// draft written by the user who just logged out must therefore not survive
+    /// into the next user's session, or a shared browser hands one person's
+    /// unsaved snake name/URL to the next person who signs in.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn logout_clears_the_previous_users_form_draft(pool: PgPool) -> cja::Result<()> {
+        let alice = seed_user(&pool, 9101, "alice").await?;
+        let bob = seed_user(&pool, 9102, "bob").await?;
+
+        let session = create_session(&pool).await?;
+        associate_user_with_session(&pool, session.session_id, alice).await?;
+
+        // Alice's create form fails validation, so her input is parked on the session.
+        set_error_flash_with_form_data(
+            &pool,
+            session.session_id,
+            "You already have a battlesnake named Secret Snake".to_string(),
+            serde_json::json!({
+                "target": "New",
+                "form": {
+                    "name": "Secret Snake",
+                    "url": "https://alice-private.example.com",
+                    "visibility": "private",
+                    "tag_ids": []
+                }
+            }),
+        )
+        .await?;
+
+        // Alice logs out without ever revisiting the form, then Bob signs in on
+        // the same browser and lands on the same session row.
+        disassociate_user_from_session(&pool, session.session_id).await?;
+        associate_user_with_session(&pool, session.session_id, bob).await?;
+
+        let leaked = take_pending_form_data(&pool, session.session_id).await?;
+
+        assert_eq!(
+            leaked, None,
+            "logout left the previous user's battlesnake form draft on the reused \
+             session row; it will prefill the next user's /battlesnakes/new form"
+        );
+
+        Ok(())
+    }
+}
