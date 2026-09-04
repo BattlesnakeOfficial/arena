@@ -12,7 +12,11 @@ use maud::{Markup, html};
 use uuid::Uuid;
 
 use crate::{
-    components::{page_factory::PageFactory, snake_tags::snake_tag_chips},
+    components::{
+        live_refresh::{LiveRefreshConfig, live_page_refresh},
+        page_factory::PageFactory,
+        snake_tags::snake_tag_chips,
+    },
     cron::MATCHMAKER_INTERVAL_SECS,
     customizations::chip_color,
     errors::{ServerResult, WithRedirect},
@@ -296,6 +300,22 @@ pub async fn show_leaderboard(
                         }
                     }
                 }
+            }
+
+            @if status.games_in_progress > 0 {
+                (live_page_refresh(&LiveRefreshConfig {
+                    interval_ms: 30_000,
+                    max_ticks: 120,
+                    state_key: &format!(
+                        "leaderboard:{}:{}:{}",
+                        status.total_games,
+                        status.games_in_progress,
+                        status.last_game_created_at.map_or_else(
+                            || "none".to_string(),
+                            |timestamp| timestamp.timestamp().to_string(),
+                        ),
+                    ),
+                }))
             }
 
             div class="grid" {
