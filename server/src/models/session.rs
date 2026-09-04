@@ -143,6 +143,65 @@ pub async fn set_flash_message(
     Ok(session)
 }
 
+/// Set an error flash and its associated form draft atomically.
+pub async fn set_error_flash_with_form_data(
+    pool: &PgPool,
+    session_id: Uuid,
+    message: String,
+    form_data: serde_json::Value,
+) -> cja::Result<()> {
+    let result = sqlx::query!(
+        r#"
+        UPDATE sessions
+        SET flash_message = $2,
+            flash_type = $3,
+            pending_form_data = $4
+        WHERE session_id = $1
+        "#,
+        session_id,
+        message,
+        FLASH_TYPE_ERROR,
+        form_data
+    )
+    .execute(pool)
+    .await
+    .wrap_err("Failed to set error flash and form data for session")?;
+
+    if result.rows_affected() == 0 {
+        return Err(eyre!("Session {session_id} not found"));
+    }
+
+    Ok(())
+}
+
+/// Take and clear a pending form draft in one locked update.
+pub async fn take_pending_form_data(
+    pool: &PgPool,
+    session_id: Uuid,
+) -> cja::Result<Option<serde_json::Value>> {
+    let row = sqlx::query_scalar!(
+        r#"
+        WITH pending AS (
+            SELECT pending_form_data
+            FROM sessions
+            WHERE session_id = $1
+            FOR UPDATE
+        )
+        UPDATE sessions s
+        SET pending_form_data = NULL
+        FROM pending
+        WHERE s.session_id = $1
+        RETURNING pending.pending_form_data AS "pending_form_data?"
+        "#,
+        session_id
+    )
+    .fetch_optional(pool)
+    .await
+    .wrap_err("Failed to take pending form data for session")?;
+
+    Ok(row.flatten())
+}
+
 /// Clear a flash message from a session
 pub async fn clear_flash_message(pool: &PgPool, session_id: Uuid) -> cja::Result<Session> {
     let session = sqlx::query_as!(

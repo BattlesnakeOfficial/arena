@@ -1,6 +1,8 @@
 import { test, expect, createMockUser } from '../fixtures/test';
 import { query } from '../fixtures/db';
 
+const sixLanguageTags = ['Python', 'Rust', 'Go', 'TypeScript', 'Elixir', 'Ruby'];
+
 test.describe('Battlesnake Validation', () => {
   test('cannot create battlesnake with duplicate name', async ({ authenticatedPage }) => {
     const duplicateName = `Duplicate Snake ${Date.now()}`;
@@ -17,12 +19,21 @@ test.describe('Battlesnake Validation', () => {
     // Try to create second with same name - should stay on form
     await authenticatedPage.goto('/battlesnakes/new');
     await authenticatedPage.getByLabel('Name').fill(duplicateName);
-    await authenticatedPage.getByLabel('URL').fill('https://example.com/second');
-    await authenticatedPage.getByLabel('Visibility').selectOption('public');
+    const submittedUrl = 'https://example.com/distinct-second';
+    await authenticatedPage.getByLabel('URL').fill(submittedUrl);
+    await authenticatedPage.getByLabel('Visibility').selectOption('private');
+    await authenticatedPage.getByLabel('Python', { exact: true }).check();
+    await authenticatedPage.getByLabel('Rust', { exact: true }).check();
     await authenticatedPage.getByRole('button', { name: 'Create Battlesnake' }).click();
 
     // Should stay on form page (not redirect to list)
     await expect(authenticatedPage).toHaveURL('/battlesnakes/new');
+    await expect(authenticatedPage.getByText('already have a battlesnake named')).toBeVisible();
+    await expect(authenticatedPage.getByLabel('Name')).toHaveValue(duplicateName);
+    await expect(authenticatedPage.getByLabel('URL')).toHaveValue(submittedUrl);
+    await expect(authenticatedPage.getByLabel('Visibility')).toHaveValue('private');
+    await expect(authenticatedPage.getByLabel('Python', { exact: true })).toBeChecked();
+    await expect(authenticatedPage.getByLabel('Rust', { exact: true })).toBeChecked();
   });
 
   test('cannot update battlesnake to use duplicate name', async ({ authenticatedPage }) => {
@@ -47,10 +58,28 @@ test.describe('Battlesnake Validation', () => {
     const secondRow = authenticatedPage.locator('tr', { hasText: secondName });
     await secondRow.getByRole('link', { name: 'Edit', exact: true }).click();
     await authenticatedPage.getByLabel('Name').fill(firstName);
+    const submittedUrl = 'https://example.com/failed-edit';
+    await authenticatedPage.getByLabel('URL').fill(submittedUrl);
+    await authenticatedPage.getByLabel('Visibility').selectOption('private');
+    await authenticatedPage.getByLabel('Go', { exact: true }).check();
+    await authenticatedPage.getByLabel('TypeScript', { exact: true }).check();
     await authenticatedPage.getByRole('button', { name: 'Update Battlesnake' }).click();
 
     // Should stay on edit form (not redirect to list)
     await expect(authenticatedPage).toHaveURL(/\/battlesnakes\/.*\/edit/);
+    await expect(authenticatedPage.getByText('already have a battlesnake named')).toBeVisible();
+    await expect(authenticatedPage.getByLabel('Name')).toHaveValue(firstName);
+    await expect(authenticatedPage.getByLabel('URL')).toHaveValue(submittedUrl);
+    await expect(authenticatedPage.getByLabel('Visibility')).toHaveValue('private');
+    await expect(authenticatedPage.getByLabel('Go', { exact: true })).toBeChecked();
+    await expect(authenticatedPage.getByLabel('TypeScript', { exact: true })).toBeChecked();
+
+    const editUrl = authenticatedPage.url();
+    await authenticatedPage.goto('/battlesnakes');
+    await authenticatedPage.goto(editUrl);
+    await expect(authenticatedPage.getByLabel('Name')).toHaveValue(secondName);
+    await expect(authenticatedPage.getByLabel('URL')).toHaveValue('https://example.com/second');
+    await expect(authenticatedPage.getByLabel('Visibility')).toHaveValue('public');
   });
 
   test('can use same name after deleting original', async ({ authenticatedPage }) => {
@@ -116,22 +145,93 @@ test.describe('Battlesnake Validation', () => {
   test('rejects a URL that is not a URL (flash, stays on form)', async ({ authenticatedPage }) => {
     // POST directly: the input's type=url would block this in the browser.
     // Don't follow the redirect, or the one-shot flash is consumed before we look.
+    const name = `Bad URL ${Date.now()}`;
     const res = await authenticatedPage.request.post('/battlesnakes', {
-      form: { name: `Bad URL ${Date.now()}`, url: 'not a url', visibility: 'private' },
+      form: { name, url: 'not a url', visibility: 'private' },
       maxRedirects: 0,
     });
     expect(res.headers()['location']).toBe('/battlesnakes/new');
     await authenticatedPage.goto('/battlesnakes/new');
     await expect(authenticatedPage.getByText('Invalid URL format')).toBeVisible();
+    await expect(authenticatedPage.getByLabel('Name')).toHaveValue(name);
+    await expect(authenticatedPage.getByLabel('URL')).toHaveValue('not a url');
+    await expect(authenticatedPage.getByLabel('Visibility')).toHaveValue('private');
   });
 
   test('server normalizes a bare hostname to https', async ({ authenticatedPage }) => {
     const name = `Bare Host ${Date.now()}`;
-    await authenticatedPage.request.post('/battlesnakes', {
-      form: { name, url: 'mysnake.fly.dev', visibility: 'private' },
-    });
-    await authenticatedPage.goto('/battlesnakes');
+    await authenticatedPage.goto('/battlesnakes/new');
+    await authenticatedPage.getByLabel('Name').fill(name);
+    await authenticatedPage.getByLabel('URL').fill('mysnake.fly.dev');
+    await authenticatedPage.getByLabel('URL').blur();
+    await expect(authenticatedPage.getByLabel('URL')).toHaveValue('https://mysnake.fly.dev');
+    await authenticatedPage.getByLabel('Visibility').selectOption('private');
+    await authenticatedPage.getByRole('button', { name: 'Create Battlesnake' }).click();
+    await expect(authenticatedPage).toHaveURL('/battlesnakes');
     await expect(authenticatedPage.getByText('https://mysnake.fly.dev')).toBeVisible();
+  });
+
+  test('preserves all submitted values when create exceeds the tag cap', async ({ authenticatedPage }) => {
+    const name = `Six Tag Create ${Date.now()}`;
+    const url = 'https://example.com/six-tag-create';
+    await authenticatedPage.goto('/battlesnakes/new');
+    await authenticatedPage.getByLabel('Name').fill(name);
+    await authenticatedPage.getByLabel('URL').fill(url);
+    await authenticatedPage.getByLabel('Visibility').selectOption('private');
+    for (const tag of sixLanguageTags) {
+      await authenticatedPage.getByLabel(tag, { exact: true }).check();
+    }
+
+    await authenticatedPage.getByRole('button', { name: 'Create Battlesnake' }).click();
+
+    await expect(authenticatedPage).toHaveURL('/battlesnakes/new');
+    await expect(authenticatedPage.getByText('at most 5 tags')).toBeVisible();
+    await expect(authenticatedPage.getByLabel('Name')).toHaveValue(name);
+    await expect(authenticatedPage.getByLabel('URL')).toHaveValue(url);
+    await expect(authenticatedPage.getByLabel('Visibility')).toHaveValue('private');
+    for (const tag of sixLanguageTags) {
+      await expect(authenticatedPage.getByLabel(tag, { exact: true })).toBeChecked();
+    }
+  });
+
+  test('preserves failed six-tag edit without mutating the snake', async ({ authenticatedPage }) => {
+    const savedName = `Six Tag Edit ${Date.now()}`;
+    await authenticatedPage.goto('/battlesnakes/new');
+    await authenticatedPage.getByLabel('Name').fill(savedName);
+    await authenticatedPage.getByLabel('URL').fill('https://example.com/saved-edit');
+    await authenticatedPage.getByRole('button', { name: 'Create Battlesnake' }).click();
+
+    const snakeRow = authenticatedPage.locator('tr', { hasText: savedName });
+    await snakeRow.getByRole('link', { name: 'Edit', exact: true }).click();
+    const editUrl = authenticatedPage.url();
+    const submittedName = `${savedName} changed`;
+    const submittedUrl = 'https://example.com/failed-six-tag-edit';
+    await authenticatedPage.getByLabel('Name').fill(submittedName);
+    await authenticatedPage.getByLabel('URL').fill(submittedUrl);
+    await authenticatedPage.getByLabel('Visibility').selectOption('private');
+    for (const tag of sixLanguageTags) {
+      await authenticatedPage.getByLabel(tag, { exact: true }).check();
+    }
+
+    await authenticatedPage.getByRole('button', { name: 'Update Battlesnake' }).click();
+
+    await expect(authenticatedPage).toHaveURL(editUrl);
+    await expect(authenticatedPage.getByText('at most 5 tags')).toBeVisible();
+    await expect(authenticatedPage.getByLabel('Name')).toHaveValue(submittedName);
+    await expect(authenticatedPage.getByLabel('URL')).toHaveValue(submittedUrl);
+    await expect(authenticatedPage.getByLabel('Visibility')).toHaveValue('private');
+    for (const tag of sixLanguageTags) {
+      await expect(authenticatedPage.getByLabel(tag, { exact: true })).toBeChecked();
+    }
+
+    await authenticatedPage.goto('/battlesnakes');
+    await authenticatedPage.goto(editUrl);
+    await expect(authenticatedPage.getByLabel('Name')).toHaveValue(savedName);
+    await expect(authenticatedPage.getByLabel('URL')).toHaveValue('https://example.com/saved-edit');
+    await expect(authenticatedPage.getByLabel('Visibility')).toHaveValue('public');
+    for (const tag of sixLanguageTags) {
+      await expect(authenticatedPage.getByLabel(tag, { exact: true })).not.toBeChecked();
+    }
   });
 
   test('rejects an over-long name with a flash, not an error page', async ({ authenticatedPage }) => {
