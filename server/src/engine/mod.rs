@@ -7,6 +7,7 @@
 
 pub mod frame;
 
+use color_eyre::eyre::eyre;
 use rules::{BoardState, Direction, Point, RoyaleSettings, SnakeMove, StandardSettings};
 use uuid::Uuid;
 
@@ -171,8 +172,21 @@ pub fn create_initial_game(
     }
 }
 
+fn required_royale_settings(game: &EngineGame) -> cja::Result<Option<RoyaleSettings>> {
+    if game.meta.ruleset_name == "royale" {
+        return game
+            .meta
+            .royale
+            .clone()
+            .map(Some)
+            .ok_or_else(|| eyre!("missing Royale settings for royale game"));
+    }
+    Ok(None)
+}
+
 /// Run a complete game with random moves, returning placements
-pub fn run_game_with_random_moves(mut game: EngineGame) -> GameResult {
+pub fn run_game_with_random_moves(mut game: EngineGame) -> cja::Result<GameResult> {
+    let royale = required_royale_settings(&game)?;
     let mut rng = rand::thread_rng();
     let mut elimination_order: Vec<String> = Vec::new();
 
@@ -225,10 +239,14 @@ pub fn run_game_with_random_moves(mut game: EngineGame) -> GameResult {
         // Apply the turn. Dispatch on the ruleset name so each mode's arm
         // stays independent (parallel game-mode PRs union their arms here).
         let _game_over = match game.meta.ruleset_name.as_str() {
-            "royale" => {
-                let royale = game.meta.royale.clone().unwrap_or_default();
-                rules::royale::execute_turn(&mut game.board, &moves, &game.meta.settings, &royale)
-            }
+            "royale" => rules::royale::execute_turn(
+                &mut game.board,
+                &moves,
+                &game.meta.settings,
+                royale
+                    .as_ref()
+                    .ok_or_else(|| eyre!("missing Royale settings for royale game"))?,
+            ),
             "constrictor" => {
                 rules::constrictor::execute_turn(&mut game.board, &moves, &game.meta.settings)
             }
@@ -238,7 +256,12 @@ pub fn run_game_with_random_moves(mut game: EngineGame) -> GameResult {
             "solo" => rules::solo::execute_turn(&mut game.board, &moves, &game.meta.settings),
             _ => rules::standard::execute_turn(&mut game.board, &moves, &game.meta.settings),
         }
-        .expect("execute_turn failed");
+        .map_err(|error| {
+            eyre!(
+                "execute_turn failed for ruleset {}: {error:?}",
+                game.meta.ruleset_name
+            )
+        })?;
 
         // Spawn food after turn. Constrictor games never spawn food (their
         // settings are food_spawn_chance=0 / minimum_food=0, which would make
@@ -270,10 +293,10 @@ pub fn run_game_with_random_moves(mut game: EngineGame) -> GameResult {
     elimination_order.reverse();
     placements.extend(elimination_order);
 
-    GameResult {
+    Ok(GameResult {
         placements,
         final_turn: game.board.turn,
-    }
+    })
 }
 
 /// Check if the game is over.
@@ -292,7 +315,8 @@ pub fn is_game_over(game: &EngineGame) -> bool {
 /// Note: Unlike the rules crate's `execute_turn`, this does NOT increment
 /// `board.turn` internally -- the caller must do that (for compatibility with
 /// game_runner.rs which increments after recording frames).
-pub fn apply_turn(game: &mut EngineGame, moves: &[(String, Direction)]) {
+pub fn apply_turn(game: &mut EngineGame, moves: &[(String, Direction)]) -> cja::Result<()> {
+    let royale = required_royale_settings(game)?;
     let snake_moves: Vec<SnakeMove> = moves
         .iter()
         .map(|(id, dir)| SnakeMove {
@@ -317,9 +341,13 @@ pub fn apply_turn(game: &mut EngineGame, moves: &[(String, Direction)]) {
         // `board.turn + 1` internally, so this must run before the caller
         // increments `board.turn`.
         "royale" => {
-            let royale = game.meta.royale.clone().unwrap_or_default();
-            rules::royale::populate_hazards(&mut game.board, &royale)
-                .expect("royale hazard population failed: invalid shrink frequency");
+            rules::royale::populate_hazards(
+                &mut game.board,
+                royale
+                    .as_ref()
+                    .ok_or_else(|| eyre!("missing Royale settings for royale game"))?,
+            )
+            .map_err(|error| eyre!("royale hazard population failed: {error:?}"))?;
         }
         // Constrictor: clear all food and grow every snake (matches Go's
         // StageSpawnFoodNoFood + StageModifySnakesAlwaysGrow, which run after
@@ -335,6 +363,8 @@ pub fn apply_turn(game: &mut EngineGame, moves: &[(String, Direction)]) {
         "snail_mode" => rules::snail::post_update_board(&mut game.board),
         _ => {}
     }
+
+    Ok(())
 }
 
 /// Spawn food for the next turn in modes that spawn food.
@@ -525,7 +555,7 @@ mod tests {
         fn test_snake_count_conserved((ref game, ref moves) in arb_game_and_moves()) {
             let old_count = game.board.snakes.len();
             let mut new_game = game.clone();
-            apply_turn(&mut new_game, moves);
+            apply_turn(&mut new_game, moves).expect("apply_turn on a valid fixture");
             prop_assert_eq!(new_game.board.snakes.len(), old_count);
         }
 
@@ -535,7 +565,7 @@ mod tests {
         ) {
             let old_food = game.board.food.clone();
             let mut new_game = game.clone();
-            apply_turn(&mut new_game, moves);
+            apply_turn(&mut new_game, moves).expect("apply_turn on a valid fixture");
 
             for (old_snake, new_snake) in game.board.snakes.iter().zip(new_game.board.snakes.iter()) {
                 if old_snake.eliminated_cause.is_eliminated() {
@@ -560,7 +590,7 @@ mod tests {
         ) {
             let old_food = game.board.food.clone();
             let mut new_game = game.clone();
-            apply_turn(&mut new_game, moves);
+            apply_turn(&mut new_game, moves).expect("apply_turn on a valid fixture");
 
             for (old_snake, new_snake) in game.board.snakes.iter().zip(new_game.board.snakes.iter()) {
                 if old_snake.eliminated_cause.is_eliminated() {
@@ -584,7 +614,7 @@ mod tests {
             (ref game, ref moves) in arb_game_and_moves()
         ) {
             let mut new_game = game.clone();
-            apply_turn(&mut new_game, moves);
+            apply_turn(&mut new_game, moves).expect("apply_turn on a valid fixture");
             for food_pos in &new_game.board.food {
                 prop_assert!(
                     game.board.food.contains(food_pos),
@@ -599,7 +629,7 @@ mod tests {
             (ref game, ref moves) in arb_game_and_moves()
         ) {
             let mut new_game = game.clone();
-            apply_turn(&mut new_game, moves);
+            apply_turn(&mut new_game, moves).expect("apply_turn on a valid fixture");
             let old_food = &game.board.food;
 
             for food_pos in old_food {
@@ -626,7 +656,7 @@ mod tests {
             (ref game, ref moves) in arb_game_and_moves()
         ) {
             let mut new_game = game.clone();
-            apply_turn(&mut new_game, moves);
+            apply_turn(&mut new_game, moves).expect("apply_turn on a valid fixture");
             for snake in &new_game.board.snakes {
                 // The rules crate allows health to go negative before elimination,
                 // but eliminated snakes' health values are not meaningful.
@@ -649,7 +679,7 @@ mod tests {
             (ref game, ref moves) in arb_game_and_moves()
         ) {
             let mut new_game = game.clone();
-            apply_turn(&mut new_game, moves);
+            apply_turn(&mut new_game, moves).expect("apply_turn on a valid fixture");
             for (old_snake, new_snake) in game.board.snakes.iter().zip(new_game.board.snakes.iter()) {
                 if old_snake.eliminated_cause.is_eliminated() {
                     prop_assert!(
@@ -666,7 +696,7 @@ mod tests {
             (ref game, ref moves) in arb_game_and_moves()
         ) {
             let mut new_game = game.clone();
-            apply_turn(&mut new_game, moves);
+            apply_turn(&mut new_game, moves).expect("apply_turn on a valid fixture");
             for (old_snake, new_snake) in game.board.snakes.iter().zip(new_game.board.snakes.iter()) {
                 if old_snake.eliminated_cause.is_eliminated() {
                     prop_assert_eq!(
@@ -691,7 +721,7 @@ mod tests {
             (ref game, ref moves) in arb_game_and_moves()
         ) {
             let mut new_game = game.clone();
-            apply_turn(&mut new_game, moves);
+            apply_turn(&mut new_game, moves).expect("apply_turn on a valid fixture");
             for (old_snake, new_snake) in game.board.snakes.iter().zip(new_game.board.snakes.iter()) {
                 if old_snake.eliminated_cause.is_eliminated() {
                     continue;
@@ -718,7 +748,7 @@ mod tests {
         ) {
             let old_food = game.board.food.clone();
             let mut new_game = game.clone();
-            apply_turn(&mut new_game, moves);
+            apply_turn(&mut new_game, moves).expect("apply_turn on a valid fixture");
 
             for (old_snake, new_snake) in game.board.snakes.iter().zip(new_game.board.snakes.iter()) {
                 if old_snake.eliminated_cause.is_eliminated() {
@@ -756,7 +786,7 @@ mod tests {
         ) {
             let old_food = game.board.food.clone();
             let mut new_game = game.clone();
-            apply_turn(&mut new_game, moves);
+            apply_turn(&mut new_game, moves).expect("apply_turn on a valid fixture");
 
             for (old_snake, new_snake) in game.board.snakes.iter().zip(new_game.board.snakes.iter()) {
                 if old_snake.eliminated_cause.is_eliminated() {
@@ -818,7 +848,7 @@ mod tests {
             let width = game.board.width;
             let height = game.board.height;
             let mut new_game = game.clone();
-            apply_turn(&mut new_game, moves);
+            apply_turn(&mut new_game, moves).expect("apply_turn on a valid fixture");
 
             for (old_snake, new_snake) in game.board.snakes.iter().zip(new_game.board.snakes.iter()) {
                 if old_snake.eliminated_cause.is_eliminated() {
@@ -841,7 +871,7 @@ mod tests {
             (ref game, ref moves) in arb_game_and_moves()
         ) {
             let mut new_game = game.clone();
-            apply_turn(&mut new_game, moves);
+            apply_turn(&mut new_game, moves).expect("apply_turn on a valid fixture");
 
             for (old_snake, new_snake) in game.board.snakes.iter().zip(new_game.board.snakes.iter()) {
                 if old_snake.eliminated_cause.is_eliminated() {
@@ -864,7 +894,7 @@ mod tests {
             (ref game, ref moves) in arb_game_and_moves()
         ) {
             let mut new_game = game.clone();
-            apply_turn(&mut new_game, moves);
+            apply_turn(&mut new_game, moves).expect("apply_turn on a valid fixture");
 
             for (idx, (old_snake, new_snake)) in game.board.snakes.iter()
                 .zip(new_game.board.snakes.iter())
@@ -901,7 +931,7 @@ mod tests {
             (ref game, ref moves) in arb_game_and_moves()
         ) {
             let mut new_game = game.clone();
-            apply_turn(&mut new_game, moves);
+            apply_turn(&mut new_game, moves).expect("apply_turn on a valid fixture");
 
             for (i, (old_a, new_a)) in game.board.snakes.iter()
                 .zip(new_game.board.snakes.iter())
@@ -947,7 +977,7 @@ mod tests {
             (ref game, ref moves) in arb_game_and_moves()
         ) {
             let mut new_game = game.clone();
-            apply_turn(&mut new_game, moves);
+            apply_turn(&mut new_game, moves).expect("apply_turn on a valid fixture");
 
             for (i, (old_a, new_a)) in game.board.snakes.iter()
                 .zip(new_game.board.snakes.iter())
@@ -992,7 +1022,7 @@ mod tests {
         ) {
             let old_food = game.board.food.clone();
             let mut new_game = game.clone();
-            apply_turn(&mut new_game, moves);
+            apply_turn(&mut new_game, moves).expect("apply_turn on a valid fixture");
 
             for (old_snake, new_snake) in game.board.snakes.iter().zip(new_game.board.snakes.iter()) {
                 if !old_snake.eliminated_cause.is_eliminated()
@@ -1025,7 +1055,7 @@ mod tests {
         // Run multiple games to ensure consistency
         for _ in 0..10 {
             let game = create_test_game(4);
-            let result = run_game_with_random_moves(game);
+            let result = run_game_with_random_moves(game).expect("random game on a valid fixture");
 
             // Should have placements for all 4 snakes
             assert_eq!(
@@ -1060,7 +1090,7 @@ mod tests {
         game.board.snakes[0].body = vec![Point::new(5, 5), Point::new(5, 4), Point::new(5, 3)];
 
         let moves = vec![("snake-0".to_string(), Direction::Up)];
-        apply_turn(&mut game, &moves);
+        apply_turn(&mut game, &moves).expect("apply_turn on a valid fixture");
 
         // Head should have moved up
         assert_eq!(game.board.snakes[0].head(), Point::new(5, 6));
@@ -1076,7 +1106,7 @@ mod tests {
         game.board.snakes[0].health = 100;
 
         let moves = vec![("snake-0".to_string(), Direction::Up)];
-        apply_turn(&mut game, &moves);
+        apply_turn(&mut game, &moves).expect("apply_turn on a valid fixture");
 
         // Health should decrease by 1
         assert_eq!(game.board.snakes[0].health, 99);
@@ -1090,7 +1120,7 @@ mod tests {
         game.board.food = vec![Point::new(5, 5)];
 
         let moves = vec![("snake-0".to_string(), Direction::Up)];
-        apply_turn(&mut game, &moves);
+        apply_turn(&mut game, &moves).expect("apply_turn on a valid fixture");
 
         // Health should be restored to max
         assert_eq!(game.board.snakes[0].health, SNAKE_MAX_HEALTH);
@@ -1107,7 +1137,7 @@ mod tests {
         game.board.snakes[0].body = vec![Point::new(0, 5), Point::new(1, 5), Point::new(2, 5)];
 
         let moves = vec![("snake-0".to_string(), Direction::Left)];
-        apply_turn(&mut game, &moves);
+        apply_turn(&mut game, &moves).expect("apply_turn on a valid fixture");
 
         // Snake should be eliminated
         assert!(game.board.snakes[0].eliminated_cause.is_eliminated());
@@ -1133,7 +1163,7 @@ mod tests {
         ];
 
         // This should not panic - both snakes try to eat the same food
-        apply_turn(&mut game, &moves);
+        apply_turn(&mut game, &moves).expect("apply_turn on a valid fixture");
 
         // Food should be consumed
         assert!(game.board.food.is_empty(), "Food should be consumed");
@@ -1163,7 +1193,7 @@ mod tests {
 
         // Moving right will hit the body at (6, 5)
         let moves = vec![("snake-0".to_string(), Direction::Right)];
-        apply_turn(&mut game, &moves);
+        apply_turn(&mut game, &moves).expect("apply_turn on a valid fixture");
 
         assert!(game.board.snakes[0].eliminated_cause.is_eliminated());
     }
@@ -1188,7 +1218,7 @@ mod tests {
             ("snake-0".to_string(), Direction::Up),
             ("snake-1".to_string(), Direction::Right),
         ];
-        apply_turn(&mut game, &moves);
+        apply_turn(&mut game, &moves).expect("apply_turn on a valid fixture");
 
         // Snake-0 should be eliminated (hit snake-1's body at (5,6))
         assert!(game.board.snakes[0].eliminated_cause.is_eliminated());
@@ -1213,7 +1243,7 @@ mod tests {
             ("snake-0".to_string(), Direction::Up),
             ("snake-1".to_string(), Direction::Down),
         ];
-        apply_turn(&mut game, &moves);
+        apply_turn(&mut game, &moves).expect("apply_turn on a valid fixture");
 
         // Smaller snake loses
         assert!(game.board.snakes[0].eliminated_cause.is_eliminated());
@@ -1233,7 +1263,7 @@ mod tests {
             ("snake-0".to_string(), Direction::Up),
             ("snake-1".to_string(), Direction::Down),
         ];
-        apply_turn(&mut game, &moves);
+        apply_turn(&mut game, &moves).expect("apply_turn on a valid fixture");
 
         // Both snakes should die
         assert!(game.board.snakes[0].eliminated_cause.is_eliminated());
@@ -1246,7 +1276,7 @@ mod tests {
         game.board.snakes[0].health = 1; // Will reach 0 after move
 
         let moves = vec![("snake-0".to_string(), Direction::Up)];
-        apply_turn(&mut game, &moves);
+        apply_turn(&mut game, &moves).expect("apply_turn on a valid fixture");
 
         // Snake should starve (health becomes 0)
         assert!(game.board.snakes[0].eliminated_cause.is_eliminated());
@@ -1261,7 +1291,7 @@ mod tests {
         game.board.food = vec![Point::new(5, 5)];
 
         let moves = vec![("snake-0".to_string(), Direction::Up)];
-        apply_turn(&mut game, &moves);
+        apply_turn(&mut game, &moves).expect("apply_turn on a valid fixture");
 
         // Snake should eat and restore health to max
         assert_eq!(game.board.snakes[0].health, SNAKE_MAX_HEALTH);
@@ -1283,7 +1313,7 @@ mod tests {
         game.board.food = vec![Point::new(5, 5)];
 
         let moves = vec![("snake-0".to_string(), Direction::Up)];
-        apply_turn(&mut game, &moves);
+        apply_turn(&mut game, &moves).expect("apply_turn on a valid fixture");
 
         // Snake eats food and health is restored to max
         assert!(!game.board.snakes[0].eliminated_cause.is_eliminated());
@@ -1307,7 +1337,7 @@ mod tests {
             game.board.snakes[0].body = vec![Point::new(5, 5), Point::new(5, 4), Point::new(5, 3)];
 
             let moves = vec![("snake-0".to_string(), direction)];
-            apply_turn(&mut game, &moves);
+            apply_turn(&mut game, &moves).expect("apply_turn on a valid fixture");
 
             assert_eq!(
                 game.board.snakes[0].head(),
@@ -1331,7 +1361,7 @@ mod tests {
         let original_body = game.board.snakes[0].body.clone();
 
         let moves = vec![("snake-0".to_string(), Direction::Up)];
-        apply_turn(&mut game, &moves);
+        apply_turn(&mut game, &moves).expect("apply_turn on a valid fixture");
 
         // Dead snake shouldn't move (head and body unchanged)
         assert!(game.board.snakes[0].eliminated_cause.is_eliminated());
@@ -1374,6 +1404,51 @@ mod tests {
             },
             snake_names,
         }
+    }
+
+    #[test]
+    fn apply_turn_rejects_missing_royale_settings_before_mutation() {
+        let mut game = create_test_game(2);
+        game.meta.ruleset_name = "royale".to_string();
+        let before = game.board.clone();
+
+        let error = apply_turn(&mut game, &[]).expect_err("missing settings must fail");
+
+        assert!(error.to_string().contains("missing Royale settings"));
+        assert_eq!(game.board, before);
+    }
+
+    #[test]
+    fn random_game_rejects_missing_royale_settings() {
+        let mut game = create_test_game(2);
+        game.meta.ruleset_name = "royale".to_string();
+
+        let error = run_game_with_random_moves(game).expect_err("missing settings must fail");
+
+        assert!(error.to_string().contains("missing Royale settings"));
+    }
+
+    #[test]
+    fn standard_game_without_royale_settings_succeeds() {
+        let game = create_test_game(2);
+        run_game_with_random_moves(game).expect("standard game needs no Royale settings");
+    }
+
+    #[test]
+    fn apply_turn_preserves_royale_rules_error_details() {
+        let mut game = create_test_game(2);
+        game.meta.ruleset_name = "royale".to_string();
+        game.meta.royale = Some(RoyaleSettings {
+            shrink_every_n_turns: 0,
+            seed: 0,
+        });
+
+        let error = apply_turn(&mut game, &[]).expect_err("invalid shrink frequency must fail");
+
+        assert!(
+            error.to_string().contains("InvalidShrinkFrequency"),
+            "rules error variant should survive conversion: {error:#}"
+        );
     }
 
     #[test]
@@ -1568,7 +1643,7 @@ mod tests {
         for _ in 0..60 {
             // Empty moves: move_snakes is a no-op, but the rest of the
             // pipeline (including hazard population) still runs.
-            apply_turn(&mut game, &[]);
+            apply_turn(&mut game, &[]).expect("apply_turn on a valid fixture");
             game.board.turn += 1;
 
             let frame = frame::game_to_frame(&game, &[], &[], &std::collections::HashMap::new());
@@ -1626,7 +1701,7 @@ mod tests {
         );
 
         for _ in 0..60 {
-            apply_turn(&mut game, &[]);
+            apply_turn(&mut game, &[]).expect("apply_turn on a valid fixture");
             game.board.turn += 1;
 
             let frame = frame::game_to_frame(&game, &[], &[], &std::collections::HashMap::new());
@@ -1654,7 +1729,7 @@ mod tests {
             );
             let mut hazard_history = Vec::new();
             for _ in 0..120 {
-                apply_turn(&mut game, &[]);
+                apply_turn(&mut game, &[]).expect("apply_turn on a valid fixture");
                 game.board.turn += 1;
                 hazard_history.push(game.board.hazards.clone());
             }
@@ -1744,7 +1819,7 @@ mod tests {
                 (id_a.clone(), Direction::Up),
                 (id_b.clone(), Direction::Down),
             ];
-            apply_turn(&mut game, &moves);
+            apply_turn(&mut game, &moves).expect("apply_turn on a valid fixture");
             game.board.turn += 1;
 
             let frame = frame::game_to_frame(&game, &[], &[], &std::collections::HashMap::new());
@@ -1804,7 +1879,7 @@ mod tests {
             (id_a.clone(), Direction::Up),
             (id_b.clone(), Direction::Down),
         ];
-        apply_turn(&mut game, &moves);
+        apply_turn(&mut game, &moves).expect("apply_turn on a valid fixture");
         game.board.turn += 1;
 
         assert!(game.board.food.is_empty());
@@ -1836,7 +1911,7 @@ mod tests {
                 GameType::Constrictor,
                 &battlesnakes,
             );
-            let result = run_game_with_random_moves(game);
+            let result = run_game_with_random_moves(game).expect("random game on a valid fixture");
 
             assert_eq!(result.placements.len(), 4);
             assert!(result.final_turn > 0);
@@ -1903,7 +1978,7 @@ mod tests {
                 (ids[0].clone(), Direction::Up),
                 (ids[1].clone(), Direction::Up),
             ];
-            apply_turn(&mut game, &moves);
+            apply_turn(&mut game, &moves).expect("apply_turn on a valid fixture");
             game.board.turn += 1;
 
             let frame = frame::game_to_frame(&game, &[], &[], &std::collections::HashMap::new());
@@ -1960,7 +2035,7 @@ mod tests {
                 GameType::SnailMode,
                 &battlesnakes,
             );
-            let result = run_game_with_random_moves(game);
+            let result = run_game_with_random_moves(game).expect("random game on a valid fixture");
 
             assert_eq!(result.placements.len(), 4);
             let mut ids = result.placements.clone();
@@ -2010,7 +2085,7 @@ mod tests {
         game.board.snakes[0].health = 1;
 
         let moves = vec![(game.board.snakes[0].id.clone(), Direction::Up)];
-        apply_turn(&mut game, &moves);
+        apply_turn(&mut game, &moves).expect("apply_turn on a valid fixture");
         game.board.turn += 1;
 
         assert!(game.board.snakes[0].eliminated_cause.is_eliminated());
@@ -2031,7 +2106,7 @@ mod tests {
         );
         game.board.turn = MAX_TURNS;
 
-        let result = run_game_with_random_moves(game);
+        let result = run_game_with_random_moves(game).expect("random game on a valid fixture");
         assert_eq!(result.final_turn, MAX_TURNS);
         assert_eq!(result.placements.len(), 1);
     }
@@ -2058,7 +2133,7 @@ mod tests {
                 GameType::Solo,
                 &battlesnakes,
             );
-            let result = run_game_with_random_moves(game);
+            let result = run_game_with_random_moves(game).expect("random game on a valid fixture");
 
             assert_eq!(result.placements.len(), 1);
             assert!(result.final_turn > 0 && result.final_turn <= MAX_TURNS);

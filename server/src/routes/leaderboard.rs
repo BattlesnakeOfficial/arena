@@ -181,11 +181,10 @@ pub async fn show_leaderboard(
     // Compute next matchmaker run time. When the ladder is starved the
     // matchmaker no-ops, so "last game + interval" would show an ever-staler
     // past timestamp — say why matchmaking is paused instead.
-    let enabled_count = leaderboard::get_active_entries(&state.db, leaderboard_id)
+    let enabled_count = leaderboard::count_active_entries(&state.db, leaderboard_id)
         .await
-        .wrap_err("Failed to fetch active entries")?
-        .len();
-    let next_run_str = if enabled_count < leaderboard::MIN_MATCH_SIZE {
+        .wrap_err("Failed to count active entries")?;
+    let next_run_str = if enabled_count < leaderboard::MIN_MATCH_SIZE as i64 {
         None
     } else {
         status.last_game_created_at.map(|last| {
@@ -285,7 +284,7 @@ pub async fn show_leaderboard(
                 div class="stat" {
                     div class="label" { "Next matchmaker run" }
                     div class="value sm" {
-                        @if enabled_count < leaderboard::MIN_MATCH_SIZE {
+                        @if enabled_count < leaderboard::MIN_MATCH_SIZE as i64 {
                             // "waiting", not "paused": entry status badges say
                             // "Paused" and e2e locators match text loosely.
                             "waiting for at least "

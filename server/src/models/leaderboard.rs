@@ -940,7 +940,8 @@ pub async fn get_activity_feed(
          JOIN users u ON b.user_id = u.user_id
          JOIN leaderboard_games lg ON lgr.leaderboard_game_id = lg.leaderboard_game_id
          WHERE lg.leaderboard_id = $1
-         ORDER BY lgr.created_at DESC, lgr.leaderboard_game_id DESC, lgr.placement ASC
+         ORDER BY lgr.created_at DESC, lgr.leaderboard_game_id DESC, lgr.placement ASC,
+                  b.battlesnake_id ASC
          LIMIT $2"#,
         leaderboard_id,
         limit
@@ -1145,6 +1146,79 @@ mod tests {
         assert_eq!(status.games_in_progress, 2);
         assert_eq!(status.total_games, 4);
 
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn activity_feed_uses_snake_id_to_break_placement_ties(pool: PgPool) -> cja::Result<()> {
+        let leaderboard_id = sqlx::query_scalar!(
+            "INSERT INTO leaderboards (name) VALUES ('feed-order') RETURNING leaderboard_id"
+        )
+        .fetch_one(&pool)
+        .await?;
+        let user_id = sqlx::query_scalar!(
+            "INSERT INTO users (external_github_id, github_login, github_access_token)
+             VALUES (9910710, 'feed-owner', 'token') RETURNING user_id"
+        )
+        .fetch_one(&pool)
+        .await?;
+        let low_snake = Uuid::from_u128(1);
+        let high_snake = Uuid::from_u128(2);
+        sqlx::query!(
+            "INSERT INTO battlesnakes (battlesnake_id, user_id, name, url)
+             VALUES ($1, $3, 'low', 'http://low'), ($2, $3, 'high', 'http://high')",
+            low_snake,
+            high_snake,
+            user_id
+        )
+        .execute(&pool)
+        .await?;
+        let low_entry = get_or_create_entry(&pool, leaderboard_id, low_snake)
+            .await?
+            .leaderboard_entry_id;
+        let high_entry = get_or_create_entry(&pool, leaderboard_id, high_snake)
+            .await?
+            .leaderboard_entry_id;
+        let game_id = sqlx::query_scalar!(
+            "INSERT INTO games (board_size, game_type, status)
+             VALUES ('11x11', 'Standard', 'finished') RETURNING game_id"
+        )
+        .fetch_one(&pool)
+        .await?;
+        let leaderboard_game_id = sqlx::query_scalar!(
+            "INSERT INTO leaderboard_games (leaderboard_id, game_id)
+             VALUES ($1, $2) RETURNING leaderboard_game_id",
+            leaderboard_id,
+            game_id
+        )
+        .fetch_one(&pool)
+        .await?;
+        for entry_id in [high_entry, low_entry] {
+            create_game_result(
+                &pool,
+                CreateGameResult {
+                    leaderboard_game_id,
+                    leaderboard_entry_id: entry_id,
+                    placement: 1,
+                    mu_before: 25.0,
+                    mu_after: 25.0,
+                    sigma_before: 8.0,
+                    sigma_after: 8.0,
+                    display_score_change: 0.0,
+                },
+            )
+            .await?;
+        }
+
+        for _ in 0..5 {
+            let feed = get_activity_feed(&pool, leaderboard_id, 2).await?;
+            assert_eq!(
+                feed.iter()
+                    .map(|entry| entry.leaderboard_entry_id)
+                    .collect::<Vec<_>>(),
+                vec![low_entry, high_entry]
+            );
+        }
         Ok(())
     }
 }

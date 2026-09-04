@@ -188,17 +188,7 @@ pub async fn record_recovery_failure(
 pub async fn deactivate(pool: &PgPool, battlesnake_id: Uuid) -> cja::Result<bool> {
     let mut tx = pool.begin().await.wrap_err("Failed to begin transaction")?;
 
-    sqlx::query!(
-        r#"UPDATE leaderboard_entries
-         SET disabled_at = NOW(), disabled_reason = $2, updated_at = NOW()
-         WHERE battlesnake_id = $1 AND disabled_at IS NULL"#,
-        battlesnake_id,
-        DISABLED_REASON_HEALTH
-    )
-    .execute(&mut *tx)
-    .await
-    .wrap_err("Failed to disable leaderboard entries")?;
-
+    // Common transition lock order: health-status row, then leaderboard entries.
     let newly_deactivated = sqlx::query_scalar!(
         r#"UPDATE snake_health_status
          SET deactivated_at = NOW(), consecutive_successes = 0, updated_at = NOW()
@@ -210,6 +200,17 @@ pub async fn deactivate(pool: &PgPool, battlesnake_id: Uuid) -> cja::Result<bool
     .await
     .wrap_err("Failed to stamp deactivation")?
     .is_some();
+
+    sqlx::query!(
+        r#"UPDATE leaderboard_entries
+         SET disabled_at = NOW(), disabled_reason = $2, updated_at = NOW()
+         WHERE battlesnake_id = $1 AND disabled_at IS NULL"#,
+        battlesnake_id,
+        DISABLED_REASON_HEALTH
+    )
+    .execute(&mut *tx)
+    .await
+    .wrap_err("Failed to disable leaderboard entries")?;
 
     tx.commit()
         .await
