@@ -2,6 +2,10 @@ import { test, expect } from '../fixtures/test';
 
 test.describe('Profile Page', () => {
   test('displays user information', async ({ authenticatedPage, mockUser }) => {
+    await authenticatedPage.route('https://example.com/avatar.png', route => route.fulfill({
+      contentType: 'image/png',
+      body: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAF/gL+XbK3AAAAAElFTkSuQmCC', 'base64'),
+    }));
     await authenticatedPage.goto('/me');
 
     // Should show profile heading
@@ -11,8 +15,9 @@ test.describe('Profile Page', () => {
     await expect(authenticatedPage.getByRole('heading', { name: mockUser.login })).toBeVisible();
 
     // Should show avatar image
-    const avatar = authenticatedPage.locator('.profile-head img.avatar');
+    const avatar = authenticatedPage.locator('.profile-head .user-avatar.avatar');
     await expect(avatar).toBeVisible();
+    await expect.poll(() => avatar.locator('img').evaluate((image: HTMLImageElement) => image.naturalWidth)).toBeGreaterThan(0);
 
     // Should show Account Details section
     await expect(authenticatedPage.getByRole('heading', { name: 'Account Details' })).toBeVisible();

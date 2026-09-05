@@ -3,14 +3,19 @@ import { query } from '../fixtures/db';
 
 test.describe('Homepage - Authenticated User', () => {
   test('displays user info when logged in', async ({ authenticatedPage, mockUser }) => {
+    await authenticatedPage.route('https://example.com/avatar.png', route => route.fulfill({
+      contentType: 'image/png',
+      body: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAF/gL+XbK3AAAAAElFTkSuQmCC', 'base64'),
+    }));
     await authenticatedPage.goto('/');
 
     // User's GitHub login name is displayed
     await expect(authenticatedPage.getByText(`Welcome, ${mockUser.login}!`)).toBeVisible();
 
     // User's avatar is displayed (decorative img in the welcome band)
-    const avatar = authenticatedPage.locator('.welcome img');
+    const avatar = authenticatedPage.locator('.welcome-avatar');
     await expect(avatar).toBeVisible();
+    await expect.poll(() => avatar.locator('img').evaluate((image: HTMLImageElement) => image.naturalWidth)).toBeGreaterThan(0);
   });
 
   test('shows navigation links for authenticated users', async ({ authenticatedPage }) => {

@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 use crate::{
     components::{
+        avatar::user_avatar,
         live_refresh::{LiveRefreshConfig, live_page_refresh},
         page_factory::PageFactory,
         snake_tags::snake_tag_chips,
@@ -773,9 +774,7 @@ pub async fn show_leaderboard_entry(
             }
 
             div class="page-head" {
-                @if let Some(ref avatar_url) = owner_avatar {
-                    img class="entry-avatar" src=(avatar_url) alt="" {}
-                }
+                (user_avatar(owner_avatar.as_deref(), &owner_login, "entry-avatar"))
                 div {
                     h1 {
                         a href={"/battlesnakes/"(snake.battlesnake_id)"/profile"} { (snake.name) }

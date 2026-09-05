@@ -11,7 +11,7 @@ use serde::Deserialize;
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::{
-    components::page_factory::PageFactory,
+    components::{avatar::user_avatar, page_factory::PageFactory},
     customizations::chip_color,
     errors::ServerResult,
     models::{
@@ -430,7 +430,7 @@ async fn root_page(
             div class="home" {
                 @if let Some(user) = &user {
                     section class="welcome" {
-                        img src=(user.github_avatar_url.clone().unwrap_or_default()) alt="" width="64" height="64";
+                        (user_avatar(user.github_avatar_url.as_deref(), &user.github_login, "welcome-avatar"))
                         div class="who" {
                             h1 { "Welcome, " (user.github_login) "!" }
                             p class="sub" {
@@ -775,7 +775,7 @@ async fn profile_page(
             }
 
             header class="profile-head" {
-                img class="avatar" src=(user.github_avatar_url.clone().unwrap_or_default()) alt="";
+                (user_avatar(user.github_avatar_url.as_deref(), &user.github_login, "avatar"))
                 div class="who" {
                     @if let Some(name) = user.display_name.as_ref().filter(|n| !n.is_empty()) {
                         h2 { (name) }

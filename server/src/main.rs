@@ -44,6 +44,7 @@ mod wire;
 
 /// Frontend UI components only - do not place backend logic here
 mod components {
+    pub mod avatar;
     pub mod flash;
     pub mod live_refresh;
     pub mod page;
