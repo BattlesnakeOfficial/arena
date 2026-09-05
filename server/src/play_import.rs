@@ -49,10 +49,17 @@ pub async fn import_from_play(play: &PgPool, arena: &PgPool) -> cja::Result<Impo
 
     // One row per play user: identity + profile + optional GitHub link.
     // uid/extra_data are cast to text so this works against both older
-    // (text) and newer (jsonb) social_django schemas.
+    // (text) and newer (jsonb) social-auth schemas.
+    //
+    // A handful of play users have more than one github social-auth row
+    // (e.g. a main + alt GitHub account linked to the same play account).
+    // DISTINCT ON collapses them to a single, deterministic link — the most
+    // recently created one (highest social-auth id) wins — so the account
+    // count is exact and a user's auto-link target can't flip between the
+    // repeated imports run during the transition window.
     let account_rows = sqlx::query(
         r#"
-        SELECT
+        SELECT DISTINCT ON (u.id)
             u.id AS play_user_id,
             u.email,
             u.password,
@@ -72,9 +79,9 @@ pub async fn import_from_play(play: &PgPool, arena: &PgPool) -> cja::Result<Impo
             s.extra_data::text AS github_extra_data
         FROM authentication_user u
         JOIN core_account a ON a.user_id = u.id
-        LEFT JOIN social_django_usersocialauth s
+        LEFT JOIN social_auth_usersocialauth s
             ON s.user_id = u.id AND s.provider = 'github'
-        ORDER BY u.id
+        ORDER BY u.id, s.id DESC NULLS LAST
         "#,
     )
     .fetch_all(play)
@@ -271,7 +278,7 @@ mod tests {
                 points_high_score INTEGER NOT NULL DEFAULT 0,
                 created TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
-            CREATE TABLE social_django_usersocialauth (
+            CREATE TABLE social_auth_usersocialauth (
                 id SERIAL PRIMARY KEY,
                 user_id TEXT NOT NULL,
                 provider TEXT NOT NULL,
@@ -312,17 +319,24 @@ mod tests {
             INSERT INTO authentication_user (id, email, password, is_email_verified, is_staff, is_superuser) VALUES
                 ('usr_linked', 'linked@example.com', 'pbkdf2_sha256$260000$s$h', true, false, false),
                 ('usr_legacy', 'legacy@example.com', 'pbkdf2_sha256$260000$s$h', true, false, true),
-                ('usr_badsocial', 'bad@example.com', '!unusablepasswordsentinel', false, false, false);
+                ('usr_badsocial', 'bad@example.com', '!unusablepasswordsentinel', false, false, false),
+                ('usr_multigh', 'multi@example.com', 'pbkdf2_sha256$260000$s$h', true, false, false);
 
             INSERT INTO core_account (id, user_id, username, display_name, pronouns, country, backstory, github_username, points, points_high_score) VALUES
                 ('act_linked', 'usr_linked', 'linkedplayer', 'Linked Player', 'they/them', 'CA', 'story', 'fallback-login', 120, 300),
                 ('act_legacy', 'usr_legacy', 'legacyplayer', '', NULL, '', '', '', 0, 50),
-                ('act_badsocial', 'usr_badsocial', 'badsocial', 'Bad Social', NULL, '', '', '', 0, 0);
+                ('act_badsocial', 'usr_badsocial', 'badsocial', 'Bad Social', NULL, '', '', '', 0, 0),
+                ('act_multigh', 'usr_multigh', 'multigh', 'Multi GH', NULL, '', '', '', 0, 0);
 
-            INSERT INTO social_django_usersocialauth (user_id, provider, uid, extra_data) VALUES
+            -- usr_multigh has two github links (a main + alt account). The
+            -- one inserted later gets the higher serial id and must win, so
+            -- the account is staged once against a deterministic uid.
+            INSERT INTO social_auth_usersocialauth (user_id, provider, uid, extra_data) VALUES
                 ('usr_linked', 'github', '777001', '{"login": "linked-gh"}'),
                 ('usr_linked', 'twitter', '999', '{}'),
-                ('usr_badsocial', 'github', 'not-a-number', '{}');
+                ('usr_badsocial', 'github', 'not-a-number', '{}'),
+                ('usr_multigh', 'github', '111000', '{"login": "old-alt"}'),
+                ('usr_multigh', 'github', '222000', '{"login": "new-main"}');
 
             INSERT INTO core_snake (id, account_id, name, url, head, tail, color, is_public, is_archived) VALUES
                 ('snk_1', 'act_linked', 'Alpha', 'https://example.com/a', 'beluga', 'default', '#ff0000', true, false),
@@ -354,7 +368,9 @@ mod tests {
         seed_play_data(&pool).await?;
 
         let counts = import_from_play(&pool, &pool).await?;
-        assert_eq!(counts.accounts, 3);
+        // usr_multigh is staged exactly once despite its two github links,
+        // so the count reflects distinct accounts, not joined rows.
+        assert_eq!(counts.accounts, 4);
         // Archived and NULL-owner snakes are filtered in SQL; the snake
         // whose owner isn't staged is counted as orphaned.
         assert_eq!(counts.snakes, 2);
@@ -401,6 +417,18 @@ mod tests {
         .await?;
         assert_eq!(bad.github_uid, None);
 
+        // Two github links collapse to the most recently created (highest
+        // social-auth id), deterministically — not whichever the join
+        // happened to yield last.
+        let multi = sqlx::query!(
+            "SELECT github_uid, github_login FROM imported_accounts
+             WHERE play_user_id = 'usr_multigh'"
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(multi.github_uid, Some(222000));
+        assert_eq!(multi.github_login.as_deref(), Some("new-main"));
+
         let snake_names: Vec<String> =
             sqlx::query!("SELECT name FROM imported_snakes ORDER BY name")
                 .fetch_all(&pool)
@@ -430,7 +458,7 @@ mod tests {
         .await?;
 
         let counts = import_from_play(&pool, &pool).await?;
-        assert_eq!(counts.accounts, 3);
+        assert_eq!(counts.accounts, 4);
         // Re-staged grants must count as staged, not orphaned (regression:
         // ON CONFLICT DO NOTHING reported 0 rows_affected on the 2nd run).
         assert_eq!(counts.grants, 2);
@@ -442,7 +470,7 @@ mod tests {
             .fetch_one(&pool)
             .await?
             .count;
-        assert_eq!(total, 3);
+        assert_eq!(total, 4);
 
         let renamed = sqlx::query!(
             "SELECT display_name FROM imported_accounts WHERE play_user_id = 'usr_linked'"
