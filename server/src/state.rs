@@ -40,6 +40,7 @@ impl AppState {
 
             let pool = PgPoolOptions::new()
                 .max_connections(max_connections)
+                .acquire_timeout(std::time::Duration::from_secs(60))
                 .connect(database_url)
                 .await?;
 
@@ -84,6 +85,7 @@ impl AppState {
                 tracing::info!("Connecting to Engine database for game backup");
                 let engine_pool = PgPoolOptions::new()
                     .max_connections(2)
+                    .acquire_timeout(std::time::Duration::from_secs(60))
                     .connect(url)
                     .await
                     .wrap_err("Failed to connect to Engine database")?;
