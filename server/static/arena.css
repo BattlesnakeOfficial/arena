@@ -374,6 +374,17 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
 @keyframes flash-in { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
 @keyframes flash-out { from { opacity: 1; } to { opacity: 0; visibility: hidden; } }
 
+.live-refresh-expired {
+  margin: 16px 0;
+  background: var(--pink-wash);
+  border: 1px solid var(--pink);
+  color: var(--ink);
+  padding: 12px 16px;
+  border-radius: 12px;
+  font-size: 14.5px;
+}
+.live-refresh-expired a { font-weight: 600; }
+
 /* --- footer -------------------------------------------------------------- */
 .site-footer { border-top: 1px solid var(--hairline); margin-top: 64px; }
 .site-footer .inner {

@@ -45,6 +45,7 @@ mod wire;
 /// Frontend UI components only - do not place backend logic here
 mod components {
     pub mod flash;
+    pub mod live_refresh;
     pub mod page;
     pub mod page_factory;
     pub mod snake_tags;

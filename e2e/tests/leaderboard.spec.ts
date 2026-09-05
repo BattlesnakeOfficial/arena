@@ -2,13 +2,50 @@ import { test, expect, createMockUser } from '../fixtures/test';
 import { query } from '../fixtures/db';
 
 test.describe('Leaderboard Pages', () => {
+  test('live standings refresh when an in-progress game finishes', async ({ authenticatedPage }, testInfo) => {
+    testInfo.setTimeout(50_000);
+    const name = `Live Refresh LB ${testInfo.workerIndex} ${Date.now()}`;
+    let leaderboardId: string | undefined;
+    let gameId: string | undefined;
+
+    try {
+      const [leaderboard] = await query<{ leaderboard_id: string }>(
+        'INSERT INTO leaderboards (name) VALUES ($1) RETURNING leaderboard_id',
+        [name]
+      );
+      leaderboardId = leaderboard.leaderboard_id;
+      const [game] = await query<{ game_id: string }>(
+        `INSERT INTO games (board_size, game_type, status)
+         VALUES ('11x11', 'Standard', 'waiting') RETURNING game_id`
+      );
+      gameId = game.game_id;
+      await query(
+        'INSERT INTO leaderboard_games (leaderboard_id, game_id) VALUES ($1, $2)',
+        [leaderboardId, gameId]
+      );
+
+      await authenticatedPage.goto(`/leaderboards/${leaderboardId}`);
+      const inProgress = authenticatedPage.locator('.stat').filter({ hasText: /^In progress/ });
+      await expect(inProgress.locator('.live')).toHaveText('1');
+      await expect(authenticatedPage.locator('[data-live-page-refresh]')).toHaveCount(1);
+
+      await query("UPDATE games SET status = 'finished' WHERE game_id = $1", [gameId]);
+      await expect(inProgress.locator('.live')).toHaveText('0', { timeout: 40_000 });
+      await expect(authenticatedPage.locator('[data-live-page-refresh]')).toHaveCount(0);
+    } finally {
+      if (leaderboardId) await query('DELETE FROM leaderboards WHERE leaderboard_id = $1', [leaderboardId]);
+      if (gameId) await query('DELETE FROM games WHERE game_id = $1', [gameId]);
+    }
+  });
+
   test('leaderboard list page renders with seeded leaderboard', async ({ authenticatedPage }) => {
     await authenticatedPage.goto('/leaderboards');
 
     await expect(authenticatedPage.getByRole('heading', { name: 'Leaderboards' })).toBeVisible();
     // The seed migration creates "Standard 11x11"
-    await expect(authenticatedPage.getByText('Standard 11x11')).toBeVisible();
-    await expect(authenticatedPage.getByText('Active')).toBeVisible();
+    const seededLeaderboard = authenticatedPage.locator('tr', { hasText: 'Standard 11x11' });
+    await expect(seededLeaderboard.getByText('Standard 11x11')).toBeVisible();
+    await expect(seededLeaderboard.getByText('Active')).toBeVisible();
   });
 
   test('leaderboard detail page shows rankings and placement sections', async ({ authenticatedPage }) => {

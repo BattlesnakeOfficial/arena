@@ -1,6 +1,6 @@
 use axum::{
     Form,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Redirect, Response},
 };
@@ -13,7 +13,10 @@ use std::str::FromStr as _;
 use uuid::Uuid;
 
 use crate::{
-    components::page_factory::PageFactory,
+    components::{
+        live_refresh::{LiveRefreshConfig, live_page_refresh},
+        page_factory::PageFactory,
+    },
     customizations::chip_color,
     errors::{ServerResult, WithStatus},
     models::{
@@ -48,6 +51,16 @@ const MAX_DESCRIPTION_CHARS: usize = 4000;
 const MAX_SNAKES_PER_USER_LIMIT: i32 = 32;
 const MAX_REQUIRED_PARTICIPANTS: i32 = 128;
 
+#[derive(Debug, Deserialize)]
+pub(crate) struct TournamentViewParams {
+    #[serde(default)]
+    watch_round: Option<String>,
+}
+
+fn parse_watch_round(value: Option<&str>) -> Option<i32> {
+    value.and_then(|value| value.parse::<i32>().ok())
+}
+
 // --- Pure business rules (unit tested below) ---
 
 /// Registrations can only be added/removed/reseeded before the bracket exists.
@@ -56,6 +69,18 @@ fn registrations_editable(status: TournamentStatus) -> bool {
         status,
         TournamentStatus::Created | TournamentStatus::Registration
     )
+}
+
+fn should_refresh_tournament(
+    tournament: &Tournament,
+    matches: &[TournamentMatch],
+    watch_round: Option<i32>,
+) -> bool {
+    tournament.status == TournamentStatus::InProgress
+        && (matches
+            .iter()
+            .any(|tournament_match| tournament_match.status == MatchStatus::InProgress)
+            || watch_round == Some(tournament.current_round))
 }
 
 /// Registration permission matrix: the tournament must be in a pre-start
@@ -959,8 +984,10 @@ pub async fn show_tournament(
     State(state): State<AppState>,
     OptionalUser(viewer): OptionalUser,
     UuidPath(tournament_id): UuidPath,
+    Query(params): Query<TournamentViewParams>,
     page_factory: PageFactory,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
+    let watch_round = parse_watch_round(params.watch_round.as_deref());
     let t = tournament::get_tournament_by_id(&state.db, tournament_id)
         .await
         .wrap_err("Failed to fetch tournament")?
@@ -1085,12 +1112,40 @@ pub async fn show_tournament(
         MatchStyle::FirstTo3 => "First to 3",
     };
 
+    let matches = bracket_data
+        .as_ref()
+        .map_or(&[][..], |(matches, _, _)| matches.as_slice());
+    let refresh_tournament = should_refresh_tournament(&t, matches, watch_round);
+    let refresh_state_key = refresh_tournament.then(|| {
+        let counts = matches.iter().fold([0; 4], |mut counts, tournament_match| {
+            let index = match tournament_match.status {
+                MatchStatus::Scheduled => 0,
+                MatchStatus::InProgress => 1,
+                MatchStatus::Completed => 2,
+                MatchStatus::Canceled => 3,
+            };
+            counts[index] += 1;
+            counts
+        });
+        format!(
+            "tournament:{}:{}:{}:{}:{}",
+            t.current_round, counts[0], counts[1], counts[2], counts[3]
+        )
+    });
+
     Ok(page_factory.create_page(
         format!("Tournament: {}", t.name),
         Box::new(html! {
             div class="crumb" {
                 a href="/tournaments" { "Tournaments" }
                 " / " (t.name)
+            }
+            @if let Some(refresh_state_key) = &refresh_state_key {
+                (live_page_refresh(&LiveRefreshConfig {
+                    interval_ms: 5_000,
+                    max_ticks: 120,
+                    state_key: refresh_state_key,
+                }))
             }
             div class="page-head" {
                 div {
@@ -2036,12 +2091,13 @@ pub async fn run_round(
     .await
     .wrap_err("Failed to enqueue round job")?;
 
+    let watched_detail_url = format!("{detail_url}?watch_round={}", t.current_round);
     flash_redirect(
         &state,
         session.session_id,
         format!("Round {} started", t.current_round),
         session::FLASH_TYPE_SUCCESS,
-        &detail_url,
+        &watched_detail_url,
     )
     .await
 }
@@ -2314,6 +2370,81 @@ mod tests {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }
+    }
+
+    fn test_match(status: MatchStatus) -> TournamentMatch {
+        TournamentMatch {
+            match_id: Uuid::new_v4(),
+            tournament_id: Uuid::new_v4(),
+            round: 1,
+            position: 0,
+            status,
+            next_match_id: None,
+            winner_id: None,
+            visual_column: 0,
+            visual_row: 0,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn tournament_refresh_follows_live_matches_and_watched_queue_gap() {
+        let mut tournament = test_tournament(
+            TournamentStatus::InProgress,
+            RegistrationStatus::Closed,
+            TournamentVisibility::Public,
+        );
+        tournament.current_round = 1;
+
+        assert!(should_refresh_tournament(
+            &tournament,
+            &[test_match(MatchStatus::InProgress)],
+            None
+        ));
+        assert!(should_refresh_tournament(
+            &tournament,
+            &[test_match(MatchStatus::Scheduled)],
+            Some(1)
+        ));
+        assert!(!should_refresh_tournament(
+            &tournament,
+            &[test_match(MatchStatus::Scheduled)],
+            None
+        ));
+
+        tournament.current_round = 2;
+        assert!(!should_refresh_tournament(
+            &tournament,
+            &[test_match(MatchStatus::Scheduled)],
+            Some(1)
+        ));
+    }
+
+    #[test]
+    fn terminal_tournaments_never_refresh() {
+        for status in [TournamentStatus::Completed, TournamentStatus::Canceled] {
+            let tournament = test_tournament(
+                status,
+                RegistrationStatus::Closed,
+                TournamentVisibility::Public,
+            );
+            assert!(!should_refresh_tournament(
+                &tournament,
+                &[test_match(MatchStatus::InProgress)],
+                Some(tournament.current_round)
+            ));
+        }
+    }
+
+    #[test]
+    fn watch_round_parsing_is_lenient() {
+        for value in ["", "alphabetic", "999999999999999999999"] {
+            assert_eq!(parse_watch_round(Some(value)), None);
+        }
+        assert_eq!(parse_watch_round(Some("-1")), Some(-1));
+        assert_eq!(parse_watch_round(Some("3")), Some(3));
+        assert_eq!(parse_watch_round(None), None);
     }
 
     #[test]
