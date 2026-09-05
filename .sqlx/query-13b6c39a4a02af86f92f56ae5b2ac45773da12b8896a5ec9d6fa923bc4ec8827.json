@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE leaderboard_game_results\n             SET created_at = $1\n             WHERE leaderboard_game_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "13b6c39a4a02af86f92f56ae5b2ac45773da12b8896a5ec9d6fa923bc4ec8827"
+}

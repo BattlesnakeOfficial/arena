@@ -21,6 +21,7 @@
 //! double-send.
 
 use reqwest::Client;
+use std::collections::BTreeMap;
 
 use crate::models::battlesnake::{Battlesnake, Visibility};
 use crate::models::snake_health_status;
@@ -33,6 +34,14 @@ struct ProbeOutcome {
     /// Human-readable description of the failed calls, e.g.
     /// `"POST /move: request timed out"`. Empty when healthy.
     failure_summary: String,
+}
+
+#[derive(Clone, Copy)]
+enum ProbeKind {
+    Active,
+    Recovering,
+    Mixed,
+    StaleMixed,
 }
 
 fn summarize(report: &HealthCheckReport) -> ProbeOutcome {
@@ -87,11 +96,10 @@ async fn snakes_in_matchmaking(pool: &sqlx::PgPool) -> cja::Result<Vec<Battlesna
     Ok(snakes)
 }
 
-/// Snakes the sweeper pulled from matchmaking: distinct snakes whose only
-/// presence on enabled leaderboards is entries disabled with
-/// `disabled_reason = 'health'`. These get recovery probes so a fixed
-/// server finds its own way back. Manual pauses (NULL reason) are the
-/// owner's business and are never probed.
+/// Snakes with at least one `health`-disabled entry on an enabled
+/// leaderboard. A snake may also appear in [`snakes_in_matchmaking`];
+/// [`run_sweep`] reconciles that overlap against its actual health stamp.
+/// Manual pauses (NULL reason) are the owner's business and are never probed.
 async fn snakes_health_disabled(pool: &sqlx::PgPool) -> cja::Result<Vec<Battlesnake>> {
     use color_eyre::eyre::Context as _;
 
@@ -132,9 +140,38 @@ pub async fn run_sweep(app_state: &AppState) -> cja::Result<()> {
         return Ok(());
     }
 
+    let mut candidates = BTreeMap::new();
+    for snake in active.into_iter() {
+        candidates.insert(snake.battlesnake_id, (ProbeKind::Active, snake));
+    }
+    for snake in recovering.into_iter() {
+        candidates
+            .entry(snake.battlesnake_id)
+            .and_modify(|(kind, _)| *kind = ProbeKind::Mixed)
+            .or_insert((ProbeKind::Recovering, snake));
+    }
+
+    // Set overlap alone cannot tell us whether a mixed snake is recovering:
+    // an out-of-band resume can clear the health stamp while leaving another
+    // entry health-disabled. Those snakes must retain the normal failure
+    // threshold and notification path.
+    for (kind, snake) in candidates.values_mut() {
+        if matches!(kind, ProbeKind::Mixed)
+            && !snake_health_status::get(&app_state.db, snake.battlesnake_id)
+                .await?
+                .is_some_and(|status| status.deactivated_at.is_some())
+        {
+            *kind = ProbeKind::StaleMixed;
+        }
+    }
+    let recovery_probe_count = candidates
+        .values()
+        .filter(|(kind, _)| matches!(kind, ProbeKind::Recovering | ProbeKind::Mixed))
+        .count();
+
     tracing::info!(
-        snake_count = active.len(),
-        recovering_count = recovering.len(),
+        probe_count = candidates.len(),
+        recovery_probe_count,
         "Starting snake health sweep"
     );
 
@@ -146,26 +183,48 @@ pub async fn run_sweep(app_state: &AppState) -> cja::Result<()> {
         .build()
         .map_err(|e| cja::color_eyre::eyre::eyre!("Failed to build health check client: {e}"))?;
 
-    for snake in &active {
-        let outcome = probe(&client, snake).await;
-        if let Err(e) = apply_probe_outcome(app_state, snake, &outcome).await {
+    for (_, (kind, snake)) in candidates {
+        let outcome = probe(&client, &snake).await;
+        let result = match (kind, outcome.healthy) {
+            (ProbeKind::Active, _) => apply_probe_outcome(app_state, &snake, &outcome).await,
+            (ProbeKind::StaleMixed, false) => {
+                apply_probe_outcome(app_state, &snake, &outcome).await
+            }
+            (ProbeKind::StaleMixed, true) => {
+                async {
+                    snake_health_status::record_success(&app_state.db, snake.battlesnake_id)
+                        .await?;
+                    // The stamp is already clear, so this repairs orphaned health
+                    // markers without winning (or notifying for) a transition.
+                    snake_health_status::reactivate(&app_state.db, snake.battlesnake_id).await?;
+                    Ok(())
+                }
+                .await
+            }
+            (ProbeKind::Recovering, _) | (ProbeKind::Mixed, true) => {
+                apply_recovery_probe_outcome(app_state, &snake, &outcome).await
+            }
+            (ProbeKind::Mixed, false) => {
+                async {
+                    snake_health_status::record_recovery_failure(
+                        &app_state.db,
+                        snake.battlesnake_id,
+                        &outcome.failure_summary,
+                    )
+                    .await?;
+                    snake_health_status::deactivate(&app_state.db, snake.battlesnake_id).await?;
+                    Ok(())
+                }
+                .await
+            }
+        };
+        if let Err(e) = result {
             // One snake's bookkeeping failing shouldn't abort the sweep for
             // the rest; the next run retries it.
             tracing::error!(
                 battlesnake_id = %snake.battlesnake_id,
                 error = %e,
                 "Failed to record health sweep outcome"
-            );
-        }
-    }
-
-    for snake in &recovering {
-        let outcome = probe(&client, snake).await;
-        if let Err(e) = apply_recovery_probe_outcome(app_state, snake, &outcome).await {
-            tracing::error!(
-                battlesnake_id = %snake.battlesnake_id,
-                error = %e,
-                "Failed to record recovery probe outcome"
             );
         }
     }
@@ -529,6 +588,187 @@ mod tests {
         assert_eq!(status.consecutive_failures, 0);
 
         Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn mixed_state_snake_is_probed_once_and_recovers(pool: PgPool) -> cja::Result<()> {
+        let server = healthy_snake_server().await;
+        let (battlesnake_id, disabled_entry) =
+            create_snake_on_leaderboard(&pool, &server.uri()).await?;
+        snake_health_status::record_failure(&pool, battlesnake_id, "was down").await?;
+        assert!(snake_health_status::deactivate(&pool, battlesnake_id).await?);
+        let enabled_entry = create_additional_enabled_entry(&pool, battlesnake_id).await?;
+        let app_state = AppState::test_from_pool(pool.clone());
+
+        for _ in 0..app_state.config.snake_health_recovery_threshold {
+            age_last_check(&pool, battlesnake_id).await?;
+            let before = server.received_requests().await.unwrap().len();
+            run_sweep(&app_state).await?;
+            let after = server.received_requests().await.unwrap().len();
+            assert_eq!(after - before, 4, "one healthy probe has four requests");
+        }
+
+        assert_eq!(entry_disabled(&pool, disabled_entry).await?, None);
+        assert_eq!(entry_disabled(&pool, enabled_entry).await?, None);
+        let status = snake_health_status::get(&pool, battlesnake_id)
+            .await?
+            .expect("health status exists");
+        assert!(status.deactivated_at.is_none());
+        assert_eq!(status.consecutive_successes, 0);
+        assert_eq!(status.consecutive_failures, 0);
+        assert!(
+            !snake_health_status::reactivate(&pool, battlesnake_id).await?,
+            "the notification gate opens only for the single stamped transition"
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn broken_mixed_state_snake_is_probed_once_and_fully_deactivated(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        let server = broken_snake_server().await;
+        let (battlesnake_id, disabled_entry) =
+            create_snake_on_leaderboard(&pool, &server.uri()).await?;
+        snake_health_status::record_failure(&pool, battlesnake_id, "was down").await?;
+        assert!(snake_health_status::deactivate(&pool, battlesnake_id).await?);
+        age_last_check(&pool, battlesnake_id).await?;
+        assert_eq!(
+            snake_health_status::record_recovery_success(&pool, battlesnake_id).await?,
+            1
+        );
+        let enabled_entry = create_additional_enabled_entry(&pool, battlesnake_id).await?;
+        let app_state = AppState::test_from_pool(pool.clone());
+
+        let before = server.received_requests().await.unwrap().len();
+        run_sweep(&app_state).await?;
+        let after = server.received_requests().await.unwrap().len();
+
+        assert_eq!(after - before, 1, "aborted broken probe has one request");
+        for entry in [disabled_entry, enabled_entry] {
+            assert_eq!(
+                entry_disabled(&pool, entry).await?.as_deref(),
+                Some(snake_health_status::DISABLED_REASON_HEALTH)
+            );
+        }
+        let status = snake_health_status::get(&pool, battlesnake_id)
+            .await?
+            .expect("health status exists");
+        assert!(status.deactivated_at.is_some());
+        assert_eq!(status.consecutive_successes, 0);
+        Ok(())
+    }
+
+    /// Reproduce the production residue described by DEV-710 item 3: a snake
+    /// was deactivated, its owner resumed one board out of band (which clears
+    /// only that entry's `health` marker), and a later healthy sweep cleared
+    /// `deactivated_at` through `record_success`. The snake is left with an
+    /// enabled entry, an orphaned `health`-disabled entry, and NO deactivation
+    /// stamp.
+    async fn create_stale_health_entry_snake(
+        pool: &PgPool,
+        url: &str,
+    ) -> cja::Result<(Uuid, Uuid, Uuid)> {
+        let (battlesnake_id, stale_entry) = create_snake_on_leaderboard(pool, url).await?;
+        let active_entry = create_additional_enabled_entry(pool, battlesnake_id).await?;
+
+        snake_health_status::record_failure(pool, battlesnake_id, "was down").await?;
+        assert!(snake_health_status::deactivate(pool, battlesnake_id).await?);
+        // Owner resumes one board through the leaderboard page, which knows
+        // nothing about health state and clears only that entry's reason.
+        crate::models::leaderboard::set_disabled(pool, active_entry, None).await?;
+        // A healthy active-population sweep then cleared the stale stamp.
+        snake_health_status::record_success(pool, battlesnake_id).await?;
+
+        let status = snake_health_status::get(pool, battlesnake_id)
+            .await?
+            .expect("health row exists");
+        assert!(
+            status.deactivated_at.is_none(),
+            "precondition: this snake is NOT deactivated"
+        );
+        assert_eq!(
+            entry_disabled(pool, stale_entry).await?.as_deref(),
+            Some(snake_health_status::DISABLED_REASON_HEALTH),
+            "precondition: the orphaned entry still carries the health marker"
+        );
+        assert_eq!(
+            entry_disabled(pool, active_entry).await?,
+            None,
+            "precondition: the resumed entry is back in matchmaking"
+        );
+
+        Ok((battlesnake_id, stale_entry, active_entry))
+    }
+
+    /// A snake that is in matchmaking and NOT deactivated must follow the
+    /// documented failure-threshold contract: it takes
+    /// `snake_health_failure_threshold` consecutive failed sweeps to pull it,
+    /// regardless of whether some unrelated entry still carries a stale
+    /// `health` marker. One failed probe must not disable it.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn stale_health_entry_does_not_bypass_the_failure_threshold(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        let server = broken_snake_server().await;
+        let (_battlesnake_id, _stale_entry, active_entry) =
+            create_stale_health_entry_snake(&pool, &server.uri()).await?;
+        let app_state = AppState::test_from_pool(pool.clone());
+        assert!(
+            app_state.config.snake_health_failure_threshold >= 2,
+            "test assumes a multi-sweep threshold"
+        );
+
+        run_sweep(&app_state).await?;
+
+        assert_eq!(
+            entry_disabled(&pool, active_entry).await?,
+            None,
+            "a single failed probe must not pull a non-deactivated snake from matchmaking"
+        );
+        Ok(())
+    }
+
+    /// DEV-710 criterion 3: "a successful probe reactivates that snake's
+    /// health-disabled entries". That must hold for the mixed-state snake whose
+    /// deactivation stamp was already cleared, which is exactly the state the
+    /// bug being fixed produced in production.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn stale_health_entry_is_restored_by_healthy_probes(pool: PgPool) -> cja::Result<()> {
+        let server = healthy_snake_server().await;
+        let (battlesnake_id, stale_entry, _active_entry) =
+            create_stale_health_entry_snake(&pool, &server.uri()).await?;
+        let app_state = AppState::test_from_pool(pool.clone());
+        let threshold = app_state.config.snake_health_recovery_threshold;
+
+        for _ in 0..=threshold {
+            age_last_check(&pool, battlesnake_id).await?;
+            run_sweep(&app_state).await?;
+        }
+
+        assert_eq!(
+            entry_disabled(&pool, stale_entry).await?,
+            None,
+            "healthy sweeps must restore the orphaned health-disabled entry"
+        );
+        Ok(())
+    }
+
+    async fn create_additional_enabled_entry(
+        pool: &PgPool,
+        battlesnake_id: Uuid,
+    ) -> cja::Result<Uuid> {
+        let leaderboard_id = sqlx::query_scalar!(
+            "INSERT INTO leaderboards (name) VALUES ($1) RETURNING leaderboard_id",
+            format!("mixed-board-{battlesnake_id}")
+        )
+        .fetch_one(pool)
+        .await?;
+        Ok(
+            crate::models::leaderboard::get_or_create_entry(pool, leaderboard_id, battlesnake_id)
+                .await?
+                .leaderboard_entry_id,
+        )
     }
 
     /// A failed recovery probe restarts the healthy streak from zero.

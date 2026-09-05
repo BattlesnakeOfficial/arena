@@ -220,6 +220,16 @@ test.describe.serial('Player Directory', () => {
       expect(hrefFor(`${prefix}-d-twin-one`)).toBe(`/users/${prefix}-twin/${firstTwinId}`);
       expect(hrefFor(`${prefix}-e-twin-two`)).toBe(`/users/${prefix}-TWIN/${secondTwinId}`);
 
+      const wrongSlug = await page.request.get(`/users/wrong-login/${activeId}`, {
+        maxRedirects: 0,
+      });
+      expect(wrongSlug.status()).toBe(308);
+      expect(wrongSlug.headers().location).toBe(`/users/${prefix}-a-active/${activeId}`);
+      const canonical = await page.request.get(`/users/${prefix}-a-active/${activeId}`, {
+        maxRedirects: 0,
+      });
+      expect(canonical.status()).toBe(200);
+
       // --- Active filter: only players holding an enabled entry ---
       // The paused, snakeless and snake-less twin rows all drop out.
       const activeMine = await collectExpectedRows(page, '/players?active=true', prefix, [

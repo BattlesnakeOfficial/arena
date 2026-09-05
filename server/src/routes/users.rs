@@ -1,7 +1,7 @@
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
-    response::IntoResponse,
+    response::{IntoResponse, Redirect, Response},
 };
 use color_eyre::eyre::Context as _;
 use maud::{Markup, html};
@@ -57,22 +57,29 @@ pub async fn show_user_profile(
 /// GET /users/{login}/{user_id} — public user profile addressed by its stable
 /// UUID.
 ///
-/// The `_login` segment is cosmetic: it keeps the URL readable and shareable,
-/// but the UUID is authoritative. A stale or differently-cased slug still
-/// resolves to the right person rather than 404ing or picking a namesake.
+/// The UUID is authoritative and stale login slugs redirect to the canonical URL.
 pub async fn show_user_profile_by_id(
     State(state): State<AppState>,
     OptionalUser(viewer): OptionalUser,
-    Path((_login, user_id)): Path<(String, Uuid)>,
+    Path((login, user_id)): Path<(String, Uuid)>,
     page_factory: PageFactory,
-) -> ServerResult<impl IntoResponse, StatusCode> {
+) -> ServerResult<Response, StatusCode> {
     let user = user::get_user_by_id(&state.db, user_id)
         .await
         .wrap_err("Failed to fetch user")?
         .ok_or_else(|| "User not found".to_string())
         .with_status(StatusCode::NOT_FOUND)?;
 
-    render_user_profile(&state, viewer, user, page_factory).await
+    if login != user.github_login {
+        return Ok(
+            Redirect::permanent(&format!("/users/{}/{}", user.github_login, user.user_id))
+                .into_response(),
+        );
+    }
+
+    Ok(render_user_profile(&state, viewer, user, page_factory)
+        .await?
+        .into_response())
 }
 
 /// Render the public profile of an already-resolved user. Shared by both
