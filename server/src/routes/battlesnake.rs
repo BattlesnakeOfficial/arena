@@ -575,6 +575,10 @@ pub async fn create_battlesnake(
                 .await
                 .wrap_err("Failed to set battlesnake tags")?;
 
+            session::take_pending_form_data(&state.db, session.session_id)
+                .await
+                .wrap_err("Failed to clear stale battlesnake form data")?;
+
             if snake.visibility == Visibility::Public {
                 state
                     .discord
@@ -791,6 +795,10 @@ pub async fn update_battlesnake(
             tag::set_tags_for_battlesnake(&state.db, battlesnake_id, &form.tag_ids)
                 .await
                 .wrap_err("Failed to set battlesnake tags")?;
+
+            session::take_pending_form_data(&state.db, session.session_id)
+                .await
+                .wrap_err("Failed to clear stale battlesnake form data")?;
 
             // Flash message for success and redirect
             session::set_flash_message(
