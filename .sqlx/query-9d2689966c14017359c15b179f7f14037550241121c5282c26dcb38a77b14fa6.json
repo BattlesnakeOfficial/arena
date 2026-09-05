@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        WITH pending AS (\n            SELECT pending_form_data\n            FROM sessions\n            WHERE session_id = $1\n            FOR UPDATE\n        )\n        UPDATE sessions s\n        SET pending_form_data = NULL\n        FROM pending\n        WHERE s.session_id = $1\n        RETURNING pending.pending_form_data AS \"pending_form_data?\"\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "pending_form_data?",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "9d2689966c14017359c15b179f7f14037550241121c5282c26dcb38a77b14fa6"
+}

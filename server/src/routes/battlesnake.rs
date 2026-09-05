@@ -29,11 +29,40 @@ use crate::{
 // Parsed new/edit battlesnake form. Parsed by hand from the urlencoded body
 // because the tag checkboxes submit a repeated `tags` key, which
 // `axum::Form` (serde_urlencoded) can't deserialize into a Vec.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 struct BattlesnakeFormData {
     name: String,
     url: String,
     visibility: Visibility,
     tag_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct PendingBattlesnakeForm {
+    target: BattlesnakeFormTarget,
+    form: BattlesnakeFormData,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+enum BattlesnakeFormTarget {
+    New,
+    Edit(Uuid),
+}
+
+const MAX_DRAFT_URL_CHARS: usize = 2_048;
+
+fn bounded_form_copy(form: &BattlesnakeFormData) -> BattlesnakeFormData {
+    BattlesnakeFormData {
+        name: form.name.chars().take(battlesnake::MAX_NAME_LEN).collect(),
+        url: form.url.chars().take(MAX_DRAFT_URL_CHARS).collect(),
+        visibility: form.visibility,
+        tag_ids: form
+            .tag_ids
+            .iter()
+            .take(tag::MAX_TAGS_PER_SNAKE * 4)
+            .copied()
+            .collect(),
+    }
 }
 
 fn parse_battlesnake_form(bytes: &[u8]) -> Result<BattlesnakeFormData, String> {
@@ -102,6 +131,54 @@ fn tag_form_fields(catalog: &tag::TagCatalog, selected: &[Uuid]) -> Markup {
                 "Missing a tag? "
                 a href="/discord" { "Request it on Discord" }
                 "."
+            }
+        }
+    }
+}
+
+const URL_NORMALIZATION_SCRIPT: &str = r#"
+(function() {
+  var el = document.getElementById('url');
+  el.addEventListener('change', function() {
+    var v = el.value.trim();
+    if (v && v.indexOf('://') === -1) {
+      el.value = 'https://' + v;
+    }
+  });
+})();
+"#;
+
+fn battlesnake_form(
+    action: &str,
+    submit_label: &str,
+    form: &BattlesnakeFormData,
+    catalog: &tag::TagCatalog,
+) -> Markup {
+    html! {
+        form class="form-stack" action=(action) method="post" {
+            div class="field" {
+                label for="name" { "Name" }
+                input type="text" id="name" name="name" required maxlength=(battlesnake::MAX_NAME_LEN) value=(form.name);
+            }
+            div class="field" {
+                label for="url" { "URL" }
+                input type="url" id="url" name="url" required
+                    placeholder="https://your-battlesnake-server.com" value=(form.url);
+                p class="help" { "The URL of your Battlesnake server" }
+            }
+            div class="field" {
+                label for="visibility" { "Visibility" }
+                select id="visibility" name="visibility" required {
+                    option value="public" selected[form.visibility == Visibility::Public] { "Public — anyone can add it to their games" }
+                    option value="private" selected[form.visibility == Visibility::Private] { "Private — only you can add it to games" }
+                }
+                p class="help" { "Only controls who can pick this snake in Create Game. It always shows on your profile and in the games it plays, and you can still enter it in leaderboards and tournaments." }
+            }
+            (tag_form_fields(catalog, &form.tag_ids))
+            script { (maud::PreEscaped(URL_NORMALIZATION_SCRIPT)) }
+            div class="form-cta" {
+                button type="submit" class="btn solid" { (submit_label) }
+                a href="/battlesnakes" class="btn" { "Cancel" }
             }
         }
     }
@@ -348,14 +425,29 @@ pub async fn list_battlesnakes(
 // Show the form to create a new battlesnake
 pub async fn new_battlesnake(
     State(state): State<AppState>,
-    CurrentUser(_): CurrentUser,
+    CurrentUserWithSession { session, .. }: CurrentUserWithSession,
     page_factory: PageFactory,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
     let catalog = tag::get_tag_catalog(&state.db)
         .await
         .wrap_err("Failed to get tag catalog")?;
 
-    // Use flash from page_factory (already extracted and cleared from DB)
+    let form = match session::take_pending_form_data(&state.db, session.session_id)
+        .await
+        .wrap_err("Failed to take pending battlesnake form data")?
+    {
+        Some(value) => {
+            let pending: PendingBattlesnakeForm = serde_json::from_value(value)
+                .wrap_err("Failed to deserialize pending battlesnake form data")?;
+            if pending.target == BattlesnakeFormTarget::New {
+                pending.form
+            } else {
+                BattlesnakeFormData::default()
+            }
+        }
+        None => BattlesnakeFormData::default(),
+    };
+
     let flash = page_factory.flash.clone();
 
     Ok(page_factory.create_page_with_flash(
@@ -367,50 +459,7 @@ pub async fn new_battlesnake(
                 div class="sub" { "Point the Arena at your snake server and pick who can play it." }
             }
 
-            form class="form-stack" action="/battlesnakes" method="post" {
-                div class="field" {
-                    label for="name" { "Name" }
-                    input type="text" id="name" name="name" required maxlength=(battlesnake::MAX_NAME_LEN);
-                }
-
-                div class="field" {
-                    label for="url" { "URL" }
-                    input type="url" id="url" name="url" required placeholder="https://your-battlesnake-server.com";
-                    p class="help" { "The URL of your Battlesnake server" }
-                }
-
-                div class="field" {
-                    label for="visibility" { "Visibility" }
-                    select id="visibility" name="visibility" required {
-                        option value="public" selected { "Public — anyone can add it to their games" }
-                        option value="private" { "Private — only you can add it to games" }
-                    }
-                    p class="help" { "Only controls who can pick this snake in Create Game. It always shows on your profile and in the games it plays, and you can still enter it in leaderboards and tournaments." }
-                }
-
-                (tag_form_fields(&catalog, &[]))
-
-                // The url input rejects bare hostnames before the server can help,
-                // so add the scheme as soon as the field loses focus.
-                script {
-                    (maud::PreEscaped(r#"
-                    (function() {
-                      var el = document.getElementById('url');
-                      el.addEventListener('change', function() {
-                        var v = el.value.trim();
-                        if (v && v.indexOf('://') === -1) {
-                          el.value = 'https://' + v;
-                        }
-                      });
-                    })();
-                    "#))
-                }
-
-                div class="form-cta" {
-                    button type="submit" class="btn solid" { "Create Battlesnake" }
-                    a href="/battlesnakes" class="btn" { "Cancel" }
-                }
-            }
+            (battlesnake_form("/battlesnakes", "Create Battlesnake", &form, &catalog))
         }),
         flash,
     ))
@@ -431,15 +480,23 @@ fn normalize_snake_url(url: &str) -> String {
 /// Set an error flash and bounce back to `to` — the web form's channel for
 /// every validation failure (name, URL, tag cap), so the user never lands on
 /// a bare error page.
-async fn flash_and_redirect(
+async fn flash_form_and_redirect(
     pool: &PgPool,
     session_id: Uuid,
     message: String,
+    form: &BattlesnakeFormData,
+    target: BattlesnakeFormTarget,
     to: &str,
 ) -> cja::Result<axum::response::Response> {
-    session::set_flash_message(pool, session_id, message, session::FLASH_TYPE_ERROR)
+    let pending = PendingBattlesnakeForm {
+        target,
+        form: bounded_form_copy(form),
+    };
+    let form_data = serde_json::to_value(pending)
+        .wrap_err("Failed to serialize pending battlesnake form data")?;
+    session::set_error_flash_with_form_data(pool, session_id, message, form_data)
         .await
-        .wrap_err("Failed to set flash message")?;
+        .wrap_err("Failed to set flash message and battlesnake form data")?;
     Ok(Redirect::to(to).into_response())
 }
 
@@ -460,9 +517,15 @@ pub async fn create_battlesnake(
     let name = match battlesnake::validate_name(&form.name) {
         Ok(name) => name,
         Err(msg) => {
-            return Ok(
-                flash_and_redirect(&state.db, session.session_id, msg, "/battlesnakes/new").await?,
-            );
+            return Ok(flash_form_and_redirect(
+                &state.db,
+                session.session_id,
+                msg,
+                &form,
+                BattlesnakeFormTarget::New,
+                "/battlesnakes/new",
+            )
+            .await?);
         }
     };
 
@@ -472,17 +535,25 @@ pub async fn create_battlesnake(
             "A battlesnake can have at most {} tags",
             tag::MAX_TAGS_PER_SNAKE
         );
-        return Ok(
-            flash_and_redirect(&state.db, session.session_id, msg, "/battlesnakes/new").await?,
-        );
+        return Ok(flash_form_and_redirect(
+            &state.db,
+            session.session_id,
+            msg,
+            &form,
+            BattlesnakeFormTarget::New,
+            "/battlesnakes/new",
+        )
+        .await?);
     }
 
     let url = normalize_snake_url(&form.url);
     if let Err(msg) = battlesnake::validate_url(&url) {
-        return Ok(flash_and_redirect(
+        return Ok(flash_form_and_redirect(
             &state.db,
             session.session_id,
             msg.to_string(),
+            &form,
+            BattlesnakeFormTarget::New,
             "/battlesnakes/new",
         )
         .await?);
@@ -503,6 +574,10 @@ pub async fn create_battlesnake(
             tag::set_tags_for_battlesnake(&state.db, snake.battlesnake_id, &form.tag_ids)
                 .await
                 .wrap_err("Failed to set battlesnake tags")?;
+
+            session::take_pending_form_data(&state.db, session.session_id)
+                .await
+                .wrap_err("Failed to clear stale battlesnake form data")?;
 
             if snake.visibility == Visibility::Public {
                 state
@@ -530,18 +605,16 @@ pub async fn create_battlesnake(
         Err(err) => {
             // Check if it's a name uniqueness error
             if err.to_string().contains("already have a battlesnake named") {
-                // Set error flash message
-                session::set_flash_message(
+                Ok(flash_form_and_redirect(
                     &state.db,
                     session.session_id,
                     err.to_string(),
-                    session::FLASH_TYPE_ERROR,
+                    &form,
+                    BattlesnakeFormTarget::New,
+                    "/battlesnakes/new",
                 )
                 .await
-                .wrap_err("Failed to set flash message")?;
-
-                // Redirect back to the form
-                Ok(Redirect::to("/battlesnakes/new").into_response())
+                .wrap_err("Failed to preserve invalid battlesnake form")?)
             } else {
                 // For other errors, propagate them
                 Err(err).wrap_err("Failed to create battlesnake")?
@@ -553,7 +626,7 @@ pub async fn create_battlesnake(
 // Show the form to edit an existing battlesnake
 pub async fn edit_battlesnake(
     State(state): State<AppState>,
-    CurrentUser(user): CurrentUser,
+    CurrentUserWithSession { user, session }: CurrentUserWithSession,
     Path(battlesnake_id): Path<Uuid>,
     page_factory: PageFactory,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
@@ -580,6 +653,28 @@ pub async fn edit_battlesnake(
         .map(|t| t.tag_id)
         .collect();
 
+    let fallback = BattlesnakeFormData {
+        name: battlesnake.name.clone(),
+        url: battlesnake.url.clone(),
+        visibility: battlesnake.visibility,
+        tag_ids: selected_tag_ids,
+    };
+    let form = match session::take_pending_form_data(&state.db, session.session_id)
+        .await
+        .wrap_err("Failed to take pending battlesnake form data")?
+    {
+        Some(value) => {
+            let pending: PendingBattlesnakeForm = serde_json::from_value(value)
+                .wrap_err("Failed to deserialize pending battlesnake form data")?;
+            if pending.target == BattlesnakeFormTarget::Edit(battlesnake_id) {
+                pending.form
+            } else {
+                fallback
+            }
+        }
+        None => fallback,
+    };
+
     // Use flash from page_factory (already extracted and cleared from DB)
     let flash = page_factory.flash.clone();
 
@@ -591,50 +686,12 @@ pub async fn edit_battlesnake(
                 h1 { "Edit Battlesnake: " (battlesnake.name) }
             }
 
-            form class="form-stack" action={"/battlesnakes/"(battlesnake_id)"/update"} method="post" {
-                div class="field" {
-                    label for="name" { "Name" }
-                    input type="text" id="name" name="name" required maxlength=(battlesnake::MAX_NAME_LEN) value=(battlesnake.name);
-                }
-
-                div class="field" {
-                    label for="url" { "URL" }
-                    input type="url" id="url" name="url" required value=(battlesnake.url);
-                    p class="help" { "The URL of your Battlesnake server" }
-                }
-
-                div class="field" {
-                    label for="visibility" { "Visibility" }
-                    select id="visibility" name="visibility" required {
-                        option value="public" selected[battlesnake.visibility == Visibility::Public] { "Public — anyone can add it to their games" }
-                        option value="private" selected[battlesnake.visibility == Visibility::Private] { "Private — only you can add it to games" }
-                    }
-                    p class="help" { "Only controls who can pick this snake in Create Game. It always shows on your profile and in the games it plays, and you can still enter it in leaderboards and tournaments." }
-                }
-
-                (tag_form_fields(&catalog, &selected_tag_ids))
-
-                // The url input rejects bare hostnames before the server can help,
-                // so add the scheme as soon as the field loses focus.
-                script {
-                    (maud::PreEscaped(r#"
-                    (function() {
-                      var el = document.getElementById('url');
-                      el.addEventListener('change', function() {
-                        var v = el.value.trim();
-                        if (v && v.indexOf('://') === -1) {
-                          el.value = 'https://' + v;
-                        }
-                      });
-                    })();
-                    "#))
-                }
-
-                div class="form-cta" {
-                    button type="submit" class="btn solid" { "Update Battlesnake" }
-                    a href="/battlesnakes" class="btn" { "Cancel" }
-                }
-            }
+            (battlesnake_form(
+                &format!("/battlesnakes/{battlesnake_id}/update"),
+                "Update Battlesnake",
+                &form,
+                &catalog,
+            ))
         }),
         flash,
     ))
@@ -675,9 +732,15 @@ pub async fn update_battlesnake(
         match battlesnake::validate_name(&form.name) {
             Ok(name) => name,
             Err(msg) => {
-                return Ok(
-                    flash_and_redirect(&state.db, session.session_id, msg, &edit_path).await?,
-                );
+                return Ok(flash_form_and_redirect(
+                    &state.db,
+                    session.session_id,
+                    msg,
+                    &form,
+                    BattlesnakeFormTarget::Edit(battlesnake_id),
+                    &edit_path,
+                )
+                .await?);
             }
         }
     };
@@ -688,14 +751,28 @@ pub async fn update_battlesnake(
             "A battlesnake can have at most {} tags",
             tag::MAX_TAGS_PER_SNAKE
         );
-        return Ok(flash_and_redirect(&state.db, session.session_id, msg, &edit_path).await?);
+        return Ok(flash_form_and_redirect(
+            &state.db,
+            session.session_id,
+            msg,
+            &form,
+            BattlesnakeFormTarget::Edit(battlesnake_id),
+            &edit_path,
+        )
+        .await?);
     }
 
     let url = normalize_snake_url(&form.url);
     if let Err(msg) = battlesnake::validate_url(&url) {
-        return Ok(
-            flash_and_redirect(&state.db, session.session_id, msg.to_string(), &edit_path).await?,
-        );
+        return Ok(flash_form_and_redirect(
+            &state.db,
+            session.session_id,
+            msg.to_string(),
+            &form,
+            BattlesnakeFormTarget::Edit(battlesnake_id),
+            &edit_path,
+        )
+        .await?);
     }
 
     let update_data = UpdateBattlesnake {
@@ -719,6 +796,10 @@ pub async fn update_battlesnake(
                 .await
                 .wrap_err("Failed to set battlesnake tags")?;
 
+            session::take_pending_form_data(&state.db, session.session_id)
+                .await
+                .wrap_err("Failed to clear stale battlesnake form data")?;
+
             // Flash message for success and redirect
             session::set_flash_message(
                 &state.db,
@@ -734,18 +815,16 @@ pub async fn update_battlesnake(
         Err(err) => {
             // Check if it's a name uniqueness error
             if err.to_string().contains("already have a battlesnake named") {
-                // Set error flash message
-                session::set_flash_message(
+                Ok(flash_form_and_redirect(
                     &state.db,
                     session.session_id,
                     err.to_string(),
-                    session::FLASH_TYPE_ERROR,
+                    &form,
+                    BattlesnakeFormTarget::Edit(battlesnake_id),
+                    &edit_path,
                 )
                 .await
-                .wrap_err("Failed to set flash message")?;
-
-                // Redirect back to the edit form
-                Ok(Redirect::to(&format!("/battlesnakes/{}/edit", battlesnake_id)).into_response())
+                .wrap_err("Failed to preserve invalid battlesnake form")?)
             } else {
                 // For other errors, propagate them
                 Err(err).wrap_err("Failed to update battlesnake")?
@@ -1419,6 +1498,48 @@ pub async fn test_battlesnake(
             }
         }),
     ))
+}
+
+#[cfg(test)]
+mod form_tests {
+    use super::{BattlesnakeFormData, MAX_DRAFT_URL_CHARS, bounded_form_copy};
+    use crate::models::{battlesnake, battlesnake::Visibility, tag};
+    use uuid::Uuid;
+
+    #[test]
+    fn bounded_form_copy_preserves_order_and_unicode_prefixes() {
+        let name: String = (0..battlesnake::MAX_NAME_LEN + 10)
+            .map(|i| char::from_u32(0x400 + i as u32).unwrap())
+            .collect();
+        let url: String = (0..2_100)
+            .map(|i| char::from_u32(0x500 + i as u32).unwrap())
+            .collect();
+        let tag_ids: Vec<Uuid> = (0..25).map(|_| Uuid::new_v4()).collect();
+        let form = BattlesnakeFormData {
+            name: name.clone(),
+            url: url.clone(),
+            visibility: Visibility::Private,
+            tag_ids: tag_ids.clone(),
+        };
+
+        let bounded = bounded_form_copy(&form);
+
+        assert_eq!(bounded.name.chars().count(), battlesnake::MAX_NAME_LEN);
+        assert_eq!(bounded.url.chars().count(), MAX_DRAFT_URL_CHARS);
+        assert_eq!(bounded.tag_ids.len(), tag::MAX_TAGS_PER_SNAKE * 4);
+        assert_eq!(
+            bounded.name,
+            name.chars()
+                .take(battlesnake::MAX_NAME_LEN)
+                .collect::<String>()
+        );
+        assert_eq!(
+            bounded.url,
+            url.chars().take(MAX_DRAFT_URL_CHARS).collect::<String>()
+        );
+        assert_eq!(bounded.tag_ids, tag_ids[..tag::MAX_TAGS_PER_SNAKE * 4]);
+        assert_eq!(bounded.visibility, Visibility::Private);
+    }
 }
 
 #[cfg(test)]

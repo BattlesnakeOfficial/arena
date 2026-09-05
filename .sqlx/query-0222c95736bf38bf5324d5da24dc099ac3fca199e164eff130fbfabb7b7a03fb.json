@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE sessions\n        SET flash_message = $2,\n            flash_type = $3,\n            pending_form_data = $4\n        WHERE session_id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "0222c95736bf38bf5324d5da24dc099ac3fca199e164eff130fbfabb7b7a03fb"
+}
