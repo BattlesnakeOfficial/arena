@@ -8,11 +8,19 @@ pub(crate) const LIVE_PAGE_REFRESH_JS: &str = r#"(() => {
   const maxTicks = Number(script.dataset.maxTicks);
   const storageKey = `arena:live-refresh:${location.pathname}${location.search}:${script.dataset.stateKey}`;
 
+  const whenVisible = (callback) => {
+    if (!document.hidden) {
+      callback();
+      return;
+    }
+    document.addEventListener('visibilitychange', () => {
+      whenVisible(callback);
+    }, { once: true });
+  };
+
   const schedule = () => {
     if (document.hidden) {
-      document.addEventListener('visibilitychange', () => {
-        if (!document.hidden) schedule();
-      }, { once: true });
+      whenVisible(schedule);
       return;
     }
 
@@ -37,18 +45,20 @@ pub(crate) const LIVE_PAGE_REFRESH_JS: &str = r#"(() => {
       revealFallback();
       return;
     }
-    setTimeout(() => location.reload(), intervalMs);
+    setTimeout(() => whenVisible(() => location.reload()), intervalMs);
   };
 
   schedule();
 })();"#;
 
+/// Configuration for a bounded refresh cycle tied to a server-state fingerprint.
 pub(crate) struct LiveRefreshConfig<'a> {
     pub interval_ms: u64,
     pub max_ticks: u32,
     pub state_key: &'a str,
 }
 
+/// Renders a one-shot live refresh and its manual fallback.
 pub(crate) fn live_page_refresh(config: &LiveRefreshConfig<'_>) -> Markup {
     html! {
         div class="live-refresh-expired" data-live-page-refresh-expired hidden {
