@@ -134,6 +134,7 @@ impl tracing::field::Visit for JsonVisitor {
 pub fn setup_gcp_tracing(
     rust_log: &str,
     eyes: Option<&crate::config::EyesConfig>,
+    identity: &eyes_subscriber::ProcessIdentity,
 ) -> color_eyre::Result<Option<EyesShutdownHandle>> {
     use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -146,9 +147,17 @@ pub fn setup_gcp_tracing(
             // The server URL and transport come from EYES_URL / EYES_TRANSPORT,
             // read inside the eyes-subscriber library itself — identical
             // behavior to the `cja::setup::setup_tracing` path.
-            let (layer, handle) =
-                eyes_subscriber::EyesSubscriberBuilder::build_from_env(eyes.org_id, eyes.app_id)
-                    .map_err(|e| color_eyre::eyre::eyre!("Failed to build Eyes subscriber: {e}"))?;
+            let (builder, transport) =
+                eyes_subscriber::EyesSubscriberBuilder::from_env_with_transport(
+                    eyes.org_id,
+                    eyes.app_id,
+                )
+                .map_err(|error| {
+                    color_eyre::eyre::eyre!("Failed to build Eyes subscriber: {error}")
+                })?;
+            let (layer, handle) = builder
+                .with_process_instance_id(identity.instance_id())
+                .build_with_transport(transport);
             println!(
                 "Eyes layer configured (org: {}, app: {})",
                 eyes.org_id, eyes.app_id

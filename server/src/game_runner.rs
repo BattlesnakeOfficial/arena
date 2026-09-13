@@ -220,11 +220,12 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
 
     // Track timing for processing_overhead metric
     let game_start = std::time::Instant::now();
-    let mut total_snake_wait_ms: i64 = 0;
+    let mut total_snake_wait = std::time::Duration::ZERO;
 
     // Run the game turn by turn
     while !crate::engine::is_game_over(&engine_game) && engine_game.board.turn < MAX_TURNS {
         // Request moves from all alive snakes in parallel
+        let move_wait_start = std::time::Instant::now();
         let move_results = request_moves_parallel(
             http_client,
             &engine_game,
@@ -236,12 +237,8 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
         )
         .await;
 
-        // Accumulate snake wait time from latency measurements
-        for result in &move_results {
-            if let Some(latency) = result.latency_ms {
-                total_snake_wait_ms += latency;
-            }
-        }
+        // Requests overlap: subtract elapsed wait, not summed snake latencies.
+        total_snake_wait += move_wait_start.elapsed();
 
         // Convert to move vector for engine
         let moves: Vec<(String, Direction)> = move_results
@@ -343,14 +340,15 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
 
     // Emit processing_overhead metric
     let total_time = game_start.elapsed();
-    let total_time_ms = total_time.as_millis() as i64;
-    let overhead_ms = total_time_ms - total_snake_wait_ms;
+    let total_time_ms = total_time.as_millis() as u64;
+    let overhead = total_time.saturating_sub(total_snake_wait);
     tracing::info!(
         metric_type = "processing_overhead",
+        timing_basis = "elapsed_move_wait",
         game_id = %game_id,
-        duration_ms = overhead_ms,
+        duration_ms = overhead.as_millis() as u64,
         total_ms = total_time_ms,
-        snake_wait_ms = total_snake_wait_ms,
+        snake_wait_ms = total_snake_wait.as_millis() as u64,
         "game processing overhead"
     );
 

@@ -2,7 +2,7 @@
 
 use cja::{
     server::run_server,
-    setup::{setup_sentry, setup_tracing},
+    setup::{TracingConfig, setup_sentry},
 };
 use color_eyre::eyre::eyre;
 use state::AppState;
@@ -28,6 +28,7 @@ mod jobs;
 mod leaderboard_matchmaker;
 mod leaderboard_ratings;
 mod models;
+mod observability;
 mod play_import;
 mod routes;
 mod scoring;
@@ -50,23 +51,6 @@ mod components {
     pub mod page;
     pub mod page_factory;
     pub mod snake_tags;
-}
-
-/// Build the Eyes boot manifest: job/cron registries plus the HTTP uptime
-/// monitor declarations Eyes should start checking. Eyes remains pinned to
-/// the production origin rather than runtime configuration.
-fn eyes_boot_manifest(
-    cron_registry: &cja::cron::CronRegistry<AppState>,
-) -> cja::eyes_manifest::AppManifest {
-    cja::eyes_manifest::build_boot_manifest::<jobs::Jobs, AppState>(
-        Some(env!("CARGO_PKG_VERSION")),
-        option_env!("VERGEN_GIT_SHA"),
-        Some(cron_registry),
-    )
-    .base_url(config::ARENA_PUBLIC_BASE_URL)
-    .monitors(vec![cja::eyes_manifest::HttpMonitor::new(
-        "health", "/health",
-    )])
 }
 
 fn main() -> color_eyre::Result<()> {
@@ -108,48 +92,49 @@ fn main() -> color_eyre::Result<()> {
 }
 
 async fn run_application(config: config::AppConfig) -> cja::Result<()> {
-    // Initialize tracing (returns Eyes shutdown handle if configured)
+    let identity = eyes_subscriber::ProcessIdentity::new(observability::ROLE);
     let eyes_shutdown_handle = if config.gcp_logging {
-        telemetry::setup_gcp_tracing(&config.rust_log, config.eyes.as_ref())?
+        telemetry::setup_gcp_tracing(&config.rust_log, config.eyes.as_ref(), &identity)?
     } else {
-        setup_tracing("arent")?
+        TracingConfig::new("arena")
+            .process(identity.clone())
+            .init()?
     };
+    let result = run_instrumented_application(config, identity).await;
+    // Preserve the final error before flushing, including startup failures.
+    if let Err(error) = &result {
+        tracing::error!(error = %format!("{error:#}"), "Arena process exiting after failure");
+    }
+    if let Some(handle) = eyes_shutdown_handle
+        && let Err(error) = handle.shutdown().await
+    {
+        tracing::warn!(%error, "Error shutting down Eyes");
+    }
+    result
+}
 
+async fn run_instrumented_application(
+    config: config::AppConfig,
+    identity: eyes_subscriber::ProcessIdentity,
+) -> cja::Result<()> {
     let app_state = AppState::from_config(config).await?;
-
-    // Spawn application tasks
-    info!("Spawning application tasks");
-    let tasks = spawn_application_tasks(app_state).await?;
-
-    // Wait for any task to complete - they all run forever, so if one exits it's an error
-    if !tasks.is_empty() {
+    let (tasks, heartbeat) = spawn_application_tasks(app_state, identity).await?;
+    let result = if tasks.is_empty() {
+        Ok(())
+    } else {
         let (name, result) = wait_for_first_task(tasks).await;
-
         match result {
-            Ok(Ok(())) => {
-                tracing::error!(task = name, "Task exited unexpectedly");
-                return Err(eyre!("Task '{}' exited unexpectedly", name));
-            }
-            Ok(Err(e)) => {
-                tracing::error!(task = name, error = ?e, "Task failed with error");
-                return Err(e);
-            }
-            Err(join_error) => {
-                tracing::error!(task = name, error = ?join_error, "Task panicked");
-                return Err(eyre!("Task '{}' panicked: {}", name, join_error));
-            }
+            Ok(Ok(())) => Err(eyre!("Task '{}' exited unexpectedly", name)),
+            Ok(Err(error)) => Err(error.wrap_err(format!("Task '{name}' failed"))),
+            Err(error) => Err(eyre!("Task '{}' panicked: {}", name, error)),
         }
+    };
+    if let Some(handle) = heartbeat
+        && let Err(error) = handle.shutdown().await
+    {
+        tracing::warn!(%error, "Eyes process shutdown signal failed");
     }
-
-    // Graceful shutdown of Eyes tracing if configured
-    if let Some(handle) = eyes_shutdown_handle {
-        info!("Shutting down Eyes tracing...");
-        if let Err(e) = handle.shutdown().await {
-            tracing::warn!("Error shutting down Eyes: {e}");
-        }
-    }
-
-    Ok(())
+    result
 }
 
 struct NamedTask {
@@ -178,25 +163,36 @@ async fn wait_for_first_task(
 ) {
     let (handles, names): (Vec<_>, Vec<_>) = tasks.into_iter().map(|t| (t.handle, t.name)).unzip();
 
-    let (result, index, _remaining) = futures::future::select_all(handles).await;
+    let (result, index, remaining) = futures::future::select_all(handles).await;
+    for handle in &remaining {
+        handle.abort();
+    }
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        futures::future::join_all(remaining),
+    )
+    .await;
     (names[index], result)
 }
 
 /// Spawn all application background tasks
-async fn spawn_application_tasks(app_state: AppState) -> cja::Result<Vec<NamedTask>> {
+async fn spawn_application_tasks(
+    app_state: AppState,
+    identity: eyes_subscriber::ProcessIdentity,
+) -> cja::Result<(
+    Vec<NamedTask>,
+    Option<eyes_subscriber::ProcessHeartbeatHandle>,
+)> {
     let mut tasks = vec![];
     let features = app_state.config.features;
     let job = &app_state.config.job;
 
-    // Build the cron registry once so we can both report it to Eyes and hand
-    // it to the cron worker. Built unconditionally so the boot manifest
-    // reflects the full deployed shape even when CRON is disabled for this
-    // process.
+    // Build the registry once; the manifest and worker both use it when
+    // this process has CRON enabled.
     let cron_registry = cron::cron_registry();
 
-    // Emit the Eyes boot manifest describing this app's jobs, cron, and HTTP
-    // uptime monitors. No-op unless EYES_ORG_ID/EYES_APP_ID are configured.
-    cja::eyes_manifest::send_manifest(eyes_boot_manifest(&cron_registry));
+    let manifest = observability::manifest(&cron_registry, identity, features)
+        .map_err(|error| eyre!("Invalid Arena observability declarations: {error}"))?;
 
     if features.server {
         info!("Server Enabled");
@@ -244,7 +240,9 @@ async fn spawn_application_tasks(app_state: AppState) -> cja::Result<Vec<NamedTa
     }
 
     info!("All application tasks spawned successfully");
-    Ok(tasks)
+    // Workers are already serving while the bounded registration runs.
+    let heartbeat = observability::start(&app_state.config, &manifest).await;
+    Ok((tasks, heartbeat))
 }
 
 #[cfg(test)]
@@ -254,7 +252,16 @@ mod tests {
     #[test]
     fn boot_manifest_declares_exactly_one_health_monitor() {
         let registry = cron::cron_registry();
-        let manifest = eyes_boot_manifest(&registry);
+        let manifest = observability::manifest(
+            &registry,
+            eyes_subscriber::ProcessIdentity::new(observability::ROLE),
+            config::FeatureFlags {
+                server: true,
+                jobs: true,
+                cron: true,
+            },
+        )
+        .unwrap();
 
         assert_eq!(
             manifest.base_url.as_deref(),
