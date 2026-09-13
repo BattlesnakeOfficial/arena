@@ -188,11 +188,13 @@ fn metrics() -> Result<Vec<NamedMetric>, String> {
             "Turn persistence · p95",
             "db_write_latency",
         )?,
-        timing(
-            "game.overhead.p95",
-            "Game processing overhead · p95",
-            "processing_overhead",
-        )?,
+        Metric::new("game.overhead.p95", Agg::P95, Some("fields.duration_ms"))?
+            .filter_eq("fields.metric_type", "processing_overhead")?
+            .filter_eq("fields.timing_basis", "elapsed_move_wait")?
+            .filter_numeric("fields.duration_ms")?
+            .display_name("Game processing overhead · p95")
+            .unit("ms")
+            .build()?,
     ])
 }
 

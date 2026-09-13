@@ -20,6 +20,13 @@ attempts/failures. It uses existing tracing fields. Request counts include
 `/health` checks; failure-event counts include retry attempts, not unique jobs.
 HTTP duration metrics are microseconds; game timings are milliseconds.
 
+Processing overhead measures elapsed turn-loop time minus elapsed time awaiting
+parallel move requests, including persistence and scheduling. The old event
+subtracted summed snake latencies, double-counting overlapping requests and
+producing negative overhead. The metric now requires
+`timing_basis = "elapsed_move_wait"` to exclude those historical measurements;
+it has no data until a game completes on the corrected build.
+
 Critical jobs cover game execution, tournament advancement, ratings, and
 individual game backups. Every enabled cron participates in Eyes run-health
 monitoring through the process role. Named metric thresholds use five-minute
@@ -32,7 +39,7 @@ breaches, and two healthy evaluations for recovery:
 | Turn persistence p95 | > 1 second | > 3 seconds |
 
 These are initial conservative boundaries. A read-only production check on
-2026-09-13 observed roughly 428ms queue-wait p95 and 318ms turn-write p95 over an
+2026-09-13 observed roughly 297ms queue-wait p95 and 317ms turn-write p95 over an
 hour. No-data periods are not outage alerts. Metric evaluations can be incomplete
 under query budgets; Eyes exposes that state instead of claiming an exact result.
 
