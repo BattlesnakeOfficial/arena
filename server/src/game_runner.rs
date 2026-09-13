@@ -340,13 +340,14 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
 
     // Emit processing_overhead metric
     let total_time = game_start.elapsed();
+    let total_time_ms = total_time.as_millis() as u64;
     let overhead = total_time.saturating_sub(total_snake_wait);
     tracing::info!(
         metric_type = "processing_overhead",
         timing_basis = "elapsed_move_wait",
         game_id = %game_id,
         duration_ms = overhead.as_millis() as u64,
-        total_ms = total_time.as_millis() as u64,
+        total_ms = total_time_ms,
         snake_wait_ms = total_snake_wait.as_millis() as u64,
         "game processing overhead"
     );
