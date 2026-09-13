@@ -56,3 +56,26 @@ under query budgets; Eyes exposes that state instead of claiming an exact result
 Local validation before publication uses an uncommitted Cargo patch file for
 cja, eyes-query, and eyes-subscriber. Those path overrides must not ship. Live
 notification delivery additionally depends on Eyes' Discord webhook configuration.
+
+## Game and job investigation evidence
+
+Each `run_game` invocation has an `arena.game` span carrying `game_id` at
+creation, nested under its cja job attempt. Its phases are `load_game`,
+`reset_game` (retries), `prepare_snakes`, `start_snakes`, `request_moves`,
+`persist_turn`, `end_snakes`, `finish_game`, and `post_completion`.
+
+An `arena.game.phase` span carries game ID, phase, and the applicable turn.
+Events with `event_type=game_phase` record `state=started`, followed by exactly
+one of `completed`, `failed`, or `cancelled` if execution unwinds normally.
+Terminal events include elapsed milliseconds; failures preserve the error cause
+chain. `finish_game` completes only after the database commit, and follow-up
+jobs are a separate phase. An interrupted future never emits `completed`.
+
+Abrupt process death can prevent both the terminal event and buffered startup
+information from arriving. An unmatched start means the phase has no observed
+terminal event, not proof that its worker crashed. Correlate the containing job
+attempt, process instance heartbeat, deployment, and Cloud Run logs.
+
+Cja's enqueue receipt (`event_type=job_enqueued`) identifies the persisted job
+UUID, which matches `job.id` on the later worker attempt. Enqueue spans alone
+include failed attempts and are not proof that work entered the queue.

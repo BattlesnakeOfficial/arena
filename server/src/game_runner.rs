@@ -6,6 +6,7 @@ use uuid::Uuid;
 use crate::customizations;
 use crate::engine::MAX_TURNS;
 use crate::engine::frame::{DeathInfo, SnakeCustomizations, game_to_frame};
+use crate::game_progress::phase;
 use crate::models::game::{GameStatus, get_game_by_id, update_game_status};
 use crate::snake_client::{request_end_parallel, request_moves_parallel, request_start_parallel};
 use crate::state::AppState;
@@ -15,6 +16,7 @@ use crate::wire;
 ///
 /// This function calls the actual snake APIs to get moves, with timeout handling.
 /// On timeout, snakes continue in the same direction as their last move.
+#[tracing::instrument(name = "arena.game", skip(app_state), fields(game_id = %game_id), err(Debug))]
 pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
     let pool = &app_state.db;
     let game_channels = &app_state.game_channels;
@@ -23,9 +25,12 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
     tracing::info!(game_id = %game_id, "Starting run_game");
 
     // Get the game details
-    let game = get_game_by_id(pool, game_id)
-        .await?
-        .ok_or_else(|| cja::color_eyre::eyre::eyre!("Game not found"))?;
+    let game = phase(game_id, "load_game", None, async {
+        get_game_by_id(pool, game_id)
+            .await?
+            .ok_or_else(|| cja::color_eyre::eyre::eyre!("Game not found"))
+    })
+    .await?;
 
     // Re-entrancy for retries and crash recovery: run_game always plays a
     // game from turn 0, so a retry must never blindly re-run on top of a
@@ -40,7 +45,13 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
                 game_id = %game_id,
                 "Game already finished; re-running post-completion hooks only"
             );
-            enqueue_post_completion_jobs(app_state, game_id).await?;
+            phase(
+                game_id,
+                "post_completion",
+                None,
+                enqueue_post_completion_jobs(app_state, game_id),
+            )
+            .await?;
             game_channels.cleanup(game_id).await;
             return Ok(());
         }
@@ -53,7 +64,13 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
                 game_id = %game_id,
                 "Game was already running; resetting partial state for a clean re-run"
             );
-            crate::models::game::reset_game_state_for_retry(pool, game_id).await?;
+            phase(
+                game_id,
+                "reset_game",
+                None,
+                crate::models::game::reset_game_state_for_retry(pool, game_id),
+            )
+            .await?;
         }
         GameStatus::Waiting => {}
         GameStatus::Failed => {
@@ -81,109 +98,119 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
         );
     }
 
-    // Update status to running
-    update_game_status(pool, game_id, GameStatus::Running).await?;
+    let (battlesnakes, snake_urls, customizations) =
+        phase(game_id, "prepare_snakes", None, async {
+            // Update status to running
+            update_game_status(pool, game_id, GameStatus::Running).await?;
 
-    // Get all the battlesnakes in the game with their URLs
-    let battlesnakes = crate::models::game_battlesnake::get_battlesnakes_by_game_id(pool, game_id)
-        .await
-        .wrap_err("Failed to get battlesnakes for game")?;
+            // Get all the battlesnakes in the game with their URLs
+            let battlesnakes =
+                crate::models::game_battlesnake::get_battlesnakes_by_game_id(pool, game_id)
+                    .await
+                    .wrap_err("Failed to get battlesnakes for game")?;
 
-    tracing::info!(
-        event_type = "game_started",
-        game_id = %game_id,
-        board_size = game.board_size.as_str(),
-        game_type = game.game_type.as_str(),
-        snake_count = battlesnakes.len(),
-        "game started"
-    );
-
-    if battlesnakes.is_empty() {
-        return Err(cja::color_eyre::eyre::eyre!("No battlesnakes in the game"));
-    }
-
-    // Build snake_id -> url mapping using game_battlesnake_id as the key
-    // This ensures uniqueness when the same battlesnake appears multiple times
-    let snake_urls: Vec<(String, String)> = battlesnakes
-        .iter()
-        .map(|bs| (bs.game_battlesnake_id.to_string(), bs.url.clone()))
-        .collect();
-
-    // Fetch snake customizations from all root endpoints in parallel (1s timeout)
-    let info_timeout = std::time::Duration::from_millis(1000);
-    let info_results =
-        crate::snake_client::request_info_parallel(http_client, &snake_urls, info_timeout).await;
-
-    // Build customization map and update DB records. Declared head/tail are
-    // honored only if the snake's owner is allowed to use them (free, or
-    // granted); anything else falls back to the default.
-    let mut customizations: HashMap<String, SnakeCustomizations> = HashMap::new();
-    for bs in &battlesnakes {
-        let snake_id = bs.game_battlesnake_id.to_string();
-        // The owner login always goes in, even when the snake's /info fetch
-        // fails below: the board scoreboard renders "by {Author}" from frame
-        // data, and empty visual fields fall back to defaults in
-        // game_to_frame.
-        customizations.insert(
-            snake_id.clone(),
-            SnakeCustomizations {
-                color: String::new(),
-                head: String::new(),
-                tail: String::new(),
-                author: bs.owner_login.clone(),
-            },
-        );
-        if let Some(info) = info_results.get(&snake_id) {
-            let color = customizations::normalize_color(
-                &info
-                    .customizations
-                    .as_ref()
-                    .map(|c| c.color.clone())
-                    .or_else(|| info.color.clone())
-                    .unwrap_or_default(),
+            tracing::info!(
+                event_type = "game_started",
+                game_id = %game_id,
+                board_size = game.board_size.as_str(),
+                game_type = game.game_type.as_str(),
+                snake_count = battlesnakes.len(),
+                "game started"
             );
-            let declared_head = info
-                .customizations
-                .as_ref()
-                .map(|c| c.head.clone())
-                .or_else(|| info.head.clone())
-                .unwrap_or_default();
-            let declared_tail = info
-                .customizations
-                .as_ref()
-                .map(|c| c.tail.clone())
-                .or_else(|| info.tail.clone())
-                .unwrap_or_default();
-            let head = customizations::resolve_head(pool, bs.user_id, &declared_head).await?;
-            let tail = customizations::resolve_tail(pool, bs.user_id, &declared_tail).await?;
 
-            if let Err(e) = crate::models::battlesnake::update_battlesnake_customizations(
-                pool,
-                bs.battlesnake_id,
-                &color,
-                &head,
-                &tail,
-            )
-            .await
-            {
-                tracing::warn!(
-                    battlesnake_id = %bs.battlesnake_id,
-                    error = %e,
-                    "Failed to persist battlesnake customizations"
-                );
+            if battlesnakes.is_empty() {
+                return Err(cja::color_eyre::eyre::eyre!("No battlesnakes in the game"));
             }
 
-            customizations.insert(
-                snake_id,
-                SnakeCustomizations {
-                    color,
-                    head,
-                    tail,
-                    author: bs.owner_login.clone(),
-                },
-            );
-        }
-    }
+            // Build snake_id -> url mapping using game_battlesnake_id as the key
+            // This ensures uniqueness when the same battlesnake appears multiple times
+            let snake_urls: Vec<(String, String)> = battlesnakes
+                .iter()
+                .map(|bs| (bs.game_battlesnake_id.to_string(), bs.url.clone()))
+                .collect();
+
+            // Fetch snake customizations from all root endpoints in parallel (1s timeout)
+            let info_timeout = std::time::Duration::from_millis(1000);
+            let info_results =
+                crate::snake_client::request_info_parallel(http_client, &snake_urls, info_timeout)
+                    .await;
+
+            // Build customization map and update DB records. Declared head/tail are
+            // honored only if the snake's owner is allowed to use them (free, or
+            // granted); anything else falls back to the default.
+            let mut customizations: HashMap<String, SnakeCustomizations> = HashMap::new();
+            for bs in &battlesnakes {
+                let snake_id = bs.game_battlesnake_id.to_string();
+                // The owner login always goes in, even when the snake's /info fetch
+                // fails below: the board scoreboard renders "by {Author}" from frame
+                // data, and empty visual fields fall back to defaults in
+                // game_to_frame.
+                customizations.insert(
+                    snake_id.clone(),
+                    SnakeCustomizations {
+                        color: String::new(),
+                        head: String::new(),
+                        tail: String::new(),
+                        author: bs.owner_login.clone(),
+                    },
+                );
+                if let Some(info) = info_results.get(&snake_id) {
+                    let color = customizations::normalize_color(
+                        &info
+                            .customizations
+                            .as_ref()
+                            .map(|c| c.color.clone())
+                            .or_else(|| info.color.clone())
+                            .unwrap_or_default(),
+                    );
+                    let declared_head = info
+                        .customizations
+                        .as_ref()
+                        .map(|c| c.head.clone())
+                        .or_else(|| info.head.clone())
+                        .unwrap_or_default();
+                    let declared_tail = info
+                        .customizations
+                        .as_ref()
+                        .map(|c| c.tail.clone())
+                        .or_else(|| info.tail.clone())
+                        .unwrap_or_default();
+                    let head =
+                        customizations::resolve_head(pool, bs.user_id, &declared_head).await?;
+                    let tail =
+                        customizations::resolve_tail(pool, bs.user_id, &declared_tail).await?;
+
+                    if let Err(e) = crate::models::battlesnake::update_battlesnake_customizations(
+                        pool,
+                        bs.battlesnake_id,
+                        &color,
+                        &head,
+                        &tail,
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            battlesnake_id = %bs.battlesnake_id,
+                            error = %e,
+                            "Failed to persist battlesnake customizations"
+                        );
+                    }
+
+                    customizations.insert(
+                        snake_id,
+                        SnakeCustomizations {
+                            color,
+                            head,
+                            tail,
+                            author: bs.owner_login.clone(),
+                        },
+                    );
+                }
+            }
+
+            Ok((battlesnakes, snake_urls, customizations))
+        })
+        .await?;
 
     // Create the initial game state
     let mut engine_game =
@@ -199,15 +226,24 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
 
     // Call /start for all snakes in parallel (fire and forget)
     tracing::info!(game_id = %game_id, "Calling /start for all snakes");
-    request_start_parallel(
-        http_client,
-        &engine_game,
-        &snake_urls,
-        timeout,
-        &snake_contexts,
-        &customizations,
+    phase(
+        game_id,
+        "start_snakes",
+        Some(engine_game.board.turn),
+        async {
+            let _: () = request_start_parallel(
+                http_client,
+                &engine_game,
+                &snake_urls,
+                timeout,
+                &snake_contexts,
+                &customizations,
+            )
+            .await;
+            Ok(())
+        },
     )
-    .await;
+    .await?;
 
     // Store turn 0 (initial state, no moves yet)
     let frame_0 = game_to_frame(&engine_game, &death_info, &[], &customizations);
@@ -215,7 +251,12 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
         serde_json::to_value(&frame_0).wrap_err("Failed to serialize initial frame")?;
 
     tracing::info!(game_id = %game_id, "Storing turn 0");
-    crate::models::turn::create_turn(pool, game_channels, game_id, 0, Some(frame_0_json)).await?;
+    phase(game_id, "persist_turn", Some(0), async {
+        crate::models::turn::create_turn(pool, game_channels, game_id, 0, Some(frame_0_json))
+            .await?;
+        Ok(())
+    })
+    .await?;
     tracing::info!(game_id = %game_id, "Turn 0 stored successfully");
 
     // Track timing for processing_overhead metric
@@ -226,16 +267,24 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
     while !crate::engine::is_game_over(&engine_game) && engine_game.board.turn < MAX_TURNS {
         // Request moves from all alive snakes in parallel
         let move_wait_start = std::time::Instant::now();
-        let move_results = request_moves_parallel(
-            http_client,
-            &engine_game,
-            &snake_urls,
-            timeout,
-            &last_moves,
-            &snake_contexts,
-            &customizations,
+        let move_results = phase(
+            game_id,
+            "request_moves",
+            Some(engine_game.board.turn),
+            async {
+                Ok(request_moves_parallel(
+                    http_client,
+                    &engine_game,
+                    &snake_urls,
+                    timeout,
+                    &last_moves,
+                    &snake_contexts,
+                    &customizations,
+                )
+                .await)
+            },
         )
-        .await;
+        .await?;
 
         // Requests overlap: subtract elapsed wait, not summed snake latencies.
         total_snake_wait += move_wait_start.elapsed();
@@ -291,30 +340,40 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
         // Measure DB write latency
         let db_write_start = std::time::Instant::now();
 
-        tracing::debug!(game_id = %game_id, turn = engine_game.board.turn, "Storing turn");
-        let turn = crate::models::turn::create_turn(
-            pool,
-            game_channels,
+        phase(
             game_id,
-            engine_game.board.turn,
-            Some(frame_json),
-        )
-        .await?;
-
-        // Store individual snake moves with latency
-        for result in &move_results {
-            if let Ok(game_battlesnake_id) = Uuid::parse_str(&result.snake_id) {
-                crate::models::turn::create_snake_turn(
+            "persist_turn",
+            Some(engine_game.board.turn),
+            async {
+                tracing::debug!(game_id = %game_id, turn = engine_game.board.turn, "Storing turn");
+                let turn = crate::models::turn::create_turn(
                     pool,
-                    turn.turn_id,
-                    game_battlesnake_id,
-                    &result.direction.to_string(),
-                    result.latency_ms,
-                    result.timed_out,
+                    game_channels,
+                    game_id,
+                    engine_game.board.turn,
+                    Some(frame_json),
                 )
                 .await?;
-            }
-        }
+
+                // Store individual snake moves with latency
+                for result in &move_results {
+                    if let Ok(game_battlesnake_id) = Uuid::parse_str(&result.snake_id) {
+                        crate::models::turn::create_snake_turn(
+                            pool,
+                            turn.turn_id,
+                            game_battlesnake_id,
+                            &result.direction.to_string(),
+                            result.latency_ms,
+                            result.timed_out,
+                        )
+                        .await?;
+                    }
+                }
+
+                Ok(())
+            },
+        )
+        .await?;
 
         let db_write_duration = db_write_start.elapsed();
         tracing::info!(
@@ -354,15 +413,19 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
 
     // Call /end for all snakes in parallel (fire and forget)
     tracing::info!(game_id = %game_id, "Calling /end for all snakes");
-    request_end_parallel(
-        http_client,
-        &engine_game,
-        &snake_urls,
-        timeout,
-        &snake_contexts,
-        &customizations,
-    )
-    .await;
+    phase(game_id, "end_snakes", Some(engine_game.board.turn), async {
+        let _: () = request_end_parallel(
+            http_client,
+            &engine_game,
+            &snake_urls,
+            timeout,
+            &snake_contexts,
+            &customizations,
+        )
+        .await;
+        Ok(())
+    })
+    .await?;
 
     tracing::info!(
         game_id = %game_id,
@@ -394,75 +457,86 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
     elimination_order.reverse();
     placements.extend(elimination_order);
 
-    // Resolve the tournament match result (if any) before the finish
-    // transaction. Placements can't express ties, so the winner is derived
-    // from the final snake states.
-    let match_winner_snake_id =
-        crate::tournament_match::game_winner_from_snakes(&engine_game.board.snakes);
-    let resolved_match_game = crate::tournament_match::resolve_finished_match_game(
-        pool,
+    phase(
         game_id,
-        match_winner_snake_id.as_deref(),
-    )
-    .await
-    .wrap_err("Failed to resolve tournament match game result")?;
-
-    // Atomic finish: placements, the Finished status flip, and the
-    // tournament match result all commit together, so a Finished game ALWAYS
-    // has its match_games winner recorded (`winner_id` NULL on a finished
-    // game unambiguously means a tie) — `run_match` relies on that
-    // invariant. Follow-up jobs are enqueued after the commit because cja's
-    // enqueue only takes a pool; if we die in between, the retry's
-    // Finished short-circuit above and the stuck-match sweeper cron are the
-    // safety nets that re-enqueue them.
-    let mut tx = pool
-        .begin()
-        .await
-        .wrap_err("Failed to start game finish transaction")?;
-
-    for (i, snake_id) in placements.iter().enumerate() {
-        let placement = (i + 1) as i32;
-
-        let game_battlesnake_id: Uuid = snake_id
-            .parse()
-            .wrap_err_with(|| format!("Invalid game_battlesnake ID: {}", snake_id))?;
-
-        crate::models::game_battlesnake::set_game_result_by_id(
-            &mut tx,
-            game_battlesnake_id,
-            placement,
-        )
-        .await
-        .wrap_err_with(|| {
-            format!(
-                "Failed to set game result for game_battlesnake {}",
-                game_battlesnake_id
+        "finish_game",
+        Some(engine_game.board.turn),
+        async {
+            // Resolve the tournament match result (if any) before the finish
+            // transaction. Placements can't express ties, so the winner is derived
+            // from the final snake states.
+            let match_winner_snake_id =
+                crate::tournament_match::game_winner_from_snakes(&engine_game.board.snakes);
+            let resolved_match_game = crate::tournament_match::resolve_finished_match_game(
+                pool,
+                game_id,
+                match_winner_snake_id.as_deref(),
             )
-        })?;
-    }
+            .await
+            .wrap_err("Failed to resolve tournament match game result")?;
 
-    crate::models::game::update_game_status_tx(&mut tx, game_id, GameStatus::Finished).await?;
+            // Atomic finish: placements, the Finished status flip, and the
+            // tournament match result all commit together, so a Finished game ALWAYS
+            // has its match_games winner recorded (`winner_id` NULL on a finished
+            // game unambiguously means a tie) — `run_match` relies on that
+            // invariant. Follow-up jobs are enqueued after the commit because cja's
+            // enqueue only takes a pool; if we die in between, the retry's
+            // Finished short-circuit above and the stuck-match sweeper cron are the
+            // safety nets that re-enqueue them.
+            let mut tx = pool
+                .begin()
+                .await
+                .wrap_err("Failed to start game finish transaction")?;
 
-    if let Some(resolved) = &resolved_match_game {
-        crate::models::tournament::set_match_game_winner(
-            &mut *tx,
-            resolved.match_game_id,
-            resolved.winner_battlesnake_id,
-        )
-        .await
-        .wrap_err("Failed to record tournament match game result")?;
+            for (i, snake_id) in placements.iter().enumerate() {
+                let placement = (i + 1) as i32;
 
-        tracing::info!(
-            game_id = %game_id,
-            match_id = %resolved.match_id,
-            winner_battlesnake_id = ?resolved.winner_battlesnake_id,
-            "Recording tournament match game result"
-        );
-    }
+                let game_battlesnake_id: Uuid = snake_id
+                    .parse()
+                    .wrap_err_with(|| format!("Invalid game_battlesnake ID: {}", snake_id))?;
 
-    tx.commit()
-        .await
-        .wrap_err("Failed to commit game finish transaction")?;
+                crate::models::game_battlesnake::set_game_result_by_id(
+                    &mut tx,
+                    game_battlesnake_id,
+                    placement,
+                )
+                .await
+                .wrap_err_with(|| {
+                    format!(
+                        "Failed to set game result for game_battlesnake {}",
+                        game_battlesnake_id
+                    )
+                })?;
+            }
+
+            crate::models::game::update_game_status_tx(&mut tx, game_id, GameStatus::Finished)
+                .await?;
+
+            if let Some(resolved) = &resolved_match_game {
+                crate::models::tournament::set_match_game_winner(
+                    &mut *tx,
+                    resolved.match_game_id,
+                    resolved.winner_battlesnake_id,
+                )
+                .await
+                .wrap_err("Failed to record tournament match game result")?;
+
+                tracing::info!(
+                    game_id = %game_id,
+                    match_id = %resolved.match_id,
+                    winner_battlesnake_id = ?resolved.winner_battlesnake_id,
+                    "Recording tournament match game result"
+                );
+            }
+
+            tx.commit()
+                .await
+                .wrap_err("Failed to commit game finish transaction")?;
+
+            Ok(())
+        },
+    )
+    .await?;
 
     tracing::info!(
         event_type = "game_completed",
@@ -473,7 +547,13 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
         "game completed"
     );
 
-    enqueue_post_completion_jobs(app_state, game_id).await?;
+    phase(
+        game_id,
+        "post_completion",
+        None,
+        enqueue_post_completion_jobs(app_state, game_id),
+    )
+    .await?;
 
     // Clean up game channel (will be removed when no subscribers)
     game_channels.cleanup(game_id).await;
