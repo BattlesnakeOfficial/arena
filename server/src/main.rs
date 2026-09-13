@@ -22,6 +22,7 @@ mod engine_models;
 mod errors;
 mod flasher;
 mod game_channels;
+mod game_progress;
 mod game_runner;
 mod github;
 mod jobs;
