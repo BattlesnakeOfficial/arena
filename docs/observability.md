@@ -79,3 +79,13 @@ attempt, process instance heartbeat, deployment, and Cloud Run logs.
 Cja's enqueue receipt (`event_type=job_enqueued`) identifies the persisted job
 UUID, which matches `job.id` on the later worker attempt. Enqueue spans alone
 include failed attempts and are not proof that work entered the queue.
+
+## Telemetry delivery
+
+Production uses `EYES_TRANSPORT=batching` with eyes-subscriber 0.8.1 or later.
+The serial HTTP default sends one event per request and fell roughly 35 minutes
+behind during live games even while process heartbeats remained fresh. Batches
+flush up to 500 events at a time or after one second, preserving buffered events
+through failed requests. A fresh heartbeat proves process liveness, not event
+delivery freshness. Verify a completed game's final phase and completion receipt
+in Eyes after rollout, alongside the source Cloud Logging records.

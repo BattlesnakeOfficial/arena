@@ -94,7 +94,7 @@ jobs:
           #
           # --update-env-vars *merges*; --set-env-vars would wipe DATABASE_URL,
           # GCP_LOGGING and friends off the service.
-          update_env_vars="BASE_URL=https://arena.battlesnake.com"
+          update_env_vars="BASE_URL=https://arena.battlesnake.com,EYES_TRANSPORT=batching"
           if [ -n "$EYES_ORG_ID" ] && [ -n "$EYES_APP_ID" ]; then
             update_env_vars="$update_env_vars,EYES_ORG_ID=$EYES_ORG_ID,EYES_APP_ID=$EYES_APP_ID"
           else
