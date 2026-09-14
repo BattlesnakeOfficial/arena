@@ -4,6 +4,10 @@ use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
 use crate::game_channels::{GameChannels, TurnNotification};
+use crate::game_progress::phase;
+
+#[cfg(test)]
+mod storage_tests;
 
 /// A turn in a game with its frame data
 #[derive(Debug, Serialize, Deserialize, FromRow)]
@@ -113,26 +117,54 @@ pub async fn create_turn(
     turn_number: i32,
     frame_data: Option<serde_json::Value>,
 ) -> cja::Result<Turn> {
-    let turn = sqlx::query_as::<_, Turn>(
-        r#"
+    let turn = {
+        let mut connection = phase(
+            game_id,
+            "persist_turn.acquire_frame_connection",
+            Some(turn_number),
+            async {
+                pool.acquire()
+                    .await
+                    .wrap_err("Failed to acquire turn connection")
+            },
+        )
+        .await?;
+        phase(
+            game_id,
+            "persist_turn.insert_frame",
+            Some(turn_number),
+            async {
+                sqlx::query_as!(
+                    Turn,
+                    r#"
         INSERT INTO turns (game_id, turn_number, frame_data)
         VALUES ($1, $2, $3)
         RETURNING turn_id, game_id, turn_number, frame_data, created_at
         "#,
-    )
-    .bind(game_id)
-    .bind(turn_number)
-    .bind(frame_data)
-    .fetch_one(pool)
-    .await
-    .wrap_err("Failed to create turn")?;
+                    game_id,
+                    turn_number,
+                    frame_data
+                )
+                .fetch_one(&mut *connection)
+                .await
+                .wrap_err("Failed to create turn")
+            },
+        )
+        .await?
+    };
 
-    game_channels
-        .notify(TurnNotification {
-            game_id,
-            turn_number,
-        })
-        .await;
+    // Return the connection before waiting on the channel map, as fetch_one(pool)
+    // did. A blocked notification must not hold scarce database capacity.
+    phase(game_id, "persist_turn.notify", Some(turn_number), async {
+        game_channels
+            .notify(TurnNotification {
+                game_id,
+                turn_number,
+            })
+            .await;
+        Ok(())
+    })
+    .await?;
 
     Ok(turn)
 }
@@ -217,14 +249,27 @@ pub struct SnakeTurn {
 /// Create a snake turn record
 pub async fn create_snake_turn(
     pool: &PgPool,
-    turn_id: Uuid,
+    turn: &Turn,
     game_battlesnake_id: Uuid,
     direction: &str,
     latency_ms: Option<i64>,
     timed_out: bool,
 ) -> cja::Result<SnakeTurn> {
+    let turn_id = turn.turn_id;
     let latency_i32 = latency_ms.map(|ms| ms as i32);
-    let row = sqlx::query!(
+    let mut connection = phase(
+        turn.game_id,
+        "persist_turn.acquire_snake_connection",
+        Some(turn.turn_number),
+        async {
+            pool.acquire()
+                .await
+                .wrap_err("Failed to acquire snake turn connection")
+        },
+    )
+    .await?;
+    let row = phase(turn.game_id, "persist_turn.insert_snake", Some(turn.turn_number), async {
+        sqlx::query!(
         r#"
         INSERT INTO snake_turns (turn_id, game_battlesnake_id, direction, latency_ms, timed_out)
         VALUES ($1, $2, $3, $4, $5)
@@ -236,9 +281,10 @@ pub async fn create_snake_turn(
         latency_i32,
         timed_out
     )
-    .fetch_one(pool)
+    .fetch_one(&mut *connection)
     .await
-    .wrap_err("Failed to create snake turn")?;
+    .wrap_err("Failed to create snake turn")
+    }).await?;
 
     Ok(SnakeTurn {
         snake_turn_id: row.snake_turn_id,

@@ -82,6 +82,44 @@ impl GameChannels {
 mod tests {
     use super::*;
 
+    #[sqlx::test(migrations = "../migrations")]
+    async fn blocked_notification_releases_the_turn_database_connection(database: sqlx::PgPool) {
+        let game_id = sqlx::query_scalar!("INSERT INTO games (board_size, game_type, status) VALUES ('11x11', 'Solo', 'running') RETURNING game_id")
+            .fetch_one(&database).await.unwrap();
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with(database.connect_options().as_ref().clone())
+            .await
+            .unwrap();
+        let channels = GameChannels::new();
+        let mut receiver = channels.subscribe(game_id).await;
+        let map = channels.channels.write().await;
+        let work = crate::models::turn::create_turn(&pool, &channels, game_id, 0, None);
+        tokio::pin!(work);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::select! {
+                result = &mut work => panic!("notification must wait for channel map: {result:?}"),
+                () = async {
+                    while sqlx::query_scalar!("SELECT count(*) FROM turns WHERE game_id=$1", game_id)
+                        .fetch_one(&database).await.unwrap() == Some(0) {
+                        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                    }
+                } => {}
+            }
+            tokio::select! {
+                result = &mut work => panic!("notification must still be blocked: {result:?}"),
+                connection = pool.acquire() => { drop(connection.unwrap()); }
+            }
+        }).await.unwrap();
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+        drop(map);
+        work.await.unwrap();
+        assert_eq!(receiver.try_recv().unwrap().turn_number, 0);
+    }
+
     #[tokio::test]
     async fn test_subscribe_creates_channel() {
         let channels = GameChannels::new();

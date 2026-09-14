@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO game_battlesnakes (game_id, battlesnake_id) VALUES ($1, $2) RETURNING game_battlesnake_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "game_battlesnake_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "6e11eb6d41b01a4f93a761f9b8f6445f55e2f47c97dededc3e2bd3bb77666b64"
+}
