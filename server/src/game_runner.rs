@@ -360,7 +360,7 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
                     if let Ok(game_battlesnake_id) = Uuid::parse_str(&result.snake_id) {
                         crate::models::turn::create_snake_turn(
                             pool,
-                            turn.turn_id,
+                            &turn,
                             game_battlesnake_id,
                             &result.direction.to_string(),
                             result.latency_ms,

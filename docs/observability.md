@@ -71,6 +71,26 @@ Terminal events include elapsed milliseconds; failures preserve the error cause
 chain. `finish_game` completes only after the database commit, and follow-up
 jobs are a separate phase. An interrupted future never emits `completed`.
 
+Turn persistence has nested phases with the same lifecycle contract:
+
+| Phase | Measured operation |
+| --- | --- |
+| `persist_turn.acquire_frame_connection` | SQLx connection acquisition before the frame write |
+| `persist_turn.insert_frame` | Frame INSERT on the acquired connection |
+| `persist_turn.notify` | Channel-map read lock and local broadcast send |
+| `persist_turn.acquire_snake_connection` | SQLx connection acquisition before each snake move write |
+| `persist_turn.insert_snake` | One snake move INSERT on the acquired connection |
+
+Every stage carries game ID and turn at span creation and inherits the job/game
+trace. `eyes investigate --game <UUID> --since 1h` includes these invocations.
+Acquisition can include pool checkout checks or opening a connection; insert
+timing includes the database round trip and row decoding, not just server CPU.
+Notification does not await WebSocket delivery. The frame connection is returned
+before notification; writes retain their existing order and autocommit behavior.
+The enclosing `persist_turn` duration includes these stages, so summing parent
+and child durations double-counts time. Routine stage fields contain no frame
+payloads, SQL parameters, or credentials.
+
 Abrupt process death can prevent both the terminal event and buffered startup
 information from arriving. An unmatched start means the phase has no observed
 terminal event, not proof that its worker crashed. Correlate the containing job
