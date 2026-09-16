@@ -21,6 +21,7 @@ use crate::{
     models::game_battlesnake,
     models::rate_limit,
     models::session,
+    routes::UuidPath,
     routes::auth::{CurrentUser, CurrentUserWithSession},
     state::AppState,
 };
@@ -118,7 +119,7 @@ pub async fn challenge_battlesnake(
 pub async fn show_game_flow(
     State(state): State<AppState>,
     CurrentUser(user): CurrentUser,
-    Path(flow_id): Path<Uuid>,
+    UuidPath(flow_id): UuidPath,
     page_factory: PageFactory,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
     // Use flash from page_factory (already extracted and cleared from DB;
@@ -126,11 +127,29 @@ pub async fn show_game_flow(
     let flash = page_factory.flash.clone();
 
     // Get the flow state, ensuring it belongs to the current user
-    let flow = GameCreationFlow::get_by_id(&state.db, flow_id, user.user_id)
+    let Some(flow) = GameCreationFlow::get_by_id(&state.db, flow_id, user.user_id)
         .await
         .wrap_err("Failed to get game flow")?
-        .ok_or_else(|| "Game flow not found".to_string())
-        .with_status(StatusCode::NOT_FOUND)?;
+    else {
+        return Ok((
+            StatusCode::NOT_FOUND,
+            page_factory.create_page(
+                "Game setup unavailable".to_string(),
+                Box::new(html! {
+                    div class="page-head" {
+                        h1 { "Game setup unavailable" }
+                        p class="sub" {
+                            "This game setup may have already been used or expired. Start a new game to pick your snakes again."
+                        }
+                    }
+                    div class="form-cta" {
+                        a class="btn solid" href="/games/new" { "Start a new game" }
+                        a class="btn" href="/me" { "Back to Profile" }
+                    }
+                }),
+            ),
+        ).into_response());
+    };
 
     // Get user's battlesnakes
     let user_battlesnakes = flow
@@ -284,7 +303,7 @@ pub async fn show_game_flow(
             }
         }),
         flash,
-    ))
+    ).into_response())
 }
 
 /// One selectable snake row — shared by "Your Battlesnakes" and search
@@ -370,11 +389,12 @@ pub async fn reset_snake_selections(
     Path(flow_id): Path<Uuid>,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
     // Get the flow
-    let mut flow = GameCreationFlow::get_by_id(&state.db, flow_id, user.user_id)
+    let Some(mut flow) = GameCreationFlow::get_by_id(&state.db, flow_id, user.user_id)
         .await
         .wrap_err("Failed to get game flow")?
-        .ok_or_else(|| "Game flow not found".to_string())
-        .with_status(StatusCode::NOT_FOUND)?;
+    else {
+        return Ok(Redirect::to(&format!("/games/flow/{flow_id}")).into_response());
+    };
 
     // Clear the selections
     flow.selected_battlesnake_ids.clear();
@@ -396,11 +416,12 @@ pub async fn add_battlesnake(
     Path((flow_id, battlesnake_id)): Path<(Uuid, Uuid)>,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
     // Get the flow
-    let mut flow = GameCreationFlow::get_by_id(&state.db, flow_id, user.user_id)
+    let Some(mut flow) = GameCreationFlow::get_by_id(&state.db, flow_id, user.user_id)
         .await
         .wrap_err("Failed to get game flow")?
-        .ok_or_else(|| "Game flow not found".to_string())
-        .with_status(StatusCode::NOT_FOUND)?;
+    else {
+        return Ok(Redirect::to(&format!("/games/flow/{flow_id}")).into_response());
+    };
 
     // Add the battlesnake
     let added = flow.add_battlesnake(battlesnake_id);
@@ -435,11 +456,12 @@ pub async fn remove_battlesnake(
     Path((flow_id, battlesnake_id)): Path<(Uuid, Uuid)>,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
     // Get the flow
-    let mut flow = GameCreationFlow::get_by_id(&state.db, flow_id, user.user_id)
+    let Some(mut flow) = GameCreationFlow::get_by_id(&state.db, flow_id, user.user_id)
         .await
         .wrap_err("Failed to get game flow")?
-        .ok_or_else(|| "Game flow not found".to_string())
-        .with_status(StatusCode::NOT_FOUND)?;
+    else {
+        return Ok(Redirect::to(&format!("/games/flow/{flow_id}")).into_response());
+    };
 
     // Remove the battlesnake
     flow.remove_battlesnake(battlesnake_id);
@@ -467,11 +489,12 @@ pub async fn search_battlesnakes(
     Query(query): Query<SearchQuery>,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
     // Get the flow
-    let mut flow = GameCreationFlow::get_by_id(&state.db, flow_id, user.user_id)
+    let Some(mut flow) = GameCreationFlow::get_by_id(&state.db, flow_id, user.user_id)
         .await
         .wrap_err("Failed to get game flow")?
-        .ok_or_else(|| "Game flow not found".to_string())
-        .with_status(StatusCode::NOT_FOUND)?;
+    else {
+        return Ok(Redirect::to(&format!("/games/flow/{flow_id}")).into_response());
+    };
 
     // Update search query
     flow.search_query = query.q;
@@ -534,11 +557,12 @@ pub async fn create_game(
     }
 
     // Get the flow
-    let mut flow = GameCreationFlow::get_by_id(&state.db, flow_id, user.user_id)
+    let Some(mut flow) = GameCreationFlow::get_by_id(&state.db, flow_id, user.user_id)
         .await
         .wrap_err("Failed to get game flow")?
-        .ok_or_else(|| "Game flow not found".to_string())
-        .with_status(StatusCode::NOT_FOUND)?;
+    else {
+        return Ok(Redirect::to(&format!("/games/flow/{flow_id}")).into_response());
+    };
 
     // Update with user's selections if provided
     if let Ok(board_size) = GameBoardSize::from_str(&data.board_size) {

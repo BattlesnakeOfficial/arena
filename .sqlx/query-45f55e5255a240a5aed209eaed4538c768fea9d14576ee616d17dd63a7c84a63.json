@@ -1,0 +1,36 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT\n                u.user_id,\n                u.github_login,\n                COALESCE(NULLIF(u.display_name, ''), u.github_login) AS \"public_name!\"\n            FROM users u\n            WHERE (strpos(lower(u.github_login), lower($3)) > 0\n                 OR strpos(lower(COALESCE(u.display_name, '')), lower($3)) > 0)\n            ORDER BY\n                LOWER(COALESCE(NULLIF(u.display_name, ''), u.github_login)) ASC,\n                LOWER(u.github_login) ASC,\n                u.user_id ASC\n            LIMIT $1 OFFSET $2\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "github_login",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "public_name!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "45f55e5255a240a5aed209eaed4538c768fea9d14576ee616d17dd63a7c84a63"
+}

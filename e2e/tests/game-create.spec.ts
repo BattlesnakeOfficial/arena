@@ -15,6 +15,7 @@ test.describe('Create Game', () => {
     await authenticatedPage.goto('/games/new');
     await expect(authenticatedPage).toHaveURL(/\/games\/flow\//);
     await expect(authenticatedPage.getByRole('heading', { name: 'Create New Game' })).toBeVisible();
+    const builderUrl = authenticatedPage.url();
 
     // Add the battlesnake
     const snakeCard = authenticatedPage.locator('.card', { hasText: snakeName });
@@ -29,6 +30,21 @@ test.describe('Create Game', () => {
 
     // Should see the snake in the results
     await expect(authenticatedPage.getByText(snakeName)).toBeVisible();
+
+    // Completed builders can remain in browser history or another tab.
+    const expired = await authenticatedPage.goto(builderUrl);
+    expect(expired?.status()).toBe(404);
+    await expect(authenticatedPage.getByRole('heading', { name: 'Game setup unavailable' })).toBeVisible();
+    await authenticatedPage.getByRole('link', { name: 'Start a new game', exact: true }).click();
+    await expect(authenticatedPage.getByRole('heading', { name: 'Create New Game' })).toBeVisible();
+    expect(authenticatedPage.url()).not.toBe(builderUrl);
+
+    // Submitting the old form also reaches recovery without creating a game.
+    const stalePost = await authenticatedPage.request.post(`${builderUrl}/create`, {
+      form: { board_size: '11x11', game_type: 'Standard' },
+    });
+    expect(stalePost.status()).toBe(404);
+    expect(await stalePost.text()).toContain('Game setup unavailable');
   });
 
   test('can create a game with multiple battlesnakes', async ({ authenticatedPage }) => {

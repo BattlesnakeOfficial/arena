@@ -370,14 +370,19 @@ pub struct PublicBattlesnakeListItem {
     pub owner_login: String,
 }
 
-// Count of all public battlesnakes, for paginating the public directory
-pub async fn count_public_battlesnakes(pool: &PgPool) -> cja::Result<i64> {
+// Count public snakes matching a literal, case-insensitive name or owner
+// substring. An empty search matches every public snake.
+pub async fn count_public_battlesnakes(pool: &PgPool, search: &str) -> cja::Result<i64> {
     let count = sqlx::query_scalar!(
         r#"
         SELECT COUNT(*) AS "count!"
-        FROM battlesnakes
-        WHERE visibility = 'public'
-        "#
+        FROM battlesnakes b
+        JOIN users u ON b.user_id = u.user_id
+        WHERE b.visibility = 'public'
+          AND (strpos(lower(b.name), lower($1)) > 0
+               OR strpos(lower(u.github_login), lower($1)) > 0)
+        "#,
+        search
     )
     .fetch_one(pool)
     .await
@@ -390,6 +395,7 @@ pub async fn count_public_battlesnakes(pool: &PgPool) -> cja::Result<i64> {
 // ties so duplicate names can't shuffle rows between pages.
 pub async fn get_public_battlesnakes_paginated(
     pool: &PgPool,
+    search: &str,
     page: i64,
     per_page: i64,
 ) -> cja::Result<Vec<PublicBattlesnakeListItem>> {
@@ -406,11 +412,14 @@ pub async fn get_public_battlesnakes_paginated(
         FROM battlesnakes b
         JOIN users u ON b.user_id = u.user_id
         WHERE b.visibility = 'public'
+          AND (strpos(lower(b.name), lower($3)) > 0
+               OR strpos(lower(u.github_login), lower($3)) > 0)
         ORDER BY b.name ASC, b.battlesnake_id ASC
         LIMIT $1 OFFSET $2
         "#,
         per_page,
-        offset
+        offset,
+        search
     )
     .fetch_all(pool)
     .await
@@ -562,7 +571,7 @@ mod tests {
         create_snake(&pool, owner, "Beta", Visibility::Public).await?;
         create_snake(&pool, owner, "Hidden", Visibility::Private).await?;
 
-        assert_eq!(count_public_battlesnakes(&pool).await?, 2);
+        assert_eq!(count_public_battlesnakes(&pool, "").await?, 2);
 
         Ok(())
     }
@@ -578,7 +587,7 @@ mod tests {
         create_snake(&pool, second_owner, "Boa", Visibility::Public).await?;
         create_snake(&pool, second_owner, "Secret", Visibility::Private).await?;
 
-        let snakes = get_public_battlesnakes_paginated(&pool, 0, 50).await?;
+        let snakes = get_public_battlesnakes_paginated(&pool, "", 0, 50).await?;
 
         let listed: Vec<(&str, &str)> = snakes
             .iter()
@@ -599,9 +608,9 @@ mod tests {
             create_snake(&pool, owner, &format!("Snake {i:02}"), Visibility::Public).await?;
         }
 
-        let first = get_public_battlesnakes_paginated(&pool, 0, 2).await?;
-        let second = get_public_battlesnakes_paginated(&pool, 1, 2).await?;
-        let third = get_public_battlesnakes_paginated(&pool, 2, 2).await?;
+        let first = get_public_battlesnakes_paginated(&pool, "", 0, 2).await?;
+        let second = get_public_battlesnakes_paginated(&pool, "", 1, 2).await?;
+        let third = get_public_battlesnakes_paginated(&pool, "", 2, 2).await?;
 
         let names = |snakes: &[PublicBattlesnakeListItem]| {
             snakes.iter().map(|s| s.name.clone()).collect::<Vec<_>>()
@@ -612,7 +621,7 @@ mod tests {
 
         // Past the final page there is simply nothing left.
         assert!(
-            get_public_battlesnakes_paginated(&pool, 3, 2)
+            get_public_battlesnakes_paginated(&pool, "", 3, 2)
                 .await?
                 .is_empty()
         );

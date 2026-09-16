@@ -109,7 +109,8 @@ pub struct PlayerDirectoryEntry {
     pub public_name: String,
 }
 
-/// Count players in the directory. `active_only` restricts to players with at
+/// Count players matching a literal, case-insensitive login/display-name
+/// substring (empty matches all). `active_only` restricts to players with at
 /// least one enabled leaderboard entry — there is no snake-level active flag,
 /// so pausing a snake (manually or via the health sweeper) is expressed as
 /// `leaderboard_entries.disabled_at`.
@@ -121,7 +122,7 @@ pub struct PlayerDirectoryEntry {
 /// thousand users that estimate crosses `jit_above_cost` and every request
 /// pays for LLVM compilation. A bare top-level `EXISTS` plans as a hash
 /// semi-join instead.
-pub async fn count_players(pool: &PgPool, active_only: bool) -> cja::Result<i64> {
+pub async fn count_players(pool: &PgPool, active_only: bool, search: &str) -> cja::Result<i64> {
     let count = if active_only {
         sqlx::query_scalar!(
             r#"
@@ -135,7 +136,10 @@ pub async fn count_players(pool: &PgPool, active_only: bool) -> cja::Result<i64>
                 WHERE b.user_id = u.user_id
                   AND le.disabled_at IS NULL
             )
-            "#
+            AND (strpos(lower(u.github_login), lower($1)) > 0
+                 OR strpos(lower(COALESCE(u.display_name, '')), lower($1)) > 0)
+            "#,
+            search
         )
         .fetch_one(pool)
         .await
@@ -143,8 +147,11 @@ pub async fn count_players(pool: &PgPool, active_only: bool) -> cja::Result<i64>
         sqlx::query_scalar!(
             r#"
             SELECT COUNT(*) AS "count!"
-            FROM users
-            "#
+            FROM users u
+            WHERE strpos(lower(u.github_login), lower($1)) > 0
+               OR strpos(lower(COALESCE(u.display_name, '')), lower($1)) > 0
+            "#,
+            search
         )
         .fetch_one(pool)
         .await
@@ -162,6 +169,7 @@ pub async fn count_players(pool: &PgPool, active_only: bool) -> cja::Result<i64>
 pub async fn get_players_paginated(
     pool: &PgPool,
     active_only: bool,
+    search: &str,
     page: i64,
     per_page: i64,
 ) -> cja::Result<Vec<PlayerDirectoryEntry>> {
@@ -184,6 +192,8 @@ pub async fn get_players_paginated(
                 WHERE b.user_id = u.user_id
                   AND le.disabled_at IS NULL
             )
+            AND (strpos(lower(u.github_login), lower($3)) > 0
+                 OR strpos(lower(COALESCE(u.display_name, '')), lower($3)) > 0)
             ORDER BY
                 LOWER(COALESCE(NULLIF(u.display_name, ''), u.github_login)) ASC,
                 LOWER(u.github_login) ASC,
@@ -191,7 +201,8 @@ pub async fn get_players_paginated(
             LIMIT $1 OFFSET $2
             "#,
             per_page,
-            offset
+            offset,
+            search
         )
         .fetch_all(pool)
         .await
@@ -204,6 +215,8 @@ pub async fn get_players_paginated(
                 u.github_login,
                 COALESCE(NULLIF(u.display_name, ''), u.github_login) AS "public_name!"
             FROM users u
+            WHERE (strpos(lower(u.github_login), lower($3)) > 0
+                 OR strpos(lower(COALESCE(u.display_name, '')), lower($3)) > 0)
             ORDER BY
                 LOWER(COALESCE(NULLIF(u.display_name, ''), u.github_login)) ASC,
                 LOWER(u.github_login) ASC,
@@ -211,7 +224,8 @@ pub async fn get_players_paginated(
             LIMIT $1 OFFSET $2
             "#,
             per_page,
-            offset
+            offset,
+            search
         )
         .fetch_all(pool)
         .await
@@ -472,7 +486,7 @@ mod tests {
     }
 
     async fn player_logins(pool: &PgPool, active_only: bool) -> cja::Result<Vec<String>> {
-        Ok(get_players_paginated(pool, active_only, 0, 50)
+        Ok(get_players_paginated(pool, active_only, "", 0, 50)
             .await?
             .into_iter()
             .map(|p| p.github_login)
@@ -481,10 +495,18 @@ mod tests {
 
     #[sqlx::test(migrations = "../migrations")]
     async fn directory_is_empty_on_a_fresh_database(pool: PgPool) -> cja::Result<()> {
-        assert_eq!(count_players(&pool, false).await?, 0);
-        assert_eq!(count_players(&pool, true).await?, 0);
-        assert!(get_players_paginated(&pool, false, 0, 50).await?.is_empty());
-        assert!(get_players_paginated(&pool, true, 0, 50).await?.is_empty());
+        assert_eq!(count_players(&pool, false, "").await?, 0);
+        assert_eq!(count_players(&pool, true, "").await?, 0);
+        assert!(
+            get_players_paginated(&pool, false, "", 0, 50)
+                .await?
+                .is_empty()
+        );
+        assert!(
+            get_players_paginated(&pool, true, "", 0, 50)
+                .await?
+                .is_empty()
+        );
 
         Ok(())
     }
@@ -508,13 +530,13 @@ mod tests {
         let active_snake = create_snake(&pool, active, "Active").await?;
         create_entry(&pool, active_snake, false).await?;
 
-        assert_eq!(count_players(&pool, false).await?, 4);
+        assert_eq!(count_players(&pool, false, "").await?, 4);
         assert_eq!(
             player_logins(&pool, false).await?,
             vec!["has-enabled", "no-entries", "no-snakes", "only-disabled"]
         );
 
-        assert_eq!(count_players(&pool, true).await?, 1);
+        assert_eq!(count_players(&pool, true, "").await?, 1);
         assert_eq!(player_logins(&pool, true).await?, vec!["has-enabled"]);
 
         Ok(())
@@ -536,7 +558,7 @@ mod tests {
         create_entry(&pool, second, false).await?;
         create_entry_on(&pool, second, "Duplicated Board", false).await?;
 
-        assert_eq!(count_players(&pool, true).await?, 1);
+        assert_eq!(count_players(&pool, true, "").await?, 1);
         assert_eq!(player_logins(&pool, true).await?, vec!["many-entries"]);
 
         Ok(())
@@ -577,7 +599,7 @@ mod tests {
         create_named_user(&pool, 7302, "zeta-empty", Some("")).await?;
         create_named_user(&pool, 7303, "zeta-named", Some("Aardvark")).await?;
 
-        let names: Vec<(String, String)> = get_players_paginated(&pool, false, 0, 50)
+        let names: Vec<(String, String)> = get_players_paginated(&pool, false, "", 0, 50)
             .await?
             .into_iter()
             .map(|p| (p.github_login, p.public_name))
@@ -604,7 +626,7 @@ mod tests {
             create_named_user(&pool, 7400 + i, &format!("player-{i:02}"), None).await?;
         }
 
-        assert_eq!(count_players(&pool, false).await?, 5);
+        assert_eq!(count_players(&pool, false, "").await?, 5);
 
         let logins = |players: Vec<PlayerDirectoryEntry>| {
             players
@@ -613,19 +635,23 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(
-            logins(get_players_paginated(&pool, false, 0, 2).await?),
+            logins(get_players_paginated(&pool, false, "", 0, 2).await?),
             vec!["player-00", "player-01"]
         );
         assert_eq!(
-            logins(get_players_paginated(&pool, false, 1, 2).await?),
+            logins(get_players_paginated(&pool, false, "", 1, 2).await?),
             vec!["player-02", "player-03"]
         );
         assert_eq!(
-            logins(get_players_paginated(&pool, false, 2, 2).await?),
+            logins(get_players_paginated(&pool, false, "", 2, 2).await?),
             vec!["player-04"]
         );
         // Past the end there is simply nothing left.
-        assert!(get_players_paginated(&pool, false, 3, 2).await?.is_empty());
+        assert!(
+            get_players_paginated(&pool, false, "", 3, 2)
+                .await?
+                .is_empty()
+        );
 
         Ok(())
     }
@@ -639,7 +665,7 @@ mod tests {
         let second = create_named_user(&pool, 7502, "twin", Some("Second Twin")).await?;
         let cased = create_named_user(&pool, 7503, "TWIN", Some("Third Twin")).await?;
 
-        let players = get_players_paginated(&pool, false, 0, 50).await?;
+        let players = get_players_paginated(&pool, false, "", 0, 50).await?;
         let ids: Vec<Uuid> = players.iter().map(|p| p.user_id).collect();
         assert_eq!(ids.len(), 3);
         assert!(ids.contains(&first) && ids.contains(&second) && ids.contains(&cased));

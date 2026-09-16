@@ -988,11 +988,12 @@ pub async fn show_tournament(
     page_factory: PageFactory,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
     let watch_round = parse_watch_round(params.watch_round.as_deref());
-    let t = tournament::get_tournament_by_id(&state.db, tournament_id)
+    let Some(t) = tournament::get_tournament_by_id(&state.db, tournament_id)
         .await
         .wrap_err("Failed to fetch tournament")?
-        .ok_or_else(|| "Tournament not found".to_string())
-        .with_status(StatusCode::NOT_FOUND)?;
+    else {
+        return Ok(crate::routes::render_not_found(page_factory));
+    };
 
     let registrations = tournament::get_registrations_with_details(&state.db, tournament_id)
         .await
@@ -1003,7 +1004,7 @@ pub async fn show_tournament(
 
     // participants_only tournaments 404 for outsiders (don't reveal existence)
     if !can_view(&t, viewer_id, &participant_user_ids) {
-        return Err("Tournament not found".to_string()).with_status(StatusCode::NOT_FOUND);
+        return Ok(crate::routes::render_not_found(page_factory));
     }
 
     let owner = user::get_user_by_id(&state.db, t.user_id)
@@ -1361,27 +1362,28 @@ pub async fn show_tournament(
                 }
             }
         }),
-    ))
+    ).into_response())
 }
 
 /// GET /tournaments/{id}/edit — settings form (owner only).
 pub async fn edit_tournament(
     State(state): State<AppState>,
     CurrentUser(user): CurrentUser,
-    Path(tournament_id): Path<Uuid>,
+    UuidPath(tournament_id): UuidPath,
     page_factory: PageFactory,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
-    let t = tournament::get_tournament_by_id(&state.db, tournament_id)
+    let Some(t) = tournament::get_tournament_by_id(&state.db, tournament_id)
         .await
         .wrap_err("Failed to fetch tournament")?
-        .ok_or_else(|| "Tournament not found".to_string())
-        .with_status(StatusCode::NOT_FOUND)?;
+    else {
+        return Ok(crate::routes::render_not_found(page_factory));
+    };
 
     if t.user_id != user.user_id {
         // Hidden tournaments 404 for outsiders — a 403 here would confirm the
         // tournament exists, distinguishing valid hidden UUIDs from noise.
         if is_hidden_from(&state.db, &t, user.user_id).await? {
-            return Err("Tournament not found".to_string()).with_status(StatusCode::NOT_FOUND);
+            return Ok(crate::routes::render_not_found(page_factory));
         }
         return Err("You don't have permission to edit this tournament".to_string())
             .with_status(StatusCode::FORBIDDEN);
@@ -1422,7 +1424,7 @@ pub async fn edit_tournament(
                 }
             }
         }),
-    ))
+    ).into_response())
 }
 
 /// POST /tournaments/{id}/settings — update settings (owner only).

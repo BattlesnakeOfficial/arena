@@ -20,6 +20,7 @@ use crate::{
     models::tag,
     models::tournament,
     models::user::get_user_by_id,
+    routes::UuidPath,
     routes::auth::{CurrentUser, CurrentUserWithSession, OptionalUser},
     routes::pagination::resolve_page,
     snake_health,
@@ -191,6 +192,8 @@ const PUBLIC_SNAKES_PER_PAGE: i64 = 50;
 pub struct PublicBattlesnakePagination {
     #[serde(default)]
     pub page: Option<i64>,
+    #[serde(default)]
+    pub q: String,
 }
 
 struct PublicBattlesnakePage {
@@ -205,11 +208,13 @@ struct PublicBattlesnakePage {
 async fn load_public_battlesnake_page(
     pool: &PgPool,
     requested: Option<i64>,
+    search: &str,
 ) -> cja::Result<PublicBattlesnakePage> {
-    let total = battlesnake::count_public_battlesnakes(pool).await?;
+    let total = battlesnake::count_public_battlesnakes(pool, search).await?;
     let (page, total_pages) = resolve_page(requested, total, PUBLIC_SNAKES_PER_PAGE);
     let snakes =
-        battlesnake::get_public_battlesnakes_paginated(pool, page, PUBLIC_SNAKES_PER_PAGE).await?;
+        battlesnake::get_public_battlesnakes_paginated(pool, search, page, PUBLIC_SNAKES_PER_PAGE)
+            .await?;
 
     Ok(PublicBattlesnakePage {
         snakes,
@@ -219,9 +224,19 @@ async fn load_public_battlesnake_page(
     })
 }
 
+fn public_snakes_href(search: &str, page: i64) -> String {
+    let mut query = url::form_urlencoded::Serializer::new(String::new());
+    query.append_pair("page", &page.to_string());
+    if !search.is_empty() {
+        query.append_pair("q", search);
+    }
+    format!("/snakes?{}", query.finish())
+}
+
 fn render_public_battlesnake_list(
     snakes: &[battlesnake::PublicBattlesnakeListItem],
     is_authenticated: bool,
+    search: &str,
     page: i64,
     total_pages: i64,
     total: i64,
@@ -234,8 +249,26 @@ fn render_public_battlesnake_list(
             }
         }
 
+        form action="/snakes" method="get" role="search" class="directory-search" {
+            div class="field" {
+                label for="snake-search" { "Search public battlesnakes" }
+                input type="search" id="snake-search" name="q" value=(search)
+                    placeholder="Snake name or owner handle";
+            }
+            button type="submit" class="btn solid" { "Search" }
+            @if !search.is_empty() {
+                a class="btn" href="/snakes" { "Clear" }
+            }
+        }
+
         @if total == 0 {
-            p class="empty" { "No public battlesnakes are available yet." }
+            p class="empty" {
+                @if search.is_empty() {
+                    "No public battlesnakes are available yet."
+                } @else {
+                    "No public battlesnakes match your search."
+                }
+            }
         } @else {
             div class="section" {
                 @if snakes.is_empty() {
@@ -287,13 +320,13 @@ fn render_public_battlesnake_list(
 
                 div class="pager" {
                     @if page > 0 {
-                        a href={"/snakes?page="(page - 1)} { "‹ Prev" }
+                        a href=(public_snakes_href(search, page - 1)) { "‹ Prev" }
                     }
                     @if total_pages > 1 {
                         span class="cur" { "Page " (page + 1) " of " (total_pages) }
                     }
                     @if page < total_pages - 1 {
-                        a href={"/snakes?page="(page + 1)} { "Next ›" }
+                        a href=(public_snakes_href(search, page + 1)) { "Next ›" }
                     }
                     @if !snakes.is_empty() {
                         span class="spacer" {}
@@ -315,12 +348,13 @@ pub async fn list_public_battlesnakes(
     Query(pagination): Query<PublicBattlesnakePagination>,
     page_factory: PageFactory,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
+    let search = pagination.q.trim();
     let PublicBattlesnakePage {
         snakes,
         page,
         total_pages,
         total,
-    } = load_public_battlesnake_page(&state.db, pagination.page)
+    } = load_public_battlesnake_page(&state.db, pagination.page, search)
         .await
         .wrap_err("Failed to load public battlesnakes page")?;
 
@@ -333,6 +367,7 @@ pub async fn list_public_battlesnakes(
             Box::new(render_public_battlesnake_list(
                 &snakes,
                 is_authenticated,
+                search,
                 page,
                 total_pages,
                 total,
@@ -627,15 +662,16 @@ pub async fn create_battlesnake(
 pub async fn edit_battlesnake(
     State(state): State<AppState>,
     CurrentUserWithSession { user, session }: CurrentUserWithSession,
-    Path(battlesnake_id): Path<Uuid>,
+    UuidPath(battlesnake_id): UuidPath,
     page_factory: PageFactory,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
     // Get the battlesnake by ID
-    let battlesnake = battlesnake::get_battlesnake_by_id(&state.db, battlesnake_id)
+    let Some(battlesnake) = battlesnake::get_battlesnake_by_id(&state.db, battlesnake_id)
         .await
         .wrap_err("Failed to get battlesnake")?
-        .ok_or_else(|| "Battlesnake not found".to_string())
-        .with_status(StatusCode::NOT_FOUND)?;
+    else {
+        return Ok(crate::routes::render_not_found(page_factory));
+    };
 
     // Check if the battlesnake belongs to the current user
     if battlesnake.user_id != user.user_id {
@@ -678,23 +714,25 @@ pub async fn edit_battlesnake(
     // Use flash from page_factory (already extracted and cleared from DB)
     let flash = page_factory.flash.clone();
 
-    Ok(page_factory.create_page_with_flash(
-        format!("Edit Battlesnake: {}", battlesnake.name),
-        Box::new(html! {
-            div class="crumb" { a href="/battlesnakes" { "Your Battlesnakes" } " / edit" }
-            div class="page-head" {
-                h1 { "Edit Battlesnake: " (battlesnake.name) }
-            }
+    Ok(page_factory
+        .create_page_with_flash(
+            format!("Edit Battlesnake: {}", battlesnake.name),
+            Box::new(html! {
+                div class="crumb" { a href="/battlesnakes" { "Your Battlesnakes" } " / edit" }
+                div class="page-head" {
+                    h1 { "Edit Battlesnake: " (battlesnake.name) }
+                }
 
-            (battlesnake_form(
-                &format!("/battlesnakes/{battlesnake_id}/update"),
-                "Update Battlesnake",
-                &form,
-                &catalog,
-            ))
-        }),
-        flash,
-    ))
+                (battlesnake_form(
+                    &format!("/battlesnakes/{battlesnake_id}/update"),
+                    "Update Battlesnake",
+                    &form,
+                    &catalog,
+                ))
+            }),
+            flash,
+        )
+        .into_response())
 }
 
 // Handle the update of an existing battlesnake
@@ -1028,15 +1066,16 @@ pub async fn reactivate_battlesnake(
 pub async fn view_battlesnake_profile(
     State(state): State<AppState>,
     OptionalUser(user): OptionalUser,
-    Path(battlesnake_id): Path<Uuid>,
+    UuidPath(battlesnake_id): UuidPath,
     page_factory: PageFactory,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
     // Fetch the battlesnake
-    let snake = battlesnake::get_battlesnake_by_id(&state.db, battlesnake_id)
+    let Some(snake) = battlesnake::get_battlesnake_by_id(&state.db, battlesnake_id)
         .await
         .wrap_err("Failed to get battlesnake")?
-        .ok_or_else(|| "Battlesnake not found".to_string())
-        .with_status(StatusCode::NOT_FOUND)?;
+    else {
+        return Ok(crate::routes::render_not_found(page_factory));
+    };
 
     let is_owner = user.as_ref().is_some_and(|u| u.user_id == snake.user_id);
 
@@ -1357,7 +1396,7 @@ pub async fn view_battlesnake_profile(
             }
         }),
         flash,
-    ))
+    ).into_response())
 }
 
 // Run an on-demand health check against a battlesnake's URL (BS-015).
@@ -1561,7 +1600,7 @@ mod public_list_tests {
 
     #[test]
     fn empty_directory_renders_message_without_table_or_pager() {
-        let html = render_public_battlesnake_list(&[], true, 0, 1, 0).into_string();
+        let html = render_public_battlesnake_list(&[], true, "", 0, 1, 0).into_string();
 
         assert!(html.contains("No public battlesnakes are available yet."));
         assert!(!html.contains("<table"));
@@ -1570,7 +1609,7 @@ mod public_list_tests {
 
     #[test]
     fn raced_empty_page_keeps_pager_navigation() {
-        let html = render_public_battlesnake_list(&[], true, 1, 2, 60).into_string();
+        let html = render_public_battlesnake_list(&[], true, "", 1, 2, 60).into_string();
 
         assert!(html.contains("No public battlesnakes remain on this page."));
         assert!(html.contains(r#"href="/snakes?page=0""#));
@@ -1583,7 +1622,7 @@ mod public_list_tests {
         let mut snake = item("Solid Snake", "kojima");
         snake.battlesnake_id = Uuid::from_u128(1);
 
-        let html = render_public_battlesnake_list(&[snake], true, 0, 1, 1).into_string();
+        let html = render_public_battlesnake_list(&[snake], true, "", 0, 1, 1).into_string();
 
         assert!(html.contains(&format!(
             r#"href="/battlesnakes/{}/profile""#,
@@ -1599,7 +1638,7 @@ mod public_list_tests {
         let mut snake = item("Challenger", "owner");
         snake.battlesnake_id = Uuid::from_u128(2);
 
-        let html = render_public_battlesnake_list(&[snake], true, 0, 1, 1).into_string();
+        let html = render_public_battlesnake_list(&[snake], true, "", 0, 1, 1).into_string();
 
         assert!(html.contains(&format!(
             r#"action="/battlesnakes/{}/challenge" method="post""#,
@@ -1611,8 +1650,9 @@ mod public_list_tests {
 
     #[test]
     fn anonymous_rows_offer_a_sign_in_link() {
-        let html = render_public_battlesnake_list(&[item("Challenger", "owner")], false, 0, 1, 1)
-            .into_string();
+        let html =
+            render_public_battlesnake_list(&[item("Challenger", "owner")], false, "", 0, 1, 1)
+                .into_string();
 
         assert!(html.contains(r#"href="/auth/github""#));
         assert!(html.contains("Sign in to challenge"));
@@ -1621,7 +1661,7 @@ mod public_list_tests {
 
     #[test]
     fn middle_page_renders_both_prev_and_next_links() {
-        let html = render_public_battlesnake_list(&[item("Middle", "owner")], true, 1, 3, 120)
+        let html = render_public_battlesnake_list(&[item("Middle", "owner")], true, "", 1, 3, 120)
             .into_string();
 
         assert!(html.contains(r#"href="/snakes?page=0""#));
@@ -1664,7 +1704,7 @@ mod public_list_tests {
         .execute(&pool)
         .await?;
 
-        let second = load_public_battlesnake_page(&pool, Some(1)).await?;
+        let second = load_public_battlesnake_page(&pool, Some(1), "").await?;
         assert_eq!(second.total, 55);
         assert_eq!((second.page, second.total_pages), (1, 2));
         let names: Vec<String> = second.snakes.iter().map(|s| s.name.clone()).collect();
@@ -1676,13 +1716,13 @@ mod public_list_tests {
         );
 
         // Negative requests fall back to the first page.
-        let negative = load_public_battlesnake_page(&pool, Some(-1)).await?;
+        let negative = load_public_battlesnake_page(&pool, Some(-1), "").await?;
         assert_eq!(negative.page, 0);
         assert_eq!(negative.snakes.len(), 50);
         assert_eq!(negative.snakes[0].name, "Loader Snake 000");
 
         // Oversized requests land on the final page.
-        let oversized = load_public_battlesnake_page(&pool, Some(9_999)).await?;
+        let oversized = load_public_battlesnake_page(&pool, Some(9_999), "").await?;
         assert_eq!(oversized.page, 1);
         assert_eq!(oversized.snakes.len(), 5);
 
@@ -1691,7 +1731,7 @@ mod public_list_tests {
 
     #[sqlx::test(migrations = "../migrations")]
     async fn loader_handles_an_empty_directory(pool: PgPool) -> cja::Result<()> {
-        let empty = load_public_battlesnake_page(&pool, Some(4)).await?;
+        let empty = load_public_battlesnake_page(&pool, Some(4), "").await?;
 
         assert_eq!(empty.total, 0);
         assert_eq!((empty.page, empty.total_pages), (0, 1));
