@@ -11,7 +11,7 @@ use crate::{
     components::{
         avatar::user_avatar, page::Page, page_factory::PageFactory, snake_tags::snake_tag_chips,
     },
-    errors::{ServerResult, WithStatus},
+    errors::ServerResult,
     models::{
         battlesnake::{self, Visibility},
         leaderboard, saved_game, tag,
@@ -45,13 +45,16 @@ pub async fn show_user_profile(
     Path(login): Path<String>,
     page_factory: PageFactory,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
-    let user = user::get_user_by_github_login(&state.db, &login)
+    let Some(user) = user::get_user_by_github_login(&state.db, &login)
         .await
         .wrap_err("Failed to fetch user")?
-        .ok_or_else(|| "User not found".to_string())
-        .with_status(StatusCode::NOT_FOUND)?;
+    else {
+        return Ok(crate::routes::render_not_found(page_factory));
+    };
 
-    render_user_profile(&state, viewer, user, page_factory).await
+    Ok(render_user_profile(&state, viewer, user, page_factory)
+        .await?
+        .into_response())
 }
 
 /// GET /users/{login}/{user_id} — public user profile addressed by its stable
@@ -64,11 +67,12 @@ pub async fn show_user_profile_by_id(
     Path((login, user_id)): Path<(String, Uuid)>,
     page_factory: PageFactory,
 ) -> ServerResult<Response, StatusCode> {
-    let user = user::get_user_by_id(&state.db, user_id)
+    let Some(user) = user::get_user_by_id(&state.db, user_id)
         .await
         .wrap_err("Failed to fetch user")?
-        .ok_or_else(|| "User not found".to_string())
-        .with_status(StatusCode::NOT_FOUND)?;
+    else {
+        return Ok(crate::routes::render_not_found(page_factory));
+    };
 
     if login != user.github_login {
         return Ok(
@@ -235,6 +239,8 @@ const PLAYERS_PER_PAGE: i64 = 50;
 pub struct PlayerDirectoryParams {
     #[serde(default)]
     pub page: Option<i64>,
+    #[serde(default)]
+    pub q: String,
     /// Restrict the listing to players with at least one active snake.
     #[serde(default, deserialize_with = "de_lenient_bool")]
     pub active: bool,
@@ -259,29 +265,30 @@ where
     ))
 }
 
-/// Base URL for the directory in a given filter mode. Switching filters always
-/// drops `page`, since page N of "all players" has nothing to do with page N
-/// of "active players".
-fn players_filter_href(active_only: bool) -> &'static str {
+/// Directory links preserve search and filters; omitting the page resets it.
+fn players_href(active_only: bool, search: &str, page: Option<i64>) -> String {
+    let mut query = url::form_urlencoded::Serializer::new(String::new());
     if active_only {
-        "/players?active=true"
-    } else {
-        "/players"
+        query.append_pair("active", "true");
     }
-}
-
-/// Pager link for a page within the current filter mode.
-fn players_page_href(active_only: bool, page: i64) -> String {
-    if active_only {
-        format!("/players?active=true&page={page}")
+    if let Some(page) = page {
+        query.append_pair("page", &page.to_string());
+    }
+    if !search.is_empty() {
+        query.append_pair("q", search);
+    }
+    let query = query.finish();
+    if query.is_empty() {
+        "/players".to_string()
     } else {
-        format!("/players?page={page}")
+        format!("/players?{query}")
     }
 }
 
 fn render_player_directory(
     players: &[PlayerDirectoryEntry],
     active_only: bool,
+    search: &str,
     page: i64,
     total_pages: i64,
     total: i64,
@@ -294,18 +301,35 @@ fn render_player_directory(
             }
         }
 
+        form action="/players" method="get" role="search" class="directory-search" {
+            @if active_only {
+                input type="hidden" name="active" value="true";
+            }
+            div class="field" {
+                label for="player-search" { "Search players" }
+                input type="search" id="player-search" name="q" value=(search)
+                    placeholder="Name or GitHub handle";
+            }
+            button type="submit" class="btn solid" { "Search" }
+            @if !search.is_empty() {
+                a class="btn" href=(players_href(active_only, "", None)) { "Clear" }
+            }
+        }
+
         nav class="modes" aria-label="Player filter" {
             @if active_only {
-                a class="mode" href=(players_filter_href(false)) { "All players" }
+                a class="mode" href=(players_href(false, search, None)) { "All players" }
                 span class="mode on" aria-current="page" { "With active snakes" }
             } @else {
                 span class="mode on" aria-current="page" { "All players" }
-                a class="mode" href=(players_filter_href(true)) { "With active snakes" }
+                a class="mode" href=(players_href(true, search, None)) { "With active snakes" }
             }
         }
 
         @if total == 0 {
-            @if active_only {
+            @if !search.is_empty() {
+                p class="empty" { "No players match your search" @if active_only { " with active snakes" } "." }
+            } @else if active_only {
                 p class="empty" { "No players currently have an active snake." }
             } @else {
                 p class="empty" { "No players have joined yet." }
@@ -341,13 +365,13 @@ fn render_player_directory(
 
             div class="pager" {
                 @if page > 0 {
-                    a href=(players_page_href(active_only, page - 1)) { "‹ Prev" }
+                    a href=(players_href(active_only, search, Some(page - 1))) { "‹ Prev" }
                 }
                 @if total_pages > 1 {
                     span class="cur" { "Page " (page + 1) " of " (total_pages) }
                 }
                 @if page < total_pages - 1 {
-                    a href=(players_page_href(active_only, page + 1)) { "Next ›" }
+                    a href=(players_href(active_only, search, Some(page + 1))) { "Next ›" }
                 }
                 @if !players.is_empty() {
                     span class="spacer" {}
@@ -370,14 +394,16 @@ pub async fn list_players(
     page_factory: PageFactory,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
     let active_only = params.active;
+    let search = params.q.trim();
 
-    let total = user::count_players(&state.db, active_only)
+    let total = user::count_players(&state.db, active_only, search)
         .await
         .wrap_err("Failed to count players")?;
     let (page, total_pages) = resolve_page(params.page, total, PLAYERS_PER_PAGE);
-    let players = user::get_players_paginated(&state.db, active_only, page, PLAYERS_PER_PAGE)
-        .await
-        .wrap_err("Failed to fetch players")?;
+    let players =
+        user::get_players_paginated(&state.db, active_only, search, page, PLAYERS_PER_PAGE)
+            .await
+            .wrap_err("Failed to fetch players")?;
 
     Ok(page_factory
         .create_page(
@@ -385,6 +411,7 @@ pub async fn list_players(
             Box::new(render_player_directory(
                 &players,
                 active_only,
+                search,
                 page,
                 total_pages,
                 total,
@@ -475,7 +502,7 @@ mod tests {
             directory_entry(second, "TWIN", "Second Twin"),
         ];
 
-        let html = render_player_directory(&players, false, 0, 1, 2).into_string();
+        let html = render_player_directory(&players, false, "", 0, 1, 2).into_string();
 
         assert!(html.contains(&format!(r#"href="/users/twin/{first}""#)));
         assert!(html.contains(&format!(r#"href="/users/TWIN/{second}""#)));
@@ -489,7 +516,7 @@ mod tests {
         // the row just renders whatever it was handed.
         let players = vec![directory_entry(Uuid::from_u128(3), "nameless", "nameless")];
 
-        let html = render_player_directory(&players, false, 0, 1, 1).into_string();
+        let html = render_player_directory(&players, false, "", 0, 1, 1).into_string();
 
         assert!(html.contains(r#"class="name""#));
         assert!(html.contains(">nameless</a>"));
@@ -497,13 +524,13 @@ mod tests {
 
     #[test]
     fn empty_states_are_mode_specific_and_omit_a_row_range() {
-        let all = render_player_directory(&[], false, 0, 1, 0).into_string();
+        let all = render_player_directory(&[], false, "", 0, 1, 0).into_string();
         assert!(all.contains("No players have joined yet."));
         assert!(!all.contains("Showing"));
         assert!(!all.contains("<table"));
         assert!(!all.contains(r#"class="pager""#));
 
-        let active = render_player_directory(&[], true, 0, 1, 0).into_string();
+        let active = render_player_directory(&[], true, "", 0, 1, 0).into_string();
         assert!(active.contains("No players currently have an active snake."));
         assert!(!active.contains("Showing"));
 
@@ -516,7 +543,7 @@ mod tests {
     fn a_page_emptied_by_a_racing_count_keeps_its_pager() {
         // The count said 101 players, but by the time the page was fetched
         // they'd dropped out of the filter. That is not "nobody has joined".
-        let html = render_player_directory(&[], true, 1, 3, 101).into_string();
+        let html = render_player_directory(&[], true, "", 1, 3, 101).into_string();
 
         assert!(html.contains("No players remain on this page."));
         assert!(!html.contains("No players currently have an active snake."));
@@ -526,12 +553,12 @@ mod tests {
 
     #[test]
     fn filter_toggle_switches_modes_and_drops_the_page() {
-        let all = render_player_directory(&[], false, 0, 1, 0).into_string();
+        let all = render_player_directory(&[], false, "", 0, 1, 0).into_string();
         assert!(all.contains(r#"<span class="mode on" aria-current="page">All players</span>"#));
         assert!(all.contains(r#"href="/players?active=true"#));
         assert!(!all.contains("active=true&amp;page="));
 
-        let active = render_player_directory(&[], true, 0, 1, 0).into_string();
+        let active = render_player_directory(&[], true, "", 0, 1, 0).into_string();
         assert!(
             active
                 .contains(r#"<span class="mode on" aria-current="page">With active snakes</span>"#)
@@ -545,14 +572,14 @@ mod tests {
 
         // Page 1 of 3, active mode: both Prev and Next carry `active=true`.
         // Maud escapes the query separator, so expect `&amp;`.
-        let html = render_player_directory(&players, true, 1, 3, 101).into_string();
+        let html = render_player_directory(&players, true, "", 1, 3, 101).into_string();
         assert!(html.contains(r#"href="/players?active=true&amp;page=0""#));
         assert!(html.contains(r#"href="/players?active=true&amp;page=2""#));
         assert!(html.contains("Page 2 of 3"));
         assert!(html.contains("Showing 51–51 of 101 players"));
 
         // The same page in "all" mode has no filter to carry.
-        let html = render_player_directory(&players, false, 1, 3, 101).into_string();
+        let html = render_player_directory(&players, false, "", 1, 3, 101).into_string();
         assert!(html.contains(r#"href="/players?page=0""#));
         assert!(html.contains(r#"href="/players?page=2""#));
     }

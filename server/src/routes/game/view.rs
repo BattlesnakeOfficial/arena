@@ -12,7 +12,7 @@ use uuid::Uuid;
 use crate::{
     components::page_factory::PageFactory,
     customizations::chip_color,
-    errors::{ServerResult, WithStatus},
+    errors::ServerResult,
     models::game::{GameStatus, GameType},
     models::game_battlesnake,
     models::saved_game,
@@ -109,11 +109,15 @@ pub async fn view_game(
     Query(params): Query<ViewGameParams>,
     page_factory: PageFactory,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
-    // Get the game with its battlesnakes
-    let (game, battlesnakes) = game_battlesnake::get_game_with_battlesnakes(&state.db, game_id)
+    let Some(game) = crate::models::game::get_game_by_id(&state.db, game_id)
         .await
-        .wrap_err("Failed to get game details")
-        .with_status(StatusCode::NOT_FOUND)?;
+        .wrap_err("Failed to get game")?
+    else {
+        return Ok(crate::routes::render_not_found(page_factory));
+    };
+    let battlesnakes = game_battlesnake::get_battlesnakes_by_game_id(&state.db, game_id)
+        .await
+        .wrap_err("Failed to get game battlesnakes")?;
 
     let finished = game.status == GameStatus::Finished;
 
@@ -385,7 +389,7 @@ pub async fn view_game(
             }
         }),
     )
-    .with_description(description))
+    .with_description(description).into_response())
 }
 
 /// Query-string suffix (each param prefixed with `&`) for the optional board

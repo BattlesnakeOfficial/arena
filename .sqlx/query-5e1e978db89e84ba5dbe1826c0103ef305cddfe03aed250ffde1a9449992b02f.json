@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT COUNT(*) AS \"count!\"\n            FROM users u\n            WHERE strpos(lower(u.github_login), lower($1)) > 0\n               OR strpos(lower(COALESCE(u.display_name, '')), lower($1)) > 0\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "5e1e978db89e84ba5dbe1826c0103ef305cddfe03aed250ffde1a9449992b02f"
+}

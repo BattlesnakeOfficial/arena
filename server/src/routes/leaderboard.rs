@@ -108,15 +108,12 @@ pub async fn show_leaderboard(
     Query(pagination): Query<PaginationParams>,
     page_factory: PageFactory,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
-    let lb = leaderboard::get_leaderboard_by_id(&state.db, leaderboard_id)
+    let Some(lb) = leaderboard::get_leaderboard_by_id(&state.db, leaderboard_id)
         .await
         .wrap_err("Failed to fetch leaderboard")?
-        .ok_or_else(|| {
-            crate::errors::ServerError(
-                color_eyre::eyre::eyre!("Leaderboard not found"),
-                StatusCode::NOT_FOUND,
-            )
-        })?;
+    else {
+        return Ok(crate::routes::render_not_found(page_factory));
+    };
 
     let all_leaderboards = leaderboard::get_all_leaderboards(&state.db)
         .await
@@ -570,7 +567,7 @@ pub async fn show_leaderboard(
             }
         }),
     )
-    .with_description(description))
+    .with_description(description).into_response())
 }
 
 /// GET /leaderboards/:id/entries/:entry_id — snake detail on leaderboard
@@ -582,42 +579,30 @@ pub async fn show_leaderboard_entry(
     Query(pagination): Query<PaginationParams>,
     page_factory: PageFactory,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
-    let lb = leaderboard::get_leaderboard_by_id(&state.db, leaderboard_id)
+    let Some(lb) = leaderboard::get_leaderboard_by_id(&state.db, leaderboard_id)
         .await
         .wrap_err("Failed to fetch leaderboard")?
-        .ok_or_else(|| {
-            crate::errors::ServerError(
-                color_eyre::eyre::eyre!("Leaderboard not found"),
-                StatusCode::NOT_FOUND,
-            )
-        })?;
+    else {
+        return Ok(crate::routes::render_not_found(page_factory));
+    };
 
-    let entry = leaderboard::get_entry_by_id(&state.db, entry_id)
+    let Some(entry) = leaderboard::get_entry_by_id(&state.db, entry_id)
         .await
         .wrap_err("Failed to fetch leaderboard entry")?
-        .ok_or_else(|| {
-            crate::errors::ServerError(
-                color_eyre::eyre::eyre!("Leaderboard entry not found"),
-                StatusCode::NOT_FOUND,
-            )
-        })?;
+    else {
+        return Ok(crate::routes::render_not_found(page_factory));
+    };
 
     if entry.leaderboard_id != leaderboard_id {
-        return Err(crate::errors::ServerError(
-            color_eyre::eyre::eyre!("Entry does not belong to this leaderboard"),
-            StatusCode::NOT_FOUND,
-        ));
+        return Ok(crate::routes::render_not_found(page_factory));
     }
 
-    let snake = battlesnake::get_battlesnake_by_id(&state.db, entry.battlesnake_id)
+    let Some(snake) = battlesnake::get_battlesnake_by_id(&state.db, entry.battlesnake_id)
         .await
         .wrap_err("Failed to fetch battlesnake")?
-        .ok_or_else(|| {
-            crate::errors::ServerError(
-                color_eyre::eyre::eyre!("Snake no longer exists"),
-                StatusCode::NOT_FOUND,
-            )
-        })?;
+    else {
+        return Ok(crate::routes::render_not_found(page_factory));
+    };
 
     let owner = user::get_user_by_id(&state.db, snake.user_id)
         .await
@@ -965,7 +950,7 @@ pub async fn show_leaderboard_entry(
             }
         }),
     )
-    .with_description(description))
+    .with_description(description).into_response())
 }
 
 #[derive(serde::Deserialize)]

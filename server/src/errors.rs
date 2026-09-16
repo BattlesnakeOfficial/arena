@@ -16,9 +16,13 @@ impl<R: IntoResponse> Display for ServerError<R> {
 
 impl<R: IntoResponse + Debug> IntoResponse for ServerError<R> {
     fn into_response(self) -> axum::response::Response {
-        tracing::error!(error = ?self, "Request Error");
-
-        self.1.into_response()
+        let response = self.1.into_response();
+        if response.status() == StatusCode::NOT_FOUND {
+            tracing::debug!(error = ?self.0, "Resource not found");
+        } else {
+            tracing::error!(error = ?self.0, status = %response.status(), "Request Error");
+        }
+        response
     }
 }
 
