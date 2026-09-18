@@ -1933,21 +1933,52 @@ mod moderation_tests {
         Ok(t.tournament_id)
     }
 
+    /// Answers with the standard allow body after `delay`, recording the
+    /// request's arrival time first — wiremock calls `respond` when the
+    /// request arrives and applies the delay afterwards (outside its lock,
+    /// so delayed responses stay concurrent).
+    struct ArrivingAllow {
+        delay: Duration,
+        arrivals: Arc<std::sync::Mutex<Vec<std::time::Instant>>>,
+    }
+
+    impl wiremock::Respond for ArrivingAllow {
+        fn respond(&self, _request: &wiremock::Request) -> wiremock::ResponseTemplate {
+            self.arrivals
+                .lock()
+                .expect("arrivals mutex poisoned")
+                .push(std::time::Instant::now());
+            ResponseTemplate::new(200)
+                .set_body_json(allow_response())
+                .set_delay(self.delay)
+        }
+    }
+
     #[sqlx::test(migrations = "../migrations")]
     async fn tournament_fields_moderated_concurrently(pool: PgPool) -> cja::Result<()> {
         let (user, session) = user_with_session(&pool, 9412).await?;
         let tournament_id = seed_tournament(&pool, user.user_id).await?;
 
         let jev = MockServer::start().await;
-        // Two expectations: one per field kind, each delayed 500ms. If the
-        // handler ran them sequentially the wall time would be >= 1s.
+        // Two expectations, one per field kind, each answering after a 1s
+        // delay. Concurrency is proven from the mock's request-ARRIVAL times,
+        // not handler wall-clock: a sequential handler cannot send the second
+        // request until the first response arrives (>= first arrival + delay),
+        // so an arrival gap below the delay means both Jev calls were in
+        // flight together. Arrival-gap measurement is immune to the rest of
+        // the handler's DB work stretching under a loaded test runner, which
+        // made a fixed wall-clock ceiling flaky (observed 940ms/2340ms total
+        // elapsed for ~500ms of enforced sleeps on contended runners).
+        const DELAY_MS: u64 = 1_000;
+        let arrivals: Arc<std::sync::Mutex<Vec<std::time::Instant>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let responder = || ArrivingAllow {
+            delay: Duration::from_millis(DELAY_MS),
+            arrivals: arrivals.clone(),
+        };
         Mock::given(method("POST"))
             .and(body_string_contains("\"field_kind\":\"tournament_name\""))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(allow_response())
-                    .set_delay(Duration::from_millis(500)),
-            )
+            .respond_with(responder())
             .expect(1)
             .mount(&jev)
             .await;
@@ -1955,16 +1986,11 @@ mod moderation_tests {
             .and(body_string_contains(
                 "\"field_kind\":\"tournament_description\"",
             ))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(allow_response())
-                    .set_delay(Duration::from_millis(500)),
-            )
+            .respond_with(responder())
             .expect(1)
             .mount(&jev)
             .await;
 
-        let started = std::time::Instant::now();
         let response = crate::routes::tournament::update_settings(
             axum::extract::State(test_state(&pool, &jev.uri())),
             crate::routes::auth::CurrentUserWithSession {
@@ -1976,14 +2002,27 @@ mod moderation_tests {
         )
         .await
         .unwrap_html();
-        let elapsed = started.elapsed().as_millis();
 
         assert_eq!(response.status(), axum::http::StatusCode::SEE_OTHER);
-        assert!(
-            elapsed < 850,
-            "two 500ms delays must overlap (took {elapsed}ms; sequential would be >=1000ms)"
-        );
         jev.verify().await;
+
+        // Exactly one arrival per moderated field (verify() above pins the
+        // counts), and they overlapped: the gap between the two arrivals is
+        // well under the response delay. Sequential execution is >= DELAY_MS
+        // by construction (wiremock enforces the delay before responding),
+        // concurrent is single-digit milliseconds, so the 900ms cutoff leaves
+        // ~890ms of scheduler slack while still detecting serialization.
+        // (Scoped so the mutex guard drops before the DB query's await.)
+        let gap_ms = {
+            let arrivals = arrivals.lock().expect("arrivals mutex poisoned");
+            assert_eq!(arrivals.len(), 2, "one Jev call per moderated field");
+            arrivals[1].duration_since(arrivals[0]).as_millis()
+        };
+        assert!(
+            gap_ms < u128::from(DELAY_MS) - 100,
+            "two Jev calls must be in flight together (arrival gap {gap_ms}ms; \
+             sequential would be >= {DELAY_MS}ms)"
+        );
 
         let row = sqlx::query!(
             "SELECT name, description FROM tournaments WHERE tournament_id = $1",
