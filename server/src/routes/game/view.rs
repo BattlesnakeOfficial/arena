@@ -65,6 +65,129 @@ const BOARD_THEME_SYNC_JS: &str = r#"(function() {
     }
 })();"#;
 
+/// Polls status without touching the board. Once a running game becomes
+/// terminal, only stable server-rendered regions are replaced; the connected
+/// iframe and save-title form remain exactly where they are.
+const GAME_STATUS_JS: &str = r#"(function() {
+  var root = document.getElementById('game-live-state');
+  if (!root) return;
+  var active = root.dataset.status;
+  if (active !== 'waiting' && active !== 'running') return;
+  var key = 'arena-game-poll-' + root.dataset.gameId;
+  var used = 0, failures = 0, timer = null, stopped = false, phase = 'status';
+  var inFlight = false, controller = null, epoch = 0;
+  var regions = ['game-status-region', 'game-outcome-region', 'game-actions-region', 'game-results-region', 'game-metadata-region'];
+  try { used = Number(sessionStorage.getItem(key)) || 0; } catch (_) {}
+  function store() { try { sessionStorage.setItem(key, String(used)); } catch (_) {} }
+  function clearBudget() { try { sessionStorage.removeItem(key); } catch (_) {} }
+  function revealRefresh() { var el = document.getElementById('game-manual-refresh'); if (el) el.hidden = false; }
+  function stop(done) {
+    stopped = true;
+    if (timer) clearTimeout(timer);
+    timer = null;
+    if (controller) controller.abort();
+    epoch += 1;
+    inFlight = false;
+    controller = null;
+    if (done) clearBudget();
+  }
+  function delay(ok) { if (ok) failures = 0; else failures += 1; return ok ? 2000 : Math.min(30000, 2000 * Math.pow(2, failures)); }
+  function schedule(ms) { if (!stopped && !timer) timer = setTimeout(run, ms); }
+  function attempt(url, parse) {
+    if (used >= 600) { stop(false); revealRefresh(); return null; }
+    used += 1; store();
+    var requestEpoch = epoch;
+    var current = new AbortController();
+    var timedOut = false;
+    var deadline = setTimeout(function() {
+      timedOut = true;
+      current.abort();
+    }, 15000);
+    controller = current;
+    inFlight = true;
+    return fetch(url, { credentials: 'same-origin', signal: current.signal })
+      .then(function(response) {
+        if (stopped || requestEpoch !== epoch) throw new DOMException('stale request', 'AbortError');
+        if (!response.ok) throw new Error('request failed');
+        return parse(response);
+      })
+      .then(function(value) {
+        if (stopped || requestEpoch !== epoch) throw new DOMException('stale request', 'AbortError');
+        return value;
+      })
+      .catch(function(error) {
+        if (timedOut && !stopped && requestEpoch === epoch) throw new Error('request timed out');
+        throw error;
+      })
+      .finally(function() {
+        clearTimeout(deadline);
+        if (controller === current && requestEpoch === epoch) {
+          inFlight = false;
+          controller = null;
+        }
+      });
+  }
+  function retry() { schedule(delay(false)); }
+  function refreshTerminal() {
+    phase = 'terminal';
+    var request = attempt(window.location.href, function(response) { return response.text(); });
+    if (!request) return;
+    request.then(function(text) {
+      var source = new DOMParser().parseFromString(text, 'text/html');
+      var pairs = regions.map(function(id) {
+        var from = source.querySelectorAll('#' + id);
+        var to = document.querySelectorAll('#' + id);
+        if (from.length !== 1 || to.length !== 1) throw new Error('invalid refresh regions');
+        return [to[0], from[0]];
+      });
+      pairs.forEach(function(pair) { pair[0].innerHTML = pair[1].innerHTML; });
+      stop(true);
+    }).catch(function(error) {
+      if (stopped || error.name === 'AbortError') return;
+      retry();
+    });
+  }
+  function run() {
+    timer = null;
+    if (stopped || inFlight) return;
+    if (document.hidden) { schedule(1000); return; }
+    if (phase === 'terminal') { refreshTerminal(); return; }
+    var request = attempt('/api/games/' + root.dataset.gameId, function(response) { return response.json(); });
+    if (!request) return;
+    request.then(function(body) {
+      var status = body && body.Game && body.Game.ArenaStatus;
+      if (['waiting', 'running', 'finished', 'failed'].indexOf(status) === -1) throw new Error('invalid status');
+      failures = 0;
+      if (active === 'waiting' && status !== 'waiting') { window.location.reload(); return; }
+      if (active === 'running' && (status === 'finished' || status === 'failed')) {
+        phase = 'terminal';
+        schedule(0);
+        return;
+      }
+      schedule(delay(true));
+    }).catch(function(error) {
+      if (stopped || error.name === 'AbortError') return;
+      retry();
+    });
+  }
+  var manual = document.getElementById('game-manual-refresh');
+  if (manual) manual.hidden = true;
+  document.addEventListener('visibilitychange', function() {
+    if (!document.hidden && !timer && !inFlight && !stopped) schedule(0);
+  });
+  window.addEventListener('pagehide', function() { stop(false); });
+  window.addEventListener('pageshow', function(event) {
+    if (!event.persisted) return;
+    stopped = false;
+    timer = null;
+    phase = 'status';
+    var fallback = document.getElementById('game-manual-refresh');
+    if (fallback) fallback.hidden = true;
+    schedule(0);
+  });
+  schedule(2000);
+})();"#;
+
 /// Optional viewer params forwarded to the board.battlesnake.com iframe so
 /// shared links can jump to a turn, autoplay, etc. Only params that were
 /// actually provided are passed through.
@@ -120,6 +243,24 @@ pub async fn view_game(
         .wrap_err("Failed to get game battlesnakes")?;
 
     let finished = game.status == GameStatus::Finished;
+    let rematch =
+        if user.is_some() && matches!(game.status, GameStatus::Finished | GameStatus::Failed) {
+            crate::models::game::get_game_rematch_metadata(&state.db, game_id)
+                .await
+                .wrap_err("Failed to get game rematch metadata")?
+        } else {
+            None
+        };
+    let can_rematch = matches!(game.status, GameStatus::Finished | GameStatus::Failed)
+        && user.as_ref().is_some_and(|current| {
+            rematch.as_ref().is_some_and(|metadata| {
+                metadata.created_by_user_id == Some(current.user_id)
+                    && metadata
+                        .rematch_battlesnake_ids
+                        .as_ref()
+                        .is_some_and(|ids| !ids.is_empty())
+            })
+        });
 
     // Survival stats for finished Solo games, read from the final persisted
     // frame. Waiting/running games may lack a final frame and other modes
@@ -184,50 +325,31 @@ pub async fn view_game(
         game_page_title(battlesnakes.iter().map(|b| b.name.as_str())),
         Box::new(html! {
             h1 class="vh" { "Game Details" }
+            div id="game-live-state" data-game-id=(game_id) data-status=(game.status.as_str()) {}
             div class="crumb" {
                 a href="/leaderboards" { "Leaderboards" }
                 " / " span { "Game " (game_id) }
-                @match game.status {
-                    GameStatus::Waiting => span class="live-pill quiet" { "Waiting" },
-                    GameStatus::Running => span class="live-pill" { span class="live-dot" {} "Live" },
-                    GameStatus::Finished => span class="live-pill quiet" { "Replay" },
-                    GameStatus::Failed => span class="live-pill quiet" { "Incomplete" },
+                span id="game-status-region" {
+                    @match game.status {
+                        GameStatus::Waiting => span class="live-pill quiet" { "Waiting" },
+                        GameStatus::Running => span class="live-pill" { span class="live-dot" {} "Live" },
+                        GameStatus::Finished => span class="live-pill quiet" { "Replay" },
+                        GameStatus::Failed => span class="live-pill quiet" { "Incomplete" },
+                    }
                 }
             }
-
-            @if game.status == GameStatus::Waiting {
-                p class="empty" {
-                    "This game is queued and will start shortly — the page refreshes "
-                    "automatically. "
-                    a href="" onclick="location.reload(); return false;" class="refresh-link" { "Refresh" }
-                    " to check manually."
+            div id="game-outcome-region" {
+                @if game.status == GameStatus::Waiting {
+                    p class="empty" { "This game is queued and will start shortly." }
                 }
-                // Poll until the runner picks the game up, then reload to show
-                // the live board (no-JS fallback: the manual refresh link above).
-                script {
-                    "(function() {"
-                        "var timer = setInterval(function() {"
-                            "fetch('/api/games/" (game_id) "')"
-                                ".then(function(r) { return r.json(); })"
-                                ".then(function(body) {"
-                                    // Nested ifs: maud escapes '&&' inside script text
-                                    "if (body.Game) { if (body.Game.Status !== 'pending') {"
-                                        "clearInterval(timer);"
-                                        "location.reload();"
-                                    "} }"
-                                "})"
-                                ".catch(function() {});"
-                        "}, 2000);"
-                    "})();"
+                @if game.status == GameStatus::Failed {
+                    p class="empty" {
+                        "This game never finished — its runner died partway through. "
+                        "It has no results and didn't affect any ratings."
+                    }
                 }
             }
-
-            @if game.status == GameStatus::Failed {
-                p class="empty" {
-                    "This game never finished — its runner died partway "
-                    "through. It has no results and didn't affect any ratings."
-                }
-            }
+            a id="game-manual-refresh" href="" onclick="location.reload(); return false;" class="refresh-link" { "Refresh" }
 
             div class="theater" {
                 div {
@@ -265,11 +387,11 @@ pub async fn view_game(
                         "});"
                     }
 
-                    div class="theater-actions" {
+                    div id="game-actions-region" class="theater-actions" {
                         @if user.is_some() {
-                            @if finished {
+                            @if can_rematch {
                                 form action={"/games/"(game_id)"/rematch"} method="post" style="display: inline;" {
-                                    button type="submit" class="btn" { "Rematch" }
+                                    button type="submit" class="btn solid rematch-action" { "Rematch" }
                                 }
                             }
                             a href="/games/new" class="btn" { "Create Another Game" }
@@ -289,6 +411,7 @@ pub async fn view_game(
                 }
 
                 aside {
+                    div id="game-results-region" {
                     h2 class="theater-rail-head" {
                         "Game Results"
                         span class="sub-count" {
@@ -298,7 +421,7 @@ pub async fn view_game(
                     }
                     div class="snakes" {
                         @for battlesnake in &battlesnakes {
-                            div .scard .p1[battlesnake.placement == Some(1)] {
+                            div .scard .p1[finished && battlesnake.placement == Some(1)] {
                                 div class="top" {
                                     span class="chip" style={"background:"(chip_color(&battlesnake.color))} {}
                                     div {
@@ -313,7 +436,9 @@ pub async fn view_game(
                                         }
                                     }
                                     div class="place" {
-                                        @if let Some(placement) = battlesnake.placement {
+                                        @if game.status == GameStatus::Failed {
+                                            "No result"
+                                        } @else if let Some(placement) = battlesnake.placement {
                                             (ordinal_place(placement))
                                         } @else if finished {
                                             "—"
@@ -325,8 +450,9 @@ pub async fn view_game(
                             }
                         }
                     }
+                    }
 
-                    div class="gmeta" {
+                    div id="game-metadata-region" class="gmeta" {
                         h3 { "Details" }
                         dl class="meta-list" {
                             div { dt { "Board" } dd { (game.board_size.as_str()) } }
@@ -387,6 +513,7 @@ pub async fn view_game(
                     }
                 }
             }
+            script { (PreEscaped(GAME_STATUS_JS)) }
         }),
     )
     .with_description(description).into_response())

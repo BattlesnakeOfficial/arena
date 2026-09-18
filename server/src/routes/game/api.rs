@@ -92,6 +92,8 @@ pub struct BoardViewerGame {
     pub id: String,
     /// Legacy-engine status string ("pending" | "running" | "complete").
     pub status: String,
+    /// Lossless Arena status, additive to the legacy engine contract.
+    pub arena_status: String,
     pub width: u32,
     pub height: u32,
 }
@@ -130,6 +132,7 @@ pub async fn get_game_info(
         game: BoardViewerGame {
             id: game.game_id.to_string(),
             status: engine_status(game.status).to_string(),
+            arena_status: game.status.as_str().to_string(),
             width,
             height,
         },
@@ -466,6 +469,7 @@ mod tests {
             game: BoardViewerGame {
                 id: "abc-123".to_string(),
                 status: "complete".to_string(),
+                arena_status: "finished".to_string(),
                 width: 11,
                 height: 11,
             },
@@ -474,7 +478,7 @@ mod tests {
         let json = serde_json::to_string(&response).unwrap();
         assert_eq!(
             json,
-            r#"{"Game":{"ID":"abc-123","Status":"complete","Width":11,"Height":11}}"#
+            r#"{"Game":{"ID":"abc-123","Status":"complete","ArenaStatus":"finished","Width":11,"Height":11}}"#
         );
     }
 
@@ -484,6 +488,36 @@ mod tests {
         assert_eq!(engine_status(GameStatus::Running), "running");
         assert_eq!(engine_status(GameStatus::Finished), "complete");
         assert_eq!(engine_status(GameStatus::Failed), "complete");
+    }
+
+    #[test]
+    fn arena_status_serializes_all_lossless_states() {
+        for (status, expected) in [
+            (GameStatus::Waiting, "waiting"),
+            (GameStatus::Running, "running"),
+            (GameStatus::Finished, "finished"),
+            (GameStatus::Failed, "failed"),
+        ] {
+            let response = BoardViewerGameResponse {
+                game: BoardViewerGame {
+                    id: "id".to_string(),
+                    status: engine_status(status).to_string(),
+                    arena_status: status.as_str().to_string(),
+                    width: 7,
+                    height: 7,
+                },
+            };
+            let value = serde_json::to_value(response).unwrap();
+            assert_eq!(value["Game"]["ArenaStatus"], expected);
+            assert_eq!(
+                value["Game"]["Status"],
+                if matches!(status, GameStatus::Finished | GameStatus::Failed) {
+                    "complete"
+                } else {
+                    engine_status(status)
+                }
+            );
+        }
     }
 
     #[test]

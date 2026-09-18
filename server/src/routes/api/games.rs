@@ -203,47 +203,6 @@ pub async fn create_game(
     game::validate_battlesnake_count(&game_type, request.snakes.len())
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
-    // Get unique snake IDs to validate (duplicates are allowed but we only need to check each once)
-    let unique_snake_ids: Vec<Uuid> = {
-        let mut ids = request.snakes.clone();
-        ids.sort();
-        ids.dedup();
-        ids
-    };
-
-    // Validate that all unique snakes exist and are accessible to the user
-    // (owned by user OR public)
-    let accessible_snakes = sqlx::query!(
-        r#"
-        SELECT battlesnake_id
-        FROM battlesnakes
-        WHERE battlesnake_id = ANY($1)
-          AND (user_id = $2 OR visibility = 'public')
-        "#,
-        &unique_snake_ids as &[Uuid],
-        user.user_id
-    )
-    .fetch_all(&state.db)
-    .await
-    .map_err(|e| {
-        tracing::error!("Failed to validate snakes: {}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Internal server error".to_string(),
-        )
-    })?;
-
-    // Check if all requested snakes were found and accessible
-    let accessible_ids: Vec<Uuid> = accessible_snakes.iter().map(|r| r.battlesnake_id).collect();
-    for snake_id in &unique_snake_ids {
-        if !accessible_ids.contains(snake_id) {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                format!("Snake {} not found or not accessible", snake_id),
-            ));
-        }
-    }
-
     let snake_count = request.snakes.len();
 
     // Create the game
@@ -253,9 +212,15 @@ pub async fn create_game(
         battlesnake_ids: request.snakes,
     };
 
-    let game = game::create_game_with_snakes(&state.db, create_request)
+    let game = game::create_game_with_snakes_for_user(&state.db, create_request, user.user_id)
         .await
         .map_err(|e| {
+            if e.downcast_ref::<game::InaccessibleBattlesnake>().is_some() {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "Snake not found or not accessible".to_string(),
+                );
+            }
             tracing::error!("Failed to create game: {}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
