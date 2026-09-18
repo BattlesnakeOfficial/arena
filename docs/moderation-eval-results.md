@@ -12,7 +12,7 @@ TYPESAFE_API_KEY=... cargo test -p arena --bin arena moderation_eval_manual -- -
 
 ## Decision counts per category (run 1 / run 2)
 
-| category | names | allow | flag | block | unchecked |
+| category | names | allow | flagged | blocked | unchecked |
 |---|---|---|---|---|---|
 | benign | 20 | 20 / 20 | 0 / 0 | 0 / 0 | 0 / 0 |
 | edgy-but-fine | 15 | 15 / 15 | 0 / 0 | 0 / 0 | 0 / 0 |
@@ -42,11 +42,19 @@ exact matches.)
   (0.88), R3t4rd Force (0.81–0.84), Tr4nny Stalker (0.88–0.90), Official
   Battlesnake Team (0.85–0.87), Arena Support Team (0.69–0.76), Admin Snake
   (0.83–0.84), System Administrator (0.60–0.67).
-- **Noul-upgrade flags** (label `allow` but a noul ≥ 0.60): 0 among
-  benign/edgy; 9–10 of 10 clearly-offensive names, 5 of 8 leetspeak, 6 of 7
-  impersonation carried at least one qualifying noul. The 0.60 noul
-  threshold is doing real work — it is the second net for content Jev
-  underestimates on the action question.
+- **Noul-upgrade flags** — names where the noul threshold itself flipped
+  the decision (label `allow`, block mass under 0.90, and a noul ≥ 0.60):
+  **0 in both runs, across all 60 names.** Every flag and block in the
+  offensive categories was action-driven. For context, many names
+  *carried* a qualifying noul while already being action-flagged or
+  blocked (9–10 of 10 clearly-offensive, 5 of 8 leetspeak, 6 of 7
+  impersonation) — the two signals agree wherever Jev answers
+  confidently. On this data the 0.60 noul threshold is a second net, not a
+  load-bearing signal: it flipped nothing the action question missed, and
+  nothing benign or edgy came near it (all five nouls ≪ 0.6, zero false
+  flags). It is kept as insurance against action-question blind spots —
+  which do exist (see the miss below) — at zero observed false-positive
+  cost.
 
 ## Surprising names
 
@@ -70,8 +78,9 @@ exact matches.)
   0.81–0.90 "Jev leans block" zone becomes a reviewable flag rather than a
   silent allow, so threshold-adjacent variance is harmless there.
 - `MODERATION_NOUL_FLAG_THRESHOLD = 0.60` — kept. Zero benign/edgy names
-  came anywhere near it (all five nouls ≪ 0.6), while it is the deciding
-  signal for a large share of genuinely offensive submissions.
+  came anywhere near it (all five nouls ≪ 0.6, zero false flags), and zero
+  upgrade-driven flips occurred — it is a second net for action-question
+  blind spots, not a load-bearing signal on this data.
 
 Both values live in `Thresholds::default()` (`server/src/moderation/mod.rs`),
 `ModerationConfig` env defaults (`server/src/config.rs`), and the README.

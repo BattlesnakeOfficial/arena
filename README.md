@@ -90,10 +90,11 @@ secrets.
 
 `TYPESAFE_API_KEY` enables moderation of user-submitted snake names,
 tournament names/descriptions, and saved-game titles via the TypeSafe
-Jev judgment API. **Unset means no Jev calls and no moderation rows are
-recorded** — but a tiny local hard-block list of unambiguous slurs still
-applies offline (exact-match on the normalized term only), so the feature
-is not 100% inert with no key. Safe to deploy before the secret exists.
+Jev judgment API. **Unset means no Jev calls; only hard-block hits (the
+tiny offline exact-match list of unambiguous slurs) are recorded**, as
+`blocked` rows in `moderation_flags` — so the feature is not 100% inert
+with no key, but the table stays quiet. Safe to deploy before the secret
+exists.
 
 Other knobs (with defaults): `TYPESAFE_MODEL` (`jev-latest`),
 `MODERATION_JEV_URL` (`https://api.typesafe.ai/v1/systemone`),

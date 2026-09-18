@@ -78,23 +78,17 @@ pub enum Decision {
 }
 
 impl Decision {
+    /// The decision string used everywhere: the `moderation_decision`
+    /// telemetry event and the `moderation_flags.decision` column share
+    /// this ONE vocabulary (past tense — what happened to the submission),
+    /// so Eyes events and DB rows join with no mapping between them.
     pub fn as_str(&self) -> &'static str {
         match self {
             Decision::Allow => "allow",
-            Decision::Flag => "flag",
-            Decision::Block => "block",
+            Decision::Flag => "flagged",
+            Decision::Block => "blocked",
             Decision::Unchecked => "unchecked",
         }
-    }
-}
-
-/// The `decision` string stored in the `moderation_flags` table.
-fn db_decision(decision: Decision) -> &'static str {
-    match decision {
-        Decision::Block => "blocked",
-        Decision::Flag => "flagged",
-        Decision::Unchecked => "unchecked",
-        Decision::Allow => "allow",
     }
 }
 
@@ -300,8 +294,13 @@ impl ModerationJudge {
             &state,
             &questions,
         );
+        // The future is lazy: it must be awaited (via the timeout) BEFORE
+        // measuring, or `latency_ms` only covers request construction, not
+        // the Jev round trip — which would gut the latency telemetry and
+        // the `moderation.latency.p95` metric on every success path.
+        let result = tokio::time::timeout(inner.deadline, call).await;
         let latency = started.elapsed().as_secs_f64() * 1000.0;
-        match tokio::time::timeout(inner.deadline, call).await {
+        match result {
             Ok(Ok(response)) => interpret_response(&response, &inner.thresholds, latency),
             Ok(Err(_)) | Err(_) => unchecked(),
         }
@@ -576,7 +575,7 @@ pub async fn moderate_field(
             text,
             subject_id,
             user_id,
-            decision: db_decision(decision),
+            decision: decision.as_str(),
             hate_or_slur: probabilities.map(|x| x.hate_or_slur),
             sexual_or_graphic: probabilities.map(|x| x.sexual_or_graphic),
             harassment_or_threat: probabilities.map(|x| x.harassment_or_threat),
@@ -2200,11 +2199,17 @@ mod eval {
             "/../scripts/moderation-eval-names.txt"
         );
         let content = std::fs::read_to_string(names_path).expect("eval names file");
+        struct EvalEntry {
+            name: String,
+            decision: Decision,
+            block_mass: f64,
+            carried_noul: bool,
+            upgrade_driven: bool,
+        }
+
         let mut category: Option<String> = None;
-        let mut per_category: std::collections::BTreeMap<
-            String,
-            Vec<(String, Decision, f64, bool)>,
-        > = std::collections::BTreeMap::new();
+        let mut per_category: std::collections::BTreeMap<String, Vec<EvalEntry>> =
+            std::collections::BTreeMap::new();
 
         for line in content.lines() {
             let trimmed = line.trim();
@@ -2222,7 +2227,7 @@ mod eval {
             };
             let outcome = judge.check(FieldKind::SnakeName, trimmed, true).await;
             let block_mass = outcome.action_block_mass.unwrap_or(f64::NAN);
-            let noul_upgrade = outcome.probabilities.is_some_and(|p| {
+            let carried_noul = outcome.probabilities.is_some_and(|p| {
                 [
                     p.hate_or_slur,
                     p.sexual_or_graphic,
@@ -2233,30 +2238,43 @@ mod eval {
                 .iter()
                 .any(|v| *v >= thresholds.noul_flag_threshold)
             });
+            // A flag with an `allow`-labeled action (and mass under the
+            // block threshold — else it would be Block) can ONLY come from
+            // the noul upgrade: this is the count where the noul threshold
+            // itself flipped the decision, as opposed to the name merely
+            // carrying a qualifying noul alongside an action-driven flag.
+            let upgrade_driven = outcome.decision == Decision::Flag
+                && outcome.action_choice.as_deref() == Some("allow");
             println!(
-                "{cat:>28} | {trimmed:<30} | {:>6} | mass {block_mass:.3} | noul_upgrade {noul_upgrade}",
-                outcome.decision.as_str()
+                "{cat:>28} | {trimmed:<30} | {:>6} | mass {block_mass:.3} | action {} | carried_noul {carried_noul} | upgrade_driven {upgrade_driven}",
+                outcome.decision.as_str(),
+                outcome.action_choice.as_deref().unwrap_or("-"),
             );
-            per_category.entry(cat.clone()).or_default().push((
-                trimmed.to_string(),
-                outcome.decision,
-                block_mass,
-                noul_upgrade,
-            ));
+            per_category
+                .entry(cat.clone())
+                .or_default()
+                .push(EvalEntry {
+                    name: trimmed.to_string(),
+                    decision: outcome.decision,
+                    block_mass,
+                    carried_noul,
+                    upgrade_driven,
+                });
         }
 
         println!("\n=== Summary ===");
         for (cat, entries) in &per_category {
-            let count = |d: Decision| entries.iter().filter(|e| e.1 == d).count();
+            let count = |d: Decision| entries.iter().filter(|e| e.decision == d).count();
             let masses: Vec<f64> = entries
                 .iter()
-                .filter(|e| e.2.is_finite())
-                .map(|e| e.2)
+                .filter(|e| e.block_mass.is_finite())
+                .map(|e| e.block_mass)
                 .collect();
             let (min, mean, sd) = stats(&masses);
-            let noul_upgrades = entries.iter().filter(|e| e.3).count();
+            let upgrade_driven = entries.iter().filter(|e| e.upgrade_driven).count();
+            let carried_noul = entries.iter().filter(|e| e.carried_noul).count();
             println!(
-                "{cat:>28}: {} names | allow {} flag {} block {} unchecked {} | block-mass min/mean/sd {min:.3}/{mean:.3}/{sd:.3} | noul-upgrade flags {noul_upgrades}",
+                "{cat:>28}: {} names | allow {} flag {} block {} unchecked {} | block-mass min/mean/sd {min:.3}/{mean:.3}/{sd:.3} | upgrade-driven flags (label=allow) {upgrade_driven} | carried qualifying noul {carried_noul}",
                 entries.len(),
                 count(Decision::Allow),
                 count(Decision::Flag),
@@ -2268,11 +2286,12 @@ mod eval {
         // Hard requirement: benign and edgy-but-fine names must never block.
         for cat in ["benign", "edgy-but-fine"] {
             if let Some(entries) = per_category.get(cat) {
-                for (name, decision, _, _) in entries {
+                for entry in entries {
                     assert_ne!(
-                        *decision,
+                        entry.decision,
                         Decision::Block,
-                        "{cat} name {name:?} was blocked — raise MODERATION_BLOCK_THRESHOLD"
+                        "{cat} name {:?} was blocked — raise MODERATION_BLOCK_THRESHOLD",
+                        entry.name
                     );
                 }
             }
