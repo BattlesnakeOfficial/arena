@@ -98,6 +98,11 @@ const GAME_STATUS_JS: &str = r#"(function() {
     used += 1; store();
     var requestEpoch = epoch;
     var current = new AbortController();
+    var timedOut = false;
+    var deadline = setTimeout(function() {
+      timedOut = true;
+      current.abort();
+    }, 15000);
     controller = current;
     inFlight = true;
     return fetch(url, { credentials: 'same-origin', signal: current.signal })
@@ -110,12 +115,17 @@ const GAME_STATUS_JS: &str = r#"(function() {
         if (stopped || requestEpoch !== epoch) throw new DOMException('stale request', 'AbortError');
         return value;
       })
+      .catch(function(error) {
+        if (timedOut && !stopped && requestEpoch === epoch) throw new Error('request timed out');
+        throw error;
+      })
       .finally(function() {
-      if (controller === current && requestEpoch === epoch) {
-        inFlight = false;
-        controller = null;
-      }
-    });
+        clearTimeout(deadline);
+        if (controller === current && requestEpoch === epoch) {
+          inFlight = false;
+          controller = null;
+        }
+      });
   }
   function retry() { schedule(delay(false)); }
   function refreshTerminal() {
@@ -411,7 +421,7 @@ pub async fn view_game(
                     }
                     div class="snakes" {
                         @for battlesnake in &battlesnakes {
-                            div .scard .p1[battlesnake.placement == Some(1)] {
+                            div .scard .p1[finished && battlesnake.placement == Some(1)] {
                                 div class="top" {
                                     span class="chip" style={"background:"(chip_color(&battlesnake.color))} {}
                                     div {

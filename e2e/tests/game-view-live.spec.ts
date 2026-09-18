@@ -131,6 +131,7 @@ test.describe('live game viewer', () => {
 
   test('real Running -> Failed refreshes actual markup and preserves the iframe and edited title', async ({ authenticatedPage, mockUser }) => {
     const game = await gameWithStatus(mockUser.login);
+    await query('UPDATE game_battlesnakes SET placement = 1 WHERE game_id = $1', [game]);
     await authenticatedPage.goto(`/games/${game}`);
     const iframe = authenticatedPage.locator('#board-viewer');
     const src = await iframe.getAttribute('src');
@@ -141,6 +142,7 @@ test.describe('live game viewer', () => {
     await query("UPDATE games SET status = 'failed' WHERE game_id = $1", [game]);
     await expect(authenticatedPage.locator('#game-status-region')).toContainText('Incomplete', { timeout: 10000 });
     await expect(authenticatedPage.locator('#game-results-region')).toContainText('No result');
+    await expect(authenticatedPage.locator('#game-results-region .scard.p1')).toHaveCount(0);
     expect(await iframe.evaluate((node: HTMLIFrameElement) => (node as any).__realIdentity)).toBe(true);
     expect(await iframe.getAttribute('src')).toBe(src);
     await expect(title).toHaveValue('keep this draft');
@@ -204,6 +206,51 @@ test.describe('live game viewer', () => {
       { timeout: 1000 },
     ).toBeGreaterThan(1);
   });
+
+  for (const phase of ['status', 'terminal'] as const) {
+    test(`a stalled ${phase} response body is aborted and retried`, async ({ authenticatedPage, mockUser }) => {
+      const game = await gameWithStatus(mockUser.login);
+      await authenticatedPage.addInitScript(({ gameId, phase, html }) => {
+        const realFetch = window.fetch.bind(window);
+        let bodyAttempts = 0;
+        Object.defineProperty(window, '__bodyAttempts', { get: () => bodyAttempts });
+        window.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+          const raw = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+          const path = new URL(raw, window.location.href).pathname;
+          const statusRequest = path === `/api/games/${gameId}`;
+          const terminalRequest = path === `/games/${gameId}`;
+          if (phase === 'terminal' && statusRequest) {
+            return Promise.resolve(new Response(JSON.stringify({ Game: { ArenaStatus: 'failed' } })));
+          }
+          if ((phase === 'status' && statusRequest) || (phase === 'terminal' && terminalRequest)) {
+            bodyAttempts += 1;
+            if (bodyAttempts === 1) {
+              const response = new Response('');
+              const stalledBody = () => new Promise<never>((_resolve, reject) => {
+                init?.signal?.addEventListener('abort', () => {
+                  reject(init.signal?.reason ?? new DOMException('body aborted', 'AbortError'));
+                }, { once: true });
+              });
+              if (phase === 'status') response.json = stalledBody;
+              else response.text = stalledBody;
+              return Promise.resolve(response);
+            }
+            if (phase === 'terminal') return Promise.resolve(new Response(html));
+          }
+          return realFetch(input, init);
+        }) as typeof window.fetch;
+        const realSetTimeout = window.setTimeout;
+        window.setTimeout = ((fn: TimerHandler, delay?: number, ...args: unknown[]) =>
+          realSetTimeout(fn, Math.min(delay || 0, 20), ...args)) as typeof window.setTimeout;
+      }, { gameId: game, phase, html: terminalHtml('failed') });
+      await authenticatedPage.goto(`/games/${game}`);
+      await expect.poll(() => authenticatedPage.evaluate(() =>
+        (window as typeof window & { __bodyAttempts: number }).__bodyAttempts)).toBeGreaterThan(1);
+      if (phase === 'terminal') {
+        await expect(authenticatedPage.locator('#game-status-region')).toContainText('Incomplete');
+      }
+    });
+  }
 
   test('exhausted shared budget reveals manual Refresh', async ({ authenticatedPage, mockUser }) => {
     const game = await gameWithStatus(mockUser.login);
