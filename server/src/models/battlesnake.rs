@@ -414,19 +414,32 @@ pub struct PublicBattlesnakeListItem {
     pub owner_login: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct PublicBattlesnakeQuery<'a> {
+    pub search: &'a str,
+    pub excluded_owner_id: Option<Uuid>,
+    pub page: i64,
+    pub per_page: i64,
+}
+
 // Count public snakes matching a literal, case-insensitive name or owner
 // substring. An empty search matches every public snake.
-pub async fn count_public_battlesnakes(pool: &PgPool, search: &str) -> cja::Result<i64> {
+pub async fn count_public_battlesnakes(
+    pool: &PgPool,
+    query: &PublicBattlesnakeQuery<'_>,
+) -> cja::Result<i64> {
     let count = sqlx::query_scalar!(
         r#"
         SELECT COUNT(*) AS "count!"
         FROM battlesnakes b
         JOIN users u ON b.user_id = u.user_id
         WHERE b.visibility = 'public'
+          AND ($2::uuid IS NULL OR b.user_id != $2)
           AND (strpos(lower(b.name), lower($1)) > 0
                OR strpos(lower(u.github_login), lower($1)) > 0)
         "#,
-        search
+        query.search,
+        query.excluded_owner_id
     )
     .fetch_one(pool)
     .await
@@ -439,11 +452,9 @@ pub async fn count_public_battlesnakes(pool: &PgPool, search: &str) -> cja::Resu
 // ties so duplicate names can't shuffle rows between pages.
 pub async fn get_public_battlesnakes_paginated(
     pool: &PgPool,
-    search: &str,
-    page: i64,
-    per_page: i64,
+    query: &PublicBattlesnakeQuery<'_>,
 ) -> cja::Result<Vec<PublicBattlesnakeListItem>> {
-    let offset = page * per_page;
+    let offset = query.page * query.per_page;
 
     let battlesnakes = sqlx::query_as!(
         PublicBattlesnakeListItem,
@@ -456,14 +467,16 @@ pub async fn get_public_battlesnakes_paginated(
         FROM battlesnakes b
         JOIN users u ON b.user_id = u.user_id
         WHERE b.visibility = 'public'
+          AND ($4::uuid IS NULL OR b.user_id != $4)
           AND (strpos(lower(b.name), lower($3)) > 0
                OR strpos(lower(u.github_login), lower($3)) > 0)
         ORDER BY b.name ASC, b.battlesnake_id ASC
         LIMIT $1 OFFSET $2
         "#,
-        per_page,
+        query.per_page,
         offset,
-        search
+        query.search,
+        query.excluded_owner_id
     )
     .fetch_all(pool)
     .await
@@ -615,7 +628,13 @@ mod tests {
         create_snake(&pool, owner, "Beta", Visibility::Public).await?;
         create_snake(&pool, owner, "Hidden", Visibility::Private).await?;
 
-        assert_eq!(count_public_battlesnakes(&pool, "").await?, 2);
+        let query = PublicBattlesnakeQuery {
+            search: "",
+            excluded_owner_id: None,
+            page: 0,
+            per_page: 50,
+        };
+        assert_eq!(count_public_battlesnakes(&pool, &query).await?, 2);
 
         Ok(())
     }
@@ -631,7 +650,13 @@ mod tests {
         create_snake(&pool, second_owner, "Boa", Visibility::Public).await?;
         create_snake(&pool, second_owner, "Secret", Visibility::Private).await?;
 
-        let snakes = get_public_battlesnakes_paginated(&pool, "", 0, 50).await?;
+        let query = PublicBattlesnakeQuery {
+            search: "",
+            excluded_owner_id: None,
+            page: 0,
+            per_page: 50,
+        };
+        let snakes = get_public_battlesnakes_paginated(&pool, &query).await?;
 
         let listed: Vec<(&str, &str)> = snakes
             .iter()
@@ -652,9 +677,15 @@ mod tests {
             create_snake(&pool, owner, &format!("Snake {i:02}"), Visibility::Public).await?;
         }
 
-        let first = get_public_battlesnakes_paginated(&pool, "", 0, 2).await?;
-        let second = get_public_battlesnakes_paginated(&pool, "", 1, 2).await?;
-        let third = get_public_battlesnakes_paginated(&pool, "", 2, 2).await?;
+        let page = |page| PublicBattlesnakeQuery {
+            search: "",
+            excluded_owner_id: None,
+            page,
+            per_page: 2,
+        };
+        let first = get_public_battlesnakes_paginated(&pool, &page(0)).await?;
+        let second = get_public_battlesnakes_paginated(&pool, &page(1)).await?;
+        let third = get_public_battlesnakes_paginated(&pool, &page(2)).await?;
 
         let names = |snakes: &[PublicBattlesnakeListItem]| {
             snakes.iter().map(|s| s.name.clone()).collect::<Vec<_>>()
@@ -665,11 +696,43 @@ mod tests {
 
         // Past the final page there is simply nothing left.
         assert!(
-            get_public_battlesnakes_paginated(&pool, "", 3, 2)
+            get_public_battlesnakes_paginated(&pool, &page(3))
                 .await?
                 .is_empty()
         );
 
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn public_query_searches_name_and_owner_and_excludes_owner(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        let excluded = create_user(&pool, 8301, "excluded-owner").await?;
+        let included = create_user(&pool, 8302, "NeedleOwner").await?;
+        create_snake(&pool, excluded, "Needle Snake", Visibility::Public).await?;
+        create_snake(&pool, included, "Ordinary", Visibility::Public).await?;
+        create_snake(&pool, included, "Needle Hidden", Visibility::Private).await?;
+
+        let query = PublicBattlesnakeQuery {
+            search: "needle",
+            excluded_owner_id: Some(excluded),
+            page: 0,
+            per_page: 10,
+        };
+        assert_eq!(count_public_battlesnakes(&pool, &query).await?, 1);
+        let snakes = get_public_battlesnakes_paginated(&pool, &query).await?;
+        assert_eq!(snakes.len(), 1);
+        assert_eq!(snakes[0].name, "Ordinary");
+        assert_eq!(snakes[0].owner_login, "NeedleOwner");
+
+        let literal = PublicBattlesnakeQuery {
+            search: "%_",
+            excluded_owner_id: None,
+            page: 0,
+            per_page: 10,
+        };
+        assert_eq!(count_public_battlesnakes(&pool, &literal).await?, 0);
         Ok(())
     }
 }

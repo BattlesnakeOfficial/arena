@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE game_flows AS flow\n            SET selected_battlesnakes = (\n                SELECT COALESCE(array_agg(item.id ORDER BY item.ord), ARRAY[]::uuid[])\n                FROM unnest(flow.selected_battlesnakes) WITH ORDINALITY AS item(id, ord)\n                WHERE item.ord != (\n                    SELECT MAX(match_item.ord)\n                    FROM unnest(flow.selected_battlesnakes) WITH ORDINALITY AS match_item(id, ord)\n                    WHERE match_item.id = $1\n                )\n            )\n            WHERE flow.flow_id = $2 AND flow.user_id = $3\n              AND $1 = ANY(flow.selected_battlesnakes)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "bf58ad613d3683752a2ce25d6e09f6cdbd9249e983deb452cfd9128495c49334"
+}

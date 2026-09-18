@@ -1,0 +1,67 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE game_flows\n            SET board_size = $1, game_type = $2\n            WHERE flow_id = $3 AND user_id = $4\n            RETURNING flow_id, board_size, game_type, selected_battlesnakes,\n                      search_query, user_id, created_at, updated_at\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "flow_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "board_size",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "game_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "selected_battlesnakes",
+        "type_info": "UuidArray"
+      },
+      {
+        "ordinal": 4,
+        "name": "search_query",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 6,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 7,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "83668720e81880dafc1a32462a2a288d12f6be751475d4a2df280af4ebf9fd59"
+}
