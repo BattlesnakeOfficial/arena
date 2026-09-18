@@ -4,7 +4,18 @@ use sqlx::{Executor, PgPool, Postgres};
 use std::str::FromStr;
 use uuid::Uuid;
 
+use super::battlesnake;
 use super::game_battlesnake::AddBattlesnakeToGame;
+
+#[derive(Debug, thiserror::Error)]
+#[error("one or more battlesnakes are unavailable")]
+pub struct InaccessibleBattlesnake;
+
+#[derive(Debug, Clone)]
+pub struct GameRematchMetadata {
+    pub created_by_user_id: Option<Uuid>,
+    pub rematch_battlesnake_ids: Option<Vec<Uuid>>,
+}
 
 // Game board size enum
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
@@ -237,6 +248,23 @@ pub async fn get_game_by_id(pool: &PgPool, game_id: Uuid) -> cja::Result<Option<
     Ok(game)
 }
 
+pub async fn get_game_rematch_metadata(
+    pool: &PgPool,
+    game_id: Uuid,
+) -> cja::Result<Option<GameRematchMetadata>> {
+    let row = sqlx::query!(
+        "SELECT created_by_user_id, rematch_battlesnake_ids FROM games WHERE game_id = $1",
+        game_id
+    )
+    .fetch_optional(pool)
+    .await
+    .wrap_err("Failed to fetch game rematch metadata")?;
+    Ok(row.map(|row| GameRematchMetadata {
+        created_by_user_id: row.created_by_user_id,
+        rematch_battlesnake_ids: row.rematch_battlesnake_ids,
+    }))
+}
+
 // Delete a game
 pub async fn delete_game(pool: &PgPool, game_id: Uuid) -> cja::Result<()> {
     sqlx::query!(
@@ -270,6 +298,65 @@ pub async fn create_game_with_snakes(
         .wrap_err("Failed to commit database transaction")?;
 
     Ok(game)
+}
+
+/// Create a user-owned custom game. Eligibility is enforced while shared row
+/// locks are held through commit; route-level checks are only UX hints.
+pub async fn create_game_with_snakes_for_user(
+    pool: &PgPool,
+    data: CreateGameWithSnakes,
+    user_id: Uuid,
+) -> cja::Result<Game> {
+    let mut tx = pool
+        .begin()
+        .await
+        .wrap_err("Failed to start database transaction")?;
+    validate_battlesnake_count(&data.game_type, data.battlesnake_ids.len())?;
+
+    let original_ids = data.battlesnake_ids.clone();
+    let mut lock_ids = original_ids.clone();
+    lock_ids.sort();
+    lock_ids.dedup();
+    let eligible = battlesnake::lock_eligible_battlesnake_ids(&mut tx, user_id, &lock_ids).await?;
+    if lock_ids.iter().any(|id| !eligible.contains(id)) {
+        return Err(InaccessibleBattlesnake.into());
+    }
+
+    let row = sqlx::query!(
+        r#"INSERT INTO games
+           (board_size, game_type, status, created_by_user_id, rematch_battlesnake_ids)
+           VALUES ($1, $2, $3, $4, $5)
+           RETURNING game_id, status, enqueued_at, created_at, updated_at"#,
+        data.board_size.as_str(),
+        data.game_type.as_str(),
+        GameStatus::Waiting.as_str(),
+        user_id,
+        &original_ids
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .wrap_err("Failed to create owned game")?;
+
+    for battlesnake_id in original_ids {
+        add_battlesnake_to_game(
+            &mut *tx,
+            row.game_id,
+            AddBattlesnakeToGame { battlesnake_id },
+        )
+        .await?;
+    }
+    tx.commit()
+        .await
+        .wrap_err("Failed to commit database transaction")?;
+    Ok(Game {
+        game_id: row.game_id,
+        board_size: data.board_size,
+        game_type: data.game_type,
+        status: GameStatus::from_str(&row.status)?,
+        enqueued_at: row.enqueued_at,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+    })
 }
 
 /// Create a game with battlesnakes using a mutable connection reference.
@@ -733,5 +820,165 @@ mod tests {
             (13, 13)
         );
         assert_eq!(GameBoardSize::Custom("13x13".to_string()).as_str(), "13x13");
+    }
+
+    async fn rematch_user(pool: &PgPool, id: i64) -> cja::Result<Uuid> {
+        Ok(sqlx::query_scalar(
+            "INSERT INTO users (external_github_id, github_login, github_access_token)
+             VALUES ($1, $2, 'test-token') RETURNING user_id",
+        )
+        .bind(id)
+        .bind(format!("rematch-user-{id}"))
+        .fetch_one(pool)
+        .await?)
+    }
+
+    async fn rematch_snake(
+        pool: &PgPool,
+        user_id: Uuid,
+        name: &str,
+        visibility: &str,
+    ) -> cja::Result<Uuid> {
+        Ok(sqlx::query_scalar(
+            "INSERT INTO battlesnakes (user_id, name, url, visibility)
+             VALUES ($1, $2, 'https://example.com', $3) RETURNING battlesnake_id",
+        )
+        .bind(user_id)
+        .bind(name)
+        .bind(visibility)
+        .fetch_one(pool)
+        .await?)
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn owned_creation_preserves_creator_and_duplicate_order(pool: PgPool) -> cja::Result<()> {
+        let creator = rematch_user(&pool, 81281).await?;
+        let a = rematch_snake(&pool, creator, "A", "private").await?;
+        let b = rematch_snake(&pool, creator, "B", "public").await?;
+        let lineup = vec![a, a, b];
+        let game = create_game_with_snakes_for_user(
+            &pool,
+            CreateGameWithSnakes {
+                board_size: GameBoardSize::Large,
+                game_type: GameType::Royale,
+                battlesnake_ids: lineup.clone(),
+            },
+            creator,
+        )
+        .await?;
+        let metadata = get_game_rematch_metadata(&pool, game.game_id)
+            .await?
+            .unwrap();
+        assert_eq!(metadata.created_by_user_id, Some(creator));
+        assert_eq!(metadata.rematch_battlesnake_ids, Some(lineup));
+        let inserted: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT battlesnake_id FROM game_battlesnakes WHERE game_id = $1 ORDER BY created_at, game_battlesnake_id",
+        )
+        .bind(game.game_id)
+        .fetch_all(&pool)
+        .await?;
+        assert_eq!(inserted.len(), 3);
+        assert_eq!(inserted.iter().filter(|&&id| id == a).count(), 2);
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn owned_creation_rejects_inaccessible_without_partial_game(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        let creator = rematch_user(&pool, 81282).await?;
+        let other = rematch_user(&pool, 81283).await?;
+        let private = rematch_snake(&pool, other, "Private", "private").await?;
+        let before: i64 = sqlx::query_scalar("SELECT count(*) FROM games")
+            .fetch_one(&pool)
+            .await?;
+        let error = create_game_with_snakes_for_user(
+            &pool,
+            CreateGameWithSnakes {
+                board_size: GameBoardSize::Medium,
+                game_type: GameType::Standard,
+                battlesnake_ids: vec![private],
+            },
+            creator,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.downcast_ref::<InaccessibleBattlesnake>().is_some());
+        let after: i64 = sqlx::query_scalar("SELECT count(*) FROM games")
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(before, after);
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn privacy_change_race_waits_then_rejects_without_partial_rows(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        let creator = rematch_user(&pool, 81285).await?;
+        let other = rematch_user(&pool, 81286).await?;
+        let public = rematch_snake(&pool, other, "Racing public", "public").await?;
+
+        let mut privacy_tx = pool.begin().await?;
+        sqlx::query("UPDATE battlesnakes SET visibility = 'private' WHERE battlesnake_id = $1")
+            .bind(public)
+            .execute(&mut *privacy_tx)
+            .await?;
+
+        let create_pool = pool.clone();
+        let create = tokio::spawn(async move {
+            create_game_with_snakes_for_user(
+                &create_pool,
+                CreateGameWithSnakes {
+                    board_size: GameBoardSize::Medium,
+                    game_type: GameType::Standard,
+                    battlesnake_ids: vec![public],
+                },
+                creator,
+            )
+            .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            !create.is_finished(),
+            "eligibility lock must wait for privacy update"
+        );
+        privacy_tx.commit().await?;
+        let error = create.await.expect("creation task panicked").unwrap_err();
+        assert!(error.downcast_ref::<InaccessibleBattlesnake>().is_some());
+        let games: i64 = sqlx::query_scalar("SELECT count(*) FROM games")
+            .fetch_one(&pool)
+            .await?;
+        let participants: i64 = sqlx::query_scalar("SELECT count(*) FROM game_battlesnakes")
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!((games, participants), (0, 0));
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn system_creation_has_no_rematch_provenance(pool: PgPool) -> cja::Result<()> {
+        let owner = rematch_user(&pool, 81284).await?;
+        let snake = rematch_snake(&pool, owner, "System", "public").await?;
+        let game = create_game_with_snakes(
+            &pool,
+            CreateGameWithSnakes {
+                board_size: GameBoardSize::Small,
+                game_type: GameType::Standard,
+                battlesnake_ids: vec![snake],
+            },
+        )
+        .await?;
+        let metadata = get_game_rematch_metadata(&pool, game.game_id)
+            .await?
+            .unwrap();
+        assert_eq!(metadata.created_by_user_id, None);
+        assert_eq!(metadata.rematch_battlesnake_ids, None);
+        assert!(
+            get_game_rematch_metadata(&pool, Uuid::new_v4())
+                .await?
+                .is_none()
+        );
+        Ok(())
     }
 }

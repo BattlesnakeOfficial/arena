@@ -1,6 +1,7 @@
 use color_eyre::eyre::Context as _;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
+use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::models::battlesnake::{self, Battlesnake};
@@ -19,6 +20,12 @@ pub struct GameCreationFlow {
     pub user_id: Uuid,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnavailableSelection {
+    pub battlesnake_id: Uuid,
+    pub occurrence_count: usize,
 }
 
 impl GameCreationFlow {
@@ -249,9 +256,10 @@ impl GameCreationFlow {
     pub async fn create_game_and_enqueue(&self, app_state: AppState) -> cja::Result<Uuid> {
         let create_request = self.to_create_game_request()?;
 
-        let game = game::create_game_with_snakes(&app_state.db, create_request)
-            .await
-            .wrap_err("Failed to create game")?;
+        let game =
+            game::create_game_with_snakes_for_user(&app_state.db, create_request, self.user_id)
+                .await
+                .wrap_err("Failed to create game")?;
 
         // Set enqueued_at timestamp before enqueueing the job
         game::set_game_enqueued_at(&app_state.db, game.game_id, chrono::Utc::now())
@@ -350,15 +358,44 @@ impl GameCreationFlow {
                 updated_at
             FROM battlesnakes
             WHERE battlesnake_id = ANY($1)
+              AND (user_id = $2 OR visibility = 'public')
             ORDER BY name ASC
             "#,
-            &ids
+            &ids,
+            self.user_id
         )
         .fetch_all(pool)
         .await
         .wrap_err("Failed to get selected battlesnakes")?;
 
         Ok(battlesnakes)
+    }
+
+    /// Report unavailable selections without changing the persisted occurrence
+    /// vector. A rematch must be corrected explicitly by its creator.
+    pub async fn unavailable_selections(
+        &self,
+        pool: &PgPool,
+    ) -> cja::Result<Vec<UnavailableSelection>> {
+        let mut unique = self.selected_battlesnake_ids.clone();
+        unique.sort();
+        unique.dedup();
+        let eligible = battlesnake::eligible_battlesnake_ids(pool, self.user_id, &unique).await?;
+        let mut counts = HashMap::new();
+        for id in &self.selected_battlesnake_ids {
+            if !eligible.contains(id) {
+                *counts.entry(*id).or_insert(0usize) += 1;
+            }
+        }
+        let mut unavailable: Vec<_> = counts
+            .into_iter()
+            .map(|(battlesnake_id, occurrence_count)| UnavailableSelection {
+                battlesnake_id,
+                occurrence_count,
+            })
+            .collect();
+        unavailable.sort_by_key(|selection| selection.battlesnake_id);
+        Ok(unavailable)
     }
 }
 
@@ -482,6 +519,75 @@ mod tests {
         assert_eq!(flow.battlesnake_count(&snake_a), 2);
         assert_eq!(flow.battlesnake_count(&snake_b), 1);
         assert_eq!(flow.selected_count(), 3);
+    }
+
+    #[test]
+    fn removal_preserves_order_and_removes_last_occurrence() {
+        let mut flow = create_test_flow();
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        flow.selected_battlesnake_ids = vec![a, b, a];
+        assert!(flow.remove_battlesnake(a));
+        assert_eq!(flow.selected_battlesnake_ids, vec![a, b]);
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn availability_groups_duplicates_without_mutating_lineup(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        let owner: Uuid = sqlx::query_scalar(
+            "INSERT INTO users (external_github_id, github_login, github_access_token)
+             VALUES (91281, 'flow-owner', 'token') RETURNING user_id",
+        )
+        .fetch_one(&pool)
+        .await?;
+        let other: Uuid = sqlx::query_scalar(
+            "INSERT INTO users (external_github_id, github_login, github_access_token)
+             VALUES (91282, 'flow-other', 'token') RETURNING user_id",
+        )
+        .fetch_one(&pool)
+        .await?;
+        let own_private: Uuid = sqlx::query_scalar(
+            "INSERT INTO battlesnakes (user_id, name, url, visibility)
+             VALUES ($1, 'Own private', 'https://example.com', 'private') RETURNING battlesnake_id",
+        )
+        .bind(owner)
+        .fetch_one(&pool)
+        .await?;
+        let other_private: Uuid = sqlx::query_scalar(
+            "INSERT INTO battlesnakes (user_id, name, url, visibility)
+             VALUES ($1, 'Other private', 'https://example.com', 'private') RETURNING battlesnake_id",
+        )
+        .bind(other)
+        .fetch_one(&pool)
+        .await?;
+        let missing = Uuid::new_v4();
+        let original = vec![own_private, other_private, missing, other_private];
+        let flow = GameCreationFlow {
+            selected_battlesnake_ids: original.clone(),
+            user_id: owner,
+            ..create_test_flow()
+        };
+        let unavailable = flow.unavailable_selections(&pool).await?;
+        assert_eq!(flow.selected_battlesnake_ids, original);
+        assert_eq!(unavailable.len(), 2);
+        assert_eq!(
+            unavailable
+                .iter()
+                .find(|entry| entry.battlesnake_id == other_private)
+                .unwrap()
+                .occurrence_count,
+            2
+        );
+        assert_eq!(
+            unavailable
+                .iter()
+                .find(|entry| entry.battlesnake_id == missing)
+                .unwrap()
+                .occurrence_count,
+            1
+        );
+        Ok(())
     }
 
     #[test]

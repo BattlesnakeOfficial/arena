@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT battlesnake_id\n        FROM battlesnakes\n        WHERE battlesnake_id = ANY($1)\n          AND (user_id = $2 OR visibility = 'public')\n        ",
+  "query": "SELECT battlesnake_id FROM battlesnakes\n           WHERE battlesnake_id = ANY($1)\n             AND (user_id = $2 OR visibility = 'public')\n           ORDER BY battlesnake_id\n           FOR SHARE",
   "describe": {
     "columns": [
       {
@@ -19,5 +19,5 @@
       false
     ]
   },
-  "hash": "d11e1e71c39e5fa6379e8d295905977fced0c3d84f6b76194f06845e7437383b"
+  "hash": "a722e239d09e7cd1248d50ecc47762a7e339e47e766e910001635eba223fa6c2"
 }

@@ -18,7 +18,6 @@ use crate::{
     models::battlesnake::{self, Visibility},
     models::flow::GameCreationFlow,
     models::game::{self, GameBoardSize, GameType},
-    models::game_battlesnake,
     models::rate_limit,
     models::session,
     routes::UuidPath,
@@ -50,19 +49,39 @@ pub async fn rematch_game(
     CurrentUser(user): CurrentUser,
     Path(game_id): Path<Uuid>,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
-    // Get the source game for its board size and game type
+    // Ownership is explicit. Historical/system games deliberately remain
+    // unowned; participant ownership is never used as a proxy.
     let game = game::get_game_by_id(&state.db, game_id)
         .await
         .wrap_err("Failed to get game")?
         .ok_or_else(|| "Game not found".to_string())
         .with_status(StatusCode::NOT_FOUND)?;
 
-    // Get the source game's participants. The query joins against the
-    // battlesnakes table, so snakes deleted since the game ran are skipped
-    // gracefully; duplicates of the same snake are preserved as separate rows.
-    let battlesnakes = game_battlesnake::get_battlesnakes_by_game_id(&state.db, game_id)
+    let metadata = game::get_game_rematch_metadata(&state.db, game_id)
         .await
-        .wrap_err("Failed to get game battlesnakes")?;
+        .wrap_err("Failed to get rematch metadata")?
+        .ok_or_else(|| "Game not found".to_string())
+        .with_status(StatusCode::NOT_FOUND)?;
+    if metadata.created_by_user_id != Some(user.user_id) {
+        return Err(crate::errors::ServerError(
+            color_eyre::eyre::eyre!("Only the game creator can rematch this game"),
+            StatusCode::FORBIDDEN,
+        ));
+    }
+    if !matches!(
+        game.status,
+        game::GameStatus::Finished | game::GameStatus::Failed
+    ) {
+        return Err(crate::errors::ServerError(
+            color_eyre::eyre::eyre!("Only terminal games can be rematched"),
+            StatusCode::CONFLICT,
+        ));
+    }
+    let lineup = metadata
+        .rematch_battlesnake_ids
+        .filter(|ids| !ids.is_empty())
+        .ok_or_else(|| "This game has no rematch lineup".to_string())
+        .with_status(StatusCode::FORBIDDEN)?;
 
     // Create a new flow for this user and pre-fill it
     let mut flow = GameCreationFlow::create_for_user(&state.db, user.user_id)
@@ -71,10 +90,7 @@ pub async fn rematch_game(
 
     flow.board_size = game.board_size;
     flow.game_type = game.game_type;
-    for battlesnake in &battlesnakes {
-        // add_battlesnake enforces the 4-snake cap, matching the flow's rules
-        flow.add_battlesnake(battlesnake.battlesnake_id);
-    }
+    flow.selected_battlesnake_ids = lineup;
 
     flow.update(&state.db)
         .await
@@ -162,6 +178,10 @@ pub async fn show_game_flow(
         .get_selected_battlesnakes(&state.db)
         .await
         .wrap_err("Failed to get selected battlesnakes")?;
+    let unavailable = flow
+        .unavailable_selections(&state.db)
+        .await
+        .wrap_err("Failed to check selected battlesnakes")?;
 
     let selected_count = flow.selected_count();
 
@@ -230,6 +250,15 @@ pub async fn show_game_flow(
                                     }
                                 }
                             }
+                            @for selection in &unavailable {
+                                div class="gc-slot gc-unavailable" data-unavailable-id=(selection.battlesnake_id) {
+                                    span class="gc-slot-name" { "Unavailable snake" }
+                                    span class="badge" { "×" (selection.occurrence_count) }
+                                    form action={"/games/flow/"(flow_id)"/remove-snake/"(selection.battlesnake_id)} method="post" {
+                                        button type="submit" class="gc-x" aria-label="Remove one unavailable snake from lineup" title="Remove one occurrence" { "✕" }
+                                    }
+                                }
+                            }
                             @for _ in selected_count..4 {
                                 div class="gc-slot empty" { "Open slot" }
                             }
@@ -273,8 +302,12 @@ pub async fn show_game_flow(
                                     option value="Solo" selected[flow.game_type == GameType::Solo] { "Solo" }
                                 }
                             }
-                            @if selected_count > 0 {
+                            @if selected_count > 0 && unavailable.is_empty() {
                                 button type="submit" class="btn solid" { "Create Game" }
+                            } @else if !unavailable.is_empty() {
+                                p class="gc-hint gc-unavailable-copy" {
+                                    "Remove or replace each unavailable snake before creating this game."
+                                }
                             }
                         }
                     }
@@ -422,6 +455,22 @@ pub async fn add_battlesnake(
     else {
         return Ok(Redirect::to(&format!("/games/flow/{flow_id}")).into_response());
     };
+
+    let eligible =
+        battlesnake::eligible_battlesnake_ids(&state.db, user.user_id, &[battlesnake_id])
+            .await
+            .wrap_err("Failed to validate battlesnake")?;
+    if !eligible.contains(&battlesnake_id) {
+        session::set_flash_message(
+            &state.db,
+            session.session_id,
+            "Snake is unavailable".to_string(),
+            session::FLASH_TYPE_WARNING,
+        )
+        .await
+        .wrap_err("Failed to set flash message")?;
+        return Ok(Redirect::to(&format!("/games/flow/{flow_id}")).into_response());
+    }
 
     // Add the battlesnake
     let added = flow.add_battlesnake(battlesnake_id);
@@ -583,10 +632,26 @@ pub async fn create_game(
     match validate_result {
         Ok(_) => {
             // Create the game and enqueue a job to run it
-            let game_id = flow
-                .create_game_and_enqueue(state.clone())
-                .await
-                .wrap_err("Failed to create game")?;
+            let game_id = match flow.create_game_and_enqueue(state.clone()).await {
+                Ok(game_id) => game_id,
+                Err(error)
+                    if error
+                        .downcast_ref::<game::InaccessibleBattlesnake>()
+                        .is_some() =>
+                {
+                    session::set_flash_message(
+                        &state.db,
+                        session.session_id,
+                        "One or more snakes became unavailable. Correct the lineup and try again."
+                            .to_string(),
+                        session::FLASH_TYPE_WARNING,
+                    )
+                    .await
+                    .wrap_err("Failed to set flash message")?;
+                    return Ok(Redirect::to(&format!("/games/flow/{flow_id}")).into_response());
+                }
+                Err(error) => return Err(error.wrap_err("Failed to create game").into()),
+            };
 
             tracing::info!(
                 event_type = "game_created",

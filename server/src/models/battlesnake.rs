@@ -1,6 +1,7 @@
 use color_eyre::eyre::Context as _;
 use serde::{Deserialize, Serialize};
-use sqlx::{PgPool, Type};
+use sqlx::{PgConnection, PgPool, Type};
+use std::collections::HashSet;
 use std::str::FromStr;
 use uuid::Uuid;
 
@@ -51,6 +52,49 @@ pub struct Battlesnake {
     pub tail: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Return the requested snakes that are selectable by this user. Missing,
+/// deleted, and another user's private snakes are intentionally indistinguishable.
+pub async fn eligible_battlesnake_ids(
+    pool: &PgPool,
+    requester: Uuid,
+    requested: &[Uuid],
+) -> cja::Result<HashSet<Uuid>> {
+    let rows = sqlx::query!(
+        r#"SELECT battlesnake_id FROM battlesnakes
+           WHERE battlesnake_id = ANY($1)
+             AND (user_id = $2 OR visibility = 'public')
+           ORDER BY battlesnake_id"#,
+        requested,
+        requester
+    )
+    .fetch_all(pool)
+    .await
+    .wrap_err("Failed to validate battlesnake eligibility")?;
+    Ok(rows.into_iter().map(|row| row.battlesnake_id).collect())
+}
+
+/// Transactional eligibility check. The deterministic shared locks prevent a
+/// visibility change or deletion racing game creation.
+pub async fn lock_eligible_battlesnake_ids(
+    conn: &mut PgConnection,
+    requester: Uuid,
+    requested: &[Uuid],
+) -> cja::Result<HashSet<Uuid>> {
+    let rows = sqlx::query!(
+        r#"SELECT battlesnake_id FROM battlesnakes
+           WHERE battlesnake_id = ANY($1)
+             AND (user_id = $2 OR visibility = 'public')
+           ORDER BY battlesnake_id
+           FOR SHARE"#,
+        requested,
+        requester
+    )
+    .fetch_all(conn)
+    .await
+    .wrap_err("Failed to lock battlesnake eligibility")?;
+    Ok(rows.into_iter().map(|row| row.battlesnake_id).collect())
 }
 
 /// Validate that a snake URL parses and uses http or https. Shared by the

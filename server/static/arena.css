@@ -1148,8 +1148,8 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
 .gc-x {
   display: grid;
   place-items: center;
-  width: 28px;
-  height: 28px;
+  width: 44px;
+  height: 44px;
   border: none;
   border-radius: 8px;
   background: transparent;
@@ -1158,6 +1158,20 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
   cursor: pointer;
 }
 .gc-x:hover { background: var(--pink-wash); color: var(--pink-deep); }
+.gc-slot.gc-unavailable {
+  border-color: var(--pink);
+  background: var(--pink-wash);
+  color: var(--pink-deep);
+  flex-wrap: wrap;
+}
+.gc-unavailable-copy { color: var(--pink-deep); }
+.rematch-action { min-height: 44px; min-width: 110px; }
+
+@media (max-width: 420px) {
+  .gc-slot { padding: 8px; }
+  .gc-slot-name { white-space: normal; overflow-wrap: anywhere; }
+  .gc-slot form { flex-shrink: 0; }
+}
 .gc-hint { font-size: 13.5px; color: var(--muted); margin-top: 12px; }
 .gc-reset { margin-top: 10px; }
 
