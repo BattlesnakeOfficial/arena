@@ -9,6 +9,7 @@ use color_eyre::eyre::Context as _;
 use maud::html;
 use serde::Deserialize;
 use std::str::FromStr;
+use tracing::Instrument as _;
 use uuid::Uuid;
 
 use crate::{
@@ -106,6 +107,7 @@ pub async fn new_game(
 ) -> ServerResult<impl IntoResponse, StatusCode> {
     // Create a new flow for this user
     let flow = GameCreationFlow::create_for_user(&state.db, user.user_id)
+        .instrument(tracing::info_span!("game_builder.new.persist_flow"))
         .await
         .wrap_err("Failed to create game flow")?;
 
@@ -205,6 +207,7 @@ pub async fn challenge_battlesnake(
 
 // Game create form - show the game creation form with the flow state
 #[debug_handler]
+#[tracing::instrument(name = "game_builder.show", skip_all)]
 pub async fn show_game_flow(
     State(state): State<AppState>,
     CurrentUser(user): CurrentUser,
@@ -807,6 +810,7 @@ pub async fn create_game(
         "web",
         window_minutes,
     )
+    .instrument(tracing::info_span!("game_builder.create.rate_limit"))
     .await
     .wrap_err("Failed to record game creation attempt")?;
     if attempts > limit {
@@ -837,6 +841,7 @@ pub async fn create_game(
 
     // Get the flow
     let Some(mut flow) = GameCreationFlow::get_by_id(&state.db, flow_id, user.user_id)
+        .instrument(tracing::info_span!("game_builder.create.load_flow"))
         .await
         .wrap_err("Failed to get game flow")?
     else {
@@ -861,6 +866,7 @@ pub async fn create_game(
         &flow.board_size,
         &flow.game_type,
     )
+    .instrument(tracing::info_span!("game_builder.create.update_settings"))
     .await
     .wrap_err("Failed to update game flow")?
     else {
@@ -904,6 +910,7 @@ pub async fn create_game(
 
             // Delete the flow
             GameCreationFlow::delete(&state.db, flow_id, user.user_id)
+                .instrument(tracing::info_span!("game_builder.create.delete_flow"))
                 .await
                 .wrap_err("Failed to delete game flow")?;
 
@@ -914,6 +921,7 @@ pub async fn create_game(
                 "Game created and queued for execution!".to_string(),
                 session::FLASH_TYPE_SUCCESS,
             )
+            .instrument(tracing::info_span!("game_builder.create.set_flash"))
             .await
             .wrap_err("Failed to set flash message")?;
 
