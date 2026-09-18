@@ -2,6 +2,7 @@ use color_eyre::eyre::Context as _;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::collections::HashMap;
+use tracing::Instrument as _;
 use uuid::Uuid;
 
 use crate::models::battlesnake::{self, Battlesnake};
@@ -403,11 +404,13 @@ impl GameCreationFlow {
 
         let game =
             game::create_game_with_snakes_for_user(&app_state.db, create_request, self.user_id)
+                .instrument(tracing::info_span!("game_builder.create.persist_game"))
                 .await
                 .wrap_err("Failed to create game")?;
 
         // Set enqueued_at timestamp before enqueueing the job
         game::set_game_enqueued_at(&app_state.db, game.game_id, chrono::Utc::now())
+            .instrument(tracing::info_span!("game_builder.create.mark_enqueued"))
             .await
             .wrap_err("Failed to set enqueued_at")?;
 
