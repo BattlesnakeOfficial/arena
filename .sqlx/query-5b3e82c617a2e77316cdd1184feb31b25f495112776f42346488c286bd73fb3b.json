@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO shout_screenings (\n            game_id, outcome, distinct_shout_count, judged_count,\n            suppressed_count, over_cap_count, model, latency_ms, input_tokens\n        )\n        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)\n        ON CONFLICT (game_id) DO NOTHING\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Text",
+        "Float8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5b3e82c617a2e77316cdd1184feb31b25f495112776f42346488c286bd73fb3b"
+}

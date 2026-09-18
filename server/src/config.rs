@@ -47,11 +47,17 @@ pub struct ModerationConfig {
     pub deadline_ms: u64,
     pub block_threshold: f64,
     pub noul_flag_threshold: f64,
+    /// Probability at/above which a shout is suppressed (DEV-1297).
+    pub shout_suppress_threshold: f64,
+    /// Max distinct shout strings judged per game; the rest are suppressed
+    /// unjudged rather than shown.
+    pub shout_max_judged: i32,
 }
 
 impl Default for ModerationConfig {
     /// Inert defaults: no key, stock endpoint/model, provisional
-    /// thresholds (see `docs/moderation-eval-results.md`).
+    /// thresholds (see `docs/moderation-eval-results.md` and
+    /// `docs/shout-moderation-eval-results.md`).
     fn default() -> Self {
         Self {
             api_key: None,
@@ -60,6 +66,10 @@ impl Default for ModerationConfig {
             deadline_ms: 1500,
             block_threshold: Thresholds::default().block_threshold,
             noul_flag_threshold: Thresholds::default().noul_flag_threshold,
+            shout_suppress_threshold: crate::moderation::shouts::ShoutScreeningParams::default()
+                .suppress_threshold,
+            shout_max_judged: crate::moderation::shouts::ShoutScreeningParams::default().max_judged
+                as i32,
         }
     }
 }
@@ -327,6 +337,12 @@ fn moderation_config_from_env() -> ModerationConfig {
             "MODERATION_NOUL_FLAG_THRESHOLD",
             defaults.noul_flag_threshold,
         ),
+        shout_suppress_threshold: parse_env(
+            "MODERATION_SHOUT_SUPPRESS_THRESHOLD",
+            defaults.shout_suppress_threshold,
+        ),
+        shout_max_judged: parse_env("MODERATION_SHOUT_MAX_JUDGED", defaults.shout_max_judged)
+            .max(1),
     }
 }
 

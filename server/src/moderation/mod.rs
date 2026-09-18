@@ -9,6 +9,7 @@
 //! blocked submissions are recorded in `moderation_flags` for review.
 
 pub mod jev;
+pub mod shouts;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -37,6 +38,11 @@ pub enum FieldKind {
     TournamentName,
     TournamentDescription,
     SavedGameTitle,
+    /// Post-game snake shouts (DEV-1297). Used for `moderation_flags`
+    /// rows surfacing suppressed shouts in the admin queue — never passed
+    /// to [`ModerationJudge::check`], so `rejection_message` is unused for
+    /// this kind (shouts are suppressed, not rejected).
+    SnakeShout,
 }
 
 impl FieldKind {
@@ -46,14 +52,16 @@ impl FieldKind {
             FieldKind::TournamentName => "tournament_name",
             FieldKind::TournamentDescription => "tournament_description",
             FieldKind::SavedGameTitle => "saved_game_title",
+            FieldKind::SnakeShout => "snake_shout",
         }
     }
 
     /// Generic, non-accusatory rejection copy. Never reveals which rule
-    /// fired.
+    /// fired. Unused for [`FieldKind::SnakeShout`] (shouts are never
+    /// rejected, only suppressed) — returns the generic name message.
     pub fn rejection_message(&self) -> &'static str {
         match self {
-            FieldKind::SnakeName | FieldKind::TournamentName => {
+            FieldKind::SnakeName | FieldKind::TournamentName | FieldKind::SnakeShout => {
                 "That name isn't allowed. Please choose another."
             }
             FieldKind::TournamentDescription => {
@@ -305,6 +313,82 @@ impl ModerationJudge {
             Ok(Err(_)) | Err(_) => unchecked(),
         }
     }
+
+    /// One Jev call with caller-supplied `state`/`questions`, through the
+    /// same plumbing as [`check`] (shared client, endpoint, model,
+    /// deadline, in-flight semaphore, fail-open error mapping). Used by the
+    /// post-game shout screener (DEV-1297), which builds its own
+    /// multi-noul question set.
+    ///
+    /// Unlike `check`, the semaphore permit is AWAITED under the deadline
+    /// rather than try-acquired: `check` runs inline in a request handler
+    /// where busy must fail fast, while `judge_raw` runs in a background
+    /// job where momentary contention must not permanently mark a game
+    /// unscreened. Worst case is deadline spent waiting + deadline spent
+    /// calling (2× deadline wall time).
+    ///
+    /// Note on deadline accounting: a `tokio::time::timeout` drop cancels
+    /// the in-flight request future and loses its reported usage tokens;
+    /// the shared client's `connect_timeout`/`timeout` (deadline + reserve)
+    /// makes that loss bounded, so usage telemetry is best-effort.
+    pub async fn judge_raw(
+        &self,
+        state: &serde_json::Value,
+        questions: &serde_json::Value,
+    ) -> RawJudgeOutcome {
+        let Some(inner) = &self.inner else {
+            return RawJudgeOutcome::Disabled;
+        };
+
+        let started = std::time::Instant::now();
+
+        // Await (bounded by the deadline) a permit instead of failing fast.
+        // Held to the end of the call.
+        let _permit =
+            match tokio::time::timeout(inner.deadline, inner.in_flight.clone().acquire_owned())
+                .await
+            {
+                Ok(Ok(permit)) => permit,
+                Ok(Err(_)) | Err(_) => {
+                    // Never log shout text; this path sees none of it anyway.
+                    tracing::warn!("moderation judge saturated; raw judgment not made");
+                    return RawJudgeOutcome::Errored;
+                }
+            };
+
+        let call = jev::system_one(
+            &inner.client,
+            &inner.endpoint,
+            &inner.model,
+            state,
+            questions,
+        );
+        match tokio::time::timeout(inner.deadline, call).await {
+            Ok(Ok(response)) => RawJudgeOutcome::Answered {
+                response,
+                latency_ms: started.elapsed().as_secs_f64() * 1000.0,
+            },
+            Ok(Err(_)) | Err(_) => RawJudgeOutcome::Errored,
+        }
+    }
+}
+
+/// Result of a caller-built Jev call through the judge plumbing
+/// (disabled check, in-flight semaphore, deadline, fail-open error
+/// mapping). Transport/non-2xx/timeout/parse details are already
+/// warn!-logged inside [`moderation::jev::system_one`].
+#[derive(Debug)]
+pub enum RawJudgeOutcome {
+    /// No API key configured — feature inert; caller must not record rows
+    /// or call again.
+    Disabled,
+    /// Transport / non-2xx / timeout / parse error. Caller fails open.
+    Errored,
+    /// Success. `latency_ms` covers the deadline-wrapped call.
+    Answered {
+        response: jev::SystemOneResponse,
+        latency_ms: f64,
+    },
 }
 
 /// Turn a parsed Jev response into an outcome, validating that all six

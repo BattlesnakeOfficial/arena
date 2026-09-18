@@ -183,7 +183,7 @@ pub async fn get_game_frames(
 ) -> ServerResult<impl IntoResponse, StatusCode> {
     // 404 for unknown games, like the legacy engine (the exporter maps this
     // through to its own 404).
-    get_game_by_id(&state.db, game_id)
+    let game = get_game_by_id(&state.db, game_id)
         .await
         .wrap_err("Failed to fetch game")?
         .ok_or_else(|| {
@@ -200,10 +200,13 @@ pub async fn get_game_frames(
         .wrap_err("Failed to fetch turn frames")?;
 
     let authors = frame_author_map(&state.db, game_id).await;
+    let suppressed =
+        crate::moderation::shouts::load_suppressed_set(&state.db, game_id, &game.status).await;
     let mut frames: Vec<serde_json::Value> =
         turns.into_iter().filter_map(|t| t.frame_data).collect();
     for frame in &mut frames {
         fill_frame_authors(frame, &authors);
+        crate::moderation::shouts::strip_suppressed_shouts(frame, &suppressed);
     }
 
     Ok(Json(GameFramesResponse {
@@ -312,11 +315,17 @@ async fn handle_game_websocket(socket: WebSocket, state: AppState, game_id: Uuid
     // Owner logins for filling in `Author` on frames persisted before the
     // game runner threaded authors through (see fill_frame_authors).
     let authors = frame_author_map(&state.db, game_id).await;
+    // Serve-time shout suppression (DEV-1297): empty for live games; a
+    // reconnecting viewer of an already-screened finished game gets
+    // stripped frames.
+    let suppressed =
+        crate::moderation::shouts::load_suppressed_set(&state.db, game_id, &game.status).await;
 
     // Send all existing frames
     for turn in existing_turns {
         if let Some(mut frame_data) = turn.frame_data {
             fill_frame_authors(&mut frame_data, &authors);
+            crate::moderation::shouts::strip_suppressed_shouts(&mut frame_data, &suppressed);
             let frame_msg = WebSocketMessage {
                 message_type: "frame".to_string(),
                 data: frame_data,
@@ -395,6 +404,10 @@ async fn handle_game_websocket(socket: WebSocket, state: AppState, game_id: Uuid
                                 }
                                 if let Some(mut frame_data) = turn.frame_data {
                                     fill_frame_authors(&mut frame_data, &authors);
+                                    crate::moderation::shouts::strip_suppressed_shouts(
+                                        &mut frame_data,
+                                        &suppressed,
+                                    );
                                     let frame_msg = WebSocketMessage {
                                         message_type: "frame".to_string(),
                                         data: frame_data,

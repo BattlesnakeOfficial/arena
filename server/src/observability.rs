@@ -210,6 +210,24 @@ fn metrics() -> Result<Vec<NamedMetric>, String> {
         .display_name("Moderation latency · p95")
         .unit("ms")
         .build()?,
+        count(
+            "moderation.shouts.screened",
+            "Games screened for shouts",
+            "fields.event_type",
+            "shout_screening",
+        )?
+        .unit("games")
+        .build()?,
+        Metric::new(
+            "moderation.shouts.suppressed",
+            Agg::Sum,
+            Some("fields.suppressed_count"),
+        )?
+        .filter_eq("fields.event_type", "shout_screening")?
+        .filter_numeric("fields.suppressed_count")?
+        .display_name("Shouts suppressed")
+        .unit("shouts")
+        .build()?,
         timing(
             "game.db_write.p95",
             "Turn persistence · p95",

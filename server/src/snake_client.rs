@@ -16,6 +16,79 @@ use crate::wire;
 
 pub(crate) const BODY_READ_CAP_BYTES: usize = 64 * 1024;
 
+/// Maximum length of a shout kept after sanitization. Longer shouts are
+/// truncated on a char boundary. 256 chars is far beyond any real shout
+/// (the board viewer clips much shorter) while bounding what an arbitrary
+/// third-party server can push into frame JSON (DEV-1297).
+pub(crate) const MAX_SHOUT_CHARS: usize = 256;
+
+/// Whitespace-like separators become a space rather than being dropped, so
+/// word boundaries survive sanitization ("gg\nwp" → "gg wp", not "ggwp").
+fn map_to_space(c: char) -> char {
+    match c {
+        '\t' | '\n' | '\r' | '\u{000B}' | '\u{000C}' | '\u{2028}' | '\u{2029}' => ' ',
+        _ => c,
+    }
+}
+
+/// Invisible / disguising characters, stripped outright:
+/// - remaining Cc (C0 minus mapped whitespace, DEL, C1) via `is_control`
+/// - Cf format characters: soft hyphen, Arabic letter mark, Khmer inherent
+///   vowels, Mongolian vowel separator, ZWSP/ZWNJ, LRM/RLM, bidi embedding
+///   and overrides (U+202A–U+202E — the RLO spoofing class), word joiner /
+///   invisible separators / bidi isolates (U+2060–U+206F), BOM (U+FEFF),
+///   interlinear annotation (U+FFF9–U+FFFB), and Unicode tags
+///   (U+E0000–U+E007F — "ASCII smuggling": invisible to humans, readable
+///   by models)
+/// - invisible non-Cf: combining grapheme joiner, blank-rendering Hangul
+///   fillers
+///
+/// Deliberately KEPT: U+200D (ZWJ) and U+FE00–U+FE0F (variation selectors)
+/// — stripping them breaks multi-codepoint emoji (👨‍👩‍👧, ❤️).
+fn is_invisible(c: char) -> bool {
+    c.is_control()
+        || matches!(u32::from(c),
+            0x00AD | 0x034F | 0x061C
+            | 0x115F | 0x1160 | 0x17B4 | 0x17B5
+            | 0x180E
+            | 0x200B | 0x200C | 0x200E | 0x200F
+            | 0x202A..=0x202E | 0x2060..=0x206F
+            | 0x3164 | 0xFFA0
+            | 0xFEFF | 0xFFF9..=0xFFFB
+            | 0xE0000..=0xE007F)
+}
+
+/// Sanitize a shout from a move response: map separators to spaces, strip
+/// invisible characters, collapse whitespace runs, trim, truncate to
+/// [`MAX_SHOUT_CHARS`] on a char boundary (then trim again). Returns None
+/// when nothing printable remains (frame code treats None as "no shout"
+/// and serializes "").
+pub(crate) fn sanitize_shout(raw: Option<String>) -> Option<String> {
+    let s = raw?;
+    let mut cleaned = String::with_capacity(s.len());
+    let mut last_was_space = false;
+    for c in s.chars().map(map_to_space) {
+        if is_invisible(c) {
+            continue;
+        }
+        if c == ' ' {
+            if !last_was_space {
+                cleaned.push(' ');
+            }
+            last_was_space = true;
+        } else {
+            cleaned.push(c);
+            last_was_space = false;
+        }
+    }
+    let mut cleaned = cleaned.trim().to_string();
+    if cleaned.chars().count() > MAX_SHOUT_CHARS {
+        cleaned = cleaned.chars().take(MAX_SHOUT_CHARS).collect();
+        cleaned = cleaned.trim_end().to_string();
+    }
+    (!cleaned.is_empty()).then_some(cleaned)
+}
+
 /// Response from a snake's /move endpoint
 #[derive(Debug, Deserialize)]
 pub struct MoveResponse {
@@ -145,7 +218,7 @@ pub async fn request_move(
                         direction,
                         latency_ms: Some(elapsed),
                         timed_out: false,
-                        shout: move_response.shout,
+                        shout: sanitize_shout(move_response.shout),
                     }
                 }
                 Err(e) => invalid_move_response(snake_id, last_direction, elapsed, &e),
@@ -694,6 +767,118 @@ mod tests {
         let response: MoveResponse = serde_json::from_str(json).unwrap();
         assert_eq!(response.direction, "down");
         assert_eq!(response.shout, Some("I'm coming for you!".to_string()));
+    }
+
+    // === Shout sanitization (DEV-1297) ===
+
+    #[test]
+    fn sanitize_shout_none_and_empty_stay_none() {
+        assert_eq!(sanitize_shout(None), None);
+        assert_eq!(sanitize_shout(Some(String::new())), None);
+        assert_eq!(sanitize_shout(Some("   \t ".to_string())), None);
+        // Zero-width-only input has nothing printable left.
+        assert_eq!(
+            sanitize_shout(Some("\u{200B}\u{FEFF}\u{2060}".to_string())),
+            None
+        );
+    }
+
+    #[test]
+    fn sanitize_shout_strips_control_and_zero_width() {
+        let out = sanitize_shout(Some("a\u{0000}b\u{001F}c\u{007F}d\u{009C}".to_string()));
+        assert_eq!(out.as_deref(), Some("abcd"));
+        let out = sanitize_shout(Some("a\u{200B}b\u{FEFF}c\u{2060}d".to_string()));
+        assert_eq!(out.as_deref(), Some("abcd"));
+        // A 4-byte emoji survives untouched.
+        let out = sanitize_shout(Some("\u{1F40D} rules".to_string()));
+        assert_eq!(out.as_deref(), Some("\u{1F40D} rules"));
+    }
+
+    #[test]
+    fn sanitize_shout_strips_bidi_override_and_tag_characters() {
+        // RLO + "kcuf": what a human sees (and what Jev must judge) is "kcuf".
+        let out = sanitize_shout(Some("\u{202E}kcuf".to_string()));
+        assert_eq!(out.as_deref(), Some("kcuf"));
+        // A run of Unicode tag characters (ASCII smuggling) disappears.
+        let out = sanitize_shout(Some("ok\u{E0041}\u{E0042}!".to_string()));
+        assert_eq!(out.as_deref(), Some("ok!"));
+    }
+
+    #[test]
+    fn sanitize_shout_maps_line_separators_to_spaces() {
+        // U+2028/U+2029 are separators, not deletions.
+        let out = sanitize_shout(Some("gg\u{2028}wp\u{2029}gg".to_string()));
+        assert_eq!(out.as_deref(), Some("gg wp gg"));
+    }
+
+    #[test]
+    fn sanitize_shout_preserves_multi_codepoint_emoji() {
+        // Family emoji joined with ZWJ must survive byte-identical.
+        let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+        let out = sanitize_shout(Some(family.to_string()));
+        assert_eq!(out.as_deref(), Some(family));
+        // VS16 (heart + variation selector) survives too.
+        let heart = "\u{2764}\u{FE0F}";
+        let out = sanitize_shout(Some(heart.to_string()));
+        assert_eq!(out.as_deref(), Some(heart));
+    }
+
+    #[test]
+    fn sanitize_shout_collapses_whitespace_runs() {
+        assert_eq!(
+            sanitize_shout(Some("gg\nwp".to_string())).as_deref(),
+            Some("gg wp")
+        );
+        assert_eq!(
+            sanitize_shout(Some("a\t\tb".to_string())).as_deref(),
+            Some("a b")
+        );
+    }
+
+    #[test]
+    fn sanitize_shout_truncates_on_char_boundary() {
+        let long = "x".repeat(300);
+        let out = sanitize_shout(Some(long)).unwrap();
+        assert_eq!(out.chars().count(), MAX_SHOUT_CHARS);
+
+        // 300 chars where position 256 falls inside a 4-byte emoji: take()
+        // operates on chars, so no panic and the result is exactly 256
+        // chars (the truncation cuts cleanly before the emoji that starts
+        // at 256; nothing straddles).
+        let mut mixed = String::new();
+        for _ in 0..255 {
+            mixed.push('x');
+        }
+        for _ in 0..45 {
+            mixed.push('\u{1F40D}');
+        }
+        assert_eq!(mixed.chars().count(), 300);
+        let out = sanitize_shout(Some(mixed)).unwrap();
+        assert_eq!(out.chars().count(), MAX_SHOUT_CHARS);
+        assert!(out.chars().take(255).all(|c| c == 'x'));
+        assert_eq!(out.chars().nth(255), Some('\u{1F40D}'));
+    }
+
+    #[test]
+    fn sanitize_shout_trims_before_counting_budget() {
+        // Leading/trailing whitespace does not eat into the 256 budget.
+        let mut padded = " ".repeat(50);
+        padded.push_str(&"x".repeat(MAX_SHOUT_CHARS));
+        padded.push_str(&" ".repeat(50));
+        let out = sanitize_shout(Some(padded)).unwrap();
+        assert_eq!(out.chars().count(), MAX_SHOUT_CHARS);
+    }
+
+    #[test]
+    fn sanitize_shout_keeps_playful_trash_talk_verbatim() {
+        // Regression guard for the trash-talk requirement (DEV-1297): the
+        // canonical playful shouts must pass through sanitization intact.
+        for shout in ["get rekt", "I'm coming for you", "gg ez"] {
+            assert_eq!(
+                sanitize_shout(Some(shout.to_string())).as_deref(),
+                Some(shout)
+            );
+        }
     }
 
     #[test]

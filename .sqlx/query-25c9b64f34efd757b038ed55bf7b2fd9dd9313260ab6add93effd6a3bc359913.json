@@ -1,0 +1,76 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT game_id, outcome, distinct_shout_count, judged_count,\n               suppressed_count, over_cap_count, model,\n               latency_ms, input_tokens, created_at\n        FROM shout_screenings\n        WHERE game_id = $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "game_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "outcome",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "distinct_shout_count",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 3,
+        "name": "judged_count",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 4,
+        "name": "suppressed_count",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 5,
+        "name": "over_cap_count",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 6,
+        "name": "model",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "latency_ms",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 8,
+        "name": "input_tokens",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 9,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "25c9b64f34efd757b038ed55bf7b2fd9dd9313260ab6add93effd6a3bc359913"
+}
