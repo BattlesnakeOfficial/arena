@@ -251,6 +251,24 @@ impl Job<AppState> for StuckGameSweeperJob {
     }
 }
 
+/// Post-completion job: screen a finished game's distinct shouts with one
+/// Jev call and record suppressions (DEV-1297). Fail-open: never retries on
+/// Jev errors (the `shout_screenings` marker row makes re-runs no-ops).
+/// See [`crate::moderation::shouts`].
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ScreenShoutsJob {
+    pub game_id: Uuid,
+}
+
+#[async_trait::async_trait]
+impl Job<AppState> for ScreenShoutsJob {
+    const NAME: &'static str = "ScreenShoutsJob";
+
+    async fn run(&self, app_state: AppState) -> cja::Result<()> {
+        crate::moderation::shouts::screen_game_shouts(&app_state, self.game_id).await
+    }
+}
+
 cja::impl_job_registry!(
     AppState,
     NoopJob,
@@ -266,5 +284,6 @@ cja::impl_job_registry!(
     StuckMatchSweeperJob,
     RateLimitPruneJob,
     SnakeHealthSweeperJob,
-    StuckGameSweeperJob
+    StuckGameSweeperJob,
+    ScreenShoutsJob
 );

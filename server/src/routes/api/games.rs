@@ -458,7 +458,13 @@ pub async fn show_game(
         })?;
 
     // Extract frames from turns
-    let frames: Vec<serde_json::Value> = turns.into_iter().filter_map(|t| t.frame_data).collect();
+    let mut frames: Vec<serde_json::Value> =
+        turns.into_iter().filter_map(|t| t.frame_data).collect();
+    let suppressed =
+        crate::moderation::shouts::load_suppressed_set(&state.db, game_id, &game.status).await;
+    for frame in &mut frames {
+        crate::moderation::shouts::strip_suppressed_shouts(frame, &suppressed);
+    }
 
     // Find winner
     let winner = battlesnakes

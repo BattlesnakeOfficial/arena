@@ -618,6 +618,17 @@ async fn enqueue_post_completion_jobs(app_state: &AppState, game_id: Uuid) -> cj
         );
     }
 
+    // Post-game shout screening (DEV-1297). Idempotent via shout_screenings;
+    // no-op while TYPESAFE_API_KEY is unset.
+    cja::jobs::Job::enqueue(
+        crate::jobs::ScreenShoutsJob { game_id },
+        app_state.clone(),
+        format!("Screen shouts for game {game_id}"),
+        None,
+    )
+    .await
+    .wrap_err("Failed to enqueue shout screening job")?;
+
     Ok(())
 }
 
@@ -739,6 +750,21 @@ mod tests {
         run_game(&app_state, game_id).await?;
 
         assert_eq!(count_jobs(&pool, "RunMatchJob").await?, 1);
+
+        Ok(())
+    }
+
+    /// Every finished game enqueues shout screening (DEV-1297); the job
+    /// itself no-ops when the judge is disabled or the game was already
+    /// screened.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn finished_game_enqueues_shout_screening(pool: PgPool) -> cja::Result<()> {
+        let app_state = crate::state::AppState::test_from_pool(pool.clone());
+        let game_id = fixture_game(&pool, "finished").await?;
+
+        run_game(&app_state, game_id).await?;
+
+        assert_eq!(count_jobs(&pool, "ScreenShoutsJob").await?, 1);
 
         Ok(())
     }

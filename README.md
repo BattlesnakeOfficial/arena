@@ -104,6 +104,25 @@ hand-written eval in `docs/moderation-eval-results.md`. Flagged and
 blocked submissions land in the `moderation_flags` table, reviewable at
 `/admin/moderation`.
 
+Finished games also screen their snakes' **shouts** (DEV-1297): one
+post-game Jev call judges the game's distinct shout strings (typically
+1–5 per snake), and violating shouts are blanked from replay frames on
+all four frame-serving paths (frames API, WebSocket catch-up and
+re-fetch, and `/api/games/{id}/details`). Frames in the database are
+never rewritten. The unscreened window between game end and job
+completion is accepted; **games finished while the key is unset are
+never screened**, and **failed games' replays are not screened** (they
+never reach the post-completion fan-out). Suppressed shouts also land in
+`moderation_flags` (`field_kind = 'snake_shout'`) for the admin queue —
+no automatic account action. Shout knobs: `MODERATION_SHOUT_SUPPRESS_THRESHOLD`
+(`0.90`) and `MODERATION_SHOUT_MAX_JUDGED` (`100` — strings beyond the
+cap are suppressed unjudged, allocated round-robin per snake so a chatty
+snake can't starve an opponent's catchphrase out of the judged set). At
+ingest, shouts are truncated to 256 chars on a char boundary and
+invisible/control characters (zero-width, bidi overrides, Unicode tag
+"ASCII smuggling") are stripped — see `docs/shout-moderation-eval-results.md`
+for the eval behind the threshold.
+
 ### Creating a GitHub App
 
 Sign-in is GitHub OAuth only, so local development needs an app:

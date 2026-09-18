@@ -11,6 +11,7 @@ pub mod moderation_flag;
 pub mod rate_limit;
 pub mod saved_game;
 pub mod session;
+pub mod shout_moderation;
 pub mod snake_health_status;
 pub mod tag;
 pub mod tournament;

@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO suppressed_shouts (game_id, snake_id, text_hash, text, probability, model)\n        SELECT $1, u.sid, u.h, u.t, NULL::DOUBLE PRECISION, 'over-cap'\n        FROM UNNEST($2::text[], $3::text[], $4::text[]) AS u(sid, h, t)\n        ON CONFLICT (game_id, snake_id, text_hash) DO NOTHING\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "TextArray",
+        "TextArray",
+        "TextArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2e8d59e5355ed78f33e8c3c042fad56f88979890108c4ab649c2f92126fbe038"
+}

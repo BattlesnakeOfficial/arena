@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT snake_id, text, probability, model FROM suppressed_shouts\n             WHERE game_id = $1 ORDER BY text",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "snake_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "text",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "probability",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 3,
+        "name": "model",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "4dc60dd3161ca886dfbb1e5b5df95af2f450f5dc7f6312405dba19752349e26c"
+}
