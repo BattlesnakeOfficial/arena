@@ -169,6 +169,42 @@ test.describe('live game viewer', () => {
     await expect(authenticatedPage.locator('#game-manual-refresh')).toBeHidden();
   });
 
+  test('a stalled status request is aborted and retried within the bounded polling budget', async ({ authenticatedPage, mockUser }) => {
+    const game = await gameWithStatus(mockUser.login);
+    await authenticatedPage.addInitScript(gameId => {
+      const realFetch = window.fetch.bind(window);
+      let statusCalls = 0;
+      Object.defineProperty(window, '__statusCalls', {
+        configurable: true,
+        get: () => statusCalls,
+      });
+      window.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+        if (url.endsWith(`/api/games/${gameId}`)) {
+          statusCalls += 1;
+          if (statusCalls === 1) {
+            return new Promise<Response>((_resolve, reject) => {
+              init?.signal?.addEventListener('abort', () => {
+                reject(init.signal?.reason ?? new DOMException('request aborted', 'AbortError'));
+              }, { once: true });
+            });
+          }
+        }
+        return realFetch(input, init);
+      }) as typeof window.fetch;
+
+      const realSetTimeout = window.setTimeout;
+      window.setTimeout = ((fn: TimerHandler, delay?: number, ...args: unknown[]) =>
+        realSetTimeout(fn, Math.min(delay || 0, 20), ...args)) as typeof window.setTimeout;
+    }, game);
+
+    await authenticatedPage.goto(`/games/${game}`);
+    await expect.poll(
+      () => authenticatedPage.evaluate(() => (window as typeof window & { __statusCalls: number }).__statusCalls),
+      { timeout: 1000 },
+    ).toBeGreaterThan(1);
+  });
+
   test('exhausted shared budget reveals manual Refresh', async ({ authenticatedPage, mockUser }) => {
     const game = await gameWithStatus(mockUser.login);
     await authenticatedPage.evaluate(([key]) => sessionStorage.setItem(key, '600'), [`arena-game-poll-${game}`]);
