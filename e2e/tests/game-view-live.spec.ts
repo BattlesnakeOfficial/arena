@@ -30,6 +30,15 @@ function terminalHtml(status: 'finished' | 'failed'): string {
 }
 
 test.describe('live game viewer', () => {
+  test.beforeEach(async ({ authenticatedPage }) => {
+    // The hosted board's hydration focuses its own body, independently of
+    // Arena polling. Keep these parent-page tests deterministic and offline.
+    await authenticatedPage.route('https://board.battlesnake.com/**', route => route.fulfill({
+      contentType: 'text/html',
+      body: '<!doctype html><html><body>Board fixture</body></html>',
+    }));
+  });
+
   for (const terminal of ['running', 'failed'] as const) {
     test(`Waiting -> ${terminal} reloads into the real server-rendered state`, async ({ authenticatedPage, mockUser }) => {
       const game = await gameWithStatus(mockUser.login, 'waiting');
@@ -101,9 +110,16 @@ test.describe('live game viewer', () => {
       const viewer = new URL(authenticatedPage.url());
       await authenticatedPage.locator('input[name="title"]').fill('partially edited title');
       await authenticatedPage.locator('input[name="title"]').focus();
+      await expect(authenticatedPage.locator('input[name="title"]')).toBeFocused();
       const iframe = authenticatedPage.locator('#board-viewer');
       const src = await iframe.getAttribute('src');
-      await iframe.evaluate((node: HTMLIFrameElement) => { (node as any).__identity = 'kept'; });
+      await iframe.evaluate((node: HTMLIFrameElement) => {
+        (node as any).__identity = 'kept';
+        (node as any).__reloads = 0;
+        node.addEventListener('load', () => { (node as any).__reloads += 1; });
+      });
+      const board = authenticatedPage.frameLocator('#board-viewer').locator('body');
+      await board.evaluate(() => { (window as any).__playbackTurn = 17; });
       await authenticatedPage.route(url => {
         const candidate = new URL(url.toString());
         return candidate.origin === viewer.origin && candidate.pathname === viewer.pathname;
@@ -120,6 +136,8 @@ test.describe('live game viewer', () => {
       expect(htmlCalls).toBeGreaterThanOrEqual(2);
       expect(await iframe.evaluate((node: HTMLIFrameElement) => ({ connected: node.isConnected, marker: (node as any).__identity }))).toEqual({ connected: true, marker: 'kept' });
       expect(await iframe.getAttribute('src')).toBe(src);
+      expect(await iframe.evaluate(node => (node as any).__reloads)).toBe(0);
+      expect(await board.evaluate(() => (window as any).__playbackTurn)).toBe(17);
       await expect(authenticatedPage.locator('input[name="title"]')).toHaveValue('partially edited title');
       await expect(authenticatedPage.locator('input[name="title"]')).toBeFocused();
       if (terminal === 'failed') await expect(authenticatedPage.locator('#game-results-region')).toContainText('No result');
@@ -139,6 +157,7 @@ test.describe('live game viewer', () => {
     const title = authenticatedPage.locator('input[name="title"]');
     await title.fill('keep this draft');
     await title.focus();
+    await expect(title).toBeFocused();
     await query("UPDATE games SET status = 'failed' WHERE game_id = $1", [game]);
     await expect(authenticatedPage.locator('#game-status-region')).toContainText('Incomplete', { timeout: 10000 });
     await expect(authenticatedPage.locator('#game-results-region')).toContainText('No result');
