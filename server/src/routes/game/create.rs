@@ -107,6 +107,7 @@ pub async fn new_game(
 ) -> ServerResult<impl IntoResponse, StatusCode> {
     // Create a new flow for this user
     let flow = GameCreationFlow::create_for_user(&state.db, user.user_id)
+        .instrument(tracing::info_span!("game_builder.new.persist_flow"))
         .await
         .wrap_err("Failed to create game flow")?;
 
@@ -206,6 +207,7 @@ pub async fn challenge_battlesnake(
 
 // Game create form - show the game creation form with the flow state
 #[debug_handler]
+#[tracing::instrument(name = "game_builder.show", skip_all)]
 pub async fn show_game_flow(
     State(state): State<AppState>,
     CurrentUser(user): CurrentUser,

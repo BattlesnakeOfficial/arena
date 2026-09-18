@@ -50,7 +50,7 @@ All 30 idle and all 30 background-profile navigations reached the expected desti
 without a manual refresh, 5xx response, or timeout. Request timings are Playwright
 request timings; complete timings include browser event/redirect/render overhead.
 
-| Profile | Sequence | Complete samples (ms) | Complete p95 / max | Server-leg p95 / max |
+| Profile | Sequence | Complete samples (ms) | Complete p95 / max | HTTP request-leg p95 / max |
 | --- | --- | --- | --- | --- |
 | Idle | Create Another -> builder | 113, 73, 87, 85, 77, 78, 74, 109, 77, 83 | 113 / 113 | 8 / 29 |
 | Idle | Rematch -> builder | 91, 89, 82, 88, 91, 85, 95, 83, 85, 92 | 95 / 95 | 7 / 8 |
@@ -70,6 +70,14 @@ bounded clean baseline, not reproduction of production latency.
 
 ## Missing attribution and diagnostic spans
 
+The reported Create Another Game navigation has two additional field-free boundaries:
+
+- `game_builder.new.persist_flow` measures the new-flow INSERT in `GET /games/new`.
+- `game_builder.show` measures the query/render handler body in `GET /games/flow/{id}`.
+
+Their start times relative to the root request distinguish earlier extractor work
+from persistence or the builder handler, without instrumenting every builder query.
+
 The following static, field-free child spans partition every awaited database boundary
 around successful final creation:
 
@@ -87,7 +95,7 @@ children retain handler/runtime scheduling. The new names carry no flow, game, u
 session, URL, form, lineup, or other high-cardinality/private fields.
 
 The next narrow experiment is to merge and deploy this diagnostic commit normally,
-then inspect the next naturally occurring slow create trace. The child durations and
+then inspect the next naturally occurring slow new-builder or create trace. The child durations and
 gaps will identify the dominant boundary for a focused regression and fix. Until such
 evidence exists, session caching, worker/pool tuning, timeout changes, idempotency, and
 recovery redesign remain unsupported and are intentionally absent.
