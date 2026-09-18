@@ -14,6 +14,7 @@ use cja::jobs::worker::{DEFAULT_LOCK_TIMEOUT, DEFAULT_MAX_RETRIES};
 
 use crate::email::MailgunConfig;
 use crate::github::auth::GitHubOAuthConfig;
+use crate::moderation::Thresholds;
 
 pub const LOCAL_BASE_URL: &str = "http://localhost:3000";
 pub const ARENA_PUBLIC_BASE_URL: &str = "https://arena.battlesnake.com";
@@ -33,6 +34,34 @@ pub struct JobConfig {
 pub struct EyesConfig {
     pub org_id: uuid::Uuid,
     pub app_id: uuid::Uuid,
+}
+
+/// Content moderation via the TypeSafe (Jev) judgment API. Unset
+/// `TYPESAFE_API_KEY` disables all Jev calls; only the offline
+/// hard-block list still applies.
+#[derive(Clone, Debug)]
+pub struct ModerationConfig {
+    pub api_key: Option<String>,
+    pub endpoint: String,
+    pub model: String,
+    pub deadline_ms: u64,
+    pub block_threshold: f64,
+    pub noul_flag_threshold: f64,
+}
+
+impl Default for ModerationConfig {
+    /// Inert defaults: no key, stock endpoint/model, provisional
+    /// thresholds (see `docs/moderation-eval-results.md`).
+    fn default() -> Self {
+        Self {
+            api_key: None,
+            endpoint: crate::moderation::jev::ENDPOINT.to_string(),
+            model: "jev-latest".to_string(),
+            deadline_ms: 1500,
+            block_threshold: Thresholds::default().block_threshold,
+            noul_flag_threshold: Thresholds::default().noul_flag_threshold,
+        }
+    }
 }
 
 /// Which long-running components to start. Driven by `<FEATURE>_DISABLED`
@@ -59,6 +88,8 @@ pub struct AppConfig {
     pub github: Option<GitHubOAuthConfig>,
     pub mailgun: Option<MailgunConfig>,
     pub discord_webhook_url: Option<String>,
+    /// Content moderation (Jev). Always present; inert without a key.
+    pub moderation: ModerationConfig,
 
     // Rate limiting
     /// Max games an account may create within the sliding window (shared
@@ -153,6 +184,7 @@ impl AppConfig {
             github: github_config_from_env(),
             mailgun: mailgun_config_from_env(),
             discord_webhook_url: optional_env("DISCORD_WEBHOOK_URL"),
+            moderation: moderation_config_from_env(),
 
             // Limit 0 is a deliberate "block all game creation" switch; a
             // zero or negative WINDOW, though, would silently disable the
@@ -207,6 +239,7 @@ impl AppConfig {
             github: None,
             mailgun: None,
             discord_webhook_url: None,
+            moderation: ModerationConfig::default(),
             game_creation_rate_limit: 20,
             game_creation_rate_limit_window_minutes: 10,
             snake_health_failure_threshold: 3,
@@ -276,6 +309,24 @@ fn eyes_config_from_env() -> cja::Result<Option<EyesConfig>> {
             eprintln!("Skipping Eyes: EYES_APP_ID set but EYES_ORG_ID missing");
             Ok(None)
         }
+    }
+}
+
+/// Build the moderation config. The key uses `optional_env` semantics
+/// (unset or empty → `None` → judge disabled); everything else falls back
+/// to the [`ModerationConfig::default`] values.
+fn moderation_config_from_env() -> ModerationConfig {
+    let defaults = ModerationConfig::default();
+    ModerationConfig {
+        api_key: optional_env("TYPESAFE_API_KEY"),
+        endpoint: std::env::var("MODERATION_JEV_URL").unwrap_or(defaults.endpoint),
+        model: std::env::var("TYPESAFE_MODEL").unwrap_or(defaults.model),
+        deadline_ms: parse_env("MODERATION_DEADLINE_MS", defaults.deadline_ms),
+        block_threshold: parse_env("MODERATION_BLOCK_THRESHOLD", defaults.block_threshold),
+        noul_flag_threshold: parse_env(
+            "MODERATION_NOUL_FLAG_THRESHOLD",
+            defaults.noul_flag_threshold,
+        ),
     }
 }
 

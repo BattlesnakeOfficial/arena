@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE moderation_flags SET created_at = NOW() - INTERVAL '1 hour'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "21255b13775e36baecad90d98ff56d0c9807a5254a85a5cf6683d31bac239858"
+}

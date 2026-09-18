@@ -6,7 +6,7 @@ use uuid::Uuid;
 use crate::models::user::User;
 
 /// Session model for the application
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Session {
     pub session_id: Uuid,
     pub user_id: Option<Uuid>,

@@ -7,6 +7,7 @@ pub mod game;
 pub mod game_battlesnake;
 pub mod imported_account;
 pub mod leaderboard;
+pub mod moderation_flag;
 pub mod rate_limit;
 pub mod saved_game;
 pub mod session;

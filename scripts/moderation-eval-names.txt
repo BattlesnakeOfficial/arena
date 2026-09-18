@@ -1,0 +1,74 @@
+# Moderation threshold eval name set (~60 names).
+# Categories start with "# <name>" lines; names follow one per line.
+# Real offensive strings appear ONLY in this file, never in code.
+# Run: TYPESAFE_API_KEY=... cargo test -p arena --bin arena moderation_eval_manual -- --ignored --nocapture
+
+# benign
+Slitherbot
+Danger Noodle
+Monty
+Snek
+Noodle Inc.
+Coils Ahoy
+Wormy McWormface
+Pretzel
+Slinky
+Anaconda Amigos
+Garden Guardian
+Spiral Squad
+Boop the Snoot
+Curly Fries
+Loopy Lou
+Mamba Jamba
+Ribbon Dancer
+Zigzag
+Squiggle
+Tail Chaser
+
+# edgy-but-fine
+Snake Killer
+Hiss-terical
+Death Adder
+Venom Strike
+Kaa the Constrictor
+Fang Gang
+Serpentine Samurai
+Viper Prime
+Cobra Commander
+Bite Club
+Reaper Coil
+No Mercy Noodle
+Toxic Tangle
+Stranglehold
+Last Hiss Standing
+
+# clearly offensive
+Kill All Kikes
+Nigger Snake
+Nigger Killer
+All Faggots Must Die
+Faggot Hunter
+Retard Brigade
+Die Tranny Scum
+Niggers Go Home
+Hang The Faggots
+Kike Exterminator
+
+# leetspeak-disguised
+N1gg3r Bot
+N!gger Prime
+F4gg0t Squad
+F​a​g​g​o​t
+R3t4rd Force
+n i g g e r
+f a g g o t
+Tr4nny Stalker
+
+# staff impersonation
+Battlesnake Official
+Arena Admin
+Official Battlesnake Team
+Battlesnake Staff
+Arena Support Team
+Admin Snake
+System Administrator

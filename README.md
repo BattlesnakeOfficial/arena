@@ -86,6 +86,24 @@ typo can't silently drop telemetry.
 service by the deploy workflow from the `EYES_ORG_ID` / `EYES_APP_ID` repo
 secrets.
 
+#### Optional: content moderation (Jev)
+
+`TYPESAFE_API_KEY` enables moderation of user-submitted snake names,
+tournament names/descriptions, and saved-game titles via the TypeSafe
+Jev judgment API. **Unset means no Jev calls; only hard-block hits (the
+tiny offline exact-match list of unambiguous slurs) are recorded**, as
+`blocked` rows in `moderation_flags` — so the feature is not 100% inert
+with no key, but the table stays quiet. Safe to deploy before the secret
+exists.
+
+Other knobs (with defaults): `TYPESAFE_MODEL` (`jev-latest`),
+`MODERATION_JEV_URL` (`https://api.typesafe.ai/v1/systemone`),
+`MODERATION_DEADLINE_MS` (`1500`), `MODERATION_BLOCK_THRESHOLD` (`0.90`),
+`MODERATION_NOUL_FLAG_THRESHOLD` (`0.60`). Thresholds were chosen from the
+hand-written eval in `docs/moderation-eval-results.md`. Flagged and
+blocked submissions land in the `moderation_flags` table, reviewable at
+`/admin/moderation`.
+
 ### Creating a GitHub App
 
 Sign-in is GitHub OAuth only, so local development needs an app:

@@ -1,0 +1,58 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT hate_or_slur, sexual_or_graphic, harassment_or_threat,\n                    impersonates_staff_or_platform, disguised_evasion,\n                    action_choice, action_block_mass\n             FROM moderation_flags WHERE user_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "hate_or_slur",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 1,
+        "name": "sexual_or_graphic",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 2,
+        "name": "harassment_or_threat",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 3,
+        "name": "impersonates_staff_or_platform",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 4,
+        "name": "disguised_evasion",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 5,
+        "name": "action_choice",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "action_block_mass",
+        "type_info": "Float8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "698c3bdf34234f7f3dbfb33dee90329aed1fb14ea6f61ef570a04a2d4de89160"
+}

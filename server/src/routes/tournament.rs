@@ -950,12 +950,70 @@ pub async fn create_tournament(
         }
     };
 
+    // Moderation: one concurrent join so two fields cost one deadline, not
+    // two stacked. Runs before the insert; unchanged/absent fields use
+    // Decision::Allow as an in-band "not moderated, no call" sentinel.
+    let description = form.description_opt();
+    let is_public = form.visibility == TournamentVisibility::Public;
+    let (name_decision, desc_decision) = tokio::join!(
+        crate::moderation::moderate_field(
+            &state.db,
+            &state.moderation,
+            user.user_id,
+            None,
+            crate::moderation::FieldKind::TournamentName,
+            form.name.trim(),
+            is_public,
+        ),
+        async {
+            match description.as_deref() {
+                Some(desc) => {
+                    crate::moderation::moderate_field(
+                        &state.db,
+                        &state.moderation,
+                        user.user_id,
+                        None,
+                        crate::moderation::FieldKind::TournamentDescription,
+                        desc,
+                        is_public,
+                    )
+                    .await
+                }
+                None => crate::moderation::Decision::Allow,
+            }
+        }
+    );
+    if name_decision == crate::moderation::Decision::Block {
+        return flash_redirect(
+            &state,
+            session.session_id,
+            crate::moderation::FieldKind::TournamentName
+                .rejection_message()
+                .to_string(),
+            session::FLASH_TYPE_ERROR,
+            "/tournaments/new",
+        )
+        .await;
+    }
+    if desc_decision == crate::moderation::Decision::Block {
+        return flash_redirect(
+            &state,
+            session.session_id,
+            crate::moderation::FieldKind::TournamentDescription
+                .rejection_message()
+                .to_string(),
+            session::FLASH_TYPE_ERROR,
+            "/tournaments/new",
+        )
+        .await;
+    }
+
     let created = tournament::create_tournament(
         &state.db,
         user.user_id,
         CreateTournament {
             name: form.name.trim().to_string(),
-            description: form.description_opt(),
+            description,
             game_type,
             board_size,
             registration_status: form.registration_status,
@@ -1434,6 +1492,130 @@ pub async fn update_settings(
     Path(tournament_id): Path<Uuid>,
     Form(form): Form<TournamentSettingsForm>,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
+    // --- Pre-transaction moderation (outside any pool checkout) ---
+    //
+    // Jev calls must never sit inside the transaction below (or hold a pool
+    // connection). The unlocked pre-fetch and pre-validation here are
+    // additive pre-work; the in-transaction locked checks below stay
+    // authoritative. Duplicating ownership and validation is intentional:
+    // outsiders can't burn Jev tokens or mint flag rows, and edits the
+    // transaction would unconditionally reject never reach moderation.
+    let edit_url = format!("/tournaments/{tournament_id}/edit");
+
+    let current = tournament::get_tournament_by_id(&state.db, tournament_id)
+        .await
+        .wrap_err("Failed to fetch tournament")?
+        .ok_or_else(|| "Tournament not found".to_string())
+        .with_status(StatusCode::NOT_FOUND)?;
+
+    if current.user_id != user.user_id {
+        // Same shape as the in-tx checks: hidden tournaments 404 for outsiders.
+        if is_hidden_from(&state.db, &current, user.user_id).await? {
+            return Err("Tournament not found".to_string()).with_status(StatusCode::NOT_FOUND);
+        }
+        return Err("You don't have permission to edit this tournament".to_string())
+            .with_status(StatusCode::FORBIDDEN);
+    }
+
+    // FULL pre-validation mirror (pure params + parses + settings rules with
+    // an unlocked registration count). Message strings and redirect target
+    // identical to the in-tx path.
+    let registration_count = tournament::count_registrations(&state.db, tournament_id)
+        .await
+        .wrap_err("Failed to count registrations")?;
+
+    let parsed = validate_tournament_params(
+        &form.name,
+        &form.description,
+        form.required_participants,
+        form.max_snakes_per_user,
+    )
+    .and_then(|()| {
+        Ok((
+            parse_game_type(&form.game_type)?,
+            parse_board_size(&form.board_size)?,
+        ))
+    })
+    .and_then(|(game_type, board_size)| {
+        validate_settings_update(&current, registration_count > 0, &game_type, &board_size)?;
+        Ok((game_type, board_size))
+    });
+    if let Err(message) = parsed {
+        return flash_redirect(
+            &state,
+            session.session_id,
+            message,
+            session::FLASH_TYPE_ERROR,
+            &edit_url,
+        )
+        .await;
+    }
+
+    // Moderate name + description CONCURRENTLY when each actually changed.
+    let new_description = form.description_opt();
+    let name_changed = form.name.trim() != current.name;
+    let desc_changed = new_description.is_some() && new_description != current.description;
+    let is_public = form.visibility == TournamentVisibility::Public;
+    let (name_decision, desc_decision) = tokio::join!(
+        async {
+            if name_changed {
+                crate::moderation::moderate_field(
+                    &state.db,
+                    &state.moderation,
+                    user.user_id,
+                    Some(tournament_id),
+                    crate::moderation::FieldKind::TournamentName,
+                    form.name.trim(),
+                    is_public,
+                )
+                .await
+            } else {
+                crate::moderation::Decision::Allow // sentinel: unchanged, no call made
+            }
+        },
+        async {
+            if desc_changed {
+                crate::moderation::moderate_field(
+                    &state.db,
+                    &state.moderation,
+                    user.user_id,
+                    Some(tournament_id),
+                    crate::moderation::FieldKind::TournamentDescription,
+                    new_description.as_deref().unwrap_or_default(),
+                    is_public,
+                )
+                .await
+            } else {
+                crate::moderation::Decision::Allow // sentinel: unchanged/absent, no call made
+            }
+        }
+    );
+    if name_decision == crate::moderation::Decision::Block {
+        return flash_redirect(
+            &state,
+            session.session_id,
+            crate::moderation::FieldKind::TournamentName
+                .rejection_message()
+                .to_string(),
+            session::FLASH_TYPE_ERROR,
+            &edit_url,
+        )
+        .await;
+    }
+    if desc_decision == crate::moderation::Decision::Block {
+        return flash_redirect(
+            &state,
+            session.session_id,
+            crate::moderation::FieldKind::TournamentDescription
+                .rejection_message()
+                .to_string(),
+            session::FLASH_TYPE_ERROR,
+            &edit_url,
+        )
+        .await;
+    }
+
+    // --- Existing transactional flow ---
     // One transaction for the whole handler: lock the tournament row, then
     // validate (ownership, status, the registration-based settings freeze)
     // against the locked row before writing.
@@ -1458,8 +1640,6 @@ pub async fn update_settings(
         return Err("You don't have permission to edit this tournament".to_string())
             .with_status(StatusCode::FORBIDDEN);
     }
-
-    let edit_url = format!("/tournaments/{tournament_id}/edit");
 
     let registration_count = tournament::count_registrations(&mut *tx, tournament_id)
         .await

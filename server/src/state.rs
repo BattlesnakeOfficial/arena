@@ -25,6 +25,9 @@ pub struct AppState {
     pub mailer: Mailer,
     /// Discord webhook notifier (no-op until DISCORD_WEBHOOK_URL is configured)
     pub discord: DiscordNotifier,
+    /// Jev content-moderation judge (inert until TYPESAFE_API_KEY is
+    /// configured; the offline hard-block list always runs)
+    pub moderation: crate::moderation::ModerationJudge,
     /// Scoring algorithm registry
     pub scoring: std::sync::Arc<crate::scoring::ScoringRegistry>,
     /// TTL memo for the anonymous-homepage feed (see HOME_FEED_CACHE_SECS)
@@ -143,6 +146,14 @@ impl AppState {
             tracing::info!("DISCORD_WEBHOOK_URL not set, Discord notifications disabled");
         }
 
+        // Optional: Jev content moderation (disabled until configured).
+        let moderation = crate::moderation::ModerationJudge::from_config(&config.moderation);
+        if moderation.is_enabled() {
+            tracing::info!("TYPESAFE_API_KEY set, Jev moderation enabled");
+        } else {
+            tracing::info!("TYPESAFE_API_KEY not set, Jev moderation disabled");
+        }
+
         let mut scoring_registry = crate::scoring::ScoringRegistry::new();
         scoring_registry.register(Box::new(crate::scoring::weng_lin::WengLinScoring));
         scoring_registry.register(Box::new(crate::scoring::win_rate::WinRateScoring));
@@ -161,6 +172,7 @@ impl AppState {
             http_client,
             mailer,
             discord,
+            moderation,
             scoring: std::sync::Arc::new(scoring_registry),
             home_feed_cache,
         })
@@ -182,6 +194,7 @@ impl AppState {
             http_client: reqwest::Client::new(),
             mailer: crate::email::Mailer::disabled(),
             discord: crate::discord::DiscordNotifier::disabled(),
+            moderation: crate::moderation::ModerationJudge::disabled(),
             scoring: std::sync::Arc::new(crate::scoring::ScoringRegistry::new()),
             home_feed_cache: Arc::new(crate::cache::TtlCell::new(std::time::Duration::ZERO)),
         }
