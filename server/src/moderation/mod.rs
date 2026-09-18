@@ -1050,6 +1050,35 @@ mod judge_tests {
         assert_eq!(outcome.decision, Decision::Allow);
         server.verify().await;
     }
+
+    /// PR review pin: the `latency_ms` telemetry field (and the
+    /// `moderation.latency.p95` metric built on it) must measure the Jev
+    /// round trip on the success path, not the time to construct the
+    /// request future.
+    #[tokio::test]
+    async fn successful_check_reports_round_trip_latency() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(allow_all_response())
+                    .set_delay(Duration::from_millis(300)),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let outcome = judge(&server)
+            .check(FieldKind::SnakeName, "Slitherbot", true)
+            .await;
+        assert_eq!(outcome.decision, Decision::Allow);
+        assert!(
+            outcome.latency_ms >= 300.0,
+            "latency_ms should cover the ~300ms Jev round trip, got {}",
+            outcome.latency_ms
+        );
+        server.verify().await;
+    }
 }
 
 /// Handler-level moderation tests: handlers invoked directly as plain async
