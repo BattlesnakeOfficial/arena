@@ -210,11 +210,16 @@ async fn load_public_battlesnake_page(
     requested: Option<i64>,
     search: &str,
 ) -> cja::Result<PublicBattlesnakePage> {
-    let total = battlesnake::count_public_battlesnakes(pool, search).await?;
+    let mut query = battlesnake::PublicBattlesnakeQuery {
+        search,
+        excluded_owner_id: None,
+        page: 0,
+        per_page: PUBLIC_SNAKES_PER_PAGE,
+    };
+    let total = battlesnake::count_public_battlesnakes(pool, &query).await?;
     let (page, total_pages) = resolve_page(requested, total, PUBLIC_SNAKES_PER_PAGE);
-    let snakes =
-        battlesnake::get_public_battlesnakes_paginated(pool, search, page, PUBLIC_SNAKES_PER_PAGE)
-            .await?;
+    query.page = page;
+    let snakes = battlesnake::get_public_battlesnakes_paginated(pool, &query).await?;
 
     Ok(PublicBattlesnakePage {
         snakes,

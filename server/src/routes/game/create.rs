@@ -16,14 +16,87 @@ use crate::{
     customizations::chip_color,
     errors::{ServerResult, WithStatus},
     models::battlesnake::{self, Visibility},
-    models::flow::GameCreationFlow,
+    models::flow::{AddBattlesnakeResult, GameCreationFlow},
     models::game::{self, GameBoardSize, GameType},
     models::rate_limit,
     models::session,
-    routes::UuidPath,
     routes::auth::{CurrentUser, CurrentUserWithSession},
+    routes::{UuidPath, pagination::resolve_page},
     state::AppState,
 };
+
+const PUBLIC_OPPONENTS_PER_PAGE: i64 = 10;
+
+#[derive(Debug, Default, Deserialize)]
+pub struct BuilderQuery {
+    #[serde(default)]
+    pub q: String,
+    #[serde(default)]
+    pub page: Option<String>,
+}
+
+impl BuilderQuery {
+    fn requested_page(&self) -> Option<i64> {
+        self.page.as_deref().and_then(|page| page.parse().ok())
+    }
+}
+
+struct PublicOpponentPage {
+    snakes: Vec<battlesnake::PublicBattlesnakeListItem>,
+    page: i64,
+    total_pages: i64,
+    total: i64,
+}
+
+fn flow_href(flow_id: Uuid, search: &str, page: i64) -> String {
+    let mut query = url::form_urlencoded::Serializer::new(String::new());
+    if !search.is_empty() {
+        query.append_pair("q", search);
+    }
+    if page > 0 {
+        query.append_pair("page", &page.to_string());
+    }
+    let query = query.finish();
+    if query.is_empty() {
+        format!("/games/flow/{flow_id}")
+    } else {
+        format!("/games/flow/{flow_id}?{query}")
+    }
+}
+
+fn flow_action(flow_id: Uuid, suffix: &str, search: &str, page: i64) -> String {
+    let href = flow_href(flow_id, search, page);
+    let (_, query) = href.split_once('?').unwrap_or((&href, ""));
+    if query.is_empty() {
+        format!("/games/flow/{flow_id}/{suffix}")
+    } else {
+        format!("/games/flow/{flow_id}/{suffix}?{query}")
+    }
+}
+
+async fn load_public_opponents(
+    pool: &sqlx::PgPool,
+    owner_id: Uuid,
+    requested: Option<i64>,
+    search: &str,
+) -> cja::Result<PublicOpponentPage> {
+    let mut query = battlesnake::PublicBattlesnakeQuery {
+        search,
+        excluded_owner_id: Some(owner_id),
+        page: 0,
+        per_page: PUBLIC_OPPONENTS_PER_PAGE,
+    };
+    let total = battlesnake::count_public_battlesnakes(pool, &query).await?;
+    let (page, total_pages) = resolve_page(requested, total, PUBLIC_OPPONENTS_PER_PAGE);
+    query.page = page;
+    let snakes = battlesnake::get_public_battlesnakes_paginated(pool, &query).await?;
+    Ok(PublicOpponentPage {
+        snakes,
+        page,
+        total_pages,
+        total,
+    })
+}
 
 // Initial game creation page - redirect to a new flow
 #[debug_handler]
@@ -94,7 +167,7 @@ pub async fn rematch_game(
 
     flow.update(&state.db)
         .await
-        .wrap_err("Failed to update game flow")?;
+        .wrap_err("Failed to initialize game flow")?;
 
     // Redirect to the flow page so the user confirms through the builder
     Ok(Redirect::to(&format!("/games/flow/{}", flow.flow_id)).into_response())
@@ -136,6 +209,7 @@ pub async fn show_game_flow(
     State(state): State<AppState>,
     CurrentUser(user): CurrentUser,
     UuidPath(flow_id): UuidPath,
+    Query(query): Query<BuilderQuery>,
     page_factory: PageFactory,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
     // Use flash from page_factory (already extracted and cleared from DB;
@@ -184,6 +258,11 @@ pub async fn show_game_flow(
         .wrap_err("Failed to check selected battlesnakes")?;
 
     let selected_count = flow.selected_count();
+    let search = query.q.trim();
+    let public_page =
+        load_public_opponents(&state.db, user.user_id, query.requested_page(), search)
+            .await
+            .wrap_err("Failed to load public opponents")?;
 
     // Render the game creation form
     Ok(page_factory.create_page_with_flash(
@@ -209,7 +288,7 @@ pub async fn show_game_flow(
                         } @else {
                             div class="gc-rows" {
                                 @for snake in &user_battlesnakes {
-                                    (snake_row(&flow, snake))
+                                    (owned_snake_row(&flow, snake, search, public_page.page))
                                 }
                             }
                         }
@@ -217,17 +296,46 @@ pub async fn show_game_flow(
 
                     div class="section gc-section" {
                         h2 { "Public Battlesnakes" }
-                        p class="gc-sub" { "Search the community's public snakes to fill out the board." }
+                        p class="gc-sub" { "Browse the community's public snakes or search by snake name or owner." }
 
-                        form action={"/games/flow/"(flow_id)"/search"} method="get" class="gc-search" {
-                            input type="search" name="q" placeholder="Search by name..." aria-label="Search public battlesnakes" value=(flow.search_query.as_deref().unwrap_or(""));
+                        form action={"/games/flow/"(flow_id)"/search"} method="get" role="search" class="gc-search" data-discovery-action {
+                            label for="opponent-search" { "Search public opponents" }
+                            input id="opponent-search" type="search" name="q" placeholder="Snake name or owner handle" value=(search);
                             button type="submit" class="btn" { "Search" }
+                            @if !search.is_empty() {
+                                a class="btn" href=(flow_href(flow_id, "", 0)) data-discovery-action { "Clear" }
+                            }
                         }
 
-                        // If we have search results from other users, show them
-                        @if let Some(query) = &flow.search_query {
-                            @if !query.is_empty() {
-                                (render_search_results(&flow, &state.db).await)
+                        @if public_page.total == 0 {
+                            p class="gc-none" {
+                                @if search.is_empty() {
+                                    "No public opponents are available yet."
+                                } @else {
+                                    "No public opponents match your search."
+                                }
+                            }
+                        } @else {
+                            div class="gc-result-summary" {
+                                "Showing " (public_page.page * PUBLIC_OPPONENTS_PER_PAGE + 1)
+                                "–" (public_page.page * PUBLIC_OPPONENTS_PER_PAGE + public_page.snakes.len() as i64)
+                                " of " (public_page.total) " public opponents"
+                            }
+                            div class="gc-rows" {
+                                @for snake in &public_page.snakes {
+                                    (public_snake_row(&flow, snake, search, public_page.page))
+                                }
+                            }
+                            nav class="pager gc-pager" aria-label="Public opponent pages" {
+                                @if public_page.page > 0 {
+                                    a href=(flow_href(flow_id, search, public_page.page - 1)) data-discovery-action { "‹ Prev" }
+                                }
+                                @if public_page.total_pages > 1 {
+                                    span class="cur" { "Page " (public_page.page + 1) " of " (public_page.total_pages) }
+                                }
+                                @if public_page.page < public_page.total_pages - 1 {
+                                    a href=(flow_href(flow_id, search, public_page.page + 1)) data-discovery-action { "Next ›" }
+                                }
                             }
                         }
                     }
@@ -245,7 +353,7 @@ pub async fn show_game_flow(
                                     @if count > 1 {
                                         span class="badge" { "×" (count) }
                                     }
-                                    form action={"/games/flow/"(flow_id)"/remove-snake/"(snake.battlesnake_id)} method="post" {
+                                    form action=(flow_action(flow_id, &format!("remove-snake/{}", snake.battlesnake_id), search, public_page.page)) method="post" data-discovery-action {
                                         button type="submit" class="gc-x" aria-label={"Remove " (snake.name) " from lineup"} title="Remove from lineup" { "✕" }
                                     }
                                 }
@@ -254,7 +362,7 @@ pub async fn show_game_flow(
                                 div class="gc-slot gc-unavailable" data-unavailable-id=(selection.battlesnake_id) {
                                     span class="gc-slot-name" { "Unavailable snake" }
                                     span class="badge" { "×" (selection.occurrence_count) }
-                                    form action={"/games/flow/"(flow_id)"/remove-snake/"(selection.battlesnake_id)} method="post" {
+                                    form action=(flow_action(flow_id, &format!("remove-snake/{}", selection.battlesnake_id), search, public_page.page)) method="post" data-discovery-action {
                                         button type="submit" class="gc-x" aria-label="Remove one unavailable snake from lineup" title="Remove one occurrence" { "✕" }
                                     }
                                 }
@@ -272,7 +380,7 @@ pub async fn show_game_flow(
                                     "survival run."
                                 }
                             }
-                            form action={"/games/flow/"(flow_id)"/reset"} method="post" class="gc-reset" {
+                            form action=(flow_action(flow_id, "reset", search, public_page.page)) method="post" class="gc-reset" data-discovery-action {
                                 button type="submit" class="btn sm" { "Reset Selection" }
                             }
                         } @else {
@@ -291,6 +399,11 @@ pub async fn show_game_flow(
                                     option value="11x11" selected[flow.board_size == GameBoardSize::Medium] { "Medium (11x11)" }
                                     option value="19x19" selected[flow.board_size == GameBoardSize::Large] { "Large (19x19)" }
                                 }
+                            }
+                            div id="configure-error" class="gc-configure-error" role="alert" hidden {
+                                span { "Could not save game settings." }
+                                button type="button" class="btn sm" data-configure-retry { "Retry" }
+                                button type="button" class="btn sm" data-configure-cancel { "Cancel" }
                             }
                             div class="field" {
                                 label for="game_type" { "Game Type" }
@@ -320,16 +433,121 @@ pub async fn show_game_flow(
             script {
                 (maud::PreEscaped(r#"
                 (function () {
-                  var form = document.getElementById('game-settings');
-                  if (!form) return;
-                  form.querySelectorAll('select').forEach(function (el) {
-                    el.addEventListener('change', function () {
-                      fetch(form.dataset.configureUrl, {
-                        method: 'POST',
-                        body: new URLSearchParams(new FormData(form)),
-                        keepalive: true,
+                  var settings = document.getElementById('game-settings');
+                  var alert = document.getElementById('configure-error');
+                  if (!settings || !alert) return;
+                  var editVersion = 0;
+                  var persistedVersion = 0;
+                  var latest = snapshot();
+                  var inFlight = false;
+                  var paused = false;
+                  var retained = null;
+
+                  function snapshot() {
+                    return {
+                      board_size: settings.elements.board_size.value,
+                      game_type: settings.elements.game_type.value
+                    };
+                  }
+                  function setActionsDisabled(disabled) {
+                    document.querySelectorAll('[data-discovery-action]').forEach(function (el) {
+                      if (el.matches('a')) {
+                        el.setAttribute('aria-disabled', disabled ? 'true' : 'false');
+                        el.style.pointerEvents = disabled ? 'none' : '';
+                      }
+                      el.querySelectorAll('button, input').forEach(function (control) {
+                        control.disabled = disabled;
                       });
                     });
+                  }
+                  function captureForm(form, submitter) {
+                    var data = submitter ? new FormData(form, submitter) : new FormData(form);
+                    return {
+                      kind: 'form', action: form.action,
+                      method: (form.method || 'get').toLowerCase(),
+                      entries: Array.from(data.entries())
+                    };
+                  }
+                  function run(action) {
+                    retained = null;
+                    setActionsDisabled(false);
+                    if (action.kind === 'link') {
+                      window.location.assign(action.href);
+                      return;
+                    }
+                    var form = document.createElement('form');
+                    form.method = action.method;
+                    form.action = action.action;
+                    action.entries.forEach(function (entry) {
+                      var input = document.createElement('input');
+                      input.type = 'hidden'; input.name = entry[0]; input.value = entry[1];
+                      form.appendChild(input);
+                    });
+                    document.body.appendChild(form);
+                    form.submit();
+                  }
+                  function maybeRun() {
+                    if (retained && !paused && !inFlight && persistedVersion === editVersion) {
+                      run(retained);
+                    }
+                  }
+                  function pump() {
+                    if (paused || inFlight || persistedVersion === editVersion) {
+                      maybeRun();
+                      return;
+                    }
+                    var sendingVersion = editVersion;
+                    var sending = latest;
+                    var controller = new AbortController();
+                    var timer = setTimeout(function () { controller.abort(); }, 15000);
+                    inFlight = true;
+                    fetch(settings.dataset.configureUrl, {
+                      method: 'POST',
+                      body: new URLSearchParams(sending),
+                      signal: controller.signal
+                    }).then(function (response) {
+                      if (!response.ok) throw new Error('configure failed');
+                      persistedVersion = Math.max(persistedVersion, sendingVersion);
+                    }).catch(function () {
+                      paused = true;
+                      alert.hidden = false;
+                    }).finally(function () {
+                      clearTimeout(timer);
+                      inFlight = false;
+                      if (!paused) pump();
+                    });
+                  }
+                  settings.querySelectorAll('select').forEach(function (el) {
+                    el.addEventListener('change', function () {
+                      editVersion += 1;
+                      latest = snapshot();
+                      pump();
+                    });
+                  });
+                  document.addEventListener('click', function (event) {
+                    var link = event.target.closest('a[data-discovery-action]');
+                    if (!link) return;
+                    event.preventDefault();
+                    if (retained) return;
+                    retained = {kind: 'link', href: link.href};
+                    setActionsDisabled(true);
+                    pump();
+                  });
+                  document.addEventListener('submit', function (event) {
+                    var form = event.target.closest('form[data-discovery-action]');
+                    if (!form) return;
+                    event.preventDefault();
+                    if (retained) return;
+                    retained = captureForm(form, event.submitter);
+                    setActionsDisabled(true);
+                    pump();
+                  });
+                  alert.querySelector('[data-configure-retry]').addEventListener('click', function () {
+                    paused = false; alert.hidden = true; pump();
+                  });
+                  alert.querySelector('[data-configure-cancel]').addEventListener('click', function () {
+                    retained = null; paused = false; alert.hidden = true;
+                    setActionsDisabled(false); pump();
                   });
                 })();
                 "#))
@@ -341,7 +559,12 @@ pub async fn show_game_flow(
 
 /// One selectable snake row — shared by "Your Battlesnakes" and search
 /// results. The `card` class is load-bearing: e2e specs locate rows by it.
-fn snake_row(flow: &GameCreationFlow, snake: &battlesnake::Battlesnake) -> maud::Markup {
+fn owned_snake_row(
+    flow: &GameCreationFlow,
+    snake: &battlesnake::Battlesnake,
+    search: &str,
+    page: i64,
+) -> maud::Markup {
     let count = flow.battlesnake_count(&snake.battlesnake_id);
     let can_add = flow.selected_count() < 4;
     html! {
@@ -358,12 +581,51 @@ fn snake_row(flow: &GameCreationFlow, snake: &battlesnake::Battlesnake) -> maud:
             }
             div class="gc-actions" {
                 @if can_add {
-                    form action={"/games/flow/"(flow.flow_id)"/add-snake/"(snake.battlesnake_id)} method="post" {
+                    form action=(flow_action(flow.flow_id, &format!("add-snake/{}", snake.battlesnake_id), search, page)) method="post" data-discovery-action {
                         button type="submit" class="btn sm" { "Add to Game" }
                     }
                 }
                 @if count > 0 {
-                    form action={"/games/flow/"(flow.flow_id)"/remove-snake/"(snake.battlesnake_id)} method="post" {
+                    form action=(flow_action(flow.flow_id, &format!("remove-snake/{}", snake.battlesnake_id), search, page)) method="post" data-discovery-action {
+                        button type="submit" class="btn sm danger" { "Remove" }
+                    }
+                }
+                @if !can_add && count == 0 {
+                    button type="button" class="btn sm" disabled { "Max reached" }
+                }
+            }
+        }
+    }
+}
+
+fn public_snake_row(
+    flow: &GameCreationFlow,
+    snake: &battlesnake::PublicBattlesnakeListItem,
+    search: &str,
+    page: i64,
+) -> maud::Markup {
+    let count = flow.battlesnake_count(&snake.battlesnake_id);
+    let can_add = flow.selected_count() < 4;
+    html! {
+        div class={"card gc-row gc-public-row" @if count > 0 { " sel" }} {
+            span class="chip" style={"background:" (chip_color(&snake.color))} {}
+            div class="gc-who" {
+                span class="gc-name" {
+                    a href={"/battlesnakes/"(snake.battlesnake_id)"/profile"} { (snake.name) }
+                    @if count > 0 {
+                        span class="badge live" { "In lineup" @if count > 1 { " ×" (count) } }
+                    }
+                }
+                span class="gc-owner" { "by " a href={"/users/"(snake.owner_login)} { (snake.owner_login) } }
+            }
+            div class="gc-actions" {
+                @if can_add {
+                    form action=(flow_action(flow.flow_id, &format!("add-snake/{}", snake.battlesnake_id), search, page)) method="post" data-discovery-action {
+                        button type="submit" class="btn sm" { "Add to Game" }
+                    }
+                }
+                @if count > 0 {
+                    form action=(flow_action(flow.flow_id, &format!("remove-snake/{}", snake.battlesnake_id), search, page)) method="post" data-discovery-action {
                         button type="submit" class="btn sm danger" { "Remove" }
                     }
                 }
@@ -407,9 +669,15 @@ pub async fn configure_game(
         flow.game_type = game_type;
     }
 
-    flow.update(&state.db)
-        .await
-        .wrap_err("Failed to update game flow")?;
+    GameCreationFlow::update_settings(
+        &state.db,
+        flow.flow_id,
+        flow.user_id,
+        &flow.board_size,
+        &flow.game_type,
+    )
+    .await
+    .wrap_err("Failed to update game flow")?;
 
     Ok(Redirect::to(&format!("/games/flow/{}", flow_id)).into_response())
 }
@@ -420,25 +688,18 @@ pub async fn reset_snake_selections(
     State(state): State<AppState>,
     CurrentUser(user): CurrentUser,
     Path(flow_id): Path<Uuid>,
+    Query(query): Query<BuilderQuery>,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
-    // Get the flow
-    let Some(mut flow) = GameCreationFlow::get_by_id(&state.db, flow_id, user.user_id)
-        .await
-        .wrap_err("Failed to get game flow")?
-    else {
-        return Ok(Redirect::to(&format!("/games/flow/{flow_id}")).into_response());
-    };
-
-    // Clear the selections
-    flow.selected_battlesnake_ids.clear();
-
-    // Update the flow
-    flow.update(&state.db)
+    GameCreationFlow::reset_selections(&state.db, flow_id, user.user_id, &[])
         .await
         .wrap_err("Failed to update game flow")?;
 
-    // Redirect back to the flow page
-    Ok(Redirect::to(&format!("/games/flow/{}", flow_id)).into_response())
+    Ok(Redirect::to(&flow_href(
+        flow_id,
+        query.q.trim(),
+        query.requested_page().unwrap_or(0),
+    ))
+    .into_response())
 }
 
 // Add a battlesnake to the selection
@@ -447,54 +708,38 @@ pub async fn add_battlesnake(
     State(state): State<AppState>,
     CurrentUserWithSession { user, session }: CurrentUserWithSession,
     Path((flow_id, battlesnake_id)): Path<(Uuid, Uuid)>,
+    Query(query): Query<BuilderQuery>,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
-    // Get the flow
-    let Some(mut flow) = GameCreationFlow::get_by_id(&state.db, flow_id, user.user_id)
-        .await
-        .wrap_err("Failed to get game flow")?
-    else {
-        return Ok(Redirect::to(&format!("/games/flow/{flow_id}")).into_response());
+    let outcome = GameCreationFlow::append_eligible_battlesnake(
+        &state.db,
+        flow_id,
+        user.user_id,
+        battlesnake_id,
+    )
+    .await
+    .wrap_err("Failed to add battlesnake")?;
+    let warning = match outcome {
+        AddBattlesnakeResult::Full => Some("Maximum of 4 battlesnakes allowed"),
+        AddBattlesnakeResult::Unavailable => Some("Snake is unavailable"),
+        AddBattlesnakeResult::Added | AddBattlesnakeResult::FlowMissing => None,
     };
-
-    let eligible =
-        battlesnake::eligible_battlesnake_ids(&state.db, user.user_id, &[battlesnake_id])
-            .await
-            .wrap_err("Failed to validate battlesnake")?;
-    if !eligible.contains(&battlesnake_id) {
+    if let Some(message) = warning {
         session::set_flash_message(
             &state.db,
             session.session_id,
-            "Snake is unavailable".to_string(),
-            session::FLASH_TYPE_WARNING,
-        )
-        .await
-        .wrap_err("Failed to set flash message")?;
-        return Ok(Redirect::to(&format!("/games/flow/{flow_id}")).into_response());
-    }
-
-    // Add the battlesnake
-    let added = flow.add_battlesnake(battlesnake_id);
-
-    // Set appropriate flash message if the add fails
-    if !added && flow.selected_count() >= 4 {
-        // Set an error flash message in the session
-        session::set_flash_message(
-            &state.db,
-            session.session_id,
-            "Maximum of 4 battlesnakes allowed".to_string(),
+            message.to_string(),
             session::FLASH_TYPE_WARNING,
         )
         .await
         .wrap_err("Failed to set flash message")?;
     }
 
-    // Update the flow
-    flow.update(&state.db)
-        .await
-        .wrap_err("Failed to update game flow")?;
-
-    // Redirect back to the flow page
-    Ok(Redirect::to(&format!("/games/flow/{}", flow_id)).into_response())
+    Ok(Redirect::to(&flow_href(
+        flow_id,
+        query.q.trim(),
+        query.requested_page().unwrap_or(0),
+    ))
+    .into_response())
 }
 
 // Remove a battlesnake from the selection
@@ -503,25 +748,18 @@ pub async fn remove_battlesnake(
     State(state): State<AppState>,
     CurrentUser(user): CurrentUser,
     Path((flow_id, battlesnake_id)): Path<(Uuid, Uuid)>,
+    Query(query): Query<BuilderQuery>,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
-    // Get the flow
-    let Some(mut flow) = GameCreationFlow::get_by_id(&state.db, flow_id, user.user_id)
-        .await
-        .wrap_err("Failed to get game flow")?
-    else {
-        return Ok(Redirect::to(&format!("/games/flow/{flow_id}")).into_response());
-    };
-
-    // Remove the battlesnake
-    flow.remove_battlesnake(battlesnake_id);
-
-    // Update the flow
-    flow.update(&state.db)
+    GameCreationFlow::remove_last_battlesnake(&state.db, flow_id, user.user_id, battlesnake_id)
         .await
         .wrap_err("Failed to update game flow")?;
 
-    // Redirect back to the flow page
-    Ok(Redirect::to(&format!("/games/flow/{}", flow_id)).into_response())
+    Ok(Redirect::to(&flow_href(
+        flow_id,
+        query.q.trim(),
+        query.requested_page().unwrap_or(0),
+    ))
+    .into_response())
 }
 
 // Search for public battlesnakes
@@ -538,23 +776,15 @@ pub async fn search_battlesnakes(
     Query(query): Query<SearchQuery>,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
     // Get the flow
-    let Some(mut flow) = GameCreationFlow::get_by_id(&state.db, flow_id, user.user_id)
+    let Some(_flow) = GameCreationFlow::get_by_id(&state.db, flow_id, user.user_id)
         .await
         .wrap_err("Failed to get game flow")?
     else {
         return Ok(Redirect::to(&format!("/games/flow/{flow_id}")).into_response());
     };
 
-    // Update search query
-    flow.search_query = query.q;
-
-    // Update the flow
-    flow.update(&state.db)
-        .await
-        .wrap_err("Failed to update game flow")?;
-
-    // Redirect back to the flow page
-    Ok(Redirect::to(&format!("/games/flow/{}", flow_id)).into_response())
+    let search = query.q.unwrap_or_default();
+    Ok(Redirect::to(&flow_href(flow_id, search.trim(), 0)).into_response())
 }
 
 // Create the game with selected snakes
@@ -622,10 +852,20 @@ pub async fn create_game(
         flow.game_type = game_type;
     }
 
-    // Update the flow with settings changes
-    flow.update(&state.db)
-        .await
-        .wrap_err("Failed to update game flow")?;
+    // Persist only settings and continue from the fresh row so a concurrent
+    // lineup mutation can never be overwritten by a stale flow snapshot.
+    let Some(flow) = GameCreationFlow::update_settings(
+        &state.db,
+        flow.flow_id,
+        flow.user_id,
+        &flow.board_size,
+        &flow.game_type,
+    )
+    .await
+    .wrap_err("Failed to update game flow")?
+    else {
+        return Ok(Redirect::to(&format!("/games/flow/{flow_id}")).into_response());
+    };
 
     // Validate and create the game
     let validate_result = flow.validate();
@@ -697,24 +937,33 @@ pub async fn create_game(
     }
 }
 
-// Helper function to render search results
-async fn render_search_results(flow: &GameCreationFlow, db: &sqlx::PgPool) -> maud::Markup {
-    // Execute the search
-    let search_results = flow
-        .search_public_battlesnakes(db)
-        .await
-        .unwrap_or_default();
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    html! {
-        @if search_results.is_empty() {
-            p class="gc-none" { "No public battlesnakes found matching your search." }
-        } @else {
-            h3 class="gc-results-head" { "Search Results" }
-            div class="gc-rows" {
-                @for snake in &search_results {
-                    (snake_row(flow, snake))
-                }
-            }
+    #[test]
+    fn malformed_builder_pages_fall_back_to_the_first_page() {
+        for page in ["garbage", "999999999999999999999999999", ""] {
+            let query = BuilderQuery {
+                q: String::new(),
+                page: Some(page.to_string()),
+            };
+            assert_eq!(query.requested_page(), None);
         }
+        let negative = BuilderQuery {
+            q: String::new(),
+            page: Some("-4".to_string()),
+        };
+        assert_eq!(negative.requested_page(), Some(-4));
+    }
+
+    #[test]
+    fn builder_urls_round_trip_reserved_search_characters() {
+        let flow_id = Uuid::nil();
+        let href = flow_href(flow_id, " %_&+雪 ", 2);
+        let url = url::Url::parse(&format!("https://example.test{href}")).unwrap();
+        let values: std::collections::HashMap<_, _> = url.query_pairs().collect();
+        assert_eq!(values.get("q").unwrap(), " %_&+雪 ");
+        assert_eq!(values.get("page").unwrap(), "2");
     }
 }

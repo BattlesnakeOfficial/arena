@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT EXISTS(\n                SELECT 1 FROM battlesnakes\n                WHERE battlesnake_id = $1\n                  AND (user_id = $2 OR visibility = 'public')\n            ) AS \"eligible!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "eligible!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "67383f6e171a919c790246ef918c3a3a412ba3748579225a8ab9ed12e48266c6"
+}

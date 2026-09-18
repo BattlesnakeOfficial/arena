@@ -1101,7 +1101,8 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
 .gc-empty p:first-child { font-weight: 600; }
 
 /* public snake search */
-.gc-search { display: flex; gap: 8px; margin-top: 16px; max-width: 480px; }
+.gc-search { display: flex; gap: 8px; margin-top: 16px; max-width: 620px; flex-wrap: wrap; }
+.gc-search label { flex-basis: 100%; font-weight: 600; }
 .gc-search input {
   flex: 1;
   min-width: 0;
@@ -1117,6 +1118,22 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
 .gc-search input:focus-visible { outline: none; border-color: var(--pink); box-shadow: 0 0 0 3px var(--pink-wash); }
 .gc-results-head { margin-top: 26px; }
 .gc-none { color: var(--muted); font-size: 14.5px; margin-top: 18px; }
+.gc-owner, .gc-result-summary { color: var(--muted); font-size: 14px; }
+.gc-owner { display: block; margin-top: 3px; }
+.gc-result-summary { margin-top: 18px; }
+.gc-pager { margin-top: 16px; }
+.gc-configure-error {
+  border: 1px solid var(--pink);
+  border-radius: 10px;
+  background: var(--pink-wash);
+  color: var(--pink-deep);
+  padding: 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.gc-configure-error[hidden] { display: none; }
 
 /* lineup rail */
 .gc-slots { margin-top: 14px; }
@@ -1190,6 +1207,9 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
   .gc-actions form { flex: 1; }
   .gc-actions .btn { width: 100%; padding: 10px 14px; }
   .gc-search { max-width: none; }
+  .gc-search input { flex-basis: 100%; }
+  .gc-row, .gc-who, .gc-owner { min-width: 0; max-width: 100%; }
+  .gc-name, .gc-owner { overflow-wrap: anywhere; }
   /* Keep mobile controls tappable and avoid iOS zooming small form text. */
   .btn, .pager a { min-height: 44px; min-width: 44px; display: inline-flex; align-items: center; justify-content: center; }
   .field input, .field select, .field textarea, .field input[type="url"], .gc-search input { font-size: 16px; }

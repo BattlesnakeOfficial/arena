@@ -28,6 +28,14 @@ pub struct UnavailableSelection {
     pub occurrence_count: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddBattlesnakeResult {
+    Added,
+    Full,
+    Unavailable,
+    FlowMissing,
+}
+
 impl GameCreationFlow {
     // Create a new flow for a user
     pub async fn create_for_user(pool: &PgPool, user_id: Uuid) -> cja::Result<Self> {
@@ -175,6 +183,143 @@ impl GameCreationFlow {
         Ok(flow.into())
     }
 
+    pub async fn update_settings(
+        pool: &PgPool,
+        flow_id: Uuid,
+        user_id: Uuid,
+        board_size: &GameBoardSize,
+        game_type: &GameType,
+    ) -> cja::Result<Option<Self>> {
+        let flow = sqlx::query_as!(
+            GameCreationFlowRaw,
+            r#"
+            UPDATE game_flows
+            SET board_size = $1, game_type = $2
+            WHERE flow_id = $3 AND user_id = $4
+            RETURNING flow_id, board_size, game_type, selected_battlesnakes,
+                      search_query, user_id, created_at, updated_at
+            "#,
+            board_size.as_str(),
+            game_type.as_str(),
+            flow_id,
+            user_id
+        )
+        .fetch_optional(pool)
+        .await
+        .wrap_err("Failed to update game flow settings")?;
+        Ok(flow.map(Into::into))
+    }
+
+    pub async fn reset_selections(
+        pool: &PgPool,
+        flow_id: Uuid,
+        user_id: Uuid,
+        selections: &[Uuid],
+    ) -> cja::Result<Option<Self>> {
+        let flow = sqlx::query_as!(
+            GameCreationFlowRaw,
+            r#"
+            UPDATE game_flows SET selected_battlesnakes = $1
+            WHERE flow_id = $2 AND user_id = $3
+            RETURNING flow_id, board_size, game_type, selected_battlesnakes,
+                      search_query, user_id, created_at, updated_at
+            "#,
+            selections,
+            flow_id,
+            user_id
+        )
+        .fetch_optional(pool)
+        .await
+        .wrap_err("Failed to reset game flow selections")?;
+        Ok(flow.map(Into::into))
+    }
+
+    pub async fn append_eligible_battlesnake(
+        pool: &PgPool,
+        flow_id: Uuid,
+        user_id: Uuid,
+        battlesnake_id: Uuid,
+    ) -> cja::Result<AddBattlesnakeResult> {
+        let mut transaction = pool.begin().await?;
+        let selected = sqlx::query_scalar!(
+            r#"SELECT selected_battlesnakes FROM game_flows
+               WHERE flow_id = $1 AND user_id = $2 FOR UPDATE"#,
+            flow_id,
+            user_id
+        )
+        .fetch_optional(&mut *transaction)
+        .await
+        .wrap_err("Failed to lock game flow")?;
+
+        let Some(selected) = selected else {
+            return Ok(AddBattlesnakeResult::FlowMissing);
+        };
+        if selected.len() >= 4 {
+            return Ok(AddBattlesnakeResult::Full);
+        }
+
+        let eligible = sqlx::query_scalar!(
+            r#"SELECT EXISTS(
+                SELECT 1 FROM battlesnakes
+                WHERE battlesnake_id = $1
+                  AND (user_id = $2 OR visibility = 'public')
+            ) AS "eligible!""#,
+            battlesnake_id,
+            user_id
+        )
+        .fetch_one(&mut *transaction)
+        .await
+        .wrap_err("Failed to validate battlesnake")?;
+        if !eligible {
+            return Ok(AddBattlesnakeResult::Unavailable);
+        }
+
+        sqlx::query!(
+            r#"UPDATE game_flows
+               SET selected_battlesnakes = array_append(selected_battlesnakes, $1)
+               WHERE flow_id = $2 AND user_id = $3"#,
+            battlesnake_id,
+            flow_id,
+            user_id
+        )
+        .execute(&mut *transaction)
+        .await
+        .wrap_err("Failed to append battlesnake")?;
+        transaction.commit().await?;
+        Ok(AddBattlesnakeResult::Added)
+    }
+
+    pub async fn remove_last_battlesnake(
+        pool: &PgPool,
+        flow_id: Uuid,
+        user_id: Uuid,
+        battlesnake_id: Uuid,
+    ) -> cja::Result<bool> {
+        let result = sqlx::query!(
+            r#"
+            UPDATE game_flows AS flow
+            SET selected_battlesnakes = (
+                SELECT COALESCE(array_agg(item.id ORDER BY item.ord), ARRAY[]::uuid[])
+                FROM unnest(flow.selected_battlesnakes) WITH ORDINALITY AS item(id, ord)
+                WHERE item.ord != (
+                    SELECT MAX(match_item.ord)
+                    FROM unnest(flow.selected_battlesnakes) WITH ORDINALITY AS match_item(id, ord)
+                    WHERE match_item.id = $1
+                )
+            )
+            WHERE flow.flow_id = $2 AND flow.user_id = $3
+              AND $1 = ANY(flow.selected_battlesnakes)
+            "#,
+            battlesnake_id,
+            flow_id,
+            user_id
+        )
+        .execute(pool)
+        .await
+        .wrap_err("Failed to remove battlesnake")?;
+        Ok(result.rows_affected() == 1)
+    }
+
     // Delete a flow
     pub async fn delete(pool: &PgPool, flow_id: Uuid, user_id: Uuid) -> cja::Result<()> {
         sqlx::query!(
@@ -287,51 +432,6 @@ impl GameCreationFlow {
         battlesnake::get_battlesnakes_by_user_id(pool, self.user_id)
             .await
             .wrap_err("Failed to get user's battlesnakes")
-    }
-
-    // Search for public battlesnakes
-    pub async fn search_public_battlesnakes(&self, pool: &PgPool) -> cja::Result<Vec<Battlesnake>> {
-        if let Some(query) = &self.search_query {
-            if query.is_empty() {
-                return Ok(Vec::new());
-            }
-
-            // Search for public battlesnakes by name (case-insensitive)
-            // This SQL query finds public battlesnakes that match the search query
-            // and are not owned by the current user
-            let battlesnakes = sqlx::query_as!(
-                Battlesnake,
-                r#"
-                SELECT
-                    battlesnake_id,
-                    user_id,
-                    name,
-                    url,
-                    visibility as "visibility: _",
-                    color,
-                    head,
-                    tail,
-                    created_at,
-                    updated_at
-                FROM battlesnakes
-                WHERE
-                    visibility = 'public'
-                    AND user_id != $1
-                    AND name ILIKE $2
-                ORDER BY name ASC
-                LIMIT 10
-                "#,
-                self.user_id,
-                format!("%{}%", query)
-            )
-            .fetch_all(pool)
-            .await
-            .wrap_err("Failed to search public battlesnakes")?;
-
-            Ok(battlesnakes)
-        } else {
-            Ok(Vec::new())
-        }
     }
 
     // Get details of the selected battlesnakes
@@ -699,6 +799,107 @@ mod tests {
         assert_eq!(persisted.board_size, GameBoardSize::Medium);
         assert_eq!(persisted.game_type, GameType::Standard);
 
+        Ok(())
+    }
+
+    async fn persisted_fixture(pool: &PgPool) -> cja::Result<(Uuid, Uuid, Uuid)> {
+        let user: Uuid = sqlx::query_scalar(
+            "INSERT INTO users (external_github_id, github_login, github_access_token)
+             VALUES (991282, 'mutation-owner', 'token') RETURNING user_id",
+        )
+        .fetch_one(pool)
+        .await?;
+        let snake: Uuid = sqlx::query_scalar(
+            "INSERT INTO battlesnakes (user_id, name, url, visibility)
+             VALUES ($1, 'Mutation snake', 'https://example.com', 'private')
+             RETURNING battlesnake_id",
+        )
+        .bind(user)
+        .fetch_one(pool)
+        .await?;
+        let flow = GameCreationFlow::create_for_user(pool, user).await?;
+        Ok((user, snake, flow.flow_id))
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn field_specific_updates_do_not_overwrite_each_other(pool: PgPool) -> cja::Result<()> {
+        let (user, snake, flow_id) = persisted_fixture(&pool).await?;
+        assert_eq!(
+            GameCreationFlow::append_eligible_battlesnake(&pool, flow_id, user, snake).await?,
+            AddBattlesnakeResult::Added
+        );
+        GameCreationFlow::update_settings(
+            &pool,
+            flow_id,
+            user,
+            &GameBoardSize::Large,
+            &GameType::Royale,
+        )
+        .await?;
+        let flow = GameCreationFlow::get_by_id(&pool, flow_id, user)
+            .await?
+            .unwrap();
+        assert_eq!(flow.selected_battlesnake_ids, vec![snake]);
+        assert_eq!(flow.board_size, GameBoardSize::Large);
+        assert_eq!(flow.game_type, GameType::Royale);
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn atomic_add_and_remove_preserve_duplicates_and_precedence(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        let (user, a, flow_id) = persisted_fixture(&pool).await?;
+        let b: Uuid = sqlx::query_scalar(
+            "INSERT INTO battlesnakes (user_id, name, url, visibility)
+             VALUES ($1, 'Second snake', 'https://example.com/b', 'private')
+             RETURNING battlesnake_id",
+        )
+        .bind(user)
+        .fetch_one(&pool)
+        .await?;
+        for snake in [a, b, a] {
+            assert_eq!(
+                GameCreationFlow::append_eligible_battlesnake(&pool, flow_id, user, snake).await?,
+                AddBattlesnakeResult::Added
+            );
+        }
+        assert!(GameCreationFlow::remove_last_battlesnake(&pool, flow_id, user, a).await?);
+        let flow = GameCreationFlow::get_by_id(&pool, flow_id, user)
+            .await?
+            .unwrap();
+        assert_eq!(flow.selected_battlesnake_ids, vec![a, b]);
+        assert!(
+            !GameCreationFlow::remove_last_battlesnake(&pool, flow_id, user, Uuid::new_v4())
+                .await?
+        );
+
+        GameCreationFlow::reset_selections(&pool, flow_id, user, &[a, a, a, a]).await?;
+        assert_eq!(
+            GameCreationFlow::append_eligible_battlesnake(&pool, flow_id, user, Uuid::new_v4())
+                .await?,
+            AddBattlesnakeResult::Full
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn concurrent_appends_never_exceed_four(pool: PgPool) -> cja::Result<()> {
+        let (user, snake, flow_id) = persisted_fixture(&pool).await?;
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let pool = pool.clone();
+            tasks.push(tokio::spawn(async move {
+                GameCreationFlow::append_eligible_battlesnake(&pool, flow_id, user, snake).await
+            }));
+        }
+        for task in tasks {
+            task.await??;
+        }
+        let flow = GameCreationFlow::get_by_id(&pool, flow_id, user)
+            .await?
+            .unwrap();
+        assert_eq!(flow.selected_battlesnake_ids.len(), 4);
         Ok(())
     }
 }

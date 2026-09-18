@@ -1,4 +1,36 @@
 import { test, expect, createMockUser } from '../fixtures/test';
+import { query } from '../fixtures/db';
+
+async function seedOpponentCatalog(prefix: string, count: number) {
+  const login = `${prefix}_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
+  const externalId = Date.now() * 1000 + Math.floor(Math.random() * 1000);
+  const [owner] = await query<{ user_id: string }>(
+    `INSERT INTO users (external_github_id, github_login, github_access_token)
+     VALUES ($1, $2, 'test-token') RETURNING user_id`,
+    [externalId, login],
+  );
+  const snakes: { battlesnake_id: string; name: string }[] = [];
+  for (let index = 0; index < count; index += 1) {
+    const name = `${prefix} Snake ${index.toString().padStart(2, '0')}`;
+    const [snake] = await query<{ battlesnake_id: string }>(
+      `INSERT INTO battlesnakes (user_id, name, url, visibility)
+       VALUES ($1, $2, $3, 'public') RETURNING battlesnake_id`,
+      [owner.user_id, name, `https://example.com/${index}`],
+    );
+    snakes.push({ battlesnake_id: snake.battlesnake_id, name });
+  }
+  await query(
+    `INSERT INTO battlesnakes (user_id, name, url, visibility)
+     VALUES ($1, $2, 'https://example.com/private', 'private')`,
+    [owner.user_id, `${prefix} Hidden`],
+  );
+  return { ownerId: owner.user_id, login, snakes };
+}
+
+async function removeOpponentCatalog(ownerId: string) {
+  await query('DELETE FROM battlesnakes WHERE user_id = $1', [ownerId]);
+  await query('DELETE FROM users WHERE user_id = $1', [ownerId]);
+}
 
 test.describe('Create Game', () => {
   test('can create a game with one battlesnake', async ({ authenticatedPage }) => {
@@ -283,11 +315,11 @@ test.describe('Create Game', () => {
     await authenticatedPage.goto('/games/new');
 
     // Search for the public snake from first user
-    await authenticatedPage.getByPlaceholder('Search by name...').fill(publicSnakeName);
+    await authenticatedPage.getByLabel('Search public opponents').fill(publicSnakeName);
     await authenticatedPage.getByRole('button', { name: 'Search' }).click();
 
     // Should see search results
-    await expect(authenticatedPage.getByRole('heading', { name: 'Search Results' })).toBeVisible();
+    await expect(authenticatedPage.getByText(/Showing 1–1 of 1 public opponents/)).toBeVisible();
     await expect(authenticatedPage.getByText(publicSnakeName)).toBeVisible();
 
     // Add the public snake
@@ -308,6 +340,59 @@ test.describe('Create Game', () => {
     await expect(authenticatedPage).toHaveURL(/\/games\/[0-9a-f-]+$/);
     await expect(authenticatedPage.getByText(publicSnakeName)).toBeVisible();
     await expect(authenticatedPage.getByText(ownSnakeName)).toBeVisible();
+  });
+
+  test('browses, searches, pages, clears, and adds public opponents in one flow', async ({ authenticatedPage }) => {
+    const catalog = await seedOpponentCatalog('BuilderCatalog', 12);
+    try {
+      await authenticatedPage.goto('/games/new');
+      const flowPath = new URL(authenticatedPage.url()).pathname;
+      await expect(authenticatedPage.getByText(catalog.snakes[0].name, { exact: true })).toBeVisible();
+      await expect(authenticatedPage.getByText(`${catalog.snakes[0].name.split(' Snake')[0]} Hidden`)).not.toBeVisible();
+      await expect(authenticatedPage.getByRole('link', { name: catalog.login, exact: true }).first()).toBeVisible();
+      await expect(authenticatedPage.getByText(/Showing 1–10 of 12 public opponents/)).toBeVisible();
+
+      await authenticatedPage.getByRole('link', { name: 'Next ›' }).click();
+      await expect(authenticatedPage).toHaveURL(/page=1/);
+      await expect(authenticatedPage.getByText(catalog.snakes[10].name, { exact: true })).toBeVisible();
+      expect(new URL(authenticatedPage.url()).pathname).toBe(flowPath);
+
+      const pageTwoRow = authenticatedPage.locator('.gc-public-row', { hasText: catalog.snakes[10].name });
+      await pageTwoRow.getByRole('button', { name: 'Add to Game' }).click();
+      await expect(authenticatedPage).toHaveURL(/page=1/);
+      await expect(pageTwoRow.getByText('In lineup')).toBeVisible();
+      await pageTwoRow.getByRole('button', { name: 'Add to Game' }).click();
+      await expect(pageTwoRow.getByText('In lineup ×2')).toBeVisible();
+
+      await authenticatedPage.getByLabel('Search public opponents').fill(catalog.snakes[3].name.toLowerCase());
+      await authenticatedPage.getByRole('button', { name: 'Search' }).click();
+      await expect(authenticatedPage).toHaveURL(/q=/);
+      await expect(authenticatedPage.getByText(catalog.snakes[3].name, { exact: true })).toBeVisible();
+      expect(new URL(authenticatedPage.url()).pathname).toBe(flowPath);
+
+      await authenticatedPage.getByLabel('Search public opponents').fill(catalog.login.toUpperCase());
+      await authenticatedPage.getByRole('button', { name: 'Search' }).click();
+      await expect(authenticatedPage.getByText(/Showing 1–10 of 12 public opponents/)).toBeVisible();
+      await authenticatedPage.getByRole('link', { name: 'Clear' }).click();
+      await expect.poll(() => {
+        const url = new URL(authenticatedPage.url());
+        return `${url.pathname}${url.search}`;
+      }).toBe(flowPath);
+      await expect(authenticatedPage.getByText('You have selected 2 of 4 possible battlesnakes.')).toBeVisible();
+
+      await authenticatedPage.setViewportSize({ width: 375, height: 812 });
+      const dimensions = await authenticatedPage.evaluate(() => ({
+        scrollWidth: document.documentElement.scrollWidth,
+        clientWidth: document.documentElement.clientWidth,
+        inputSize: getComputedStyle(document.querySelector('#opponent-search')!).fontSize,
+        searchHeight: (document.querySelector('.gc-search button') as HTMLElement).getBoundingClientRect().height,
+      }));
+      expect(dimensions.scrollWidth).toBeLessThanOrEqual(dimensions.clientWidth);
+      expect(dimensions.inputSize).toBe('16px');
+      expect(dimensions.searchHeight).toBeGreaterThanOrEqual(44);
+    } finally {
+      await removeOpponentCatalog(catalog.ownerId);
+    }
   });
 
   test('can remove a battlesnake from selection using card button', async ({ authenticatedPage }) => {
@@ -448,19 +533,64 @@ test.describe('Create Game', () => {
     await authenticatedPage.goto('/games/new');
 
     // Search for the private snake
-    await authenticatedPage.getByPlaceholder('Search by name...').fill(privateSnakeName);
+    await authenticatedPage.getByLabel('Search public opponents').fill(privateSnakeName);
     await authenticatedPage.getByRole('button', { name: 'Search' }).click();
 
     // Should NOT find the private snake
-    await expect(authenticatedPage.getByText('No public battlesnakes found matching your search.')).toBeVisible();
+    await expect(authenticatedPage.getByText('No public opponents match your search.')).toBeVisible();
 
     // Search for the public snake
-    await authenticatedPage.getByPlaceholder('Search by name...').fill(publicSnakeName);
+    await authenticatedPage.getByLabel('Search public opponents').fill(publicSnakeName);
     await authenticatedPage.getByRole('button', { name: 'Search' }).click();
 
     // Should find the public snake
-    await expect(authenticatedPage.getByRole('heading', { name: 'Search Results' })).toBeVisible();
+    await expect(authenticatedPage.getByText(/Showing 1–1 of 1 public opponents/)).toBeVisible();
     await expect(authenticatedPage.getByText(publicSnakeName)).toBeVisible();
+  });
+
+  test('keeps every selection when a public opponent becomes unavailable before create', async ({ authenticatedPage, mockUser }) => {
+    const catalog = await seedOpponentCatalog('BecomesPrivate', 1);
+    try {
+      const ownName = `Owned private ${Date.now()}`;
+      await authenticatedPage.goto('/battlesnakes/new');
+      await authenticatedPage.getByLabel('Name').fill(ownName);
+      await authenticatedPage.getByLabel('URL').fill('https://example.com/owned-private');
+      await authenticatedPage.getByLabel('Visibility').selectOption('private');
+      await authenticatedPage.getByRole('button', { name: 'Create Battlesnake' }).click();
+
+      await authenticatedPage.goto('/games/new');
+      const flowUrl = authenticatedPage.url();
+      await authenticatedPage.locator('.card', { hasText: ownName }).getByRole('button', { name: 'Add to Game' }).click();
+      let opponent = authenticatedPage.locator('.gc-public-row', { hasText: catalog.snakes[0].name });
+      await opponent.getByRole('button', { name: 'Add to Game' }).click();
+      opponent = authenticatedPage.locator('.gc-public-row', { hasText: catalog.snakes[0].name });
+      await opponent.getByRole('button', { name: 'Add to Game' }).click();
+      await authenticatedPage.getByLabel('Board Size', { exact: true }).selectOption('19x19');
+      await authenticatedPage.getByLabel('Game Type', { exact: true }).selectOption('Royale');
+      await expect(authenticatedPage.getByText('You have selected 3 of 4 possible battlesnakes.')).toBeVisible();
+
+      const [creator] = await query<{ user_id: string }>('SELECT user_id FROM users WHERE github_login = $1', [mockUser.login]);
+      const [before] = await query<{ count: string }>('SELECT COUNT(*)::text AS count FROM games WHERE created_by_user_id = $1', [creator.user_id]);
+      await query("UPDATE battlesnakes SET visibility = 'private' WHERE battlesnake_id = $1", [catalog.snakes[0].battlesnake_id]);
+      await authenticatedPage.getByRole('button', { name: 'Create Game' }).click();
+
+      await expect(authenticatedPage).toHaveURL(flowUrl);
+      await expect(authenticatedPage.getByText('One or more snakes became unavailable. Correct the lineup and try again.')).toBeVisible();
+      await expect(authenticatedPage.locator('.gc-unavailable .badge')).toHaveText('×2');
+      await expect(authenticatedPage.getByLabel('Board Size', { exact: true })).toHaveValue('19x19');
+      await expect(authenticatedPage.getByLabel('Game Type', { exact: true })).toHaveValue('Royale');
+      const [after] = await query<{ count: string }>('SELECT COUNT(*)::text AS count FROM games WHERE created_by_user_id = $1', [creator.user_id]);
+      expect(after.count).toBe(before.count);
+
+      await authenticatedPage.getByLabel('Remove one unavailable snake from lineup').click();
+      await expect(authenticatedPage.locator('.gc-unavailable .badge')).toHaveText('×1');
+      await authenticatedPage.getByLabel('Remove one unavailable snake from lineup').click();
+      await expect(authenticatedPage.locator('.gc-unavailable')).toHaveCount(0);
+      await authenticatedPage.getByRole('button', { name: 'Create Game' }).click();
+      await expect(authenticatedPage).toHaveURL(/\/games\/[0-9a-f-]+$/);
+    } finally {
+      await removeOpponentCatalog(catalog.ownerId);
+    }
   });
 
   test('navigates to game details after successful creation', async ({ authenticatedPage }) => {
@@ -496,5 +626,148 @@ test.describe('Create Game', () => {
 
     // Should see the snake in the results
     await expect(authenticatedPage.getByText(snakeName)).toBeVisible();
+  });
+
+  test('retains the first discovery action while configure is outstanding', async ({ authenticatedPage }) => {
+    await authenticatedPage.goto('/games/new');
+    const flowUrl = authenticatedPage.url();
+    await authenticatedPage.goto(`${flowUrl}?q=old`);
+
+    let releaseConfigure!: () => void;
+    const configureReleased = new Promise<void>((resolve) => { releaseConfigure = resolve; });
+    let configureStarted!: () => void;
+    const configureRequest = new Promise<void>((resolve) => { configureStarted = resolve; });
+    const payloads: URLSearchParams[] = [];
+    let outstanding = 0;
+    let maxOutstanding = 0;
+    let released = false;
+    await authenticatedPage.route('**/configure', async (route) => {
+      outstanding += 1;
+      maxOutstanding = Math.max(maxOutstanding, outstanding);
+      payloads.push(new URLSearchParams(route.request().postData() || ''));
+      configureStarted();
+      if (!released) await configureReleased;
+      await route.continue();
+      outstanding -= 1;
+    });
+
+    await authenticatedPage.getByLabel('Board Size', { exact: true }).selectOption('19x19');
+    await configureRequest;
+    await authenticatedPage.getByLabel('Game Type', { exact: true }).selectOption('Royale');
+    await authenticatedPage.getByLabel('Search public opponents').fill('new search');
+    await authenticatedPage.getByRole('button', { name: 'Search' }).click();
+
+    // A second keyboard-activated action cannot bypass the retained search.
+    await authenticatedPage.getByRole('link', { name: 'Clear' }).press('Enter');
+    await expect(authenticatedPage).toHaveURL(/\?q=old$/);
+
+    released = true;
+    releaseConfigure();
+    await expect(authenticatedPage).toHaveURL(/\?q=new(?:\+|%20)search$/);
+    await expect(authenticatedPage.getByLabel('Board Size', { exact: true })).toHaveValue('19x19');
+    await expect(authenticatedPage.getByLabel('Game Type', { exact: true })).toHaveValue('Royale');
+    expect(maxOutstanding).toBe(1);
+    expect(payloads.map((body) => `${body.get('board_size')}/${body.get('game_type')}`)).toEqual([
+      '19x19/Standard',
+      '19x19/Royale',
+    ]);
+  });
+
+  test('retry saves the newest snapshot and cancel drops only the retained action', async ({ authenticatedPage }) => {
+    await authenticatedPage.goto('/games/new');
+    const flowUrl = authenticatedPage.url();
+    const flowId = new URL(flowUrl).pathname.split('/').pop()!;
+    await authenticatedPage.goto(`${flowUrl}?q=old`);
+
+    let releaseFailure!: () => void;
+    let failing = true;
+    const failureGate = new Promise<void>((resolve) => { releaseFailure = resolve; });
+    const payloads: string[] = [];
+    await authenticatedPage.route('**/configure', async (route) => {
+      const body = new URLSearchParams(route.request().postData() || '');
+      payloads.push(`${body.get('board_size')}/${body.get('game_type')}`);
+      if (failing) {
+        await failureGate;
+        failing = false;
+        await route.fulfill({ status: 500, body: 'nope' });
+      } else {
+        await route.continue();
+      }
+    });
+
+    await authenticatedPage.getByLabel('Board Size', { exact: true }).selectOption('7x7');
+    await authenticatedPage.getByLabel('Search public opponents').fill('retry target');
+    await authenticatedPage.getByRole('button', { name: 'Search' }).click();
+    releaseFailure();
+    const alert = authenticatedPage.getByRole('alert');
+    await expect(alert).toBeVisible();
+    await expect(authenticatedPage).toHaveURL(/\?q=old$/);
+
+    await authenticatedPage.getByLabel('Board Size', { exact: true }).selectOption('19x19');
+    await authenticatedPage.getByLabel('Game Type', { exact: true }).selectOption('Royale');
+    await alert.getByRole('button', { name: 'Retry' }).click();
+    await expect(authenticatedPage).toHaveURL(/q=retry(?:\+|%20)target/);
+    expect(payloads).toEqual(['7x7/Standard', '19x19/Royale']);
+    let [persisted] = await query<{ board_size: string; game_type: string }>(
+      'SELECT board_size, game_type FROM game_flows WHERE flow_id = $1', [flowId],
+    );
+    expect(persisted).toEqual({ board_size: '19x19', game_type: 'Royale' });
+
+    let releaseCancelFailure!: () => void;
+    const cancelGate = new Promise<void>((resolve) => { releaseCancelFailure = resolve; });
+    let cancelFailure = true;
+    await authenticatedPage.unroute('**/configure');
+    await authenticatedPage.route('**/configure', async (route) => {
+      if (cancelFailure) {
+        await cancelGate;
+        cancelFailure = false;
+        await route.fulfill({ status: 500, body: 'nope' });
+      } else {
+        await route.continue();
+      }
+    });
+    await authenticatedPage.getByLabel('Board Size', { exact: true }).selectOption('7x7');
+    await authenticatedPage.getByRole('link', { name: 'Clear' }).click();
+    releaseCancelFailure();
+    await expect(alert).toBeVisible();
+    await authenticatedPage.getByLabel('Game Type', { exact: true }).selectOption('Constrictor');
+    await alert.getByRole('button', { name: 'Cancel' }).click();
+    await expect(authenticatedPage).toHaveURL(/q=retry(?:\+|%20)target/);
+    await expect.poll(async () => {
+      const [row] = await query<{ board_size: string; game_type: string }>(
+        'SELECT board_size, game_type FROM game_flows WHERE flow_id = $1', [flowId],
+      );
+      return `${row.board_size}/${row.game_type}`;
+    }).toBe('7x7/Constrictor');
+    persisted = (await query<{ board_size: string; game_type: string }>(
+      'SELECT board_size, game_type FROM game_flows WHERE flow_id = $1', [flowId],
+    ))[0];
+    expect(persisted).toEqual({ board_size: '7x7', game_type: 'Constrictor' });
+  });
+
+  test('a stalled configure times out without running the retained action', async ({ authenticatedPage }) => {
+    await authenticatedPage.goto('/games/new');
+    const flowUrl = authenticatedPage.url();
+    await authenticatedPage.goto(`${flowUrl}?q=keep-me`);
+    await authenticatedPage.clock.install();
+
+    let releaseStall!: () => void;
+    const stall = new Promise<void>((resolve) => { releaseStall = resolve; });
+    await authenticatedPage.route('**/configure', async (route) => {
+      await stall;
+      await route.abort().catch(() => {});
+    });
+    await authenticatedPage.getByLabel('Board Size', { exact: true }).selectOption('19x19');
+    await authenticatedPage.getByRole('link', { name: 'Clear' }).click();
+    await authenticatedPage.clock.fastForward(15_001);
+    const alert = authenticatedPage.getByRole('alert');
+    await expect(alert).toBeVisible();
+    await expect(authenticatedPage).toHaveURL(/\?q=keep-me$/);
+
+    await authenticatedPage.unroute('**/configure');
+    await alert.getByRole('button', { name: 'Cancel' }).click();
+    releaseStall();
+    await expect(authenticatedPage).toHaveURL(/\?q=keep-me$/);
+    await expect(alert).toBeHidden();
   });
 });

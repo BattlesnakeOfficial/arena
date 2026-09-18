@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT selected_battlesnakes FROM game_flows\n               WHERE flow_id = $1 AND user_id = $2 FOR UPDATE",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "selected_battlesnakes",
+        "type_info": "UuidArray"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "185e2d959600d81b59982dfb67177fed62d4fdf323fe13652f7bbbb7ce84b57c"
+}
