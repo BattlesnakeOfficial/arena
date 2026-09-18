@@ -8,6 +8,7 @@ use sqlx::PgPool;
 
 use crate::components::page_factory::PageFactory;
 use crate::errors::ServerResult;
+use crate::models::moderation_flag::{self, ModerationFlagListing};
 use crate::routes::auth::{AdminApiUser, AdminUser};
 use crate::state::AppState;
 
@@ -220,6 +221,7 @@ pub async fn dashboard(
 
                 div style="margin-bottom: 20px;" {
                     a href="/admin" style="padding: 8px 16px; background: #0066cc; color: white; text-decoration: none; border-radius: 4px;" { "Refresh" }
+                    a href="/admin/moderation" style="padding: 8px 16px; background: #666; color: white; text-decoration: none; border-radius: 4px; margin-left: 8px;" { "Moderation queue" }
                 }
 
                 h2 { "Job Queue" }
@@ -375,6 +377,92 @@ pub async fn dashboard(
             }
         }),
     ))
+}
+
+/// GET /admin/moderation — unreviewed moderation flags, newest first.
+/// Admin-gated via [`AdminUser`] like every other /admin route. This task
+/// ships the list only; review actions (dismiss/confirm) are future work.
+pub async fn moderation_queue(
+    State(state): State<AppState>,
+    AdminUser(_user): AdminUser,
+    page_factory: PageFactory,
+) -> ServerResult<impl IntoResponse, StatusCode> {
+    let flags = moderation_flag::list_unreviewed(&state.db, 200).await?;
+
+    let fmt = |v: Option<f64>| match v {
+        Some(v) => format!("{v:.2}"),
+        None => "—".to_string(),
+    };
+    let cell = |value: String| {
+        maud::html! {
+            td style="padding: 8px; border-bottom: 1px solid #ddd;" { (value) }
+        }
+    };
+    let prob_cell = |v: Option<f64>| cell(fmt(v));
+
+    let rows = flags.iter().map(|flag: &ModerationFlagListing| {
+        maud::html! {
+            tr {
+                td style="padding: 8px; border-bottom: 1px solid #ddd; white-space: nowrap;" { (flag.created_at.format("%Y-%m-%d %H:%M")) }
+                td style="padding: 8px; border-bottom: 1px solid #ddd;" { (flag.field_kind) }
+                // maud escapes the text — the submitted string renders
+                // inert even though it's attacker-controlled.
+                td style="padding: 8px; border-bottom: 1px solid #ddd; max-width: 320px;" { (flag.text) }
+                td style="padding: 8px; border-bottom: 1px solid #ddd;" { (flag.user_login) }
+                td style="padding: 8px; border-bottom: 1px solid #ddd;" { (flag.decision) }
+                (prob_cell(flag.action_confidence))
+                (prob_cell(flag.action_block_mass))
+                (prob_cell(flag.hate_or_slur))
+                (prob_cell(flag.sexual_or_graphic))
+                (prob_cell(flag.harassment_or_threat))
+                (prob_cell(flag.impersonates_staff_or_platform))
+                (prob_cell(flag.disguised_evasion))
+                td style="padding: 8px; border-bottom: 1px solid #ddd;" { (flag.action_choice.as_deref().unwrap_or("—")) }
+                td style="padding: 8px; border-bottom: 1px solid #ddd;" { (flag.model.as_deref().unwrap_or("—")) }
+                td style="padding: 8px; border-bottom: 1px solid #ddd;" { (flag.subject_id.map(|id| id.to_string()).unwrap_or_else(|| "—".to_string())) }
+            }
+        }
+    });
+
+    Ok(page_factory
+        .create_page(
+            "Moderation Queue".to_string(),
+            Box::new(maud::html! {
+                div {
+                    h1 { "Moderation Queue" }
+                    div style="margin-bottom: 20px;" {
+                        a href="/admin" style="padding: 8px 16px; background: #666; color: white; text-decoration: none; border-radius: 4px;" { "Back to Admin" }
+                    }
+                    @if flags.is_empty() {
+                        p { "No unreviewed moderation flags." }
+                    } @else {
+                        table style="border-collapse: collapse; width: 100%; font-size: 13px;" {
+                            tr {
+                                th style="text-align: left; padding: 8px; border-bottom: 1px solid #ddd; background-color: #f5f5f5;" { "Created" }
+                                th style="text-align: left; padding: 8px; border-bottom: 1px solid #ddd; background-color: #f5f5f5;" { "Field" }
+                                th style="text-align: left; padding: 8px; border-bottom: 1px solid #ddd; background-color: #f5f5f5;" { "Text" }
+                                th style="text-align: left; padding: 8px; border-bottom: 1px solid #ddd; background-color: #f5f5f5;" { "Owner" }
+                                th style="text-align: left; padding: 8px; border-bottom: 1px solid #ddd; background-color: #f5f5f5;" { "Decision" }
+                                th style="text-align: right; padding: 8px; border-bottom: 1px solid #ddd; background-color: #f5f5f5;" { "Conf" }
+                                th style="text-align: right; padding: 8px; border-bottom: 1px solid #ddd; background-color: #f5f5f5;" { "Block mass" }
+                                th style="text-align: right; padding: 8px; border-bottom: 1px solid #ddd; background-color: #f5f5f5;" { "Hate" }
+                                th style="text-align: right; padding: 8px; border-bottom: 1px solid #ddd; background-color: #f5f5f5;" { "Sexual" }
+                                th style="text-align: right; padding: 8px; border-bottom: 1px solid #ddd; background-color: #f5f5f5;" { "Harass" }
+                                th style="text-align: right; padding: 8px; border-bottom: 1px solid #ddd; background-color: #f5f5f5;" { "Impersonate" }
+                                th style="text-align: right; padding: 8px; border-bottom: 1px solid #ddd; background-color: #f5f5f5;" { "Evasion" }
+                                th style="text-align: left; padding: 8px; border-bottom: 1px solid #ddd; background-color: #f5f5f5;" { "Action" }
+                                th style="text-align: left; padding: 8px; border-bottom: 1px solid #ddd; background-color: #f5f5f5;" { "Model" }
+                                th style="text-align: left; padding: 8px; border-bottom: 1px solid #ddd; background-color: #f5f5f5;" { "Subject" }
+                            }
+                            @for row in rows {
+                                (row)
+                            }
+                        }
+                    }
+                }
+            }),
+        )
+        .into_response())
 }
 
 pub async fn stats_json(

@@ -269,6 +269,7 @@ pub fn routes(app_state: AppState) -> axum::Router {
         )
         // Admin routes
         .route("/admin", get(admin::dashboard))
+        .route("/admin/moderation", get(admin::moderation_queue))
         // Game API routes for board viewer (with CORS)
         .nest("/api", api_routes)
         // Static files

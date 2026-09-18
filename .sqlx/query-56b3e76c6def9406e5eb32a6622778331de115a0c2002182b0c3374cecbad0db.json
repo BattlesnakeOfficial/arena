@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE moderation_flags\n             SET reviewed_at = NOW(), review_outcome = 'dismissed'\n             WHERE user_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "56b3e76c6def9406e5eb32a6622778331de115a0c2002182b0c3374cecbad0db"
+}

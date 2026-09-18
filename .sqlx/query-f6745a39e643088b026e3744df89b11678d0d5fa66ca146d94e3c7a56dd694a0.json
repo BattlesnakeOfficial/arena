@@ -1,0 +1,118 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT mf.moderation_flag_id, mf.field_kind, mf.text, mf.subject_id, mf.user_id,\n               u.github_login AS user_login, mf.decision,\n               mf.hate_or_slur, mf.sexual_or_graphic, mf.harassment_or_threat,\n               mf.impersonates_staff_or_platform, mf.disguised_evasion,\n               mf.action_choice, mf.action_confidence, mf.action_block_mass,\n               mf.model, mf.created_at\n        FROM moderation_flags mf\n        INNER JOIN users u ON u.user_id = mf.user_id\n        WHERE mf.reviewed_at IS NULL\n        ORDER BY mf.created_at DESC\n        LIMIT $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "moderation_flag_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "field_kind",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "text",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "subject_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 4,
+        "name": "user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 5,
+        "name": "user_login",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "decision",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "hate_or_slur",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 8,
+        "name": "sexual_or_graphic",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 9,
+        "name": "harassment_or_threat",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 10,
+        "name": "impersonates_staff_or_platform",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 11,
+        "name": "disguised_evasion",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 12,
+        "name": "action_choice",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 13,
+        "name": "action_confidence",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 14,
+        "name": "action_block_mass",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 15,
+        "name": "model",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 16,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "f6745a39e643088b026e3744df89b11678d0d5fa66ca146d94e3c7a56dd694a0"
+}

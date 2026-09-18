@@ -47,6 +47,37 @@ pub async fn save_game(
 
     let title = normalize_title(form.title.as_deref());
 
+    // Moderation: only for a non-empty title that actually changes (the
+    // upsert would re-save the same row). Saved games render on the
+    // owner's public profile, so titles are public.
+    let existing =
+        saved_game::get_saved_game_for_user_and_game(&state.db, user.user_id, game_id).await?;
+    let unchanged = existing.as_ref().is_some_and(|s| s.title == title);
+    if !title.is_empty() && !unchanged {
+        let decision = crate::moderation::moderate_field(
+            &state.db,
+            &state.moderation,
+            user.user_id,
+            existing.as_ref().map(|s| s.saved_game_id),
+            crate::moderation::FieldKind::SavedGameTitle,
+            &title,
+            true,
+        )
+        .await;
+        if decision == crate::moderation::Decision::Block {
+            session::set_flash_message(
+                &state.db,
+                session.session_id,
+                crate::moderation::FieldKind::SavedGameTitle
+                    .rejection_message()
+                    .to_string(),
+                session::FLASH_TYPE_ERROR,
+            )
+            .await?;
+            return Ok(Redirect::to(&format!("/games/{game_id}")));
+        }
+    }
+
     saved_game::save_game(&state.db, user.user_id, game_id, &title).await?;
 
     session::set_flash_message(

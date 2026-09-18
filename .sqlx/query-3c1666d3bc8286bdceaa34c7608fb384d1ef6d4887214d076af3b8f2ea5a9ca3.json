@@ -1,0 +1,27 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO moderation_flags (\n            field_kind, text, subject_id, user_id, decision,\n            hate_or_slur, sexual_or_graphic, harassment_or_threat,\n            impersonates_staff_or_platform, disguised_evasion,\n            action_choice, action_confidence, action_block_mass, model\n        )\n        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Float8",
+        "Float8",
+        "Float8",
+        "Float8",
+        "Float8",
+        "Text",
+        "Float8",
+        "Float8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "3c1666d3bc8286bdceaa34c7608fb384d1ef6d4887214d076af3b8f2ea5a9ca3"
+}

@@ -599,6 +599,33 @@ pub async fn create_battlesnake(
         .await?);
     }
 
+    // Moderation runs outside any DB transaction and before the insert, so
+    // a flagged/unchecked row may reference a snake that was never created —
+    // the row records what was submitted.
+    let decision = crate::moderation::moderate_field(
+        &state.db,
+        &state.moderation,
+        user.user_id,
+        None,
+        crate::moderation::FieldKind::SnakeName,
+        &name,
+        form.visibility == Visibility::Public,
+    )
+    .await;
+    if decision == crate::moderation::Decision::Block {
+        return Ok(flash_form_and_redirect(
+            &state.db,
+            session.session_id,
+            crate::moderation::FieldKind::SnakeName
+                .rejection_message()
+                .to_string(),
+            &form,
+            BattlesnakeFormTarget::New,
+            "/battlesnakes/new",
+        )
+        .await?);
+    }
+
     let create_data = CreateBattlesnake {
         name,
         url,
@@ -619,7 +646,11 @@ pub async fn create_battlesnake(
                 .await
                 .wrap_err("Failed to clear stale battlesnake form data")?;
 
-            if snake.visibility == Visibility::Public {
+            // Relay only clean names: flagged, blocked, and unchecked
+            // names never reach Discord.
+            if snake.visibility == Visibility::Public
+                && decision == crate::moderation::Decision::Allow
+            {
                 state
                     .discord
                     .notify_snake_registered(&snake.name, &user.github_login);
@@ -769,6 +800,10 @@ pub async fn update_battlesnake(
         .ok_or_else(|| {
             eyre!("Battlesnake {battlesnake_id} vanished between ownership check and update")
         })?;
+    // Compute BEFORE the name-resolution match below moves existing.name.
+    // Trimmed comparison so "Foo " on an existing "Foo" doesn't burn a Jev
+    // call (validate_name trims; the update result equals the existing name).
+    let name_changed = form.name.trim() != existing.name;
     let name = if form.name == existing.name {
         existing.name
     } else {
@@ -816,6 +851,33 @@ pub async fn update_battlesnake(
             &edit_path,
         )
         .await?);
+    }
+
+    // Only re-moderate when the name actually changes.
+    if name_changed {
+        let decision = crate::moderation::moderate_field(
+            &state.db,
+            &state.moderation,
+            user.user_id,
+            Some(battlesnake_id),
+            crate::moderation::FieldKind::SnakeName,
+            &name,
+            form.visibility == Visibility::Public,
+        )
+        .await;
+        if decision == crate::moderation::Decision::Block {
+            return Ok(flash_form_and_redirect(
+                &state.db,
+                session.session_id,
+                crate::moderation::FieldKind::SnakeName
+                    .rejection_message()
+                    .to_string(),
+                &form,
+                BattlesnakeFormTarget::Edit(battlesnake_id),
+                &edit_path,
+            )
+            .await?);
+        }
     }
 
     let update_data = UpdateBattlesnake {

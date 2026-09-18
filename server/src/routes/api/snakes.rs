@@ -83,6 +83,27 @@ pub async fn create_snake(
     let name =
         battlesnake::validate_name(&request.name).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
+    // Moderation runs before the insert; a flagged/unchecked row may
+    // reference a snake that was never created (it records the submission).
+    let decision = crate::moderation::moderate_field(
+        &state.db,
+        &state.moderation,
+        user.user_id,
+        None,
+        crate::moderation::FieldKind::SnakeName,
+        &name,
+        request.is_public,
+    )
+    .await;
+    if decision == crate::moderation::Decision::Block {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            crate::moderation::FieldKind::SnakeName
+                .rejection_message()
+                .to_string(),
+        ));
+    }
+
     let create_data = CreateBattlesnake {
         name,
         url: request.url,
@@ -109,7 +130,9 @@ pub async fn create_snake(
             }
         })?;
 
-    if snake.visibility == Visibility::Public {
+    // Relay only clean names: flagged, blocked, and unchecked names never
+    // reach Discord.
+    if snake.visibility == Visibility::Public && decision == crate::moderation::Decision::Allow {
         state
             .discord
             .notify_snake_registered(&snake.name, &user.github_login);
@@ -164,6 +187,14 @@ pub async fn update_snake(
         return Err((StatusCode::NOT_FOUND, "Snake not found".to_string()));
     }
 
+    // Compute BEFORE the defaults below partially move existing.name (and
+    // existing.url). Trimmed comparison: re-sending the same name should
+    // not burn a Jev call.
+    let name_changed = request
+        .name
+        .as_deref()
+        .is_some_and(|n| n.trim() != existing.name);
+
     // Build update with existing values as defaults
     let new_url = request.url.unwrap_or(existing.url);
 
@@ -179,14 +210,40 @@ pub async fn update_snake(
         None => existing.name,
     };
 
+    let new_visibility = match request.is_public {
+        Some(true) => Visibility::Public,
+        Some(false) => Visibility::Private,
+        None => existing.visibility,
+    };
+
+    // Only re-moderate when the name actually changes. (No Discord relay on
+    // the API update path.) Runs before the update builds so the resolved
+    // name is still borrowable.
+    if name_changed {
+        let decision = crate::moderation::moderate_field(
+            &state.db,
+            &state.moderation,
+            user.user_id,
+            Some(snake_id),
+            crate::moderation::FieldKind::SnakeName,
+            &name,
+            new_visibility == Visibility::Public,
+        )
+        .await;
+        if decision == crate::moderation::Decision::Block {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                crate::moderation::FieldKind::SnakeName
+                    .rejection_message()
+                    .to_string(),
+            ));
+        }
+    }
+
     let update_data = UpdateBattlesnake {
         name,
         url: new_url,
-        visibility: match request.is_public {
-            Some(true) => Visibility::Public,
-            Some(false) => Visibility::Private,
-            None => existing.visibility,
-        },
+        visibility: new_visibility,
     };
 
     let snake = battlesnake::update_battlesnake(&state.db, snake_id, user.user_id, update_data)

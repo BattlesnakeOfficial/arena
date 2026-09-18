@@ -29,6 +29,7 @@ mod jobs;
 mod leaderboard_matchmaker;
 mod leaderboard_ratings;
 mod models;
+mod moderation;
 mod observability;
 mod play_import;
 mod routes;

@@ -6,7 +6,7 @@ use uuid::Uuid;
 use crate::github::auth::{GitHubTokenResponse, GitHubUser};
 
 // User model for our application
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct User {
     pub user_id: Uuid,
     pub external_github_id: i64,

@@ -183,6 +183,33 @@ fn metrics() -> Result<Vec<NamedMetric>, String> {
         .time_bucket(300)
         .build()?,
         timing("game.queue_wait.p95", "Game queue wait · p95", "queue_wait")?,
+        count(
+            "moderation.decisions",
+            "Moderation decisions",
+            "fields.event_type",
+            "moderation_decision",
+        )?
+        .unit("decisions")
+        .build()?,
+        count(
+            "moderation.decisions.by_field",
+            "Moderation decisions by field",
+            "fields.event_type",
+            "moderation_decision",
+        )?
+        .group_by("fields[\"field_kind\"]")?
+        .unit("decisions")
+        .build()?,
+        Metric::new(
+            "moderation.latency.p95",
+            Agg::P95,
+            Some("fields.latency_ms"),
+        )?
+        .filter_eq("fields.event_type", "moderation_decision")?
+        .filter_numeric("fields.latency_ms")?
+        .display_name("Moderation latency · p95")
+        .unit("ms")
+        .build()?,
         timing(
             "game.db_write.p95",
             "Turn persistence · p95",
@@ -225,6 +252,13 @@ fn dashboard() -> Result<NamedDashboard, String> {
                 .item(Item::stat("game.queue_wait.p95"))
                 .item(Item::stat("game.db_write.p95"))
                 .item(Item::stat("game.overhead.p95")),
+        )
+        .section(
+            Section::new()
+                .title("Moderation")
+                .item(Item::stat("moderation.decisions"))
+                .item(Item::table("moderation.decisions.by_field"))
+                .item(Item::stat("moderation.latency.p95")),
         )
         .section(
             Section::new()
