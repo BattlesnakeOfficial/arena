@@ -116,7 +116,5 @@ vergen = { version = "8.3.1", features = [
 
 [dev-dependencies]
 proptest = "1"
-# Paused-clock tests for the shutdown supervisor.
-tokio = { version = "1.21", features = ["test-util"] }
 wiremock = "0.6"
 tower-cookies = { version = "0.11", features = ["private"] }
