@@ -1,10 +1,13 @@
 #![allow(dead_code)]
 
+use std::time::Duration;
+
 use cja::{
-    server::run_server,
+    server::run_server_until,
     setup::{TracingConfig, setup_sentry},
 };
-use color_eyre::eyre::eyre;
+use color_eyre::eyre::{Context as _, eyre};
+use futures::stream::{FuturesUnordered, StreamExt as _};
 use state::AppState;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
@@ -115,21 +118,36 @@ async fn run_application(config: config::AppConfig) -> cja::Result<()> {
     result
 }
 
+/// Time tasks get to exit after the job drain ends: job workers release
+/// their locks, the HTTP server closes connections. Together with
+/// `JobConfig::shutdown_drain_secs` this must stay under Cloud Run's fixed
+/// 10 second SIGTERM-to-SIGKILL window, with room left to flush telemetry.
+pub(crate) const SHUTDOWN_EXIT_GRACE: Duration = Duration::from_secs(3);
+
+/// Cloud Run sends SIGKILL this long after SIGTERM; not configurable.
+const CLOUD_RUN_TERMINATION_WINDOW: Duration = Duration::from_secs(10);
+
 async fn run_instrumented_application(
     config: config::AppConfig,
     identity: eyes_subscriber::ProcessIdentity,
 ) -> cja::Result<()> {
     let app_state = AppState::from_config(config).await?;
-    let (tasks, heartbeat) = spawn_application_tasks(app_state, identity).await?;
+    let shutdown = CancellationToken::new();
+    let exit_deadline =
+        Duration::from_secs(app_state.config.job.shutdown_drain_secs) + SHUTDOWN_EXIT_GRACE;
+    if app_state.config.gcp_logging && exit_deadline >= CLOUD_RUN_TERMINATION_WINDOW {
+        tracing::warn!(
+            deadline_secs = exit_deadline.as_secs(),
+            "Shutdown deadline exceeds Cloud Run's 10s termination window; \
+             job locks will be stranded on deploy. Lower ARENA_JOB_SHUTDOWN_DRAIN_SECS"
+        );
+    }
+    let signal = shutdown_signal()?;
+    let (tasks, heartbeat) = spawn_application_tasks(app_state, identity, shutdown.clone()).await?;
     let result = if tasks.is_empty() {
         Ok(())
     } else {
-        let (name, result) = wait_for_first_task(tasks).await;
-        match result {
-            Ok(Ok(())) => Err(eyre!("Task '{}' exited unexpectedly", name)),
-            Ok(Err(error)) => Err(error.wrap_err(format!("Task '{name}' failed"))),
-            Err(error) => Err(eyre!("Task '{}' panicked: {}", name, error)),
-        }
+        supervise(tasks, shutdown, signal, exit_deadline).await
     };
     if let Some(handle) = heartbeat
         && let Err(error) = handle.shutdown().await
@@ -137,6 +155,21 @@ async fn run_instrumented_application(
         tracing::warn!(%error, "Eyes process shutdown signal failed");
     }
     result
+}
+
+/// Resolves with the name of the first shutdown signal received. Handlers
+/// are registered eagerly so a signal arriving during startup is not lost.
+fn shutdown_signal() -> cja::Result<impl Future<Output = &'static str>> {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let mut sigterm = signal(SignalKind::terminate()).wrap_err("Failed to register SIGTERM")?;
+    let mut sigint = signal(SignalKind::interrupt()).wrap_err("Failed to register SIGINT")?;
+    Ok(async move {
+        tokio::select! {
+            _ = sigterm.recv() => "SIGTERM",
+            _ = sigint.recv() => "SIGINT",
+        }
+    })
 }
 
 struct NamedTask {
@@ -156,31 +189,80 @@ impl NamedTask {
     }
 }
 
-/// Wait for the first task to complete and return its name and result
-async fn wait_for_first_task(
+/// Run until a shutdown signal arrives or any task exits on its own.
+///
+/// Either way every task is then told to stop through `shutdown` and given
+/// `exit_deadline` to finish: job workers drain what they can and release
+/// their locks so another instance picks the rest up immediately, instead of
+/// after the lock timeout. Tasks still running at the deadline are aborted.
+///
+/// A signal is a clean exit. A task exiting by itself is always an error,
+/// because every task is meant to run for the life of the process.
+async fn supervise(
     tasks: Vec<NamedTask>,
-) -> (
-    &'static str,
-    Result<cja::Result<()>, tokio::task::JoinError>,
-) {
-    let (handles, names): (Vec<_>, Vec<_>) = tasks.into_iter().map(|t| (t.handle, t.name)).unzip();
+    shutdown: CancellationToken,
+    signal: impl Future<Output = &'static str>,
+    exit_deadline: Duration,
+) -> cja::Result<()> {
+    let aborts: Vec<_> = tasks
+        .iter()
+        .map(|task| (task.name, task.handle.abort_handle()))
+        .collect();
+    let mut running: FuturesUnordered<_> = tasks
+        .into_iter()
+        .map(|task| async move { (task.name, task.handle.await) })
+        .collect();
 
-    let (result, index, remaining) = futures::future::select_all(handles).await;
-    for handle in &remaining {
-        handle.abort();
-    }
-    let _ = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        futures::future::join_all(remaining),
-    )
+    let result = tokio::select! {
+        signal = signal => {
+            info!(signal, deadline_secs = exit_deadline.as_secs(), "Shutdown signal received; draining");
+            Ok(())
+        }
+        Some((name, result)) = running.next() => match result {
+            Ok(Ok(())) => Err(eyre!("Task '{}' exited unexpectedly", name)),
+            Ok(Err(error)) => Err(error.wrap_err(format!("Task '{name}' failed"))),
+            Err(error) => Err(eyre!("Task '{}' panicked: {}", name, error)),
+        },
+    };
+
+    shutdown.cancel();
+    let drained = tokio::time::timeout(exit_deadline, async {
+        while let Some((name, result)) = running.next().await {
+            match result {
+                Ok(Ok(())) => tracing::debug!(task = name, "Task stopped"),
+                Ok(Err(error)) => {
+                    tracing::warn!(task = name, error = %format!("{error:#}"), "Task failed while stopping");
+                }
+                Err(error) => tracing::warn!(task = name, %error, "Task panicked while stopping"),
+            }
+        }
+    })
     .await;
-    (names[index], result)
+    if drained.is_err() {
+        let stragglers: Vec<_> = aborts
+            .iter()
+            .filter(|(_, handle)| !handle.is_finished())
+            .map(|(name, _)| *name)
+            .collect();
+        tracing::warn!(
+            ?stragglers,
+            "Shutdown deadline reached; aborting remaining tasks"
+        );
+        for (_, handle) in &aborts {
+            handle.abort();
+        }
+    } else {
+        info!("All tasks stopped");
+    }
+
+    result
 }
 
 /// Spawn all application background tasks
 async fn spawn_application_tasks(
     app_state: AppState,
     identity: eyes_subscriber::ProcessIdentity,
+    shutdown: CancellationToken,
 ) -> cja::Result<(
     Vec<NamedTask>,
     Option<eyes_subscriber::ProcessHeartbeatHandle>,
@@ -200,7 +282,10 @@ async fn spawn_application_tasks(
         info!("Server Enabled");
         tasks.push(NamedTask::spawn(
             "server",
-            run_server(routes::routes(app_state.clone())),
+            run_server_until(
+                routes::routes(app_state.clone()),
+                shutdown.clone().cancelled_owned(),
+            ),
         ));
     } else {
         info!("Server Disabled");
@@ -212,18 +297,20 @@ async fn spawn_application_tasks(
         info!("Job lock timeout: {}s", job.lock_timeout_secs);
         info!("Job max retries: {}", job.max_retries);
         info!("Job workers: {}", job.workers);
+        info!("Job shutdown drain: {}s", job.shutdown_drain_secs);
 
         for i in 0..job.workers {
             let name: &'static str = Box::leak(format!("jobs-{i}").into_boxed_str());
             tasks.push(NamedTask::spawn(
                 name,
-                cja::jobs::worker::job_worker(
+                cja::jobs::worker::job_worker_with_shutdown_drain(
                     app_state.clone(),
                     jobs::Jobs,
-                    std::time::Duration::from_millis(job.poll_interval_ms),
+                    Duration::from_millis(job.poll_interval_ms),
                     job.max_retries,
-                    CancellationToken::new(),
-                    std::time::Duration::from_secs(job.lock_timeout_secs),
+                    shutdown.clone(),
+                    Duration::from_secs(job.lock_timeout_secs),
+                    Duration::from_secs(job.shutdown_drain_secs),
                 ),
             ));
         }
@@ -235,7 +322,7 @@ async fn spawn_application_tasks(
         info!("Cron Enabled");
         tasks.push(NamedTask::spawn(
             "cron",
-            cron::run_cron(app_state.clone(), cron_registry),
+            cron::run_cron(app_state.clone(), cron_registry, shutdown.clone()),
         ));
     } else {
         info!("Cron Disabled");
@@ -250,6 +337,97 @@ async fn spawn_application_tasks(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A task that stops as soon as it is asked to, like the real workers.
+    fn cooperative(name: &'static str, shutdown: &CancellationToken) -> NamedTask {
+        let shutdown = shutdown.clone();
+        NamedTask::spawn(name, async move {
+            shutdown.cancelled().await;
+            Ok(())
+        })
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn signal_stops_every_task_and_exits_cleanly() {
+        let shutdown = CancellationToken::new();
+        let tasks = vec![
+            cooperative("jobs-0", &shutdown),
+            cooperative("cron", &shutdown),
+        ];
+
+        let result = supervise(
+            tasks,
+            shutdown.clone(),
+            async { "SIGTERM" },
+            Duration::from_secs(8),
+        )
+        .await;
+
+        assert!(result.is_ok(), "a signal is a clean exit: {result:?}");
+        assert!(shutdown.is_cancelled());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn task_ignoring_shutdown_is_aborted_at_the_deadline() {
+        let shutdown = CancellationToken::new();
+        let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = finished.clone();
+        let tasks = vec![
+            cooperative("jobs-0", &shutdown),
+            NamedTask::spawn("server", async move {
+                tokio::time::sleep(Duration::from_secs(3600)).await;
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }),
+        ];
+
+        let started = tokio::time::Instant::now();
+        let result = supervise(tasks, shutdown, async { "SIGTERM" }, Duration::from_secs(8)).await;
+
+        assert!(
+            result.is_ok(),
+            "stragglers do not turn a signal into a failure"
+        );
+        assert_eq!(started.elapsed(), Duration::from_secs(8));
+        tokio::time::sleep(Duration::from_secs(7200)).await;
+        assert!(
+            !finished.load(std::sync::atomic::Ordering::SeqCst),
+            "the straggler must be aborted, not left running"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn task_exiting_on_its_own_fails_the_process_but_still_drains_the_rest() {
+        let shutdown = CancellationToken::new();
+        let drained = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = drained.clone();
+        let worker_shutdown = shutdown.clone();
+        let tasks = vec![
+            NamedTask::spawn("cron", async { Err(eyre!("database went away")) }),
+            NamedTask::spawn("jobs-0", async move {
+                worker_shutdown.cancelled().await;
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }),
+        ];
+
+        let error = supervise(
+            tasks,
+            shutdown,
+            std::future::pending(),
+            Duration::from_secs(8),
+        )
+        .await
+        .expect_err("a task exiting by itself is a failure");
+
+        let rendered = format!("{error:#}");
+        assert!(rendered.contains("Task 'cron' failed"), "{rendered}");
+        assert!(rendered.contains("database went away"), "{rendered}");
+        assert!(
+            drained.load(std::sync::atomic::Ordering::SeqCst),
+            "surviving workers must get the chance to release their locks"
+        );
+    }
 
     #[test]
     fn boot_manifest_declares_exactly_one_health_monitor() {

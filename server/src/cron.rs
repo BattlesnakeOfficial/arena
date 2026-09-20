@@ -75,8 +75,7 @@ pub(crate) fn cron_registry() -> CronRegistry<AppState> {
 pub(crate) async fn run_cron(
     app_state: AppState,
     registry: CronRegistry<AppState>,
+    shutdown: CancellationToken,
 ) -> cja::Result<()> {
-    Ok(Worker::new(app_state, registry)
-        .run(CancellationToken::new())
-        .await?)
+    Ok(Worker::new(app_state, registry).run(shutdown).await?)
 }
