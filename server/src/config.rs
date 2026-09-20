@@ -19,11 +19,19 @@ use crate::moderation::Thresholds;
 pub const LOCAL_BASE_URL: &str = "http://localhost:3000";
 pub const ARENA_PUBLIC_BASE_URL: &str = "https://arena.battlesnake.com";
 
+/// Default for [`JobConfig::shutdown_drain_secs`].
+pub const DEFAULT_JOB_SHUTDOWN_DRAIN_SECS: u64 = 5;
+
 /// Background job worker tuning.
 #[derive(Clone, Debug)]
 pub struct JobConfig {
     pub poll_interval_ms: u64,
     pub lock_timeout_secs: u64,
+    /// How long an in-flight job may keep running after a shutdown signal
+    /// before it is dropped and its lock released. Cloud Run sends SIGKILL
+    /// 10 seconds after SIGTERM, so this plus [`crate::SHUTDOWN_EXIT_GRACE`]
+    /// must stay under that.
+    pub shutdown_drain_secs: u64,
     pub max_retries: i32,
     pub workers: usize,
 }
@@ -224,6 +232,10 @@ impl AppConfig {
                     "ARENA_JOB_LOCK_TIMEOUT_SECS",
                     DEFAULT_LOCK_TIMEOUT.as_secs(),
                 ),
+                shutdown_drain_secs: parse_env(
+                    "ARENA_JOB_SHUTDOWN_DRAIN_SECS",
+                    DEFAULT_JOB_SHUTDOWN_DRAIN_SECS,
+                ),
                 max_retries: parse_env("ARENA_JOB_MAX_RETRIES", DEFAULT_MAX_RETRIES),
                 workers: parse_env::<usize>("ARENA_JOB_WORKERS", 1).max(1),
             },
@@ -265,6 +277,7 @@ impl AppConfig {
             job: JobConfig {
                 poll_interval_ms: 60_000,
                 lock_timeout_secs: 7200,
+                shutdown_drain_secs: DEFAULT_JOB_SHUTDOWN_DRAIN_SECS,
                 max_retries: 20,
                 workers: 1,
             },
