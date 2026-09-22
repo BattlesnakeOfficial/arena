@@ -98,8 +98,9 @@ fn privacy_content() -> Markup {
             p {
                 "If you had an account on the old play.battlesnake.com, we "
                 "imported your email, username, display name, profile fields "
-                "(pronouns, country, backstory), and points balances to allow "
-                "you to claim your account. Your play password was imported "
+                "(pronouns, country, backstory), and historical Play points totals "
+                "as migration records. Points are not used to unlock customizations "
+                "in Arena. Your play password was imported "
                 "in hashed form only — it is never stored in plaintext, and "
                 "it is checked only to verify a claim. When you claim your "
                 "account, your play snakes and customization unlocks are "
