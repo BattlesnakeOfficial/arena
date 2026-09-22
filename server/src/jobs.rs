@@ -287,3 +287,6 @@ cja::impl_job_registry!(
     StuckGameSweeperJob,
     ScreenShoutsJob
 );
+
+#[cfg(test)]
+mod tests;
