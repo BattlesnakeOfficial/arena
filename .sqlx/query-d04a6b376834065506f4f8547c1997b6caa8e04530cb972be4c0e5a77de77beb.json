@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO jobs (job_id, name, payload, context, priority)\n         VALUES ($1, 'NoopJob', 'null', 'migration-test', 0)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d04a6b376834065506f4f8547c1997b6caa8e04530cb972be4c0e5a77de77beb"
+}

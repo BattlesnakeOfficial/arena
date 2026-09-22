@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO jobs (job_id, name, payload, context, priority, error_count)\n         VALUES ($1, 'MigrationTestFailure', '{\"reference\":713}', 'migration-test', 10, $2)\n         RETURNING created_at",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "d55256255490ba034949f96d8ae4b81ad733d37fd007939b7bb9010690f69985"
+}

@@ -1,0 +1,68 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT original_job_id, name, payload, context, priority, error_count,\n                last_error_message, created_at, failed_at FROM dead_letter_jobs",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "original_job_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "payload",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 3,
+        "name": "context",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "priority",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 5,
+        "name": "error_count",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 6,
+        "name": "last_error_message",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 8,
+        "name": "failed_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "f39f548158de7691e3b6bb6c4224bbb2700ba630e2b01481fc769f4678d8e3f1"
+}
