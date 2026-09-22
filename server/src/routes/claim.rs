@@ -35,7 +35,7 @@ const MAX_ATTEMPTS_PER_USER_PER_HOUR: i64 = 5;
 /// this closes, so the DoS is the lesser evil. Revisit if griefing shows up.
 const MAX_ATTEMPTS_PER_EMAIL_PER_HOUR: i64 = 10;
 
-fn claim_form(error: Option<&str>) -> Markup {
+fn claim_form(error: Option<Markup>) -> Markup {
     html! {
         div class="form-page" {
             div class="crumb" { "Play migration" }
@@ -82,7 +82,9 @@ fn claim_form(error: Option<&str>) -> Markup {
                 "Forgot your play password? "
                 a href="/claim/email" { "Claim by email instead" }
                 " — we'll send a one-time link to your old play address. Or "
-                "contact us on Discord and we'll verify you another way."
+                "contact us on "
+                a href="/discord" { "Discord" }
+                " and we'll verify you another way."
             }
         }
     }
@@ -131,10 +133,11 @@ pub async fn submit_claim(
         return Ok(page_factory
             .create_page(
                 "Claim Play Account".to_string(),
-                Box::new(claim_form(Some(
-                    "Too many attempts. Try again in an hour, or reach out on \
-                     Discord for help.",
-                ))),
+                Box::new(claim_form(Some(html! {
+                    "Too many attempts. Try again in an hour, or reach out on "
+                    a href="/discord" { "Discord" }
+                    " for help."
+                }))),
             )
             .into_response());
     }
@@ -171,9 +174,9 @@ pub async fn submit_claim(
         return Ok(page_factory
             .create_page(
                 "Claim Play Account".to_string(),
-                Box::new(claim_form(Some(
-                    "No unclaimed play account matches that email and password.",
-                ))),
+                Box::new(claim_form(Some(html! {
+                    "No unclaimed play account matches that email and password."
+                }))),
             )
             .into_response());
     };
@@ -189,10 +192,11 @@ pub async fn submit_claim(
         return Ok(page_factory
             .create_page(
                 "Claim Play Account".to_string(),
-                Box::new(claim_form(Some(
-                    "That account was just claimed. If that wasn't you, reach \
-                     out on Discord.",
-                ))),
+                Box::new(claim_form(Some(html! {
+                    "That account was just claimed. If that wasn't you, reach out on "
+                    a href="/discord" { "Discord" }
+                    "."
+                }))),
             )
             .into_response());
     };
@@ -329,8 +333,9 @@ pub async fn submit_email_claim(
                 "Claim by Email".to_string(),
                 Box::new(email_claim_form(Some(html! {
                     div class="form-error" role="alert" {
-                        "Too many attempts. Try again in an hour, or reach "
-                        "out on Discord for help."
+                        "Too many attempts. Try again in an hour, or reach out on "
+                        a href="/discord" { "Discord" }
+                        " for help."
                     }
                 }))),
             )

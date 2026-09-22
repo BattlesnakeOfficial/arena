@@ -31,7 +31,9 @@ pub fn account_claimed(
          If this was you, there's nothing to do — welcome back!\n\
          \n\
          If this WASN'T you, please reach out to us on Discord right away so \
-         we can secure your account.\n\
+         we can secure your account:\n\
+         \n\
+         https://arena.battlesnake.com/discord\n\
          \n\
          — Battlesnake Arena\n"
     );
