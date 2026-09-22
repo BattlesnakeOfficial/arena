@@ -38,7 +38,7 @@ test.describe('Leaderboard Pages', () => {
     }
   });
 
-  test('leaderboard list page renders with seeded leaderboard', async ({ authenticatedPage }) => {
+  test('leaderboard list page renders all seeded game modes', async ({ authenticatedPage }) => {
     await authenticatedPage.goto('/leaderboards');
 
     await expect(authenticatedPage.getByRole('heading', { name: 'Leaderboards' })).toBeVisible();
@@ -46,6 +46,8 @@ test.describe('Leaderboard Pages', () => {
     const seededLeaderboard = authenticatedPage.locator('tr', { hasText: 'Standard 11x11' });
     await expect(seededLeaderboard.getByText('Standard 11x11')).toBeVisible();
     await expect(seededLeaderboard.getByText('Active')).toBeVisible();
+    await expect(authenticatedPage.getByRole('link', { name: 'Royale 11x11' })).toBeVisible();
+    await expect(authenticatedPage.getByRole('link', { name: 'Duels 11x11' })).toBeVisible();
   });
 
   test('leaderboard detail page shows rankings and placement sections', async ({ authenticatedPage }) => {
@@ -317,6 +319,11 @@ test.describe('Leaderboard API', () => {
     const standard = leaderboards.find((lb: { name: string }) => lb.name === 'Standard 11x11');
     expect(standard).toBeDefined();
     expect(standard.active).toBe(true);
+    expect(standard).toMatchObject({ game_type: 'Standard', board_size: '11x11', match_size: 4 });
+    expect(leaderboards.find((lb: { name: string }) => lb.name === 'Royale 11x11'))
+      .toMatchObject({ game_type: 'Royale', board_size: '11x11', match_size: 4 });
+    expect(leaderboards.find((lb: { name: string }) => lb.name === 'Duels 11x11'))
+      .toMatchObject({ game_type: 'Standard', board_size: '11x11', match_size: 2 });
   });
 
   test('GET /api/leaderboards/:id/rankings returns rankings', async ({ authenticatedPage }) => {
