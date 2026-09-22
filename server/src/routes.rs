@@ -559,7 +559,7 @@ async fn root_page(
                             "search you think about in the shower. Battlesnake is open-ended by "
                             "design: how far you take it is up to you."
                         }
-                        a class="btn solid" href="/auth/github" { "Get started free" }
+                        a class="btn solid" href="/auth/github" { "Get started" }
                     }
                 }
             }

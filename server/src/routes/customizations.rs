@@ -18,20 +18,19 @@ fn catalog_item(
     def: &CustomizationDef,
     granted: &HashSet<(String, String)>,
 ) -> Markup {
-    let owned = granted.contains(&(kind.to_string(), slug.to_string()));
-    let free = def.is_free();
-    let locked = !owned && !free;
+    let unlocked = def.is_free() || granted.contains(&(kind.to_string(), slug.to_string()));
 
     html! {
-        div .cz-item .locked[locked] {
+        div .cz-item .locked[!unlocked] {
             div class="cz-swatch" {
                 img src=(image_url) alt="" loading="lazy";
             }
             div class="cz-name" title=(def.display_name) { (def.display_name) }
-            @if owned {
-                span class="badge ok" { "Owned" }
-            } @else if free {
-                span class="badge" { "Free" }
+            @if !def.description.is_empty() {
+                p class="cz-description" { (def.description) }
+            }
+            @if unlocked {
+                span class="badge ok" { "Unlocked" }
             } @else {
                 span class="badge" { "Locked" }
             }
@@ -59,9 +58,15 @@ pub async fn list_customizations(
                 h1 { "Customizations" }
                 div class="sub" {
                     "Heads and tails your snakes can wear. A snake declares its "
-                    "customizations from its root endpoint; anything you don't have "
-                    "access to falls back to the default."
+                    "customizations from its root endpoint; locked customizations "
+                    "fall back to the default."
                 }
+            }
+
+            p class="cz-note" {
+                "See a head or tail you want? "
+                a href="/discord" { "Reach out on Discord" }
+                " and tell us which one!"
             }
 
             @if user.is_none() {
