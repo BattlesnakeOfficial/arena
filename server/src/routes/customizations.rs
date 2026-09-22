@@ -63,6 +63,12 @@ pub async fn list_customizations(
                 }
             }
 
+            p class="cz-note" {
+                "See a head or tail you want? "
+                a href="/discord" { "Reach out on Discord" }
+                " and tell us which one!"
+            }
+
             @if user.is_none() {
                 p class="cz-note" {
                     "Browsing as a guest — "
