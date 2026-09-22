@@ -4,8 +4,7 @@ use sqlx::{FromRow, PgPool, Postgres};
 use uuid::Uuid;
 
 /// Application constants for leaderboard configuration
-pub const MATCH_SIZE: usize = 4;
-/// Smallest game the matchmaker will create when fewer than MATCH_SIZE
+/// Smallest game the matchmaker will create when fewer than a leaderboard's match size
 /// snakes are enabled. Below this the ladder is starved and matchmaking
 /// pauses entirely.
 pub const MIN_MATCH_SIZE: usize = 2;
@@ -17,6 +16,9 @@ pub const GAMES_PER_DAY: i32 = 100;
 pub struct Leaderboard {
     pub leaderboard_id: Uuid,
     pub name: String,
+    pub game_type: String,
+    pub board_size: String,
+    pub match_size: i32,
     pub disabled_at: Option<chrono::DateTime<chrono::Utc>>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
@@ -108,9 +110,10 @@ impl LeaderboardSort {
 pub async fn get_all_leaderboards(pool: &PgPool) -> cja::Result<Vec<Leaderboard>> {
     let rows = sqlx::query_as!(
         Leaderboard,
-        r#"SELECT leaderboard_id, name, disabled_at, created_at, updated_at
+        r#"SELECT leaderboard_id, name, game_type, board_size, match_size,
+                disabled_at, created_at, updated_at
          FROM leaderboards
-         ORDER BY created_at ASC"#
+         ORDER BY created_at ASC, name ASC"#
     )
     .fetch_all(pool)
     .await
@@ -122,10 +125,11 @@ pub async fn get_all_leaderboards(pool: &PgPool) -> cja::Result<Vec<Leaderboard>
 pub async fn get_active_leaderboards(pool: &PgPool) -> cja::Result<Vec<Leaderboard>> {
     let rows = sqlx::query_as!(
         Leaderboard,
-        r#"SELECT leaderboard_id, name, disabled_at, created_at, updated_at
+        r#"SELECT leaderboard_id, name, game_type, board_size, match_size,
+                disabled_at, created_at, updated_at
          FROM leaderboards
          WHERE disabled_at IS NULL
-         ORDER BY created_at ASC"#
+         ORDER BY created_at ASC, name ASC"#
     )
     .fetch_all(pool)
     .await
@@ -140,7 +144,8 @@ pub async fn get_leaderboard_by_id(
 ) -> cja::Result<Option<Leaderboard>> {
     let row = sqlx::query_as!(
         Leaderboard,
-        r#"SELECT leaderboard_id, name, disabled_at, created_at, updated_at
+        r#"SELECT leaderboard_id, name, game_type, board_size, match_size,
+                disabled_at, created_at, updated_at
          FROM leaderboards
          WHERE leaderboard_id = $1"#,
         leaderboard_id

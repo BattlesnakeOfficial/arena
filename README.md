@@ -36,8 +36,9 @@ and pushed to the [`screenshots` branch](https://github.com/BattlesnakeOfficial/
 
 ## What's in the box
 
-- **Ranked leaderboards** — register a snake, and the matchmaker starts games every few
-  minutes. Ratings use Weng-Lin (OpenSkill), not Elo; displayed rating is `μ − 3σ`.
+- **Ranked leaderboards** — register a snake for Standard 11x11, Royale 11x11, or
+  Duels 11x11 (two snakes), and the matchmaker starts games every few minutes.
+  Ratings use Weng-Lin (OpenSkill), not Elo; displayed rating is `μ − 3σ`.
 - **Tournaments** — single-elimination brackets with seeding, best-of-N matches, live
   round tracking, and a champion's trophy.
 - **Game engine** — Rust rules crate simulating Standard games on 7x7 / 11x11 / 19x19

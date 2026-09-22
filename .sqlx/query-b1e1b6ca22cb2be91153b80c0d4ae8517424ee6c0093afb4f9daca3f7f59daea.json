@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT leaderboard_id, name, disabled_at, created_at, updated_at\n         FROM leaderboards\n         WHERE leaderboard_id = $1",
+  "query": "SELECT leaderboard_id, name, game_type, board_size, match_size,\n                          disabled_at, created_at, updated_at\n                   FROM leaderboards WHERE name = $1",
   "describe": {
     "columns": [
       {
@@ -15,26 +15,44 @@
       },
       {
         "ordinal": 2,
+        "name": "game_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "board_size",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "match_size",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 5,
         "name": "disabled_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 3,
+        "ordinal": 6,
         "name": "created_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 4,
+        "ordinal": 7,
         "name": "updated_at",
         "type_info": "Timestamptz"
       }
     ],
     "parameters": {
       "Left": [
-        "Uuid"
+        "Text"
       ]
     },
     "nullable": [
+      false,
+      false,
+      false,
       false,
       false,
       true,
@@ -42,5 +60,5 @@
       false
     ]
   },
-  "hash": "cf6620175dfb7bd4db7a8050cefb68328a0188224160ba3a8f4eb7314a8eb80f"
+  "hash": "b1e1b6ca22cb2be91153b80c0d4ae8517424ee6c0093afb4f9daca3f7f59daea"
 }

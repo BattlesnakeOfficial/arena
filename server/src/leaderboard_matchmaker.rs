@@ -1,12 +1,12 @@
 use color_eyre::eyre::Context as _;
-use uuid::Uuid;
+use std::str::FromStr;
 
 use crate::{
     cron::MATCHMAKER_INTERVAL_SECS,
     jobs::GameRunnerJob,
     models::{
         game::{self, CreateGame, GameBoardSize, GameType},
-        leaderboard::{self, GAMES_PER_DAY, LeaderboardEntry, MATCH_SIZE, MIN_MATCH_SIZE},
+        leaderboard::{self, GAMES_PER_DAY, Leaderboard, LeaderboardEntry, MIN_MATCH_SIZE},
     },
     state::AppState,
 };
@@ -20,7 +20,7 @@ pub async fn run_matchmaker(app_state: &AppState) -> cja::Result<()> {
         .wrap_err("Failed to fetch active leaderboards")?;
 
     for lb in &leaderboards {
-        if let Err(e) = run_matchmaker_for_leaderboard(app_state, lb.leaderboard_id).await {
+        if let Err(e) = run_matchmaker_for_leaderboard(app_state, lb).await {
             tracing::error!(
                 leaderboard_id = %lb.leaderboard_id,
                 leaderboard_name = %lb.name,
@@ -33,11 +33,9 @@ pub async fn run_matchmaker(app_state: &AppState) -> cja::Result<()> {
     Ok(())
 }
 
-async fn run_matchmaker_for_leaderboard(
-    app_state: &AppState,
-    leaderboard_id: Uuid,
-) -> cja::Result<()> {
+async fn run_matchmaker_for_leaderboard(app_state: &AppState, lb: &Leaderboard) -> cja::Result<()> {
     let pool = &app_state.db;
+    let leaderboard_id = lb.leaderboard_id;
 
     let entries = leaderboard::get_active_entries(pool, leaderboard_id)
         .await
@@ -47,15 +45,23 @@ async fn run_matchmaker_for_leaderboard(
     // ladder when snakes drop out — a health-disabled snake once starved
     // matchmaking for 10 days because this was a silent 4-or-nothing check.
     if entries.len() < MIN_MATCH_SIZE {
-        tracing::warn!(
-            leaderboard_id = %leaderboard_id,
-            active_snakes = entries.len(),
-            "Matchmaking starved: not enough active snakes (need at least {})",
-            MIN_MATCH_SIZE
-        );
+        if entries.is_empty() {
+            tracing::debug!(leaderboard_id = %leaderboard_id, "No snakes entered in leaderboard");
+        } else {
+            tracing::warn!(
+                leaderboard_id = %leaderboard_id,
+                active_snakes = entries.len(),
+                "Matchmaking starved: not enough active snakes (need at least {})",
+                MIN_MATCH_SIZE
+            );
+        }
         return Ok(());
     }
-    let match_size = entries.len().min(MATCH_SIZE);
+    let match_size = entries.len().min(lb.match_size as usize);
+    let game_type = GameType::from_str(&lb.game_type)
+        .wrap_err_with(|| format!("Invalid game type for leaderboard {}", lb.name))?;
+    let board_size = GameBoardSize::from_str(&lb.board_size)
+        .wrap_err_with(|| format!("Invalid board size for leaderboard {}", lb.name))?;
 
     // Calculate how many games to create this run
     // Derived from shared cron interval constant to avoid manual sync bugs
@@ -86,8 +92,8 @@ async fn run_matchmaker_for_leaderboard(
         let game = game::create_game(
             &mut *tx,
             CreateGame {
-                board_size: GameBoardSize::Medium, // 11x11
-                game_type: GameType::Standard,
+                board_size: board_size.clone(),
+                game_type: game_type.clone(),
             },
         )
         .await
@@ -233,14 +239,14 @@ mod tests {
         assert!(selected.is_empty());
     }
 
-    /// The matchmaker passes `min(pool, MATCH_SIZE)` — a 3-snake pool plays
+    /// The matchmaker passes `min(pool, match_size)` — a 3-snake pool plays
     /// 3-snake games instead of freezing the ladder.
     #[test]
     fn test_select_match_short_handed() {
-        for pool in MIN_MATCH_SIZE..MATCH_SIZE {
+        for pool in MIN_MATCH_SIZE..4 {
             let entries: Vec<LeaderboardEntry> =
                 (0..pool).map(|i| make_entry(i as f64 * 5.0)).collect();
-            let selected = select_match(&mut seeded_rng(), &entries, pool.min(MATCH_SIZE));
+            let selected = select_match(&mut seeded_rng(), &entries, pool.min(4));
             assert_eq!(selected.len(), pool);
             let unique: std::collections::HashSet<Uuid> =
                 selected.iter().map(|e| e.battlesnake_id).collect();
@@ -308,13 +314,16 @@ mod tests {
         Ok(sizes)
     }
 
-    /// A pool short of MATCH_SIZE still gets games — sized to the pool.
+    /// A pool short of the configured match size still gets games — sized to the pool.
     #[sqlx::test(migrations = "../migrations")]
     async fn matchmaker_creates_short_handed_games(pool: sqlx::PgPool) -> cja::Result<()> {
         let app_state = crate::state::AppState::test_from_pool(pool.clone());
         let leaderboard_id = leaderboard_with_snakes(&pool, 3).await?;
 
-        run_matchmaker_for_leaderboard(&app_state, leaderboard_id).await?;
+        let lb = leaderboard::get_leaderboard_by_id(&pool, leaderboard_id)
+            .await?
+            .expect("test leaderboard exists");
+        run_matchmaker_for_leaderboard(&app_state, &lb).await?;
 
         let sizes = game_sizes(&pool, leaderboard_id).await?;
         assert!(!sizes.is_empty(), "3 enabled snakes must produce games");
@@ -328,9 +337,76 @@ mod tests {
         let app_state = crate::state::AppState::test_from_pool(pool.clone());
         let leaderboard_id = leaderboard_with_snakes(&pool, 1).await?;
 
-        run_matchmaker_for_leaderboard(&app_state, leaderboard_id).await?;
+        let lb = leaderboard::get_leaderboard_by_id(&pool, leaderboard_id)
+            .await?
+            .expect("test leaderboard exists");
+        run_matchmaker_for_leaderboard(&app_state, &lb).await?;
 
         assert!(game_sizes(&pool, leaderboard_id).await?.is_empty());
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn seeded_modes_create_games_with_their_own_rules(pool: sqlx::PgPool) -> cja::Result<()> {
+        let app_state = crate::state::AppState::test_from_pool(pool.clone());
+
+        for (name, expected_type, expected_board, expected_size) in [
+            ("Royale 11x11", "Royale", "11x11", 4_i64),
+            ("Duels 11x11", "Standard", "11x11", 2_i64),
+        ] {
+            let lb = sqlx::query_as!(
+                Leaderboard,
+                r#"SELECT leaderboard_id, name, game_type, board_size, match_size,
+                          disabled_at, created_at, updated_at
+                   FROM leaderboards WHERE name = $1"#,
+                name,
+            )
+            .fetch_one(&pool)
+            .await?;
+            assert_eq!(lb.game_type, expected_type);
+            assert_eq!(lb.board_size, expected_board);
+            assert_eq!(i64::from(lb.match_size), expected_size);
+
+            let user_id = sqlx::query_scalar!(
+                "INSERT INTO users (external_github_id, github_login, github_access_token)
+                 VALUES ($1, $2, 'test-token') RETURNING user_id",
+                88002 + expected_size,
+                format!("mm-{name}"),
+            )
+            .fetch_one(&pool)
+            .await?;
+            for i in 0..4 {
+                let battlesnake_id = sqlx::query_scalar!(
+                    "INSERT INTO battlesnakes (user_id, name, url)
+                     VALUES ($1, $2, 'http://example.com/snake') RETURNING battlesnake_id",
+                    user_id,
+                    format!("{name}-snake-{i}"),
+                )
+                .fetch_one(&pool)
+                .await?;
+                leaderboard::get_or_create_entry(&pool, lb.leaderboard_id, battlesnake_id).await?;
+            }
+
+            run_matchmaker_for_leaderboard(&app_state, &lb).await?;
+            let games = sqlx::query!(
+                r#"SELECT g.game_type, g.board_size, COUNT(gb.game_battlesnake_id) AS "snake_count!"
+                   FROM leaderboard_games lg
+                   JOIN games g ON g.game_id = lg.game_id
+                   JOIN game_battlesnakes gb ON gb.game_id = g.game_id
+                   WHERE lg.leaderboard_id = $1
+                   GROUP BY g.game_id"#,
+                lb.leaderboard_id,
+            )
+            .fetch_all(&pool)
+            .await?;
+            assert!(!games.is_empty());
+            for game in games {
+                assert_eq!(game.game_type, expected_type);
+                assert_eq!(game.board_size, expected_board);
+                assert_eq!(game.snake_count, expected_size);
+            }
+        }
+
         Ok(())
     }
 }

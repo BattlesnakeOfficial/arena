@@ -22,6 +22,9 @@ use crate::{
 pub struct LeaderboardResponse {
     pub id: Uuid,
     pub name: String,
+    pub game_type: String,
+    pub board_size: String,
+    pub match_size: i32,
     pub active: bool,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
@@ -90,6 +93,9 @@ pub async fn list_leaderboards(
         .map(|lb| LeaderboardResponse {
             id: lb.leaderboard_id,
             name: lb.name,
+            game_type: lb.game_type,
+            board_size: lb.board_size,
+            match_size: lb.match_size,
             active: lb.disabled_at.is_none(),
             created_at: lb.created_at,
         })
