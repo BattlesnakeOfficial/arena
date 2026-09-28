@@ -442,4 +442,45 @@ mod tests {
         assert!(final_progress.done);
         assert_eq!(final_progress.cursor_id, first.cursor_id);
     }
+
+    /// A stalled source must not starve the other five. `sessions` is the
+    /// largest backfill source and the one most likely to blow the batch
+    /// statement timeout in production (its measured page does ~20k buffer
+    /// reads against a 10s budget). When it does, the five cheap sources still
+    /// hold most of the reconstructable history and must still make progress.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn one_stalled_source_does_not_block_the_other_sources(db: PgPool) {
+        let user = sqlx::query_scalar!(
+            "INSERT INTO users(external_github_id, github_login, github_access_token) VALUES (1, 'stalled-source', '') RETURNING user_id"
+        ).fetch_one(&db).await.unwrap();
+        sqlx::query!(
+            "INSERT INTO battlesnakes(user_id, name, url, created_at) VALUES ($1, 'stalled-source', 'https://example.com', '2020-02-03 08:00+00')",
+            user
+        ).execute(&db).await.unwrap();
+
+        // Hold `sessions` so its batch blocks and trips the per-batch
+        // statement timeout, exactly as an oversized production page would.
+        let mut blocker = db.begin().await.unwrap();
+        sqlx::query!("LOCK TABLE sessions IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *blocker)
+            .await
+            .unwrap();
+
+        let state = AppState::test_from_pool(db.clone());
+        let _ = run_batch(&state).await;
+        blocker.rollback().await.unwrap();
+
+        let days = sqlx::query_scalar!(
+            "SELECT day FROM user_activity_days WHERE user_id = $1 ORDER BY day",
+            user
+        )
+        .fetch_all(&db)
+        .await
+        .unwrap();
+        assert_eq!(
+            days.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            ["2020-02-03"],
+            "battlesnakes must still be backfilled when the sessions batch stalls"
+        );
+    }
 }

@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO battlesnakes(user_id, name, url, created_at) VALUES ($1, 'stalled-source', 'https://example.com', '2020-02-03 08:00+00')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "58ac48ad4ab096a14c6ef7e9c70f2b26060e2225476c0ede64310e9a12a329dd"
+}
