@@ -382,6 +382,7 @@ table.data td.rating { font-family: var(--mono); font-weight: 600; font-size: 15
 .public-stats-section h2 { margin-bottom: 16px; }
 .public-stats-chart { display: block; width: 100%; height: auto; max-height: 240px; overflow: visible; }
 .public-stats-chart .chart-axis { stroke: var(--hairline); stroke-width: 2; }
+.public-stats-chart .chart-label { fill: var(--ink); font-family: var(--mono); font-size: 14px; }
 .public-stats-chart .chart-series-0, .public-stats-legend .series-0 { fill: var(--pink); background: var(--pink); }
 .public-stats-chart .chart-series-1, .public-stats-legend .series-1 { fill: #3ca7a0; background: #3ca7a0; }
 .public-stats-chart .chart-series-2, .public-stats-legend .series-2 { fill: #db9d40; background: #db9d40; }

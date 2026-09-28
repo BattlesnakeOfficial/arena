@@ -20,7 +20,13 @@ async fn snapshot_for_day(
 ) -> cja::Result<Arc<StatsSnapshot>> {
     let as_of = today_utc - Duration::days(1);
     if let Some(cached) = state.stats_cache.get()
-        && cached.as_of_utc_date == as_of
+        && cached.as_of_utc_date >= as_of
+    {
+        return Ok(cached);
+    }
+    let _refresh = state.stats_refresh.lock().await;
+    if let Some(cached) = state.stats_cache.get()
+        && cached.as_of_utc_date >= as_of
     {
         return Ok(cached);
     }
@@ -47,7 +53,14 @@ pub async fn stats_page(
     Ok(page_factory.create_page("Stats".to_string(), Box::new(render_stats(&stats))))
 }
 
-fn chart(id: &str, title: &str, description: &str, values: &[[i64; 3]]) -> Markup {
+fn chart(
+    id: &str,
+    title: &str,
+    description: &str,
+    values: &[[i64; 3]],
+    first_period: Option<String>,
+    last_period: Option<String>,
+) -> Markup {
     let max = values
         .iter()
         .map(|v| v.iter().sum::<i64>())
@@ -71,15 +84,18 @@ fn chart(id: &str, title: &str, description: &str, values: &[[i64; 3]]) -> Marku
     let desc_id = format!("{id}-desc");
     let labelled_by = format!("{label_id} {desc_id}");
     html! {
-        svg class="public-stats-chart" viewBox="0 0 720 220" role="img" aria-labelledby=(labelled_by) {
+        svg class="public-stats-chart" viewBox="0 0 720 240" role="img" aria-labelledby=(labelled_by) {
             title id=(label_id) { (title) }
             desc id=(desc_id) { (description) }
+            text x="0" y="16" class="chart-label" { "Max " (max) }
             line x1="0" y1="200" x2="720" y2="200" class="chart-axis" {}
             @for (x, y, width, height, series) in bars {
                 rect x=(format!("{x:.2}")) y=(format!("{y:.2}"))
                      width=(format!("{width:.2}")) height=(format!("{height:.2}"))
                      class=(format!("chart-series-{series}")) {}
             }
+            @if let Some(first) = first_period { text x="0" y="224" class="chart-label" { (first) } }
+            @if let Some(last) = last_period { text x="720" y="224" text-anchor="end" class="chart-label" { (last) } }
         }
     }
 }
@@ -145,7 +161,7 @@ fn render_stats(s: &StatsSnapshot) -> Markup {
 
             section class="public-stats-section" {
                 h2 { "Daily active users" }
-                (chart("daily-users", "Daily active users", "Last 90 complete UTC days", &dau))
+                (chart("daily-users", "Daily active users", "Last 90 complete UTC days", &dau, s.daily_active_users.first().map(|r| r.date.to_string()), s.daily_active_users.last().map(|r| r.date.to_string())))
                 div class="public-stats-table-wrap" {
                     table class="public-stats-table" {
                         caption { "Daily active users, last 90 complete UTC days" }
@@ -156,7 +172,7 @@ fn render_stats(s: &StatsSnapshot) -> Markup {
             }
             section class="public-stats-section" {
                 h2 { "Weekly active users" }
-                (chart("weekly-users", "Weekly active users", "Last 52 complete ISO weeks", &wau))
+                (chart("weekly-users", "Weekly active users", "Last 52 complete ISO weeks", &wau, s.weekly_active_users.first().map(|r| r.week_start.to_string()), s.weekly_active_users.last().map(|r| r.week_start.to_string())))
                 div class="public-stats-table-wrap" {
                     table class="public-stats-table" {
                         caption { "Weekly active users, last 52 complete ISO weeks" }
@@ -167,7 +183,7 @@ fn render_stats(s: &StatsSnapshot) -> Markup {
             }
             section class="public-stats-section" {
                 h2 { "Games per day" }
-                (chart("daily-games", "Games played per day", "Custom, leaderboard, and tournament games over the last 90 complete UTC days", &daily_games))
+                (chart("daily-games", "Games played per day", "Custom, leaderboard, and tournament games over the last 90 complete UTC days", &daily_games, s.daily_games.first().map(|r| r.date.to_string()), s.daily_games.last().map(|r| r.date.to_string())))
                 (game_legend())
                 div class="public-stats-table-wrap" {
                     table class="public-stats-table" {
@@ -179,7 +195,7 @@ fn render_stats(s: &StatsSnapshot) -> Markup {
             }
             section class="public-stats-section" {
                 h2 { "Games per week" }
-                (chart("weekly-games", "Games played per week", "Custom, leaderboard, and tournament games over the last 52 complete ISO weeks", &weekly_games))
+                (chart("weekly-games", "Games played per week", "Custom, leaderboard, and tournament games over the last 52 complete ISO weeks", &weekly_games, s.weekly_games.first().map(|r| r.week_start.to_string()), s.weekly_games.last().map(|r| r.week_start.to_string())))
                 (game_legend())
                 div class="public-stats-table-wrap" {
                     table class="public-stats-table" {
@@ -191,7 +207,7 @@ fn render_stats(s: &StatsSnapshot) -> Markup {
             }
             section class="public-stats-section" {
                 h2 { "Community growth" }
-                (chart("growth", "New users and snakes per week", "New users and snakes over the last 52 complete ISO weeks", &growth))
+                (chart("growth", "New users and snakes per week", "New users and snakes over the last 52 complete ISO weeks", &growth, s.weekly_growth.first().map(|r| r.week_start.to_string()), s.weekly_growth.last().map(|r| r.week_start.to_string())))
                 p class="public-stats-legend" { span class="key series-0" {} "New users" span class="key series-1" {} "New snakes" }
                 div class="public-stats-table-wrap" {
                     table class="public-stats-table" {
@@ -203,7 +219,7 @@ fn render_stats(s: &StatsSnapshot) -> Markup {
             }
             section class="public-stats-section" {
                 h2 { "Active snakes per week" }
-                (chart("weekly-snakes", "Active snakes per week", "Distinct snakes in played games over the last 52 complete ISO weeks", &snakes))
+                (chart("weekly-snakes", "Active snakes per week", "Distinct snakes in played games over the last 52 complete ISO weeks", &snakes, s.weekly_active_snakes.first().map(|r| r.week_start.to_string()), s.weekly_active_snakes.last().map(|r| r.week_start.to_string())))
                 div class="public-stats-table-wrap" {
                     table class="public-stats-table" {
                         caption { "Active snakes per week, last 52 complete ISO weeks" }

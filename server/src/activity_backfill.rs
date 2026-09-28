@@ -4,6 +4,14 @@ use uuid::Uuid;
 use crate::state::AppState;
 
 const BATCH_SIZE: i64 = 1_000;
+const MIN_BATCH_SIZE: i64 = 25;
+
+fn is_statement_timeout(error: &color_eyre::Report) -> bool {
+    matches!(
+        error.downcast_ref::<sqlx::Error>(),
+        Some(sqlx::Error::Database(db_error)) if db_error.code().as_deref() == Some("57014")
+    )
+}
 
 #[derive(Debug)]
 struct BatchResult {
@@ -25,6 +33,7 @@ pub async fn run_batch(state: &AppState) -> cja::Result<bool> {
         return Ok(false);
     }
 
+    let mut source_failed = false;
     for source in [
         "sessions",
         "games",
@@ -33,6 +42,9 @@ pub async fn run_batch(state: &AppState) -> cja::Result<bool> {
         "tournament_registrations",
         "leaderboard_entries",
     ] {
+        let mut batch_size = BATCH_SIZE;
+        loop {
+            let source_result: cja::Result<()> = async {
         let mut tx = state
             .db
             .begin()
@@ -42,6 +54,10 @@ pub async fn run_batch(state: &AppState) -> cja::Result<bool> {
             .execute(&mut *tx)
             .await
             .wrap_err("Failed to set activity backfill timeout")?;
+            sqlx::query("SET LOCAL lock_timeout = '1s'")
+            .execute(&mut *tx)
+            .await
+            .wrap_err("Failed to set activity backfill lock timeout")?;
         let progress = sqlx::query!(
             "SELECT cursor_id, done FROM stats_activity_backfill_progress WHERE source = $1 FOR UPDATE SKIP LOCKED",
             source
@@ -50,10 +66,10 @@ pub async fn run_batch(state: &AppState) -> cja::Result<bool> {
         .await
         .wrap_err("Failed to lock activity backfill progress")?;
         let Some(progress) = progress else {
-            continue;
+            return Ok(());
         };
         if progress.done {
-            continue;
+            return Ok(());
         }
         let cursor = progress.cursor_id;
         let result: BatchResult = match source {
@@ -77,7 +93,7 @@ SELECT (SELECT COUNT(*) FROM batch) AS "source_row_count!: i64",
        (SELECT MAX(key::text)::uuid FROM batch) AS "last_source_key?: Uuid",
        (SELECT COUNT(*) FROM inserted) AS "inserted_count!: i64""#,
                     cursor,
-                    BATCH_SIZE,
+                    batch_size,
                     epoch.tracking_started_at
                 )
                 .fetch_one(&mut *tx)
@@ -109,7 +125,7 @@ SELECT (SELECT COUNT(*) FROM batch) AS "source_row_count!: i64",
        (SELECT MAX(key::text)::uuid FROM batch) AS "last_source_key?: Uuid",
        (SELECT COUNT(*) FROM inserted) AS "inserted_count!: i64""#,
                     cursor,
-                    BATCH_SIZE,
+                    batch_size,
                     epoch.tracking_started_at
                 )
                 .fetch_one(&mut *tx)
@@ -141,7 +157,7 @@ SELECT (SELECT COUNT(*) FROM batch) AS "source_row_count!: i64",
        (SELECT MAX(key::text)::uuid FROM batch) AS "last_source_key?: Uuid",
        (SELECT COUNT(*) FROM inserted) AS "inserted_count!: i64""#,
                     cursor,
-                    BATCH_SIZE,
+                    batch_size,
                     epoch.tracking_started_at
                 )
                 .fetch_one(&mut *tx)
@@ -173,7 +189,7 @@ SELECT (SELECT COUNT(*) FROM batch) AS "source_row_count!: i64",
        (SELECT MAX(key::text)::uuid FROM batch) AS "last_source_key?: Uuid",
        (SELECT COUNT(*) FROM inserted) AS "inserted_count!: i64""#,
                     cursor,
-                    BATCH_SIZE,
+                    batch_size,
                     epoch.tracking_started_at
                 )
                 .fetch_one(&mut *tx)
@@ -205,7 +221,7 @@ SELECT (SELECT COUNT(*) FROM batch) AS "source_row_count!: i64",
        (SELECT MAX(key::text)::uuid FROM batch) AS "last_source_key?: Uuid",
        (SELECT COUNT(*) FROM inserted) AS "inserted_count!: i64""#,
                     cursor,
-                    BATCH_SIZE,
+                    batch_size,
                     epoch.tracking_started_at
                 )
                 .fetch_one(&mut *tx)
@@ -237,7 +253,7 @@ SELECT (SELECT COUNT(*) FROM batch) AS "source_row_count!: i64",
        (SELECT MAX(key::text)::uuid FROM batch) AS "last_source_key?: Uuid",
        (SELECT COUNT(*) FROM inserted) AS "inserted_count!: i64""#,
                     cursor,
-                    BATCH_SIZE,
+                    batch_size,
                     epoch.tracking_started_at
                 )
                 .fetch_one(&mut *tx)
@@ -251,7 +267,7 @@ SELECT (SELECT COUNT(*) FROM batch) AS "source_row_count!: i64",
             }
             _ => return Err(eyre!("Unknown activity backfill source: {source}")),
         };
-        let done = result.source_row_count < BATCH_SIZE;
+        let done = result.source_row_count < batch_size;
         sqlx::query!(
             "UPDATE stats_activity_backfill_progress SET cursor_id = COALESCE($2, cursor_id), done = $3 WHERE source = $1",
             source,
@@ -271,6 +287,29 @@ SELECT (SELECT COUNT(*) FROM batch) AS "source_row_count!: i64",
             done,
             "Activity backfill batch committed"
         );
+        Ok(())
+        }.await;
+            match source_result {
+                Ok(()) => break,
+                Err(error)
+                    if source == "sessions"
+                        && batch_size > MIN_BATCH_SIZE
+                        && is_statement_timeout(&error) =>
+                {
+                    batch_size = (batch_size / 2).max(MIN_BATCH_SIZE);
+                    tracing::warn!(source, batch_size, error = %format!("{error:#}"), "Activity backfill timed out; retrying a smaller page");
+                }
+                Err(error) => {
+                    source_failed = true;
+                    tracing::warn!(source, error = %format!("{error:#}"), "Activity backfill source failed; continuing other sources");
+                    break;
+                }
+            }
+        }
+    }
+
+    if source_failed {
+        return Ok(true);
     }
 
     let remaining = sqlx::query_scalar!(

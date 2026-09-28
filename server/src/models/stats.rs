@@ -105,6 +105,7 @@ impl StatsSnapshot {
             .ok_or_else(|| eyre!("Invalid tracking epoch"))?;
 
         let activity_rows = sqlx::query!(
+            // The (user_id, day) primary key makes COUNT(*) a distinct-user count for each day.
             "SELECT day, COUNT(*) AS \"count!: i64\" FROM user_activity_days WHERE day >= $1 AND day < $2 GROUP BY day",
             daily_start, today_utc
         ).fetch_all(db).await.wrap_err("Failed to fetch daily account activity")?;

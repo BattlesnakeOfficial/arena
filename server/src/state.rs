@@ -33,6 +33,7 @@ pub struct AppState {
     /// TTL memo for the anonymous-homepage feed (see HOME_FEED_CACHE_SECS)
     pub home_feed_cache: Arc<crate::cache::TtlCell<crate::models::leaderboard::HomeFeed>>,
     pub stats_cache: Arc<crate::cache::TtlCell<crate::models::stats::StatsSnapshot>>,
+    pub stats_refresh: Arc<tokio::sync::Mutex<()>>,
     pub activity_recorder: Arc<crate::activity::ActivityRecorder>,
 }
 
@@ -181,6 +182,7 @@ impl AppState {
             scoring: std::sync::Arc::new(scoring_registry),
             home_feed_cache,
             stats_cache,
+            stats_refresh: Arc::new(tokio::sync::Mutex::new(())),
             activity_recorder: Arc::new(crate::activity::ActivityRecorder::default()),
         })
     }
@@ -205,6 +207,7 @@ impl AppState {
             scoring: std::sync::Arc::new(crate::scoring::ScoringRegistry::new()),
             home_feed_cache: Arc::new(crate::cache::TtlCell::new(std::time::Duration::ZERO)),
             stats_cache: Arc::new(crate::cache::TtlCell::new(std::time::Duration::ZERO)),
+            stats_refresh: Arc::new(tokio::sync::Mutex::new(())),
             activity_recorder: Arc::new(crate::activity::ActivityRecorder::default()),
         }
     }
