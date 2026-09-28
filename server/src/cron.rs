@@ -5,7 +5,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::jobs::{
     GameBackupJob, LeaderboardMatchmakerJob, RateLimitPruneJob, SnakeHealthSweeperJob,
-    StuckGameSweeperJob, StuckMatchSweeperJob,
+    StatsActivityBackfillJob, StuckGameSweeperJob, StuckMatchSweeperJob,
 };
 use crate::state::AppState;
 
@@ -27,6 +27,12 @@ pub(crate) fn cron_registry() -> CronRegistry<AppState> {
     registry.register_job(
         GameBackupJob,
         Some("Enqueue backup jobs for games from the last 4 hours"),
+        Duration::from_secs(60 * 60),
+    );
+
+    registry.register_job(
+        StatsActivityBackfillJob,
+        Some("Recover historical account activity backfill"),
         Duration::from_secs(60 * 60),
     );
 

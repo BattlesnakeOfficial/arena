@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT day, COUNT(*) AS \"count!: i64\" FROM user_activity_days WHERE day >= $1 AND day < $2 GROUP BY day",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "day",
+        "type_info": "Date"
+      },
+      {
+        "ordinal": 1,
+        "name": "count!: i64",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Date",
+        "Date"
+      ]
+    },
+    "nullable": [
+      false,
+      null
+    ]
+  },
+  "hash": "6033182a6400a7659f148a0829fcfac8d7e978a2ece680b57661626b533e5a97"
+}

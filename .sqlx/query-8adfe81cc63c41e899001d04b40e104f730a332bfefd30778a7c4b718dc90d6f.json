@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DROP TABLE user_activity_days",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "8adfe81cc63c41e899001d04b40e104f730a332bfefd30778a7c4b718dc90d6f"
+}

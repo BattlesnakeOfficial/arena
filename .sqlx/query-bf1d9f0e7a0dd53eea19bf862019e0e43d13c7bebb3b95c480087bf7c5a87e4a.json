@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT cursor_id, done FROM stats_activity_backfill_progress WHERE source = $1 FOR UPDATE SKIP LOCKED",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "cursor_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "done",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      true,
+      false
+    ]
+  },
+  "hash": "bf1d9f0e7a0dd53eea19bf862019e0e43d13c7bebb3b95c480087bf7c5a87e4a"
+}

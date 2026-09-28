@@ -45,6 +45,7 @@ pub mod policy;
 pub mod redirects;
 pub mod saved_games;
 pub mod settings;
+pub mod stats;
 pub mod tournament;
 pub mod users;
 
@@ -76,6 +77,7 @@ pub fn routes(app_state: AppState) -> axum::Router {
         .route("/games/{id}/details", get(api::games::show_game))
         .route("/games/status", post(api::games::batch_game_status))
         .route("/admin/stats", get(admin::stats_json))
+        .route("/stats", get(stats::stats_json))
         // Leaderboard API endpoints
         .route("/leaderboards", get(api::leaderboards::list_leaderboards))
         .route(
@@ -95,6 +97,7 @@ pub fn routes(app_state: AppState) -> axum::Router {
     let router = axum::Router::new()
         // Public pages
         .route("/", get(root_page))
+        .route("/stats", get(stats::stats_page))
         .route("/robots.txt", get(robots_txt))
         .route("/health", get(health::health))
         .route("/favicon.ico", get(crate::static_assets::serve_favicon))

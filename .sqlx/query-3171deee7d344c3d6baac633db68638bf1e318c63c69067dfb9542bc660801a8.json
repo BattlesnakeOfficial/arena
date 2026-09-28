@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "LOCK TABLE user_activity_days IN ACCESS EXCLUSIVE MODE",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "3171deee7d344c3d6baac633db68638bf1e318c63c69067dfb9542bc660801a8"
+}

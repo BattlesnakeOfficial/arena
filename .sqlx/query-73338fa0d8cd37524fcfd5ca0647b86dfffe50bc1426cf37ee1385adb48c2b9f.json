@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO tournament_matches(tournament_id, round, position, visual_column, visual_row) VALUES ($1, 1, 0, 0, 0) RETURNING match_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "match_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "73338fa0d8cd37524fcfd5ca0647b86dfffe50bc1426cf37ee1385adb48c2b9f"
+}

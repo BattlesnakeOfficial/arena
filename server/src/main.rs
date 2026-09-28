@@ -11,6 +11,8 @@ use color_eyre::eyre::eyre;
 use state::AppState;
 use tracing::info;
 
+mod activity;
+mod activity_backfill;
 mod backup;
 mod cache;
 mod config;
@@ -128,6 +130,16 @@ async fn run_instrumented_application(
     identity: eyes_subscriber::ProcessIdentity,
 ) -> cja::Result<()> {
     let app_state = AppState::from_config(config).await?;
+    if app_state.config.features.jobs {
+        use cja::jobs::Job as _;
+        jobs::StatsActivityBackfillJob
+            .enqueue(
+                app_state.clone(),
+                "initial public stats backfill".to_string(),
+                Some(-10),
+            )
+            .await?;
+    }
     let mut supervisor = Supervisor::new(ShutdownBudget {
         job_drain: Duration::from_secs(app_state.config.job.shutdown_drain_secs),
         exit_grace: SHUTDOWN_EXIT_GRACE,

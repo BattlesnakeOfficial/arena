@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE stats_activity_backfill_progress SET cursor_id = COALESCE($2, cursor_id), done = $3 WHERE source = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Uuid",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e3b52b72a16dd3e18295912210e68c98988c1e9b7e644a796b137ff3ad0e3654"
+}

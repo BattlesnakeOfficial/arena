@@ -92,7 +92,15 @@ impl FromRequestParts<AppState> for CurrentSession {
 
         // If session doesn't exist, create a new one
         match result {
-            Some((session, user)) => Ok(CurrentSession { session, user }),
+            Some((session, user)) => {
+                if let Some(user) = &user {
+                    app_state
+                        .activity_recorder
+                        .record(&app_state.db, user.user_id)
+                        .await;
+                }
+                Ok(CurrentSession { session, user })
+            }
             None => {
                 // Session expired or doesn't exist, create a new one
                 let new_session = match create_session(&app_state.db).await {
@@ -303,7 +311,13 @@ async fn try_bearer_auth(parts: &Parts, state: &AppState) -> BearerAuthResult {
     };
 
     match get_user_by_id(&state.db, user_id).await {
-        Ok(Some(user)) => BearerAuthResult::Authenticated(Box::new(user)),
+        Ok(Some(user)) => {
+            state
+                .activity_recorder
+                .record(&state.db, user.user_id)
+                .await;
+            BearerAuthResult::Authenticated(Box::new(user))
+        }
         _ => BearerAuthResult::InvalidToken,
     }
 }
@@ -372,5 +386,123 @@ impl FromRequestParts<AppState> for ApiUser {
             .user
             .map(ApiUser)
             .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Authentication required").into_response())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::api_token::create_api_token;
+    use axum::http::Request;
+
+    fn add_session_cookie(parts: &mut Parts, state: &AppState, session_id: Uuid) {
+        let cookies = tower_cookies::Cookies::default();
+        cookies
+            .private(&state.cookie_key.0)
+            .add(tower_cookies::Cookie::new(
+                SESSION_COOKIE_NAME,
+                session_id.to_string(),
+            ));
+        parts.extensions.insert(cookies);
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn session_and_bearer_extractors_record_authenticated_activity_only(db: sqlx::PgPool) {
+        let user_id = sqlx::query_scalar!(
+            "INSERT INTO users(external_github_id, github_login, github_access_token) VALUES (1, 'extractor', '') RETURNING user_id"
+        ).fetch_one(&db).await.unwrap();
+        let session_id = sqlx::query_scalar!(
+            "INSERT INTO sessions(user_id) VALUES ($1) RETURNING session_id",
+            user_id
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        let token = create_api_token(&db, user_id, "extractor").await.unwrap();
+        let state = AppState::test_from_pool(db.clone());
+        for _ in 0..3 {
+            let (mut parts, ()) = Request::builder().uri("/me").body(()).unwrap().into_parts();
+            add_session_cookie(&mut parts, &state, session_id);
+            let session = CurrentSession::from_request_parts(&mut parts, &state)
+                .await
+                .unwrap();
+            assert_eq!(session.user.unwrap().user_id, user_id);
+        }
+        let (mut parts, ()) = Request::builder()
+            .uri("/api/snakes")
+            .header(AUTHORIZATION, format!("Bearer {}", token.secret))
+            .body(())
+            .unwrap()
+            .into_parts();
+        let api_user = ApiUser::from_request_parts(&mut parts, &state)
+            .await
+            .unwrap();
+        assert_eq!(api_user.0.user_id, user_id);
+
+        let (mut anonymous, ()) = Request::builder()
+            .uri("/stats")
+            .body(())
+            .unwrap()
+            .into_parts();
+        anonymous
+            .extensions
+            .insert(tower_cookies::Cookies::default());
+        assert!(
+            CurrentSession::from_request_parts(&mut anonymous, &state)
+                .await
+                .unwrap()
+                .user
+                .is_none()
+        );
+        let (mut invalid, ()) = Request::builder()
+            .uri("/api/snakes")
+            .header(AUTHORIZATION, "Bearer invalid")
+            .body(())
+            .unwrap()
+            .into_parts();
+        assert!(
+            ApiUser::from_request_parts(&mut invalid, &state)
+                .await
+                .is_err()
+        );
+
+        let count = sqlx::query_scalar!(
+            "SELECT COUNT(*) AS \"count!: i64\" FROM user_activity_days WHERE user_id = $1",
+            user_id
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(count, 1);
+        assert!(!state.activity_recorder.record(&db, user_id).await);
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn activity_write_failure_does_not_fail_auth_or_retry_today(db: sqlx::PgPool) {
+        let user_id = sqlx::query_scalar!(
+            "INSERT INTO users(external_github_id, github_login, github_access_token) VALUES (1, 'failure', '') RETURNING user_id"
+        ).fetch_one(&db).await.unwrap();
+        let session_id = sqlx::query_scalar!(
+            "INSERT INTO sessions(user_id) VALUES ($1) RETURNING session_id",
+            user_id
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        let state = AppState::test_from_pool(db.clone());
+        sqlx::query!("DROP TABLE user_activity_days")
+            .execute(&db)
+            .await
+            .unwrap();
+        let (mut parts, ()) = Request::builder().uri("/me").body(()).unwrap().into_parts();
+        add_session_cookie(&mut parts, &state, session_id);
+        assert!(
+            CurrentSession::from_request_parts(&mut parts, &state)
+                .await
+                .unwrap()
+                .user
+                .is_some()
+        );
+        assert!(!state.activity_recorder.record(&db, user_id).await);
     }
 }

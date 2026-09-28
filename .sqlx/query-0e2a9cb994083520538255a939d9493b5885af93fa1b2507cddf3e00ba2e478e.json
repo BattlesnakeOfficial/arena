@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT (date_trunc('week', created_at AT TIME ZONE 'UTC'))::date AS \"week_start!: NaiveDate\", COUNT(*) AS \"count!: i64\" FROM battlesnakes WHERE created_at >= $1 AND created_at < $2 GROUP BY 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "week_start!: NaiveDate",
+        "type_info": "Date"
+      },
+      {
+        "ordinal": 1,
+        "name": "count!: i64",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "0e2a9cb994083520538255a939d9493b5885af93fa1b2507cddf3e00ba2e478e"
+}

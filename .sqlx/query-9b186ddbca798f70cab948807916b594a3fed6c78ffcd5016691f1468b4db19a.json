@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT COUNT(DISTINCT COALESCE(gb.battlesnake_id, le.battlesnake_id)) AS \"count!: i64\"\n               FROM games g\n               JOIN game_battlesnakes gb ON gb.game_id = g.game_id\n               LEFT JOIN leaderboard_entries le ON le.leaderboard_entry_id = gb.leaderboard_entry_id\n               WHERE g.status = 'finished' AND g.engine_game_id IS NULL\n                 AND g.created_at >= $1 AND g.created_at < $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count!: i64",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "9b186ddbca798f70cab948807916b594a3fed6c78ffcd5016691f1468b4db19a"
+}

@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT (tracking_started_at AT TIME ZONE 'UTC')::date AS \"start_day!: NaiveDate\", backfill_completed_at FROM stats_tracking_start WHERE singleton = TRUE",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "start_day!: NaiveDate",
+        "type_info": "Date"
+      },
+      {
+        "ordinal": 1,
+        "name": "backfill_completed_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      true
+    ]
+  },
+  "hash": "8da349914e274ee1e74b84841179cd059e3b0fb29773579822574ce12e5503f8"
+}

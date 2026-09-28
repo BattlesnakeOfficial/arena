@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO users(external_github_id, github_login, github_access_token, created_at) VALUES (1, 'u1-secret', '', '2026-09-20 23:59:59+00') RETURNING user_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "c6fe4624886648620238f8808246229d0188ebdb1a95428635c2e3145c79147b"
+}

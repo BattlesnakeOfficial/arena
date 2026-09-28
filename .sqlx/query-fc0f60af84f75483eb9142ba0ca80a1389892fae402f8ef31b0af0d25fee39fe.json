@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO games(board_size, game_type, status, created_at, engine_game_id) VALUES ('11x11', 'Standard', 'finished', '2026-09-27 12:00+00', 'legacy'), ('11x11', 'Standard', 'failed', '2026-09-27 12:00+00', NULL), ('11x11', 'Standard', 'running', '2026-09-27 12:00+00', NULL), ('11x11', 'Standard', 'finished', '2026-09-28 00:00+00', NULL)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "fc0f60af84f75483eb9142ba0ca80a1389892fae402f8ef31b0af0d25fee39fe"
+}

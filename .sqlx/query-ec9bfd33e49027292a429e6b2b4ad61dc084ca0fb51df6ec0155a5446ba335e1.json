@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO leaderboard_entries(leaderboard_id, battlesnake_id, created_at) VALUES ($1, $2, '2020-01-05 01:00+00')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ec9bfd33e49027292a429e6b2b4ad61dc084ca0fb51df6ec0155a5446ba335e1"
+}

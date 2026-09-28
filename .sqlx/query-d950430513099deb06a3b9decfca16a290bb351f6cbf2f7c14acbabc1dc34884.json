@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO sessions(user_id, created_at) SELECT $1, '2020-01-01 00:00+00'::timestamptz FROM generate_series(1, 1001)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d950430513099deb06a3b9decfca16a290bb351f6cbf2f7c14acbabc1dc34884"
+}

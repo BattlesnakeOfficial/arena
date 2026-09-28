@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT (SELECT COUNT(*) FROM users WHERE created_at < $1) AS \"users!: i64\", (SELECT COUNT(*) FROM battlesnakes WHERE created_at < $1) AS \"snakes!: i64\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "users!: i64",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "snakes!: i64",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "1288022edfebdb3c8873eb65b350a79b55350233d6d5622dbfd8b282643214d4"
+}

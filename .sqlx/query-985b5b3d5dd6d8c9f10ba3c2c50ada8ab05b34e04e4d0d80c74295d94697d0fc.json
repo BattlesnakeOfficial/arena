@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO battlesnakes(user_id, name, url, created_at) VALUES ($1, 'backfill', 'https://example.com', '2020-01-02 08:00+00') RETURNING battlesnake_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "battlesnake_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "985b5b3d5dd6d8c9f10ba3c2c50ada8ab05b34e04e4d0d80c74295d94697d0fc"
+}

@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO games(board_size, game_type, created_by_user_id, created_at) VALUES ('11x11', 'Standard', $1, '2020-01-02 22:00+00') RETURNING game_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "game_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "4378617de9cd31dca1d8e78d095b9e88511e2579df05af5876cdeb9bb118ab0f"
+}

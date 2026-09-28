@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT session_id FROM sessions WHERE user_id = $1 ORDER BY session_id LIMIT 1 OFFSET 999",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "session_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "7dd72ced92df56b5cab07950eedad8448ab1af265ee03e1118546be54f228613"
+}

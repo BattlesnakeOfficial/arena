@@ -32,6 +32,8 @@ pub struct AppState {
     pub scoring: std::sync::Arc<crate::scoring::ScoringRegistry>,
     /// TTL memo for the anonymous-homepage feed (see HOME_FEED_CACHE_SECS)
     pub home_feed_cache: Arc<crate::cache::TtlCell<crate::models::leaderboard::HomeFeed>>,
+    pub stats_cache: Arc<crate::cache::TtlCell<crate::models::stats::StatsSnapshot>>,
+    pub activity_recorder: Arc<crate::activity::ActivityRecorder>,
 }
 
 impl AppState {
@@ -162,6 +164,9 @@ impl AppState {
         let home_feed_cache = Arc::new(crate::cache::TtlCell::new(std::time::Duration::from_secs(
             config.home_feed_cache_secs,
         )));
+        let stats_cache = Arc::new(crate::cache::TtlCell::new(std::time::Duration::from_secs(
+            config.stats_cache_secs,
+        )));
 
         Ok(Self {
             config: Arc::new(config),
@@ -175,6 +180,8 @@ impl AppState {
             moderation,
             scoring: std::sync::Arc::new(scoring_registry),
             home_feed_cache,
+            stats_cache,
+            activity_recorder: Arc::new(crate::activity::ActivityRecorder::default()),
         })
     }
 }
@@ -197,6 +204,8 @@ impl AppState {
             moderation: crate::moderation::ModerationJudge::disabled(),
             scoring: std::sync::Arc::new(crate::scoring::ScoringRegistry::new()),
             home_feed_cache: Arc::new(crate::cache::TtlCell::new(std::time::Duration::ZERO)),
+            stats_cache: Arc::new(crate::cache::TtlCell::new(std::time::Duration::ZERO)),
+            activity_recorder: Arc::new(crate::activity::ActivityRecorder::default()),
         }
     }
 }

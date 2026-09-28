@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SET TIME ZONE 'America/New_York'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "f7fa4ac285e553d0fc1beb08fe7ae47a733915fa9895f897d059869c0bca86d8"
+}
