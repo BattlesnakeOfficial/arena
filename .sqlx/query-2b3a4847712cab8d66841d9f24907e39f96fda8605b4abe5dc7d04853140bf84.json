@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT (\n            u.claim_prompt_dismissed_at IS NULL\n            AND NOT EXISTS (\n                SELECT 1 FROM imported_accounts ia\n                WHERE ia.claimed_by_user_id = u.user_id\n            )\n        ) AS \"show!\"\n        FROM users u\n        WHERE u.user_id = $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "show!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "2b3a4847712cab8d66841d9f24907e39f96fda8605b4abe5dc7d04853140bf84"
+}

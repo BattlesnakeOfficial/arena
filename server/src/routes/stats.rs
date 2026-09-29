@@ -262,22 +262,10 @@ mod tests {
         http::{Request, header},
     };
     use tower::ServiceExt as _;
-    use uuid::Uuid;
 
-    fn signed_session_cookie(state: &AppState, session_id: Uuid) -> String {
-        let cookies = tower_cookies::Cookies::default();
-        cookies
-            .private(&state.cookie_key.0)
-            .add(tower_cookies::Cookie::new(
-                crate::models::session::SESSION_COOKIE_NAME,
-                session_id.to_string(),
-            ));
-        cookies
-            .get(crate::models::session::SESSION_COOKIE_NAME)
-            .unwrap()
-            .value()
-            .to_string()
-    }
+    use crate::routes::test_support::{
+        create_user_session, session_user_id, signed_session_cookie,
+    };
 
     async fn route_response(
         app: &axum::Router,
@@ -305,25 +293,6 @@ mod tests {
             .oneshot(builder.body(Body::empty()).unwrap())
             .await
             .unwrap()
-    }
-
-    async fn create_user_session(db: &sqlx::PgPool, github_id: i64, is_admin: bool) -> Uuid {
-        let user_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token, is_admin) VALUES ($1, $2, '', $3) RETURNING user_id",
-        )
-        .bind(github_id)
-        .bind(format!("stats-test-{github_id}"))
-        .bind(is_admin)
-        .fetch_one(db)
-        .await
-        .unwrap();
-        let session_id: Uuid =
-            sqlx::query_scalar("INSERT INTO sessions (user_id) VALUES ($1) RETURNING session_id")
-                .bind(user_id)
-                .fetch_one(db)
-                .await
-                .unwrap();
-        session_id
     }
 
     #[sqlx::test(migrations = "../migrations")]
@@ -361,12 +330,7 @@ mod tests {
             assert_eq!(stats.status(), admin.status(), "non-admin {stats_path}");
             assert_eq!(stats.status(), StatusCode::FORBIDDEN);
         }
-        let non_admin_id: Uuid =
-            sqlx::query_scalar("SELECT user_id FROM sessions WHERE session_id = $1")
-                .bind(non_admin_session)
-                .fetch_one(&db)
-                .await
-                .unwrap();
+        let non_admin_id = session_user_id(&db, non_admin_session).await;
         let non_admin_token =
             crate::models::api_token::create_api_token(&db, non_admin_id, "stats-test")
                 .await
@@ -420,12 +384,7 @@ mod tests {
         assert_eq!(html.matches("class=\"public-stats-collecting\"").count(), 2);
         assert!(!html.contains("u1-secret"));
 
-        let admin_id: Uuid =
-            sqlx::query_scalar("SELECT user_id FROM sessions WHERE session_id = $1")
-                .bind(admin_session)
-                .fetch_one(&db)
-                .await
-                .unwrap();
+        let admin_id = session_user_id(&db, admin_session).await;
         let admin_token = crate::models::api_token::create_api_token(&db, admin_id, "stats-test")
             .await
             .unwrap();

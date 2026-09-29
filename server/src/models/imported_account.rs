@@ -459,6 +459,47 @@ pub async fn try_auto_claim(
     claim_account(pool, account.imported_account_id, user_id).await
 }
 
+/// Whether /me should prompt this user to claim a play account: they
+/// haven't claimed one and haven't dismissed the prompt. We can't tell a
+/// returning play player from a brand-new one, so everyone unclaimed sees
+/// it until they hide it.
+pub async fn should_show_claim_prompt(pool: &PgPool, user_id: Uuid) -> cja::Result<bool> {
+    let show = sqlx::query_scalar!(
+        r#"
+        SELECT (
+            u.claim_prompt_dismissed_at IS NULL
+            AND NOT EXISTS (
+                SELECT 1 FROM imported_accounts ia
+                WHERE ia.claimed_by_user_id = u.user_id
+            )
+        ) AS "show!"
+        FROM users u
+        WHERE u.user_id = $1
+        "#,
+        user_id,
+    )
+    .fetch_optional(pool)
+    .await
+    .wrap_err("Failed to query claim prompt state")?;
+
+    Ok(show.unwrap_or(false))
+}
+
+/// Hide the claim prompt for good. Idempotent: re-dismissing keeps the
+/// original timestamp.
+pub async fn dismiss_claim_prompt(pool: &PgPool, user_id: Uuid) -> cja::Result<()> {
+    sqlx::query!(
+        "UPDATE users SET claim_prompt_dismissed_at = NOW()
+         WHERE user_id = $1 AND claim_prompt_dismissed_at IS NULL",
+        user_id,
+    )
+    .execute(pool)
+    .await
+    .wrap_err("Failed to record claim prompt dismissal")?;
+
+    Ok(())
+}
+
 /// Counts of claim attempts in the last hour, by arena user and by target
 /// email, for two-dimension rate limiting.
 #[derive(Debug)]
@@ -660,6 +701,59 @@ mod tests {
             .count;
         assert_eq!(snake_count, 1);
 
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn claim_prompt_shows_until_claimed(pool: PgPool) -> cja::Result<()> {
+        let user_id = create_user(&pool, 2101).await?;
+        let other_user = create_user(&pool, 2102).await?;
+        let account_id = stage_full_account(&pool, 21).await?;
+
+        assert!(should_show_claim_prompt(&pool, user_id).await?);
+
+        claim_account(&pool, account_id, user_id)
+            .await?
+            .expect("claim should succeed");
+
+        assert!(!should_show_claim_prompt(&pool, user_id).await?);
+        // Someone else's claim doesn't hide your prompt.
+        assert!(should_show_claim_prompt(&pool, other_user).await?);
+
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn claim_prompt_dismissal_sticks_and_is_per_user(pool: PgPool) -> cja::Result<()> {
+        let user_id = create_user(&pool, 2201).await?;
+        let other_user = create_user(&pool, 2202).await?;
+
+        dismiss_claim_prompt(&pool, user_id).await?;
+        assert!(!should_show_claim_prompt(&pool, user_id).await?);
+        assert!(should_show_claim_prompt(&pool, other_user).await?);
+
+        let first = sqlx::query_scalar!(
+            "SELECT claim_prompt_dismissed_at FROM users WHERE user_id = $1",
+            user_id
+        )
+        .fetch_one(&pool)
+        .await?;
+        dismiss_claim_prompt(&pool, user_id).await?;
+        let second = sqlx::query_scalar!(
+            "SELECT claim_prompt_dismissed_at FROM users WHERE user_id = $1",
+            user_id
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert!(first.is_some());
+        assert_eq!(first, second, "re-dismissing keeps the original timestamp");
+
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn claim_prompt_hidden_for_unknown_user(pool: PgPool) -> cja::Result<()> {
+        assert!(!should_show_claim_prompt(&pool, Uuid::new_v4()).await?);
         Ok(())
     }
 

@@ -794,6 +794,15 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
 
 .profile-actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 24px; }
 
+/* play-account claim prompt (/me, until claimed or dismissed) */
+.claim-prompt { margin-top: 28px; background: var(--pink-wash); border: 1px solid var(--pink); border-radius: 14px; padding: 18px 22px; font-size: 15px; max-width: 72ch; }
+.claim-prompt-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 16px; margin-bottom: 8px; }
+.claim-prompt h2 { font-size: 20px; overflow-wrap: anywhere; }
+.claim-prompt-head form { margin: 0; flex-shrink: 0; }
+.claim-prompt ul { padding-left: 20px; margin: 10px 0; display: grid; gap: 6px; }
+.claim-prompt a { color: var(--pink); text-decoration: underline; text-underline-offset: 2px; }
+.claim-prompt .fine { color: var(--muted); font-size: 13.5px; }
+
 /* snakes list table (/battlesnakes) */
 .head-actions { margin-left: auto; padding-bottom: 6px; display: flex; gap: 10px; flex-wrap: wrap; }
 .url-cell { font-family: var(--mono); font-size: 13px; color: var(--muted); max-width: 340px; }
@@ -805,7 +814,8 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
 @media (max-width: 640px) {
   .profile-head { gap: 16px; }
   .profile-head .avatar { width: 60px; height: 60px; }
-  .profile-actions .btn, .head-actions .btn { padding: 11px 20px; }
+  .profile-actions .btn, .head-actions .btn, .claim-prompt .btn { padding: 11px 20px; }
+  .claim-prompt { padding: 16px; }
   .row-actions { flex-direction: column; align-items: flex-end; gap: 6px; }
   .row-actions .btn.sm { padding: 9px 16px; }
 }

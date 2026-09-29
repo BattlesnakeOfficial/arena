@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE users SET claim_prompt_dismissed_at = NOW()\n         WHERE user_id = $1 AND claim_prompt_dismissed_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "06ed663183fca6d02f0aba543a046265e795de68e54e00286d49753b94c26a67"
+}
