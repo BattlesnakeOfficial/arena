@@ -451,6 +451,56 @@ mod tests {
         assert!((stats.headlines.dau_mau_percent - (4.0 / 28.0 / 2.0 * 100.0)).abs() < 0.001);
     }
 
+    /// Success criteria: "The DAU and WAU charts begin at the first complete
+    /// tracked day or week. Periods before tracking began are not drawn at
+    /// all, not even as zeros." The 90-day and 52-week active-user series
+    /// must therefore never contain a date earlier than
+    /// `live_tracking_started_on`, regardless of how far back the fixed
+    /// 90-day/52-week window would otherwise reach.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn active_user_series_excludes_periods_before_tracking_start(db: PgPool) {
+        let today = NaiveDate::from_ymd_opt(2026, 9, 28).unwrap();
+        // Tracking began 10 days before "today", so most of the fixed 90-day
+        // / 52-week windows predate the tracking epoch and must be omitted
+        // entirely rather than zero-filled.
+        let tracking_started_at = today
+            .checked_sub_signed(Duration::days(10))
+            .unwrap()
+            .and_hms_opt(3, 0, 0)
+            .unwrap()
+            .and_utc();
+        sqlx::query!(
+            "UPDATE stats_tracking_start SET tracking_started_at = $1 WHERE singleton = TRUE",
+            tracking_started_at
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+
+        let stats = StatsSnapshot::fetch(&db, today).await.unwrap();
+
+        assert!(
+            stats
+                .daily_active_users
+                .iter()
+                .all(|row| row.date >= stats.live_tracking_started_on),
+            "daily active-user series must start no earlier than tracking start \
+             ({:?}); got entries as early as {:?}",
+            stats.live_tracking_started_on,
+            stats.daily_active_users.first().map(|r| r.date)
+        );
+        assert!(
+            stats
+                .weekly_active_users
+                .iter()
+                .all(|row| row.week_start >= stats.live_tracking_started_on),
+            "weekly active-user series must start no earlier than tracking start \
+             ({:?}); got entries as early as {:?}",
+            stats.live_tracking_started_on,
+            stats.weekly_active_users.first().map(|r| r.week_start)
+        );
+    }
+
     #[sqlx::test(migrations = "../migrations")]
     async fn utc_buckets_do_not_depend_on_database_session_timezone(db: PgPool) {
         sqlx::query!(
