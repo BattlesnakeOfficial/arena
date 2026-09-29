@@ -46,7 +46,12 @@ test('anonymous visitor can read public stats and JSON without horizontal scroll
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBeTruthy();
   expect(await page.locator('body').evaluate((el) => parseFloat(getComputedStyle(el).fontSize))).toBeGreaterThanOrEqual(16);
   await expect(page.locator('svg.public-stats-chart')).toHaveCount(4);
+  await expect(page.locator('table.public-stats-table')).toHaveCount(4);
   await expect(page.locator('.public-stats-collecting')).toHaveCount(2);
+  const narrowTablesFit = await page.locator('.public-stats-table-wrap').evaluateAll((wrappers) =>
+    wrappers.filter((wrapper) => wrapper.querySelectorAll('thead th').length <= 3)
+      .every((wrapper) => wrapper.scrollWidth <= wrapper.clientWidth));
+  expect(narrowTablesFit).toBeTruthy();
 });
 
 test('stats charts and tables render without JavaScript', async ({ browser }) => {
