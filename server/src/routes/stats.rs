@@ -140,17 +140,17 @@ fn render_stats(s: &StatsSnapshot) -> Markup {
             }
             p class="stats-period" { "UTC; through " (s.as_of_utc_date) }
             div class="stats public-stats-tiles" {
-                (tile("DAU", h.dau.to_string(), "Last complete day"))
-                (tile("WAU", h.wau.to_string(), "Trailing 7 complete days"))
-                (tile("MAU", h.mau.to_string(), "Trailing 28 complete days"))
-                (tile("DAU / MAU", format!("{:.1}%", h.dau_mau_percent), "28-day average DAU / MAU"))
+                (tile("DAU", active_tile(h.dau.map(|value| value.to_string()), h.dau_available_on), "Last complete day"))
+                (tile("WAU", active_tile(h.wau.map(|value| value.to_string()), h.wau_available_on), "Trailing 7 complete days"))
+                (tile("MAU", active_tile(h.mau.map(|value| value.to_string()), h.mau_available_on), "Trailing 28 complete days"))
+                (tile("DAU / MAU", active_tile(h.dau_mau_percent.map(|value| format!("{value:.1}%")), h.dau_mau_percent_available_on), "28-day average DAU / MAU"))
                 (tile("Games played", h.games_7d.to_string(), "Trailing 7 complete days"))
                 (tile("Active snakes", h.active_snakes_7d.to_string(), "Trailing 7 complete days"))
                 (tile("Registered users", h.registered_users.to_string(), "Through last complete day"))
                 (tile("Total snakes", h.total_snakes.to_string(), "Through last complete day"))
             }
             div class="public-stats-note" {
-                p { "Live activity tracking starts on " (s.live_tracking_started_on) " UTC. Earlier account activity is reconstructed from durable records and is a lower bound." }
+                p { "Active-user tracking began " (s.tracking_started_on) " UTC. The first complete tracked day is " (s.live_tracking_started_on) ". Earlier account activity is reconstructed from durable records and is a lower bound." }
                 @if !s.backfill_complete {
                     p { "Historical reconstruction in progress." }
                 }
@@ -161,10 +161,10 @@ fn render_stats(s: &StatsSnapshot) -> Markup {
 
             section class="public-stats-section" {
                 h2 { "Daily active users" }
-                (chart("daily-users", "Daily active users", "Last 90 complete UTC days", &dau, s.daily_active_users.first().map(|r| r.date.to_string()), s.daily_active_users.last().map(|r| r.date.to_string())))
+                (chart("daily-users", "Daily active users", "Up to 90 complete UTC days since tracking began", &dau, s.daily_active_users.first().map(|r| r.date.to_string()), s.daily_active_users.last().map(|r| r.date.to_string())))
                 div class="public-stats-table-wrap" {
                     table class="public-stats-table" {
-                        caption { "Daily active users, last 90 complete UTC days" }
+                        caption { "Daily active users, up to 90 complete UTC days since tracking began" }
                         thead { tr { th scope="col" { "Date (UTC)" } th scope="col" { "Active users" } } }
                         tbody { @for row in &s.daily_active_users { tr { th scope="row" { (row.date) } td { (row.count) } } } }
                     }
@@ -172,10 +172,10 @@ fn render_stats(s: &StatsSnapshot) -> Markup {
             }
             section class="public-stats-section" {
                 h2 { "Weekly active users" }
-                (chart("weekly-users", "Weekly active users", "Last 52 complete ISO weeks", &wau, s.weekly_active_users.first().map(|r| r.week_start.to_string()), s.weekly_active_users.last().map(|r| r.week_start.to_string())))
+                (chart("weekly-users", "Weekly active users", "Up to 52 complete ISO weeks since tracking began", &wau, s.weekly_active_users.first().map(|r| r.week_start.to_string()), s.weekly_active_users.last().map(|r| r.week_start.to_string())))
                 div class="public-stats-table-wrap" {
                     table class="public-stats-table" {
-                        caption { "Weekly active users, last 52 complete ISO weeks" }
+                        caption { "Weekly active users, up to 52 complete ISO weeks since tracking began" }
                         thead { tr { th scope="col" { "Week starting Monday (UTC)" } th scope="col" { "Active users" } } }
                         tbody { @for row in &s.weekly_active_users { tr { th scope="row" { (row.week_start) } td { (row.count) } } } }
                     }
@@ -234,6 +234,10 @@ fn render_stats(s: &StatsSnapshot) -> Markup {
 
 fn tile(label: &str, value: String, detail: &str) -> Markup {
     html! { div class="stat" { div class="label" { (label) } div class="value" { (value) } div class="detail" { (detail) } } }
+}
+
+fn active_tile(value: Option<String>, available_on: chrono::NaiveDate) -> String {
+    value.unwrap_or_else(|| format!("Collecting data — available {available_on}"))
 }
 
 fn game_legend() -> Markup {
@@ -319,7 +323,9 @@ mod tests {
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["headlines"]["dau"], 0);
+        assert!(json["headlines"]["dau"].is_null());
+        assert!(json["headlines"]["dau_available_on"].is_string());
+        assert!(html.contains("Collecting data — available"));
         assert_eq!(json["daily_games"].as_array().unwrap().len(), 90);
         assert_eq!(json["weekly_growth"].as_array().unwrap().len(), 52);
 

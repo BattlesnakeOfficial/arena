@@ -8,6 +8,7 @@ use sqlx::PgPool;
 #[derive(Debug, Clone, Serialize)]
 pub struct StatsSnapshot {
     pub as_of_utc_date: NaiveDate,
+    pub tracking_started_on: NaiveDate,
     pub live_tracking_started_on: NaiveDate,
     pub backfill_complete: bool,
     pub headlines: StatsHeadlines,
@@ -21,10 +22,14 @@ pub struct StatsSnapshot {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct StatsHeadlines {
-    pub dau: i64,
-    pub wau: i64,
-    pub mau: i64,
-    pub dau_mau_percent: f64,
+    pub dau: Option<i64>,
+    pub dau_available_on: NaiveDate,
+    pub wau: Option<i64>,
+    pub wau_available_on: NaiveDate,
+    pub mau: Option<i64>,
+    pub mau_available_on: NaiveDate,
+    pub dau_mau_percent: Option<f64>,
+    pub dau_mau_percent_available_on: NaiveDate,
     pub games_7d: i64,
     pub active_snakes_7d: i64,
     pub registered_users: i64,
@@ -79,6 +84,11 @@ fn days_before(day: NaiveDate, n: i64) -> cja::Result<NaiveDate> {
         .ok_or_else(|| eyre!("Stats date out of range"))
 }
 
+fn days_after(day: NaiveDate, n: i64) -> cja::Result<NaiveDate> {
+    day.checked_add_signed(Duration::days(n))
+        .ok_or_else(|| eyre!("Stats date out of range"))
+}
+
 fn monday(day: NaiveDate) -> cja::Result<NaiveDate> {
     days_before(day, i64::from(day.weekday().num_days_from_monday()))
 }
@@ -103,6 +113,9 @@ impl StatsSnapshot {
             .start_day
             .succ_opt()
             .ok_or_else(|| eyre!("Invalid tracking epoch"))?;
+        let dau_available_on = days_after(live_tracking_started_on, 1)?;
+        let wau_available_on = days_after(live_tracking_started_on, 7)?;
+        let mau_available_on = days_after(live_tracking_started_on, 28)?;
 
         let activity_rows = sqlx::query!(
             // The (user_id, day) primary key makes COUNT(*) a distinct-user count for each day.
@@ -121,6 +134,7 @@ impl StatsSnapshot {
                     count: *activity_map.get(&date).unwrap_or(&0),
                 }
             })
+            .filter(|row| row.date >= live_tracking_started_on)
             .collect();
 
         let weekly_activity_rows = sqlx::query!(
@@ -139,6 +153,7 @@ impl StatsSnapshot {
                     count: *weekly_activity_map.get(&week_start).unwrap_or(&0),
                 }
             })
+            .filter(|row| row.week_start >= live_tracking_started_on)
             .collect();
 
         let active_headlines = sqlx::query!(
@@ -289,13 +304,18 @@ impl StatsSnapshot {
 
         Ok(Self {
             as_of_utc_date,
+            tracking_started_on: tracking.start_day,
             live_tracking_started_on,
             backfill_complete: tracking.backfill_completed_at.is_some(),
             headlines: StatsHeadlines {
-                dau: active_headlines.dau,
-                wau: active_headlines.wau,
-                mau: active_headlines.mau,
-                dau_mau_percent,
+                dau: (today_utc >= dau_available_on).then_some(active_headlines.dau),
+                dau_available_on,
+                wau: (today_utc >= wau_available_on).then_some(active_headlines.wau),
+                wau_available_on,
+                mau: (today_utc >= mau_available_on).then_some(active_headlines.mau),
+                mau_available_on,
+                dau_mau_percent: (today_utc >= mau_available_on).then_some(dau_mau_percent),
+                dau_mau_percent_available_on: mau_available_on,
                 games_7d,
                 active_snakes_7d,
                 registered_users: totals.users,
@@ -317,35 +337,74 @@ mod tests {
     use sqlx::{PgPool, postgres::PgPoolOptions};
 
     #[sqlx::test(migrations = "../migrations")]
-    async fn empty_database_has_complete_zero_filled_calendars(db: PgPool) {
+    async fn empty_database_collects_activity_and_zero_fills_other_calendars(db: PgPool) {
+        sqlx::query!("UPDATE stats_tracking_start SET tracking_started_at = '2026-09-28 00:00+00' WHERE singleton = TRUE")
+            .execute(&db).await.unwrap();
         let today = NaiveDate::from_ymd_opt(2026, 9, 28).unwrap();
         let stats = StatsSnapshot::fetch(&db, today).await.unwrap();
-        assert_eq!(stats.daily_active_users.len(), 90);
-        assert_eq!(stats.weekly_active_users.len(), 52);
+        assert!(stats.daily_active_users.is_empty());
+        assert!(stats.weekly_active_users.is_empty());
         assert_eq!(stats.daily_games.len(), 90);
         assert_eq!(stats.weekly_games.len(), 52);
         assert_eq!(stats.weekly_growth.len(), 52);
         assert_eq!(stats.weekly_active_snakes.len(), 52);
+        assert_eq!(stats.headlines.dau, None);
+        assert_eq!(stats.headlines.wau, None);
+        assert_eq!(stats.headlines.mau, None);
+        assert_eq!(stats.headlines.dau_mau_percent, None);
         assert_eq!(
-            stats.daily_active_users.last().unwrap().date.to_string(),
-            "2026-09-27"
+            stats.headlines.dau_available_on,
+            stats.live_tracking_started_on + Duration::days(1)
         );
         assert_eq!(
-            stats
-                .weekly_active_users
-                .last()
-                .unwrap()
-                .week_start
-                .to_string(),
-            "2026-09-21"
+            stats.headlines.wau_available_on,
+            stats.live_tracking_started_on + Duration::days(7)
         );
-        assert_eq!(stats.headlines.dau, 0);
-        assert_eq!(stats.headlines.dau_mau_percent, 0.0);
+        assert_eq!(
+            stats.headlines.mau_available_on,
+            stats.live_tracking_started_on + Duration::days(28)
+        );
+        let json = serde_json::to_value(&stats).unwrap();
+        assert!(json["headlines"]["dau"].is_null());
+        assert!(json["headlines"]["dau_available_on"].is_string());
         assert!(!stats.backfill_complete);
     }
 
     #[sqlx::test(migrations = "../migrations")]
+    async fn active_headlines_become_available_after_complete_windows(db: PgPool) {
+        sqlx::query!("UPDATE stats_tracking_start SET tracking_started_at = '2026-09-01 12:00+00' WHERE singleton = TRUE")
+            .execute(&db).await.unwrap();
+        let start = NaiveDate::from_ymd_opt(2026, 9, 2).unwrap();
+        for (elapsed, dau, wau, mau) in [
+            (0, None, None, None),
+            (1, Some(0), None, None),
+            (6, Some(0), None, None),
+            (7, Some(0), Some(0), None),
+            (27, Some(0), Some(0), None),
+            (28, Some(0), Some(0), Some(0)),
+        ] {
+            let stats = StatsSnapshot::fetch(&db, start + Duration::days(elapsed))
+                .await
+                .unwrap();
+            assert_eq!(
+                (
+                    stats.headlines.dau,
+                    stats.headlines.wau,
+                    stats.headlines.mau
+                ),
+                (dau, wau, mau)
+            );
+            assert_eq!(stats.headlines.dau_mau_percent, mau.map(|_| 0.0));
+            assert_eq!(stats.headlines.dau_available_on, start + Duration::days(1));
+            assert_eq!(stats.headlines.wau_available_on, start + Duration::days(7));
+            assert_eq!(stats.headlines.mau_available_on, start + Duration::days(28));
+        }
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
     async fn accounts_games_and_snakes_respect_utc_and_iso_boundaries(db: PgPool) {
+        sqlx::query!("UPDATE stats_tracking_start SET tracking_started_at = '2026-08-01 00:00+00' WHERE singleton = TRUE")
+            .execute(&db).await.unwrap();
         let u1 = sqlx::query_scalar!(
             "INSERT INTO users(external_github_id, github_login, github_access_token, created_at) VALUES (1, 'u1-secret', '', '2026-09-20 23:59:59+00') RETURNING user_id"
         ).fetch_one(&db).await.unwrap();
@@ -429,7 +488,7 @@ mod tests {
                 stats.headlines.wau,
                 stats.headlines.mau
             ),
-            (2, 2, 2)
+            (Some(2), Some(2), Some(2))
         );
         assert_eq!(stats.headlines.games_7d, 3);
         assert_eq!(stats.headlines.active_snakes_7d, 2);
@@ -448,7 +507,9 @@ mod tests {
         assert_eq!(stats.weekly_growth.last().unwrap().new_snakes, 1);
         assert_eq!(stats.weekly_active_users.last().unwrap().count, 2);
         assert_eq!(stats.daily_active_users.last().unwrap().count, 2);
-        assert!((stats.headlines.dau_mau_percent - (4.0 / 28.0 / 2.0 * 100.0)).abs() < 0.001);
+        assert!(
+            (stats.headlines.dau_mau_percent.unwrap() - (4.0 / 28.0 / 2.0 * 100.0)).abs() < 0.001
+        );
     }
 
     /// Success criteria: "The DAU and WAU charts begin at the first complete

@@ -6,11 +6,21 @@ use crate::state::AppState;
 const BATCH_SIZE: i64 = 1_000;
 const MIN_BATCH_SIZE: i64 = 25;
 
-fn is_statement_timeout(error: &color_eyre::Report) -> bool {
-    matches!(
-        error.downcast_ref::<sqlx::Error>(),
-        Some(sqlx::Error::Database(db_error)) if db_error.code().as_deref() == Some("57014")
-    )
+fn retry_batch_size(source: &str, batch_size: i64, sqlstate: Option<&str>) -> Option<i64> {
+    (source == "sessions" && batch_size > MIN_BATCH_SIZE && sqlstate == Some("57014"))
+        .then(|| (batch_size / 2).max(MIN_BATCH_SIZE))
+}
+
+fn retry_batch_size_for_error(
+    source: &str,
+    batch_size: i64,
+    error: &color_eyre::Report,
+) -> Option<i64> {
+    let sqlstate = match error.downcast_ref::<sqlx::Error>() {
+        Some(sqlx::Error::Database(db_error)) => db_error.code(),
+        _ => None,
+    };
+    retry_batch_size(source, batch_size, sqlstate.as_deref())
 }
 
 #[derive(Debug)]
@@ -54,7 +64,7 @@ pub async fn run_batch(state: &AppState) -> cja::Result<bool> {
             .execute(&mut *tx)
             .await
             .wrap_err("Failed to set activity backfill timeout")?;
-            sqlx::query("SET LOCAL lock_timeout = '1s'")
+            sqlx::query!("SET LOCAL lock_timeout = '1s'")
             .execute(&mut *tx)
             .await
             .wrap_err("Failed to set activity backfill lock timeout")?;
@@ -110,7 +120,7 @@ SELECT (SELECT COUNT(*) FROM batch) AS "source_row_count!: i64",
                     r#"WITH batch AS MATERIALIZED (
     SELECT s.game_id AS key, s.created_by_user_id AS user_id, s.created_at AS event_at
     FROM games s
-    WHERE ($1::uuid IS NULL OR s.game_id > $1) AND TRUE
+    WHERE ($1::uuid IS NULL OR s.game_id > $1)
     ORDER BY s.game_id
     LIMIT $2
 ), inserted AS (
@@ -142,7 +152,7 @@ SELECT (SELECT COUNT(*) FROM batch) AS "source_row_count!: i64",
                     r#"WITH batch AS MATERIALIZED (
     SELECT s.battlesnake_id AS key, s.user_id AS user_id, s.created_at AS event_at
     FROM battlesnakes s
-    WHERE ($1::uuid IS NULL OR s.battlesnake_id > $1) AND TRUE
+    WHERE ($1::uuid IS NULL OR s.battlesnake_id > $1)
     ORDER BY s.battlesnake_id
     LIMIT $2
 ), inserted AS (
@@ -174,7 +184,7 @@ SELECT (SELECT COUNT(*) FROM batch) AS "source_row_count!: i64",
                     r#"WITH batch AS MATERIALIZED (
     SELECT s.saved_game_id AS key, s.user_id AS user_id, s.created_at AS event_at
     FROM saved_games s
-    WHERE ($1::uuid IS NULL OR s.saved_game_id > $1) AND TRUE
+    WHERE ($1::uuid IS NULL OR s.saved_game_id > $1)
     ORDER BY s.saved_game_id
     LIMIT $2
 ), inserted AS (
@@ -206,7 +216,7 @@ SELECT (SELECT COUNT(*) FROM batch) AS "source_row_count!: i64",
                     r#"WITH batch AS MATERIALIZED (
     SELECT s.registration_id AS key, s.user_id AS user_id, s.registered_at AS event_at
     FROM tournament_registrations s
-    WHERE ($1::uuid IS NULL OR s.registration_id > $1) AND TRUE
+    WHERE ($1::uuid IS NULL OR s.registration_id > $1)
     ORDER BY s.registration_id
     LIMIT $2
 ), inserted AS (
@@ -238,7 +248,7 @@ SELECT (SELECT COUNT(*) FROM batch) AS "source_row_count!: i64",
                     r#"WITH batch AS MATERIALIZED (
     SELECT s.leaderboard_entry_id AS key, b.user_id AS user_id, s.created_at AS event_at
     FROM leaderboard_entries s LEFT JOIN battlesnakes b ON b.battlesnake_id = s.battlesnake_id
-    WHERE ($1::uuid IS NULL OR s.leaderboard_entry_id > $1) AND TRUE
+    WHERE ($1::uuid IS NULL OR s.leaderboard_entry_id > $1)
     ORDER BY s.leaderboard_entry_id
     LIMIT $2
 ), inserted AS (
@@ -291,18 +301,15 @@ SELECT (SELECT COUNT(*) FROM batch) AS "source_row_count!: i64",
         }.await;
             match source_result {
                 Ok(()) => break,
-                Err(error)
-                    if source == "sessions"
-                        && batch_size > MIN_BATCH_SIZE
-                        && is_statement_timeout(&error) =>
-                {
-                    batch_size = (batch_size / 2).max(MIN_BATCH_SIZE);
-                    tracing::warn!(source, batch_size, error = %format!("{error:#}"), "Activity backfill timed out; retrying a smaller page");
-                }
                 Err(error) => {
-                    source_failed = true;
-                    tracing::warn!(source, error = %format!("{error:#}"), "Activity backfill source failed; continuing other sources");
-                    break;
+                    if let Some(smaller) = retry_batch_size_for_error(source, batch_size, &error) {
+                        batch_size = smaller;
+                        tracing::warn!(source, batch_size, error = %format!("{error:#}"), "Activity backfill timed out; retrying a smaller page");
+                    } else {
+                        source_failed = true;
+                        tracing::warn!(source, error = %format!("{error:#}"), "Activity backfill source failed; continuing other sources");
+                        break;
+                    }
                 }
             }
         }
@@ -335,6 +342,19 @@ SELECT (SELECT COUNT(*) FROM batch) AS "source_row_count!: i64",
 mod tests {
     use super::*;
     use sqlx::PgPool;
+
+    #[test]
+    fn session_statement_timeout_shrinks_page_but_lock_timeout_does_not() {
+        assert_eq!(
+            retry_batch_size("sessions", 1_000, Some("57014")),
+            Some(500)
+        );
+        assert_eq!(retry_batch_size("sessions", 50, Some("57014")), Some(25));
+        assert_eq!(retry_batch_size("sessions", 25, Some("57014")), None);
+        assert_eq!(retry_batch_size("sessions", 1_000, Some("55P03")), None);
+        assert_eq!(retry_batch_size("games", 1_000, Some("57014")), None);
+        assert_eq!(retry_batch_size("sessions", 1_000, None), None);
+    }
 
     #[sqlx::test(migrations = "../migrations")]
     async fn backfills_all_six_durable_signals_once_per_user_day(db: PgPool) {

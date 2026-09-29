@@ -9,7 +9,7 @@ test('anonymous visitor can read public stats and JSON without horizontal scroll
   await expect(page.locator('svg.public-stats-chart')).toHaveCount(6);
   await expect(page.locator('table.public-stats-table')).toHaveCount(6);
   await expect(page.getByText(/UTC; through \d{4}-\d{2}-\d{2}/)).toBeVisible();
-  await expect(page.getByText(/Live activity tracking starts on/)).toBeVisible();
+  await expect(page.getByText(/Active-user tracking began/)).toBeVisible();
   await expect(page.getByText(/An active user is an account/)).toBeVisible();
   await expect(page.getByText(/A played game finished/)).toBeVisible();
 
@@ -17,15 +17,25 @@ test('anonymous visitor can read public stats and JSON without horizontal scroll
   expect(response.ok()).toBeTruthy();
   const data = await response.json();
   expect(Object.keys(data.headlines).sort()).toEqual([
-    'active_snakes_7d', 'dau', 'dau_mau_percent', 'games_7d',
-    'mau', 'registered_users', 'total_snakes', 'wau',
+    'active_snakes_7d', 'dau', 'dau_available_on', 'dau_mau_percent',
+    'dau_mau_percent_available_on', 'games_7d', 'mau', 'mau_available_on',
+    'registered_users', 'total_snakes', 'wau', 'wau_available_on',
   ]);
   for (const key of ['daily_active_users', 'weekly_active_users', 'daily_games',
     'weekly_games', 'weekly_growth', 'weekly_active_snakes']) {
     expect(Array.isArray(data[key])).toBeTruthy();
   }
-  expect(data.daily_active_users).toHaveLength(90);
-  expect(data.weekly_active_users).toHaveLength(52);
+  expect(data.daily_active_users.length).toBeLessThanOrEqual(90);
+  expect(data.weekly_active_users.length).toBeLessThanOrEqual(52);
+  expect(data.daily_active_users.every((row: { date: string }) => row.date >= data.live_tracking_started_on)).toBeTruthy();
+  expect(data.weekly_active_users.every((row: { week_start: string }) => row.week_start >= data.live_tracking_started_on)).toBeTruthy();
+  for (const [metric, available] of [
+    ['dau', 'dau_available_on'], ['wau', 'wau_available_on'],
+    ['mau', 'mau_available_on'], ['dau_mau_percent', 'dau_mau_percent_available_on'],
+  ]) {
+    expect(typeof data.headlines[available]).toBe('string');
+    expect(data.headlines[metric] === null || typeof data.headlines[metric] === 'number').toBeTruthy();
+  }
 
   await page.setViewportSize({ width: 375, height: 812 });
   await page.goto('/');

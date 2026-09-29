@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE stats_tracking_start SET tracking_started_at = '2026-09-01 12:00+00' WHERE singleton = TRUE",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "21c5487900383c95b7577cd61c1ad17a1b653e751682d6208766051c928c241a"
+}
