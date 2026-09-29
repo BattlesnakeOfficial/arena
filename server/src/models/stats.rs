@@ -10,7 +10,6 @@ pub struct StatsSnapshot {
     pub as_of_utc_date: NaiveDate,
     pub tracking_started_on: NaiveDate,
     pub live_tracking_started_on: NaiveDate,
-    pub backfill_complete: bool,
     pub headlines: StatsHeadlines,
     pub daily_active_users: Vec<DailyCount>,
     pub weekly_active_users: Vec<WeeklyCount>,
@@ -106,7 +105,7 @@ impl StatsSnapshot {
         let seven_start_ts = midnight(seven_start)?;
 
         let tracking = sqlx::query!(
-            "SELECT (tracking_started_at AT TIME ZONE 'UTC')::date AS \"start_day!: NaiveDate\", backfill_completed_at FROM stats_tracking_start WHERE singleton = TRUE"
+            "SELECT (tracking_started_at AT TIME ZONE 'UTC')::date AS \"start_day!: NaiveDate\" FROM stats_tracking_start WHERE singleton = TRUE"
         ).fetch_optional(db).await.wrap_err("Failed to read stats tracking epoch")?
          .ok_or_else(|| eyre!("Missing stats tracking singleton"))?;
         let live_tracking_started_on = tracking
@@ -306,7 +305,6 @@ impl StatsSnapshot {
             as_of_utc_date,
             tracking_started_on: tracking.start_day,
             live_tracking_started_on,
-            backfill_complete: tracking.backfill_completed_at.is_some(),
             headlines: StatsHeadlines {
                 dau: (today_utc >= dau_available_on).then_some(active_headlines.dau),
                 dau_available_on,
@@ -367,7 +365,6 @@ mod tests {
         let json = serde_json::to_value(&stats).unwrap();
         assert!(json["headlines"]["dau"].is_null());
         assert!(json["headlines"]["dau_available_on"].is_string());
-        assert!(!stats.backfill_complete);
     }
 
     #[sqlx::test(migrations = "../migrations")]
@@ -399,6 +396,145 @@ mod tests {
             assert_eq!(stats.headlines.wau_available_on, start + Duration::days(7));
             assert_eq!(stats.headlines.mau_available_on, start + Duration::days(28));
         }
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn seeded_activity_uses_only_complete_tracked_days_and_weeks(db: PgPool) {
+        let start_day = NaiveDate::from_ymd_opt(2026, 9, 27).unwrap();
+        let started_at = start_day.and_hms_opt(15, 0, 0).unwrap().and_utc();
+        sqlx::query!(
+            "UPDATE stats_tracking_start SET tracking_started_at = $1 WHERE singleton = TRUE",
+            started_at
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        let first = sqlx::query_scalar!(
+            "INSERT INTO users(external_github_id, github_login, github_access_token) VALUES (101, 'tracked-first', '') RETURNING user_id"
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        let second = sqlx::query_scalar!(
+            "INSERT INTO users(external_github_id, github_login, github_access_token) VALUES (102, 'tracked-second', '') RETURNING user_id"
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        let pre_tracking_only = sqlx::query_scalar!(
+            "INSERT INTO users(external_github_id, github_login, github_access_token) VALUES (103, 'pre-tracking-only', '') RETURNING user_id"
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        for day in [start_day - Duration::days(3), start_day] {
+            sqlx::query!(
+                "INSERT INTO user_activity_days(user_id, day) VALUES ($1, $2)",
+                pre_tracking_only,
+                day
+            )
+            .execute(&db)
+            .await
+            .unwrap();
+        }
+        for offset in 1..=30 {
+            let day = start_day + Duration::days(offset);
+            let user_id = if offset >= 29 { second } else { first };
+            sqlx::query!(
+                "INSERT INTO user_activity_days(user_id, day) VALUES ($1, $2)",
+                user_id,
+                day
+            )
+            .execute(&db)
+            .await
+            .unwrap();
+        }
+        // A second distinct user on one tracked day makes the average DAU
+        // different from the count of distinct users across the window.
+        sqlx::query!(
+            "INSERT INTO user_activity_days(user_id, day) VALUES ($1, $2)",
+            second,
+            start_day + Duration::days(2)
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+
+        let first_day = StatsSnapshot::fetch(&db, start_day + Duration::days(1))
+            .await
+            .unwrap();
+        assert_eq!(first_day.headlines.dau, None);
+        assert_eq!(first_day.headlines.wau, None);
+        assert_eq!(first_day.headlines.mau, None);
+        assert_eq!(first_day.headlines.dau_mau_percent, None);
+        assert!(first_day.daily_active_users.is_empty());
+        assert!(first_day.weekly_active_users.is_empty());
+
+        let next_day = StatsSnapshot::fetch(&db, start_day + Duration::days(2))
+            .await
+            .unwrap();
+        assert_eq!(next_day.headlines.dau, Some(1));
+        assert_eq!(next_day.headlines.wau, None);
+        assert_eq!(next_day.headlines.mau, None);
+        assert_eq!(
+            next_day.daily_active_users[0].date,
+            start_day + Duration::days(1)
+        );
+        assert_eq!(next_day.daily_active_users[0].count, 1);
+
+        let first_week = StatsSnapshot::fetch(&db, start_day + Duration::days(8))
+            .await
+            .unwrap();
+        assert_eq!(first_week.headlines.wau, Some(2));
+        assert_eq!(first_week.weekly_active_users.len(), 1);
+        assert_eq!(
+            first_week.weekly_active_users[0].week_start,
+            start_day + Duration::days(1)
+        );
+        assert_eq!(first_week.weekly_active_users[0].count, 2);
+
+        let first_mau = StatsSnapshot::fetch(&db, start_day + Duration::days(29))
+            .await
+            .unwrap();
+        assert_eq!(first_mau.headlines.mau, Some(2));
+        assert!(
+            (first_mau.headlines.dau_mau_percent.unwrap() - 29.0 / 28.0 / 2.0 * 100.0).abs()
+                < 0.001
+        );
+        assert!(
+            first_mau
+                .daily_active_users
+                .iter()
+                .all(|row| row.date > start_day)
+        );
+        assert!(
+            first_mau
+                .weekly_active_users
+                .iter()
+                .all(|row| row.week_start > start_day)
+        );
+
+        // Start again with the first tracked day midweek. The partial ISO
+        // week must be omitted even after it has ended.
+        let midweek_start = start_day + Duration::days(2);
+        let midweek_started_at = midweek_start.and_hms_opt(15, 0, 0).unwrap().and_utc();
+        sqlx::query!(
+            "UPDATE stats_tracking_start SET tracking_started_at = $1 WHERE singleton = TRUE",
+            midweek_started_at
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        let midweek = StatsSnapshot::fetch(&db, start_day + Duration::days(8))
+            .await
+            .unwrap();
+        assert!(midweek.weekly_active_users.is_empty());
+        assert!(
+            midweek
+                .daily_active_users
+                .iter()
+                .all(|row| row.date > midweek_start)
+        );
     }
 
     #[sqlx::test(migrations = "../migrations")]

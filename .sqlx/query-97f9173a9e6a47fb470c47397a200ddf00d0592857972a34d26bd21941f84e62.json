@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO users(external_github_id, github_login, github_access_token) VALUES (1, 'backfill', '') RETURNING user_id",
+  "query": "INSERT INTO users(external_github_id, github_login, github_access_token) VALUES (102, 'tracked-second', '') RETURNING user_id",
   "describe": {
     "columns": [
       {
@@ -16,5 +16,5 @@
       false
     ]
   },
-  "hash": "3d2fa24e9d4f841a7dd87c895aeb7d615c57bd77793a636c7553aefb97bcdd9e"
+  "hash": "97f9173a9e6a47fb470c47397a200ddf00d0592857972a34d26bd21941f84e62"
 }

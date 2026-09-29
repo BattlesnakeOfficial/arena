@@ -12,7 +12,6 @@ use state::AppState;
 use tracing::info;
 
 mod activity;
-mod activity_backfill;
 mod backup;
 mod cache;
 mod config;
@@ -130,19 +129,6 @@ async fn run_instrumented_application(
     identity: eyes_subscriber::ProcessIdentity,
 ) -> cja::Result<()> {
     let app_state = AppState::from_config(config).await?;
-    if app_state.config.features.jobs {
-        use cja::jobs::Job as _;
-        if let Err(error) = jobs::StatsActivityBackfillJob
-            .enqueue(
-                app_state.clone(),
-                "initial public stats backfill".to_string(),
-                Some(-10),
-            )
-            .await
-        {
-            tracing::warn!(error = %format!("{error:#}"), "Failed to enqueue initial stats backfill; hourly recovery will retry");
-        }
-    }
     let mut supervisor = Supervisor::new(ShutdownBudget {
         job_drain: Duration::from_secs(app_state.config.job.shutdown_drain_secs),
         exit_grace: SHUTDOWN_EXIT_GRACE,

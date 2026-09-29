@@ -150,10 +150,7 @@ fn render_stats(s: &StatsSnapshot) -> Markup {
                 (tile("Total snakes", h.total_snakes.to_string(), "Through last complete day"))
             }
             div class="public-stats-note" {
-                p { "Active-user tracking began " (s.tracking_started_on) " UTC. The first complete tracked day is " (s.live_tracking_started_on) ". Earlier account activity is reconstructed from durable records and is a lower bound." }
-                @if !s.backfill_complete {
-                    p { "Historical reconstruction in progress." }
-                }
+                p { "Active-user tracking began " (s.tracking_started_on) " UTC. The first complete tracked day is " (s.live_tracking_started_on) "." }
                 p { "An active user is an account making at least one signed-in web request or API-token request during a UTC day. Automated API clients count." }
                 p { "A played game finished on Arena, excludes legacy imports, and is dated by game creation. An active snake appeared in a played game during the period." }
                 p { "Read the " a href="/privacy" { "privacy policy" } " for how activity dates are stored." }
@@ -161,23 +158,31 @@ fn render_stats(s: &StatsSnapshot) -> Markup {
 
             section class="public-stats-section" {
                 h2 { "Daily active users" }
-                (chart("daily-users", "Daily active users", "Up to 90 complete UTC days since tracking began", &dau, s.daily_active_users.first().map(|r| r.date.to_string()), s.daily_active_users.last().map(|r| r.date.to_string())))
-                div class="public-stats-table-wrap" {
-                    table class="public-stats-table" {
-                        caption { "Daily active users, up to 90 complete UTC days since tracking began" }
-                        thead { tr { th scope="col" { "Date (UTC)" } th scope="col" { "Active users" } } }
-                        tbody { @for row in &s.daily_active_users { tr { th scope="row" { (row.date) } td { (row.count) } } } }
+                @if s.daily_active_users.is_empty() {
+                    p class="public-stats-collecting" { (active_tile(None, h.dau_available_on)) }
+                } @else {
+                    (chart("daily-users", "Daily active users", "Up to 90 complete UTC days since tracking began", &dau, s.daily_active_users.first().map(|r| r.date.to_string()), s.daily_active_users.last().map(|r| r.date.to_string())))
+                    div class="public-stats-table-wrap" {
+                        table class="public-stats-table" {
+                            caption { "Daily active users, up to 90 complete UTC days since tracking began" }
+                            thead { tr { th scope="col" { "Date (UTC)" } th scope="col" { "Active users" } } }
+                            tbody { @for row in &s.daily_active_users { tr { th scope="row" { (row.date) } td { (row.count) } } } }
+                        }
                     }
                 }
             }
             section class="public-stats-section" {
                 h2 { "Weekly active users" }
-                (chart("weekly-users", "Weekly active users", "Up to 52 complete ISO weeks since tracking began", &wau, s.weekly_active_users.first().map(|r| r.week_start.to_string()), s.weekly_active_users.last().map(|r| r.week_start.to_string())))
-                div class="public-stats-table-wrap" {
-                    table class="public-stats-table" {
-                        caption { "Weekly active users, up to 52 complete ISO weeks since tracking began" }
-                        thead { tr { th scope="col" { "Week starting Monday (UTC)" } th scope="col" { "Active users" } } }
-                        tbody { @for row in &s.weekly_active_users { tr { th scope="row" { (row.week_start) } td { (row.count) } } } }
+                @if s.weekly_active_users.is_empty() {
+                    p class="public-stats-collecting" { (active_tile(None, h.wau_available_on)) }
+                } @else {
+                    (chart("weekly-users", "Weekly active users", "Up to 52 complete ISO weeks since tracking began", &wau, s.weekly_active_users.first().map(|r| r.week_start.to_string()), s.weekly_active_users.last().map(|r| r.week_start.to_string())))
+                    div class="public-stats-table-wrap" {
+                        table class="public-stats-table" {
+                            caption { "Weekly active users, up to 52 complete ISO weeks since tracking began" }
+                            thead { tr { th scope="col" { "Week starting Monday (UTC)" } th scope="col" { "Active users" } } }
+                            tbody { @for row in &s.weekly_active_users { tr { th scope="row" { (row.week_start) } td { (row.count) } } } }
+                        }
                     }
                 }
             }
@@ -295,9 +300,12 @@ mod tests {
         )
         .unwrap();
         assert!(html.contains("href=\"/stats\""));
-        assert_eq!(html.matches("class=\"public-stats-chart\"").count(), 6);
-        assert_eq!(html.matches("class=\"public-stats-table\"").count(), 6);
+        assert_eq!(html.matches("class=\"public-stats-chart\"").count(), 4);
+        assert_eq!(html.matches("class=\"public-stats-table\"").count(), 4);
         assert_eq!(html.matches("class=\"stat\"").count(), 8);
+        assert_eq!(html.matches("class=\"public-stats-collecting\"").count(), 2);
+        assert!(html.contains("Collecting data — available"));
+        assert!(!html.contains("Historical reconstruction"));
         assert!(!html.contains("u1-secret"));
 
         let json_response = app
@@ -325,6 +333,7 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(json["headlines"]["dau"].is_null());
         assert!(json["headlines"]["dau_available_on"].is_string());
+        assert!(json.get("backfill_complete").is_none());
         assert!(html.contains("Collecting data — available"));
         assert_eq!(json["daily_games"].as_array().unwrap().len(), 90);
         assert_eq!(json["weekly_growth"].as_array().unwrap().len(), 52);

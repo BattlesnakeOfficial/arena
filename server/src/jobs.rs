@@ -269,28 +269,6 @@ impl Job<AppState> for ScreenShoutsJob {
     }
 }
 
-/// Bounded, resumable reconstruction of historical account-activity days.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct StatsActivityBackfillJob;
-
-#[async_trait::async_trait]
-impl Job<AppState> for StatsActivityBackfillJob {
-    const NAME: &'static str = "StatsActivityBackfillJob";
-
-    async fn run(&self, app_state: AppState) -> cja::Result<()> {
-        if crate::activity_backfill::run_batch(&app_state).await? {
-            StatsActivityBackfillJob
-                .enqueue(
-                    app_state.clone(),
-                    "continue public stats backfill".to_string(),
-                    Some(-10),
-                )
-                .await?;
-        }
-        Ok(())
-    }
-}
-
 cja::impl_job_registry!(
     AppState,
     NoopJob,
@@ -307,8 +285,7 @@ cja::impl_job_registry!(
     RateLimitPruneJob,
     SnakeHealthSweeperJob,
     StuckGameSweeperJob,
-    ScreenShoutsJob,
-    StatsActivityBackfillJob
+    ScreenShoutsJob
 );
 
 #[cfg(test)]

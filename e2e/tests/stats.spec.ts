@@ -6,8 +6,9 @@ test('anonymous visitor can read public stats and JSON without horizontal scroll
   await expect(page).toHaveURL(/\/stats$/);
   await expect(page.getByRole('heading', { name: 'Arena stats' })).toBeVisible();
   await expect(page.locator('.public-stats-tiles .stat')).toHaveCount(8);
-  await expect(page.locator('svg.public-stats-chart')).toHaveCount(6);
-  await expect(page.locator('table.public-stats-table')).toHaveCount(6);
+  await expect(page.locator('svg.public-stats-chart')).toHaveCount(4);
+  await expect(page.locator('table.public-stats-table')).toHaveCount(4);
+  await expect(page.locator('.public-stats-collecting')).toHaveCount(2);
   await expect(page.getByText(/UTC; through \d{4}-\d{2}-\d{2}/)).toBeVisible();
   await expect(page.getByText(/Active-user tracking began/)).toBeVisible();
   await expect(page.getByText(/An active user is an account/)).toBeVisible();
@@ -44,7 +45,8 @@ test('anonymous visitor can read public stats and JSON without horizontal scroll
   await page.evaluate(() => document.fonts.ready);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBeTruthy();
   expect(await page.locator('body').evaluate((el) => parseFloat(getComputedStyle(el).fontSize))).toBeGreaterThanOrEqual(16);
-  await expect(page.locator('svg.public-stats-chart')).toHaveCount(6);
+  await expect(page.locator('svg.public-stats-chart')).toHaveCount(4);
+  await expect(page.locator('.public-stats-collecting')).toHaveCount(2);
 });
 
 test('stats charts and tables render without JavaScript', async ({ browser }) => {
@@ -53,8 +55,9 @@ test('stats charts and tables render without JavaScript', async ({ browser }) =>
     const page = await context.newPage();
     await page.goto('/stats');
     await expect(page.getByRole('heading', { name: 'Arena stats' })).toBeVisible();
-    await expect(page.locator('svg.public-stats-chart')).toHaveCount(6);
-    await expect(page.locator('table.public-stats-table')).toHaveCount(6);
+    await expect(page.locator('svg.public-stats-chart')).toHaveCount(4);
+    await expect(page.locator('table.public-stats-table')).toHaveCount(4);
+    await expect(page.locator('.public-stats-collecting')).toHaveCount(2);
   } finally {
     await context.close();
   }

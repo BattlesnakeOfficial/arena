@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO users(external_github_id, github_login, github_access_token) VALUES (1, 'full-page', '') RETURNING user_id",
+  "query": "INSERT INTO users(external_github_id, github_login, github_access_token) VALUES (101, 'tracked-first', '') RETURNING user_id",
   "describe": {
     "columns": [
       {
@@ -16,5 +16,5 @@
       false
     ]
   },
-  "hash": "37e28114e1cfd1d3e57ff8fcd44c439d9d99c0f2fe529f2e58343af9de92afa4"
+  "hash": "bcb688aa5353d67c45347d6ee046b9917ed477687f1710c88534bef06df56abb"
 }
