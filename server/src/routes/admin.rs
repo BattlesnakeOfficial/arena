@@ -222,6 +222,7 @@ pub async fn dashboard(
                 div style="margin-bottom: 20px;" {
                     a href="/admin" style="padding: 8px 16px; background: #0066cc; color: white; text-decoration: none; border-radius: 4px;" { "Refresh" }
                     a href="/admin/moderation" style="padding: 8px 16px; background: #666; color: white; text-decoration: none; border-radius: 4px; margin-left: 8px;" { "Moderation queue" }
+                    a href="/stats" style="padding: 8px 16px; background: #666; color: white; text-decoration: none; border-radius: 4px; margin-left: 8px;" { "Stats" }
                 }
 
                 h2 { "Job Queue" }

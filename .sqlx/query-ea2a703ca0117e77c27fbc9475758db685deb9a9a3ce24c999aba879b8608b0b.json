@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT date_trunc('week', day::timestamp)::date AS \"week_start!: NaiveDate\", COUNT(DISTINCT user_id) AS \"count!: i64\" FROM user_activity_days WHERE day >= $1 AND day < $2 GROUP BY 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "week_start!: NaiveDate",
+        "type_info": "Date"
+      },
+      {
+        "ordinal": 1,
+        "name": "count!: i64",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Date",
+        "Date"
+      ]
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "ea2a703ca0117e77c27fbc9475758db685deb9a9a3ce24c999aba879b8608b0b"
+}

@@ -137,6 +137,8 @@ pub struct AppConfig {
     /// TTL for the anonymous-homepage feed cache, in seconds. 0 disables
     /// caching (e2e sets this so seeded data shows up immediately).
     pub home_feed_cache_secs: u64,
+    /// TTL for public aggregate stats, in seconds. Zero disables caching.
+    pub stats_cache_secs: u64,
     pub gcp_logging: bool,
     pub gcp_project_id: Option<String>,
     pub rust_log: String,
@@ -221,6 +223,7 @@ impl AppConfig {
 
             tokio_worker_multiplier: parse_env("ARENA_TOKIO_WORKER_MULTIPLIER", 2),
             home_feed_cache_secs: parse_env("HOME_FEED_CACHE_SECS", 30),
+            stats_cache_secs: parse_env("STATS_CACHE_SECS", 900),
             gcp_logging,
             gcp_project_id: optional_env("GCP_PROJECT_ID"),
             rust_log: std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
@@ -269,6 +272,7 @@ impl AppConfig {
             stuck_game_max_age_hours: 2,
             email_per_recipient_hourly_limit: 5,
             home_feed_cache_secs: 0,
+            stats_cache_secs: 0,
             tokio_worker_multiplier: 2,
             gcp_logging: false,
             gcp_project_id: None,

@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO user_activity_days(user_id, day) VALUES ($1, '2026-09-27'), ($1, '2026-09-26'), ($2, '2026-09-27'), ($2, '2026-09-21')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5bfaea8d71b55f6ac993cf2f28bb0e00217831c3c3a6a8882ea871f37c41ce50"
+}

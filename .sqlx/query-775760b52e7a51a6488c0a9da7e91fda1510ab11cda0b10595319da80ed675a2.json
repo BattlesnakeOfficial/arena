@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO users(external_github_id, github_login, github_access_token) VALUES (103, 'pre-tracking-only', '') RETURNING user_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "775760b52e7a51a6488c0a9da7e91fda1510ab11cda0b10595319da80ed675a2"
+}

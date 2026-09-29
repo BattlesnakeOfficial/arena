@@ -5,6 +5,7 @@ use maud::{Markup, html};
 use crate::{components::page_factory::PageFactory, errors::ServerResult};
 
 const EFFECTIVE_DATE: &str = "July 2026";
+const PRIVACY_EFFECTIVE_DATE: &str = "September 2026";
 
 pub async fn conduct_page(
     page_factory: PageFactory,
@@ -79,7 +80,7 @@ fn privacy_content() -> Markup {
     html! {
         div style="max-width: 800px; margin: 0 auto;" {
             h1 { "Privacy Policy" }
-            p style="color: #666;" { "Effective: " (EFFECTIVE_DATE) }
+            p style="color: #666;" { "Effective: " (PRIVACY_EFFECTIVE_DATE) }
 
             h2 { "Information We Collect" }
             p {
@@ -92,6 +93,11 @@ fn privacy_content() -> Markup {
                 "If you create snakes, we store the name and URL you provide. "
                 "Game history — including moves and outcomes — is stored for "
                 "each game played."
+            }
+            p {
+                "For signed-in web and API-token requests, we store your account ID "
+                "and the UTC date of activity. The activity record contains no request "
+                "path, IP address, or browser identifier."
             }
 
             h3 { "Play.battlesnake.com Migration Data" }
@@ -116,6 +122,11 @@ fn privacy_content() -> Markup {
                 li { "Display your profile and snakes." }
                 li { "Run games and store game results." }
                 li { "Maintain leaderboards and tournament results." }
+                li {
+                    "Compute aggregate usage statistics, such as daily, weekly, and monthly active "
+                    "accounts, to operate and improve the arena. We may publish these statistics in "
+                    "aggregate form; published statistics never identify individual accounts."
+                }
                 li { "Send transactional email (via Mailgun) when your play account is claimed, as a security notice." }
                 li { "Notify you by email if your snake is removed from leaderboard matchmaking because its server keeps failing." }
             }
@@ -230,7 +241,7 @@ mod tests {
         assert!(html.contains("Data Storage"));
         assert!(html.contains("Cookies"));
         assert!(html.contains("Contact"));
-        assert!(html.contains(EFFECTIVE_DATE));
+        assert!(html.contains(PRIVACY_EFFECTIVE_DATE));
     }
 
     #[test]

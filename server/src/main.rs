@@ -11,6 +11,7 @@ use color_eyre::eyre::eyre;
 use state::AppState;
 use tracing::info;
 
+mod activity;
 mod backup;
 mod cache;
 mod config;

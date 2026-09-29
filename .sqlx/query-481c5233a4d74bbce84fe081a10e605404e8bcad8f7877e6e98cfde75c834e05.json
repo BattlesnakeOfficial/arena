@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT (tracking_started_at AT TIME ZONE 'UTC')::date AS \"start_day!: NaiveDate\" FROM stats_tracking_start WHERE singleton = TRUE",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "start_day!: NaiveDate",
+        "type_info": "Date"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "481c5233a4d74bbce84fe081a10e605404e8bcad8f7877e6e98cfde75c834e05"
+}

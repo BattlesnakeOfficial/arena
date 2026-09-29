@@ -1,0 +1,35 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT (g.created_at AT TIME ZONE 'UTC')::date AS \"day!: NaiveDate\",\n               CASE WHEN mg.game_id IS NOT NULL THEN 'tournament'\n                    WHEN lg.game_id IS NOT NULL THEN 'leaderboard'\n                    ELSE 'custom' END AS \"source!: String\",\n               COUNT(*) AS \"count!: i64\"\n               FROM games g\n               LEFT JOIN leaderboard_games lg ON lg.game_id = g.game_id\n               LEFT JOIN match_games mg ON mg.game_id = g.game_id\n               WHERE g.status = 'finished' AND g.engine_game_id IS NULL\n                 AND g.created_at >= $1 AND g.created_at < $2\n               GROUP BY 1, 2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "day!: NaiveDate",
+        "type_info": "Date"
+      },
+      {
+        "ordinal": 1,
+        "name": "source!: String",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "count!: i64",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "c28a3088cd87489ca79a39e5142de7f408611c87004d55c6776a23c53a0ed82a"
+}

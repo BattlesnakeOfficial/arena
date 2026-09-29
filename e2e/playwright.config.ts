@@ -61,6 +61,7 @@ export default defineConfig({
         ARENA_JOB_POLL_INTERVAL_MS: '2000',
         // Disable the homepage feed cache so seeded data is visible immediately
         HOME_FEED_CACHE_SECS: '0',
+        STATS_CACHE_SECS: '0',
       },
     },
   ],

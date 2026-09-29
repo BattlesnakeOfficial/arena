@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO leaderboards(name) VALUES ('Test') RETURNING leaderboard_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "leaderboard_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "7aee2371fd7f5099a614ac88c75488c3e1e7e17f38fd673e5f8cbcb8d93f1c70"
+}

@@ -1,0 +1,37 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT COUNT(DISTINCT user_id) FILTER (WHERE day = $1) AS \"dau!: i64\", COUNT(DISTINCT user_id) FILTER (WHERE day >= $2) AS \"wau!: i64\", COUNT(DISTINCT user_id) FILTER (WHERE day >= $3) AS \"mau!: i64\" FROM user_activity_days WHERE day >= $3 AND day < $4",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "dau!: i64",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "wau!: i64",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "mau!: i64",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Date",
+        "Date",
+        "Date",
+        "Date"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "ae0c888b89415d2b373bc7a3abbfb12fada53e2df4eda16851c78c0d4c53796c"
+}
