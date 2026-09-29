@@ -735,4 +735,82 @@ mod tests {
         assert_eq!(count_public_battlesnakes(&pool, &literal).await?, 0);
         Ok(())
     }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn delete_battlesnake_removes_it_from_leaderboard_and_casual_games(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        use crate::models::game::{add_battlesnake_to_game, add_leaderboard_entry_to_game};
+        use crate::models::game_battlesnake::AddBattlesnakeToGame;
+
+        let owner = create_user(&pool, 8401, "delete-owner").await?;
+        let rival_owner = create_user(&pool, 8402, "rival-owner").await?;
+        let doomed = create_snake(&pool, owner, "Doomed", Visibility::Public).await?;
+        let rival = create_snake(&pool, rival_owner, "Rival", Visibility::Public).await?;
+
+        let leaderboard_id = sqlx::query_scalar!(
+            "INSERT INTO leaderboards (name) VALUES ('Delete Test') RETURNING leaderboard_id"
+        )
+        .fetch_one(&pool)
+        .await?;
+        let mut entry_ids = Vec::new();
+        for snake in [doomed, rival] {
+            entry_ids.push(
+                sqlx::query_scalar!(
+                    "INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id)
+                     VALUES ($1, $2)
+                     RETURNING leaderboard_entry_id",
+                    leaderboard_id,
+                    snake
+                )
+                .fetch_one(&pool)
+                .await?,
+            );
+        }
+
+        let mut game_ids = Vec::new();
+        for _ in 0..2 {
+            game_ids.push(
+                sqlx::query_scalar!(
+                    "INSERT INTO games (board_size, game_type, status)
+                     VALUES ('11x11', 'Standard', 'finished')
+                     RETURNING game_id"
+                )
+                .fetch_one(&pool)
+                .await?,
+            );
+        }
+        let (leaderboard_game, casual_game) = (game_ids[0], game_ids[1]);
+
+        // Leaderboard games record participants by entry, leaving battlesnake_id NULL.
+        for entry_id in &entry_ids {
+            add_leaderboard_entry_to_game(&pool, leaderboard_game, *entry_id).await?;
+        }
+        for battlesnake_id in [doomed, rival] {
+            add_battlesnake_to_game(&pool, casual_game, AddBattlesnakeToGame { battlesnake_id })
+                .await?;
+        }
+
+        delete_battlesnake(&pool, doomed, owner).await?;
+
+        let remaining = sqlx::query!(
+            "SELECT gb.game_id, COALESCE(gb.battlesnake_id, le.battlesnake_id) AS battlesnake_id
+             FROM game_battlesnakes gb
+             LEFT JOIN leaderboard_entries le USING (leaderboard_entry_id)
+             ORDER BY gb.game_id = $1 DESC",
+            leaderboard_game
+        )
+        .fetch_all(&pool)
+        .await?;
+        let remaining: Vec<(Uuid, Option<Uuid>)> = remaining
+            .into_iter()
+            .map(|row| (row.game_id, row.battlesnake_id))
+            .collect();
+        assert_eq!(
+            remaining,
+            vec![(leaderboard_game, Some(rival)), (casual_game, Some(rival))]
+        );
+
+        Ok(())
+    }
 }
