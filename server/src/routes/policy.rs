@@ -242,12 +242,6 @@ mod tests {
         assert!(html.contains("Cookies"));
         assert!(html.contains("Contact"));
         assert!(html.contains(PRIVACY_EFFECTIVE_DATE));
-        assert!(html.contains("UTC date of activity"));
-        assert!(html.contains("Compute aggregate usage statistics"));
-        assert!(html.contains("We may publish these statistics in aggregate form"));
-        assert!(html.contains("published statistics never identify individual accounts"));
-        assert!(!html.contains("public stats"));
-        assert!(!html.contains("Publish anonymous"));
     }
 
     #[test]

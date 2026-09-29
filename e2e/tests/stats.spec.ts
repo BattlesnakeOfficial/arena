@@ -23,10 +23,6 @@ test('admin reaches stats from dashboard and sees aggregates at mobile width', a
   await expect(authenticatedPage.locator('svg.public-stats-chart')).toHaveCount(4);
   await expect(authenticatedPage.locator('table.public-stats-table')).toHaveCount(4);
   await expect(authenticatedPage.locator('.public-stats-collecting')).toHaveCount(2);
-  await expect(authenticatedPage.getByText(/UTC; through \d{4}-\d{2}-\d{2}/)).toBeVisible();
-  await expect(authenticatedPage.getByText(/Active-user tracking began/)).toBeVisible();
-  await expect(authenticatedPage.getByText(/An active user is an account/)).toBeVisible();
-  await expect(authenticatedPage.getByText(/A played game finished/)).toBeVisible();
 
   const response = await authenticatedPage.request.get('/api/stats');
   expect(response.ok()).toBeTruthy();

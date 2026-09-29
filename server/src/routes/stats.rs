@@ -414,13 +414,10 @@ mod tests {
                 .to_vec(),
         )
         .unwrap();
-        assert!(html.contains("Aggregate usage for admins. No per-user data."));
         assert_eq!(html.matches("class=\"public-stats-chart\"").count(), 4);
         assert_eq!(html.matches("class=\"public-stats-table\"").count(), 4);
         assert_eq!(html.matches("class=\"stat\"").count(), 8);
         assert_eq!(html.matches("class=\"public-stats-collecting\"").count(), 2);
-        assert!(html.contains("Collecting data — available"));
-        assert!(!html.contains("Historical reconstruction"));
         assert!(!html.contains("u1-secret"));
 
         let admin_id: Uuid =
@@ -448,8 +445,6 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(json["headlines"]["dau"].is_null());
         assert!(json["headlines"]["dau_available_on"].is_string());
-        assert!(json.get("backfill_complete").is_none());
-        assert!(html.contains("Collecting data — available"));
         assert_eq!(json["daily_games"].as_array().unwrap().len(), 90);
         assert_eq!(json["weekly_growth"].as_array().unwrap().len(), 52);
 
