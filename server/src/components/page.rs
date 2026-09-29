@@ -19,12 +19,11 @@ const GOOGLE_FONTS_HREF: &str = "https://fonts.googleapis.com/css2?family=Bricol
 /// Primary nav links: (label, href, authed_only). "Snakes" is the public
 /// directory of every public snake and "Players" the directory of the people
 /// behind them; "My Snakes" manages your own and is only shown logged in.
-const NAV_LINKS: [(&str, &str, bool); 7] = [
+const NAV_LINKS: [(&str, &str, bool); 6] = [
     ("Leaderboards", "/leaderboards", false),
     ("Tournaments", "/tournaments", false),
     ("Snakes", "/snakes", false),
     ("Players", "/players", false),
-    ("Stats", "/stats", false),
     ("My Snakes", "/battlesnakes", true),
     ("Customizations", "/customizations", false),
 ];

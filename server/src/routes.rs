@@ -97,7 +97,6 @@ pub fn routes(app_state: AppState) -> axum::Router {
     let router = axum::Router::new()
         // Public pages
         .route("/", get(root_page))
-        .route("/stats", get(stats::stats_page))
         .route("/robots.txt", get(robots_txt))
         .route("/health", get(health::health))
         .route("/favicon.ico", get(crate::static_assets::serve_favicon))
@@ -272,6 +271,7 @@ pub fn routes(app_state: AppState) -> axum::Router {
         )
         // Admin routes
         .route("/admin", get(admin::dashboard))
+        .route("/stats", get(stats::stats_page))
         .route("/admin/moderation", get(admin::moderation_queue))
         // Game API routes for board viewer (with CORS)
         .nest("/api", api_routes)

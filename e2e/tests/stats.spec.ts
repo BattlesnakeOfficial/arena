@@ -1,20 +1,34 @@
-import { test, expect } from '@playwright/test';
+import { test, expect } from '../fixtures/test';
+import { query } from '../fixtures/db';
 
-test('anonymous visitor can read public stats and JSON without horizontal scroll', async ({ page }) => {
+test('logged-out visitors cannot reach stats or find it in navigation', async ({ page }) => {
   await page.goto('/');
-  await page.locator('.site-nav .links').getByRole('link', { name: 'Stats' }).click();
-  await expect(page).toHaveURL(/\/stats$/);
-  await expect(page.getByRole('heading', { name: 'Arena stats' })).toBeVisible();
-  await expect(page.locator('.public-stats-tiles .stat')).toHaveCount(8);
-  await expect(page.locator('svg.public-stats-chart')).toHaveCount(4);
-  await expect(page.locator('table.public-stats-table')).toHaveCount(4);
-  await expect(page.locator('.public-stats-collecting')).toHaveCount(2);
-  await expect(page.getByText(/UTC; through \d{4}-\d{2}-\d{2}/)).toBeVisible();
-  await expect(page.getByText(/Active-user tracking began/)).toBeVisible();
-  await expect(page.getByText(/An active user is an account/)).toBeVisible();
-  await expect(page.getByText(/A played game finished/)).toBeVisible();
+  await expect(page.locator('.site-nav .links').getByRole('link', { name: 'Stats' })).toHaveCount(0);
+  await page.setViewportSize({ width: 375, height: 812 });
+  await page.locator('.mobile-menu summary').click();
+  await expect(page.locator('.mobile-menu').getByRole('link', { name: 'Stats' })).toHaveCount(0);
+  const response = await page.goto('/stats');
+  expect(response?.status()).toBe(401);
+  await expect(page.getByRole('heading', { name: 'Arena stats' })).toHaveCount(0);
+  expect((await page.request.get('/api/stats')).ok()).toBeFalsy();
+});
 
-  const response = await page.request.get('/api/stats');
+test('admin reaches stats from dashboard and sees aggregates at mobile width', async ({ authenticatedPage, mockUser }) => {
+  await query('UPDATE users SET is_admin = true WHERE github_login = $1', [mockUser.login]);
+  await authenticatedPage.goto('/admin');
+  await authenticatedPage.getByRole('link', { name: 'Stats' }).click();
+  await expect(authenticatedPage).toHaveURL(/\/stats$/);
+  await expect(authenticatedPage.getByRole('heading', { name: 'Arena stats' })).toBeVisible();
+  await expect(authenticatedPage.locator('.public-stats-tiles .stat')).toHaveCount(8);
+  await expect(authenticatedPage.locator('svg.public-stats-chart')).toHaveCount(4);
+  await expect(authenticatedPage.locator('table.public-stats-table')).toHaveCount(4);
+  await expect(authenticatedPage.locator('.public-stats-collecting')).toHaveCount(2);
+  await expect(authenticatedPage.getByText(/UTC; through \d{4}-\d{2}-\d{2}/)).toBeVisible();
+  await expect(authenticatedPage.getByText(/Active-user tracking began/)).toBeVisible();
+  await expect(authenticatedPage.getByText(/An active user is an account/)).toBeVisible();
+  await expect(authenticatedPage.getByText(/A played game finished/)).toBeVisible();
+
+  const response = await authenticatedPage.request.get('/api/stats');
   expect(response.ok()).toBeTruthy();
   const data = await response.json();
   expect(Object.keys(data.headlines).sort()).toEqual([
@@ -38,25 +52,25 @@ test('anonymous visitor can read public stats and JSON without horizontal scroll
     expect(data.headlines[metric] === null || typeof data.headlines[metric] === 'number').toBeTruthy();
   }
 
-  await page.setViewportSize({ width: 375, height: 812 });
-  await page.goto('/');
-  await page.locator('.mobile-menu summary').click();
-  await page.locator('.mobile-menu').getByRole('link', { name: 'Stats' }).click();
-  await page.evaluate(() => document.fonts.ready);
-  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBeTruthy();
-  expect(await page.locator('body').evaluate((el) => parseFloat(getComputedStyle(el).fontSize))).toBeGreaterThanOrEqual(16);
-  await expect(page.locator('svg.public-stats-chart')).toHaveCount(4);
-  await expect(page.locator('table.public-stats-table')).toHaveCount(4);
-  await expect(page.locator('.public-stats-collecting')).toHaveCount(2);
-  const narrowTablesFit = await page.locator('.public-stats-table-wrap').evaluateAll((wrappers) =>
+  await authenticatedPage.setViewportSize({ width: 375, height: 812 });
+  await authenticatedPage.reload();
+  await authenticatedPage.evaluate(() => document.fonts.ready);
+  expect(await authenticatedPage.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBeTruthy();
+  expect(await authenticatedPage.locator('body').evaluate((el) => parseFloat(getComputedStyle(el).fontSize))).toBeGreaterThanOrEqual(16);
+  await expect(authenticatedPage.locator('svg.public-stats-chart')).toHaveCount(4);
+  await expect(authenticatedPage.locator('table.public-stats-table')).toHaveCount(4);
+  await expect(authenticatedPage.locator('.public-stats-collecting')).toHaveCount(2);
+  const narrowTablesFit = await authenticatedPage.locator('.public-stats-table-wrap').evaluateAll((wrappers) =>
     wrappers.filter((wrapper) => wrapper.querySelectorAll('thead th').length <= 3)
       .every((wrapper) => wrapper.scrollWidth <= wrapper.clientWidth));
   expect(narrowTablesFit).toBeTruthy();
 });
 
-test('stats charts and tables render without JavaScript', async ({ browser }) => {
+test('admin stats charts and tables render without JavaScript', async ({ browser, authenticatedPage, mockUser }) => {
+  await query('UPDATE users SET is_admin = true WHERE github_login = $1', [mockUser.login]);
   const context = await browser.newContext({ javaScriptEnabled: false });
   try {
+    await context.addCookies(await authenticatedPage.context().cookies());
     const page = await context.newPage();
     await page.goto('/stats');
     await expect(page.getByRole('heading', { name: 'Arena stats' })).toBeVisible();

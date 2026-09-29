@@ -6,7 +6,10 @@ use color_eyre::eyre::Context as _;
 use maud::{Markup, html};
 
 use crate::{
-    components::page_factory::PageFactory, errors::ServerResult, models::stats::StatsSnapshot,
+    components::page_factory::PageFactory,
+    errors::ServerResult,
+    models::stats::StatsSnapshot,
+    routes::auth::{AdminApiUser, AdminUser},
     state::AppState,
 };
 
@@ -36,20 +39,18 @@ async fn snapshot_for_day(
 
 pub async fn stats_json(
     State(state): State<AppState>,
+    AdminApiUser(_user): AdminApiUser,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
-    let stats = snapshot(&state)
-        .await
-        .wrap_err("Failed to fetch public stats")?;
+    let stats = snapshot(&state).await.wrap_err("Failed to fetch stats")?;
     Ok(Json(stats.as_ref().clone()))
 }
 
 pub async fn stats_page(
     State(state): State<AppState>,
+    AdminUser(_user): AdminUser,
     page_factory: PageFactory,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
-    let stats = snapshot(&state)
-        .await
-        .wrap_err("Failed to fetch public stats")?;
+    let stats = snapshot(&state).await.wrap_err("Failed to fetch stats")?;
     Ok(page_factory.create_page("Stats".to_string(), Box::new(render_stats(&stats))))
 }
 
@@ -136,7 +137,7 @@ fn render_stats(s: &StatsSnapshot) -> Markup {
         div class="public-stats" {
             div class="page-head" {
                 h1 { "Arena stats" }
-                p class="sub" { "A public view of the people and snakes building this arena." }
+                p class="sub" { "Aggregate usage for admins. No per-user data." }
             }
             p class="stats-period" { "UTC; through " (s.as_of_utc_date) }
             div class="stats public-stats-tiles" {
@@ -261,6 +262,69 @@ mod tests {
         http::{Request, header},
     };
     use tower::ServiceExt as _;
+    use uuid::Uuid;
+
+    fn signed_session_cookie(state: &AppState, session_id: Uuid) -> String {
+        let cookies = tower_cookies::Cookies::default();
+        cookies
+            .private(&state.cookie_key.0)
+            .add(tower_cookies::Cookie::new(
+                crate::models::session::SESSION_COOKIE_NAME,
+                session_id.to_string(),
+            ));
+        cookies
+            .get(crate::models::session::SESSION_COOKIE_NAME)
+            .unwrap()
+            .value()
+            .to_string()
+    }
+
+    async fn route_response(
+        app: &axum::Router,
+        path: &str,
+        session_cookie: Option<&str>,
+        token: Option<&str>,
+    ) -> axum::response::Response {
+        let mut builder = Request::builder().uri(path);
+        if path.starts_with("/api/") {
+            builder = builder.header(header::ORIGIN, "https://example.com");
+        }
+        if let Some(session_cookie) = session_cookie {
+            builder = builder.header(
+                header::COOKIE,
+                format!(
+                    "{}={session_cookie}",
+                    crate::models::session::SESSION_COOKIE_NAME
+                ),
+            );
+        }
+        if let Some(token) = token {
+            builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
+        }
+        app.clone()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+    }
+
+    async fn create_user_session(db: &sqlx::PgPool, github_id: i64, is_admin: bool) -> Uuid {
+        let user_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO users (external_github_id, github_login, github_access_token, is_admin) VALUES ($1, $2, '', $3) RETURNING user_id",
+        )
+        .bind(github_id)
+        .bind(format!("stats-test-{github_id}"))
+        .bind(is_admin)
+        .fetch_one(db)
+        .await
+        .unwrap();
+        let session_id: Uuid =
+            sqlx::query_scalar("INSERT INTO sessions (user_id) VALUES ($1) RETURNING session_id")
+                .bind(user_id)
+                .fetch_one(db)
+                .await
+                .unwrap();
+        session_id
+    }
 
     #[sqlx::test(migrations = "../migrations")]
     async fn stale_day_is_not_served_inside_cache_ttl(db: sqlx::PgPool) {
@@ -278,19 +342,70 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "../migrations")]
-    async fn public_router_serves_html_json_and_reports_query_failure(db: sqlx::PgPool) {
+    async fn admin_router_serves_html_json_and_reports_query_failure(db: sqlx::PgPool) {
         let state = AppState::test_from_pool(db.clone());
-        let app = crate::routes::routes(state).layer(tower_cookies::CookieManagerLayer::new());
-        let html_response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/stats")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let app =
+            crate::routes::routes(state.clone()).layer(tower_cookies::CookieManagerLayer::new());
+        for (stats_path, admin_path) in [("/stats", "/admin"), ("/api/stats", "/api/admin/stats")] {
+            let stats = route_response(&app, stats_path, None, None).await;
+            let admin = route_response(&app, admin_path, None, None).await;
+            assert_eq!(stats.status(), admin.status(), "anonymous {stats_path}");
+            assert_eq!(stats.status(), StatusCode::UNAUTHORIZED);
+        }
+
+        let non_admin_session = create_user_session(&db, 14621, false).await;
+        let non_admin_cookie = signed_session_cookie(&state, non_admin_session);
+        for (stats_path, admin_path) in [("/stats", "/admin"), ("/api/stats", "/api/admin/stats")] {
+            let stats = route_response(&app, stats_path, Some(&non_admin_cookie), None).await;
+            let admin = route_response(&app, admin_path, Some(&non_admin_cookie), None).await;
+            assert_eq!(stats.status(), admin.status(), "non-admin {stats_path}");
+            assert_eq!(stats.status(), StatusCode::FORBIDDEN);
+        }
+        let non_admin_id: Uuid =
+            sqlx::query_scalar("SELECT user_id FROM sessions WHERE session_id = $1")
+                .bind(non_admin_session)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        let non_admin_token =
+            crate::models::api_token::create_api_token(&db, non_admin_id, "stats-test")
+                .await
+                .unwrap();
+        let stats = route_response(&app, "/api/stats", None, Some(&non_admin_token.secret)).await;
+        let admin = route_response(
+            &app,
+            "/api/admin/stats",
+            None,
+            Some(&non_admin_token.secret),
+        )
+        .await;
+        assert_eq!(stats.status(), admin.status());
+        assert_eq!(stats.status(), StatusCode::FORBIDDEN);
+
+        let root = route_response(&app, "/", None, None).await;
+        let root_html = String::from_utf8(
+            to_bytes(root.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(!root_html.contains("href=\"/stats\""));
+
+        let admin_session = create_user_session(&db, 14622, true).await;
+        let admin_cookie = signed_session_cookie(&state, admin_session);
+        let admin_page = route_response(&app, "/admin", Some(&admin_cookie), None).await;
+        assert_eq!(admin_page.status(), StatusCode::OK);
+        let admin_html = String::from_utf8(
+            to_bytes(admin_page.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(admin_html.contains("href=\"/stats\""));
+
+        let html_response = route_response(&app, "/stats", Some(&admin_cookie), None).await;
         assert_eq!(html_response.status(), StatusCode::OK);
         let html = String::from_utf8(
             to_bytes(html_response.into_body(), usize::MAX)
@@ -299,7 +414,7 @@ mod tests {
                 .to_vec(),
         )
         .unwrap();
-        assert!(html.contains("href=\"/stats\""));
+        assert!(html.contains("Aggregate usage for admins. No per-user data."));
         assert_eq!(html.matches("class=\"public-stats-chart\"").count(), 4);
         assert_eq!(html.matches("class=\"public-stats-table\"").count(), 4);
         assert_eq!(html.matches("class=\"stat\"").count(), 8);
@@ -308,17 +423,17 @@ mod tests {
         assert!(!html.contains("Historical reconstruction"));
         assert!(!html.contains("u1-secret"));
 
-        let json_response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/api/stats")
-                    .header(header::ORIGIN, "https://example.com")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+        let admin_id: Uuid =
+            sqlx::query_scalar("SELECT user_id FROM sessions WHERE session_id = $1")
+                .bind(admin_session)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        let admin_token = crate::models::api_token::create_api_token(&db, admin_id, "stats-test")
             .await
             .unwrap();
+        let json_response =
+            route_response(&app, "/api/stats", None, Some(&admin_token.secret)).await;
         assert_eq!(json_response.status(), StatusCode::OK);
         assert_eq!(
             json_response
@@ -342,15 +457,7 @@ mod tests {
             .execute(&db)
             .await
             .unwrap();
-        let failed = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/stats")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let failed = route_response(&app, "/api/stats", None, Some(&admin_token.secret)).await;
         assert_eq!(failed.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 }
