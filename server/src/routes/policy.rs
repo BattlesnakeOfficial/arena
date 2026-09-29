@@ -122,7 +122,11 @@ fn privacy_content() -> Markup {
                 li { "Display your profile and snakes." }
                 li { "Run games and store game results." }
                 li { "Maintain leaderboards and tournament results." }
-                li { "Compute aggregate usage statistics, such as daily active accounts, to operate and improve the arena." }
+                li {
+                    "Compute aggregate usage statistics, such as daily, weekly, and monthly active "
+                    "accounts, to operate and improve the arena. We may publish these statistics in "
+                    "aggregate form; published statistics never identify individual accounts."
+                }
                 li { "Send transactional email (via Mailgun) when your play account is claimed, as a security notice." }
                 li { "Notify you by email if your snake is removed from leaderboard matchmaking because its server keeps failing." }
             }
@@ -239,7 +243,9 @@ mod tests {
         assert!(html.contains("Contact"));
         assert!(html.contains(PRIVACY_EFFECTIVE_DATE));
         assert!(html.contains("UTC date of activity"));
-        assert!(html.contains("Compute aggregate usage statistics, such as daily active accounts, to operate and improve the arena."));
+        assert!(html.contains("Compute aggregate usage statistics"));
+        assert!(html.contains("We may publish these statistics in aggregate form"));
+        assert!(html.contains("published statistics never identify individual accounts"));
         assert!(!html.contains("public stats"));
         assert!(!html.contains("Publish anonymous"));
     }
