@@ -65,6 +65,7 @@ pub async fn eligible_battlesnake_ids(
         r#"SELECT battlesnake_id FROM battlesnakes
            WHERE battlesnake_id = ANY($1)
              AND (user_id = $2 OR visibility = 'public')
+             AND deleted_at IS NULL
            ORDER BY battlesnake_id"#,
         requested,
         requester
@@ -86,6 +87,7 @@ pub async fn lock_eligible_battlesnake_ids(
         r#"SELECT battlesnake_id FROM battlesnakes
            WHERE battlesnake_id = ANY($1)
              AND (user_id = $2 OR visibility = 'public')
+             AND deleted_at IS NULL
            ORDER BY battlesnake_id
            FOR SHARE"#,
         requested,
@@ -165,6 +167,7 @@ pub async fn get_battlesnakes_by_user_id(
             updated_at
         FROM battlesnakes
         WHERE user_id = $1
+          AND deleted_at IS NULL
         ORDER BY name ASC
         "#,
         user_id
@@ -197,6 +200,7 @@ pub async fn get_battlesnake_by_id(
             updated_at
         FROM battlesnakes
         WHERE battlesnake_id = $1
+          AND deleted_at IS NULL
         "#,
         battlesnake_id
     )
@@ -285,6 +289,7 @@ pub async fn update_battlesnake(
         WHERE
             battlesnake_id = $1
             AND user_id = $2
+            AND deleted_at IS NULL
         RETURNING
             battlesnake_id,
             user_id,
@@ -326,27 +331,150 @@ pub async fn update_battlesnake(
     }
 }
 
-// Delete a battlesnake
+/// `leaderboard_entries.disabled_reason` for entries of a deleted snake.
+/// Nothing re-enables these: health reactivation only touches `health`
+/// entries, and owner pause/resume refuses them.
+pub const DISABLED_REASON_DELETED: &str = "deleted";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeleteBattlesnakeOutcome {
+    Deleted,
+    /// No live snake with this ID belongs to the user.
+    NotFound,
+    /// Registered in a tournament that is open for registration or running;
+    /// the owner has to withdraw it first.
+    InActiveTournament,
+}
+
+/// Soft-delete a battlesnake so the games, placements and tournament results
+/// it took part in stay intact for everyone else.
+///
+/// In one transaction: refuses if the snake is in an active tournament,
+/// withdraws it from not-yet-opened (`created`) tournaments, stamps
+/// `deleted_at`, and disables its leaderboard entries so matchmaking and the
+/// rankings drop it.
 pub async fn delete_battlesnake(
     pool: &PgPool,
     battlesnake_id: Uuid,
     user_id: Uuid,
-) -> cja::Result<()> {
-    sqlx::query!(
+) -> cja::Result<DeleteBattlesnakeOutcome> {
+    use crate::models::tournament::{self, TournamentStatus};
+
+    let mut tx = pool
+        .begin()
+        .await
+        .wrap_err("Failed to begin delete transaction")?;
+
+    // Row lock serializes against tournament registration, which takes a
+    // FOR SHARE lock on the snake before inserting.
+    let locked = sqlx::query_scalar!(
         r#"
-        DELETE FROM battlesnakes
-        WHERE
-            battlesnake_id = $1
-            AND user_id = $2
+        SELECT battlesnake_id
+        FROM battlesnakes
+        WHERE battlesnake_id = $1
+          AND user_id = $2
+          AND deleted_at IS NULL
+        FOR UPDATE
         "#,
         battlesnake_id,
         user_id
     )
-    .execute(pool)
+    .fetch_optional(&mut *tx)
     .await
-    .wrap_err("Failed to delete battlesnake from database")?;
+    .wrap_err("Failed to lock battlesnake for deletion")?;
+    if locked.is_none() {
+        return Ok(DeleteBattlesnakeOutcome::NotFound);
+    }
 
-    Ok(())
+    if tournament::count_active_tournament_registrations(&mut *tx, battlesnake_id).await? > 0 {
+        return Ok(DeleteBattlesnakeOutcome::InActiveTournament);
+    }
+
+    let pending = sqlx::query!(
+        r#"
+        SELECT tr.registration_id, tr.tournament_id
+        FROM tournament_registrations tr
+        JOIN tournaments t ON t.tournament_id = tr.tournament_id
+        WHERE tr.battlesnake_id = $1
+          AND t.status = 'created'
+        ORDER BY tr.tournament_id
+        "#,
+        battlesnake_id
+    )
+    .fetch_all(&mut *tx)
+    .await
+    .wrap_err("Failed to find registrations in unopened tournaments")?;
+
+    for registration in pending {
+        // The status may have moved on since the read above; re-check it on
+        // the locked row.
+        let status = tournament::get_tournament_for_update(&mut tx, registration.tournament_id)
+            .await?
+            .map(|t| t.status);
+        match status {
+            Some(TournamentStatus::Created) => {
+                tournament::delete_registration_and_renumber(
+                    &mut tx,
+                    registration.tournament_id,
+                    registration.registration_id,
+                )
+                .await?;
+            }
+            Some(TournamentStatus::Registration | TournamentStatus::InProgress) => {
+                return Ok(DeleteBattlesnakeOutcome::InActiveTournament);
+            }
+            Some(TournamentStatus::Completed | TournamentStatus::Canceled) | None => {}
+        }
+    }
+
+    sqlx::query!(
+        "UPDATE battlesnakes SET deleted_at = NOW() WHERE battlesnake_id = $1",
+        battlesnake_id
+    )
+    .execute(&mut *tx)
+    .await
+    .wrap_err("Failed to mark battlesnake deleted")?;
+
+    sqlx::query!(
+        r#"
+        UPDATE leaderboard_entries
+        SET disabled_at = COALESCE(disabled_at, NOW()),
+            disabled_reason = $2,
+            updated_at = NOW()
+        WHERE battlesnake_id = $1
+        "#,
+        battlesnake_id,
+        DISABLED_REASON_DELETED
+    )
+    .execute(&mut *tx)
+    .await
+    .wrap_err("Failed to disable leaderboard entries of deleted battlesnake")?;
+
+    tx.commit()
+        .await
+        .wrap_err("Failed to commit battlesnake deletion")?;
+
+    Ok(DeleteBattlesnakeOutcome::Deleted)
+}
+
+/// Name of a soft-deleted battlesnake, for rendering its "deleted" page.
+/// `None` when the snake is live or never existed.
+pub async fn get_deleted_battlesnake_name(
+    pool: &PgPool,
+    battlesnake_id: Uuid,
+) -> cja::Result<Option<String>> {
+    sqlx::query_scalar!(
+        r#"
+        SELECT name
+        FROM battlesnakes
+        WHERE battlesnake_id = $1
+          AND deleted_at IS NOT NULL
+        "#,
+        battlesnake_id
+    )
+    .fetch_optional(pool)
+    .await
+    .wrap_err("Failed to fetch deleted battlesnake")
 }
 
 // Check if a battlesnake belongs to a user
@@ -363,6 +491,7 @@ pub async fn belongs_to_user(
             WHERE
                 battlesnake_id = $1
                 AND user_id = $2
+                AND deleted_at IS NULL
         ) as "exists!"
         "#,
         battlesnake_id,
@@ -393,6 +522,7 @@ pub async fn get_public_battlesnakes(pool: &PgPool) -> cja::Result<Vec<Battlesna
             updated_at
         FROM battlesnakes
         WHERE visibility = 'public'
+          AND deleted_at IS NULL
         ORDER BY name ASC
         "#
     )
@@ -434,6 +564,7 @@ pub async fn count_public_battlesnakes(
         FROM battlesnakes b
         JOIN users u ON b.user_id = u.user_id
         WHERE b.visibility = 'public'
+          AND b.deleted_at IS NULL
           AND ($2::uuid IS NULL OR b.user_id != $2)
           AND (strpos(lower(b.name), lower($1)) > 0
                OR strpos(lower(u.github_login), lower($1)) > 0)
@@ -467,6 +598,7 @@ pub async fn get_public_battlesnakes_paginated(
         FROM battlesnakes b
         JOIN users u ON b.user_id = u.user_id
         WHERE b.visibility = 'public'
+          AND b.deleted_at IS NULL
           AND ($4::uuid IS NULL OR b.user_id != $4)
           AND (strpos(lower(b.name), lower($3)) > 0
                OR strpos(lower(u.github_login), lower($3)) > 0)
@@ -505,7 +637,8 @@ pub async fn get_available_battlesnakes(
             created_at,
             updated_at
         FROM battlesnakes
-        WHERE user_id = $1 OR visibility = 'public'
+        WHERE (user_id = $1 OR visibility = 'public')
+          AND deleted_at IS NULL
         ORDER BY name ASC
         "#,
         user_id
@@ -529,6 +662,7 @@ pub async fn update_battlesnake_customizations(
         UPDATE battlesnakes
         SET color = $2, head = $3, tail = $4
         WHERE battlesnake_id = $1
+          AND deleted_at IS NULL
         "#,
         battlesnake_id,
         color,
@@ -736,12 +870,82 @@ mod tests {
         Ok(())
     }
 
+    async fn create_leaderboard_entry(
+        pool: &PgPool,
+        leaderboard_id: Uuid,
+        battlesnake_id: Uuid,
+    ) -> cja::Result<Uuid> {
+        Ok(sqlx::query_scalar!(
+            "INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id)
+             VALUES ($1, $2)
+             RETURNING leaderboard_entry_id",
+            leaderboard_id,
+            battlesnake_id
+        )
+        .fetch_one(pool)
+        .await?)
+    }
+
+    async fn create_finished_game(pool: &PgPool) -> cja::Result<Uuid> {
+        Ok(sqlx::query_scalar!(
+            "INSERT INTO games (board_size, game_type, status)
+             VALUES ('11x11', 'Standard', 'finished')
+             RETURNING game_id"
+        )
+        .fetch_one(pool)
+        .await?)
+    }
+
+    async fn create_tournament_in(pool: &PgPool, owner: Uuid, status: &str) -> cja::Result<Uuid> {
+        Ok(sqlx::query_scalar!(
+            "INSERT INTO tournaments (name, user_id, status)
+             VALUES ('Delete Test', $1, $2)
+             RETURNING tournament_id",
+            owner,
+            status
+        )
+        .fetch_one(pool)
+        .await?)
+    }
+
+    async fn register(
+        pool: &PgPool,
+        tournament_id: Uuid,
+        battlesnake_id: Uuid,
+        user_id: Uuid,
+        seed: i32,
+    ) -> cja::Result<()> {
+        crate::models::tournament::create_registration(
+            pool,
+            tournament_id,
+            battlesnake_id,
+            user_id,
+            seed,
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn entry_state(pool: &PgPool, entry_id: Uuid) -> cja::Result<(bool, Option<String>)> {
+        let row = sqlx::query!(
+            "SELECT disabled_at IS NOT NULL AS \"disabled!\", disabled_reason
+             FROM leaderboard_entries WHERE leaderboard_entry_id = $1",
+            entry_id
+        )
+        .fetch_one(pool)
+        .await?;
+        Ok((row.disabled, row.disabled_reason))
+    }
+
+    // Regression: deleting a snake that had played a leaderboard game used to
+    // 500 on game_battlesnakes_snake_or_entry_required. Soft delete keeps every
+    // game row, so other players' results (including who won) are untouched.
     #[sqlx::test(migrations = "../migrations")]
-    async fn delete_battlesnake_removes_it_from_leaderboard_and_casual_games(
+    async fn delete_battlesnake_keeps_leaderboard_and_casual_game_history(
         pool: PgPool,
     ) -> cja::Result<()> {
         use crate::models::game::{add_battlesnake_to_game, add_leaderboard_entry_to_game};
-        use crate::models::game_battlesnake::AddBattlesnakeToGame;
+        use crate::models::game_battlesnake::{AddBattlesnakeToGame, get_battlesnakes_by_game_id};
 
         let owner = create_user(&pool, 8401, "delete-owner").await?;
         let rival_owner = create_user(&pool, 8402, "rival-owner").await?;
@@ -753,62 +957,253 @@ mod tests {
         )
         .fetch_one(&pool)
         .await?;
-        let mut entry_ids = Vec::new();
-        for snake in [doomed, rival] {
-            entry_ids.push(
-                sqlx::query_scalar!(
-                    "INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id)
-                     VALUES ($1, $2)
-                     RETURNING leaderboard_entry_id",
-                    leaderboard_id,
-                    snake
-                )
-                .fetch_one(&pool)
-                .await?,
-            );
-        }
+        let doomed_entry = create_leaderboard_entry(&pool, leaderboard_id, doomed).await?;
+        let rival_entry = create_leaderboard_entry(&pool, leaderboard_id, rival).await?;
 
-        let mut game_ids = Vec::new();
-        for _ in 0..2 {
-            game_ids.push(
-                sqlx::query_scalar!(
-                    "INSERT INTO games (board_size, game_type, status)
-                     VALUES ('11x11', 'Standard', 'finished')
-                     RETURNING game_id"
-                )
-                .fetch_one(&pool)
-                .await?,
-            );
-        }
-        let (leaderboard_game, casual_game) = (game_ids[0], game_ids[1]);
-
-        // Leaderboard games record participants by entry, leaving battlesnake_id NULL.
-        for entry_id in &entry_ids {
-            add_leaderboard_entry_to_game(&pool, leaderboard_game, *entry_id).await?;
+        let leaderboard_game = create_finished_game(&pool).await?;
+        let casual_game = create_finished_game(&pool).await?;
+        for entry_id in [doomed_entry, rival_entry] {
+            add_leaderboard_entry_to_game(&pool, leaderboard_game, entry_id).await?;
         }
         for battlesnake_id in [doomed, rival] {
             add_battlesnake_to_game(&pool, casual_game, AddBattlesnakeToGame { battlesnake_id })
                 .await?;
         }
+        // The soon-to-be-deleted snake won both games.
+        sqlx::query!(
+            "UPDATE game_battlesnakes gb
+             SET placement = CASE WHEN COALESCE(
+                 gb.battlesnake_id,
+                 (SELECT le.battlesnake_id FROM leaderboard_entries le
+                  WHERE le.leaderboard_entry_id = gb.leaderboard_entry_id)
+             ) = $1 THEN 1 ELSE 2 END",
+            doomed
+        )
+        .execute(&pool)
+        .await?;
 
-        delete_battlesnake(&pool, doomed, owner).await?;
+        assert_eq!(
+            delete_battlesnake(&pool, doomed, owner).await?,
+            DeleteBattlesnakeOutcome::Deleted
+        );
 
-        let remaining = sqlx::query!(
-            "SELECT gb.game_id, COALESCE(gb.battlesnake_id, le.battlesnake_id) AS battlesnake_id
-             FROM game_battlesnakes gb
-             LEFT JOIN leaderboard_entries le USING (leaderboard_entry_id)
-             ORDER BY gb.game_id = $1 DESC",
-            leaderboard_game
+        for game_id in [leaderboard_game, casual_game] {
+            let results: Vec<(Uuid, Option<i32>)> = get_battlesnakes_by_game_id(&pool, game_id)
+                .await?
+                .into_iter()
+                .map(|gb| (gb.battlesnake_id, gb.placement))
+                .collect();
+            assert_eq!(results, vec![(doomed, Some(1)), (rival, Some(2))]);
+        }
+
+        assert!(get_battlesnake_by_id(&pool, doomed).await?.is_none());
+        assert_eq!(
+            get_deleted_battlesnake_name(&pool, doomed)
+                .await?
+                .as_deref(),
+            Some("Doomed")
+        );
+        assert_eq!(get_deleted_battlesnake_name(&pool, rival).await?, None);
+
+        // Out of matchmaking and the rankings; the rival is unaffected.
+        assert_eq!(
+            entry_state(&pool, doomed_entry).await?,
+            (true, Some(DISABLED_REASON_DELETED.to_string()))
+        );
+        assert_eq!(entry_state(&pool, rival_entry).await?, (false, None));
+
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn deleted_battlesnake_is_hidden_from_active_queries(pool: PgPool) -> cja::Result<()> {
+        let owner = create_user(&pool, 8501, "hidden-owner").await?;
+        let other = create_user(&pool, 8502, "hidden-other").await?;
+        let live = create_snake(&pool, owner, "Live", Visibility::Public).await?;
+        let gone = create_snake(&pool, owner, "Gone", Visibility::Public).await?;
+        assert_eq!(
+            delete_battlesnake(&pool, gone, owner).await?,
+            DeleteBattlesnakeOutcome::Deleted
+        );
+
+        let ids = |snakes: Vec<Battlesnake>| {
+            snakes
+                .into_iter()
+                .map(|s| s.battlesnake_id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            ids(get_battlesnakes_by_user_id(&pool, owner).await?),
+            vec![live]
+        );
+        assert_eq!(ids(get_public_battlesnakes(&pool).await?), vec![live]);
+        assert_eq!(
+            ids(get_available_battlesnakes(&pool, other).await?),
+            vec![live]
+        );
+
+        let query = PublicBattlesnakeQuery {
+            search: "",
+            excluded_owner_id: None,
+            page: 0,
+            per_page: 50,
+        };
+        assert_eq!(count_public_battlesnakes(&pool, &query).await?, 1);
+        assert_eq!(
+            get_public_battlesnakes_paginated(&pool, &query)
+                .await?
+                .len(),
+            1
+        );
+
+        assert_eq!(
+            eligible_battlesnake_ids(&pool, owner, &[live, gone]).await?,
+            HashSet::from([live])
+        );
+        let mut conn = pool.acquire().await?;
+        assert_eq!(
+            lock_eligible_battlesnake_ids(&mut conn, owner, &[live, gone]).await?,
+            HashSet::from([live])
+        );
+        drop(conn);
+
+        assert!(!belongs_to_user(&pool, gone, owner).await?);
+        assert!(
+            update_battlesnake(
+                &pool,
+                gone,
+                owner,
+                UpdateBattlesnake {
+                    name: "Revived".to_string(),
+                    url: "http://localhost:8000".to_string(),
+                    visibility: Visibility::Public,
+                },
+            )
+            .await
+            .is_err()
+        );
+
+        // Deleting twice is a not-found, not a second delete.
+        assert_eq!(
+            delete_battlesnake(&pool, gone, owner).await?,
+            DeleteBattlesnakeOutcome::NotFound
+        );
+        // Only the owner can delete.
+        assert_eq!(
+            delete_battlesnake(&pool, live, other).await?,
+            DeleteBattlesnakeOutcome::NotFound
+        );
+
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn deleted_battlesnake_name_can_be_reused(pool: PgPool) -> cja::Result<()> {
+        let owner = create_user(&pool, 8601, "reuse-owner").await?;
+        let first = create_snake(&pool, owner, "Reuse", Visibility::Public).await?;
+        delete_battlesnake(&pool, first, owner).await?;
+
+        let data = CreateBattlesnake {
+            name: "Reuse".to_string(),
+            url: "http://localhost:8000".to_string(),
+            visibility: Visibility::Public,
+        };
+        let second = create_battlesnake(&pool, owner, data.clone()).await?;
+        assert_ne!(second.battlesnake_id, first);
+
+        // Live snakes still can't share a name.
+        let err = create_battlesnake(&pool, owner, data).await.unwrap_err();
+        assert!(
+            err.to_string().contains("already have a battlesnake named"),
+            "{err}"
+        );
+
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn delete_refuses_active_tournaments_and_withdraws_from_unopened_ones(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        let owner = create_user(&pool, 8701, "tourney-owner").await?;
+        let other = create_user(&pool, 8702, "tourney-other").await?;
+        let doomed = create_snake(&pool, owner, "Doomed", Visibility::Public).await?;
+        let a = create_snake(&pool, other, "A", Visibility::Public).await?;
+        let b = create_snake(&pool, other, "B", Visibility::Public).await?;
+
+        // Open for registration: refused, nothing changes.
+        let open = create_tournament_in(&pool, other, "registration").await?;
+        register(&pool, open, doomed, owner, 1).await?;
+        assert_eq!(
+            delete_battlesnake(&pool, doomed, owner).await?,
+            DeleteBattlesnakeOutcome::InActiveTournament
+        );
+        assert!(get_battlesnake_by_id(&pool, doomed).await?.is_some());
+
+        sqlx::query!(
+            "UPDATE tournaments SET status = 'completed' WHERE tournament_id = $1",
+            open
+        )
+        .execute(&pool)
+        .await?;
+
+        // Not opened yet: withdrawn, and the remaining seeds close the gap.
+        let draft = create_tournament_in(&pool, other, "created").await?;
+        register(&pool, draft, a, other, 1).await?;
+        register(&pool, draft, doomed, owner, 2).await?;
+        register(&pool, draft, b, other, 3).await?;
+        assert_eq!(
+            delete_battlesnake(&pool, doomed, owner).await?,
+            DeleteBattlesnakeOutcome::Deleted
+        );
+
+        let seeds = sqlx::query!(
+            "SELECT battlesnake_id, seed FROM tournament_registrations
+             WHERE tournament_id = $1 ORDER BY seed",
+            draft
         )
         .fetch_all(&pool)
+        .await?
+        .into_iter()
+        .map(|r| (r.battlesnake_id, r.seed))
+        .collect::<Vec<_>>();
+        assert_eq!(seeds, vec![(a, 1), (b, 2)]);
+
+        // The finished tournament keeps its history.
+        let kept = sqlx::query_scalar!(
+            "SELECT COUNT(*) AS \"count!\" FROM tournament_registrations
+             WHERE tournament_id = $1 AND battlesnake_id = $2",
+            open,
+            doomed
+        )
+        .fetch_one(&pool)
         .await?;
-        let remaining: Vec<(Uuid, Option<Uuid>)> = remaining
-            .into_iter()
-            .map(|row| (row.game_id, row.battlesnake_id))
-            .collect();
+        assert_eq!(kept, 1);
+
+        // And a deleted snake can't be registered anywhere.
+        let later = create_tournament_in(&pool, other, "registration").await?;
+        assert!(register(&pool, later, doomed, owner, 1).await.is_err());
+
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn deleted_snake_leaderboard_entry_cannot_be_resumed(pool: PgPool) -> cja::Result<()> {
+        let owner = create_user(&pool, 8801, "resume-owner").await?;
+        let doomed = create_snake(&pool, owner, "Doomed", Visibility::Public).await?;
+        let leaderboard_id = sqlx::query_scalar!(
+            "INSERT INTO leaderboards (name) VALUES ('Resume Test') RETURNING leaderboard_id"
+        )
+        .fetch_one(&pool)
+        .await?;
+        let entry = create_leaderboard_entry(&pool, leaderboard_id, doomed).await?;
+        delete_battlesnake(&pool, doomed, owner).await?;
+
+        crate::models::leaderboard::set_disabled(&pool, entry, None).await?;
+
         assert_eq!(
-            remaining,
-            vec![(leaderboard_game, Some(rival)), (casual_game, Some(rival))]
+            entry_state(&pool, entry).await?,
+            (true, Some(DISABLED_REASON_DELETED.to_string()))
         );
 
         Ok(())

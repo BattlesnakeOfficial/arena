@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO tournaments (name, user_id, status)\n             VALUES ('Delete Test', $1, $2)\n             RETURNING tournament_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "tournament_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "eacf8364de4a55ca59ff50b50a5e7c92515d3d13c4a23d0f6af90698baf65b13"
+}

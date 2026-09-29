@@ -461,7 +461,7 @@ where
 ///
 /// Always clears `disabled_reason`: a manual pause is reason-less, and a
 /// manual resume of a health-disabled entry means the owner has taken over
-/// from the sweeper.
+/// from the sweeper. Entries of a deleted snake are never touched.
 pub async fn set_disabled(
     pool: &PgPool,
     entry_id: Uuid,
@@ -470,9 +470,11 @@ pub async fn set_disabled(
     sqlx::query!(
         r#"UPDATE leaderboard_entries
          SET disabled_at = $2, disabled_reason = NULL
-         WHERE leaderboard_entry_id = $1"#,
+         WHERE leaderboard_entry_id = $1
+           AND disabled_reason IS DISTINCT FROM $3"#,
         entry_id,
-        disabled_at
+        disabled_at,
+        crate::models::battlesnake::DISABLED_REASON_DELETED
     )
     .execute(pool)
     .await
@@ -495,7 +497,7 @@ pub async fn get_user_entries(
             le.disabled_at, le.disabled_reason, le.created_at, le.updated_at
          FROM leaderboard_entries le
          JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id
-         WHERE le.leaderboard_id = $1 AND b.user_id = $2
+         WHERE le.leaderboard_id = $1 AND b.user_id = $2 AND b.deleted_at IS NULL
          ORDER BY le.display_score DESC"#,
         leaderboard_id,
         user_id

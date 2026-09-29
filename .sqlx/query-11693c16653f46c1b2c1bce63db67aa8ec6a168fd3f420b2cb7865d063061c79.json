@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT name\n        FROM battlesnakes\n        WHERE battlesnake_id = $1\n          AND deleted_at IS NOT NULL\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "name",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "11693c16653f46c1b2c1bce63db67aa8ec6a168fd3f420b2cb7865d063061c79"
+}

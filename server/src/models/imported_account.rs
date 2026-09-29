@@ -321,14 +321,16 @@ pub async fn claim_account(
     // Materialize snakes. Names must be unique per user in arena; play had
     // no such constraint, so collisions get a numeric suffix. Existing
     // names are fetched up front to avoid unique-violation aborts mid-tx.
-    let mut existing_names: Vec<String> =
-        sqlx::query!("SELECT name FROM battlesnakes WHERE user_id = $1", user_id)
-            .fetch_all(&mut *tx)
-            .await
-            .wrap_err("Failed to fetch existing snake names")?
-            .into_iter()
-            .map(|r| r.name)
-            .collect();
+    let mut existing_names: Vec<String> = sqlx::query!(
+        "SELECT name FROM battlesnakes WHERE user_id = $1 AND deleted_at IS NULL",
+        user_id
+    )
+    .fetch_all(&mut *tx)
+    .await
+    .wrap_err("Failed to fetch existing snake names")?
+    .into_iter()
+    .map(|r| r.name)
+    .collect();
 
     let staged_snakes = sqlx::query!(
         r#"

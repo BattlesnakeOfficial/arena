@@ -270,24 +270,17 @@ pub async fn delete_snake(
     ApiUser(user): ApiUser,
     Path(snake_id): Path<Uuid>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    // Check ownership first
-    let exists = battlesnake::belongs_to_user(&state.db, snake_id, user.user_id)
+    let outcome = battlesnake::delete_battlesnake(&state.db, snake_id, user.user_id)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to check snake ownership: {}", e);
+            tracing::error!("Failed to delete snake: {:#}", e);
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-    if !exists {
-        return Err(StatusCode::NOT_FOUND);
+    match outcome {
+        battlesnake::DeleteBattlesnakeOutcome::Deleted => Ok(StatusCode::NO_CONTENT),
+        battlesnake::DeleteBattlesnakeOutcome::NotFound => Err(StatusCode::NOT_FOUND),
+        // Registered in a tournament that is open or running: withdraw first.
+        battlesnake::DeleteBattlesnakeOutcome::InActiveTournament => Err(StatusCode::CONFLICT),
     }
-
-    battlesnake::delete_battlesnake(&state.db, snake_id, user.user_id)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to delete snake: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
-    Ok(StatusCode::NO_CONTENT)
 }

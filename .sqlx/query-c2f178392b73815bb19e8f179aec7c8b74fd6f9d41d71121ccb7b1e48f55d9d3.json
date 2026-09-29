@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id)\n                     VALUES ($1, $2)\n                     RETURNING leaderboard_entry_id",
+  "query": "INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id)\n             VALUES ($1, $2)\n             RETURNING leaderboard_entry_id",
   "describe": {
     "columns": [
       {
@@ -19,5 +19,5 @@
       false
     ]
   },
-  "hash": "7dfe234813cbcb1897c2981ea19d58122e98870f95005d10d399d1b4a38d18db"
+  "hash": "c2f178392b73815bb19e8f179aec7c8b74fd6f9d41d71121ccb7b1e48f55d9d3"
 }

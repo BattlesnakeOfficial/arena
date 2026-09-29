@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT\n            b.battlesnake_id,\n            b.name,\n            b.color,\n            u.github_login AS owner_login\n        FROM battlesnakes b\n        JOIN users u ON b.user_id = u.user_id\n        WHERE b.visibility = 'public'\n          AND ($4::uuid IS NULL OR b.user_id != $4)\n          AND (strpos(lower(b.name), lower($3)) > 0\n               OR strpos(lower(u.github_login), lower($3)) > 0)\n        ORDER BY b.name ASC, b.battlesnake_id ASC\n        LIMIT $1 OFFSET $2\n        ",
+  "query": "\n        SELECT\n            b.battlesnake_id,\n            b.name,\n            b.color,\n            u.github_login AS owner_login\n        FROM battlesnakes b\n        JOIN users u ON b.user_id = u.user_id\n        WHERE b.visibility = 'public'\n          AND b.deleted_at IS NULL\n          AND ($4::uuid IS NULL OR b.user_id != $4)\n          AND (strpos(lower(b.name), lower($3)) > 0\n               OR strpos(lower(u.github_login), lower($3)) > 0)\n        ORDER BY b.name ASC, b.battlesnake_id ASC\n        LIMIT $1 OFFSET $2\n        ",
   "describe": {
     "columns": [
       {
@@ -39,5 +39,5 @@
       false
     ]
   },
-  "hash": "54ac0afe19d5ba970e5f5fcfec02225e6e31ba3ade941a5d492fb5a4385e6e46"
+  "hash": "2a98f7fd2bdb8bc941b2a56872c218dbccd584cd98e74a4eca70310b08830289"
 }

@@ -87,6 +87,7 @@ async fn snakes_in_matchmaking(pool: &sqlx::PgPool) -> cja::Result<Vec<Battlesna
          JOIN leaderboards l ON l.leaderboard_id = le.leaderboard_id
          WHERE le.disabled_at IS NULL
            AND l.disabled_at IS NULL
+           AND b.deleted_at IS NULL
          ORDER BY b.battlesnake_id"#,
     )
     .fetch_all(pool)
@@ -122,6 +123,7 @@ async fn snakes_health_disabled(pool: &sqlx::PgPool) -> cja::Result<Vec<Battlesn
          WHERE le.disabled_at IS NOT NULL
            AND le.disabled_reason = 'health'
            AND l.disabled_at IS NULL
+           AND b.deleted_at IS NULL
          ORDER BY b.battlesnake_id"#,
     )
     .fetch_all(pool)

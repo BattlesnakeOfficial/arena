@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT\n            le.leaderboard_entry_id, le.leaderboard_id, le.battlesnake_id,\n            le.mu, le.sigma, le.display_score, le.games_played, le.first_place_finishes, le.non_first_finishes,\n            le.disabled_at, le.disabled_reason, le.created_at, le.updated_at\n         FROM leaderboard_entries le\n         JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id\n         WHERE le.leaderboard_id = $1 AND b.user_id = $2\n         ORDER BY le.display_score DESC",
+  "query": "SELECT\n            le.leaderboard_entry_id, le.leaderboard_id, le.battlesnake_id,\n            le.mu, le.sigma, le.display_score, le.games_played, le.first_place_finishes, le.non_first_finishes,\n            le.disabled_at, le.disabled_reason, le.created_at, le.updated_at\n         FROM leaderboard_entries le\n         JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id\n         WHERE le.leaderboard_id = $1 AND b.user_id = $2 AND b.deleted_at IS NULL\n         ORDER BY le.display_score DESC",
   "describe": {
     "columns": [
       {
@@ -91,5 +91,5 @@
       false
     ]
   },
-  "hash": "935cb224b77678e7903b9e7f0bb2b964cb193d42c5bc20b4bb898b7556cf616e"
+  "hash": "52baf621aaae0510520f090aad3d772db0a1039357648829a7ba6bec717f307f"
 }

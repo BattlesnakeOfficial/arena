@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE battlesnakes SET deleted_at = NOW() WHERE battlesnake_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a1d0e92deab3afbf6a07e635327df794a97c91902d3b7c05723db1f24647c6f7"
+}

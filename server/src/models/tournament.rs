@@ -596,11 +596,18 @@ pub async fn create_registration<'e, E>(
 where
     E: Executor<'e, Database = Postgres>,
 {
+    // Selecting the snake FOR SHARE (instead of VALUES) refuses deleted snakes
+    // and serializes against `battlesnake::delete_battlesnake`'s row lock, so
+    // a registration can't slip in while the snake is being deleted.
     let registration = sqlx::query_as!(
         TournamentRegistration,
         r#"
         INSERT INTO tournament_registrations (tournament_id, battlesnake_id, user_id, seed)
-        VALUES ($1, $2, $3, $4)
+        SELECT $1::uuid, b.battlesnake_id, $3::uuid, $4::int
+        FROM battlesnakes b
+        WHERE b.battlesnake_id = $2
+          AND b.deleted_at IS NULL
+        FOR SHARE
         RETURNING
             registration_id,
             tournament_id,
