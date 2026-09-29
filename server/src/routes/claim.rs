@@ -98,6 +98,59 @@ pub async fn claim_page(
     Ok(page_factory.create_page("Claim Play Account".to_string(), Box::new(claim_form(None))))
 }
 
+/// Prompt shown on /me until the user claims a play account or dismisses
+/// it. This is the signed-in entry point to the claim flows; without it,
+/// players who used email/password on play have no way to find `/claim`.
+pub fn claim_prompt() -> Markup {
+    html! {
+        section class="claim-prompt" aria-labelledby="claim-prompt-title" {
+            div class="claim-prompt-head" {
+                h2 id="claim-prompt-title" { "Played on play.battlesnake.com?" }
+                form method="post" action="/claim/dismiss-prompt" {
+                    button type="submit" class="btn" { "Dismiss" }
+                }
+            }
+            p {
+                "Bring your old snakes, profile, and customization unlocks with you. "
+                "How depends on how you signed in to play:"
+            }
+            ul {
+                li {
+                    strong { "With GitHub: " }
+                    "it links automatically when you sign in here with the same GitHub "
+                    "account. Nothing came over? "
+                    a href="/auth/github" { "Sign in with GitHub again" }
+                    "."
+                }
+                li {
+                    strong { "With email and password: " }
+                    a href="/claim" { "enter your old play login" }
+                    " once to bring it over."
+                }
+                li {
+                    strong { "Forgot your password, or used a different GitHub account? " }
+                    a href="/claim/email" { "Get a one-time claim link" }
+                    " sent to your old play email."
+                }
+            }
+            p class="fine" {
+                "New to Battlesnake? There's nothing to claim. Dismiss this and it won't come back."
+            }
+        }
+    }
+}
+
+/// POST /claim/dismiss-prompt — hide the /me claim prompt for good.
+pub async fn dismiss_claim_prompt(
+    State(state): State<AppState>,
+    CurrentUser(user): CurrentUser,
+) -> ServerResult<Redirect, StatusCode> {
+    imported_account::dismiss_claim_prompt(&state.db, user.user_id)
+        .await
+        .wrap_err("Failed to dismiss claim prompt")?;
+    Ok(Redirect::to("/me"))
+}
+
 #[derive(Deserialize)]
 pub struct ClaimForm {
     pub email: String,
@@ -517,4 +570,108 @@ pub async fn complete_email_claim(
         ))
         .await?;
     Ok(Redirect::to("/battlesnakes").into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Method, Request, StatusCode, header},
+    };
+    use tower::ServiceExt as _;
+
+    use crate::{
+        routes::test_support::{create_user_session, session_user_id, signed_session_cookie},
+        state::AppState,
+    };
+
+    const PROMPT_TITLE: &str = "Played on play.battlesnake.com?";
+
+    fn app(state: &AppState) -> axum::Router {
+        crate::routes::routes(state.clone()).layer(tower_cookies::CookieManagerLayer::new())
+    }
+
+    async fn send(
+        app: &axum::Router,
+        method: Method,
+        path: &str,
+        session_cookie: Option<&str>,
+    ) -> axum::response::Response {
+        let mut builder = Request::builder().method(method).uri(path);
+        if let Some(session_cookie) = session_cookie {
+            builder = builder.header(
+                header::COOKIE,
+                format!(
+                    "{}={session_cookie}",
+                    crate::models::session::SESSION_COOKIE_NAME
+                ),
+            );
+        }
+        app.clone()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+    }
+
+    async fn profile_html(app: &axum::Router, session_cookie: &str) -> String {
+        let response = send(app, Method::GET, "/me", Some(session_cookie)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn profile_shows_claim_prompt_until_dismissed(db: sqlx::PgPool) {
+        let state = AppState::test_from_pool(db.clone());
+        let app = app(&state);
+        let session = create_user_session(&db, 31001, false).await;
+        let cookie = signed_session_cookie(&state, session);
+
+        let page = profile_html(&app, &cookie).await;
+        assert!(page.contains(PROMPT_TITLE));
+        for target in [
+            r#"href="/auth/github""#,
+            r#"href="/claim""#,
+            r#"href="/claim/email""#,
+            r#"action="/claim/dismiss-prompt""#,
+        ] {
+            assert!(page.contains(target), "claim prompt is missing {target}");
+        }
+
+        let dismissed = send(&app, Method::POST, "/claim/dismiss-prompt", Some(&cookie)).await;
+        assert_eq!(dismissed.status(), StatusCode::SEE_OTHER);
+        assert_eq!(dismissed.headers()[header::LOCATION], "/me");
+
+        let page = profile_html(&app, &cookie).await;
+        assert!(page.contains("My Profile"));
+        assert!(!page.contains(PROMPT_TITLE));
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn profile_hides_claim_prompt_once_claimed(db: sqlx::PgPool) {
+        let state = AppState::test_from_pool(db.clone());
+        let app = app(&state);
+        let session = create_user_session(&db, 31002, false).await;
+        let user_id = session_user_id(&db, session).await;
+        sqlx::query(
+            "INSERT INTO imported_accounts
+                 (play_user_id, play_account_id, email, username, claimed_by_user_id, claimed_at)
+             VALUES ('usr_31002', 'act_31002', 'p31002@example.com', 'p31002', $1, NOW())",
+        )
+        .bind(user_id)
+        .execute(&db)
+        .await
+        .unwrap();
+
+        let page = profile_html(&app, &signed_session_cookie(&state, session)).await;
+        assert!(page.contains("My Profile"));
+        assert!(!page.contains(PROMPT_TITLE));
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn dismissing_claim_prompt_requires_sign_in(db: sqlx::PgPool) {
+        let state = AppState::test_from_pool(db);
+        let response = send(&app(&state), Method::POST, "/claim/dismiss-prompt", None).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
 }

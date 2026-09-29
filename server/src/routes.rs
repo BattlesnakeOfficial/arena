@@ -46,6 +46,8 @@ pub mod redirects;
 pub mod saved_games;
 pub mod settings;
 pub mod stats;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod tournament;
 pub mod users;
 
@@ -130,6 +132,7 @@ pub fn routes(app_state: AppState) -> axum::Router {
         .route("/customizations", get(customizations::list_customizations))
         .route("/claim", get(claim::claim_page))
         .route("/claim", post(claim::submit_claim))
+        .route("/claim/dismiss-prompt", post(claim::dismiss_claim_prompt))
         .route("/claim/email", get(claim::email_claim_page))
         .route("/claim/email", post(claim::submit_email_claim))
         .route(
@@ -765,10 +768,15 @@ fn home_delta(change: f64) -> (bool, String) {
 /// Profile page that requires authentication
 #[allow(clippy::too_many_lines)]
 async fn profile_page(
+    State(state): State<AppState>,
     auth::CurrentUser(user): auth::CurrentUser,
     page_factory: PageFactory,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
     let flash = page_factory.flash.clone();
+    let show_claim_prompt =
+        crate::models::imported_account::should_show_claim_prompt(&state.db, user.user_id)
+            .await
+            .wrap_err("Failed to check claim prompt state")?;
 
     Ok(page_factory.create_page_with_flash(
         "My Profile".to_string(),
@@ -776,6 +784,10 @@ async fn profile_page(
             div class="page-head" {
                 h1 { "My Profile" }
                 div class="sub" { "How you appear across the Arena — and the account behind it." }
+            }
+
+            @if show_claim_prompt {
+                (claim::claim_prompt())
             }
 
             header class="profile-head" {
