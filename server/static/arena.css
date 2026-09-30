@@ -489,6 +489,29 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
 .rating-chart .grid { stroke: var(--hairline); }
 .rating-chart .line { stroke: var(--pink); }
 .rating-chart .lbl { fill: var(--muted); font-family: var(--mono); font-size: 11px; }
+.latency-summary { margin: 0 0 12px; }
+.latency-summary .latency-timeouts { color: var(--down); }
+.latency-chart { display: block; width: 100%; height: auto; max-height: 280px; }
+.latency-chart .grid { stroke: var(--hairline); stroke-width: 1; }
+.latency-chart .timeout-line { stroke: var(--down); stroke-width: 1; stroke-dasharray: 4 4; }
+.latency-chart .lbl { fill: var(--muted); font-family: var(--mono); font-size: 13px; }
+.latency-chart .timeout-lbl { fill: var(--down); }
+.latency-chart .hit { fill: transparent; }
+.latency-chart a:hover .hit, .latency-chart a:focus .hit { fill: var(--hover); }
+.latency-chart .plot { pointer-events: none; }
+.latency-chart .p50, .latency-chart .p95 { fill: none; stroke-width: 2; stroke-linejoin: round; }
+.latency-chart .p95 { stroke: var(--pink); }
+.latency-chart .p50 { stroke: #3ca7a0; }
+.latency-chart .pt-p95 { fill: var(--pink); }
+.latency-chart .pt-p50 { fill: #3ca7a0; }
+.latency-chart .timeout { fill: var(--down); }
+.latency-legend { display: flex; flex-wrap: wrap; gap: 8px 16px; margin-top: 8px; color: var(--muted); font-size: 14px; }
+.latency-legend .swatch { display: inline-block; width: 12px; height: 12px; margin-right: 6px; border-radius: 2px; vertical-align: -1px; }
+.latency-legend .swatch.p95 { background: var(--pink); }
+.latency-legend .swatch.p50 { background: #3ca7a0; }
+.latency-legend .swatch.timeout { background: var(--down); border-radius: 50%; }
+/* The chart scales down to fit; enlarge its labels so they stay readable at ~375px. */
+@media (max-width: 640px) { .latency-chart .lbl { font-size: 22px; } }
 
 /* Leaderboard entry page */
 .entry-avatar { width: 44px; height: 44px; align-self: center; }

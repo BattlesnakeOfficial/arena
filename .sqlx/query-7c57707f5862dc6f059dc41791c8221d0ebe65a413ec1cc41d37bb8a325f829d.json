@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO games (board_size, game_type, status, created_at)\n                 VALUES ('11x11', 'Standard', $1, NOW() - make_interval(mins => $2))\n                 RETURNING game_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "game_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "7c57707f5862dc6f059dc41791c8221d0ebe65a413ec1cc41d37bb8a325f829d"
+}

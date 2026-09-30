@@ -52,6 +52,7 @@ mod wire;
 mod components {
     pub mod avatar;
     pub mod flash;
+    pub mod latency_chart;
     pub mod live_refresh;
     pub mod page;
     pub mod page_factory;

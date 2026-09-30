@@ -9,7 +9,10 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{
-    components::{avatar::user_avatar, page_factory::PageFactory, snake_tags::snake_tag_chips},
+    components::{
+        avatar::user_avatar, latency_chart::latency_chart, page_factory::PageFactory,
+        snake_tags::snake_tag_chips,
+    },
     customizations::chip_color,
     errors::{ServerResult, WithStatus},
     models::battlesnake::{self, CreateBattlesnake, UpdateBattlesnake, Visibility},
@@ -17,6 +20,7 @@ use crate::{
     models::leaderboard,
     models::session,
     models::snake_health_status,
+    models::snake_latency,
     models::tag,
     models::user::get_user_by_id,
     routes::UuidPath,
@@ -1162,6 +1166,14 @@ pub async fn view_battlesnake_profile(
         .await
         .wrap_err("Failed to get battlesnake tags")?;
 
+    let recent_latency = snake_latency::get_recent_latency_for_battlesnake(
+        &state.db,
+        battlesnake_id,
+        snake_latency::RECENT_GAMES_LIMIT,
+    )
+    .await
+    .wrap_err("Failed to get recent latency")?;
+
     let flash = page_factory.flash.clone();
 
     // Compute stats
@@ -1332,6 +1344,14 @@ pub async fn view_battlesnake_profile(
                                 span { "4th: " (stats.fourth_places) }
                             }
                         }
+                    }
+                }
+
+                // Recent /move latency, per game
+                h2 { "Move Latency" }
+                div class="card mb-4" {
+                    div class="card-body" {
+                        (latency_chart(&recent_latency, crate::engine::MOVE_TIMEOUT_MS))
                     }
                 }
 
