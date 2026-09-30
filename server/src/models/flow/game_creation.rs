@@ -455,6 +455,7 @@ impl GameCreationFlow {
                 name,
                 url,
                 visibility as "visibility: _",
+                engine_region as "engine_region: _",
                 color,
                 head,
                 tail,

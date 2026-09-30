@@ -8,7 +8,10 @@ use crate::engine::MAX_TURNS;
 use crate::engine::frame::{DeathInfo, SnakeCustomizations, game_to_frame};
 use crate::game_progress::phase;
 use crate::models::game::{GameStatus, get_game_by_id, update_game_status};
-use crate::snake_client::{request_end_parallel, request_moves_parallel, request_start_parallel};
+use crate::snake_client::{
+    ProxyClients, SnakeEndpoint, request_end_routed_parallel, request_info_routed_parallel,
+    request_moves_routed_parallel, request_start_routed_parallel,
+};
 use crate::state::AppState;
 use crate::wire;
 
@@ -20,7 +23,12 @@ use crate::wire;
 pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
     let pool = &app_state.db;
     let game_channels = &app_state.game_channels;
-    let http_client = &app_state.http_client;
+    let proxy_clients = ProxyClients {
+        direct: &app_state.http_client,
+        east: &app_state.proxy_east_client,
+        europe: &app_state.proxy_europe_client,
+        config: &app_state.config.engine_proxy,
+    };
 
     tracing::info!(game_id = %game_id, "Starting run_game");
 
@@ -124,16 +132,19 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
 
             // Build snake_id -> url mapping using game_battlesnake_id as the key
             // This ensures uniqueness when the same battlesnake appears multiple times
-            let snake_urls: Vec<(String, String)> = battlesnakes
+            let snake_urls: Vec<SnakeEndpoint> = battlesnakes
                 .iter()
-                .map(|bs| (bs.game_battlesnake_id.to_string(), bs.url.clone()))
+                .map(|bs| SnakeEndpoint {
+                    snake_id: bs.game_battlesnake_id.to_string(),
+                    url: bs.url.clone(),
+                    engine_region: bs.engine_region,
+                })
                 .collect();
 
             // Fetch snake customizations from all root endpoints in parallel (1s timeout)
             let info_timeout = std::time::Duration::from_millis(1000);
             let info_results =
-                crate::snake_client::request_info_parallel(http_client, &snake_urls, info_timeout)
-                    .await;
+                request_info_routed_parallel(&proxy_clients, &snake_urls, info_timeout).await;
 
             // Build customization map and update DB records. Declared head/tail are
             // honored only if the snake's owner is allowed to use them (free, or
@@ -231,8 +242,8 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
         "start_snakes",
         Some(engine_game.board.turn),
         async {
-            let _: () = request_start_parallel(
-                http_client,
+            let _: () = request_start_routed_parallel(
+                &proxy_clients,
                 &engine_game,
                 &snake_urls,
                 timeout,
@@ -272,8 +283,8 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
             "request_moves",
             Some(engine_game.board.turn),
             async {
-                Ok(request_moves_parallel(
-                    http_client,
+                Ok(request_moves_routed_parallel(
+                    &proxy_clients,
                     &engine_game,
                     &snake_urls,
                     timeout,
@@ -414,8 +425,8 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
     // Call /end for all snakes in parallel (fire and forget)
     tracing::info!(game_id = %game_id, "Calling /end for all snakes");
     phase(game_id, "end_snakes", Some(engine_game.board.turn), async {
-        let _: () = request_end_parallel(
-            http_client,
+        let _: () = request_end_routed_parallel(
+            &proxy_clients,
             &engine_game,
             &snake_urls,
             timeout,

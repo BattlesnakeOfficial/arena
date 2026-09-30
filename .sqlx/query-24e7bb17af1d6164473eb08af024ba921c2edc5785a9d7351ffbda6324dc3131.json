@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT DISTINCT\n            b.battlesnake_id,\n            b.user_id,\n            b.name,\n            b.url,\n            b.visibility as \"visibility: Visibility\",\n            b.color,\n            b.head,\n            b.tail,\n            b.created_at,\n            b.updated_at\n         FROM battlesnakes b\n         JOIN leaderboard_entries le ON le.battlesnake_id = b.battlesnake_id\n         JOIN leaderboards l ON l.leaderboard_id = le.leaderboard_id\n         WHERE le.disabled_at IS NOT NULL\n           AND le.disabled_reason = 'health'\n           AND l.disabled_at IS NULL\n           AND b.deleted_at IS NULL\n         ORDER BY b.battlesnake_id",
+  "query": "\n        INSERT INTO battlesnakes (\n            user_id,\n            name,\n            url,\n            visibility,\n            engine_region\n        )\n        VALUES ($1, $2, $3, $4, $5)\n        RETURNING\n            battlesnake_id,\n            user_id,\n            name,\n            url,\n            visibility as \"visibility: Visibility\",\n            engine_region as \"engine_region: EngineRegion\",\n            color,\n            head,\n            tail,\n            created_at,\n            updated_at\n        ",
   "describe": {
     "columns": [
       {
@@ -30,34 +30,46 @@
       },
       {
         "ordinal": 5,
-        "name": "color",
+        "name": "engine_region: EngineRegion",
         "type_info": "Text"
       },
       {
         "ordinal": 6,
-        "name": "head",
+        "name": "color",
         "type_info": "Text"
       },
       {
         "ordinal": 7,
-        "name": "tail",
+        "name": "head",
         "type_info": "Text"
       },
       {
         "ordinal": 8,
+        "name": "tail",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
         "name": "created_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 9,
+        "ordinal": 10,
         "name": "updated_at",
         "type_info": "Timestamptz"
       }
     ],
     "parameters": {
-      "Left": []
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Text"
+      ]
     },
     "nullable": [
+      false,
       false,
       false,
       false,
@@ -70,5 +82,5 @@
       false
     ]
   },
-  "hash": "ba9e11bac9f557fb663332b798271ba571123546e558cd085a4a18d202114675"
+  "hash": "24e7bb17af1d6164473eb08af024ba921c2edc5785a9d7351ffbda6324dc3131"
 }

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            SELECT\n                battlesnake_id,\n                user_id,\n                name,\n                url,\n                visibility as \"visibility: _\",\n                color,\n                head,\n                tail,\n                created_at,\n                updated_at\n            FROM battlesnakes\n            WHERE battlesnake_id = ANY($1)\n              AND (user_id = $2 OR visibility = 'public')\n              AND deleted_at IS NULL\n            ORDER BY name ASC\n            ",
+  "query": "\n        SELECT\n            battlesnake_id,\n            user_id,\n            name,\n            url,\n            visibility as \"visibility: Visibility\",\n            engine_region as \"engine_region: EngineRegion\",\n            color,\n            head,\n            tail,\n            created_at,\n            updated_at\n        FROM battlesnakes\n        WHERE visibility = 'public'\n          AND deleted_at IS NULL\n        ORDER BY name ASC\n        ",
   "describe": {
     "columns": [
       {
@@ -25,42 +25,45 @@
       },
       {
         "ordinal": 4,
-        "name": "visibility: _",
+        "name": "visibility: Visibility",
         "type_info": "Text"
       },
       {
         "ordinal": 5,
-        "name": "color",
+        "name": "engine_region: EngineRegion",
         "type_info": "Text"
       },
       {
         "ordinal": 6,
-        "name": "head",
+        "name": "color",
         "type_info": "Text"
       },
       {
         "ordinal": 7,
-        "name": "tail",
+        "name": "head",
         "type_info": "Text"
       },
       {
         "ordinal": 8,
+        "name": "tail",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
         "name": "created_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 9,
+        "ordinal": 10,
         "name": "updated_at",
         "type_info": "Timestamptz"
       }
     ],
     "parameters": {
-      "Left": [
-        "UuidArray",
-        "Uuid"
-      ]
+      "Left": []
     },
     "nullable": [
+      false,
       false,
       false,
       false,
@@ -73,5 +76,5 @@
       false
     ]
   },
-  "hash": "bab06fe6e6dfc85de0b6f434d7551152b700a9a5ec866e17958ac74a98598fb7"
+  "hash": "9519c07c277b6cb7d540f55e0fecbc9be6f2aad56520d49270e61751016c065b"
 }

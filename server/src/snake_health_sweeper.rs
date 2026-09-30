@@ -25,12 +25,13 @@ use std::collections::BTreeMap;
 
 use crate::models::battlesnake::{Battlesnake, Visibility};
 use crate::models::snake_health_status;
-use crate::snake_health::{self, HEALTH_CHECK_TIMEOUT, HealthCheckReport};
+use crate::snake_client::ProxyClients;
+use crate::snake_health::{self, HEALTH_CHECK_TIMEOUT, HealthCallStatus, HealthCheckReport};
 use crate::state::AppState;
 
 /// Everything in one probe result the sweep needs to act on.
 struct ProbeOutcome {
-    healthy: bool,
+    status: HealthCallStatus,
     /// Human-readable description of the failed calls, e.g.
     /// `"POST /move: request timed out"`. Empty when healthy.
     failure_summary: String,
@@ -48,12 +49,18 @@ fn summarize(report: &HealthCheckReport) -> ProbeOutcome {
     let failures: Vec<String> = report
         .calls
         .iter()
-        .filter(|c| !c.ok)
+        .filter(|c| c.status != HealthCallStatus::Healthy)
         .map(|c| format!("{}: {}", c.name, c.summary))
         .collect();
 
     ProbeOutcome {
-        healthy: failures.is_empty(),
+        status: if report.proxy_fault_count() > 0 {
+            HealthCallStatus::ProxyFault
+        } else if failures.is_empty() {
+            HealthCallStatus::Healthy
+        } else {
+            HealthCallStatus::SnakeFailure
+        },
         failure_summary: failures.join("; "),
     }
 }
@@ -77,6 +84,7 @@ async fn snakes_in_matchmaking(pool: &sqlx::PgPool) -> cja::Result<Vec<Battlesna
             b.name,
             b.url,
             b.visibility as "visibility: Visibility",
+            b.engine_region as "engine_region: _",
             b.color,
             b.head,
             b.tail,
@@ -112,6 +120,7 @@ async fn snakes_health_disabled(pool: &sqlx::PgPool) -> cja::Result<Vec<Battlesn
             b.name,
             b.url,
             b.visibility as "visibility: Visibility",
+            b.engine_region as "engine_region: _",
             b.color,
             b.head,
             b.tail,
@@ -185,14 +194,26 @@ pub async fn run_sweep(app_state: &AppState) -> cja::Result<()> {
         .build()
         .map_err(|e| cja::color_eyre::eyre::eyre!("Failed to build health check client: {e}"))?;
 
+    let clients = ProxyClients {
+        direct: &client,
+        east: &app_state.proxy_east_health_client,
+        europe: &app_state.proxy_europe_health_client,
+        config: &app_state.config.engine_proxy,
+    };
     for (_, (kind, snake)) in candidates {
-        let outcome = probe(&client, &snake).await;
-        let result = match (kind, outcome.healthy) {
+        let outcome = probe(&clients, &snake).await;
+        if outcome.status == HealthCallStatus::ProxyFault {
+            tracing::error!(battlesnake_id = %snake.battlesnake_id,
+                region = snake.engine_region.as_str(), summary = %outcome.failure_summary,
+                "Engine proxy fault during health sweep; preserving snake state");
+            continue;
+        }
+        let result = match (kind, outcome.status) {
             (ProbeKind::Active, _) => apply_probe_outcome(app_state, &snake, &outcome).await,
-            (ProbeKind::StaleMixed, false) => {
+            (ProbeKind::StaleMixed, HealthCallStatus::SnakeFailure) => {
                 apply_probe_outcome(app_state, &snake, &outcome).await
             }
-            (ProbeKind::StaleMixed, true) => {
+            (ProbeKind::StaleMixed, HealthCallStatus::Healthy) => {
                 async {
                     snake_health_status::record_success(&app_state.db, snake.battlesnake_id)
                         .await?;
@@ -203,10 +224,10 @@ pub async fn run_sweep(app_state: &AppState) -> cja::Result<()> {
                 }
                 .await
             }
-            (ProbeKind::Recovering, _) | (ProbeKind::Mixed, true) => {
+            (ProbeKind::Recovering, _) | (ProbeKind::Mixed, HealthCallStatus::Healthy) => {
                 apply_recovery_probe_outcome(app_state, &snake, &outcome).await
             }
-            (ProbeKind::Mixed, false) => {
+            (ProbeKind::Mixed, HealthCallStatus::SnakeFailure) => {
                 async {
                     snake_health_status::record_recovery_failure(
                         &app_state.db,
@@ -219,6 +240,7 @@ pub async fn run_sweep(app_state: &AppState) -> cja::Result<()> {
                 }
                 .await
             }
+            (_, HealthCallStatus::ProxyFault) => unreachable!(),
         };
         if let Err(e) = result {
             // One snake's bookkeeping failing shouldn't abort the sweep for
@@ -235,13 +257,14 @@ pub async fn run_sweep(app_state: &AppState) -> cja::Result<()> {
 }
 
 /// One four-call health probe, summarized.
-async fn probe(client: &Client, snake: &Battlesnake) -> ProbeOutcome {
+async fn probe(clients: &ProxyClients<'_>, snake: &Battlesnake) -> ProbeOutcome {
     let (engine_game, snake_id) = snake_health::build_test_game(snake);
     // AbortOnFailure keeps a dead snake at one timeout (~5s) instead of
     // four, bounding how far a sweep full of dead snakes can stretch.
-    let report = snake_health::run_health_check(
-        client,
+    let report = snake_health::run_health_check_routed(
+        clients,
         &snake.url,
+        snake.engine_region,
         &engine_game,
         &snake_id,
         snake_health::FailureMode::AbortOnFailure,
@@ -258,9 +281,13 @@ async fn apply_probe_outcome(
     snake: &Battlesnake,
     outcome: &ProbeOutcome,
 ) -> cja::Result<()> {
-    if outcome.healthy {
-        snake_health_status::record_success(&app_state.db, snake.battlesnake_id).await?;
-        return Ok(());
+    match outcome.status {
+        HealthCallStatus::Healthy => {
+            snake_health_status::record_success(&app_state.db, snake.battlesnake_id).await?;
+            return Ok(());
+        }
+        HealthCallStatus::SnakeFailure => {}
+        HealthCallStatus::ProxyFault => return Ok(()),
     }
 
     let failures = snake_health_status::record_failure(
@@ -333,14 +360,18 @@ async fn apply_recovery_probe_outcome(
     snake: &Battlesnake,
     outcome: &ProbeOutcome,
 ) -> cja::Result<()> {
-    if !outcome.healthy {
-        snake_health_status::record_recovery_failure(
-            &app_state.db,
-            snake.battlesnake_id,
-            &outcome.failure_summary,
-        )
-        .await?;
-        return Ok(());
+    match outcome.status {
+        HealthCallStatus::SnakeFailure => {
+            snake_health_status::record_recovery_failure(
+                &app_state.db,
+                snake.battlesnake_id,
+                &outcome.failure_summary,
+            )
+            .await?;
+            return Ok(());
+        }
+        HealthCallStatus::Healthy => {}
+        HealthCallStatus::ProxyFault => return Ok(()),
     }
 
     let successes =
@@ -482,6 +513,83 @@ mod tests {
             .mount(&server)
             .await;
         server
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn proxy_fault_preserves_active_and_recovering_state(pool: PgPool) -> cja::Result<()> {
+        let proxy = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(502))
+            .mount(&proxy)
+            .await;
+        let (snake_id, entry_id) =
+            create_snake_on_leaderboard(&pool, "https://example.com/eu").await?;
+        sqlx::query(
+            "UPDATE battlesnakes SET engine_region = 'europe-west4' WHERE battlesnake_id = $1",
+        )
+        .bind(snake_id)
+        .execute(&pool)
+        .await?;
+        let mut state = AppState::test_from_pool(pool.clone());
+        let config = std::sync::Arc::get_mut(&mut state.config).unwrap();
+        config.engine_proxy.token = Some("test-token".to_string());
+        config.engine_proxy.europe_west4_url = proxy.uri();
+
+        for _ in 0..=state.config.snake_health_failure_threshold {
+            run_sweep(&state).await?;
+        }
+        assert!(snake_health_status::get(&pool, snake_id).await?.is_none());
+        assert_eq!(entry_disabled(&pool, entry_id).await?, None);
+
+        snake_health_status::record_failure(&pool, snake_id, "preexisting snake failure").await?;
+        snake_health_status::deactivate(&pool, snake_id).await?;
+        let before = snake_health_status::get(&pool, snake_id).await?.unwrap();
+        for _ in 0..=state.config.snake_health_recovery_threshold {
+            run_sweep(&state).await?;
+        }
+        let after = snake_health_status::get(&pool, snake_id).await?.unwrap();
+        assert_eq!(after.consecutive_failures, before.consecutive_failures);
+        assert_eq!(after.consecutive_successes, before.consecutive_successes);
+        assert_eq!(after.deactivated_at, before.deactivated_at);
+        assert_eq!(
+            entry_disabled(&pool, entry_id).await?.as_deref(),
+            Some(snake_health_status::DISABLED_REASON_HEALTH)
+        );
+
+        // Mixed: one health-disabled entry plus a separate active entry.
+        let second_board: Uuid = sqlx::query_scalar(
+            "INSERT INTO leaderboards (name) VALUES ('mixed-board') RETURNING leaderboard_id",
+        )
+        .fetch_one(&pool)
+        .await?;
+        let second_entry: Uuid = sqlx::query_scalar(
+            "INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id)
+             VALUES ($1, $2) RETURNING leaderboard_entry_id",
+        )
+        .bind(second_board)
+        .bind(snake_id)
+        .fetch_one(&pool)
+        .await?;
+        run_sweep(&state).await?;
+        let mixed = snake_health_status::get(&pool, snake_id).await?.unwrap();
+        assert_eq!(mixed.consecutive_successes, before.consecutive_successes);
+        assert_eq!(entry_disabled(&pool, second_entry).await?, None);
+
+        // Stale mixed: an out-of-band resume cleared the stamp but left the
+        // original health marker. A proxy fault must not repair that marker.
+        sqlx::query(
+            "UPDATE snake_health_status SET deactivated_at = NULL WHERE battlesnake_id = $1",
+        )
+        .bind(snake_id)
+        .execute(&pool)
+        .await?;
+        run_sweep(&state).await?;
+        assert_eq!(
+            entry_disabled(&pool, entry_id).await?.as_deref(),
+            Some(snake_health_status::DISABLED_REASON_HEALTH)
+        );
+        assert_eq!(entry_disabled(&pool, second_entry).await?, None);
+        Ok(())
     }
 
     #[sqlx::test(migrations = "../migrations")]

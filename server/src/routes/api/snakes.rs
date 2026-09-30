@@ -8,7 +8,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    models::battlesnake::{self, Battlesnake, CreateBattlesnake, UpdateBattlesnake, Visibility},
+    models::battlesnake::{
+        self, Battlesnake, CreateBattlesnake, EngineRegion, UpdateBattlesnake, Visibility,
+    },
     routes::auth::ApiUser,
     state::AppState,
 };
@@ -20,6 +22,7 @@ pub struct SnakeResponse {
     pub name: String,
     pub url: String,
     pub is_public: bool,
+    pub engine_region: EngineRegion,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
@@ -31,6 +34,7 @@ impl From<Battlesnake> for SnakeResponse {
             name: snake.name,
             url: snake.url,
             is_public: snake.visibility == Visibility::Public,
+            engine_region: snake.engine_region,
             created_at: snake.created_at,
             updated_at: snake.updated_at,
         }
@@ -44,6 +48,8 @@ pub struct CreateSnakeRequest {
     pub url: String,
     #[serde(default)]
     pub is_public: bool,
+    #[serde(default, deserialize_with = "deserialize_present_region")]
+    pub engine_region: Option<serde_json::Value>,
 }
 
 /// Request body for updating a snake
@@ -52,6 +58,32 @@ pub struct UpdateSnakeRequest {
     pub name: Option<String>,
     pub url: Option<String>,
     pub is_public: Option<bool>,
+    #[serde(default, deserialize_with = "deserialize_present_region")]
+    pub engine_region: Option<serde_json::Value>,
+}
+
+fn deserialize_present_region<'de, D>(
+    deserializer: D,
+) -> Result<Option<serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    serde_json::Value::deserialize(deserializer).map(Some)
+}
+
+fn parse_api_region(
+    value: Option<serde_json::Value>,
+) -> Result<Option<EngineRegion>, (StatusCode, String)> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let Some(value) = value.as_str() else {
+        return Err((StatusCode::BAD_REQUEST, "Invalid engine region".to_string()));
+    };
+    value
+        .parse()
+        .map(Some)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid engine region".to_string()))
 }
 
 /// GET /api/snakes - List user's snakes
@@ -82,6 +114,7 @@ pub async fn create_snake(
     }
     let name =
         battlesnake::validate_name(&request.name).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let engine_region = parse_api_region(request.engine_region)?.unwrap_or_default();
 
     // Moderation runs before the insert; a flagged/unchecked row may
     // reference a snake that was never created (it records the submission).
@@ -107,6 +140,7 @@ pub async fn create_snake(
     let create_data = CreateBattlesnake {
         name,
         url: request.url,
+        engine_region,
         visibility: if request.is_public {
             Visibility::Public
         } else {
@@ -209,6 +243,7 @@ pub async fn update_snake(
         }
         None => existing.name,
     };
+    let engine_region = parse_api_region(request.engine_region)?;
 
     let new_visibility = match request.is_public {
         Some(true) => Visibility::Public,
@@ -243,6 +278,7 @@ pub async fn update_snake(
     let update_data = UpdateBattlesnake {
         name,
         url: new_url,
+        engine_region,
         visibility: new_visibility,
     };
 

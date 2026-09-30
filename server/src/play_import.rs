@@ -12,6 +12,8 @@
 use color_eyre::eyre::Context as _;
 use sqlx::{PgPool, Row as _};
 
+use crate::models::battlesnake::EngineRegion;
+
 use crate::models::imported_account::{self, StageAccount, StageSnake};
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -19,8 +21,58 @@ pub struct ImportCounts {
     pub accounts: u64,
     pub snakes: u64,
     pub snakes_orphaned: u64,
+    pub snakes_region_unmapped: u64,
     pub grants: u64,
     pub grants_orphaned: u64,
+}
+
+/// The Play region tuple is retained even when unknown so import can warn
+/// without dropping its snake.
+fn map_play_region(id: &str, platform: Option<&str>, region: Option<&str>) -> (EngineRegion, bool) {
+    match (platform, region) {
+        (Some("GCP"), Some("US-WEST1")) => (EngineRegion::UsWest1, false),
+        (Some("GCP"), Some("US-EAST4")) => (EngineRegion::UsEast4, false),
+        (Some("GCP"), Some("EUROPE-WEST4")) => (EngineRegion::EuropeWest4, false),
+        _ => {
+            tracing::warn!(play_snake_id = %id, ?platform, ?region, "Unknown Play engine region; using US-West");
+            (EngineRegion::UsWest1, true)
+        }
+    }
+}
+
+async fn read_play_snakes(play: &PgPool) -> cja::Result<(Vec<StageSnake>, u64)> {
+    let rows = sqlx::query(
+        r#"SELECT s.id AS play_snake_id, s.account_id, s.name, s.url,
+                  s.head, s.tail, s.color, s.is_public, r.platform, r.region
+           FROM core_snake s
+           LEFT JOIN core_engineregion r ON r.id = s.engine_region_id
+           WHERE s.is_archived = false AND s.account_id IS NOT NULL
+           ORDER BY s.id"#,
+    )
+    .fetch_all(play)
+    .await
+    .wrap_err("Failed to read Play snakes")?;
+    let mut snakes = Vec::with_capacity(rows.len());
+    let mut unmapped = 0;
+    for row in rows {
+        let id: String = row.try_get("play_snake_id")?;
+        let platform: Option<String> = row.try_get("platform")?;
+        let region: Option<String> = row.try_get("region")?;
+        let (engine_region, unknown) = map_play_region(&id, platform.as_deref(), region.as_deref());
+        unmapped += u64::from(unknown);
+        snakes.push(StageSnake {
+            play_snake_id: id,
+            play_account_id: row.try_get("account_id")?,
+            name: row.try_get("name")?,
+            url: row.try_get("url")?,
+            head: row.try_get("head")?,
+            tail: row.try_get("tail")?,
+            color: row.try_get("color")?,
+            is_public: row.try_get("is_public")?,
+            engine_region,
+        });
+    }
+    Ok((snakes, unmapped))
 }
 
 pub async fn import_from_play(play: &PgPool, arena: &PgPool) -> cja::Result<ImportCounts> {
@@ -141,32 +193,10 @@ pub async fn import_from_play(play: &PgPool, arena: &PgPool) -> cja::Result<Impo
         counts.accounts += 1;
     }
 
-    // Active (non-archived) snakes with an owner.
-    let snake_rows = sqlx::query(
-        r#"
-        SELECT s.id AS play_snake_id, s.account_id, s.name, s.url,
-               s.head, s.tail, s.color, s.is_public
-        FROM core_snake s
-        WHERE s.is_archived = false AND s.account_id IS NOT NULL
-        ORDER BY s.id
-        "#,
-    )
-    .fetch_all(play)
-    .await
-    .wrap_err("Failed to read play snakes")?;
-
-    for row in snake_rows {
-        let snake = StageSnake {
-            play_snake_id: row.try_get("play_snake_id")?,
-            play_account_id: row.try_get("account_id")?,
-            name: row.try_get("name")?,
-            url: row.try_get("url")?,
-            head: row.try_get("head")?,
-            tail: row.try_get("tail")?,
-            color: row.try_get("color")?,
-            is_public: row.try_get("is_public")?,
-        };
-
+    // Active, owned snakes. The same reader is used by the read-only exporter.
+    let (snakes, unmapped) = read_play_snakes(play).await?;
+    counts.snakes_region_unmapped = unmapped;
+    for snake in snakes {
         if imported_account::stage_snake(arena, &snake).await? {
             counts.snakes += 1;
         } else {
@@ -210,6 +240,98 @@ pub async fn import_from_play(play: &PgPool, arena: &PgPool) -> cja::Result<Impo
     Ok(counts)
 }
 
+/// Print deterministic literal SQL inputs without modifying either database.
+pub async fn export_play_regions() -> cja::Result<()> {
+    use std::collections::{HashMap, HashSet};
+    let play_url = std::env::var("PLAY_DATABASE_URL")?;
+    let arena_url = std::env::var("DATABASE_URL")?;
+    async fn readonly_pool(url: &str) -> cja::Result<PgPool> {
+        Ok(sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .after_connect(|conn, _| {
+                Box::pin(async move {
+                    sqlx::query("SET default_transaction_read_only = on")
+                        .execute(conn)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .connect(url)
+            .await?)
+    }
+    let play = readonly_pool(&play_url).await?;
+    let arena = readonly_pool(&arena_url).await?;
+    let (snakes, unmapped) = read_play_snakes(&play).await?;
+    let imported: HashSet<String> = sqlx::query_scalar("SELECT play_snake_id FROM imported_snakes")
+        .fetch_all(&arena)
+        .await?
+        .into_iter()
+        .collect();
+    let materialized: HashSet<uuid::Uuid> = sqlx::query_scalar(
+        "SELECT materialized_battlesnake_id FROM imported_snakes WHERE materialized_battlesnake_id IS NOT NULL"
+    ).fetch_all(&arena).await?.into_iter().collect();
+    let mut by_url: HashMap<String, HashSet<String>> = HashMap::new();
+    for snake in &snakes {
+        by_url
+            .entry(snake.url.to_lowercase().trim_end_matches('/').to_string())
+            .or_default()
+            .insert(snake.engine_region.as_str().to_string());
+    }
+    for region in [EngineRegion::UsEast4, EngineRegion::EuropeWest4] {
+        let mut ids: Vec<_> = snakes
+            .iter()
+            .filter(|s| s.engine_region == region && imported.contains(&s.play_snake_id))
+            .map(|s| s.play_snake_id.as_str())
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        if ids.iter().any(|id| {
+            !id.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        }) {
+            return Err(color_eyre::eyre::eyre!(
+                "Play snake ID cannot be represented safely in a SQL array literal"
+            ));
+        }
+        println!("-- {} imported: {}", region.as_str(), ids.len());
+        println!(
+            "UPDATE imported_snakes SET engine_region = '{}' WHERE play_snake_id = ANY('{{{}}}'::text[]);",
+            region.as_str(),
+            ids.join(",")
+        );
+        let native: Vec<(uuid::Uuid, String)> =
+            sqlx::query_as("SELECT battlesnake_id, url FROM battlesnakes")
+                .fetch_all(&arena)
+                .await?;
+        let mut native_ids: Vec<_> = native
+            .iter()
+            .filter(|(id, url)| {
+                !materialized.contains(id)
+                    && by_url
+                        .get(url.to_lowercase().trim_end_matches('/'))
+                        .is_some_and(|regions| {
+                            regions.len() == 1 && regions.contains(region.as_str())
+                        })
+            })
+            .map(|(id, _)| id.to_string())
+            .collect();
+        native_ids.sort();
+        println!("-- {} native: {}", region.as_str(), native_ids.len());
+        println!(
+            "UPDATE battlesnakes SET engine_region = '{}' WHERE battlesnake_id = ANY('{{{}}}'::uuid[]);",
+            region.as_str(),
+            native_ids.join(",")
+        );
+    }
+    eprintln!(
+        "Play snakes: {}, staged: {}, unmapped: {}",
+        snakes.len(),
+        imported.len(),
+        unmapped
+    );
+    Ok(())
+}
+
 /// Entry point for the `arena import-play` subcommand.
 pub async fn run_import() -> cja::Result<()> {
     let play_url = std::env::var("PLAY_DATABASE_URL")
@@ -251,6 +373,30 @@ pub async fn run_import() -> cja::Result<()> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn play_region_mapping_keeps_unknown_snakes_at_west() {
+        assert_eq!(
+            map_play_region("west", Some("GCP"), Some("US-WEST1")),
+            (EngineRegion::UsWest1, false)
+        );
+        assert_eq!(
+            map_play_region("east", Some("GCP"), Some("US-EAST4")),
+            (EngineRegion::UsEast4, false)
+        );
+        assert_eq!(
+            map_play_region("eu", Some("GCP"), Some("EUROPE-WEST4")),
+            (EngineRegion::EuropeWest4, false)
+        );
+        assert_eq!(
+            map_play_region("null", None, None),
+            (EngineRegion::UsWest1, true)
+        );
+        assert_eq!(
+            map_play_region("unknown", Some("GCP"), Some("MOON")),
+            (EngineRegion::UsWest1, true)
+        );
+    }
+
     /// Minimal play-shaped tables (just the columns the importer reads),
     /// created in the arena test database so play-pool == arena-pool in
     /// tests. Column types match play's real schema.
@@ -285,6 +431,11 @@ mod tests {
                 uid TEXT NOT NULL,
                 extra_data JSONB
             );
+            CREATE TABLE core_engineregion (
+                id TEXT PRIMARY KEY,
+                platform TEXT NOT NULL,
+                region TEXT NOT NULL
+            );
             CREATE TABLE core_snake (
                 id TEXT PRIMARY KEY,
                 account_id TEXT,
@@ -294,7 +445,8 @@ mod tests {
                 tail TEXT NOT NULL DEFAULT 'default',
                 color TEXT NOT NULL DEFAULT '#888888',
                 is_public BOOLEAN NOT NULL DEFAULT false,
-                is_archived BOOLEAN NOT NULL DEFAULT false
+                is_archived BOOLEAN NOT NULL DEFAULT false,
+                engine_region_id TEXT
             );
             CREATE TABLE core_snakecustomization (
                 id TEXT PRIMARY KEY,
@@ -366,6 +518,13 @@ mod tests {
     async fn import_stages_accounts_snakes_and_grants(pool: PgPool) -> cja::Result<()> {
         create_play_tables(&pool).await?;
         seed_play_data(&pool).await?;
+        sqlx::raw_sql(
+            "INSERT INTO core_engineregion (id, platform, region)
+                       VALUES ('east', 'GCP', 'US-EAST4');
+                       UPDATE core_snake SET engine_region_id = 'east' WHERE id = 'snk_1';",
+        )
+        .execute(&pool)
+        .await?;
 
         let counts = import_from_play(&pool, &pool).await?;
         // usr_multigh is staged exactly once despite its two github links,
@@ -375,6 +534,12 @@ mod tests {
         // whose owner isn't staged is counted as orphaned.
         assert_eq!(counts.snakes, 2);
         assert_eq!(counts.snakes_orphaned, 1);
+        let region: String = sqlx::query_scalar(
+            "SELECT engine_region FROM imported_snakes WHERE play_snake_id = 'snk_1'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(region, "us-east4");
         // Color grants are filtered in SQL; the grant with a missing owner
         // is orphaned.
         assert_eq!(counts.grants, 2);

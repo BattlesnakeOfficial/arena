@@ -3,6 +3,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::customizations::normalize_color;
+use crate::models::battlesnake::EngineRegion;
 
 /// A play account staged for migration. Inert until claimed.
 #[derive(Debug, sqlx::FromRow)]
@@ -51,6 +52,7 @@ pub struct StageSnake {
     pub tail: String,
     pub color: String,
     pub is_public: bool,
+    pub engine_region: EngineRegion,
 }
 
 /// Upsert a play account into staging. Re-runnable: refreshes play-side
@@ -134,9 +136,9 @@ pub async fn stage_snake(pool: &PgPool, snake: &StageSnake) -> cja::Result<bool>
     let result = sqlx::query!(
         r#"
         INSERT INTO imported_snakes (
-            imported_account_id, play_snake_id, name, url, head, tail, color, is_public
+            imported_account_id, play_snake_id, name, url, head, tail, color, is_public, engine_region
         )
-        SELECT ia.imported_account_id, $2, $3, $4, $5, $6, $7, $8
+        SELECT ia.imported_account_id, $2, $3, $4, $5, $6, $7, $8, $9
         FROM imported_accounts ia
         WHERE ia.play_account_id = $1
         ON CONFLICT (play_snake_id) DO UPDATE SET
@@ -145,7 +147,8 @@ pub async fn stage_snake(pool: &PgPool, snake: &StageSnake) -> cja::Result<bool>
             head = $5,
             tail = $6,
             color = $7,
-            is_public = $8
+            is_public = $8,
+            engine_region = $9
         "#,
         snake.play_account_id,
         snake.play_snake_id,
@@ -155,6 +158,7 @@ pub async fn stage_snake(pool: &PgPool, snake: &StageSnake) -> cja::Result<bool>
         snake.tail,
         normalize_color(&snake.color),
         snake.is_public,
+        snake.engine_region.as_str(),
     )
     .execute(pool)
     .await
@@ -334,7 +338,7 @@ pub async fn claim_account(
 
     let staged_snakes = sqlx::query!(
         r#"
-        SELECT imported_snake_id, name, url, head, tail, color, is_public
+        SELECT imported_snake_id, name, url, head, tail, color, is_public, engine_region
         FROM imported_snakes
         WHERE imported_account_id = $1 AND materialized_battlesnake_id IS NULL
         ORDER BY imported_at
@@ -357,8 +361,8 @@ pub async fn claim_account(
         let visibility = if snake.is_public { "public" } else { "private" };
         let battlesnake_id = sqlx::query!(
             r#"
-            INSERT INTO battlesnakes (user_id, name, url, visibility, color, head, tail)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            INSERT INTO battlesnakes (user_id, name, url, visibility, color, head, tail, engine_region)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             RETURNING battlesnake_id
             "#,
             user_id,
@@ -368,6 +372,7 @@ pub async fn claim_account(
             normalize_color(&snake.color),
             snake.head,
             snake.tail,
+            snake.engine_region,
         )
         .fetch_one(&mut *tx)
         .await
@@ -606,6 +611,7 @@ mod tests {
                 tail: "default".to_string(),
                 color: "#ff0000".to_string(),
                 is_public: true,
+                engine_region: EngineRegion::UsWest1,
             },
         )
         .await?;
@@ -618,6 +624,11 @@ mod tests {
     async fn claim_materializes_snakes_grants_and_display_name(pool: PgPool) -> cja::Result<()> {
         let user_id = create_user(&pool, 1001).await?;
         let account_id = stage_full_account(&pool, 1).await?;
+        sqlx::query!(
+            "UPDATE imported_snakes SET engine_region = 'us-east4' WHERE play_snake_id = 'snk_1'"
+        )
+        .execute(&pool)
+        .await?;
 
         let summary = claim_account(&pool, account_id, user_id)
             .await?
@@ -628,7 +639,7 @@ mod tests {
         assert_eq!(summary.username, "player1");
 
         let snake = sqlx::query!(
-            "SELECT name, url, head, tail, color, visibility FROM battlesnakes WHERE user_id = $1",
+            "SELECT name, url, head, tail, color, visibility, engine_region FROM battlesnakes WHERE user_id = $1",
             user_id
         )
         .fetch_one(&pool)
@@ -637,6 +648,37 @@ mod tests {
         assert_eq!(snake.head, "alligator");
         assert_eq!(snake.visibility, "public");
         assert_eq!(snake.color, "#ff0000");
+        assert_eq!(snake.engine_region, "us-east4");
+
+        // A later Play refresh changes staging, never the owner's live choice.
+        sqlx::query!(
+            "UPDATE battlesnakes SET engine_region = 'europe-west4' WHERE user_id = $1",
+            user_id
+        )
+        .execute(&pool)
+        .await?;
+        stage_snake(
+            &pool,
+            &StageSnake {
+                play_snake_id: "snk_1".to_string(),
+                play_account_id: "act_1".to_string(),
+                name: "Hissy".to_string(),
+                url: "https://example.com/snake".to_string(),
+                head: "alligator".to_string(),
+                tail: "default".to_string(),
+                color: "#ff0000".to_string(),
+                is_public: true,
+                engine_region: EngineRegion::UsWest1,
+            },
+        )
+        .await?;
+        let saved = sqlx::query_scalar!(
+            "SELECT engine_region FROM battlesnakes WHERE user_id = $1",
+            user_id
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(saved, "europe-west4");
 
         let display_name =
             sqlx::query!("SELECT display_name FROM users WHERE user_id = $1", user_id)
@@ -649,6 +691,59 @@ mod tests {
         let resolved = crate::customizations::resolve_head(&pool, user_id, "alligator").await?;
         assert_eq!(resolved, "alligator");
 
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn backfill_engine_region_is_idempotent(pool: PgPool) -> cja::Result<()> {
+        let user_id = create_user(&pool, 1480).await?;
+        let account_id = stage_account(&pool, &play_account(1480)).await?;
+        stage_snake(
+            &pool,
+            &StageSnake {
+                play_snake_id: "snk_33GPkJxhMmQttTGqcrXFJjSC".to_string(),
+                play_account_id: "act_1480".to_string(),
+                name: "Imported EU".to_string(),
+                url: "https://example.com/eu".to_string(),
+                head: "default".to_string(),
+                tail: "default".to_string(),
+                color: "#ff0000".to_string(),
+                is_public: true,
+                engine_region: EngineRegion::UsWest1,
+            },
+        )
+        .await?;
+        claim_account(&pool, account_id, user_id)
+            .await?
+            .expect("claim succeeds");
+        let native_id = Uuid::parse_str("0c041986-aecb-4dc2-9e1e-3e03fd629e04")?;
+        sqlx::query(
+            "INSERT INTO battlesnakes (battlesnake_id, user_id, name, url, visibility)
+                     VALUES ($1, $2, 'Native EU', 'https://example.com/native', 'public')",
+        )
+        .bind(native_id)
+        .bind(user_id)
+        .execute(&pool)
+        .await?;
+        let migration =
+            include_str!("../../../migrations/20260930143001_backfill_engine_region.up.sql");
+        sqlx::raw_sql(migration).execute(&pool).await?;
+        let first: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT name, url, engine_region FROM battlesnakes WHERE user_id = $1 ORDER BY name",
+        )
+        .bind(user_id)
+        .fetch_all(&pool)
+        .await?;
+        assert_eq!(first.len(), 2);
+        assert!(first.iter().all(|(_, _, region)| region == "europe-west4"));
+        sqlx::raw_sql(migration).execute(&pool).await?;
+        let second: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT name, url, engine_region FROM battlesnakes WHERE user_id = $1 ORDER BY name",
+        )
+        .bind(user_id)
+        .fetch_all(&pool)
+        .await?;
+        assert_eq!(first, second);
         Ok(())
     }
 
@@ -667,6 +762,7 @@ mod tests {
                 tail: "default".to_string(),
                 color: "red;position:fixed;inset:0".to_string(),
                 is_public: true,
+                engine_region: EngineRegion::UsWest1,
             },
         )
         .await?;

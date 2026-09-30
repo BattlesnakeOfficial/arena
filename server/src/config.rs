@@ -91,6 +91,61 @@ pub struct FeatureFlags {
     pub cron: bool,
 }
 
+pub const US_EAST_PROXY_URL: &str = "https://tf-engine-proxy-us-east4-7yjsrlddxa-uk.a.run.app";
+pub const EUROPE_PROXY_URL: &str = "https://tf-engine-proxy-europe-west4-7yjsrlddxa-ez.a.run.app";
+
+#[derive(Clone)]
+pub struct EngineProxyConfig {
+    pub token: Option<String>,
+    pub us_east4_url: String,
+    pub europe_west4_url: String,
+}
+
+impl std::fmt::Debug for EngineProxyConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EngineProxyConfig")
+            .field("token", &self.token.as_ref().map(|_| "[redacted]"))
+            .field("us_east4_url", &self.us_east4_url)
+            .field("europe_west4_url", &self.europe_west4_url)
+            .finish()
+    }
+}
+
+impl Default for EngineProxyConfig {
+    fn default() -> Self {
+        Self {
+            token: None,
+            us_east4_url: US_EAST_PROXY_URL.to_string(),
+            europe_west4_url: EUROPE_PROXY_URL.to_string(),
+        }
+    }
+}
+
+fn proxy_config_from_env() -> cja::Result<EngineProxyConfig> {
+    let mut config = EngineProxyConfig {
+        token: optional_env("ENGINE_PROXY_AUTH_TOKEN"),
+        us_east4_url: optional_env("ENGINE_PROXY_US_EAST4_URL")
+            .unwrap_or_else(|| US_EAST_PROXY_URL.to_string()),
+        europe_west4_url: optional_env("ENGINE_PROXY_EUROPE_WEST4_URL")
+            .unwrap_or_else(|| EUROPE_PROXY_URL.to_string()),
+    };
+    for (name, value) in [
+        ("ENGINE_PROXY_US_EAST4_URL", &mut config.us_east4_url),
+        (
+            "ENGINE_PROXY_EUROPE_WEST4_URL",
+            &mut config.europe_west4_url,
+        ),
+    ] {
+        let url =
+            url::Url::parse(value).map_err(|_| cja::color_eyre::eyre::eyre!("Invalid {name}"))?;
+        if !matches!(url.scheme(), "http" | "https") {
+            return Err(cja::color_eyre::eyre::eyre!("Invalid {name}"));
+        }
+        *value = value.trim_end_matches('/').to_string();
+    }
+    Ok(config)
+}
+
 /// All resolved configuration, read once at boot.
 #[derive(Clone, Debug)]
 pub struct AppConfig {
@@ -108,6 +163,7 @@ pub struct AppConfig {
     pub discord_webhook_url: Option<String>,
     /// Content moderation (Jev). Always present; inert without a key.
     pub moderation: ModerationConfig,
+    pub engine_proxy: EngineProxyConfig,
 
     // Rate limiting
     /// Max games an account may create within the sliding window (shared
@@ -205,6 +261,7 @@ impl AppConfig {
             mailgun: mailgun_config_from_env(),
             discord_webhook_url: optional_env("DISCORD_WEBHOOK_URL"),
             moderation: moderation_config_from_env(),
+            engine_proxy: proxy_config_from_env()?,
 
             // Limit 0 is a deliberate "block all game creation" switch; a
             // zero or negative WINDOW, though, would silently disable the
@@ -265,6 +322,7 @@ impl AppConfig {
             mailgun: None,
             discord_webhook_url: None,
             moderation: ModerationConfig::default(),
+            engine_proxy: EngineProxyConfig::default(),
             game_creation_rate_limit: 20,
             game_creation_rate_limit_window_minutes: 10,
             snake_health_failure_threshold: 3,
@@ -455,5 +513,14 @@ mod tests {
         assert_eq!(c.job.workers, 1);
         assert_eq!(c.stuck_game_max_age_hours, 2);
         assert!(c.features.server && c.features.jobs && c.features.cron);
+    }
+
+    #[test]
+    fn engine_proxy_token_is_redacted_from_config_debug() {
+        let mut config = AppConfig::test_default();
+        config.engine_proxy.token = Some("sample-engine-proxy-secret".to_string());
+        let debug = format!("{config:?}");
+        assert!(!debug.contains("sample-engine-proxy-secret"));
+        assert!(debug.contains("[redacted]"));
     }
 }

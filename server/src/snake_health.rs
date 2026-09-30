@@ -15,12 +15,18 @@ use uuid::Uuid;
 
 use crate::engine::EngineGame;
 use crate::models::battlesnake::Battlesnake;
+use crate::models::battlesnake::EngineRegion;
 use crate::models::game::{GameBoardSize, GameType};
 use crate::models::game_battlesnake::GameBattlesnakeWithDetails;
 use crate::snake_client::{
     BODY_READ_CAP_BYTES, MoveResponse, build_endpoint_url, parse_direction, read_body_capped,
 };
+use crate::snake_client::{
+    ProxyCall, ProxyClients, ProxyResponseClass, SnakeRequestRoute, build_routed_request,
+    execute_proxy, log_proxy_auth_failure, log_proxy_fault,
+};
 use crate::wire;
+use reqwest::{Method, StatusCode};
 
 /// Generous per-call budget for on-demand tests.
 ///
@@ -36,7 +42,7 @@ const BODY_EXCERPT_MAX_CHARS: usize = 500;
 pub struct HealthCheckCall {
     /// Human-readable endpoint name, e.g. `"GET /"` or `"POST /move"`.
     pub name: &'static str,
-    pub ok: bool,
+    pub status: HealthCallStatus,
     /// HTTP status code, when a response was received at all.
     pub http_status: Option<u16>,
     /// Round-trip latency, when a response was received.
@@ -46,6 +52,13 @@ pub struct HealthCheckCall {
     pub summary: String,
     /// Truncated raw response body, shown for failed calls to aid debugging.
     pub body_excerpt: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HealthCallStatus {
+    Healthy,
+    SnakeFailure,
+    ProxyFault,
 }
 
 /// Full report of a snake health check run.
@@ -58,7 +71,17 @@ pub struct HealthCheckReport {
 
 impl HealthCheckReport {
     pub fn failure_count(&self) -> usize {
-        self.calls.iter().filter(|c| !c.ok).count()
+        self.calls
+            .iter()
+            .filter(|c| c.status == HealthCallStatus::SnakeFailure)
+            .count()
+    }
+
+    pub fn proxy_fault_count(&self) -> usize {
+        self.calls
+            .iter()
+            .filter(|c| c.status == HealthCallStatus::ProxyFault)
+            .count()
     }
 }
 
@@ -81,6 +104,9 @@ enum CallOutcome {
     },
     Failed {
         latency_ms: Option<u64>,
+        summary: String,
+    },
+    ProxyFault {
         summary: String,
     },
 }
@@ -123,6 +149,7 @@ pub fn build_test_game(snake: &Battlesnake) -> (EngineGame, String) {
         updated_at: now,
         name: snake.name.clone(),
         url: snake.url.clone(),
+        engine_region: crate::models::battlesnake::EngineRegion::UsWest1,
         user_id: snake.user_id,
         leaderboard_entry_id: None,
         color: snake.color.clone(),
@@ -175,7 +202,8 @@ pub async fn run_health_check(
 
     let mut calls = Vec::with_capacity(4);
     let abort = |calls: &Vec<HealthCheckCall>| {
-        failure_mode == FailureMode::AbortOnFailure && calls.iter().any(|c| !c.ok)
+        failure_mode == FailureMode::AbortOnFailure
+            && calls.iter().any(|c| c.status != HealthCallStatus::Healthy)
     };
 
     let outcome = execute_call(client.get(url), HEALTH_CHECK_TIMEOUT).await;
@@ -209,6 +237,139 @@ pub async fn run_health_check(
     HealthCheckReport {
         calls,
         game_timeout_ms: engine_game.meta.timeout,
+    }
+}
+
+pub async fn run_health_check_routed(
+    clients: &ProxyClients<'_>,
+    url: &str,
+    region: EngineRegion,
+    engine_game: &EngineGame,
+    snake_id: &str,
+    failure_mode: FailureMode,
+) -> HealthCheckReport {
+    let contexts = HashMap::new();
+    let customizations = HashMap::new();
+    let payload = wire::Game::from_engine_game(engine_game, snake_id, &contexts, &customizations);
+    let mut calls = Vec::with_capacity(4);
+    for (name, method, target, expectation) in [
+        ("GET /", Method::GET, url.to_string(), Expectation::Info),
+        (
+            "POST /start",
+            Method::POST,
+            build_endpoint_url(url, "start"),
+            Expectation::Ack,
+        ),
+        (
+            "POST /move",
+            Method::POST,
+            build_endpoint_url(url, "move"),
+            Expectation::Move,
+        ),
+        (
+            "POST /end",
+            Method::POST,
+            build_endpoint_url(url, "end"),
+            Expectation::Ack,
+        ),
+    ] {
+        if failure_mode == FailureMode::AbortOnFailure
+            && calls
+                .iter()
+                .any(|c: &HealthCheckCall| c.status != HealthCallStatus::Healthy)
+        {
+            break;
+        }
+        let outcome = execute_call_routed(clients, region, method, &target, &payload).await;
+        calls.push(evaluate_call(name, &expectation, outcome));
+    }
+    HealthCheckReport {
+        calls,
+        game_timeout_ms: engine_game.meta.timeout,
+    }
+}
+
+async fn execute_call_routed(
+    clients: &ProxyClients<'_>,
+    region: EngineRegion,
+    method: Method,
+    target: &str,
+    payload: &wire::Game,
+) -> CallOutcome {
+    let route = build_routed_request(
+        clients,
+        region,
+        method.clone(),
+        target,
+        HEALTH_CHECK_TIMEOUT,
+    );
+    let is_post = method == Method::POST;
+    let direct = || {
+        let builder = clients.direct.request(method.clone(), target);
+        if is_post {
+            builder.json(payload)
+        } else {
+            builder
+        }
+    };
+    let SnakeRequestRoute::Proxied(builder) = route else {
+        return execute_call(direct(), HEALTH_CHECK_TIMEOUT).await;
+    };
+    let builder = if is_post {
+        builder.json(payload)
+    } else {
+        builder
+    };
+    match execute_proxy(builder, HEALTH_CHECK_TIMEOUT).await {
+        ProxyCall::Response {
+            class: ProxyResponseClass::SnakeResponse { latency_ms },
+            status,
+            body,
+        } => CallOutcome::Response {
+            status: status.as_u16(),
+            latency_ms: latency_ms as u64,
+            body,
+        },
+        ProxyCall::Response {
+            class:
+                ProxyResponseClass::SnakeTransportFailure {
+                    timed_out,
+                    latency_ms,
+                },
+            status,
+            ..
+        } => CallOutcome::Failed {
+            latency_ms: Some(latency_ms as u64),
+            summary: if timed_out {
+                "Snake timed out at engine proxy".to_string()
+            } else {
+                format!("Snake server error at engine proxy (HTTP {status})")
+            },
+        },
+        ProxyCall::Response {
+            class: ProxyResponseClass::ProxyFault,
+            status,
+            ..
+        } if status == StatusCode::PROXY_AUTHENTICATION_REQUIRED => {
+            log_proxy_auth_failure(region);
+            execute_call(direct(), HEALTH_CHECK_TIMEOUT).await
+        }
+        ProxyCall::Response {
+            class: ProxyResponseClass::ProxyFault,
+            status,
+            ..
+        } => {
+            log_proxy_fault(region, "health response", Some(status));
+            CallOutcome::ProxyFault {
+                summary: format!("Engine proxy failed (HTTP {status})"),
+            }
+        }
+        ProxyCall::Fault { kind } => {
+            log_proxy_fault(region, kind, None);
+            CallOutcome::ProxyFault {
+                summary: "Engine proxy did not respond".to_string(),
+            }
+        }
     }
 }
 
@@ -273,12 +434,20 @@ fn evaluate_call(
     outcome: CallOutcome,
 ) -> HealthCheckCall {
     match outcome {
+        CallOutcome::ProxyFault { summary } => HealthCheckCall {
+            name,
+            status: HealthCallStatus::ProxyFault,
+            http_status: None,
+            latency_ms: None,
+            summary,
+            body_excerpt: None,
+        },
         CallOutcome::Failed {
             latency_ms,
             summary,
         } => HealthCheckCall {
             name,
-            ok: false,
+            status: HealthCallStatus::SnakeFailure,
             http_status: None,
             latency_ms,
             summary,
@@ -292,7 +461,7 @@ fn evaluate_call(
             if !(200..300).contains(&status) {
                 return HealthCheckCall {
                     name,
-                    ok: false,
+                    status: HealthCallStatus::SnakeFailure,
                     http_status: Some(status),
                     latency_ms: Some(latency_ms),
                     summary: format!("Returned non-success HTTP status {status}"),
@@ -317,7 +486,11 @@ fn evaluate_call(
 
             HealthCheckCall {
                 name,
-                ok,
+                status: if ok {
+                    HealthCallStatus::Healthy
+                } else {
+                    HealthCallStatus::SnakeFailure
+                },
                 http_status: Some(status),
                 latency_ms: Some(latency_ms),
                 summary,
@@ -401,6 +574,206 @@ fn truncate_excerpt(body: &str) -> String {
 mod tests {
     use super::*;
     use crate::models::battlesnake::Visibility;
+    use tokio::io::AsyncWriteExt as _;
+    use wiremock::matchers::{header, method};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn routed_health_uses_proxy_latency_for_all_calls() {
+        let proxy = MockServer::start().await;
+        let snake = test_snake();
+        for (name, verb, target, body) in [
+            ("GET /", "GET", snake.url.clone(), r#"{"apiversion":"1"}"#),
+            (
+                "POST /start",
+                "POST",
+                build_endpoint_url(&snake.url, "start"),
+                "{}",
+            ),
+            (
+                "POST /move",
+                "POST",
+                build_endpoint_url(&snake.url, "move"),
+                r#"{"move":"up"}"#,
+            ),
+            (
+                "POST /end",
+                "POST",
+                build_endpoint_url(&snake.url, "end"),
+                "{}",
+            ),
+        ] {
+            let _ = name;
+            Mock::given(method(verb))
+                .and(header("X-Request-URI", target.as_str()))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .insert_header("X-Battlesnake-Latency-Ms", "28")
+                        .set_body_string(body),
+                )
+                .expect(1)
+                .mount(&proxy)
+                .await;
+        }
+        let config = crate::config::EngineProxyConfig {
+            token: Some("test-secret".to_string()),
+            us_east4_url: proxy.uri(),
+            europe_west4_url: proxy.uri(),
+        };
+        let client = Client::new();
+        let clients = ProxyClients {
+            direct: &client,
+            east: &client,
+            europe: &client,
+            config: &config,
+        };
+        let (game, snake_id) = build_test_game(&snake);
+        let report = run_health_check_routed(
+            &clients,
+            &snake.url,
+            EngineRegion::EuropeWest4,
+            &game,
+            &snake_id,
+            FailureMode::RunAll,
+        )
+        .await;
+        assert_eq!(report.calls.len(), 4);
+        assert!(report.calls.iter().all(|call| call.status == HealthCallStatus::Healthy
+            && call.latency_ms == Some(28)));
+    }
+
+    #[tokio::test]
+    async fn proxy_fault_is_separate_from_snake_failure() {
+        let proxy = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(502))
+            .mount(&proxy)
+            .await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(502))
+            .mount(&proxy)
+            .await;
+        let config = crate::config::EngineProxyConfig {
+            token: Some("test-secret".to_string()),
+            us_east4_url: proxy.uri(),
+            europe_west4_url: proxy.uri(),
+        };
+        let client = Client::new();
+        let clients = ProxyClients {
+            direct: &client,
+            east: &client,
+            europe: &client,
+            config: &config,
+        };
+        let snake = test_snake();
+        let (game, snake_id) = build_test_game(&snake);
+        let all = run_health_check_routed(
+            &clients,
+            &snake.url,
+            EngineRegion::EuropeWest4,
+            &game,
+            &snake_id,
+            FailureMode::RunAll,
+        )
+        .await;
+        assert_eq!(all.calls.len(), 4);
+        assert_eq!(all.proxy_fault_count(), 4);
+        assert_eq!(all.failure_count(), 0);
+        let abort = run_health_check_routed(
+            &clients,
+            &snake.url,
+            EngineRegion::EuropeWest4,
+            &game,
+            &snake_id,
+            FailureMode::AbortOnFailure,
+        )
+        .await;
+        assert_eq!(abort.calls.len(), 1);
+        assert_eq!(abort.proxy_fault_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn measured_proxy_timeout_counts_as_snake_failure() {
+        let proxy = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(504)
+                    .insert_header("X-Battlesnake-Latency-Ms", "500")
+                    .insert_header("X-Battlesnake-Server-Error", "true"),
+            )
+            .mount(&proxy)
+            .await;
+        let config = crate::config::EngineProxyConfig {
+            token: Some("secret".to_string()),
+            us_east4_url: proxy.uri(),
+            europe_west4_url: proxy.uri(),
+        };
+        let client = Client::new();
+        let clients = ProxyClients {
+            direct: &client,
+            east: &client,
+            europe: &client,
+            config: &config,
+        };
+        let snake = test_snake();
+        let (game, snake_id) = build_test_game(&snake);
+        let report = run_health_check_routed(
+            &clients,
+            &snake.url,
+            EngineRegion::EuropeWest4,
+            &game,
+            &snake_id,
+            FailureMode::AbortOnFailure,
+        )
+        .await;
+        assert_eq!(report.calls.len(), 1);
+        assert_eq!(report.failure_count(), 1);
+        assert_eq!(report.proxy_fault_count(), 0);
+        assert_eq!(report.calls[0].latency_ms, Some(500));
+    }
+
+    #[tokio::test]
+    async fn stalled_health_body_hits_guard_before_client_timeout() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nX-Battlesnake-Latency-Ms: 28\r\n\r\n")
+                .await.unwrap();
+            tokio::time::sleep(Duration::from_secs(7)).await;
+        });
+        let config = crate::config::EngineProxyConfig {
+            token: Some("secret".to_string()),
+            us_east4_url: format!("http://{address}"),
+            europe_west4_url: format!("http://{address}"),
+        };
+        let direct = Client::new();
+        let health = Client::builder()
+            .timeout(Duration::from_secs(6))
+            .build()
+            .unwrap();
+        let clients = ProxyClients {
+            direct: &direct,
+            east: &health,
+            europe: &health,
+            config: &config,
+        };
+        let snake = test_snake();
+        let (game, snake_id) = build_test_game(&snake);
+        let started = Instant::now();
+        let report = run_health_check_routed(
+            &clients,
+            &snake.url,
+            EngineRegion::UsEast4,
+            &game,
+            &snake_id,
+            FailureMode::AbortOnFailure,
+        )
+        .await;
+        assert!(started.elapsed() >= Duration::from_secs(5));
+        assert!(started.elapsed() < Duration::from_secs(6));
+        assert_eq!(report.proxy_fault_count(), 1);
+    }
 
     fn test_snake() -> Battlesnake {
         let now = chrono::Utc::now();
@@ -410,6 +783,7 @@ mod tests {
             name: "Test Snake".to_string(),
             url: "http://localhost:8000".to_string(),
             visibility: Visibility::Private,
+            engine_region: crate::models::battlesnake::EngineRegion::UsWest1,
             color: "#ff0000".to_string(),
             head: "default".to_string(),
             tail: "default".to_string(),
@@ -521,7 +895,7 @@ mod tests {
                 body: "Not Found".to_string(),
             },
         );
-        assert!(!call.ok);
+        assert_ne!(call.status, HealthCallStatus::Healthy);
         assert_eq!(call.http_status, Some(404));
         assert_eq!(call.latency_ms, Some(12));
         assert!(call.summary.contains("404"));
@@ -539,7 +913,7 @@ mod tests {
                 body: "whatever".to_string(),
             },
         );
-        assert!(call.ok);
+        assert_eq!(call.status, HealthCallStatus::Healthy);
         assert_eq!(call.http_status, Some(200));
         assert!(call.body_excerpt.is_none());
     }
@@ -554,7 +928,7 @@ mod tests {
                 summary: "Timed out: no response within 5 seconds".to_string(),
             },
         );
-        assert!(!call.ok);
+        assert_ne!(call.status, HealthCallStatus::Healthy);
         assert_eq!(call.http_status, None);
         assert_eq!(call.latency_ms, None);
         assert!(call.summary.contains("Timed out"));
@@ -571,7 +945,7 @@ mod tests {
                 body: r#"{"apiversion":"1"}"#.to_string(),
             },
         );
-        assert!(call.ok);
+        assert_eq!(call.status, HealthCallStatus::Healthy);
         assert!(call.body_excerpt.is_none());
     }
 

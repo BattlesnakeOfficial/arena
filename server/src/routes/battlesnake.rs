@@ -15,7 +15,7 @@ use crate::{
     },
     customizations::chip_color,
     errors::{ServerResult, WithStatus},
-    models::battlesnake::{self, CreateBattlesnake, UpdateBattlesnake, Visibility},
+    models::battlesnake::{self, CreateBattlesnake, EngineRegion, UpdateBattlesnake, Visibility},
     models::game_battlesnake,
     models::leaderboard,
     models::session,
@@ -38,6 +38,8 @@ struct BattlesnakeFormData {
     name: String,
     url: String,
     visibility: Visibility,
+    #[serde(default)]
+    engine_region: EngineRegion,
     tag_ids: Vec<Uuid>,
 }
 
@@ -60,6 +62,7 @@ fn bounded_form_copy(form: &BattlesnakeFormData) -> BattlesnakeFormData {
         name: form.name.chars().take(battlesnake::MAX_NAME_LEN).collect(),
         url: form.url.chars().take(MAX_DRAFT_URL_CHARS).collect(),
         visibility: form.visibility,
+        engine_region: form.engine_region,
         tag_ids: form
             .tag_ids
             .iter()
@@ -73,6 +76,7 @@ fn parse_battlesnake_form(bytes: &[u8]) -> Result<BattlesnakeFormData, String> {
     let mut name = None;
     let mut url = None;
     let mut visibility = None;
+    let mut engine_region = None;
     let mut tag_ids = Vec::new();
 
     for (key, value) in url::form_urlencoded::parse(bytes) {
@@ -84,6 +88,13 @@ fn parse_battlesnake_form(bytes: &[u8]) -> Result<BattlesnakeFormData, String> {
                     value
                         .parse::<Visibility>()
                         .map_err(|_| format!("Invalid visibility: {value}"))?,
+                );
+            }
+            "engine_region" => {
+                engine_region = Some(
+                    value
+                        .parse::<EngineRegion>()
+                        .map_err(|_| format!("Invalid engine region: {value}"))?,
                 );
             }
             "tags" => tag_ids
@@ -98,6 +109,7 @@ fn parse_battlesnake_form(bytes: &[u8]) -> Result<BattlesnakeFormData, String> {
             .filter(|u| !u.is_empty())
             .ok_or_else(|| "URL is required".to_string())?,
         visibility: visibility.ok_or_else(|| "Visibility is required".to_string())?,
+        engine_region: engine_region.ok_or_else(|| "Engine region is required".to_string())?,
         tag_ids,
     })
 }
@@ -177,6 +189,15 @@ fn battlesnake_form(
                     option value="private" selected[form.visibility == Visibility::Private] { "Private — only you can add it to games" }
                 }
                 p class="help" { "Only controls who can pick this snake in Create Game. It always shows on your profile and in the games it plays, and you can still enter it in leaderboards and tournaments." }
+            }
+            div class="field" {
+                label for="engine_region" { "Engine region" }
+                select id="engine_region" name="engine_region" required style="min-height:44px;font-size:16px;" {
+                    @for region in EngineRegion::ALL {
+                        option value=(region.as_str()) selected[form.engine_region == region] { (region.label()) }
+                    }
+                }
+                p class="help" { "Pick the region closest to where your snake is hosted." }
             }
             (tag_form_fields(catalog, &form.tag_ids))
             script { (maud::PreEscaped(URL_NORMALIZATION_SCRIPT)) }
@@ -633,6 +654,7 @@ pub async fn create_battlesnake(
         name,
         url,
         visibility: form.visibility,
+        engine_region: form.engine_region,
     };
 
     // Create the new battlesnake in the database
@@ -732,6 +754,7 @@ pub async fn edit_battlesnake(
         name: battlesnake.name.clone(),
         url: battlesnake.url.clone(),
         visibility: battlesnake.visibility,
+        engine_region: battlesnake.engine_region,
         tag_ids: selected_tag_ids,
     };
     let form = match session::take_pending_form_data(&state.db, session.session_id)
@@ -887,6 +910,7 @@ pub async fn update_battlesnake(
         name,
         url,
         visibility: form.visibility,
+        engine_region: Some(form.engine_region),
     };
 
     // Update the battlesnake
@@ -1225,6 +1249,7 @@ fn render_battlesnake_profile(view: &ProfileView<'_>) -> Markup {
                         } @else {
                             span class="badge" { "Private" }
                         }
+                        span class="badge" { (snake.engine_region.label()) }
                         span { "created " (snake.created_at.format("%b %-d, %Y")) }
                         span { "head " (display_head) }
                         span { "tail " (display_tail) }
@@ -1570,9 +1595,16 @@ pub async fn test_battlesnake(
         .wrap_err("Failed to build HTTP client for snake test")?;
 
     let (engine_game, snake_id) = snake_health::build_test_game(&snake);
-    let report = snake_health::run_health_check(
-        &client,
+    let clients = crate::snake_client::ProxyClients {
+        direct: &client,
+        east: &state.proxy_east_health_client,
+        europe: &state.proxy_europe_health_client,
+        config: &state.config.engine_proxy,
+    };
+    let report = snake_health::run_health_check_routed(
+        &clients,
         &snake.url,
+        snake.engine_region,
         &engine_game,
         &snake_id,
         snake_health::FailureMode::RunAll,
@@ -1580,7 +1612,8 @@ pub async fn test_battlesnake(
     .await;
 
     let failures = report.failure_count();
-    let all_ok = failures == 0;
+    let proxy_faults = report.proxy_fault_count();
+    let all_ok = failures == 0 && proxy_faults == 0;
 
     Ok(page_factory.create_page(
         format!("Test Results: {}", snake.name),
@@ -1593,7 +1626,11 @@ pub async fn test_battlesnake(
                     " with the same calls a real game makes."
                 }
 
-                @if all_ok {
+                @if proxy_faults > 0 {
+                    div class="alert alert-warning" {
+                        p { (proxy_faults) " engine proxy calls failed. Snake health is unknown; try again shortly." }
+                    }
+                } @else if all_ok {
                     div class="alert alert-success" {
                         p { "All " (report.calls.len()) " checks passed. This snake looks ready to play!" }
                     }
@@ -1618,8 +1655,10 @@ pub async fn test_battlesnake(
                             tr {
                                 td { code { (call.name) } }
                                 td {
-                                    @if call.ok {
+                                    @if call.status == snake_health::HealthCallStatus::Healthy {
                                         span class="badge ok" { "OK" }
+                                    } @else if call.status == snake_health::HealthCallStatus::ProxyFault {
+                                        span class="badge warn" { "Proxy error" }
                                     } @else {
                                         span class="badge warn" { "Failed" }
                                     }
@@ -1676,8 +1715,10 @@ pub async fn test_battlesnake(
 
 #[cfg(test)]
 mod form_tests {
-    use super::{BattlesnakeFormData, MAX_DRAFT_URL_CHARS, bounded_form_copy};
-    use crate::models::{battlesnake, battlesnake::Visibility, tag};
+    use super::{
+        BattlesnakeFormData, MAX_DRAFT_URL_CHARS, bounded_form_copy, parse_battlesnake_form,
+    };
+    use crate::models::{battlesnake, battlesnake::EngineRegion, battlesnake::Visibility, tag};
     use uuid::Uuid;
 
     #[test]
@@ -1693,6 +1734,7 @@ mod form_tests {
             name: name.clone(),
             url: url.clone(),
             visibility: Visibility::Private,
+            engine_region: EngineRegion::UsEast4,
             tag_ids: tag_ids.clone(),
         };
 
@@ -1713,6 +1755,35 @@ mod form_tests {
         );
         assert_eq!(bounded.tag_ids, tag_ids[..tag::MAX_TAGS_PER_SNAKE * 4]);
         assert_eq!(bounded.visibility, Visibility::Private);
+        assert_eq!(bounded.engine_region, EngineRegion::UsEast4);
+    }
+
+    #[test]
+    fn form_requires_a_valid_engine_region() {
+        let base = b"name=Example&url=https%3A%2F%2Fexample.com&visibility=public";
+        assert_eq!(
+            parse_battlesnake_form(base).unwrap_err(),
+            "Engine region is required"
+        );
+        let invalid =
+            b"name=Example&url=https%3A%2F%2Fexample.com&visibility=public&engine_region=moon";
+        assert_eq!(
+            parse_battlesnake_form(invalid).unwrap_err(),
+            "Invalid engine region: moon"
+        );
+        let valid = b"name=Example&url=https%3A%2F%2Fexample.com&visibility=public&engine_region=europe-west4";
+        assert_eq!(
+            parse_battlesnake_form(valid).unwrap().engine_region,
+            EngineRegion::EuropeWest4
+        );
+    }
+
+    #[test]
+    fn old_pending_form_defaults_to_west() {
+        let old =
+            r#"{"name":"Example","url":"https://example.com","visibility":"public","tag_ids":[]}"#;
+        let form: BattlesnakeFormData = serde_json::from_str(old).unwrap();
+        assert_eq!(form.engine_region, EngineRegion::UsWest1);
     }
 }
 

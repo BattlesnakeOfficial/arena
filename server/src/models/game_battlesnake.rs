@@ -41,6 +41,7 @@ pub struct GameBattlesnakeWithDetails {
     // Battlesnake details
     pub name: String,
     pub url: String,
+    pub engine_region: crate::models::battlesnake::EngineRegion,
     pub user_id: Uuid,
     pub leaderboard_entry_id: Option<Uuid>,
     pub color: String,
@@ -70,6 +71,7 @@ pub async fn get_battlesnakes_by_game_id(
             gb.updated_at,
             b.name,
             b.url,
+            b.engine_region,
             b.user_id,
             gb.leaderboard_entry_id,
             b.color,
@@ -377,4 +379,43 @@ pub async fn get_game_with_battlesnakes(
     let battlesnakes = get_battlesnakes_by_game_id(pool, game_id).await?;
 
     Ok((game, battlesnakes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::battlesnake::EngineRegion;
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn game_projection_carries_engine_region(pool: PgPool) -> cja::Result<()> {
+        let user_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO users (external_github_id, github_login, github_access_token)
+             VALUES (1480001, 'region-owner', 'test') RETURNING user_id",
+        )
+        .fetch_one(&pool)
+        .await?;
+        let snake_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO battlesnakes (user_id, name, url, visibility, engine_region)
+             VALUES ($1, 'East', 'https://example.com/east', 'public', 'us-east4')
+             RETURNING battlesnake_id",
+        )
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await?;
+        let game_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO games (board_size, game_type, status)
+             VALUES ('11x11', 'Standard', 'waiting') RETURNING game_id",
+        )
+        .fetch_one(&pool)
+        .await?;
+        sqlx::query("INSERT INTO game_battlesnakes (game_id, battlesnake_id) VALUES ($1, $2)")
+            .bind(game_id)
+            .bind(snake_id)
+            .execute(&pool)
+            .await?;
+        let rows = get_battlesnakes_by_game_id(&pool, game_id).await?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].engine_region, EngineRegion::UsEast4);
+        Ok(())
+    }
 }

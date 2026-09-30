@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE imported_snakes SET engine_region = 'us-east4' WHERE play_snake_id = 'snk_1'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "6bf4e2e52f58b97bca2c5f89e43d8c8336c1765d5ca4d2df2dabe941b31357ff"
+}

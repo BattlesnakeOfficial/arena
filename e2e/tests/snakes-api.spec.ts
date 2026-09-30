@@ -1,6 +1,36 @@
 import { test, expect } from '../fixtures/test';
 
 test.describe('Snakes API', () => {
+  test('region defaults, updates and rejects unknown values', async ({ authenticatedPage }) => {
+    const created = await authenticatedPage.request.post('/api/snakes', {
+      data: { name: `Region ${Date.now()}`, url: 'https://example.com/region' },
+    });
+    expect(created.status()).toBe(201);
+    const snake = await created.json();
+    expect(snake.engine_region).toBe('us-west1');
+
+    const changed = await authenticatedPage.request.put(`/api/snakes/${snake.id}`, {
+      data: { engine_region: 'us-east4' },
+    });
+    expect(changed.status()).toBe(200);
+    expect((await changed.json()).engine_region).toBe('us-east4');
+
+    const retained = await authenticatedPage.request.put(`/api/snakes/${snake.id}`, {
+      data: { url: 'https://example.com/region-updated' },
+    });
+    expect((await retained.json()).engine_region).toBe('us-east4');
+
+    const invalid = await authenticatedPage.request.put(`/api/snakes/${snake.id}`, {
+      data: { engine_region: 'moon' },
+    });
+    expect(invalid.status()).toBe(400);
+
+    const nullRegion = await authenticatedPage.request.put(`/api/snakes/${snake.id}`, {
+      data: { engine_region: null },
+    });
+    expect(nullRegion.status()).toBe(400);
+  });
+
   test.describe('POST /api/snakes - name validation', () => {
     test('rejects an empty name', async ({ authenticatedPage }) => {
       const response = await authenticatedPage.request.post('/api/snakes', {
