@@ -51,9 +51,7 @@ pub struct RecentLatency {
 ///
 /// Snakes join games two ways: directly via `game_battlesnakes.battlesnake_id`
 /// (custom games) or via `leaderboard_entry_id` with a NULL `battlesnake_id`
-/// (leaderboard games), so both are matched. Imported legacy engine games
-/// (`engine_game_id IS NOT NULL`) never have turn rows and are skipped so they
-/// can't crowd real games out of the window. Moves recorded before latency
+/// (leaderboard games), so both are matched. Moves recorded before latency
 /// tracking existed (NULL latency, not timed out) are ignored.
 ///
 /// Recency is `game_battlesnakes.created_at`, written when the snake is added
@@ -62,6 +60,13 @@ pub struct RecentLatency {
 /// by the window rather than by how many games the snake (or arena) has
 /// played. Driving from `games` instead scanned every finished game for
 /// snakes with few or no games.
+///
+/// Deliberately no `engine_game_id IS NULL` filter. Imported legacy games are
+/// ~99% of `games` and never get `game_battlesnakes` rows (the backup importer
+/// doesn't create them), so the filter changes no results. But the planner
+/// reads it as discarding ~99% of joined rows, abandons the index walk, and
+/// hash-joins the snake's whole history instead: 90ms vs 13ms on prod for a
+/// 28k-game snake.
 pub async fn get_recent_latency_for_battlesnake(
     pool: &PgPool,
     battlesnake_id: Uuid,
@@ -78,7 +83,6 @@ pub async fn get_recent_latency_for_battlesnake(
                 JOIN games g ON g.game_id = gb.game_id
                 WHERE gb.battlesnake_id = $1
                   AND g.status = 'finished'
-                  AND g.engine_game_id IS NULL
                 ORDER BY gb.created_at DESC
                 LIMIT $2
             )
@@ -92,7 +96,6 @@ pub async fn get_recent_latency_for_battlesnake(
                 WHERE gb.leaderboard_entry_id = le.leaderboard_entry_id
                   AND gb.battlesnake_id IS NULL
                   AND g.status = 'finished'
-                  AND g.engine_game_id IS NULL
                 ORDER BY gb.created_at DESC
                 LIMIT $2
             ) lb

@@ -176,6 +176,10 @@ async fn compress_and_upload_to_gcs(
 const ARCHIVE_VERSION: i32 = 1;
 
 /// Insert or update a game record in the local database after archiving.
+///
+/// Imported games get no `game_battlesnakes` rows. `models::snake_latency`
+/// relies on that to skip an `engine_game_id IS NULL` filter that wrecks its
+/// query plan; linking snakes to imported games would need that filter back.
 async fn upsert_game_record(db: &PgPool, game: &EngineGame, gcs_path: &str) -> cja::Result<()> {
     let now = Utc::now();
     let board_size = game.board_size();
