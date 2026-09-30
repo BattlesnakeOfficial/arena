@@ -350,10 +350,13 @@ mod tests {
     async fn seeded_modes_create_games_with_their_own_rules(pool: sqlx::PgPool) -> cja::Result<()> {
         let app_state = crate::state::AppState::test_from_pool(pool.clone());
 
+        let mut github_id = 88_010_i64;
         for (name, expected_type, expected_board, expected_size) in [
             ("Royale 11x11", "Royale", "11x11", 4_i64),
             ("Duels 11x11", "Standard", "11x11", 2_i64),
+            ("Constrictor 11x11", "Constrictor", "11x11", 4_i64),
         ] {
+            github_id += 1;
             let lb = sqlx::query_as!(
                 Leaderboard,
                 r#"SELECT leaderboard_id, name, game_type, board_size, match_size,
@@ -370,7 +373,7 @@ mod tests {
             let user_id = sqlx::query_scalar!(
                 "INSERT INTO users (external_github_id, github_login, github_access_token)
                  VALUES ($1, $2, 'test-token') RETURNING user_id",
-                88002 + expected_size,
+                github_id,
                 format!("mm-{name}"),
             )
             .fetch_one(&pool)
