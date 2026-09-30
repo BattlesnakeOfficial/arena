@@ -9,7 +9,10 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{
-    components::{avatar::user_avatar, page_factory::PageFactory, snake_tags::snake_tag_chips},
+    components::{
+        avatar::user_avatar, latency_chart::latency_chart, page_factory::PageFactory,
+        snake_tags::snake_tag_chips,
+    },
     customizations::chip_color,
     errors::{ServerResult, WithStatus},
     models::battlesnake::{self, CreateBattlesnake, UpdateBattlesnake, Visibility},
@@ -17,6 +20,7 @@ use crate::{
     models::leaderboard,
     models::session,
     models::snake_health_status,
+    models::snake_latency,
     models::tag,
     models::user::get_user_by_id,
     routes::UuidPath,
@@ -1115,17 +1119,341 @@ pub async fn reactivate_battlesnake(
     Ok(Redirect::to(&format!("/battlesnakes/{battlesnake_id}/profile")).into_response())
 }
 
+/// Who is looking at a snake profile, which decides the header actions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProfileViewer {
+    Anonymous,
+    Owner,
+    Visitor,
+}
+
+/// Everything the snake profile renders, fetched up front by the handler.
+struct ProfileView<'a> {
+    snake: &'a battlesnake::Battlesnake,
+    owner_login: &'a str,
+    owner_avatar_url: Option<&'a str>,
+    owner_exists: bool,
+    owner_pronouns: &'a str,
+    viewer: ProfileViewer,
+    history: &'a [game_battlesnake::GameHistoryEntry],
+    stats: &'a BattlesnakeStats,
+    leaderboard_entries: &'a [leaderboard::BattlesnakeLeaderboardSummary],
+    health_status: Option<&'a snake_health_status::SnakeHealthStatus>,
+    tags: &'a [tag::Tag],
+    latency: &'a snake_latency::RecentLatency,
+}
+
+fn placement_badge(placement: i32) -> Markup {
+    html! {
+        @match placement {
+            1 => span class="badge ok" { "🥇 1st" },
+            2 => span class="badge" { "🥈 2nd" },
+            3 => span class="badge" { "🥉 3rd" },
+            p => span class="badge" { (p) "th" },
+        }
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn render_battlesnake_profile(view: &ProfileView<'_>) -> Markup {
+    let snake = view.snake;
+    let battlesnake_id = snake.battlesnake_id;
+    let stats = view.stats;
+    let is_owner = view.viewer == ProfileViewer::Owner;
+    let is_public = snake.visibility == Visibility::Public;
+
+    let display_head = if snake.head.is_empty() {
+        "default"
+    } else {
+        snake.head.as_str()
+    };
+    let display_tail = if snake.tail.is_empty() {
+        "default"
+    } else {
+        snake.tail.as_str()
+    };
+    let raw_color = if snake.color.is_empty() {
+        "#888888"
+    } else {
+        snake.color.as_str()
+    };
+    let url_color = raw_color
+        .strip_prefix('#')
+        .map_or_else(|| raw_color.to_string(), |hex| format!("%23{hex}"));
+    let preview_url = format!(
+        "https://exporter.battlesnake.com/avatars/head:{display_head}/tail:{display_tail}/color:{url_color}/320x100.svg"
+    );
+
+    let deactivation = if is_owner {
+        view.health_status.filter(|s| s.deactivated_at.is_some())
+    } else {
+        None
+    };
+    let overall_latency = view.latency.overall;
+
+    html! {
+        div class="snake-profile" {
+            div class="crumb" {
+                @if is_owner {
+                    a href="/battlesnakes" { "Your Battlesnakes" }
+                } @else {
+                    a href="/snakes" { "Snakes" }
+                }
+                " / " span { (snake.name) }
+            }
+
+            div class="page-head" {
+                img class="snake-preview" src=(preview_url) alt=(format!("{} snake preview", snake.name))
+                    width="128" height="40";
+                div class="snake-id" {
+                    h1 { (snake.name) }
+                    div class="sub owner-line" {
+                        "by "
+                        (user_avatar(view.owner_avatar_url, view.owner_login, "owner-avatar"))
+                        @if view.owner_exists {
+                            a href={"/users/"(view.owner_login)} { (view.owner_login) }
+                        } @else {
+                            (view.owner_login)
+                        }
+                        @if !view.owner_pronouns.is_empty() {
+                            " · " (view.owner_pronouns)
+                        }
+                    }
+                    div class="snake-meta" {
+                        @if is_public {
+                            span class="badge ok" { "Public" }
+                        } @else {
+                            span class="badge" { "Private" }
+                        }
+                        span { "created " (snake.created_at.format("%b %-d, %Y")) }
+                        span { "head " (display_head) }
+                        span { "tail " (display_tail) }
+                        span {
+                            span class="chip" style={"background:" (chip_color(&snake.color))} {}
+                            (raw_color)
+                        }
+                    }
+                    (snake_tag_chips(view.tags))
+                    @if is_owner {
+                        div class="url-cell snake-url" {
+                            a href=(snake.url) target="_blank" rel="noopener" { (snake.url) }
+                        }
+                    }
+                }
+                div class="head-actions" {
+                    @match view.viewer {
+                        ProfileViewer::Owner => {
+                            form action={"/battlesnakes/"(battlesnake_id)"/test"} method="post" {
+                                button type="submit" class="btn" { "Test Snake" }
+                            }
+                            a href={"/battlesnakes/"(battlesnake_id)"/edit"} class="btn" { "Edit" }
+                            form action={"/battlesnakes/"(battlesnake_id)"/delete"} method="post" {
+                                button type="submit" class="btn danger"
+                                    onclick="return confirm('Are you sure you want to delete this battlesnake?');" { "Delete" }
+                            }
+                        }
+                        ProfileViewer::Visitor if is_public => {
+                            form action={"/battlesnakes/"(battlesnake_id)"/challenge"} method="post" {
+                                button type="submit" class="btn solid" { "Challenge" }
+                            }
+                        }
+                        ProfileViewer::Anonymous if is_public => {
+                            a href="/auth/github" class="btn" { "Sign in to challenge" }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            // Auto-deactivation notice: the health sweeper pulled this snake
+            // from matchmaking; the owner can resume once it's fixed.
+            @if let Some(status) = deactivation {
+                div class="form-error snake-paused" {
+                    p {
+                        strong { "Paused from leaderboard matchmaking. " }
+                        "This snake failed " (status.consecutive_failures)
+                        " health checks in a row, so we stopped matching it to protect its rating."
+                    }
+                    @if let Some(failure) = status.last_failure.as_ref() {
+                        p class="fine" { "Most recent problem: " (failure) }
+                    }
+                    p class="fine" {
+                        "Fix your snake (Test Snake runs the same checks), then resume."
+                    }
+                    form action={"/battlesnakes/"(battlesnake_id)"/reactivate"} method="post" {
+                        button type="submit" class="btn solid sm" { "Resume Matchmaking" }
+                    }
+                }
+            }
+
+            div class="stats" {
+                div class="stat" {
+                    div class="label" { "Games" }
+                    div class="value" {
+                        (stats.total_games)
+                        small { (stats.wins) " won" }
+                    }
+                }
+                div class="stat" {
+                    div class="label" { "Win Rate" }
+                    @if stats.finished_games > 0 {
+                        div class="value" { (format!("{:.1}%", stats.win_rate)) }
+                    } @else {
+                        div class="value" { "—" }
+                    }
+                }
+                div class="stat" {
+                    div class="label" { "Avg. Placement" }
+                    @if stats.finished_games > 0 {
+                        div class="value" { (format!("{:.1}", stats.average_placement)) }
+                        div class="stat-detail" title="Finishes by placement" {
+                            span { "🥇 " (stats.wins) }
+                            span { "🥈 " (stats.second_places) }
+                            span { "🥉 " (stats.third_places) }
+                            span { "4th " (stats.fourth_places) }
+                        }
+                    } @else {
+                        div class="value" { "—" }
+                    }
+                }
+                div class="stat" {
+                    div class="label" { "p95 Latency" }
+                    @if let Some(p95) = overall_latency.p95_ms {
+                        div class="value" { (format!("{p95:.0}ms")) }
+                        div class="stat-detail" {
+                            @if let Some(p50) = overall_latency.p50_ms {
+                                span { "p50 " (format!("{p50:.0}ms")) }
+                            }
+                            @if overall_latency.timeouts > 0 {
+                                span class="warn" { (overall_latency.timeouts) " timeouts" }
+                            }
+                        }
+                    } @else {
+                        div class="value" { "—" }
+                    }
+                }
+            }
+
+            section class="section" {
+                h2 { "Move Latency" }
+                (latency_chart(view.latency, crate::engine::MOVE_TIMEOUT_MS))
+            }
+
+            @if !view.leaderboard_entries.is_empty() {
+                section class="section" {
+                    h2 { "Leaderboards" }
+                    table class="data" {
+                        thead {
+                            tr {
+                                th { "Leaderboard" }
+                                th class="r" { "Rating" }
+                                th class="r hide-sm" { "Games" }
+                                th class="r hide-sm" { "1st Place" }
+                                th class="r" { "Status" }
+                            }
+                        }
+                        tbody {
+                            @for entry in view.leaderboard_entries {
+                                tr {
+                                    td {
+                                        a href={"/leaderboards/"(entry.leaderboard_id)"/entries/"(entry.leaderboard_entry_id)} {
+                                            (entry.leaderboard_name)
+                                        }
+                                    }
+                                    td class="r num" { (format!("{:.1}", entry.display_score)) }
+                                    td class="r num hide-sm" { (entry.games_played) }
+                                    td class="r num hide-sm" {
+                                        @if entry.games_played > 0 {
+                                            (format!("{:.0}%", f64::from(entry.first_place_finishes) / f64::from(entry.games_played) * 100.0))
+                                        } @else {
+                                            "—"
+                                        }
+                                    }
+                                    td class="r" {
+                                        @if entry.disabled_at.is_some() {
+                                            span class="badge" { "Paused" }
+                                        } @else {
+                                            span class="badge ok" { "Active" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            section class="section" {
+                h2 { "Game History" }
+                @if view.history.is_empty() {
+                    p class="empty" { "No games played yet." }
+                } @else {
+                    table class="data" {
+                        thead {
+                            tr {
+                                th { "Date" }
+                                th { "Game" }
+                                th class="r hide-sm" { "Snakes" }
+                                th { "Placement" }
+                                th class="hide-sm" { "Winner" }
+                                th class="r" { "Replay" }
+                            }
+                        }
+                        tbody {
+                            @for entry in view.history {
+                                @let finished = entry.status == crate::models::game::GameStatus::Finished;
+                                tr {
+                                    td class="when" {
+                                        (entry.created_at.format("%b %-d"))
+                                        span class="sub" { (entry.created_at.format("%H:%M")) }
+                                    }
+                                    td {
+                                        (entry.game_type.as_str())
+                                        span class="sub" { (entry.board_size.as_str()) }
+                                    }
+                                    td class="r num hide-sm" { (entry.snake_count) }
+                                    td {
+                                        @if let Some(placement) = entry.placement {
+                                            (placement_badge(placement))
+                                        } @else if finished {
+                                            span class="badge" { "—" }
+                                        } @else {
+                                            span class="badge warn" { "Live" }
+                                        }
+                                    }
+                                    td class="hide-sm" {
+                                        @if let Some(winner) = &entry.winner_name {
+                                            (winner)
+                                        } @else if finished {
+                                            span class="sub" { "No winner" }
+                                        } @else {
+                                            span class="sub" { "In progress" }
+                                        }
+                                    }
+                                    td class="r" {
+                                        a href={"/games/"(entry.game_id)} class="btn sm" {
+                                            @if finished { "Watch" } @else { "Live" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 // View a battlesnake's profile with game history and stats.
 // Public to everyone: visibility only controls whether a snake can be
 // matchmade against, not who can see it.
-#[allow(clippy::too_many_lines)]
 pub async fn view_battlesnake_profile(
     State(state): State<AppState>,
     OptionalUser(user): OptionalUser,
     UuidPath(battlesnake_id): UuidPath,
     page_factory: PageFactory,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
-    // Fetch the battlesnake
     let Some(snake) = battlesnake::get_battlesnake_by_id(&state.db, battlesnake_id)
         .await
         .wrap_err("Failed to get battlesnake")?
@@ -1135,19 +1463,20 @@ pub async fn view_battlesnake_profile(
         );
     };
 
-    let is_owner = user.as_ref().is_some_and(|u| u.user_id == snake.user_id);
+    let viewer = match user.as_ref() {
+        None => ProfileViewer::Anonymous,
+        Some(u) if u.user_id == snake.user_id => ProfileViewer::Owner,
+        Some(_) => ProfileViewer::Visitor,
+    };
 
-    // Fetch the owner user info
     let owner = get_user_by_id(&state.db, snake.user_id)
         .await
         .wrap_err("Failed to get owner user")?;
 
-    // Fetch game history
     let history = game_battlesnake::get_game_history_for_battlesnake(&state.db, battlesnake_id)
         .await
         .wrap_err("Failed to get game history")?;
 
-    // Fetch leaderboard entries
     let leaderboard_entries = leaderboard::get_entries_for_battlesnake(&state.db, battlesnake_id)
         .await
         .wrap_err("Failed to get leaderboard entries")?;
@@ -1162,299 +1491,47 @@ pub async fn view_battlesnake_profile(
         .await
         .wrap_err("Failed to get battlesnake tags")?;
 
-    let flash = page_factory.flash.clone();
+    let recent_latency = snake_latency::get_recent_latency_for_battlesnake(
+        &state.db,
+        battlesnake_id,
+        snake_latency::RECENT_GAMES_LIMIT,
+    )
+    .await
+    .wrap_err("Failed to get recent latency")?;
 
-    // Compute stats
     let stats = compute_stats(&history);
-
-    // Owner display info
     let owner_login = owner
         .as_ref()
-        .map(|o| o.github_login.clone())
-        .unwrap_or_else(|| "Unknown User".to_string());
+        .map_or_else(|| "Unknown User".to_string(), |o| o.github_login.clone());
     let owner_pronouns = owner
         .as_ref()
         .map(|o| o.pronouns.clone())
         .unwrap_or_default();
 
-    Ok(page_factory.create_page_with_flash(
-        format!("Battlesnake: {}", snake.name),
-        Box::new(html! {
-            div class="container" {
-                // Flash messages
-                @if let Some(message) = flash.message() {
-                    div class=(flash.class()) {
-                        p { (message) }
-                    }
-                }
+    let content = render_battlesnake_profile(&ProfileView {
+        snake: &snake,
+        owner_login: &owner_login,
+        owner_avatar_url: owner.as_ref().and_then(|o| o.github_avatar_url.as_deref()),
+        owner_exists: owner.is_some(),
+        owner_pronouns: &owner_pronouns,
+        viewer,
+        history: &history,
+        stats: &stats,
+        leaderboard_entries: &leaderboard_entries,
+        health_status: health_status.as_ref(),
+        tags: &snake_tags,
+        latency: &recent_latency,
+    });
 
-                // Auto-deactivation banner: the health sweeper pulled this
-                // snake from matchmaking; the owner can resume once fixed.
-                @if is_owner {
-                    @if let Some(status) = health_status.as_ref().filter(|s| s.deactivated_at.is_some()) {
-                        div class="alert alert-warning" {
-                            p {
-                                strong { "Paused from leaderboard matchmaking. " }
-                                "This snake failed " (status.consecutive_failures)
-                                " health checks in a row, so we stopped matching it to protect its rating."
-                            }
-                            @if let Some(failure) = status.last_failure.as_ref() {
-                                p class="small" { "Most recent problem: " (failure) }
-                            }
-                            p class="small" {
-                                "Fix your snake (the Test Snake button runs the same checks), then resume."
-                            }
-                            form action={"/battlesnakes/"(battlesnake_id)"/reactivate"} method="post" style="display: inline;" {
-                                button type="submit" class="btn btn-sm btn-success" { "Resume Matchmaking" }
-                            }
-                        }
-                    }
-                }
-
-                // Snake Header Section
-                div class="card mb-4" {
-                    div class="card-body" {
-                        div class="d-flex justify-content-between align-items-center" {
-                            div {
-                                h1 class="mb-2" { (snake.name) }
-                                div class="d-flex align-items-center mb-2" {
-                                    (user_avatar(
-                                        owner.as_ref().and_then(|value| value.github_avatar_url.as_deref()),
-                                        &owner_login,
-                                        "owner-avatar",
-                                    ))
-                                    @if owner.is_some() {
-                                        a href={"/users/"(owner_login)} { (owner_login) }
-                                    } @else {
-                                        span { (owner_login) }
-                                    }
-                                    @if !owner_pronouns.is_empty() {
-                                        span class="text-muted" { " · " (owner_pronouns) }
-                                    }
-                                }
-                                @if snake.visibility == Visibility::Public {
-                                    span class="badge bg-success text-white" { "Public" }
-                                } @else {
-                                    span class="badge bg-secondary text-white" { "Private" }
-                                }
-                                div class="mt-2" {
-                                    @let display_head = if snake.head.is_empty() { "default" } else { snake.head.as_str() };
-                                    @let display_tail = if snake.tail.is_empty() { "default" } else { snake.tail.as_str() };
-                                    @let raw_color = if snake.color.is_empty() { "#888888" } else { snake.color.as_str() };
-                                    @let url_color = if let Some(hex) = raw_color.strip_prefix('#') { format!("%23{hex}") } else { raw_color.to_string() };
-                                    @let avatar_url = format!(
-                                        "https://exporter.battlesnake.com/avatars/head:{}/tail:{}/color:{}/320x100.svg",
-                                        display_head, display_tail, url_color
-                                    );
-                                    img src=(avatar_url) alt=(format!("{} snake preview", snake.name))
-                                        style="max-width:320px;height:auto;display:block;margin-bottom:4px;" {}
-                                    span class="text-muted small" {
-                                        "Head: " (display_head) " · Tail: " (display_tail) " · Color: " (raw_color)
-                                    }
-                                }
-                                (snake_tag_chips(&snake_tags))
-                                @if is_owner {
-                                    p class="mt-2" {
-                                        "URL: "
-                                        a href=(snake.url) target="_blank" { (snake.url) }
-                                    }
-                                }
-                                p { "Created: " (snake.created_at.format("%Y-%m-%d %H:%M")) }
-                            }
-                            @if is_owner {
-                                div {
-                                    form action={"/battlesnakes/"(battlesnake_id)"/test"} method="post" class="inline" style="display: inline;" {
-                                        button type="submit" class="btn btn-sm btn-info" { "Test Snake" }
-                                    }
-                                    a href={"/battlesnakes/"(battlesnake_id)"/edit"} class="btn btn-sm btn-primary" { "Edit" }
-                                    form action={"/battlesnakes/"(battlesnake_id)"/delete"} method="post" class="inline" style="display: inline;" {
-                                        button type="submit" class="btn btn-sm btn-danger" onclick="return confirm('Are you sure you want to delete this battlesnake?');" { "Delete" }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Statistics Section
-                h2 { "Statistics" }
-
-                div class="d-flex" style="gap: 16px; flex-wrap: wrap; margin-bottom: 20px;" {
-                    div class="card mb-4" style="flex: 1; min-width: 150px;" {
-                        div class="card-body" {
-                            h5 { "Games Played" }
-                            p style="font-size: 2em; margin: 0;" { (stats.total_games) }
-                        }
-                    }
-                    div class="card mb-4" style="flex: 1; min-width: 150px;" {
-                        div class="card-body" {
-                            h5 { "Win Rate" }
-                            p style="font-size: 2em; margin: 0;" {
-                                @if stats.finished_games > 0 {
-                                    (format!("{:.1}%", stats.win_rate))
-                                } @else {
-                                    "N/A"
-                                }
-                            }
-                        }
-                    }
-                    div class="card mb-4" style="flex: 1; min-width: 150px;" {
-                        div class="card-body" {
-                            h5 { "Wins" }
-                            p style="font-size: 2em; margin: 0;" {
-                                span class="badge bg-success text-white" { (stats.wins) }
-                            }
-                        }
-                    }
-                    div class="card mb-4" style="flex: 1; min-width: 150px;" {
-                        div class="card-body" {
-                            h5 { "Avg. Placement" }
-                            p style="font-size: 2em; margin: 0;" {
-                                @if stats.finished_games > 0 {
-                                    (format!("{:.1}", stats.average_placement))
-                                } @else {
-                                    "N/A"
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Placement Distribution
-                @if stats.finished_games > 0 {
-                    div class="card mb-4" {
-                        div class="card-body" {
-                            h5 { "Placement Distribution" }
-                            div class="d-flex" style="gap: 16px;" {
-                                span { "🥇 1st: " (stats.wins) }
-                                span { "🥈 2nd: " (stats.second_places) }
-                                span { "🥉 3rd: " (stats.third_places) }
-                                span { "4th: " (stats.fourth_places) }
-                            }
-                        }
-                    }
-                }
-
-                // Leaderboard Participation
-                @if !leaderboard_entries.is_empty() {
-                    h2 { "Leaderboard Participation" }
-                    table class="table" {
-                        thead {
-                            tr {
-                                th { "Leaderboard" }
-                                th { "Rating" }
-                                th { "Games" }
-                                th { "1st Place %" }
-                                th { "Status" }
-                                th { "" }
-                            }
-                        }
-                        tbody {
-                            @for entry in &leaderboard_entries {
-                                tr {
-                                    td { (entry.leaderboard_name) }
-                                    td { (format!("{:.1}", entry.display_score)) }
-                                    td { (entry.games_played) }
-                                    td {
-                                        @if entry.games_played > 0 {
-                                            (format!("{:.0}%", (entry.first_place_finishes as f64 / entry.games_played as f64) * 100.0))
-                                        } @else {
-                                            "N/A"
-                                        }
-                                    }
-                                    td {
-                                        @if entry.disabled_at.is_some() {
-                                            span class="badge bg-secondary text-white" { "Paused" }
-                                        } @else {
-                                            span class="badge bg-success text-white" { "Active" }
-                                        }
-                                    }
-                                    td {
-                                        a href={"/leaderboards/"(entry.leaderboard_id)"/entries/"(entry.leaderboard_entry_id)} class="btn btn-sm btn-info" { "Details" }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Game History Table
-                h2 { "Game History" }
-
-                @if history.is_empty() {
-                    div class="alert alert-info" {
-                        p { "No games played yet." }
-                    }
-                } @else {
-                    div class="table-responsive" {
-                        table class="table table-striped" {
-                            thead {
-                                tr {
-                                    th { "Game Type" }
-                                    th { "Board Size" }
-                                    th { "Snakes" }
-                                    th { "Placement" }
-                                    th { "Winner" }
-                                    th { "Date" }
-                                    th { "Actions" }
-                                }
-                            }
-                            tbody {
-                                @for entry in &history {
-                                    tr {
-                                        td { (entry.game_type.as_str()) }
-                                        td { (entry.board_size.as_str()) }
-                                        td { (entry.snake_count) }
-                                        td {
-                                            @if let Some(placement) = entry.placement {
-                                                @match placement {
-                                                    1 => span class="badge bg-warning text-dark" { "🥇 1st" },
-                                                    2 => span class="badge bg-secondary text-white" { "🥈 2nd" },
-                                                    3 => span class="badge bg-danger text-white" { "🥉 3rd" },
-                                                    _ => span class="badge bg-dark text-white" { (placement) "th" },
-                                                }
-                                            } @else {
-                                                span class="badge bg-info text-dark" { "In Progress" }
-                                            }
-                                        }
-                                        td {
-                                            @if let Some(winner) = &entry.winner_name {
-                                                (winner)
-                                            } @else {
-                                                @if entry.status == crate::models::game::GameStatus::Finished {
-                                                    span class="badge bg-secondary text-white" { "No Winner" }
-                                                } @else {
-                                                    span class="badge bg-info text-dark" { "In Progress" }
-                                                }
-                                            }
-                                        }
-                                        td { (entry.created_at.format("%Y-%m-%d %H:%M")) }
-                                        td {
-                                            a href={"/games/"(entry.game_id)} class="btn btn-sm btn-primary" { "View" }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Navigation Links
-                div class="mt-4" {
-                    @if is_owner {
-                        a href="/battlesnakes" class="btn btn-secondary ms-2" { "Your Battlesnakes" }
-                    }
-                    @if owner.is_some() {
-                        a href={"/users/"(owner_login)} class="btn btn-secondary ms-2" { "Owner Profile" }
-                    }
-                    @if user.is_some() {
-                        a href="/me" class="btn btn-secondary ms-2" { "My Profile" }
-                    }
-                }
-            }
-        }),
-        flash,
-    ).into_response())
+    // The page shell renders the flash; don't render it again in the body.
+    let flash = page_factory.flash.clone();
+    Ok(page_factory
+        .create_page_with_flash(
+            format!("Battlesnake: {}", snake.name),
+            Box::new(content),
+            flash,
+        )
+        .into_response())
 }
 
 // Run an on-demand health check against a battlesnake's URL (BS-015).
@@ -2010,5 +2087,238 @@ mod deleted_snake_route_tests {
         assert_eq!(status, StatusCode::NOT_FOUND);
         let (status, _) = send(&app, Method::DELETE, &path, Some(&token.secret)).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+}
+
+#[cfg(test)]
+mod profile_page_tests {
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, header},
+    };
+    use tower::ServiceExt as _;
+
+    use super::*;
+    use crate::routes::test_support::{
+        create_user_session, session_user_id, signed_session_cookie,
+    };
+
+    struct Fixture {
+        app: axum::Router,
+        state: AppState,
+        db: PgPool,
+        owner_session: Uuid,
+        visitor_session: Uuid,
+        snake_id: Uuid,
+    }
+
+    impl Fixture {
+        async fn new(db: PgPool, visibility: &str) -> Self {
+            let state = AppState::test_from_pool(db.clone());
+            let app = crate::routes::routes(state.clone())
+                .layer(tower_cookies::CookieManagerLayer::new());
+            let owner_session = create_user_session(&db, 51001, false).await;
+            let visitor_session = create_user_session(&db, 51002, false).await;
+            let owner_id = session_user_id(&db, owner_session).await;
+            let snake_id: Uuid = sqlx::query_scalar(
+                "INSERT INTO battlesnakes (user_id, name, url, visibility)
+                 VALUES ($1, 'Profile Snake', 'https://snake.example.com/api', $2)
+                 RETURNING battlesnake_id",
+            )
+            .bind(owner_id)
+            .bind(visibility)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+            Self {
+                app,
+                state,
+                db,
+                owner_session,
+                visitor_session,
+                snake_id,
+            }
+        }
+
+        async fn get(&self, session: Option<Uuid>) -> (StatusCode, String) {
+            let mut builder =
+                Request::builder().uri(format!("/battlesnakes/{}/profile", self.snake_id));
+            if let Some(session_id) = session {
+                builder = builder.header(
+                    header::COOKIE,
+                    format!(
+                        "{}={}",
+                        session::SESSION_COOKIE_NAME,
+                        signed_session_cookie(&self.state, session_id)
+                    ),
+                );
+            }
+            let response = self
+                .app
+                .clone()
+                .oneshot(builder.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let status = response.status();
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            (status, String::from_utf8(body.to_vec()).unwrap())
+        }
+
+        async fn deactivate(&self) {
+            sqlx::query(
+                "INSERT INTO snake_health_status (battlesnake_id, consecutive_failures, last_failure, deactivated_at)
+                 VALUES ($1, 4, 'POST /move timed out', NOW())",
+            )
+            .bind(self.snake_id)
+            .execute(&self.db)
+            .await
+            .unwrap();
+        }
+    }
+
+    fn challenge_form(snake_id: Uuid) -> String {
+        format!(r#"action="/battlesnakes/{snake_id}/challenge""#)
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn owner_sees_management_actions_url_and_pause_notice(db: PgPool) {
+        let fx = Fixture::new(db, "public").await;
+        fx.deactivate().await;
+
+        let (status, html) = fx.get(Some(fx.owner_session)).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(html.contains(r#"<a href="/battlesnakes">Your Battlesnakes</a>"#));
+        for action in ["test", "delete", "reactivate"] {
+            assert!(
+                html.contains(&format!(
+                    r#"action="/battlesnakes/{}/{action}""#,
+                    fx.snake_id
+                )),
+                "owner should get the {action} form"
+            );
+        }
+        assert!(html.contains(&format!(r#"href="/battlesnakes/{}/edit""#, fx.snake_id)));
+        assert!(html.contains("https://snake.example.com/api"));
+        assert!(html.contains("Paused from leaderboard matchmaking."));
+        assert!(html.contains("POST /move timed out"));
+        assert!(!html.contains(&challenge_form(fx.snake_id)));
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn visitors_can_challenge_but_never_see_owner_details(db: PgPool) {
+        let fx = Fixture::new(db, "public").await;
+        fx.deactivate().await;
+
+        let (status, html) = fx.get(Some(fx.visitor_session)).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(html.contains(&challenge_form(fx.snake_id)));
+        assert!(html.contains(r#"<a href="/snakes">Snakes</a>"#));
+        assert!(
+            !html.contains("https://snake.example.com/api"),
+            "URL is owner-only"
+        );
+        assert!(!html.contains("Paused from leaderboard matchmaking."));
+        assert!(!html.contains(&format!(r#"action="/battlesnakes/{}/delete""#, fx.snake_id)));
+        assert!(!html.contains(&format!(r#"href="/battlesnakes/{}/edit""#, fx.snake_id)));
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn anonymous_visitors_are_asked_to_sign_in_to_challenge(db: PgPool) {
+        let fx = Fixture::new(db, "public").await;
+
+        let (status, html) = fx.get(None).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(html.contains("Sign in to challenge"));
+        assert!(!html.contains(&challenge_form(fx.snake_id)));
+        assert!(!html.contains("https://snake.example.com/api"));
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn private_snakes_offer_no_challenge(db: PgPool) {
+        let fx = Fixture::new(db, "private").await;
+
+        let (_, visitor) = fx.get(Some(fx.visitor_session)).await;
+        let (_, anonymous) = fx.get(None).await;
+
+        for html in [visitor, anonymous] {
+            assert!(html.contains("Private"));
+            assert!(!html.contains(&challenge_form(fx.snake_id)));
+            assert!(!html.contains("Sign in to challenge"));
+        }
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn flash_message_renders_once(db: PgPool) {
+        let fx = Fixture::new(db, "public").await;
+        session::set_flash_message(
+            &fx.db,
+            fx.owner_session,
+            "Battlesnake updated successfully!".to_string(),
+            session::FLASH_TYPE_SUCCESS,
+        )
+        .await
+        .unwrap();
+
+        let (_, html) = fx.get(Some(fx.owner_session)).await;
+
+        assert_eq!(html.matches("Battlesnake updated successfully!").count(), 1);
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn leaderboard_games_feed_the_latency_chart(db: PgPool) {
+        let fx = Fixture::new(db, "public").await;
+        let game_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO games (board_size, game_type, status) VALUES ('11x11', 'Standard', 'finished')
+             RETURNING game_id",
+        )
+        .fetch_one(&fx.db)
+        .await
+        .unwrap();
+        let game_battlesnake_id: Uuid = sqlx::query_scalar(
+            "WITH entry AS (
+                 INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id)
+                 SELECT leaderboard_id, $2 FROM leaderboards ORDER BY created_at LIMIT 1
+                 RETURNING leaderboard_entry_id
+             )
+             INSERT INTO game_battlesnakes (game_id, leaderboard_entry_id)
+             SELECT $1, leaderboard_entry_id FROM entry
+             RETURNING game_battlesnake_id",
+        )
+        .bind(game_id)
+        .bind(fx.snake_id)
+        .fetch_one(&fx.db)
+        .await
+        .unwrap();
+        for (turn, latency) in [(0, Some(40)), (1, Some(60)), (2, None)] {
+            let turn_id: Uuid = sqlx::query_scalar(
+                "INSERT INTO turns (game_id, turn_number) VALUES ($1, $2) RETURNING turn_id",
+            )
+            .bind(game_id)
+            .bind(turn)
+            .fetch_one(&fx.db)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO snake_turns (turn_id, game_battlesnake_id, direction, latency_ms, timed_out)
+                 VALUES ($1, $2, 'up', $3, $4)",
+            )
+            .bind(turn_id)
+            .bind(game_battlesnake_id)
+            .bind(latency)
+            .bind(latency.is_none())
+            .execute(&fx.db)
+            .await
+            .unwrap();
+        }
+
+        let (_, html) = fx.get(None).await;
+
+        assert!(html.contains(r#"class="latency-chart""#));
+        assert!(html.contains(&format!(r#"href="/games/{game_id}""#)));
+        assert!(html.contains("1 of 3 moves timed out"));
+        assert!(html.contains("p95 Latency"));
     }
 }

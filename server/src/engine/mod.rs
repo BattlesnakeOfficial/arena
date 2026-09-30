@@ -16,6 +16,9 @@ use crate::models::game_battlesnake::GameBattlesnakeWithDetails;
 
 pub const MAX_TURNS: i32 = 5000;
 
+/// Per-request budget every game gives a snake to answer `/move`, in ms.
+pub const MOVE_TIMEOUT_MS: i64 = 500;
+
 /// Metadata about the game that lives alongside the board state.
 ///
 /// This replaces the `NestedGame` / `Game` wrapper from `battlesnake-game-types`.
@@ -164,7 +167,7 @@ pub fn create_initial_game(
         meta: GameMeta {
             game_id: game_id.to_string(),
             ruleset_name: ruleset_name.to_string(),
-            timeout: 500,
+            timeout: MOVE_TIMEOUT_MS,
             settings,
             royale,
         },

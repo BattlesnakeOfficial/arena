@@ -1284,3 +1284,73 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
   text-transform: uppercase;
   letter-spacing: .12em;
 }
+
+/* --- page: snake profile (/battlesnakes/{id}/profile) ---------------------- */
+
+/* identity header */
+.snake-profile .page-head { align-items: center; }
+.snake-profile .snake-preview {
+  width: 128px;
+  height: 40px;
+  object-fit: contain;
+  padding: 10px 12px;
+  background: var(--pill);
+  border: 1px solid var(--hairline);
+  border-radius: 14px;
+  box-sizing: content-box;
+  flex-shrink: 0;
+}
+.snake-profile .snake-id { min-width: 0; }
+.snake-profile .snake-id h1 { overflow-wrap: anywhere; }
+.snake-profile .page-head .sub { padding-bottom: 0; margin-top: 2px; }
+.snake-profile .owner-line { display: flex; align-items: center; flex-wrap: wrap; gap: 0 6px; }
+.snake-profile .owner-line .owner-avatar { margin-right: 0; }
+.snake-profile .snake-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; margin-top: 10px; font-family: var(--mono); font-size: 12.5px; color: var(--muted); }
+.snake-profile .snake-meta .chip { display: inline-block; width: 22px; height: 14px; border-radius: 4px 8px 8px 4px; margin-right: 6px; vertical-align: -3px; }
+.snake-profile .snake-meta .chip::after { width: 3px; height: 3px; right: 4px; top: 4px; }
+.snake-profile .snake-id .snake-tags { margin-top: 10px; }
+.snake-profile .snake-url { margin-top: 8px; max-width: 460px; }
+.snake-profile .head-actions { padding-bottom: 0; align-self: center; }
+.snake-profile .head-actions form { margin: 0; }
+
+/* owner notice when the health sweeper paused matchmaking */
+.snake-profile .snake-paused { margin-top: 24px; display: grid; gap: 8px; justify-items: start; }
+.snake-profile .snake-paused .fine { color: var(--muted); font-size: 13.5px; }
+
+/* stat band + tables */
+.snake-profile .stats { margin-top: 28px; border-top: 1px solid var(--hairline); }
+.snake-profile .stat-detail { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 8px; font-family: var(--mono); font-size: 12.5px; color: var(--muted); }
+.snake-profile .stat-detail .warn { color: var(--down); }
+.snake-profile table.data td .sub { display: block; color: var(--muted); font-family: var(--mono); font-size: 12px; margin-top: 2px; }
+
+/* move latency chart */
+.latency-summary { margin: 10px 0 12px; }
+.latency-summary .latency-timeouts { color: var(--down); }
+.latency-chart { display: block; width: 100%; height: auto; max-height: 280px; }
+.latency-chart .grid { stroke: var(--hairline); stroke-width: 1; }
+.latency-chart .timeout-line { stroke: var(--down); stroke-width: 1; stroke-dasharray: 4 4; }
+.latency-chart .lbl { fill: var(--muted); font-family: var(--mono); font-size: 13px; }
+.latency-chart .timeout-lbl { fill: var(--down); }
+.latency-chart .hit { fill: transparent; }
+.latency-chart a:hover .hit, .latency-chart a:focus .hit { fill: var(--hover); }
+.latency-chart .plot { pointer-events: none; }
+.latency-chart .p50, .latency-chart .p95 { fill: none; stroke-width: 2; stroke-linejoin: round; }
+.latency-chart .p95 { stroke: var(--pink); }
+.latency-chart .p50 { stroke: #3ca7a0; }
+.latency-chart .pt-p95 { fill: var(--pink); }
+.latency-chart .pt-p50 { fill: #3ca7a0; }
+.latency-chart .timeout { fill: var(--down); }
+.latency-legend { display: flex; flex-wrap: wrap; gap: 8px 16px; margin-top: 8px; color: var(--muted); font-size: 14px; }
+.latency-legend .swatch { display: inline-block; width: 12px; height: 12px; margin-right: 6px; border-radius: 2px; vertical-align: -1px; }
+.latency-legend .swatch.p95 { background: var(--pink); }
+.latency-legend .swatch.p50 { background: #3ca7a0; }
+.latency-legend .swatch.timeout { background: var(--down); border-radius: 50%; }
+
+@media (max-width: 640px) {
+  .snake-profile .page-head { gap: 16px; }
+  .snake-profile .snake-preview { width: 96px; height: 30px; padding: 8px 10px; }
+  .snake-profile .head-actions { margin-left: 0; width: 100%; }
+  .snake-profile .head-actions .btn { padding: 11px 20px; }
+  /* The chart scales down to fit; enlarge its labels so they stay readable at ~375px. */
+  .latency-chart .lbl { font-size: 22px; }
+}

@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO game_battlesnakes (game_id, leaderboard_entry_id, created_at)\n                 SELECT $1, $2, created_at FROM games WHERE game_id = $1\n                 RETURNING game_battlesnake_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "game_battlesnake_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "fc4280451ddc6732467118e49f5f9a5768413106c8ffd139fd0640fde6725d51"
+}

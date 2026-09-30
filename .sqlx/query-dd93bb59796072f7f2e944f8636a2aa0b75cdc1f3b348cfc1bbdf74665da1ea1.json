@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO turns (game_id, turn_number)\n                 VALUES ($1, (SELECT COUNT(*)::int FROM turns WHERE game_id = $1))\n                 RETURNING turn_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "turn_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "dd93bb59796072f7f2e944f8636a2aa0b75cdc1f3b348cfc1bbdf74665da1ea1"
+}

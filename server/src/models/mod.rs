@@ -13,6 +13,7 @@ pub mod saved_game;
 pub mod session;
 pub mod shout_moderation;
 pub mod snake_health_status;
+pub mod snake_latency;
 pub mod stats;
 pub mod tag;
 pub mod tournament;
