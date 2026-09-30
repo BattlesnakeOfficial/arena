@@ -13,6 +13,8 @@ test.describe('Create Battlesnake', () => {
     await authenticatedPage.getByLabel('Name').fill(uniqueName);
     await authenticatedPage.getByLabel('URL').fill(snakeUrl);
     await authenticatedPage.getByLabel('Visibility').selectOption('public');
+    await expect(authenticatedPage.getByLabel('Engine region')).toHaveValue('us-west1');
+    await authenticatedPage.getByLabel('Engine region').selectOption('europe-west4');
 
     // Submit the form
     await authenticatedPage.getByRole('button', { name: 'Create Battlesnake' }).click();

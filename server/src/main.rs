@@ -72,6 +72,13 @@ fn main() -> color_eyre::Result<()> {
             .block_on(async { play_import::run_import().await });
     }
 
+    if std::env::args().nth(1).as_deref() == Some("export-play-regions") {
+        return tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?
+            .block_on(play_import::export_play_regions());
+    }
+
     // Read all configuration once, here, before anything else. Downstream
     // code takes values from this struct (via AppState) rather than
     // reaching for the environment itself.

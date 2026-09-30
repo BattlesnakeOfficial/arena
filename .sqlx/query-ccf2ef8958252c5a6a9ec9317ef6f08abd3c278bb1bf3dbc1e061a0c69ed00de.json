@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE battlesnakes SET engine_region = 'europe-west4' WHERE user_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ccf2ef8958252c5a6a9ec9317ef6f08abd3c278bb1bf3dbc1e061a0c69ed00de"
+}

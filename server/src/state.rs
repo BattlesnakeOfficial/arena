@@ -21,6 +21,10 @@ pub struct AppState {
     pub game_channels: GameChannels,
     /// HTTP client for calling snake APIs
     pub http_client: reqwest::Client,
+    pub proxy_east_client: reqwest::Client,
+    pub proxy_europe_client: reqwest::Client,
+    pub proxy_east_health_client: reqwest::Client,
+    pub proxy_europe_health_client: reqwest::Client,
     /// Transactional email sender (no-op until Mailgun is configured)
     pub mailer: Mailer,
     /// Discord webhook notifier (no-op until DISCORD_WEBHOOK_URL is configured)
@@ -114,6 +118,22 @@ impl AppState {
             .build()
             .wrap_err("Failed to create HTTP client")?;
         tracing::info!("HTTP client initialized for snake API calls");
+        let proxy_client = |timeout| -> cja::Result<reqwest::Client> {
+            reqwest::Client::builder()
+                .timeout(timeout)
+                .pool_max_idle_per_host(80)
+                .build()
+                .wrap_err("Failed to create engine proxy client")
+        };
+        let proxy_east_client = proxy_client(std::time::Duration::from_secs(2))?;
+        let proxy_europe_client = proxy_client(std::time::Duration::from_secs(2))?;
+        let proxy_east_health_client = proxy_client(std::time::Duration::from_secs(6))?;
+        let proxy_europe_health_client = proxy_client(std::time::Duration::from_secs(6))?;
+        if config.engine_proxy.token.is_none() {
+            tracing::warn!(
+                "ENGINE_PROXY_AUTH_TOKEN is unset; regional snakes will be called directly"
+            );
+        }
 
         // Optional: Mailgun transactional email (disabled until configured).
         // Uses its own client — the snake client's 600ms timeout is far too
@@ -176,6 +196,10 @@ impl AppState {
             engine_db,
             game_channels: GameChannels::new(),
             http_client,
+            proxy_east_client,
+            proxy_europe_client,
+            proxy_east_health_client,
+            proxy_europe_health_client,
             mailer,
             discord,
             moderation,
@@ -201,6 +225,10 @@ impl AppState {
             engine_db: None,
             game_channels: GameChannels::new(),
             http_client: reqwest::Client::new(),
+            proxy_east_client: reqwest::Client::new(),
+            proxy_europe_client: reqwest::Client::new(),
+            proxy_east_health_client: reqwest::Client::new(),
+            proxy_europe_health_client: reqwest::Client::new(),
             mailer: crate::email::Mailer::disabled(),
             discord: crate::discord::DiscordNotifier::disabled(),
             moderation: crate::moderation::ModerationJudge::disabled(),

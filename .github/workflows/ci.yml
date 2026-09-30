@@ -86,6 +86,7 @@ jobs:
         env:
           EYES_ORG_ID: ${{ secrets.EYES_ORG_ID }}
           EYES_APP_ID: ${{ secrets.EYES_APP_ID }}
+          ENGINE_PROXY_AUTH_TOKEN: ${{ secrets.ENGINE_PROXY_AUTH_TOKEN }}
         run: |
           # Eyes telemetry is keyed by these two UUIDs. They live in repo
           # secrets rather than this file because the Eyes ingest endpoint is
@@ -99,6 +100,10 @@ jobs:
             update_env_vars="$update_env_vars,EYES_ORG_ID=$EYES_ORG_ID,EYES_APP_ID=$EYES_APP_ID"
           else
             echo "::warning::EYES_ORG_ID/EYES_APP_ID not set -- deploying without Eyes telemetry"
+          fi
+
+          if [ -n "$ENGINE_PROXY_AUTH_TOKEN" ]; then
+            update_env_vars="$update_env_vars,ENGINE_PROXY_AUTH_TOKEN=$ENGINE_PROXY_AUTH_TOKEN"
           fi
 
           gcloud run services update ${{ secrets.GCP_CLOUD_RUN_SERVICE }} \

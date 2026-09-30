@@ -37,6 +37,53 @@ impl FromStr for Visibility {
     }
 }
 
+/// Region where the engine should measure snake requests. West calls directly.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[sqlx(type_name = "text")]
+pub enum EngineRegion {
+    #[default]
+    #[serde(rename = "us-west1")]
+    #[sqlx(rename = "us-west1")]
+    UsWest1,
+    #[serde(rename = "us-east4")]
+    #[sqlx(rename = "us-east4")]
+    UsEast4,
+    #[serde(rename = "europe-west4")]
+    #[sqlx(rename = "europe-west4")]
+    EuropeWest4,
+}
+
+impl EngineRegion {
+    pub const ALL: [Self; 3] = [Self::UsWest1, Self::UsEast4, Self::EuropeWest4];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::UsWest1 => "us-west1",
+            Self::UsEast4 => "us-east4",
+            Self::EuropeWest4 => "europe-west4",
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::UsWest1 => "US-West (Oregon)",
+            Self::UsEast4 => "US-East (Virginia)",
+            Self::EuropeWest4 => "Europe (Netherlands)",
+        }
+    }
+}
+
+impl FromStr for EngineRegion {
+    type Err = color_eyre::eyre::Report;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|region| region.as_str() == s)
+            .ok_or_else(|| color_eyre::eyre::eyre!("Invalid engine region: {s}"))
+    }
+}
+
 // Default implementation for Visibility - default to Public
 
 // Battlesnake model for our application
@@ -47,6 +94,7 @@ pub struct Battlesnake {
     pub name: String,
     pub url: String,
     pub visibility: Visibility,
+    pub engine_region: EngineRegion,
     pub color: String,
     pub head: String,
     pub tail: String,
@@ -134,6 +182,8 @@ pub struct CreateBattlesnake {
     pub name: String,
     pub url: String,
     pub visibility: Visibility,
+    #[serde(default)]
+    pub engine_region: EngineRegion,
 }
 
 // For updating an existing battlesnake
@@ -142,6 +192,8 @@ pub struct UpdateBattlesnake {
     pub name: String,
     pub url: String,
     pub visibility: Visibility,
+    #[serde(default)]
+    pub engine_region: Option<EngineRegion>,
 }
 
 // Database functions for battlesnake management
@@ -160,6 +212,7 @@ pub async fn get_battlesnakes_by_user_id(
             name,
             url,
             visibility as "visibility: Visibility",
+            engine_region as "engine_region: EngineRegion",
             color,
             head,
             tail,
@@ -193,6 +246,7 @@ pub async fn get_battlesnake_by_id(
             name,
             url,
             visibility as "visibility: Visibility",
+            engine_region as "engine_region: EngineRegion",
             color,
             head,
             tail,
@@ -226,15 +280,17 @@ pub async fn create_battlesnake(
             user_id,
             name,
             url,
-            visibility
+            visibility,
+            engine_region
         )
-        VALUES ($1, $2, $3, $4)
+        VALUES ($1, $2, $3, $4, $5)
         RETURNING
             battlesnake_id,
             user_id,
             name,
             url,
             visibility as "visibility: Visibility",
+            engine_region as "engine_region: EngineRegion",
             color,
             head,
             tail,
@@ -244,7 +300,8 @@ pub async fn create_battlesnake(
         user_id,
         data.name,
         data.url,
-        visibility_str
+        visibility_str,
+        data.engine_region.as_str()
     )
     .fetch_one(pool)
     .await;
@@ -285,7 +342,8 @@ pub async fn update_battlesnake(
         SET
             name = $3,
             url = $4,
-            visibility = $5
+            visibility = $5,
+            engine_region = COALESCE($6, engine_region)
         WHERE
             battlesnake_id = $1
             AND user_id = $2
@@ -296,6 +354,7 @@ pub async fn update_battlesnake(
             name,
             url,
             visibility as "visibility: Visibility",
+            engine_region as "engine_region: EngineRegion",
             color,
             head,
             tail,
@@ -306,7 +365,8 @@ pub async fn update_battlesnake(
         user_id,
         data.name,
         data.url,
-        visibility_str
+        visibility_str,
+        data.engine_region.map(EngineRegion::as_str)
     )
     .fetch_one(pool)
     .await;
@@ -515,6 +575,7 @@ pub async fn get_public_battlesnakes(pool: &PgPool) -> cja::Result<Vec<Battlesna
             name,
             url,
             visibility as "visibility: Visibility",
+            engine_region as "engine_region: EngineRegion",
             color,
             head,
             tail,
@@ -631,6 +692,7 @@ pub async fn get_available_battlesnakes(
             name,
             url,
             visibility as "visibility: Visibility",
+            engine_region as "engine_region: EngineRegion",
             color,
             head,
             tail,
@@ -1074,6 +1136,7 @@ mod tests {
                 gone,
                 owner,
                 UpdateBattlesnake {
+                    engine_region: None,
                     name: "Revived".to_string(),
                     url: "http://localhost:8000".to_string(),
                     visibility: Visibility::Public,
@@ -1107,6 +1170,7 @@ mod tests {
             name: "Reuse".to_string(),
             url: "http://localhost:8000".to_string(),
             visibility: Visibility::Public,
+            engine_region: EngineRegion::UsWest1,
         };
         let second = create_battlesnake(&pool, owner, data.clone()).await?;
         assert_ne!(second.battlesnake_id, first);

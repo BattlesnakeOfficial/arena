@@ -3,18 +3,180 @@
 //! This module handles all HTTP communication with snake servers following
 //! the official Battlesnake API specification.
 
-use reqwest::Client;
+use reqwest::{Client, Method, StatusCode, header::HeaderMap};
 use rules::Direction;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use url::Url;
 
+use crate::config::EngineProxyConfig;
 use crate::engine::EngineGame;
 use crate::engine::frame::SnakeCustomizations;
+use crate::models::battlesnake::EngineRegion;
 use crate::wire;
 
 pub(crate) const BODY_READ_CAP_BYTES: usize = 64 * 1024;
+
+const PROXY_TRANSIT_MARGIN: Duration = Duration::from_millis(300);
+const LATENCY_HEADER: &str = "x-battlesnake-latency-ms";
+const SERVER_ERROR_HEADER: &str = "x-battlesnake-server-error";
+
+#[derive(Clone)]
+pub struct SnakeEndpoint {
+    pub snake_id: String,
+    pub url: String,
+    pub engine_region: EngineRegion,
+}
+
+pub struct ProxyClients<'a> {
+    pub direct: &'a Client,
+    pub east: &'a Client,
+    pub europe: &'a Client,
+    pub config: &'a EngineProxyConfig,
+}
+
+impl ProxyClients<'_> {
+    fn client_for(&self, region: EngineRegion) -> &Client {
+        match region {
+            EngineRegion::UsEast4 => self.east,
+            EngineRegion::EuropeWest4 => self.europe,
+            EngineRegion::UsWest1 => self.direct,
+        }
+    }
+}
+
+pub(crate) enum SnakeRequestRoute {
+    Direct(reqwest::RequestBuilder),
+    Proxied(reqwest::RequestBuilder),
+}
+
+pub(crate) fn build_routed_request(
+    clients: &ProxyClients<'_>,
+    region: EngineRegion,
+    method: Method,
+    target: &str,
+    timeout: Duration,
+) -> SnakeRequestRoute {
+    let Some(token) = clients.config.token.as_ref() else {
+        return SnakeRequestRoute::Direct(clients.direct.request(method, target));
+    };
+    let proxy_url = match region {
+        EngineRegion::UsWest1 => {
+            return SnakeRequestRoute::Direct(clients.direct.request(method, target));
+        }
+        EngineRegion::UsEast4 => &clients.config.us_east4_url,
+        EngineRegion::EuropeWest4 => &clients.config.europe_west4_url,
+    };
+    SnakeRequestRoute::Proxied(
+        clients
+            .client_for(region)
+            .request(method, proxy_url)
+            .header("X-Request-URI", target)
+            .header("X-Battlesnake-Timeout-Ms", timeout.as_millis().to_string())
+            .header("X-Proxy-Authorization", format!("token {token}")),
+    )
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ProxyResponseClass {
+    ProxyFault,
+    SnakeTransportFailure { timed_out: bool, latency_ms: i64 },
+    SnakeResponse { latency_ms: i64 },
+}
+
+pub(crate) fn classify_proxy_response(
+    status: StatusCode,
+    headers: &HeaderMap,
+) -> ProxyResponseClass {
+    let latency = headers
+        .get(LATENCY_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<i64>().ok())
+        .filter(|v| (0..=1_000_000).contains(v));
+    let Some(latency_ms) = latency else {
+        return ProxyResponseClass::ProxyFault;
+    };
+    if headers.contains_key(SERVER_ERROR_HEADER) {
+        ProxyResponseClass::SnakeTransportFailure {
+            timed_out: status == StatusCode::GATEWAY_TIMEOUT,
+            latency_ms,
+        }
+    } else {
+        ProxyResponseClass::SnakeResponse { latency_ms }
+    }
+}
+
+pub(crate) fn log_proxy_fault(region: EngineRegion, kind: &str, status: Option<StatusCode>) {
+    tracing::warn!(region = region.as_str(), kind, status = ?status,
+        "Engine proxy fault, using fallback");
+}
+
+pub(crate) fn log_proxy_auth_failure(region: EngineRegion) {
+    use std::sync::{Mutex, OnceLock};
+    static LAST: OnceLock<Mutex<HashMap<&'static str, (Instant, u64)>>> = OnceLock::new();
+    let now = Instant::now();
+    let mut entries = LAST
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap();
+    let entry = entries
+        .entry(region.as_str())
+        .or_insert((now - Duration::from_secs(61), 0));
+    if now.duration_since(entry.0) >= Duration::from_secs(60) {
+        tracing::error!(
+            region = region.as_str(),
+            suppressed = entry.1,
+            "Engine proxy rejected authorization; retrying snake directly"
+        );
+        *entry = (now, 0);
+    } else {
+        entry.1 += 1;
+    }
+}
+
+pub(crate) enum ProxyCall {
+    Response {
+        class: ProxyResponseClass,
+        status: StatusCode,
+        body: String,
+    },
+    Fault {
+        kind: &'static str,
+    },
+}
+
+pub(crate) async fn execute_proxy(
+    builder: reqwest::RequestBuilder,
+    timeout: Duration,
+) -> ProxyCall {
+    let result = tokio::time::timeout(timeout + PROXY_TRANSIT_MARGIN, async {
+        let response = builder.send().await?;
+        let status = response.status();
+        let class = classify_proxy_response(status, response.headers());
+        // A proxy-auth rejection is a proxy response, not snake content.
+        // Retry direct without waiting for a broken proxy's response body.
+        if status == StatusCode::PROXY_AUTHENTICATION_REQUIRED
+            && class == ProxyResponseClass::ProxyFault
+        {
+            return Ok::<_, reqwest::Error>((class, status, String::new()));
+        }
+        let body = read_body_capped(response, BODY_READ_CAP_BYTES).await?;
+        Ok::<_, reqwest::Error>((class, status, body))
+    })
+    .await;
+    match result {
+        Ok(Ok((class, status, body))) => ProxyCall::Response {
+            class,
+            status,
+            body,
+        },
+        Ok(Err(_)) => ProxyCall::Fault { kind: "transport" },
+        Err(_) => ProxyCall::Fault {
+            kind: "local guard",
+        },
+    }
+}
 
 /// Maximum length of a shout kept after sanitization. Longer shouts are
 /// truncated on a char boundary. 256 chars is far beyond any real shout
@@ -516,12 +678,812 @@ pub async fn request_info_parallel(
         .collect()
 }
 
+pub async fn request_move_routed(
+    clients: &ProxyClients<'_>,
+    endpoint: &SnakeEndpoint,
+    game: &EngineGame,
+    timeout: Duration,
+    last_direction: Option<Direction>,
+    snake_contexts: &HashMap<String, wire::SnakeContext>,
+    customizations: &HashMap<String, SnakeCustomizations>,
+) -> MoveResult {
+    let target = build_endpoint_url(&endpoint.url, "move");
+    let route = build_routed_request(
+        clients,
+        endpoint.engine_region,
+        Method::POST,
+        &target,
+        timeout,
+    );
+    let SnakeRequestRoute::Proxied(builder) = route else {
+        return request_move(
+            clients.direct,
+            &endpoint.url,
+            game,
+            &endpoint.snake_id,
+            timeout,
+            last_direction,
+            snake_contexts,
+            customizations,
+        )
+        .await;
+    };
+    let body = build_request_for_snake(game, &endpoint.snake_id, snake_contexts, customizations);
+    let fallback = |latency_ms, timed_out| MoveResult {
+        snake_id: endpoint.snake_id.clone(),
+        direction: last_direction.unwrap_or(Direction::Up),
+        latency_ms,
+        timed_out,
+        shout: None,
+    };
+    match execute_proxy(builder.json(&body), timeout).await {
+        ProxyCall::Response {
+            class: ProxyResponseClass::SnakeResponse { latency_ms },
+            body,
+            ..
+        } => match serde_json::from_str::<MoveResponse>(&body) {
+            Ok(moved) => MoveResult {
+                snake_id: endpoint.snake_id.clone(),
+                direction: parse_direction(&moved.direction)
+                    .unwrap_or_else(|| last_direction.unwrap_or(Direction::Up)),
+                latency_ms: Some(latency_ms),
+                timed_out: false,
+                shout: sanitize_shout(moved.shout),
+            },
+            Err(error) => {
+                invalid_move_response(&endpoint.snake_id, last_direction, latency_ms, &error)
+            }
+        },
+        ProxyCall::Response {
+            class: ProxyResponseClass::SnakeTransportFailure { timed_out, .. },
+            status,
+            ..
+        } => {
+            if timed_out {
+                tracing::warn!(
+                    snake_id = %endpoint.snake_id,
+                    timeout_ms = timeout.as_millis(),
+                    region = endpoint.engine_region.as_str(),
+                    "Snake timed out, using fallback"
+                );
+            } else {
+                tracing::warn!(
+                    snake_id = %endpoint.snake_id,
+                    region = endpoint.engine_region.as_str(),
+                    %status,
+                    "Network error calling snake, using fallback"
+                );
+            }
+            fallback(None, true)
+        }
+        ProxyCall::Response {
+            class: ProxyResponseClass::ProxyFault,
+            status,
+            ..
+        } if status == StatusCode::PROXY_AUTHENTICATION_REQUIRED => {
+            log_proxy_auth_failure(endpoint.engine_region);
+            request_move(
+                clients.direct,
+                &endpoint.url,
+                game,
+                &endpoint.snake_id,
+                timeout,
+                last_direction,
+                snake_contexts,
+                customizations,
+            )
+            .await
+        }
+        ProxyCall::Response {
+            class: ProxyResponseClass::ProxyFault,
+            status,
+            ..
+        } => {
+            log_proxy_fault(endpoint.engine_region, "response", Some(status));
+            fallback(None, false)
+        }
+        ProxyCall::Fault { kind } => {
+            log_proxy_fault(endpoint.engine_region, kind, None);
+            fallback(None, false)
+        }
+    }
+}
+
+async fn request_lifecycle_routed(
+    clients: &ProxyClients<'_>,
+    endpoint: &SnakeEndpoint,
+    game: &EngineGame,
+    path: &str,
+    timeout: Duration,
+    snake_contexts: &HashMap<String, wire::SnakeContext>,
+    customizations: &HashMap<String, SnakeCustomizations>,
+) {
+    let target = build_endpoint_url(&endpoint.url, path);
+    let route = build_routed_request(
+        clients,
+        endpoint.engine_region,
+        Method::POST,
+        &target,
+        timeout,
+    );
+    let SnakeRequestRoute::Proxied(builder) = route else {
+        if path == "start" {
+            request_start(
+                clients.direct,
+                &endpoint.url,
+                game,
+                &endpoint.snake_id,
+                timeout,
+                snake_contexts,
+                customizations,
+            )
+            .await;
+        } else {
+            request_end(
+                clients.direct,
+                &endpoint.url,
+                game,
+                &endpoint.snake_id,
+                timeout,
+                snake_contexts,
+                customizations,
+            )
+            .await;
+        }
+        return;
+    };
+    let body = build_request_for_snake(game, &endpoint.snake_id, snake_contexts, customizations);
+    match execute_proxy(builder.json(&body), timeout).await {
+        ProxyCall::Response {
+            class: ProxyResponseClass::ProxyFault,
+            status,
+            ..
+        } if status == StatusCode::PROXY_AUTHENTICATION_REQUIRED => {
+            log_proxy_auth_failure(endpoint.engine_region);
+            if path == "start" {
+                request_start(
+                    clients.direct,
+                    &endpoint.url,
+                    game,
+                    &endpoint.snake_id,
+                    timeout,
+                    snake_contexts,
+                    customizations,
+                )
+                .await;
+            } else {
+                request_end(
+                    clients.direct,
+                    &endpoint.url,
+                    game,
+                    &endpoint.snake_id,
+                    timeout,
+                    snake_contexts,
+                    customizations,
+                )
+                .await;
+            }
+        }
+        ProxyCall::Response {
+            class: ProxyResponseClass::ProxyFault,
+            status,
+            ..
+        } => {
+            log_proxy_fault(endpoint.engine_region, path, Some(status));
+        }
+        ProxyCall::Fault { kind } => log_proxy_fault(endpoint.engine_region, kind, None),
+        ProxyCall::Response { .. } => {}
+    }
+}
+
+pub async fn request_info_routed(
+    clients: &ProxyClients<'_>,
+    endpoint: &SnakeEndpoint,
+    timeout: Duration,
+) -> Option<SnakeInfoResponse> {
+    let route = build_routed_request(
+        clients,
+        endpoint.engine_region,
+        Method::GET,
+        &endpoint.url,
+        timeout,
+    );
+    let SnakeRequestRoute::Proxied(builder) = route else {
+        return request_info(clients.direct, &endpoint.url, timeout).await;
+    };
+    match execute_proxy(builder, timeout).await {
+        ProxyCall::Response {
+            class: ProxyResponseClass::SnakeResponse { .. },
+            body,
+            ..
+        } => match serde_json::from_str(&body) {
+            Ok(info) => Some(info),
+            Err(error) => {
+                tracing::warn!(
+                    url = %endpoint.url,
+                    region = endpoint.engine_region.as_str(),
+                    %error,
+                    "Failed to parse snake info response"
+                );
+                None
+            }
+        },
+        ProxyCall::Response {
+            class: ProxyResponseClass::ProxyFault,
+            status,
+            ..
+        } if status == StatusCode::PROXY_AUTHENTICATION_REQUIRED => {
+            log_proxy_auth_failure(endpoint.engine_region);
+            request_info(clients.direct, &endpoint.url, timeout).await
+        }
+        ProxyCall::Response {
+            class: ProxyResponseClass::ProxyFault,
+            status,
+            ..
+        } => {
+            log_proxy_fault(endpoint.engine_region, "info", Some(status));
+            None
+        }
+        ProxyCall::Fault { kind } => {
+            log_proxy_fault(endpoint.engine_region, kind, None);
+            None
+        }
+        ProxyCall::Response {
+            class: ProxyResponseClass::SnakeTransportFailure { timed_out, .. },
+            status,
+            ..
+        } => {
+            if timed_out {
+                tracing::warn!(
+                    url = %endpoint.url,
+                    region = endpoint.engine_region.as_str(),
+                    "Timeout fetching snake info"
+                );
+            } else {
+                tracing::warn!(
+                    url = %endpoint.url,
+                    region = endpoint.engine_region.as_str(),
+                    %status,
+                    "Network error fetching snake info"
+                );
+            }
+            None
+        }
+    }
+}
+
+pub async fn request_info_routed_parallel(
+    clients: &ProxyClients<'_>,
+    endpoints: &[SnakeEndpoint],
+    timeout: Duration,
+) -> HashMap<String, SnakeInfoResponse> {
+    let results = futures::future::join_all(endpoints.iter().map(|endpoint| async move {
+        (
+            endpoint.snake_id.clone(),
+            request_info_routed(clients, endpoint, timeout).await,
+        )
+    }))
+    .await;
+    results
+        .into_iter()
+        .filter_map(|(id, result)| result.map(|r| (id, r)))
+        .collect()
+}
+
+pub async fn request_start_routed_parallel(
+    clients: &ProxyClients<'_>,
+    game: &EngineGame,
+    endpoints: &[SnakeEndpoint],
+    timeout: Duration,
+    snake_contexts: &HashMap<String, wire::SnakeContext>,
+    customizations: &HashMap<String, SnakeCustomizations>,
+) {
+    futures::future::join_all(endpoints.iter().map(|endpoint| {
+        request_lifecycle_routed(
+            clients,
+            endpoint,
+            game,
+            "start",
+            timeout,
+            snake_contexts,
+            customizations,
+        )
+    }))
+    .await;
+}
+
+pub async fn request_end_routed_parallel(
+    clients: &ProxyClients<'_>,
+    game: &EngineGame,
+    endpoints: &[SnakeEndpoint],
+    timeout: Duration,
+    snake_contexts: &HashMap<String, wire::SnakeContext>,
+    customizations: &HashMap<String, SnakeCustomizations>,
+) {
+    futures::future::join_all(endpoints.iter().map(|endpoint| {
+        request_lifecycle_routed(
+            clients,
+            endpoint,
+            game,
+            "end",
+            timeout,
+            snake_contexts,
+            customizations,
+        )
+    }))
+    .await;
+}
+
+pub async fn request_moves_routed_parallel(
+    clients: &ProxyClients<'_>,
+    game: &EngineGame,
+    endpoints: &[SnakeEndpoint],
+    timeout: Duration,
+    last_moves: &HashMap<String, Direction>,
+    snake_contexts: &HashMap<String, wire::SnakeContext>,
+    customizations: &HashMap<String, SnakeCustomizations>,
+) -> Vec<MoveResult> {
+    futures::future::join_all(
+        game.board
+            .snakes
+            .iter()
+            .filter(|snake| !snake.eliminated_cause.is_eliminated())
+            .filter_map(|snake| {
+                endpoints
+                    .iter()
+                    .find(|e| e.snake_id == snake.id)
+                    .map(|endpoint| {
+                        request_move_routed(
+                            clients,
+                            endpoint,
+                            game,
+                            timeout,
+                            last_moves.get(&snake.id).copied(),
+                            snake_contexts,
+                            customizations,
+                        )
+                    })
+            }),
+    )
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::wire;
     use proptest::prelude::*;
-    use wiremock::matchers::{method, path};
+    use tokio::io::AsyncWriteExt as _;
+    use wiremock::matchers::{header, method, path};
+
+    #[test]
+    fn proxy_response_classification_requires_measured_latency() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(
+            classify_proxy_response(StatusCode::PROXY_AUTHENTICATION_REQUIRED, &headers),
+            ProxyResponseClass::ProxyFault
+        );
+        headers.insert(LATENCY_HEADER, "28".parse().unwrap());
+        assert_eq!(
+            classify_proxy_response(StatusCode::PROXY_AUTHENTICATION_REQUIRED, &headers),
+            ProxyResponseClass::SnakeResponse { latency_ms: 28 }
+        );
+        headers.insert(SERVER_ERROR_HEADER, "true".parse().unwrap());
+        assert_eq!(
+            classify_proxy_response(StatusCode::GATEWAY_TIMEOUT, &headers),
+            ProxyResponseClass::SnakeTransportFailure {
+                timed_out: true,
+                latency_ms: 28
+            }
+        );
+        assert_eq!(
+            classify_proxy_response(StatusCode::BAD_GATEWAY, &headers),
+            ProxyResponseClass::SnakeTransportFailure {
+                timed_out: false,
+                latency_ms: 28
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn routed_move_uses_proxy_headers_and_measured_latency() {
+        let snake = MockServer::start().await;
+        let proxy = MockServer::start().await;
+        let target = format!("{}/move", snake.uri());
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .and(header("X-Request-URI", target.as_str()))
+            .and(header("X-Battlesnake-Timeout-Ms", "500"))
+            .and(header("X-Proxy-Authorization", "token sample-secret"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header(LATENCY_HEADER, "28")
+                    .set_body_string(r#"{"move":"right"}"#),
+            )
+            .expect(1)
+            .mount(&proxy)
+            .await;
+        let config = EngineProxyConfig {
+            token: Some("sample-secret".to_string()),
+            us_east4_url: proxy.uri(),
+            europe_west4_url: proxy.uri(),
+        };
+        let client = Client::new();
+        let clients = ProxyClients {
+            direct: &client,
+            east: &client,
+            europe: &client,
+            config: &config,
+        };
+        let endpoint = SnakeEndpoint {
+            snake_id: "snake-1".to_string(),
+            url: snake.uri(),
+            engine_region: EngineRegion::UsEast4,
+        };
+        let game = create_test_engine_game_with_snakes(vec!["snake-1"]);
+        let result = request_move_routed(
+            &clients,
+            &endpoint,
+            &game,
+            Duration::from_millis(500),
+            Some(Direction::Left),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .await;
+        assert_eq!(result.direction, Direction::Right);
+        assert_eq!(result.latency_ms, Some(28));
+        assert!(!result.timed_out);
+    }
+
+    #[tokio::test]
+    async fn proxy_failure_classes_and_auth_retry() {
+        let snake = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/move"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"move":"up"}"#))
+            .mount(&snake)
+            .await;
+        let game = create_test_engine_game_with_snakes(vec!["snake-1"]);
+        for (status, measured, error, direction, timed_out, latency) in [
+            (504, true, true, Direction::Left, true, None),
+            (502, true, true, Direction::Left, true, None),
+            (407, false, false, Direction::Up, false, Some(0)),
+        ] {
+            let proxy = MockServer::start().await;
+            let mut response = ResponseTemplate::new(status);
+            if measured {
+                response = response.insert_header(LATENCY_HEADER, "35");
+            }
+            if error {
+                response = response.insert_header(SERVER_ERROR_HEADER, "true");
+            }
+            Mock::given(method("POST"))
+                .respond_with(response)
+                .expect(1)
+                .mount(&proxy)
+                .await;
+            let config = EngineProxyConfig {
+                token: Some("sample-secret".to_string()),
+                us_east4_url: proxy.uri(),
+                europe_west4_url: proxy.uri(),
+            };
+            let client = Client::new();
+            let clients = ProxyClients {
+                direct: &client,
+                east: &client,
+                europe: &client,
+                config: &config,
+            };
+            let endpoint = SnakeEndpoint {
+                snake_id: "snake-1".to_string(),
+                url: snake.uri(),
+                engine_region: EngineRegion::UsEast4,
+            };
+            let result = request_move_routed(
+                &clients,
+                &endpoint,
+                &game,
+                Duration::from_millis(500),
+                Some(Direction::Left),
+                &HashMap::new(),
+                &HashMap::new(),
+            )
+            .await;
+            assert_eq!(result.direction, direction);
+            assert_eq!(result.timed_out, timed_out);
+            if status != 407 {
+                assert_eq!(result.latency_ms, latency);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn forwarded_snake_statuses_are_not_proxy_faults() {
+        let game = create_test_engine_game_with_snakes(vec!["snake-1"]);
+        for status in [407, 500, 504] {
+            let proxy = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(
+                    ResponseTemplate::new(status)
+                        .insert_header(LATENCY_HEADER, "41")
+                        .set_body_string(r#"{"move":"down"}"#),
+                )
+                .expect(1)
+                .mount(&proxy)
+                .await;
+            let config = EngineProxyConfig {
+                token: Some("secret".to_string()),
+                us_east4_url: proxy.uri(),
+                europe_west4_url: proxy.uri(),
+            };
+            let client = Client::new();
+            let clients = ProxyClients {
+                direct: &client,
+                east: &client,
+                europe: &client,
+                config: &config,
+            };
+            let endpoint = SnakeEndpoint {
+                snake_id: "snake-1".to_string(),
+                url: "https://unreachable.example".to_string(),
+                engine_region: EngineRegion::UsEast4,
+            };
+            let result = request_move_routed(
+                &clients,
+                &endpoint,
+                &game,
+                Duration::from_millis(500),
+                None,
+                &HashMap::new(),
+                &HashMap::new(),
+            )
+            .await;
+            assert_eq!(result.direction, Direction::Down);
+            assert_eq!(result.latency_ms, Some(41));
+            assert!(!result.timed_out);
+        }
+    }
+
+    #[tokio::test]
+    async fn west_and_unset_token_bypass_proxy() {
+        let snake = MockServer::start().await;
+        let proxy = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/move"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"move":"up"}"#))
+            .expect(2)
+            .mount(&snake)
+            .await;
+        let client = Client::new();
+        let game = create_test_engine_game_with_snakes(vec!["snake-1"]);
+        for (region, token) in [
+            (EngineRegion::UsWest1, Some("secret".to_string())),
+            (EngineRegion::UsEast4, None),
+        ] {
+            let config = EngineProxyConfig {
+                token,
+                us_east4_url: proxy.uri(),
+                europe_west4_url: proxy.uri(),
+            };
+            let clients = ProxyClients {
+                direct: &client,
+                east: &client,
+                europe: &client,
+                config: &config,
+            };
+            let endpoint = SnakeEndpoint {
+                snake_id: "snake-1".to_string(),
+                url: snake.uri(),
+                engine_region: region,
+            };
+            let result = request_move_routed(
+                &clients,
+                &endpoint,
+                &game,
+                Duration::from_millis(500),
+                None,
+                &HashMap::new(),
+                &HashMap::new(),
+            )
+            .await;
+            assert_eq!(result.direction, Direction::Up);
+        }
+        assert!(proxy.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn hanging_proxy_hits_local_guard_without_marking_snake_timed_out() {
+        let proxy = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(2)))
+            .mount(&proxy)
+            .await;
+        let config = EngineProxyConfig {
+            token: Some("secret".to_string()),
+            us_east4_url: proxy.uri(),
+            europe_west4_url: proxy.uri(),
+        };
+        let client = Client::new();
+        let clients = ProxyClients {
+            direct: &client,
+            east: &client,
+            europe: &client,
+            config: &config,
+        };
+        let endpoint = SnakeEndpoint {
+            snake_id: "snake-1".to_string(),
+            url: "https://snake.example".to_string(),
+            engine_region: EngineRegion::UsEast4,
+        };
+        let game = create_test_engine_game_with_snakes(vec!["snake-1"]);
+        let start = Instant::now();
+        let result = request_move_routed(
+            &clients,
+            &endpoint,
+            &game,
+            Duration::from_millis(100),
+            None,
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .await;
+        assert!(start.elapsed() < Duration::from_secs(1));
+        assert!(!result.timed_out);
+        assert!(result.latency_ms.is_none());
+    }
+
+    #[tokio::test]
+    async fn measured_450ms_move_survives_proxy_transit() {
+        let proxy = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header(LATENCY_HEADER, "450")
+                    .set_body_string(r#"{"move":"up"}"#)
+                    .set_delay(Duration::from_millis(640)),
+            )
+            .mount(&proxy)
+            .await;
+        let config = EngineProxyConfig {
+            token: Some("secret".to_string()),
+            us_east4_url: proxy.uri(),
+            europe_west4_url: proxy.uri(),
+        };
+        let client = Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
+        let clients = ProxyClients {
+            direct: &client,
+            east: &client,
+            europe: &client,
+            config: &config,
+        };
+        let endpoint = SnakeEndpoint {
+            snake_id: "snake-1".to_string(),
+            url: "https://snake.example".to_string(),
+            engine_region: EngineRegion::EuropeWest4,
+        };
+        let game = create_test_engine_game_with_snakes(vec!["snake-1"]);
+        let result = request_move_routed(
+            &clients,
+            &endpoint,
+            &game,
+            Duration::from_millis(500),
+            None,
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .await;
+        assert_eq!(result.direction, Direction::Up);
+        assert_eq!(result.latency_ms, Some(450));
+        assert!(!result.timed_out);
+    }
+
+    #[tokio::test]
+    async fn stalled_proxy_body_is_caught_by_local_guard() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nX-Battlesnake-Latency-Ms: 20\r\n\r\n")
+                .await.unwrap();
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        });
+        let config = EngineProxyConfig {
+            token: Some("secret".to_string()),
+            us_east4_url: format!("http://{address}"),
+            europe_west4_url: format!("http://{address}"),
+        };
+        let client = Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
+        let clients = ProxyClients {
+            direct: &client,
+            east: &client,
+            europe: &client,
+            config: &config,
+        };
+        let endpoint = SnakeEndpoint {
+            snake_id: "snake-1".to_string(),
+            url: "https://snake.example".to_string(),
+            engine_region: EngineRegion::UsEast4,
+        };
+        let game = create_test_engine_game_with_snakes(vec!["snake-1"]);
+        let started = Instant::now();
+        let result = request_move_routed(
+            &clients,
+            &endpoint,
+            &game,
+            Duration::from_millis(100),
+            None,
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .await;
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(result.latency_ms.is_none());
+        assert!(!result.timed_out);
+    }
+
+    #[tokio::test]
+    async fn bare_407_retries_direct_without_waiting_for_body() {
+        let snake = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/move"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"move":"right"}"#))
+            .expect(1)
+            .mount(&snake)
+            .await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 100\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        });
+        let config = EngineProxyConfig {
+            token: Some("bad-token".to_string()),
+            us_east4_url: format!("http://{address}"),
+            europe_west4_url: format!("http://{address}"),
+        };
+        let client = Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
+        let clients = ProxyClients {
+            direct: &client,
+            east: &client,
+            europe: &client,
+            config: &config,
+        };
+        let endpoint = SnakeEndpoint {
+            snake_id: "snake-1".to_string(),
+            url: snake.uri(),
+            engine_region: EngineRegion::UsEast4,
+        };
+        let game = create_test_engine_game_with_snakes(vec!["snake-1"]);
+        let started = Instant::now();
+        let result = request_move_routed(
+            &clients,
+            &endpoint,
+            &game,
+            Duration::from_millis(500),
+            None,
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .await;
+        assert!(started.elapsed() < Duration::from_millis(500));
+        assert_eq!(result.direction, Direction::Right);
+    }
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]

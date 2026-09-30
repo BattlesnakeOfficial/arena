@@ -1366,7 +1366,7 @@ mod moderation_tests {
                 session: session.clone(),
             },
             RawForm(axum::body::Bytes::from(
-                "name=Bad&url=https://e.co&visibility=public",
+                "name=Bad&url=https://e.co&visibility=public&engine_region=us-west1",
             )),
         )
         .await
@@ -1413,6 +1413,7 @@ mod moderation_tests {
                 axum::extract::State(test_state(&pool, &jev.uri())),
                 crate::routes::auth::ApiUser(user.clone()),
                 axum::Json(crate::routes::api::snakes::CreateSnakeRequest {
+                    engine_region: None,
                     name: "Bad".to_string(),
                     url: "https://e.co".to_string(),
                     is_public: true,
@@ -1448,7 +1449,7 @@ mod moderation_tests {
                 session: session.clone(),
             },
             RawForm(axum::body::Bytes::from(
-                "name=Borderline&url=https://e.co&visibility=public",
+                "name=Borderline&url=https://e.co&visibility=public&engine_region=us-west1",
             )),
         )
         .await
@@ -1494,6 +1495,7 @@ mod moderation_tests {
             axum::extract::State(test_state(&pool, &jev.uri())),
             crate::routes::auth::ApiUser(user.clone()),
             axum::Json(crate::routes::api::snakes::CreateSnakeRequest {
+                engine_region: None,
                 name: "Slitherbot".to_string(),
                 url: "https://e.co".to_string(),
                 is_public: true,
@@ -1541,6 +1543,7 @@ mod moderation_tests {
             axum::extract::State(state),
             crate::routes::auth::ApiUser(user.clone()),
             axum::Json(crate::routes::api::snakes::CreateSnakeRequest {
+                engine_region: None,
                 name: "SlowJudge".to_string(),
                 url: "https://e.co".to_string(),
                 is_public: true,
@@ -1580,6 +1583,7 @@ mod moderation_tests {
             axum::extract::State(state),
             crate::routes::auth::ApiUser(user.clone()),
             axum::Json(crate::routes::api::snakes::CreateSnakeRequest {
+                engine_region: None,
                 name: "NoKey".to_string(),
                 url: "https://e.co".to_string(),
                 is_public: true,
@@ -1615,6 +1619,7 @@ mod moderation_tests {
             axum::extract::State(state),
             crate::routes::auth::ApiUser(user.clone()),
             axum::Json(crate::routes::api::snakes::CreateSnakeRequest {
+                engine_region: None,
                 name: "FlaggedName".to_string(),
                 url: "https://e.co".to_string(),
                 is_public: true,
@@ -1645,6 +1650,7 @@ mod moderation_tests {
             axum::extract::State(state),
             crate::routes::auth::ApiUser(user.clone()),
             axum::Json(crate::routes::api::snakes::CreateSnakeRequest {
+                engine_region: None,
                 name: "RelayMe".to_string(),
                 url: "https://e.co/x".to_string(),
                 is_public: true,
@@ -1697,7 +1703,7 @@ mod moderation_tests {
                 session: session.clone(),
             },
             RawForm(axum::body::Bytes::from(
-                "name=Slitherbot&url=https://e.co&visibility=public",
+                "name=Slitherbot&url=https://e.co&visibility=public&engine_region=us-west1",
             )),
         )
         .await
@@ -1714,7 +1720,7 @@ mod moderation_tests {
             },
             axum::extract::Path(snake_id),
             RawForm(axum::body::Bytes::from(
-                "name=Slitherbot&url=https://e.co/changed&visibility=public",
+                "name=Slitherbot&url=https://e.co/changed&visibility=public&engine_region=us-west1",
             )),
         )
         .await
@@ -1730,7 +1736,7 @@ mod moderation_tests {
             },
             axum::extract::Path(snake_id),
             RawForm(axum::body::Bytes::from(
-                "name=Slitherbot+&url=https://e.co/changed&visibility=public",
+                "name=Slitherbot+&url=https://e.co/changed&visibility=public&engine_region=us-west1",
             )),
         )
         .await
@@ -1743,6 +1749,7 @@ mod moderation_tests {
             crate::routes::auth::ApiUser(user.clone()),
             axum::extract::Path(snake_id),
             axum::Json(crate::routes::api::snakes::UpdateSnakeRequest {
+                engine_region: None,
                 name: None,
                 url: Some("https://e.co/again".to_string()),
                 is_public: None,
@@ -1782,7 +1789,7 @@ mod moderation_tests {
                 session: session.clone(),
             },
             RawForm(axum::body::Bytes::from(
-                "name=GoodName&url=https://e.co&visibility=public",
+                "name=GoodName&url=https://e.co&visibility=public&engine_region=us-west1",
             )),
         )
         .await
@@ -1797,7 +1804,7 @@ mod moderation_tests {
             },
             axum::extract::Path(snake_id),
             RawForm(axum::body::Bytes::from(
-                "name=BadRename&url=https://e.co&visibility=public",
+                "name=BadRename&url=https://e.co&visibility=public&engine_region=us-west1",
             )),
         )
         .await

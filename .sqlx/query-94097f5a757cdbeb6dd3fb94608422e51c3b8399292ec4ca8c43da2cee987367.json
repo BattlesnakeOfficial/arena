@@ -1,0 +1,64 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT imported_snake_id, name, url, head, tail, color, is_public, engine_region\n        FROM imported_snakes\n        WHERE imported_account_id = $1 AND materialized_battlesnake_id IS NULL\n        ORDER BY imported_at\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "imported_snake_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "head",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "tail",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "color",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "is_public",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 7,
+        "name": "engine_region",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "94097f5a757cdbeb6dd3fb94608422e51c3b8399292ec4ca8c43da2cee987367"
+}

@@ -147,7 +147,7 @@ test.describe('Battlesnake Validation', () => {
     // Don't follow the redirect, or the one-shot flash is consumed before we look.
     const name = `Bad URL ${Date.now()}`;
     const res = await authenticatedPage.request.post('/battlesnakes', {
-      form: { name, url: 'not a url', visibility: 'private' },
+      form: { name, url: 'not a url', visibility: 'private', engine_region: 'us-west1' },
       maxRedirects: 0,
     });
     expect(res.headers()['location']).toBe('/battlesnakes/new');
@@ -174,7 +174,7 @@ test.describe('Battlesnake Validation', () => {
   test('server normalizes a bare hostname to https', async ({ authenticatedPage }) => {
     const name = `Server Bare Host ${Date.now()}`;
     const res = await authenticatedPage.request.post('/battlesnakes', {
-      form: { name, url: 'server-snake.fly.dev', visibility: 'private' },
+      form: { name, url: 'server-snake.fly.dev', visibility: 'private', engine_region: 'us-west1' },
       maxRedirects: 0,
     });
 
@@ -249,7 +249,7 @@ test.describe('Battlesnake Validation', () => {
 
   test('rejects an over-long name with a flash, not an error page', async ({ authenticatedPage }) => {
     const res = await authenticatedPage.request.post('/battlesnakes', {
-      form: { name: 'x'.repeat(65), url: 'https://example.com/long', visibility: 'private' },
+      form: { name: 'x'.repeat(65), url: 'https://example.com/long', visibility: 'private', engine_region: 'us-west1' },
       maxRedirects: 0,
     });
     expect(res.headers()['location']).toBe('/battlesnakes/new');
@@ -298,7 +298,7 @@ test.describe('Battlesnake Validation', () => {
     // A malformed URL fails validation and parks a draft targeted at this
     // snake. Don't follow the redirect -- nothing consumes the draft yet.
     await authenticatedPage.request.post(updatePath, {
-      form: { name: savedName, url: 'not a url', visibility: 'private' },
+      form: { name: savedName, url: 'not a url', visibility: 'private', engine_region: 'us-west1' },
       maxRedirects: 0,
     });
 
@@ -306,7 +306,7 @@ test.describe('Battlesnake Validation', () => {
     // to the edit page.
     const goodUrl = 'https://example.com/stale-draft-good-final';
     await authenticatedPage.request.post(updatePath, {
-      form: { name: savedName, url: goodUrl, visibility: 'public' },
+      form: { name: savedName, url: goodUrl, visibility: 'public', engine_region: 'us-west1' },
       maxRedirects: 0,
     });
 

@@ -29,6 +29,7 @@ test.describe('Battlesnake Edit', () => {
     await authenticatedPage.getByLabel('Name').fill(uniqueName);
     await authenticatedPage.getByLabel('URL').fill(originalUrl);
     await authenticatedPage.getByLabel('Visibility').selectOption('private');
+    await authenticatedPage.getByLabel('Engine region').selectOption('us-east4');
     await authenticatedPage.getByRole('button', { name: 'Create Battlesnake' }).click();
 
     // Navigate to edit
@@ -39,6 +40,15 @@ test.describe('Battlesnake Edit', () => {
     await expect(authenticatedPage.getByLabel('Name')).toHaveValue(uniqueName);
     await expect(authenticatedPage.getByLabel('URL')).toHaveValue(originalUrl);
     await expect(authenticatedPage.getByLabel('Visibility')).toHaveValue('private');
+    await expect(authenticatedPage.getByLabel('Engine region')).toHaveValue('us-east4');
+    await authenticatedPage.getByLabel('Engine region').selectOption('europe-west4');
+    await authenticatedPage.getByRole('button', { name: 'Update Battlesnake' }).click();
+    await authenticatedPage.locator('tr', { hasText: uniqueName })
+      .getByRole('link', { name: 'Edit', exact: true }).click();
+    await expect(authenticatedPage.getByLabel('Engine region')).toHaveValue('europe-west4');
+    await authenticatedPage.goto('/battlesnakes');
+    await authenticatedPage.locator('tr', { hasText: uniqueName }).getByRole('link', { name: uniqueName }).click();
+    await expect(authenticatedPage.getByText('Europe (Netherlands)')).toBeVisible();
   });
 
   test('can update battlesnake name', async ({ authenticatedPage }) => {
