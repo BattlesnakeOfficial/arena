@@ -735,13 +735,27 @@ pub async fn request_move_routed(
             }
         },
         ProxyCall::Response {
-            class:
-                ProxyResponseClass::SnakeTransportFailure {
-                    timed_out,
-                    latency_ms,
-                },
+            class: ProxyResponseClass::SnakeTransportFailure { timed_out, .. },
+            status,
             ..
-        } => fallback(Some(latency_ms), timed_out),
+        } => {
+            if timed_out {
+                tracing::warn!(
+                    snake_id = %endpoint.snake_id,
+                    timeout_ms = timeout.as_millis(),
+                    region = endpoint.engine_region.as_str(),
+                    "Snake timed out, using fallback"
+                );
+            } else {
+                tracing::warn!(
+                    snake_id = %endpoint.snake_id,
+                    region = endpoint.engine_region.as_str(),
+                    %status,
+                    "Network error calling snake, using fallback"
+                );
+            }
+            fallback(None, true)
+        }
         ProxyCall::Response {
             class: ProxyResponseClass::ProxyFault,
             status,
@@ -882,7 +896,18 @@ pub async fn request_info_routed(
             class: ProxyResponseClass::SnakeResponse { .. },
             body,
             ..
-        } => serde_json::from_str(&body).ok(),
+        } => match serde_json::from_str(&body) {
+            Ok(info) => Some(info),
+            Err(error) => {
+                tracing::warn!(
+                    url = %endpoint.url,
+                    region = endpoint.engine_region.as_str(),
+                    %error,
+                    "Failed to parse snake info response"
+                );
+                None
+            }
+        },
         ProxyCall::Response {
             class: ProxyResponseClass::ProxyFault,
             status,
@@ -903,7 +928,27 @@ pub async fn request_info_routed(
             log_proxy_fault(endpoint.engine_region, kind, None);
             None
         }
-        ProxyCall::Response { .. } => None,
+        ProxyCall::Response {
+            class: ProxyResponseClass::SnakeTransportFailure { timed_out, .. },
+            status,
+            ..
+        } => {
+            if timed_out {
+                tracing::warn!(
+                    url = %endpoint.url,
+                    region = endpoint.engine_region.as_str(),
+                    "Timeout fetching snake info"
+                );
+            } else {
+                tracing::warn!(
+                    url = %endpoint.url,
+                    region = endpoint.engine_region.as_str(),
+                    %status,
+                    "Network error fetching snake info"
+                );
+            }
+            None
+        }
     }
 }
 
@@ -1101,8 +1146,8 @@ mod tests {
             .await;
         let game = create_test_engine_game_with_snakes(vec!["snake-1"]);
         for (status, measured, error, direction, timed_out, latency) in [
-            (504, true, true, Direction::Left, true, Some(35)),
-            (502, true, true, Direction::Left, false, Some(35)),
+            (504, true, true, Direction::Left, true, None),
+            (502, true, true, Direction::Left, true, None),
             (407, false, false, Direction::Up, false, Some(0)),
         ] {
             let proxy = MockServer::start().await;
