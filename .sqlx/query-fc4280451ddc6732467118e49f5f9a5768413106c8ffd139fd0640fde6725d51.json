@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO game_battlesnakes (game_id, leaderboard_entry_id)\n                 VALUES ($1, $2)\n                 RETURNING game_battlesnake_id",
+  "query": "INSERT INTO game_battlesnakes (game_id, leaderboard_entry_id, created_at)\n                 SELECT $1, $2, created_at FROM games WHERE game_id = $1\n                 RETURNING game_battlesnake_id",
   "describe": {
     "columns": [
       {
@@ -19,5 +19,5 @@
       false
     ]
   },
-  "hash": "0ac81e31e29a863c9ca04ec713cd7279a208bceeafd086e77e1c98ce8c19d2ff"
+  "hash": "fc4280451ddc6732467118e49f5f9a5768413106c8ffd139fd0640fde6725d51"
 }

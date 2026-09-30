@@ -55,6 +55,13 @@ pub struct RecentLatency {
 /// (`engine_game_id IS NOT NULL`) never have turn rows and are skipped so they
 /// can't crowd real games out of the window. Moves recorded before latency
 /// tracking existed (NULL latency, not timed out) are ignored.
+///
+/// Recency is `game_battlesnakes.created_at`, written when the snake is added
+/// to a new game. Each link path walks its own `(…, created_at DESC)` index
+/// newest-first and stops after `limit` finished games, so the cost is bounded
+/// by the window rather than by how many games the snake (or arena) has
+/// played. Driving from `games` instead scanned every finished game for
+/// snakes with few or no games.
 pub async fn get_recent_latency_for_battlesnake(
     pool: &PgPool,
     battlesnake_id: Uuid,
@@ -64,21 +71,37 @@ pub async fn get_recent_latency_for_battlesnake(
     // (game_id NULL) whose percentiles span every move in the window.
     let rows = sqlx::query!(
         r#"
-        WITH recent AS (
-            SELECT gb.game_battlesnake_id, g.game_id, g.created_at
-            FROM game_battlesnakes gb
-            JOIN games g ON g.game_id = gb.game_id
-            WHERE (
-                gb.battlesnake_id = $1
-                OR gb.leaderboard_entry_id IN (
-                    SELECT le.leaderboard_entry_id
-                    FROM leaderboard_entries le
-                    WHERE le.battlesnake_id = $1
-                )
+        WITH linked AS (
+            (
+                SELECT gb.game_battlesnake_id, g.game_id, g.created_at, gb.created_at AS linked_at
+                FROM game_battlesnakes gb
+                JOIN games g ON g.game_id = gb.game_id
+                WHERE gb.battlesnake_id = $1
+                  AND g.status = 'finished'
+                  AND g.engine_game_id IS NULL
+                ORDER BY gb.created_at DESC
+                LIMIT $2
             )
-              AND g.status = 'finished'
-              AND g.engine_game_id IS NULL
-            ORDER BY g.created_at DESC
+            UNION ALL
+            SELECT lb.game_battlesnake_id, lb.game_id, lb.created_at, lb.linked_at
+            FROM leaderboard_entries le
+            CROSS JOIN LATERAL (
+                SELECT gb.game_battlesnake_id, g.game_id, g.created_at, gb.created_at AS linked_at
+                FROM game_battlesnakes gb
+                JOIN games g ON g.game_id = gb.game_id
+                WHERE gb.leaderboard_entry_id = le.leaderboard_entry_id
+                  AND gb.battlesnake_id IS NULL
+                  AND g.status = 'finished'
+                  AND g.engine_game_id IS NULL
+                ORDER BY gb.created_at DESC
+                LIMIT $2
+            ) lb
+            WHERE le.battlesnake_id = $1
+        ),
+        recent AS (
+            SELECT game_battlesnake_id, game_id, created_at
+            FROM linked
+            ORDER BY linked_at DESC
             LIMIT $2
         )
         SELECT
@@ -196,8 +219,8 @@ mod tests {
 
         async fn join_direct(&self, game_id: Uuid, battlesnake_id: Uuid) -> cja::Result<Uuid> {
             Ok(sqlx::query_scalar!(
-                "INSERT INTO game_battlesnakes (game_id, battlesnake_id)
-                 VALUES ($1, $2)
+                "INSERT INTO game_battlesnakes (game_id, battlesnake_id, created_at)
+                 SELECT $1, $2, created_at FROM games WHERE game_id = $1
                  RETURNING game_battlesnake_id",
                 game_id,
                 battlesnake_id
@@ -206,18 +229,24 @@ mod tests {
             .await?)
         }
 
-        async fn join_via_leaderboard(&self, game_id: Uuid) -> cja::Result<Uuid> {
-            let entry_id = sqlx::query_scalar!(
+        /// Enter the snake in the `nth` seeded leaderboard.
+        async fn entry(&self, nth: i64) -> cja::Result<Uuid> {
+            Ok(sqlx::query_scalar!(
                 "INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id)
-                 SELECT leaderboard_id, $1 FROM leaderboards ORDER BY created_at LIMIT 1
+                 SELECT leaderboard_id, $1 FROM leaderboards
+                 ORDER BY created_at, leaderboard_id OFFSET $2 LIMIT 1
                  RETURNING leaderboard_entry_id",
-                self.battlesnake_id
+                self.battlesnake_id,
+                nth
             )
             .fetch_one(&self.pool)
-            .await?;
+            .await?)
+        }
+
+        async fn join_via_leaderboard(&self, game_id: Uuid, entry_id: Uuid) -> cja::Result<Uuid> {
             Ok(sqlx::query_scalar!(
-                "INSERT INTO game_battlesnakes (game_id, leaderboard_entry_id)
-                 VALUES ($1, $2)
+                "INSERT INTO game_battlesnakes (game_id, leaderboard_entry_id, created_at)
+                 SELECT $1, $2, created_at FROM games WHERE game_id = $1
                  RETURNING game_battlesnake_id",
                 game_id,
                 entry_id
@@ -288,7 +317,8 @@ mod tests {
             .await?;
 
         let newer = seed.game("finished", 10).await?;
-        let newer_gb = seed.join_via_leaderboard(newer).await?;
+        let entry = seed.entry(0).await?;
+        let newer_gb = seed.join_via_leaderboard(newer, entry).await?;
         seed.moves(newer, newer_gb, &[Some(100), Some(200)]).await?;
 
         let recent = seed.fetch(RECENT_GAMES_LIMIT).await?;
@@ -374,6 +404,54 @@ mod tests {
         let ids: Vec<Uuid> = recent.games.iter().map(|g| g.game_id).collect();
         assert_eq!(ids, games[2..].to_vec());
         assert_eq!(recent.overall.answered, 2);
+
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn window_merges_direct_games_and_every_leaderboard_entry(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        let seed = Seed::new(pool).await?;
+        let first_board = seed.entry(0).await?;
+        let second_board = seed.entry(1).await?;
+
+        let mut games = Vec::new();
+        for (minutes_ago, entry) in [
+            (50, None),
+            (40, Some(first_board)),
+            (30, Some(second_board)),
+            (20, None),
+            (10, Some(second_board)),
+        ] {
+            let game = seed.game("finished", minutes_ago).await?;
+            let gb = match entry {
+                Some(entry_id) => seed.join_via_leaderboard(game, entry_id).await?,
+                None => seed.join_direct(game, seed.battlesnake_id).await?,
+            };
+            seed.moves(game, gb, &[Some(minutes_ago)]).await?;
+            games.push(game);
+        }
+
+        // A row carrying both links must still count once.
+        let both = seed.game("finished", 5).await?;
+        let both_gb = sqlx::query_scalar!(
+            "INSERT INTO game_battlesnakes (game_id, battlesnake_id, leaderboard_entry_id, created_at)
+             SELECT $1, $2, $3, created_at FROM games WHERE game_id = $1
+             RETURNING game_battlesnake_id",
+            both,
+            seed.battlesnake_id,
+            first_board
+        )
+        .fetch_one(&seed.pool)
+        .await?;
+        seed.moves(both, both_gb, &[Some(5)]).await?;
+
+        let recent = seed.fetch(4).await?;
+
+        let ids: Vec<Uuid> = recent.games.iter().map(|g| g.game_id).collect();
+        assert_eq!(ids, vec![games[2], games[3], games[4], both]);
+        assert_eq!(recent.overall.answered, 4);
 
         Ok(())
     }
