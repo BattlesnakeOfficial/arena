@@ -264,6 +264,7 @@ impl GameCreationFlow {
                 SELECT 1 FROM battlesnakes
                 WHERE battlesnake_id = $1
                   AND (user_id = $2 OR visibility = 'public')
+                  AND deleted_at IS NULL
             ) AS "eligible!""#,
             battlesnake_id,
             user_id
@@ -462,6 +463,7 @@ impl GameCreationFlow {
             FROM battlesnakes
             WHERE battlesnake_id = ANY($1)
               AND (user_id = $2 OR visibility = 'public')
+              AND deleted_at IS NULL
             ORDER BY name ASC
             "#,
             &ids,

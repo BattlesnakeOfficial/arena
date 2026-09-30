@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE game_battlesnakes gb\n             SET placement = CASE WHEN COALESCE(\n                 gb.battlesnake_id,\n                 (SELECT le.battlesnake_id FROM leaderboard_entries le\n                  WHERE le.leaderboard_entry_id = gb.leaderboard_entry_id)\n             ) = $1 THEN 1 ELSE 2 END",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f4bf342ba4984ed9325256eb783dd32a0ecc31f332bd149b765f07a28e820118"
+}

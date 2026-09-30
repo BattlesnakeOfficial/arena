@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT battlesnake_id\n        FROM battlesnakes\n        WHERE battlesnake_id = $1\n          AND user_id = $2\n          AND deleted_at IS NULL\n        FOR UPDATE\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "battlesnake_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "aa0e5f66e0616ce19bf64beb4ffd4d0123e89955be5faf80efa4f43be192b0e1"
+}

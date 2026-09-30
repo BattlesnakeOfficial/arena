@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT battlesnake_id FROM battlesnakes\n           WHERE battlesnake_id = ANY($1)\n             AND (user_id = $2 OR visibility = 'public')\n             AND deleted_at IS NULL\n           ORDER BY battlesnake_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "battlesnake_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "9175f5815f68a7a22b8077397c3d08d102a019a18456649a2b4ba41bd0f5665a"
+}

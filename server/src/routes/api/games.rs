@@ -295,6 +295,7 @@ pub async fn list_games(
             FROM battlesnakes
             WHERE battlesnake_id = $1
               AND (user_id = $2 OR visibility = 'public')
+              AND deleted_at IS NULL
             "#,
             snake_id,
             user.user_id

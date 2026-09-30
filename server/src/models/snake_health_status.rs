@@ -286,6 +286,7 @@ pub async fn owner_notification_email(
          JOIN users u ON b.user_id = u.user_id
          LEFT JOIN imported_accounts ia ON ia.claimed_by_user_id = u.user_id
          WHERE b.battlesnake_id = $1
+           AND b.deleted_at IS NULL
          ORDER BY ia.is_email_verified DESC NULLS LAST
          LIMIT 1"#,
         battlesnake_id

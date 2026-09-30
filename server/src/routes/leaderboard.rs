@@ -601,7 +601,12 @@ pub async fn show_leaderboard_entry(
         .await
         .wrap_err("Failed to fetch battlesnake")?
     else {
-        return Ok(crate::routes::render_not_found(page_factory));
+        return Ok(crate::routes::render_missing_snake(
+            &state.db,
+            entry.battlesnake_id,
+            page_factory,
+        )
+        .await?);
     };
 
     let owner = user::get_user_by_id(&state.db, snake.user_id)

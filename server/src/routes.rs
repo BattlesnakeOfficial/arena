@@ -329,6 +329,48 @@ pub fn render_not_found(page_factory: PageFactory) -> axum::response::Response {
         .into_response()
 }
 
+/// Stand-in for the profile of a battlesnake its owner deleted. Past games
+/// still link here, so say what happened instead of a bare 404.
+pub fn render_deleted_snake(page_factory: PageFactory, name: &str) -> axum::response::Response {
+    (
+        StatusCode::GONE,
+        page_factory.create_page(
+            format!("{name} (deleted)"),
+            Box::new(html! {
+                div class="home" {
+                    section class="section" {
+                        h1 { (name) }
+                        p class="empty" {
+                            "This battlesnake was deleted by its owner. "
+                            "Games it played are still viewable."
+                        }
+                        div class="cta-row" {
+                            a class="btn solid" href="/" { "Back to Home" }
+                            a class="btn" href="/leaderboards" { "View Leaderboards" }
+                        }
+                    }
+                }
+            }),
+        ),
+    )
+        .into_response()
+}
+
+/// Response for a snake page whose live snake lookup came back empty: the
+/// deleted page if the owner deleted it, otherwise a plain 404.
+pub async fn render_missing_snake(
+    db: &sqlx::PgPool,
+    battlesnake_id: uuid::Uuid,
+    page_factory: PageFactory,
+) -> cja::Result<axum::response::Response> {
+    Ok(
+        match crate::models::battlesnake::get_deleted_battlesnake_name(db, battlesnake_id).await? {
+            Some(name) => render_deleted_snake(page_factory, &name),
+            None => render_not_found(page_factory),
+        },
+    )
+}
+
 /// Path extractor for a single `{id}` UUID segment on user-facing HTML pages.
 ///
 /// Behaves like [`axum::extract::Path<Uuid>`] on success, but when the segment

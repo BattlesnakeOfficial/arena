@@ -18,7 +18,6 @@ use crate::{
     models::session,
     models::snake_health_status,
     models::tag,
-    models::tournament,
     models::user::get_user_by_id,
     routes::UuidPath,
     routes::auth::{CurrentUser, CurrentUserWithSession, OptionalUser},
@@ -944,40 +943,30 @@ pub async fn delete_battlesnake(
     CurrentUserWithSession { user, session }: CurrentUserWithSession,
     Path(battlesnake_id): Path<Uuid>,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
-    // First check if the battlesnake exists and belongs to the user
-    let exists = battlesnake::belongs_to_user(&state.db, battlesnake_id, user.user_id)
+    match battlesnake::delete_battlesnake(&state.db, battlesnake_id, user.user_id)
         .await
-        .wrap_err("Failed to check battlesnake ownership")?;
-
-    if !exists {
-        return Err("Battlesnake not found or you don't have permission to delete it".to_string())
+        .wrap_err("Failed to delete battlesnake")?
+    {
+        battlesnake::DeleteBattlesnakeOutcome::Deleted => {}
+        battlesnake::DeleteBattlesnakeOutcome::NotFound => {
+            return Err(
+                "Battlesnake not found or you don't have permission to delete it".to_string(),
+            )
             .with_status(StatusCode::FORBIDDEN);
-    }
-
-    // Refuse to delete a battlesnake that is registered in an active
-    // tournament — the FK cascades would rip it out of a live bracket.
-    let active_registrations =
-        tournament::count_active_tournament_registrations(&state.db, battlesnake_id)
+        }
+        battlesnake::DeleteBattlesnakeOutcome::InActiveTournament => {
+            session::set_flash_message(
+                &state.db,
+                session.session_id,
+                "This battlesnake is registered in an active tournament and can't be deleted. Withdraw it from the tournament first.".to_string(),
+                session::FLASH_TYPE_ERROR,
+            )
             .await
-            .wrap_err("Failed to check tournament registrations")?;
+            .wrap_err("Failed to set flash message")?;
 
-    if active_registrations > 0 {
-        session::set_flash_message(
-            &state.db,
-            session.session_id,
-            "This battlesnake is registered in an active tournament and can't be deleted. Withdraw it from the tournament first.".to_string(),
-            session::FLASH_TYPE_ERROR,
-        )
-        .await
-        .wrap_err("Failed to set flash message")?;
-
-        return Ok(Redirect::to("/battlesnakes").into_response());
+            return Ok(Redirect::to("/battlesnakes").into_response());
+        }
     }
-
-    // Delete the battlesnake
-    battlesnake::delete_battlesnake(&state.db, battlesnake_id, user.user_id)
-        .await
-        .wrap_err("Failed to delete battlesnake")?;
 
     // Flash message for success and redirect
     session::set_flash_message(
@@ -1141,7 +1130,9 @@ pub async fn view_battlesnake_profile(
         .await
         .wrap_err("Failed to get battlesnake")?
     else {
-        return Ok(crate::routes::render_not_found(page_factory));
+        return Ok(
+            crate::routes::render_missing_snake(&state.db, battlesnake_id, page_factory).await?,
+        );
     };
 
     let is_owner = user.as_ref().is_some_and(|u| u.user_id == snake.user_id);
@@ -1870,5 +1861,154 @@ mod stats_tests {
         assert_eq!(stats.win_rate, 50.0);
         assert_eq!(stats.average_placement, 1.5);
         assert_eq!(stats.second_places, 1);
+    }
+}
+
+#[cfg(test)]
+mod deleted_snake_route_tests {
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Method, Request, StatusCode, header},
+    };
+    use sqlx::PgPool;
+    use tower::ServiceExt as _;
+    use uuid::Uuid;
+
+    use crate::models::battlesnake::{self, DeleteBattlesnakeOutcome};
+    use crate::state::AppState;
+
+    fn app(pool: &PgPool) -> axum::Router {
+        crate::routes::routes(AppState::test_from_pool(pool.clone()))
+            .layer(tower_cookies::CookieManagerLayer::new())
+    }
+
+    async fn send(
+        app: &axum::Router,
+        method: Method,
+        path: &str,
+        token: Option<&str>,
+    ) -> (StatusCode, String) {
+        let mut builder = Request::builder().method(method).uri(path);
+        if path.starts_with("/api/") {
+            builder = builder.header(header::ORIGIN, "https://example.com");
+        }
+        if let Some(token) = token {
+            builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
+        }
+        let response = app
+            .clone()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        (status, String::from_utf8_lossy(&body).into_owned())
+    }
+
+    async fn owner_with_snake(pool: &PgPool, github_id: i64, name: &str) -> (Uuid, Uuid) {
+        let user_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO users (external_github_id, github_login, github_access_token)
+             VALUES ($1, $2, '') RETURNING user_id",
+        )
+        .bind(github_id)
+        .bind(format!("route-owner-{github_id}"))
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        let snake_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO battlesnakes (user_id, name, url)
+             VALUES ($1, $2, 'http://localhost:8000') RETURNING battlesnake_id",
+        )
+        .bind(user_id)
+        .bind(name)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        (user_id, snake_id)
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn deleted_snake_pages_render_the_deleted_page(pool: PgPool) {
+        let (owner, snake) = owner_with_snake(&pool, 9101, "Ghost Snake").await;
+        let leaderboard_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO leaderboards (name) VALUES ('Route Test') RETURNING leaderboard_id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let entry_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id)
+             VALUES ($1, $2) RETURNING leaderboard_entry_id",
+        )
+        .bind(leaderboard_id)
+        .bind(snake)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            battlesnake::delete_battlesnake(&pool, snake, owner)
+                .await
+                .unwrap(),
+            DeleteBattlesnakeOutcome::Deleted
+        );
+        let app = app(&pool);
+
+        for path in [
+            format!("/battlesnakes/{snake}/profile"),
+            format!("/leaderboards/{leaderboard_id}/entries/{entry_id}"),
+        ] {
+            let (status, body) = send(&app, Method::GET, &path, None).await;
+            assert_eq!(status, StatusCode::GONE, "{path}");
+            assert!(body.contains("Ghost Snake"), "{path}");
+            assert!(body.contains("deleted by its owner"), "{path}");
+        }
+
+        // A snake that never existed is still a plain 404.
+        let (status, body) = send(
+            &app,
+            Method::GET,
+            &format!("/battlesnakes/{}/profile", Uuid::new_v4()),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(!body.contains("deleted by its owner"));
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn api_delete_refuses_active_tournaments_then_soft_deletes(pool: PgPool) {
+        let (owner, snake) = owner_with_snake(&pool, 9201, "Api Snake").await;
+        let token = crate::models::api_token::create_api_token(&pool, owner, "delete-test")
+            .await
+            .unwrap();
+        let tournament_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO tournaments (name, user_id, status)
+             VALUES ('Open', $1, 'registration') RETURNING tournament_id",
+        )
+        .bind(owner)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        crate::models::tournament::create_registration(&pool, tournament_id, snake, owner, 1)
+            .await
+            .unwrap();
+        let app = app(&pool);
+        let path = format!("/api/snakes/{snake}");
+
+        let (status, _) = send(&app, Method::DELETE, &path, Some(&token.secret)).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+
+        sqlx::query("UPDATE tournaments SET status = 'completed' WHERE tournament_id = $1")
+            .bind(tournament_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let (status, _) = send(&app, Method::DELETE, &path, Some(&token.secret)).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let (status, _) = send(&app, Method::GET, &path, Some(&token.secret)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = send(&app, Method::DELETE, &path, Some(&token.secret)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 }

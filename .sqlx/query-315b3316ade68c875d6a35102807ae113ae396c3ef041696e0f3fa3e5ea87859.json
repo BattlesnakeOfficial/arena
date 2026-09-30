@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT tr.registration_id, tr.tournament_id\n        FROM tournament_registrations tr\n        JOIN tournaments t ON t.tournament_id = tr.tournament_id\n        WHERE tr.battlesnake_id = $1\n          AND t.status = 'created'\n        ORDER BY tr.tournament_id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "registration_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "tournament_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "315b3316ade68c875d6a35102807ae113ae396c3ef041696e0f3fa3e5ea87859"
+}
