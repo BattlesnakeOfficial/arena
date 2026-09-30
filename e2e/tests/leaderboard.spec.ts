@@ -48,6 +48,7 @@ test.describe('Leaderboard Pages', () => {
     await expect(seededLeaderboard.getByText('Active')).toBeVisible();
     await expect(authenticatedPage.getByRole('link', { name: 'Royale 11x11' })).toBeVisible();
     await expect(authenticatedPage.getByRole('link', { name: 'Duels 11x11' })).toBeVisible();
+    await expect(authenticatedPage.getByRole('link', { name: 'Constrictor 11x11' })).toBeVisible();
   });
 
   test('leaderboard detail page shows rankings and placement sections', async ({ authenticatedPage }) => {
@@ -324,6 +325,8 @@ test.describe('Leaderboard API', () => {
       .toMatchObject({ game_type: 'Royale', board_size: '11x11', match_size: 4 });
     expect(leaderboards.find((lb: { name: string }) => lb.name === 'Duels 11x11'))
       .toMatchObject({ game_type: 'Standard', board_size: '11x11', match_size: 2 });
+    expect(leaderboards.find((lb: { name: string }) => lb.name === 'Constrictor 11x11'))
+      .toMatchObject({ game_type: 'Constrictor', board_size: '11x11', match_size: 4 });
   });
 
   test('GET /api/leaderboards/:id/rankings returns rankings', async ({ authenticatedPage }) => {
