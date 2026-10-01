@@ -369,6 +369,19 @@ pub async fn request_move(
 
     let elapsed = start.elapsed().as_millis() as i64;
 
+    // `tokio::time::timeout` checks the inner future before its deadline, so
+    // a completed send that still exceeds the budget means this task was
+    // polled late: an arena-side stall, not a slow snake.
+    if result.is_ok() && elapsed > timeout.as_millis() as i64 {
+        tracing::warn!(
+            metric_type = "late_poll",
+            snake_id = %snake_id,
+            elapsed_ms = elapsed,
+            timeout_ms = timeout.as_millis() as u64,
+            "Move request polled after its deadline"
+        );
+    }
+
     match result {
         Ok(Ok(response)) => match read_body_capped(response, BODY_READ_CAP_BYTES).await {
             Ok(body) => match serde_json::from_str::<MoveResponse>(&body) {
