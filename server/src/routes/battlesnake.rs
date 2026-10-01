@@ -1272,16 +1272,18 @@ fn render_battlesnake_profile(view: &ProfileView<'_>) -> Markup {
                 }
                 div class="stat" {
                     div class="label" { "Avg. Placement" }
-                    @if stats.finished_games > 0 {
+                    @if stats.placement_count > 0 {
                         div class="value" { (format!("{:.1}", stats.average_placement)) }
+                    } @else {
+                        div class="value" { "—" }
+                    }
+                    @if stats.finished_games > 0 {
                         div class="stat-detail" title="Finishes by placement" {
                             span { "🥇 " (stats.wins) }
                             span { "🥈 " (stats.second_places) }
                             span { "🥉 " (stats.third_places) }
                             span { "4th " (stats.fourth_places) }
                         }
-                    } @else {
-                        div class="value" { "—" }
                     }
                 }
                 div class="stat" {
@@ -2228,11 +2230,42 @@ mod profile_page_tests {
             assert!(html.contains("<td class=\"r num hide-sm\">7</td>"));
             if pager_link == 1 {
                 assert!(html.contains("Next ›"));
+                assert!(!html.contains("‹ Prev"));
                 assert!(history.contains("Profile Snake"));
             } else {
                 assert!(html.contains("‹ Prev"));
+                assert!(!html.contains("Next ›"));
             }
         }
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn finished_unplaced_game_has_no_average_placement(db: PgPool) {
+        let fx = Fixture::new(db, "public").await;
+        let game_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO games (board_size, game_type, status)
+             VALUES ('11x11', 'Standard', 'finished') RETURNING game_id",
+        )
+        .fetch_one(&fx.db)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO game_battlesnakes (game_id, battlesnake_id) VALUES ($1, $2)")
+            .bind(game_id)
+            .bind(fx.snake_id)
+            .execute(&fx.db)
+            .await
+            .unwrap();
+
+        let stats = game_battlesnake::get_game_stats_for_battlesnake(&fx.db, fx.snake_id)
+            .await
+            .unwrap();
+        assert_eq!(stats.finished_games, 1);
+        assert_eq!(stats.placement_count, 0);
+
+        let (status, html) = fx.get(None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(html.contains("Avg. Placement</div><div class=\"value\">—</div>"));
+        assert!(!html.contains("Avg. Placement</div><div class=\"value\">0.0</div>"));
     }
 
     #[sqlx::test(migrations = "../migrations")]

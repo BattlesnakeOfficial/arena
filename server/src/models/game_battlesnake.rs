@@ -407,6 +407,7 @@ pub async fn get_game_history_for_battlesnake(
 pub struct GameHistoryStats {
     pub total_games: i64,
     pub finished_games: i64,
+    pub placement_count: i64,
     pub wins: i64,
     pub second_places: i64,
     pub third_places: i64,
@@ -419,7 +420,11 @@ pub struct GameHistoryStats {
 /// 27.8k such probes timed out at 15s on prod, while a participant-only
 /// aggregate took 10.1ms warm. Leaderboard type comes from `leaderboards`;
 /// NULL placement means unfinished for these rows, verified on prod 2026-09-30.
-/// Direct rows still join `games` because placed failed games exist there.
+/// `set_game_result` keys on `battlesnake_id`, so it cannot place ladder rows
+/// (whose `battlesnake_id` is NULL); the ladder finisher writes placements via
+/// `set_game_result_by_id` and status='finished' in one transaction. Revisit
+/// this aggregate if another writer can place ladder rows. Direct rows still
+/// join `games` because placed failed games exist there.
 pub async fn get_game_stats_for_battlesnake(
     pool: &PgPool,
     battlesnake_id: Uuid,
@@ -464,6 +469,7 @@ pub async fn get_game_stats_for_battlesnake(
     Ok(GameHistoryStats {
         total_games: row.total_games,
         finished_games: row.finished_games,
+        placement_count: row.placement_count,
         wins: row.wins,
         second_places: row.second_places,
         third_places: row.third_places,
