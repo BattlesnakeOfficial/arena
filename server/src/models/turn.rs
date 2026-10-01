@@ -80,6 +80,29 @@ pub async fn get_turn_frames_page(
     Ok(turns)
 }
 
+/// The most recent persisted frame of a game (the engine API's `LastFrame`),
+/// or `None` before turn 0 is stored.
+pub async fn get_latest_frame(
+    pool: &PgPool,
+    game_id: Uuid,
+) -> cja::Result<Option<serde_json::Value>> {
+    let frame = sqlx::query_scalar!(
+        r#"
+        SELECT frame_data AS "frame_data!"
+        FROM turns
+        WHERE game_id = $1 AND frame_data IS NOT NULL
+        ORDER BY turn_number DESC
+        LIMIT 1
+        "#,
+        game_id
+    )
+    .fetch_optional(pool)
+    .await
+    .wrap_err("Failed to fetch latest frame")?;
+
+    Ok(frame)
+}
+
 /// Get turns for a game starting from a specific turn number
 /// Used for reconnection catch-up
 pub async fn get_turns_from(

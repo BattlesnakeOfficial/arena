@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use axum::{
     Json,
     extract::{
@@ -15,9 +17,9 @@ use uuid::Uuid;
 
 use crate::{
     errors::ServerResult,
-    models::game::{GameStatus, get_game_by_id},
+    models::game::{GameStatus, GameType, get_game_by_id, get_game_source},
     models::game_battlesnake::get_battlesnakes_by_game_id,
-    models::turn::{get_turn_frames_page, get_turns_by_game_id},
+    models::turn::{get_latest_frame, get_turn_frames_page, get_turns_by_game_id},
     state::AppState,
 };
 
@@ -75,12 +77,30 @@ fn fill_frame_authors(
     }
 }
 
-/// Response format for the board viewer's game info endpoint
-/// Uses PascalCase to match the Battlesnake board viewer expectations
+/// Everything a persisted frame needs before it is served publicly: owner
+/// names filled in, moderated shouts stripped, and the legacy engine's public
+/// frame shape (see `normalize_public_frame`).
+fn prepare_public_frame(
+    frame: &mut serde_json::Value,
+    authors: &std::collections::HashMap<String, String>,
+    suppressed: &std::collections::HashMap<String, std::collections::HashSet<String>>,
+) {
+    fill_frame_authors(frame, authors);
+    crate::moderation::shouts::strip_suppressed_shouts(frame, suppressed);
+    crate::engine::frame::normalize_public_frame(frame, crate::engine::MOVE_TIMEOUT_MS);
+}
+
+/// `GET /api/games/{id}`: the legacy engine's `GET /games/{id}` shape,
+/// `{Game, LastFrame}` (sampled live from engine.battlesnake.com). Read by
+/// the board viewer (Width/Height), the GIF exporter, and third-party tools
+/// written against the engine.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct BoardViewerGameResponse {
     pub game: BoardViewerGame,
+    /// Latest persisted frame; omitted before turn 0 exists, like the engine.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_frame: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -96,6 +116,81 @@ pub struct BoardViewerGame {
     pub arena_status: String,
     pub width: u32,
     pub height: u32,
+    /// Rules settings as strings keyed by the Go rules param names
+    /// (`name`, `foodSpawnChance`, `minimumFood`, `damagePerTurn`,
+    /// `shrinkEveryNTurns`), like the engine's `Game.Ruleset` map.
+    pub ruleset: BTreeMap<String, String>,
+    pub ruleset_name: String,
+    pub rules_stages: Vec<String>,
+    pub map: String,
+    pub source: String,
+    pub snake_timeout: i64,
+    pub max_turns: i32,
+    /// Pre-placed spawns; arena games never have any.
+    pub food_spawns: Vec<serde_json::Value>,
+    pub hazard_spawns: Vec<serde_json::Value>,
+    /// Unix microseconds as a string, like the engine.
+    pub created: String,
+}
+
+/// The legacy engine's `Game.Ruleset`, `RulesetName`, `Map`, and
+/// `RulesStages` for a game. Settings come from `engine::mode_rules` and the
+/// public ruleset/map pair from `wire::wire_ruleset_and_map`, the same
+/// sources as the snake request payload, so the API and what snakes are told
+/// can't drift apart.
+fn engine_rules(
+    game_type: GameType,
+    game_id: Uuid,
+) -> (BTreeMap<String, String>, String, String, Vec<String>) {
+    let (internal, settings, royale) = crate::engine::mode_rules(game_type, game_id);
+    let (ruleset_name, map) = crate::wire::wire_ruleset_and_map(internal);
+
+    let mut ruleset = BTreeMap::from([
+        ("name".to_string(), ruleset_name.to_string()),
+        (
+            "foodSpawnChance".to_string(),
+            settings.food_spawn_chance.to_string(),
+        ),
+        ("minimumFood".to_string(), settings.minimum_food.to_string()),
+        (
+            "damagePerTurn".to_string(),
+            settings.hazard_damage_per_turn.to_string(),
+        ),
+    ]);
+    if let Some(royale) = royale {
+        ruleset.insert(
+            "shrinkEveryNTurns".to_string(),
+            royale.shrink_every_n_turns.to_string(),
+        );
+    }
+
+    // Stage pipelines from play `core/game_stages.py`: the game-over stage
+    // depends on the snake count (Solo is the single-snake mode), and only
+    // Constrictor adds a stage to the standard pipeline; Royale's shrinking
+    // and Snail Mode's trails came from their maps.
+    let game_over = if internal == "solo" {
+        "game_over.solo_snake"
+    } else {
+        "game_over.standard"
+    };
+    let mut stages = vec![
+        game_over,
+        "movement.standard",
+        "starvation.standard",
+        "hazard_damage.standard",
+        "feed_snakes.standard",
+    ];
+    if ruleset_name == "constrictor" {
+        stages.push("modify_snakes.always_grow");
+    }
+    stages.push("elimination.standard");
+
+    (
+        ruleset,
+        ruleset_name.to_string(),
+        map.to_string(),
+        stages.into_iter().map(String::from).collect(),
+    )
 }
 
 /// Map arena's game status to the legacy engine's status strings
@@ -127,6 +222,25 @@ pub async fn get_game_info(
         })?;
 
     let (width, height) = game.board_size.dimensions();
+    let (ruleset, ruleset_name, map, rules_stages) = engine_rules(game.game_type, game_id);
+    let source = get_game_source(&state.db, game_id)
+        .await
+        .wrap_err("Failed to load game source")?;
+
+    let last_frame = match get_latest_frame(&state.db, game_id)
+        .await
+        .wrap_err("Failed to fetch latest frame")?
+    {
+        Some(mut frame) => {
+            let authors = frame_author_map(&state.db, game_id).await;
+            let suppressed =
+                crate::moderation::shouts::load_suppressed_set(&state.db, game_id, &game.status)
+                    .await;
+            prepare_public_frame(&mut frame, &authors, &suppressed);
+            Some(frame)
+        }
+        None => None,
+    };
 
     Ok(Json(BoardViewerGameResponse {
         game: BoardViewerGame {
@@ -135,7 +249,18 @@ pub async fn get_game_info(
             arena_status: game.status.as_str().to_string(),
             width,
             height,
+            ruleset,
+            ruleset_name,
+            rules_stages,
+            map,
+            source: source.as_str().to_string(),
+            snake_timeout: crate::engine::MOVE_TIMEOUT_MS,
+            max_turns: crate::engine::MAX_TURNS,
+            food_spawns: Vec::new(),
+            hazard_spawns: Vec::new(),
+            created: game.created_at.timestamp_micros().to_string(),
         },
+        last_frame,
     }))
 }
 
@@ -161,10 +286,13 @@ fn clamp_frames_pagination(offset: Option<i64>, limit: Option<i64>) -> (i64, i64
     (offset, limit)
 }
 
-/// Engine-compatible frames list envelope. The legacy engine used lowercase
-/// keys here (unlike the PascalCase frame contents) and the exporter's
-/// `gameFramesResponse` deserializes exactly `count` + `frames`.
+/// Engine-compatible frames list envelope: `{"Count", "Frames"}`, PascalCase
+/// like the rest of the legacy engine API (verified live against
+/// engine.battlesnake.com). `Count` is the number of frames in this page. The
+/// GIF exporter's lowercase `count`/`frames` tags still match because Go's
+/// JSON decoding is case-insensitive; JS/Python clients are not.
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "PascalCase")]
 pub struct GameFramesResponse {
     pub count: usize,
     pub frames: Vec<serde_json::Value>,
@@ -205,8 +333,7 @@ pub async fn get_game_frames(
     let mut frames: Vec<serde_json::Value> =
         turns.into_iter().filter_map(|t| t.frame_data).collect();
     for frame in &mut frames {
-        fill_frame_authors(frame, &authors);
-        crate::moderation::shouts::strip_suppressed_shouts(frame, &suppressed);
+        prepare_public_frame(frame, &authors, &suppressed);
     }
 
     Ok(Json(GameFramesResponse {
@@ -324,8 +451,7 @@ async fn handle_game_websocket(socket: WebSocket, state: AppState, game_id: Uuid
     // Send all existing frames
     for turn in existing_turns {
         if let Some(mut frame_data) = turn.frame_data {
-            fill_frame_authors(&mut frame_data, &authors);
-            crate::moderation::shouts::strip_suppressed_shouts(&mut frame_data, &suppressed);
+            prepare_public_frame(&mut frame_data, &authors, &suppressed);
             let frame_msg = WebSocketMessage {
                 message_type: "frame".to_string(),
                 data: frame_data,
@@ -403,11 +529,7 @@ async fn handle_game_websocket(socket: WebSocket, state: AppState, game_id: Uuid
                                     continue;
                                 }
                                 if let Some(mut frame_data) = turn.frame_data {
-                                    fill_frame_authors(&mut frame_data, &authors);
-                                    crate::moderation::shouts::strip_suppressed_shouts(
-                                        &mut frame_data,
-                                        &suppressed,
-                                    );
+                                    prepare_public_frame(&mut frame_data, &authors, &suppressed);
                                     let frame_msg = WebSocketMessage {
                                         message_type: "frame".to_string(),
                                         data: frame_data,
@@ -476,23 +598,141 @@ async fn handle_game_websocket(socket: WebSocket, state: AppState, game_id: Uuid
 mod tests {
     use super::*;
 
+    fn sample_game(status: GameStatus, game_type: GameType) -> BoardViewerGame {
+        let game_id = Uuid::nil();
+        let (ruleset, ruleset_name, map, rules_stages) = engine_rules(game_type, game_id);
+        BoardViewerGame {
+            id: "abc-123".to_string(),
+            status: engine_status(status).to_string(),
+            arena_status: status.as_str().to_string(),
+            width: 11,
+            height: 11,
+            ruleset,
+            ruleset_name,
+            rules_stages,
+            map,
+            source: "ladder".to_string(),
+            snake_timeout: crate::engine::MOVE_TIMEOUT_MS,
+            max_turns: crate::engine::MAX_TURNS,
+            food_spawns: Vec::new(),
+            hazard_spawns: Vec::new(),
+            created: "1790859473028997".to_string(),
+        }
+    }
+
+    /// `Game` carries every key of the legacy engine's `GET /games/{id}`
+    /// (sampled live from engine.battlesnake.com) plus arena's additive
+    /// `ArenaStatus`; `LastFrame` is omitted until a frame exists.
     #[test]
-    fn test_board_viewer_response_serialization() {
+    fn test_board_viewer_response_matches_legacy_engine_shape() {
         let response = BoardViewerGameResponse {
-            game: BoardViewerGame {
-                id: "abc-123".to_string(),
-                status: "complete".to_string(),
-                arena_status: "finished".to_string(),
-                width: 11,
-                height: 11,
-            },
+            game: sample_game(GameStatus::Finished, GameType::Standard),
+            last_frame: None,
         };
 
-        let json = serde_json::to_string(&response).unwrap();
+        let json = serde_json::to_value(&response).unwrap();
+        let mut top: Vec<&str> = json
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        top.sort();
+        assert_eq!(top, ["Game"]);
+        let mut game: Vec<&str> = json["Game"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        game.sort();
         assert_eq!(
-            json,
-            r#"{"Game":{"ID":"abc-123","Status":"complete","ArenaStatus":"finished","Width":11,"Height":11}}"#
+            game,
+            [
+                "ArenaStatus",
+                "Created",
+                "FoodSpawns",
+                "HazardSpawns",
+                "Height",
+                "ID",
+                "Map",
+                "MaxTurns",
+                "RulesStages",
+                "Ruleset",
+                "RulesetName",
+                "SnakeTimeout",
+                "Source",
+                "Status",
+                "Width",
+            ]
         );
+        assert_eq!(json["Game"]["Created"], "1790859473028997");
+        assert_eq!(json["Game"]["SnakeTimeout"], 500);
+
+        let with_frame = BoardViewerGameResponse {
+            game: sample_game(GameStatus::Running, GameType::Standard),
+            last_frame: Some(serde_json::json!({"Turn": 7})),
+        };
+        let json = serde_json::to_value(&with_frame).unwrap();
+        assert_eq!(json["LastFrame"]["Turn"], 7);
+    }
+
+    /// Ruleset/map/stages match what play.battlesnake.com created for each
+    /// mode (play `ui/maps.py`, `leaderboards_setup.py`, `game_stages.py`),
+    /// with arena's real settings values.
+    #[test]
+    fn test_engine_rules_match_play_per_mode() {
+        let standard_pipeline = [
+            "movement.standard",
+            "starvation.standard",
+            "hazard_damage.standard",
+            "feed_snakes.standard",
+            "elimination.standard",
+        ];
+        let with_game_over = |game_over: &str| {
+            std::iter::once(game_over.to_string())
+                .chain(standard_pipeline.iter().map(|s| s.to_string()))
+                .collect::<Vec<_>>()
+        };
+
+        let (ruleset, name, map, stages) = engine_rules(GameType::Standard, Uuid::nil());
+        assert_eq!((name.as_str(), map.as_str()), ("standard", "standard"));
+        assert_eq!(ruleset["name"], "standard");
+        assert_eq!(ruleset["foodSpawnChance"], "15");
+        assert_eq!(ruleset["minimumFood"], "1");
+        assert!(!ruleset.contains_key("shrinkEveryNTurns"));
+        assert_eq!(stages, with_game_over("game_over.standard"));
+
+        let (ruleset, name, map, stages) = engine_rules(GameType::Royale, Uuid::nil());
+        assert_eq!((name.as_str(), map.as_str()), ("standard", "royale"));
+        assert_eq!(ruleset["name"], "standard");
+        assert_eq!(ruleset["damagePerTurn"], "14");
+        assert_eq!(ruleset["shrinkEveryNTurns"], "25");
+        assert_eq!(stages, with_game_over("game_over.standard"));
+
+        let (ruleset, name, map, stages) = engine_rules(GameType::Constrictor, Uuid::nil());
+        assert_eq!((name.as_str(), map.as_str()), ("constrictor", "empty"));
+        assert_eq!(ruleset["name"], "constrictor");
+        assert_eq!(
+            stages,
+            [
+                "game_over.standard",
+                "movement.standard",
+                "starvation.standard",
+                "hazard_damage.standard",
+                "feed_snakes.standard",
+                "modify_snakes.always_grow",
+                "elimination.standard",
+            ]
+        );
+
+        let (_, name, map, stages) = engine_rules(GameType::SnailMode, Uuid::nil());
+        assert_eq!((name.as_str(), map.as_str()), ("standard", "snail_mode"));
+        assert_eq!(stages, with_game_over("game_over.standard"));
+
+        let (_, name, map, stages) = engine_rules(GameType::Solo, Uuid::nil());
+        assert_eq!((name.as_str(), map.as_str()), ("standard", "standard"));
+        assert_eq!(stages, with_game_over("game_over.solo_snake"));
     }
 
     #[test]
@@ -512,13 +752,8 @@ mod tests {
             (GameStatus::Failed, "failed"),
         ] {
             let response = BoardViewerGameResponse {
-                game: BoardViewerGame {
-                    id: "id".to_string(),
-                    status: engine_status(status).to_string(),
-                    arena_status: status.as_str().to_string(),
-                    width: 7,
-                    height: 7,
-                },
+                game: sample_game(status, GameType::Standard),
+                last_frame: None,
             };
             let value = serde_json::to_value(response).unwrap();
             assert_eq!(value["Game"]["ArenaStatus"], expected);
@@ -535,8 +770,8 @@ mod tests {
 
     #[test]
     fn test_frames_response_serialization() {
-        // Engine envelope: lowercase count/frames keys wrapping PascalCase
-        // frame blobs — exactly what the exporter's gameFramesResponse expects.
+        // Engine envelope: PascalCase Count/Frames wrapping the frame blobs,
+        // exactly like engine.battlesnake.com.
         let response = GameFramesResponse {
             count: 1,
             frames: vec![serde_json::json!({
@@ -550,7 +785,7 @@ mod tests {
         let json = serde_json::to_string(&response).unwrap();
         assert_eq!(
             json,
-            r#"{"count":1,"frames":[{"Food":[{"X":1,"Y":2}],"Hazards":[],"Snakes":[],"Turn":0}]}"#
+            r#"{"Count":1,"Frames":[{"Food":[{"X":1,"Y":2}],"Hazards":[],"Snakes":[],"Turn":0}]}"#
         );
     }
 
@@ -625,6 +860,93 @@ mod tests {
         serde_json::from_slice(&bytes).unwrap()
     }
 
+    /// `GET /api/games/{id}` serves the legacy engine's `{Game, LastFrame}`:
+    /// a ladder game reports `Source: "ladder"`, `LastFrame` is the latest
+    /// turn, and a frame persisted before DEV-1502 (Latency "timeout", no
+    /// engine fields) is served in the engine's shape.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn game_info_serves_engine_game_and_last_frame(pool: PgPool) -> cja::Result<()> {
+        let state = crate::state::AppState::test_from_pool(pool.clone());
+        let game_id = fixture_game(&pool, "finished").await?;
+        let leaderboard_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO leaderboards (name) VALUES ('info') RETURNING leaderboard_id",
+        )
+        .fetch_one(&pool)
+        .await?;
+        sqlx::query("INSERT INTO leaderboard_games (leaderboard_id, game_id) VALUES ($1, $2)")
+            .bind(leaderboard_id)
+            .bind(game_id)
+            .execute(&pool)
+            .await?;
+        fixture_turn(
+            &pool,
+            game_id,
+            0,
+            Some(serde_json::json!({"Turn": 0, "Snakes": [], "Food": [], "Hazards": []})),
+        )
+        .await?;
+        fixture_turn(
+            &pool,
+            game_id,
+            1,
+            Some(serde_json::json!({
+                "Turn": 1,
+                "Snakes": [{"ID": "s1", "Latency": "timeout", "APIVersion": "1"}],
+                "Food": [],
+                "Hazards": []
+            })),
+        )
+        .await?;
+
+        let response = get_game_info(State(state), Path(game_id))
+            .await
+            .unwrap()
+            .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
+
+        let game = &json["Game"];
+        assert_eq!(game["Status"], "complete");
+        assert_eq!(game["Source"], "ladder");
+        assert_eq!(game["RulesetName"], "standard");
+        assert_eq!(game["Map"], "standard");
+        assert_eq!(game["Ruleset"]["name"], "standard");
+        assert_eq!(game["SnakeTimeout"], 500);
+        assert!(
+            game["Created"]
+                .as_str()
+                .is_some_and(|c| c.parse::<i64>().is_ok())
+        );
+
+        let last = &json["LastFrame"];
+        assert_eq!(last["Turn"], 1);
+        assert_eq!(last["PointState"], serde_json::json!([]));
+        let snake = &last["Snakes"][0];
+        assert_eq!(snake["Latency"], "500");
+        assert_eq!(snake["Error"], crate::engine::frame::TIMEOUT_ERROR);
+        assert_eq!(snake["APIVersion"], "");
+
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn game_info_omits_last_frame_before_turn_zero(pool: PgPool) -> cja::Result<()> {
+        let state = crate::state::AppState::test_from_pool(pool.clone());
+        let game_id = fixture_game(&pool, "waiting").await?;
+
+        let response = get_game_info(State(state), Path(game_id))
+            .await
+            .unwrap()
+            .into_response();
+        let json = response_json(response).await;
+
+        assert_eq!(json["Game"]["Status"], "pending");
+        assert_eq!(json["Game"]["Source"], "custom");
+        assert!(json.get("LastFrame").is_none());
+
+        Ok(())
+    }
+
     #[sqlx::test(migrations = "../migrations")]
     async fn frames_endpoint_returns_engine_envelope(pool: PgPool) -> cja::Result<()> {
         let state = crate::state::AppState::test_from_pool(pool.clone());
@@ -663,8 +985,8 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let json = response_json(response).await;
 
-        assert_eq!(json["count"], 2);
-        let frames = json["frames"].as_array().unwrap();
+        assert_eq!(json["Count"], 2);
+        let frames = json["Frames"].as_array().unwrap();
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0]["Turn"], 0);
         assert_eq!(frames[1]["Turn"], 1);
@@ -700,9 +1022,9 @@ mod tests {
         .into_response();
 
         let json = response_json(response).await;
-        assert_eq!(json["count"], 2);
-        assert_eq!(json["frames"][0]["Turn"], 2);
-        assert_eq!(json["frames"][1]["Turn"], 3);
+        assert_eq!(json["Count"], 2);
+        assert_eq!(json["Frames"][0]["Turn"], 2);
+        assert_eq!(json["Frames"][1]["Turn"], 3);
 
         Ok(())
     }
@@ -733,8 +1055,8 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         let json = response_json(response).await;
-        assert_eq!(json["count"], 0);
-        assert_eq!(json["frames"].as_array().unwrap().len(), 0);
+        assert_eq!(json["Count"], 0);
+        assert_eq!(json["Frames"].as_array().unwrap().len(), 0);
 
         Ok(())
     }
@@ -807,8 +1129,8 @@ mod tests {
         .into_response();
 
         let json = response_json(response).await;
-        let frames = json["frames"].as_array().unwrap();
-        assert_eq!(json["count"], 4);
+        let frames = json["Frames"].as_array().unwrap();
+        assert_eq!(json["Count"], 4);
         assert_eq!(frames[0]["Turn"], 0, "progression starts at turn 0");
         for (i, frame) in frames.iter().enumerate() {
             assert_eq!(frame["Turn"], i, "frames stay ordered");

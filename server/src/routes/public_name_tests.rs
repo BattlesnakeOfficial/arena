@@ -174,7 +174,7 @@ async fn game_page_and_frames_show_owner_public_name(pool: PgPool) {
     let (status, body) = fx.get(&format!("/api/games/{game_id}/frames"), None).await;
     assert_eq!(status, StatusCode::OK);
     let json: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(json["frames"][0]["Snakes"][0]["Author"], "Display Person");
+    assert_eq!(json["Frames"][0]["Snakes"][0]["Author"], "Display Person");
 }
 
 #[sqlx::test(migrations = "../migrations")]

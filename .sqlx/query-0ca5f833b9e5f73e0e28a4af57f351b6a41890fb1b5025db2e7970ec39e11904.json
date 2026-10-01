@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT frame_data AS \"frame_data!\"\n        FROM turns\n        WHERE game_id = $1 AND frame_data IS NOT NULL\n        ORDER BY turn_number DESC\n        LIMIT 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "frame_data!",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "0ca5f833b9e5f73e0e28a4af57f351b6a41890fb1b5025db2e7970ec39e11904"
+}

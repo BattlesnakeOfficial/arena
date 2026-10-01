@@ -875,7 +875,8 @@ mod tests {
     /// - `board.snakes` lists exactly the snakes alive in that turn's frame,
     ///   so no eliminated snake (or off-board head) is ever sent;
     /// - after a timed-out move the next request reports `you.latency` as
-    ///   the timeout ("500"), matching the frame's "timeout";
+    ///   the timeout ("500"), matching the frame (Latency "500" plus the
+    ///   engine's timeout Error, DEV-1502);
     /// - `game.map` / `game.source` are filled in.
     #[sqlx::test(migrations = "../migrations")]
     async fn snake_requests_match_official_engine(pool: PgPool) -> cja::Result<()> {
@@ -1016,13 +1017,15 @@ mod tests {
             .iter()
             .find(|(t, _)| *t == 1)
             .expect("frame 1 exists");
-        let frame_latency = frame_one["Snakes"]
+        let frame_snake = frame_one["Snakes"]
             .as_array()
             .into_iter()
             .flatten()
             .find(|s| s["ID"] == doomed_id)
-            .map(|s| s["Latency"].clone());
-        assert_eq!(frame_latency, Some(serde_json::json!("timeout")));
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(frame_snake["Latency"], "500");
+        assert_eq!(frame_snake["Error"], crate::engine::frame::TIMEOUT_ERROR);
 
         // /end goes to every snake, dead or alive, and each sees itself.
         for server in [&doomed, &late, &survivor] {
