@@ -267,6 +267,10 @@ pub struct MoveResult {
     pub latency_ms: Option<i64>,
     pub timed_out: bool,
     pub shout: Option<String>,
+    /// HTTP status the snake answered with; `None` when no response arrived
+    /// (timeout, transport error, engine-proxy fault). Surfaced in frames as
+    /// `StatusCode` like the legacy engine.
+    pub status_code: Option<u16>,
 }
 
 /// Build the request body for a specific snake
@@ -383,23 +387,27 @@ pub async fn request_move(
     }
 
     match result {
-        Ok(Ok(response)) => match read_body_capped(response, BODY_READ_CAP_BYTES).await {
-            Ok(body) => match serde_json::from_str::<MoveResponse>(&body) {
-                Ok(move_response) => {
-                    let direction = parse_direction(&move_response.direction)
-                        .unwrap_or_else(|| last_direction.unwrap_or(Direction::Up));
-                    MoveResult {
-                        snake_id: snake_id.to_string(),
-                        direction,
-                        latency_ms: Some(elapsed),
-                        timed_out: false,
-                        shout: sanitize_shout(move_response.shout),
+        Ok(Ok(response)) => {
+            let status = Some(response.status().as_u16());
+            match read_body_capped(response, BODY_READ_CAP_BYTES).await {
+                Ok(body) => match serde_json::from_str::<MoveResponse>(&body) {
+                    Ok(move_response) => {
+                        let direction = parse_direction(&move_response.direction)
+                            .unwrap_or_else(|| last_direction.unwrap_or(Direction::Up));
+                        MoveResult {
+                            snake_id: snake_id.to_string(),
+                            direction,
+                            latency_ms: Some(elapsed),
+                            timed_out: false,
+                            shout: sanitize_shout(move_response.shout),
+                            status_code: status,
+                        }
                     }
-                }
-                Err(e) => invalid_move_response(snake_id, last_direction, elapsed, &e),
-            },
-            Err(e) => invalid_move_response(snake_id, last_direction, elapsed, &e),
-        },
+                    Err(e) => invalid_move_response(snake_id, last_direction, elapsed, status, &e),
+                },
+                Err(e) => invalid_move_response(snake_id, last_direction, elapsed, status, &e),
+            }
+        }
         Ok(Err(e)) => {
             // Network error - continue in same direction
             tracing::warn!(
@@ -413,6 +421,7 @@ pub async fn request_move(
                 latency_ms: None,
                 timed_out: true,
                 shout: None,
+                status_code: None,
             }
         }
         Err(_) => {
@@ -428,6 +437,7 @@ pub async fn request_move(
                 latency_ms: None,
                 timed_out: true,
                 shout: None,
+                status_code: None,
             }
         }
     }
@@ -437,6 +447,7 @@ fn invalid_move_response(
     snake_id: &str,
     last_direction: Option<Direction>,
     elapsed: i64,
+    status_code: Option<u16>,
     error: &dyn std::fmt::Display,
 ) -> MoveResult {
     tracing::warn!(
@@ -450,6 +461,7 @@ fn invalid_move_response(
         latency_ms: Some(elapsed),
         timed_out: false,
         shout: None,
+        status_code,
     }
 }
 
@@ -728,12 +740,13 @@ pub async fn request_move_routed(
         latency_ms,
         timed_out,
         shout: None,
+        status_code: None,
     };
     match execute_proxy(builder.json(&body), timeout).await {
         ProxyCall::Response {
             class: ProxyResponseClass::SnakeResponse { latency_ms },
             body,
-            ..
+            status,
         } => match serde_json::from_str::<MoveResponse>(&body) {
             Ok(moved) => MoveResult {
                 snake_id: endpoint.snake_id.clone(),
@@ -742,10 +755,15 @@ pub async fn request_move_routed(
                 latency_ms: Some(latency_ms),
                 timed_out: false,
                 shout: sanitize_shout(moved.shout),
+                status_code: Some(status.as_u16()),
             },
-            Err(error) => {
-                invalid_move_response(&endpoint.snake_id, last_direction, latency_ms, &error)
-            }
+            Err(error) => invalid_move_response(
+                &endpoint.snake_id,
+                last_direction,
+                latency_ms,
+                Some(status.as_u16()),
+                &error,
+            ),
         },
         ProxyCall::Response {
             class: ProxyResponseClass::SnakeTransportFailure { timed_out, .. },
@@ -1687,6 +1705,7 @@ mod tests {
             latency_ms: Some(100),
             timed_out: false,
             shout: Some("hello".to_string()),
+            status_code: Some(200),
         };
         let cloned = result.clone();
         assert_eq!(cloned.snake_id, "test");

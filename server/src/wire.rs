@@ -115,6 +115,23 @@ impl From<&rules::Point> for Position {
     }
 }
 
+/// The public `(ruleset name, map)` pair for an internal ruleset name.
+///
+/// Internal `GameMeta::ruleset_name` drives engine dispatch; everything
+/// public (snake payloads, the engine-compatible game API) matches
+/// play.battlesnake.com exactly (play `ui/maps.py` + `leaderboards_setup.py`).
+/// Royale and Snail Mode were *maps* on the standard ruleset, and
+/// single-snake games were plain standard games, so only Constrictor has its
+/// own ruleset name.
+pub fn wire_ruleset_and_map(internal_ruleset: &str) -> (&'static str, &'static str) {
+    match internal_ruleset {
+        "royale" => ("standard", "royale"),
+        "snail_mode" => ("standard", "snail_mode"),
+        "constrictor" => ("constrictor", "empty"),
+        _ => ("standard", "standard"),
+    }
+}
+
 /// Extra per-snake context from the previous turn's MoveResults.
 pub struct SnakeContext {
     pub latency_ms: Option<i64>,
@@ -218,7 +235,7 @@ impl Game {
             .snakes
             .iter()
             .find(|s| s.id == you_snake_id)
-            .map(&convert_snake)
+            .map(convert_snake)
             .unwrap_or_else(|| BattleSnake {
                 id: "dummy".to_string(),
                 name: "Dummy".to_string(),
@@ -234,17 +251,7 @@ impl Game {
 
         let settings = &engine_game.meta.settings;
 
-        // Internal `meta.ruleset_name` drives engine dispatch; the wire
-        // protocol matches play.battlesnake.com exactly (play `ui/maps.py`
-        // + `leaderboards_setup.py`). Royale and Snail Mode were *maps* on
-        // the standard ruleset, and single-snake games were plain standard
-        // games, so only Constrictor sends its own ruleset name.
-        let (wire_ruleset_name, wire_map) = match engine_game.meta.ruleset_name.as_str() {
-            "royale" => ("standard", "royale"),
-            "snail_mode" => ("standard", "snail_mode"),
-            "constrictor" => ("constrictor", "empty"),
-            _ => ("standard", "standard"),
-        };
+        let (wire_ruleset_name, wire_map) = wire_ruleset_and_map(&engine_game.meta.ruleset_name);
 
         Game {
             game: NestedGame {
@@ -687,7 +694,7 @@ mod tests {
     }
 
     /// The request after a timeout carries `you.latency = "<timeout>"`,
-    /// consistent with the frame's "timeout".
+    /// the same value the frame records.
     #[test]
     fn test_latency_after_timeout_is_timeout_value() {
         let engine_game = create_test_engine_game();

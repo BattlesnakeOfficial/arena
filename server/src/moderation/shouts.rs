@@ -828,7 +828,7 @@ mod tests {
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        let frames = json["frames"].as_array().unwrap();
+        let frames = json["Frames"].as_array().unwrap();
         assert_eq!(frames.len(), 4);
         for f in frames {
             let snakes = f["Snakes"].as_array().unwrap();

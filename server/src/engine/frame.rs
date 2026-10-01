@@ -3,6 +3,8 @@
 //! This module converts the internal game state to the PascalCase JSON format
 //! expected by the board viewer.
 
+use std::collections::BTreeMap;
+
 use rules::Point;
 use serde::Serialize;
 
@@ -29,7 +31,15 @@ pub struct EngineGameFrame {
     pub snakes: Vec<FrameSnake>,
     pub food: Vec<FrameCoord>,
     pub hazards: Vec<FrameCoord>,
+    /// Legacy engine map state. Arena has no map state, so these are always
+    /// empty, but present like in the engine's frames.
+    pub game_state: BTreeMap<String, String>,
+    pub point_state: Vec<serde_json::Value>,
 }
+
+/// Legacy engine `Error` for a move that timed out (BattlesnakeOfficial/engine
+/// `client/snake_errors.go`).
+pub const TIMEOUT_ERROR: &str = "A response was not received before the timeout";
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "PascalCase")]
@@ -51,6 +61,70 @@ pub struct FrameSnake {
     pub death: Option<FrameDeath>,
     pub eliminated_cause: String,
     pub eliminated_by: String,
+    /// HTTP status of the snake's /move reply; 0 when none arrived.
+    pub status_code: u16,
+    /// Legacy engine error text for the move ("" when it succeeded).
+    pub error: String,
+    /// Per-phase HTTP timings in the legacy engine; arena doesn't trace them.
+    pub timing_micros: BTreeMap<String, i64>,
+    pub is_bot: bool,
+    pub is_environment: bool,
+    /// Never public: always "" (the engine blanked it too).
+    #[serde(rename = "URL")]
+    pub url: String,
+    #[serde(rename = "ProxyURL")]
+    pub proxy_url: String,
+}
+
+/// Legacy engine `Error` for a move result: timeouts get the engine's timeout
+/// text, non-200 replies "Bad HTTP status code N", anything else "".
+fn move_error(result: &MoveResult) -> String {
+    if result.timed_out {
+        return TIMEOUT_ERROR.to_string();
+    }
+    match result.status_code {
+        Some(code) if code != 200 => format!("Bad HTTP status code {code}"),
+        _ => String::new(),
+    }
+}
+
+/// Bring a persisted frame up to the legacy engine's public frame shape at
+/// serve time. Frames written before DEV-1502 lack the engine-only fields and
+/// recorded a timeout as `Latency: "timeout"`; the engine reported the timeout
+/// in ms plus an `Error`. Snake URLs and API versions are blanked like the
+/// engine's public API did. Idempotent.
+pub fn normalize_public_frame(frame: &mut serde_json::Value, timeout_ms: i64) {
+    use serde_json::{Value, json};
+
+    let Some(frame) = frame.as_object_mut() else {
+        return;
+    };
+    frame.entry("GameState").or_insert_with(|| json!({}));
+    frame.entry("PointState").or_insert_with(|| json!([]));
+    let Some(snakes) = frame.get_mut("Snakes").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for snake in snakes.iter_mut().filter_map(Value::as_object_mut) {
+        snake.entry("StatusCode").or_insert_with(|| json!(0));
+        snake.entry("Error").or_insert_with(|| json!(""));
+        snake.entry("TimingMicros").or_insert_with(|| json!({}));
+        snake.entry("IsBot").or_insert_with(|| json!(false));
+        snake.entry("IsEnvironment").or_insert_with(|| json!(false));
+        for key in ["URL", "ProxyURL", "APIVersion"] {
+            snake.insert(key.to_string(), json!(""));
+        }
+        if snake.get("Latency").and_then(Value::as_str) == Some("timeout") {
+            snake.insert("Latency".to_string(), json!(timeout_ms.to_string()));
+            if snake
+                .get("Error")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .is_empty()
+            {
+                snake.insert("Error".to_string(), json!(TIMEOUT_ERROR));
+            }
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -123,20 +197,22 @@ pub fn game_to_frame(
                     Default::default()
                 };
 
-                // Find latency for this snake from move results
-                let latency = move_results
-                    .iter()
-                    .find(|r| r.snake_id == s.id)
-                    .map(|r| {
-                        if r.timed_out {
-                            "timeout".to_string()
-                        } else {
-                            r.latency_ms
-                                .map(|ms| ms.to_string())
-                                .unwrap_or_else(|| "0".to_string())
-                        }
+                // Latency like the engine: measured ms clamped to [1, timeout],
+                // and a timeout reports the full timeout (with an Error)
+                // rather than a sentinel. Identical to the `you.latency` the
+                // snake sees on its next request.
+                let result = move_results.iter().find(|r| r.snake_id == s.id);
+                let latency = result
+                    .and_then(|r| {
+                        crate::wire::reported_latency_ms(
+                            r.latency_ms,
+                            r.timed_out,
+                            game.meta.timeout,
+                        )
                     })
-                    .unwrap_or_else(|| "0".to_string());
+                    .map_or_else(|| "0".to_string(), |ms| ms.to_string());
+                let status_code = result.and_then(|r| r.status_code).unwrap_or(0);
+                let error = result.map(move_error).unwrap_or_default();
 
                 // Get shout from move result if available
                 let shout = move_results
@@ -186,6 +262,13 @@ pub fn game_to_frame(
                     death,
                     eliminated_cause,
                     eliminated_by,
+                    status_code,
+                    error,
+                    timing_micros: BTreeMap::new(),
+                    is_bot: false,
+                    is_environment: false,
+                    url: String::new(),
+                    proxy_url: String::new(),
                 }
             })
             .collect(),
@@ -197,6 +280,8 @@ pub fn game_to_frame(
         // partial turns and replay from turn 0), so bookkeeping points are
         // excluded from persistence.
         hazards: game.board.on_board_hazards().map(|p| (*p).into()).collect(),
+        game_state: BTreeMap::new(),
+        point_state: Vec::new(),
     }
 }
 
@@ -507,6 +592,7 @@ mod tests {
             latency_ms: Some(42),
             timed_out: false,
             shout: None,
+            status_code: Some(200),
         }];
 
         let frame = game_to_frame(
@@ -531,6 +617,7 @@ mod tests {
             latency_ms: None,
             timed_out: true,
             shout: None,
+            status_code: None,
         }];
 
         let frame = game_to_frame(
@@ -540,7 +627,135 @@ mod tests {
             &std::collections::HashMap::new(),
         );
 
-        assert_eq!(frame.snakes[0].latency, "timeout");
+        // Engine parity: the timeout in ms plus the engine's error text,
+        // never a "timeout" sentinel (the board viewer renders "{latency}ms").
+        assert_eq!(frame.snakes[0].latency, "500");
+        assert_eq!(frame.snakes[0].error, TIMEOUT_ERROR);
+        assert_eq!(frame.snakes[0].status_code, 0);
+    }
+
+    #[test]
+    fn test_game_to_frame_reports_status_and_bad_status_error() {
+        use crate::snake_client::MoveResult;
+
+        let game = create_test_game();
+        let result = |status_code| MoveResult {
+            snake_id: "snake-1".to_string(),
+            direction: rules::Direction::Up,
+            latency_ms: Some(0),
+            timed_out: false,
+            shout: None,
+            status_code,
+        };
+
+        let ok = game_to_frame(&game, &[], &[result(Some(200))], &Default::default());
+        assert_eq!(ok.snakes[0].status_code, 200);
+        assert_eq!(ok.snakes[0].error, "");
+        // Sub-millisecond replies report 1, like the engine.
+        assert_eq!(ok.snakes[0].latency, "1");
+
+        let bad = game_to_frame(&game, &[], &[result(Some(502))], &Default::default());
+        assert_eq!(bad.snakes[0].status_code, 502);
+        assert_eq!(bad.snakes[0].error, "Bad HTTP status code 502");
+    }
+
+    /// Frames serialize every field the legacy engine's public frames carry
+    /// (sampled live from engine.battlesnake.com), plus arena's additive
+    /// EliminatedCause/EliminatedBy.
+    #[test]
+    fn test_frame_schema_matches_legacy_engine() {
+        let frame = game_to_frame(&create_test_game(), &[], &[], &Default::default());
+        let json = serde_json::to_value(&frame).unwrap();
+
+        let mut top: Vec<&str> = json
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        top.sort();
+        assert_eq!(
+            top,
+            [
+                "Food",
+                "GameState",
+                "Hazards",
+                "PointState",
+                "Snakes",
+                "Turn"
+            ]
+        );
+        let mut snake: Vec<&str> = json["Snakes"][0]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        snake.sort();
+        assert_eq!(
+            snake,
+            [
+                "APIVersion",
+                "Author",
+                "Body",
+                "Color",
+                "Death",
+                "EliminatedBy",
+                "EliminatedCause",
+                "Error",
+                "HeadType",
+                "Health",
+                "ID",
+                "IsBot",
+                "IsEnvironment",
+                "Latency",
+                "Name",
+                "ProxyURL",
+                "Shout",
+                "Squad",
+                "StatusCode",
+                "TailType",
+                "TimingMicros",
+                "URL",
+            ]
+        );
+    }
+
+    /// Frames persisted before DEV-1502 are upgraded at serve time: engine
+    /// fields filled in, the "timeout" sentinel rewritten to the engine's
+    /// representation, private fields blanked. Already-normalized frames are
+    /// left as they are.
+    #[test]
+    fn test_normalize_public_frame_upgrades_legacy_frames() {
+        let mut frame = serde_json::json!({
+            "Turn": 3,
+            "Snakes": [
+                {"ID": "a", "Latency": "timeout", "APIVersion": "1"},
+                {"ID": "b", "Latency": "42", "APIVersion": "1", "StatusCode": 200}
+            ],
+            "Food": [],
+            "Hazards": []
+        });
+
+        normalize_public_frame(&mut frame, 500);
+        let once = frame.clone();
+        normalize_public_frame(&mut frame, 500);
+
+        assert_eq!(frame, once, "normalization is idempotent");
+        assert_eq!(frame["GameState"], serde_json::json!({}));
+        assert_eq!(frame["PointState"], serde_json::json!([]));
+        let a = &frame["Snakes"][0];
+        assert_eq!(a["Latency"], "500");
+        assert_eq!(a["Error"], TIMEOUT_ERROR);
+        assert_eq!(a["StatusCode"], 0);
+        assert_eq!(a["APIVersion"], "");
+        assert_eq!(a["URL"], "");
+        assert_eq!(a["IsBot"], false);
+        let b = &frame["Snakes"][1];
+        assert_eq!(b["Latency"], "42");
+        assert_eq!(b["Error"], "");
+        assert_eq!(b["StatusCode"], 200);
+        assert_eq!(b["TimingMicros"], serde_json::json!({}));
     }
 
     #[test]
@@ -555,6 +770,7 @@ mod tests {
             latency_ms: Some(100),
             timed_out: false,
             shout: Some("Hello from move!".to_string()),
+            status_code: Some(200),
         }];
 
         let frame = game_to_frame(
@@ -581,6 +797,7 @@ mod tests {
             latency_ms: Some(50),
             timed_out: false,
             shout: None,
+            status_code: Some(200),
         }];
 
         let frame = game_to_frame(

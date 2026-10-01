@@ -86,30 +86,14 @@ fn game_seed(game_id: Uuid) -> u64 {
     u64::from_le_bytes(bytes[..8].try_into().expect("uuid has 16 bytes"))
 }
 
-/// Create the initial game state from database models
-pub fn create_initial_game(
-    game_id: Uuid,
-    board_size: GameBoardSize,
+/// Per-mode rules: the internal ruleset name (drives engine dispatch), the
+/// standard settings, and Royale's shrink settings. Single source for both
+/// game creation and everything that describes a game's rules (snake
+/// payloads via `GameMeta`, the engine-compatible game API).
+pub fn mode_rules(
     game_type: GameType,
-    battlesnakes: &[GameBattlesnakeWithDetails],
-) -> EngineGame {
-    let (w, h) = board_size.dimensions();
-    let (width, height) = (w as i32, h as i32);
-
-    let snake_ids: Vec<String> = battlesnakes
-        .iter()
-        .map(|bs| bs.game_battlesnake_id.to_string())
-        .collect();
-
-    let mut rng = rand::thread_rng();
-    let mut board = rules::board::create_default_board_state(&mut rng, width, height, &snake_ids)
-        .expect("Failed to create initial board state");
-
-    let mut snake_names = std::collections::HashMap::new();
-    for bs in battlesnakes {
-        snake_names.insert(bs.game_battlesnake_id.to_string(), bs.name.clone());
-    }
-
+    game_id: Uuid,
+) -> (&'static str, StandardSettings, Option<RoyaleSettings>) {
     // Hazard damage: the arena has historically used 15 for standard games
     // (where it is inert -- standard boards never spawn hazards), and we keep
     // that unchanged. Royale and Snail Mode use 14, the default in the
@@ -118,7 +102,7 @@ pub fn create_initial_game(
     // play.battlesnake.com). Constrictor advertises no food spawning
     // (chance 0 / minimum 0) on the wire; its hazard damage is inert like
     // standard's.
-    let (ruleset_name, settings, royale) = match game_type {
+    match game_type {
         GameType::Royale => (
             "royale",
             StandardSettings {
@@ -176,7 +160,34 @@ pub fn create_initial_game(
             },
             None,
         ),
-    };
+    }
+}
+
+/// Create the initial game state from database models
+pub fn create_initial_game(
+    game_id: Uuid,
+    board_size: GameBoardSize,
+    game_type: GameType,
+    battlesnakes: &[GameBattlesnakeWithDetails],
+) -> EngineGame {
+    let (w, h) = board_size.dimensions();
+    let (width, height) = (w as i32, h as i32);
+
+    let snake_ids: Vec<String> = battlesnakes
+        .iter()
+        .map(|bs| bs.game_battlesnake_id.to_string())
+        .collect();
+
+    let mut rng = rand::thread_rng();
+    let mut board = rules::board::create_default_board_state(&mut rng, width, height, &snake_ids)
+        .expect("Failed to create initial board state");
+
+    let mut snake_names = std::collections::HashMap::new();
+    for bs in battlesnakes {
+        snake_names.insert(bs.game_battlesnake_id.to_string(), bs.name.clone());
+    }
+
+    let (ruleset_name, settings, royale) = mode_rules(game_type, game_id);
 
     if ruleset_name == "constrictor" {
         // Match the Go engine's initialization pass (the constrictor
