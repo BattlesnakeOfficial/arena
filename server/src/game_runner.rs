@@ -154,7 +154,7 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
             let mut customizations: HashMap<String, SnakeCustomizations> = HashMap::new();
             for bs in &battlesnakes {
                 let snake_id = bs.game_battlesnake_id.to_string();
-                // The owner login always goes in, even when the snake's /info fetch
+                // The owner's public name always goes in, even when the snake's /info fetch
                 // fails below: the board scoreboard renders "by {Author}" from frame
                 // data, and empty visual fields fall back to defaults in
                 // game_to_frame.
