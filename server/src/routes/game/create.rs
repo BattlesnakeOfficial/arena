@@ -619,7 +619,7 @@ fn public_snake_row(
                         span class="badge live" { "In lineup" @if count > 1 { " ×" (count) } }
                     }
                 }
-                span class="gc-owner" { "by " a href={"/users/"(snake.owner_login)} { (snake.owner_login) } }
+                span class="gc-owner" { "by " a href={"/users/"(snake.owner_login)} { (snake.owner_name) } }
             }
             div class="gc-actions" {
                 @if can_add {

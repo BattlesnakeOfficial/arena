@@ -9,13 +9,24 @@ test.describe('Homepage - Authenticated User', () => {
     }));
     await authenticatedPage.goto('/');
 
-    // User's GitHub login name is displayed
+    // No display name set yet, so the welcome falls back to the GitHub login
     await expect(authenticatedPage.getByText(`Welcome, ${mockUser.login}!`)).toBeVisible();
 
     // User's avatar is displayed (decorative img in the welcome band)
     const avatar = authenticatedPage.locator('.welcome-avatar');
     await expect(avatar).toBeVisible();
     await expect.poll(() => avatar.locator('img').evaluate((image: HTMLImageElement) => image.naturalWidth)).toBeGreaterThan(0);
+  });
+
+  test('greets the user by display name once one is set', async ({ authenticatedPage, mockUser }) => {
+    const displayName = `Display ${mockUser.login}`;
+    await query('UPDATE users SET display_name = $1 WHERE github_login = $2', [displayName, mockUser.login]);
+
+    await authenticatedPage.goto('/');
+
+    await expect(authenticatedPage.getByText(`Welcome, ${displayName}!`)).toBeVisible();
+    await expect(authenticatedPage.getByText(`Welcome, ${mockUser.login}!`)).toHaveCount(0);
+    await expect(authenticatedPage.locator('.nav-user-name')).toHaveText(displayName);
   });
 
   test('shows navigation links for authenticated users', async ({ authenticatedPage }) => {

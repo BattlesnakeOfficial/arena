@@ -660,13 +660,15 @@ where
 
 // --- Tournament list / detail / registration queries (BS-017 + BS-018) ---
 
-/// A tournament row enriched with owner login and registration count for the
-/// list page.
+/// A tournament row enriched with owner login/public name and registration
+/// count for the list page.
 #[derive(Debug, Clone)]
 pub struct TournamentListItem {
     pub tournament_id: Uuid,
     pub name: String,
     pub owner_login: String,
+    /// Owner's public name: `display_name` when set, else the GitHub login.
+    pub owner_name: String,
     pub status: TournamentStatus,
     pub game_type: GameType,
     pub registration_count: i64,
@@ -683,6 +685,7 @@ pub async fn list_visible_tournaments(
         tournament_id: Uuid,
         name: String,
         owner_login: String,
+        owner_name: String,
         status: TournamentStatus,
         game_type: String,
         registration_count: i64,
@@ -696,6 +699,7 @@ pub async fn list_visible_tournaments(
             t.tournament_id,
             t.name,
             u.github_login as owner_login,
+            COALESCE(NULLIF(u.display_name, ''), u.github_login) as "owner_name!",
             t.status as "status: TournamentStatus",
             t.game_type,
             COUNT(r.registration_id) as "registration_count!",
@@ -704,7 +708,7 @@ pub async fn list_visible_tournaments(
         JOIN users u ON t.user_id = u.user_id
         LEFT JOIN tournament_registrations r ON r.tournament_id = t.tournament_id
         WHERE t.visibility = 'public' OR t.user_id = $1
-        GROUP BY t.tournament_id, u.github_login
+        GROUP BY t.tournament_id, u.github_login, u.display_name
         ORDER BY t.created_at DESC
         "#,
         viewer_user_id,
@@ -721,6 +725,7 @@ pub async fn list_visible_tournaments(
                 tournament_id: row.tournament_id,
                 name: row.name,
                 owner_login: row.owner_login,
+                owner_name: row.owner_name,
                 status: row.status,
                 game_type,
                 registration_count: row.registration_count,
@@ -730,7 +735,8 @@ pub async fn list_visible_tournaments(
         .collect()
 }
 
-/// A registration enriched with snake name and owner login for display.
+/// A registration enriched with snake name and owner login/public name for
+/// display.
 #[derive(Debug, Clone)]
 pub struct RegistrationWithDetails {
     pub registration_id: Uuid,
@@ -740,6 +746,8 @@ pub struct RegistrationWithDetails {
     pub snake_name: String,
     pub snake_color: String,
     pub owner_login: String,
+    /// Owner's public name: `display_name` when set, else the GitHub login.
+    pub owner_name: String,
 }
 
 pub async fn get_registrations_with_details(
@@ -756,7 +764,8 @@ pub async fn get_registrations_with_details(
             r.seed,
             b.name as snake_name,
             b.color as snake_color,
-            u.github_login as owner_login
+            u.github_login as owner_login,
+            COALESCE(NULLIF(u.display_name, ''), u.github_login) as "owner_name!"
         FROM tournament_registrations r
         JOIN battlesnakes b ON r.battlesnake_id = b.battlesnake_id
         JOIN users u ON r.user_id = u.user_id

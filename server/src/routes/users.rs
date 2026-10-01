@@ -22,15 +22,6 @@ use crate::{
     state::AppState,
 };
 
-/// Display name shown on the public profile: the chosen display name when
-/// set, otherwise the GitHub login.
-fn public_name(user: &User) -> &str {
-    user.display_name
-        .as_deref()
-        .filter(|n| !n.is_empty())
-        .unwrap_or(&user.github_login)
-}
-
 /// GET /users/{login} — public user profile, looked up by GitHub login.
 ///
 /// `users.github_login` is not unique (GitHub logins can be renamed and
@@ -122,13 +113,13 @@ async fn render_user_profile(
         .await
         .wrap_err("Failed to fetch saved games")?;
 
-    let name = public_name(&user).to_string();
+    let name = user.public_name().to_string();
 
     Ok(page_factory.create_page(
         name.clone(),
         Box::new(html! {
             header class="profile-head" {
-                (user_avatar(user.github_avatar_url.as_deref(), &user.github_login, "avatar"))
+                (user_avatar(user.github_avatar_url.as_deref(), &name, "avatar"))
                 div class="who" {
                     h1 { (name) }
                     div class="meta" {
@@ -446,13 +437,13 @@ mod tests {
 
     #[test]
     fn public_name_prefers_display_name() {
-        assert_eq!(public_name(&test_user(Some("Corey"))), "Corey");
+        assert_eq!(test_user(Some("Corey")).public_name(), "Corey");
     }
 
     #[test]
     fn public_name_falls_back_to_login_when_unset_or_empty() {
-        assert_eq!(public_name(&test_user(None)), "coreyja");
-        assert_eq!(public_name(&test_user(Some(""))), "coreyja");
+        assert_eq!(test_user(None).public_name(), "coreyja");
+        assert_eq!(test_user(Some("")).public_name(), "coreyja");
     }
 
     fn directory_entry(user_id: Uuid, login: &str, public_name: &str) -> PlayerDirectoryEntry {

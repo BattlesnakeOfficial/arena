@@ -865,7 +865,7 @@ pub async fn list_tournaments(
                                         div class="snake-cell" {
                                             span {
                                                 a class="name" href={"/tournaments/"(t.tournament_id)} { (t.name) }
-                                                span class="owner" { "by " (t.owner_login) }
+                                                span class="owner" { "by " (t.owner_name) }
                                             }
                                         }
                                     }
@@ -1068,10 +1068,9 @@ pub async fn show_tournament(
     let owner = user::get_user_by_id(&state.db, t.user_id)
         .await
         .wrap_err("Failed to fetch tournament owner")?;
-    let owner_login = owner
+    let owner_name = owner
         .as_ref()
-        .map(|o| o.github_login.clone())
-        .unwrap_or_else(|| "Unknown".to_string());
+        .map_or_else(|| "Unknown".to_string(), |o| o.public_name().to_string());
 
     let is_owner = viewer_id == Some(t.user_id);
 
@@ -1210,7 +1209,7 @@ pub async fn show_tournament(
                 div {
                     h1 { (t.name) }
                     div class="sub" {
-                        "by " (owner_login)
+                        "by " (owner_name)
                         " · " (t.game_type.as_str())
                         " · " (t.board_size.as_str())
                         " · " (style_label)
@@ -1298,7 +1297,7 @@ pub async fn show_tournament(
                                                     span class="chip" style={"background:"(chip_color(&reg.snake_color))} {}
                                                     span {
                                                         a class="name" href={"/battlesnakes/"(reg.battlesnake_id)"/profile"} { (reg.snake_name) }
-                                                        span class="owner" { "by " (reg.owner_login) }
+                                                        span class="owner" { "by " (reg.owner_name) }
                                                     }
                                                 }
                                             }
@@ -2783,6 +2782,7 @@ mod tests {
             snake_name: "ranked-snake".to_string(),
             snake_color: "#888888".to_string(),
             owner_login: "ranked-owner".to_string(),
+            owner_name: "Ranked Owner".to_string(),
         }
     }
 

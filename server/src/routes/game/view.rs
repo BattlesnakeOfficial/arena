@@ -432,7 +432,7 @@ pub async fn view_game(
                                         }
                                         div class="owner" {
                                             "by "
-                                            a href={"/users/"(battlesnake.owner_login)} { (battlesnake.owner_login) }
+                                            a href={"/users/"(battlesnake.owner_login)} { (battlesnake.owner_name) }
                                         }
                                     }
                                     div class="place" {

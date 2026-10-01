@@ -21,7 +21,7 @@ use crate::{
     state::AppState,
 };
 
-/// Snake-ID → owner-login map for filling in frame `Author` fields.
+/// Snake-ID → owner public name map for filling in frame `Author` fields.
 ///
 /// Frames persisted before authors were threaded through the game runner have
 /// `Author: ""`, which the board viewer's scoreboard renders as a dangling
@@ -35,7 +35,7 @@ async fn frame_author_map(
     match get_battlesnakes_by_game_id(db, game_id).await {
         Ok(snakes) => snakes
             .into_iter()
-            .map(|bs| (bs.game_battlesnake_id.to_string(), bs.owner_login))
+            .map(|bs| (bs.game_battlesnake_id.to_string(), bs.owner_name))
             .collect(),
         Err(e) => {
             // Author enrichment is cosmetic; never fail a frames request over it.

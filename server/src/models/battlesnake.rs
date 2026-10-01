@@ -595,7 +595,8 @@ pub async fn get_public_battlesnakes(pool: &PgPool) -> cja::Result<Vec<Battlesna
 }
 
 // A public battlesnake as shown in the public /snakes directory. Joined with
-// the owner's login so the listing doesn't need a per-row user lookup.
+// the owner's login (link key) and public name (display text) so the listing
+// doesn't need a per-row user lookup.
 // Deliberately omits `url` — a snake's server URL is only shown to its owner.
 #[derive(Debug)]
 pub struct PublicBattlesnakeListItem {
@@ -603,6 +604,7 @@ pub struct PublicBattlesnakeListItem {
     pub name: String,
     pub color: String,
     pub owner_login: String,
+    pub owner_name: String,
 }
 
 #[derive(Debug, Clone)]
@@ -614,7 +616,7 @@ pub struct PublicBattlesnakeQuery<'a> {
 }
 
 // Count public snakes matching a literal, case-insensitive name or owner
-// substring. An empty search matches every public snake.
+// (login or display name) substring. An empty search matches every public snake.
 pub async fn count_public_battlesnakes(
     pool: &PgPool,
     query: &PublicBattlesnakeQuery<'_>,
@@ -628,7 +630,8 @@ pub async fn count_public_battlesnakes(
           AND b.deleted_at IS NULL
           AND ($2::uuid IS NULL OR b.user_id != $2)
           AND (strpos(lower(b.name), lower($1)) > 0
-               OR strpos(lower(u.github_login), lower($1)) > 0)
+               OR strpos(lower(u.github_login), lower($1)) > 0
+               OR strpos(lower(COALESCE(u.display_name, '')), lower($1)) > 0)
         "#,
         query.search,
         query.excluded_owner_id
@@ -655,14 +658,16 @@ pub async fn get_public_battlesnakes_paginated(
             b.battlesnake_id,
             b.name,
             b.color,
-            u.github_login AS owner_login
+            u.github_login AS owner_login,
+            COALESCE(NULLIF(u.display_name, ''), u.github_login) AS "owner_name!"
         FROM battlesnakes b
         JOIN users u ON b.user_id = u.user_id
         WHERE b.visibility = 'public'
           AND b.deleted_at IS NULL
           AND ($4::uuid IS NULL OR b.user_id != $4)
           AND (strpos(lower(b.name), lower($3)) > 0
-               OR strpos(lower(u.github_login), lower($3)) > 0)
+               OR strpos(lower(u.github_login), lower($3)) > 0
+               OR strpos(lower(COALESCE(u.display_name, '')), lower($3)) > 0)
         ORDER BY b.name ASC, b.battlesnake_id ASC
         LIMIT $1 OFFSET $2
         "#,

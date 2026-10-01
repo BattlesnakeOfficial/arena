@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO turns (game_id, turn_number, frame_data) VALUES ($1, 0, $2)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "60a13b2b87256007d0e0296b83300a4dcf288475634e35b8f8387d67645ca15f"
+}

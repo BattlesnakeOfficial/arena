@@ -34,7 +34,10 @@ pub struct RankingEntry {
     pub rank: usize,
     pub battlesnake_id: Uuid,
     pub snake_name: String,
+    /// Owner's GitHub login (stable identifier, the `/users/{login}` key).
     pub owner: String,
+    /// Owner's public name: display name when set, else the GitHub login.
+    pub owner_name: String,
     pub display_score: f64,
     pub games_played: i32,
     pub first_place_finishes: i32,
@@ -190,6 +193,7 @@ pub async fn get_rankings(
                     battlesnake_id: e.battlesnake_id,
                     snake_name: e.snake_name,
                     owner: e.owner_login,
+                    owner_name: e.owner_name,
                     display_score: e.display_score,
                     games_played: e.games_played,
                     first_place_finishes: e.first_place_finishes,

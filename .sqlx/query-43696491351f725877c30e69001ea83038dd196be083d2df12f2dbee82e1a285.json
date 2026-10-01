@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT\n                    le.leaderboard_entry_id,\n                    le.battlesnake_id,\n                    b.user_id,\n                    le.display_score,\n                    le.games_played,\n                    le.first_place_finishes,\n                    le.non_first_finishes,\n                    le.mu,\n                    le.sigma,\n                    b.name as snake_name,\n                    b.color as snake_color,\n                    u.github_login as owner_login\n                 FROM leaderboard_entries le\n                 JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id\n                 JOIN users u ON b.user_id = u.user_id\n                 WHERE le.leaderboard_id = $1\n                   AND le.disabled_at IS NULL\n                   AND le.games_played >= $2\n                 ORDER BY le.display_score DESC\n                 LIMIT 100",
+  "query": "SELECT\n                    le.leaderboard_entry_id,\n                    le.battlesnake_id,\n                    b.user_id,\n                    le.display_score,\n                    le.games_played,\n                    le.first_place_finishes,\n                    le.non_first_finishes,\n                    le.mu,\n                    le.sigma,\n                    b.name as snake_name,\n                    b.color as snake_color,\n                    u.github_login as owner_login,\n                    COALESCE(NULLIF(u.display_name, ''), u.github_login) AS \"owner_name!\"\n                 FROM leaderboard_entries le\n                 JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id\n                 JOIN users u ON b.user_id = u.user_id\n                 LEFT JOIN food_eaten_stats fes ON le.leaderboard_entry_id = fes.leaderboard_entry_id\n                 WHERE le.leaderboard_id = $1\n                   AND le.disabled_at IS NULL\n                   AND le.games_played >= $2\n                 ORDER BY COALESCE(fes.food_score, 0) DESC\n                 LIMIT $3 OFFSET $4",
   "describe": {
     "columns": [
       {
@@ -62,12 +62,19 @@
         "ordinal": 11,
         "name": "owner_login",
         "type_info": "Text"
+      },
+      {
+        "ordinal": 12,
+        "name": "owner_name!",
+        "type_info": "Text"
       }
     ],
     "parameters": {
       "Left": [
         "Uuid",
-        "Int4"
+        "Int4",
+        "Int8",
+        "Int8"
       ]
     },
     "nullable": [
@@ -82,8 +89,9 @@
       false,
       false,
       false,
-      false
+      false,
+      null
     ]
   },
-  "hash": "ab7724b57fef431bc7a140fb9ba7a9b28a90932f297986ee167d25986c398b39"
+  "hash": "43696491351f725877c30e69001ea83038dd196be083d2df12f2dbee82e1a285"
 }

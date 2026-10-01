@@ -210,8 +210,8 @@ impl Page {
                 }
                 @if let Some(user) = &self.user {
                     a class="nav-user" href="/me" {
-                        (user_avatar(user.github_avatar_url.as_deref(), &user.github_login, "nav-avatar"))
-                        span class="nav-user-name" { (user.display_name.as_deref().unwrap_or(&user.github_login)) }
+                        (user_avatar(user.github_avatar_url.as_deref(), user.public_name(), "nav-avatar"))
+                        span class="nav-user-name" { (user.public_name()) }
                     }
                 } @else {
                     a class="btn solid" href="/auth/github" { "Sign in with GitHub" }
