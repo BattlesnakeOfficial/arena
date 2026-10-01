@@ -1,0 +1,41 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT g.user_id AS \"user_id!\", g.best_scores AS \"best_scores!\", g.total_score AS \"total_score!\",\n                g.enabled_leaderboards AS \"enabled_leaderboards!\"\n         FROM global_player_scores($1) g WHERE g.user_id = $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "best_scores!",
+        "type_info": "Float8Array"
+      },
+      {
+        "ordinal": 2,
+        "name": "total_score!",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 3,
+        "name": "enabled_leaderboards!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "f92e3157f29b0ca9f32375583869908a9bd184988fbd6175f4c5544e18544b23"
+}

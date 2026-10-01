@@ -19,11 +19,12 @@ const GOOGLE_FONTS_HREF: &str = "https://fonts.googleapis.com/css2?family=Bricol
 /// Primary nav links: (label, href, authed_only). "Snakes" is the public
 /// directory of every public snake and "Players" the directory of the people
 /// behind them; "My Snakes" manages your own and is only shown logged in.
-const NAV_LINKS: [(&str, &str, bool); 6] = [
+const NAV_LINKS: [(&str, &str, bool); 7] = [
     ("Leaderboards", "/leaderboards", false),
     ("Tournaments", "/tournaments", false),
     ("Snakes", "/snakes", false),
     ("Players", "/players", false),
+    ("Rankings", "/rankings", false),
     ("My Snakes", "/battlesnakes", true),
     ("Customizations", "/customizations", false),
 ];
@@ -378,6 +379,26 @@ mod tests {
         let html = page.render().into_string();
         assert_eq!(
             html.matches(r#"<a class="active" href="/players">Players</a>"#)
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn rankings_is_in_both_anonymous_navs_and_active_on_its_page() {
+        let mut page = test_page();
+        assert_eq!(
+            page.render()
+                .into_string()
+                .matches(r#"href="/rankings">Rankings</a>"#)
+                .count(),
+            2
+        );
+        page.current_path = "/rankings".to_string();
+        assert_eq!(
+            page.render()
+                .into_string()
+                .matches(r#"<a class="active" href="/rankings">Rankings</a>"#)
                 .count(),
             2
         );

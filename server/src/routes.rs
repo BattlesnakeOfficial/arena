@@ -110,6 +110,7 @@ pub fn routes(app_state: AppState) -> axum::Router {
         .route("/terms", get(policy::terms_page))
         // Public player directory
         .route("/players", get(users::list_players))
+        .route("/rankings", get(users::list_global_rankings))
         // Public user profiles. The two-segment form is the stable one — the
         // UUID is authoritative and the login is a cosmetic slug — while the
         // login-only form stays for compatibility and hand-typed URLs.
