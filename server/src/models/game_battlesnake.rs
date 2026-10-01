@@ -315,29 +315,67 @@ pub struct GameHistoryEntry {
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
-// Get game history for a battlesnake (for profile page)
+/// Return one page of profile history. Direct and per-leaderboard-entry paths
+/// walk their own `(link_id, created_at DESC)` indexes, each bounded by
+/// `offset + limit`. Participant creation time is the recency key; the row ID
+/// breaks timestamp ties. Imported legacy games have no participant rows, so
+/// an `engine_game_id` filter changes no results and ruins the ordered walk.
 pub async fn get_game_history_for_battlesnake(
     pool: &PgPool,
     battlesnake_id: Uuid,
+    limit: i64,
+    offset: i64,
 ) -> cja::Result<Vec<GameHistoryEntry>> {
     let rows = sqlx::query!(
         r#"
-        SELECT
-            g.game_id,
-            g.board_size,
-            g.game_type,
-            g.status,
-            gb_self.placement,
-            (SELECT COUNT(*) FROM game_battlesnakes gb2 WHERE gb2.game_id = g.game_id) as "snake_count!",
-            winner_b.name as "winner_name?",
-            g.created_at
-        FROM games g
-        JOIN game_battlesnakes gb_self ON g.game_id = gb_self.game_id AND gb_self.battlesnake_id = $1
-        LEFT JOIN game_battlesnakes gb_winner ON g.game_id = gb_winner.game_id AND gb_winner.placement = 1
-        LEFT JOIN battlesnakes winner_b ON gb_winner.battlesnake_id = winner_b.battlesnake_id
-        ORDER BY g.created_at DESC
+        WITH linked AS (
+            (SELECT gb.game_battlesnake_id, gb.game_id, gb.placement,
+                    gb.created_at AS linked_at
+             FROM game_battlesnakes gb
+             WHERE gb.battlesnake_id = $1
+             ORDER BY gb.created_at DESC, gb.game_battlesnake_id DESC
+             LIMIT $2)
+            UNION ALL
+            SELECT lb.game_battlesnake_id, lb.game_id, lb.placement, lb.linked_at
+            FROM leaderboard_entries le
+            CROSS JOIN LATERAL (
+                SELECT gb.game_battlesnake_id, gb.game_id, gb.placement,
+                       gb.created_at AS linked_at
+                FROM game_battlesnakes gb
+                WHERE gb.leaderboard_entry_id = le.leaderboard_entry_id
+                  AND gb.battlesnake_id IS NULL
+                ORDER BY gb.created_at DESC, gb.game_battlesnake_id DESC
+                LIMIT $2
+            ) lb
+            WHERE le.battlesnake_id = $1
+        ), page AS (
+            SELECT * FROM linked
+            ORDER BY linked_at DESC, game_battlesnake_id DESC
+            LIMIT $3 OFFSET $4
+        )
+        SELECT g.game_id, g.board_size, g.game_type, g.status, p.placement,
+               (SELECT COUNT(*) FROM game_battlesnakes gb2
+                WHERE gb2.game_id = p.game_id) AS "snake_count!",
+               winner.name AS "winner_name?", g.created_at
+        FROM page p
+        JOIN games g ON g.game_id = p.game_id
+        LEFT JOIN LATERAL (
+            SELECT b.name
+            FROM game_battlesnakes gb_winner
+            LEFT JOIN leaderboard_entries le_winner
+              ON le_winner.leaderboard_entry_id = gb_winner.leaderboard_entry_id
+            JOIN battlesnakes b
+              ON b.battlesnake_id = COALESCE(gb_winner.battlesnake_id,
+                                            le_winner.battlesnake_id)
+            WHERE gb_winner.game_id = p.game_id AND gb_winner.placement = 1
+            ORDER BY gb_winner.game_battlesnake_id LIMIT 1
+        ) winner ON TRUE
+        ORDER BY p.linked_at DESC, p.game_battlesnake_id DESC
         "#,
-        battlesnake_id
+        battlesnake_id,
+        offset + limit,
+        limit,
+        offset
     )
     .fetch_all(pool)
     .await
@@ -367,6 +405,90 @@ pub async fn get_game_history_for_battlesnake(
         .collect::<cja::Result<Vec<_>>>()?;
 
     Ok(entries)
+}
+
+#[derive(Debug)]
+pub struct GameHistoryStats {
+    pub total_games: i64,
+    pub finished_games: i64,
+    pub placement_count: i64,
+    pub wins: i64,
+    pub second_places: i64,
+    pub third_places: i64,
+    pub fourth_places: i64,
+    pub win_rate: f64,
+    pub average_placement: f64,
+}
+
+/// Aggregate all profile history. Leaderboard rows never probe `games`:
+/// 27.8k such probes timed out at 15s on prod, while a participant-only
+/// aggregate took 10.1ms warm. Leaderboard type comes from `leaderboards`;
+/// NULL placement means unfinished for these rows, verified on prod 2026-09-30.
+/// `set_game_result` keys on `battlesnake_id`, so it cannot place ladder rows
+/// (whose `battlesnake_id` is NULL); the ladder finisher writes placements via
+/// `set_game_result_by_id` and status='finished' in one transaction. Revisit
+/// this aggregate if another writer can place ladder rows. Direct rows still
+/// join `games` because placed failed games exist there.
+pub async fn get_game_stats_for_battlesnake(
+    pool: &PgPool,
+    battlesnake_id: Uuid,
+) -> cja::Result<GameHistoryStats> {
+    let row = sqlx::query!(
+        r#"
+        WITH classified AS (
+            SELECT gb.placement,
+                   (g.status = 'finished' AND lower(g.game_type) <> 'solo') AS competitive
+            FROM game_battlesnakes gb
+            JOIN games g ON g.game_id = gb.game_id
+            WHERE gb.battlesnake_id = $1
+            UNION ALL
+            SELECT lb.placement,
+                   (lb.placement IS NOT NULL AND lower(l.game_type) <> 'solo') AS competitive
+            FROM leaderboard_entries le
+            JOIN leaderboards l ON l.leaderboard_id = le.leaderboard_id
+            CROSS JOIN LATERAL (
+                SELECT gb.placement
+                FROM game_battlesnakes gb
+                WHERE gb.leaderboard_entry_id = le.leaderboard_entry_id
+                  AND gb.battlesnake_id IS NULL
+            ) lb
+            WHERE le.battlesnake_id = $1
+        )
+        SELECT COUNT(*) AS "total_games!",
+               COUNT(*) FILTER (WHERE competitive) AS "finished_games!",
+               COUNT(*) FILTER (WHERE competitive AND placement = 1) AS "wins!",
+               COUNT(*) FILTER (WHERE competitive AND placement = 2) AS "second_places!",
+               COUNT(*) FILTER (WHERE competitive AND placement = 3) AS "third_places!",
+               COUNT(*) FILTER (WHERE competitive AND placement = 4) AS "fourth_places!",
+               COUNT(placement) FILTER (WHERE competitive) AS "placement_count!",
+               COALESCE(SUM(placement) FILTER (WHERE competitive), 0)::bigint AS "placement_sum!"
+        FROM classified
+        "#,
+        battlesnake_id
+    )
+    .fetch_one(pool)
+    .await
+    .wrap_err("Failed to fetch game stats for battlesnake")?;
+
+    Ok(GameHistoryStats {
+        total_games: row.total_games,
+        finished_games: row.finished_games,
+        placement_count: row.placement_count,
+        wins: row.wins,
+        second_places: row.second_places,
+        third_places: row.third_places,
+        fourth_places: row.fourth_places,
+        win_rate: if row.finished_games > 0 {
+            row.wins as f64 / row.finished_games as f64 * 100.0
+        } else {
+            0.0
+        },
+        average_placement: if row.placement_count > 0 {
+            row.placement_sum as f64 / row.placement_count as f64
+        } else {
+            0.0
+        },
+    })
 }
 
 // Get a game with all its battlesnakes
@@ -420,6 +542,266 @@ mod tests {
         let rows = get_battlesnakes_by_game_id(&pool, game_id).await?;
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].engine_region, EngineRegion::UsEast4);
+        Ok(())
+    }
+    async fn test_snake(pool: &PgPool, user_id: Uuid, name: &str) -> cja::Result<Uuid> {
+        Ok(sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO battlesnakes (user_id, name, url, visibility)
+             VALUES ($1, $2, 'https://example.invalid', 'public') RETURNING battlesnake_id",
+        )
+        .bind(user_id)
+        .bind(name)
+        .fetch_one(pool)
+        .await?)
+    }
+
+    async fn test_entry(pool: &PgPool, snake_id: Uuid, offset: i64) -> cja::Result<Uuid> {
+        Ok(sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id)
+             SELECT leaderboard_id, $1 FROM leaderboards ORDER BY created_at, leaderboard_id
+             OFFSET $2 LIMIT 1 RETURNING leaderboard_entry_id",
+        )
+        .bind(snake_id)
+        .bind(offset)
+        .fetch_one(pool)
+        .await?)
+    }
+
+    async fn test_game(
+        pool: &PgPool,
+        game_type: &str,
+        status: &str,
+        age_minutes: i64,
+    ) -> cja::Result<Uuid> {
+        Ok(sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO games (board_size, game_type, status, created_at)
+             VALUES ('11x11', $1, $2, now() - $3 * interval '1 minute') RETURNING game_id",
+        )
+        .bind(game_type)
+        .bind(status)
+        .bind(age_minutes)
+        .fetch_one(pool)
+        .await?)
+    }
+
+    async fn test_link(
+        pool: &PgPool,
+        game_id: Uuid,
+        snake_id: Option<Uuid>,
+        entry_id: Option<Uuid>,
+        placement: Option<i32>,
+    ) -> cja::Result<()> {
+        sqlx::query(
+            "INSERT INTO game_battlesnakes
+             (game_id, battlesnake_id, leaderboard_entry_id, placement, created_at)
+             SELECT $1, $2, $3, $4, created_at FROM games WHERE game_id = $1",
+        )
+        .bind(game_id)
+        .bind(snake_id)
+        .bind(entry_id)
+        .bind(placement)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn profile_membership_winner_and_stat_semantics(pool: PgPool) -> cja::Result<()> {
+        let user_id = sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO users (external_github_id, github_login, github_access_token)
+             VALUES (1482001, 'profile-model', 'test') RETURNING user_id",
+        )
+        .fetch_one(&pool)
+        .await?;
+        let direct = test_snake(&pool, user_id, "Direct").await?;
+        let ladder = test_snake(&pool, user_id, "Ladder Winner").await?;
+        let mixed = test_snake(&pool, user_id, "Mixed").await?;
+        let solo_only = test_snake(&pool, user_id, "Solo Only").await?;
+        let empty = test_snake(&pool, user_id, "Empty").await?;
+        let ladder_entry = test_entry(&pool, ladder, 0).await?;
+        let mixed_entry_a = test_entry(&pool, mixed, 0).await?;
+        let mixed_entry_b = test_entry(&pool, mixed, 1).await?;
+
+        let direct_win = test_game(&pool, "Standard", "finished", 15).await?;
+        test_link(&pool, direct_win, Some(direct), None, Some(1)).await?;
+        let direct_second = test_game(&pool, "Standard", "finished", 16).await?;
+        test_link(&pool, direct_second, Some(direct), None, Some(2)).await?;
+        let ladder_win = test_game(&pool, "Standard", "finished", 14).await?;
+        test_link(&pool, ladder_win, None, Some(ladder_entry), Some(1)).await?;
+        test_link(&pool, ladder_win, Some(mixed), None, Some(2)).await?;
+        let mixed_a = test_game(&pool, "Standard", "finished", 13).await?;
+        test_link(&pool, mixed_a, None, Some(mixed_entry_a), Some(2)).await?;
+        let mixed_b = test_game(&pool, "Standard", "finished", 12).await?;
+        test_link(&pool, mixed_b, None, Some(mixed_entry_b), Some(3)).await?;
+        let both = test_game(&pool, "Standard", "finished", 11).await?;
+        test_link(&pool, both, Some(mixed), Some(mixed_entry_a), Some(1)).await?;
+        let duplicate = test_game(&pool, "Standard", "finished", 10).await?;
+        test_link(&pool, duplicate, Some(mixed), None, Some(2)).await?;
+        test_link(&pool, duplicate, Some(mixed), None, Some(3)).await?;
+        let running = test_game(&pool, "Standard", "running", 9).await?;
+        test_link(&pool, running, None, Some(mixed_entry_a), None).await?;
+        let failed_ladder = test_game(&pool, "Standard", "failed", 8).await?;
+        test_link(&pool, failed_ladder, None, Some(mixed_entry_b), None).await?;
+        let failed_direct = test_game(&pool, "Standard", "failed", 7).await?;
+        test_link(&pool, failed_direct, Some(mixed), None, Some(1)).await?;
+        let solo = test_game(&pool, "Solo", "finished", 6).await?;
+        test_link(&pool, solo, Some(mixed), None, Some(1)).await?;
+        for age in [20, 21] {
+            let game = test_game(&pool, "Solo", "finished", age).await?;
+            test_link(&pool, game, Some(solo_only), None, Some(1)).await?;
+        }
+        let unplaced = test_game(&pool, "Standard", "finished", 5).await?;
+        test_link(&pool, unplaced, Some(mixed), None, None).await?;
+
+        let direct_rows = get_game_history_for_battlesnake(&pool, direct, 50, 0).await?;
+        assert_eq!(direct_rows.len(), 2);
+        assert_eq!(direct_rows[0].winner_name.as_deref(), Some("Direct"));
+        let direct_stats = get_game_stats_for_battlesnake(&pool, direct).await?;
+        assert_eq!(
+            (
+                direct_stats.total_games,
+                direct_stats.finished_games,
+                direct_stats.wins
+            ),
+            (2, 2, 1)
+        );
+        assert_eq!(
+            (direct_stats.win_rate, direct_stats.average_placement),
+            (50.0, 1.5)
+        );
+
+        let ladder_rows = get_game_history_for_battlesnake(&pool, ladder, 50, 0).await?;
+        assert_eq!(ladder_rows.len(), 1);
+        assert_eq!(ladder_rows[0].winner_name.as_deref(), Some("Ladder Winner"));
+        let ladder_stats = get_game_stats_for_battlesnake(&pool, ladder).await?;
+        assert_eq!((ladder_stats.total_games, ladder_stats.wins), (1, 1));
+
+        let mixed_rows = get_game_history_for_battlesnake(&pool, mixed, 50, 0).await?;
+        assert_eq!(mixed_rows.len(), 11);
+        assert_eq!(mixed_rows.iter().filter(|r| r.game_id == both).count(), 1);
+        assert_eq!(
+            mixed_rows.iter().filter(|r| r.game_id == duplicate).count(),
+            2
+        );
+        assert_eq!(
+            mixed_rows
+                .iter()
+                .find(|r| r.game_id == ladder_win)
+                .unwrap()
+                .winner_name
+                .as_deref(),
+            Some("Ladder Winner")
+        );
+        assert!(
+            mixed_rows
+                .iter()
+                .find(|r| r.game_id == mixed_a)
+                .unwrap()
+                .winner_name
+                .is_none()
+        );
+        let stats = get_game_stats_for_battlesnake(&pool, mixed).await?;
+        assert_eq!(
+            (stats.total_games, stats.finished_games, stats.wins),
+            (11, 7, 1)
+        );
+        assert_eq!(
+            (stats.second_places, stats.third_places, stats.fourth_places),
+            (3, 2, 0)
+        );
+        assert!((stats.win_rate - 100.0 / 7.0).abs() < 1e-9);
+        assert!((stats.average_placement - 13.0 / 6.0).abs() < 1e-9);
+        let empty_stats = get_game_stats_for_battlesnake(&pool, empty).await?;
+        let solo_stats = get_game_stats_for_battlesnake(&pool, solo_only).await?;
+        assert_eq!(
+            (
+                solo_stats.total_games,
+                solo_stats.finished_games,
+                solo_stats.wins
+            ),
+            (2, 0, 0)
+        );
+        assert_eq!(
+            (solo_stats.win_rate, solo_stats.average_placement),
+            (0.0, 0.0)
+        );
+        assert_eq!(
+            (
+                empty_stats.total_games,
+                empty_stats.finished_games,
+                empty_stats.win_rate
+            ),
+            (0, 0, 0.0)
+        );
+        assert!(
+            get_game_history_for_battlesnake(&pool, empty, 50, 0)
+                .await?
+                .is_empty()
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn profile_paging_keeps_full_history_stats(pool: PgPool) -> cja::Result<()> {
+        let user_id = sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO users (external_github_id, github_login, github_access_token)
+             VALUES (1482002, 'profile-paging', 'test') RETURNING user_id",
+        )
+        .fetch_one(&pool)
+        .await?;
+        let snake = test_snake(&pool, user_id, "Paged").await?;
+        let entry_a = test_entry(&pool, snake, 0).await?;
+        let entry_b = test_entry(&pool, snake, 1).await?;
+        for n in 0..51 {
+            let game = test_game(&pool, "Standard", "finished", n).await?;
+            if n % 3 == 0 {
+                test_link(
+                    &pool,
+                    game,
+                    Some(snake),
+                    None,
+                    Some(if n == 0 { 1 } else { 2 }),
+                )
+                .await?;
+            } else {
+                test_link(
+                    &pool,
+                    game,
+                    None,
+                    Some(if n % 2 == 0 { entry_a } else { entry_b }),
+                    Some(2),
+                )
+                .await?;
+            }
+        }
+        let first = get_game_history_for_battlesnake(&pool, snake, 50, 0).await?;
+        let last = get_game_history_for_battlesnake(&pool, snake, 50, 50).await?;
+        assert_eq!((first.len(), last.len()), (50, 1));
+        assert!(first.last().unwrap().created_at > last[0].created_at);
+        let stats = get_game_stats_for_battlesnake(&pool, snake).await?;
+        assert_eq!(
+            (stats.total_games, stats.finished_games, stats.wins),
+            (51, 51, 1)
+        );
+        assert!((stats.win_rate - 100.0 / 51.0).abs() < 1e-9);
+        assert!((stats.average_placement - 101.0 / 51.0).abs() < 1e-9);
+        assert_eq!(
+            crate::routes::pagination::resolve_page(Some(-1), stats.total_games, 50),
+            (0, 2)
+        );
+        assert_eq!(
+            crate::routes::pagination::resolve_page(Some(999), stats.total_games, 50),
+            (1, 2)
+        );
+        sqlx::query("UPDATE game_battlesnakes SET created_at = '2026-01-01'::timestamptz")
+            .execute(&pool)
+            .await?;
+        let tied_first = get_game_history_for_battlesnake(&pool, snake, 50, 0).await?;
+        let tied_last = get_game_history_for_battlesnake(&pool, snake, 50, 50).await?;
+        let first_ids: std::collections::HashSet<_> =
+            tied_first.iter().map(|row| row.game_id).collect();
+        assert_eq!(first_ids.len(), 50);
+        assert!(!first_ids.contains(&tied_last[0].game_id));
         Ok(())
     }
 }

@@ -31,6 +31,31 @@ pub struct GameMeta {
     /// `Some` when this is a Royale game; drives hazard population each turn
     /// and the `royale` block of the wire-protocol ruleset settings.
     pub royale: Option<RoyaleSettings>,
+    /// Where the game came from; sent to snakes as `game.source`.
+    pub source: GameSource,
+}
+
+/// Origin of a game, sent to snakes as `game.source` using the values
+/// play.battlesnake.com sent (`Game.SourceType` in play's core models).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GameSource {
+    /// A leaderboard (ladder) matchmaker game.
+    Ladder,
+    /// A tournament match game.
+    Tournament,
+    /// Anything a user created directly (game builder, API, rematch).
+    #[default]
+    Custom,
+}
+
+impl GameSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            GameSource::Ladder => "ladder",
+            GameSource::Tournament => "tournament",
+            GameSource::Custom => "custom",
+        }
+    }
 }
 
 /// Full engine game state: board + metadata.
@@ -170,6 +195,7 @@ pub fn create_initial_game(
             timeout: MOVE_TIMEOUT_MS,
             settings,
             royale,
+            source: GameSource::default(),
         },
         snake_names,
     }
@@ -479,6 +505,7 @@ mod tests {
                             timeout: 500,
                             settings: StandardSettings::default(),
                             royale: None,
+                            source: crate::engine::GameSource::Custom,
                         },
                         snake_names,
                     }
@@ -1399,6 +1426,7 @@ mod tests {
                 timeout: 500,
                 settings: StandardSettings::default(),
                 royale: None,
+                source: crate::engine::GameSource::Custom,
             },
             snake_names,
         }

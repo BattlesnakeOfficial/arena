@@ -18,6 +18,28 @@ use cja::jobs::Job;
 /// Batch size for historical backfill discovery
 const HISTORICAL_BATCH_SIZE: i32 = 500;
 
+/// Backups run one at a time per process. Discovery enqueues a burst of
+/// jobs every hour, and prod has a single vCPU shared with live games: a
+/// burst of concurrent frame parsing + zstd stalled every running game for
+/// ~300ms, long enough to time out snakes mid-turn.
+static BACKUP_SLOT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+
+/// Shared GCS client. Building one per job re-ran TLS setup and a metadata
+/// token fetch for every archived game; the client refreshes its own token.
+static GCS_CLIENT: tokio::sync::OnceCell<GcsClient> = tokio::sync::OnceCell::const_new();
+
+async fn gcs_client() -> cja::Result<&'static GcsClient> {
+    GCS_CLIENT
+        .get_or_try_init(|| async {
+            let config = ClientConfig::default()
+                .with_auth()
+                .await
+                .wrap_err("Failed to configure GCS client")?;
+            Ok(GcsClient::new(config))
+        })
+        .await
+}
+
 /// Row from Engine's games table
 #[derive(FromRow)]
 struct EngineGameRow {
@@ -73,8 +95,11 @@ async fn fetch_game_by_id(engine_db: &PgPool, game_id: &str) -> cja::Result<Opti
     Ok(row)
 }
 
-/// Fetch all frames for a game from the Engine database.
-async fn fetch_game_frames(engine_db: &PgPool, game_id: &str) -> cja::Result<Vec<EngineGameFrame>> {
+/// Fetch all frames for a game from the Engine database, unparsed.
+async fn fetch_game_frames(
+    engine_db: &PgPool,
+    game_id: &str,
+) -> cja::Result<Vec<serde_json::Value>> {
     let rows: Vec<(serde_json::Value,)> = sqlx::query_as(
         r#"
         SELECT value
@@ -88,13 +113,7 @@ async fn fetch_game_frames(engine_db: &PgPool, game_id: &str) -> cja::Result<Vec
     .await
     .wrap_err("Failed to fetch game frames from Engine")?;
 
-    let frames: Vec<EngineGameFrame> = rows
-        .into_iter()
-        .map(|(value,)| serde_json::from_value(value))
-        .collect::<Result<Vec<_>, _>>()
-        .wrap_err("Failed to deserialize game frames")?;
-
-    Ok(frames)
+    Ok(rows.into_iter().map(|(value,)| value).collect())
 }
 
 /// Check if a game has already been archived (exists in local games table with archived_at set).
@@ -127,15 +146,26 @@ fn gcs_path(game: &EngineGame) -> String {
     )
 }
 
-/// Compress JSON with zstd and upload to GCS.
-async fn compress_and_upload_to_gcs(
-    client: &GcsClient,
-    bucket: &str,
-    path: &str,
-    export: &GameExport,
-) -> cja::Result<()> {
+/// Parse frames, build the export, and zstd-compress its JSON. Pure CPU
+/// work: callers run it on the blocking pool, never on an async worker.
+fn build_compressed_export(
+    game: EngineGame,
+    frame_values: Vec<serde_json::Value>,
+) -> cja::Result<Vec<u8>> {
+    let frames: Vec<EngineGameFrame> = frame_values
+        .into_iter()
+        .map(serde_json::from_value)
+        .collect::<Result<Vec<_>, _>>()
+        .wrap_err("Failed to deserialize game frames")?;
+
+    let export = GameExport {
+        game,
+        frames,
+        exported_at: Utc::now(),
+    };
+
     // Serialize to JSON
-    let json = serde_json::to_vec(export).wrap_err("Failed to serialize game export")?;
+    let json = serde_json::to_vec(&export).wrap_err("Failed to serialize game export")?;
 
     // Compress with zstd (level 3 is a good balance of speed/compression)
     let mut encoder =
@@ -155,7 +185,16 @@ async fn compress_and_upload_to_gcs(
         "Compressed game for upload"
     );
 
-    // Upload to GCS
+    Ok(compressed)
+}
+
+/// Upload an already-compressed export to GCS.
+async fn upload_to_gcs(
+    client: &GcsClient,
+    bucket: &str,
+    path: &str,
+    compressed: Vec<u8>,
+) -> cja::Result<()> {
     let upload_type = UploadType::Simple(Media::new(path.to_string()));
     client
         .upload_object(
@@ -322,6 +361,13 @@ pub async fn backup_single_game(
         }
     };
 
+    // One backup at a time: the parse/compress below competes with live
+    // games for the CPU (see BACKUP_SLOT).
+    let _slot = BACKUP_SLOT
+        .acquire()
+        .await
+        .wrap_err("Backup slot semaphore closed")?;
+
     // Fetch the game from Engine
     let game_row = fetch_game_by_id(engine_db, engine_game_id)
         .await?
@@ -332,25 +378,18 @@ pub async fn backup_single_game(
         .wrap_err_with(|| format!("Failed to parse game data for {}", engine_game_id))?;
 
     // Fetch frames
-    let frames = fetch_game_frames(engine_db, &game.id).await?;
+    let frame_values = fetch_game_frames(engine_db, &game.id).await?;
 
-    // Build export
-    let export = GameExport {
-        game: game.clone(),
-        frames,
-        exported_at: Utc::now(),
-    };
-
-    // Initialize GCS client
-    let config = ClientConfig::default()
-        .with_auth()
-        .await
-        .wrap_err("Failed to configure GCS client")?;
-    let gcs_client = GcsClient::new(config);
+    // Parse + serialize + compress off the async workers
+    let export_game = game.clone();
+    let compressed =
+        tokio::task::spawn_blocking(move || build_compressed_export(export_game, frame_values))
+            .await
+            .wrap_err("Backup compression task panicked")??;
 
     // Generate path and upload
     let path = gcs_path(&game);
-    compress_and_upload_to_gcs(&gcs_client, &bucket, &path, &export).await?;
+    upload_to_gcs(gcs_client().await?, &bucket, &path, compressed).await?;
 
     // Record in local database
     upsert_game_record(&app_state.db, &game, &path).await?;
@@ -667,4 +706,67 @@ pub async fn run_historical_backup_discovery(
     tracing::info!(batch_id = batch_id, "Enqueued all backup jobs for batch");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The off-thread export step must produce exactly what the old inline
+    /// path uploaded: zstd-compressed JSON of the game plus every frame, in
+    /// order.
+    #[test]
+    fn compressed_export_round_trips_game_and_frames() {
+        let game: EngineGame = serde_json::from_value(serde_json::json!({
+            "ID": "g1",
+            "Status": "complete",
+            "Width": 11,
+            "Height": 11,
+            "Source": null,
+            "RulesetName": "standard",
+            "RulesStages": null,
+            "Map": "standard",
+        }))
+        .unwrap();
+        let frames = (0..3)
+            .map(|turn| serde_json::json!({ "Turn": turn, "Snakes": [], "Food": [{"X": 1, "Y": 2}] }))
+            .collect();
+
+        let compressed = build_compressed_export(game, frames).unwrap();
+
+        let json = zstd::decode_all(compressed.as_slice()).unwrap();
+        let export: serde_json::Value = serde_json::from_slice(&json).unwrap();
+        assert_eq!(export["game"]["ID"], "g1");
+        let turns: Vec<i64> = export["frames"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["Turn"].as_i64().unwrap())
+            .collect();
+        assert_eq!(turns, vec![0, 1, 2]);
+        assert_eq!(export["frames"][2]["Food"][0]["Y"], 2);
+    }
+
+    #[test]
+    fn malformed_frame_fails_the_export() {
+        let game: EngineGame = serde_json::from_value(serde_json::json!({
+            "ID": "g1", "Status": "complete", "Source": null,
+            "RulesetName": null, "RulesStages": null, "Map": null,
+        }))
+        .unwrap();
+
+        let result = build_compressed_export(game, vec![serde_json::json!({ "Turn": "nope" })]);
+
+        assert!(result.is_err());
+    }
+
+    /// Backups are serialized process-wide so an hourly burst can't
+    /// monopolize the CPU live games run on.
+    #[tokio::test]
+    async fn backup_slot_admits_one_backup_at_a_time() {
+        let held = BACKUP_SLOT.acquire().await.unwrap();
+        assert!(BACKUP_SLOT.try_acquire().is_err());
+        drop(held);
+        assert!(BACKUP_SLOT.try_acquire().is_ok());
+    }
 }

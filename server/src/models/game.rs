@@ -202,6 +202,35 @@ pub fn validate_battlesnake_count(game_type: &GameType, count: usize) -> cja::Re
 
 // Database functions for game management
 
+/// Where a game came from, sent to snakes as `game.source`. Matchmaker and
+/// tournament games link their `leaderboard_games` / `match_games` row in the
+/// same transaction that creates the game, so the link exists before the
+/// game runner starts.
+pub async fn get_game_source(
+    pool: &PgPool,
+    game_id: Uuid,
+) -> cja::Result<crate::engine::GameSource> {
+    let row = sqlx::query!(
+        r#"
+        SELECT
+            EXISTS (SELECT 1 FROM leaderboard_games WHERE game_id = $1) AS "ladder!",
+            EXISTS (SELECT 1 FROM match_games WHERE game_id = $1) AS "tournament!"
+        "#,
+        game_id
+    )
+    .fetch_one(pool)
+    .await
+    .wrap_err("Failed to look up game source")?;
+
+    Ok(if row.ladder {
+        crate::engine::GameSource::Ladder
+    } else if row.tournament {
+        crate::engine::GameSource::Tournament
+    } else {
+        crate::engine::GameSource::Custom
+    })
+}
+
 // Get a single game by ID
 pub async fn get_game_by_id(pool: &PgPool, game_id: Uuid) -> cja::Result<Option<Game>> {
     let row = sqlx::query!(

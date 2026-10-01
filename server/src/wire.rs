@@ -45,10 +45,13 @@ pub struct RulesetSettings {
     pub minimum_food: i32,
     #[serde(rename = "hazardDamagePerTurn")]
     pub hazard_damage_per_turn: i32,
-    #[serde(rename = "hazardMap", skip_serializing_if = "Option::is_none")]
-    pub hazard_map: Option<String>,
-    #[serde(rename = "hazardMapAuthor", skip_serializing_if = "Option::is_none")]
-    pub hazard_map_author: Option<String>,
+    /// Deprecated upstream (replaced by `game.map`) but still always present
+    /// as "" in the official engine's payload.
+    #[serde(rename = "hazardMap")]
+    pub hazard_map: String,
+    /// Deprecated upstream; always present as "".
+    #[serde(rename = "hazardMapAuthor")]
+    pub hazard_map_author: String,
     pub royale: RoyaleSettings,
     pub squad: SquadSettings,
 }
@@ -118,6 +121,22 @@ pub struct SnakeContext {
     pub shout: Option<String>,
 }
 
+/// The `latency` a snake sees for its previous move, matching the official
+/// engine (`convertBoardStatetoGameFrame` in BattlesnakeOfficial/engine):
+/// measured milliseconds clamped to `[1, timeout]`, so a timed-out move
+/// reports the full timeout rather than "0". `None` (no measurement, e.g. an
+/// engine-proxy fault that was not the snake's doing) serializes as "0".
+pub fn reported_latency_ms(
+    latency_ms: Option<i64>,
+    timed_out: bool,
+    timeout_ms: i64,
+) -> Option<i64> {
+    if timed_out {
+        return Some(timeout_ms);
+    }
+    latency_ms.map(|ms| ms.clamp(1, timeout_ms.max(1)))
+}
+
 impl BattleSnake {
     pub fn from_rules_snake(
         snake: &rules::Snake,
@@ -158,8 +177,8 @@ impl Default for RulesetSettings {
             food_spawn_chance: 0,
             minimum_food: 0,
             hazard_damage_per_turn: 0,
-            hazard_map: None,
-            hazard_map_author: None,
+            hazard_map: String::new(),
+            hazard_map_author: String::new(),
             royale: RoyaleSettings {
                 shrink_every_n_turns: 0,
             },
@@ -216,28 +235,29 @@ impl Game {
         let settings = &engine_game.meta.settings;
 
         // Internal `meta.ruleset_name` drives engine dispatch; the wire
-        // protocol mirrors play.battlesnake.com. Snail Mode upstream is a
-        // community *map* on the standard ruleset, so snakes see
-        // `ruleset.name = "standard"` with `game.map = "snail_mode"`
-        // (existing community snakes key off `game.map`). Other modes keep
-        // their ruleset name and an empty map, unchanged.
+        // protocol matches play.battlesnake.com exactly (play `ui/maps.py`
+        // + `leaderboards_setup.py`). Royale and Snail Mode were *maps* on
+        // the standard ruleset, and single-snake games were plain standard
+        // games, so only Constrictor sends its own ruleset name.
         let (wire_ruleset_name, wire_map) = match engine_game.meta.ruleset_name.as_str() {
-            "snail_mode" => ("standard".to_string(), "snail_mode".to_string()),
-            name => (name.to_string(), String::new()),
+            "royale" => ("standard", "royale"),
+            "snail_mode" => ("standard", "snail_mode"),
+            "constrictor" => ("constrictor", "empty"),
+            _ => ("standard", "standard"),
         };
 
         Game {
             game: NestedGame {
                 id: engine_game.meta.game_id.clone(),
                 ruleset: Ruleset {
-                    name: wire_ruleset_name,
+                    name: wire_ruleset_name.to_string(),
                     version: "v1.0.0".to_string(),
                     settings: RulesetSettings {
                         food_spawn_chance: settings.food_spawn_chance,
                         minimum_food: settings.minimum_food,
                         hazard_damage_per_turn: settings.hazard_damage_per_turn,
-                        hazard_map: None,
-                        hazard_map_author: None,
+                        hazard_map: String::new(),
+                        hazard_map_author: String::new(),
                         royale: RoyaleSettings {
                             // Real shrink cadence for Royale games; 0 for
                             // standard/other modes (board-viewer convention).
@@ -256,18 +276,25 @@ impl Game {
                     },
                 },
                 timeout: engine_game.meta.timeout,
-                map: wire_map,
-                source: String::new(),
+                map: wire_map.to_string(),
+                source: engine_game.meta.source.as_str().to_string(),
             },
             turn: engine_game.board.turn,
             board: Board {
                 height: engine_game.board.height as u32,
                 width: engine_game.board.width as u32,
                 food: engine_game.board.food.iter().map(Position::from).collect(),
+                // Only living snakes, like the official engine
+                // (`frame.FilteredSnakes().Alive()`). Eliminated snakes keep
+                // their final body in engine state -- a wall death leaves the
+                // head off the board -- so sending them breaks snakes that
+                // index a grid, and on /end it hides who won. `you` is still
+                // the requesting snake's own state, dead or alive.
                 snakes: engine_game
                     .board
                     .snakes
                     .iter()
+                    .filter(|s| !s.eliminated_cause.is_eliminated())
                     .map(&convert_snake)
                     .collect(),
                 // Snail Mode stores pending-trail bookkeeping as off-board
@@ -322,6 +349,7 @@ mod tests {
                     hazard_damage_per_turn: 15,
                 },
                 royale: None,
+                source: crate::engine::GameSource::Custom,
             },
             snake_names,
         }
@@ -475,7 +503,9 @@ mod tests {
         let wire = Game::from_engine_game(&engine_game, "s1", &contexts, &customizations);
         let json: Value = serde_json::to_value(&wire).unwrap();
 
-        assert_eq!(json["game"]["ruleset"]["name"], "royale");
+        // Play parity: Royale is the "royale" map on the standard ruleset.
+        assert_eq!(json["game"]["ruleset"]["name"], "standard");
+        assert_eq!(json["game"]["map"], "royale");
         let settings = &json["game"]["ruleset"]["settings"];
         assert_eq!(
             settings["royale"]["shrinkEveryNTurns"], 25,
@@ -543,30 +573,251 @@ mod tests {
         assert_eq!(settings["royale"]["shrinkEveryNTurns"], 0);
     }
 
-    /// Other modes are unchanged by the map-field wiring: ruleset name
-    /// passes through and the map stays empty.
+    /// Every mode sends exactly the ruleset + map pair play.battlesnake.com
+    /// sent, so `game.map` is never empty.
     #[test]
-    fn test_non_snail_modes_keep_ruleset_name_and_empty_map() {
-        for ruleset in ["standard", "royale", "constrictor"] {
+    fn test_modes_send_play_ruleset_and_map() {
+        for (internal, ruleset, map) in [
+            ("standard", "standard", "standard"),
+            ("royale", "standard", "royale"),
+            ("snail_mode", "standard", "snail_mode"),
+            ("constrictor", "constrictor", "empty"),
+            ("solo", "standard", "standard"),
+        ] {
             let mut engine_game = create_test_engine_game();
-            engine_game.meta.ruleset_name = ruleset.to_string();
+            engine_game.meta.ruleset_name = internal.to_string();
 
             let contexts = HashMap::new();
             let customizations = HashMap::new();
             let wire = Game::from_engine_game(&engine_game, "s1", &contexts, &customizations);
             let json: Value = serde_json::to_value(&wire).unwrap();
 
-            assert_eq!(json["game"]["ruleset"]["name"], ruleset);
-            assert_eq!(json["game"]["map"], "");
+            assert_eq!(
+                json["game"]["ruleset"]["name"], ruleset,
+                "ruleset for {internal}"
+            );
+            assert_eq!(json["game"]["map"], map, "map for {internal}");
         }
     }
 
-    /// Solo games serialize the canonical snake-facing shape: ruleset name
-    /// "solo" (community snakes key off it), empty map, and the standard
-    /// food/hazard settings set by `create_initial_game`. Snail Mode remains
-    /// the only mode translated to standard-plus-map.
+    /// `game.source` uses play's source values: ladder for leaderboard
+    /// games, tournament for bracket games, custom for everything else.
     #[test]
-    fn test_solo_game_serializes_solo_ruleset_and_empty_map() {
+    fn test_source_reflects_game_origin() {
+        for (source, expected) in [
+            (crate::engine::GameSource::Ladder, "ladder"),
+            (crate::engine::GameSource::Tournament, "tournament"),
+            (crate::engine::GameSource::Custom, "custom"),
+        ] {
+            let mut engine_game = create_test_engine_game();
+            engine_game.meta.source = source;
+
+            let wire = Game::from_engine_game(&engine_game, "s1", &HashMap::new(), &HashMap::new());
+            let json: Value = serde_json::to_value(&wire).unwrap();
+
+            assert_eq!(json["game"]["source"], expected);
+        }
+    }
+
+    /// A board with one living snake (s1) and one that died running into
+    /// the wall on the previous turn: its head is off the board.
+    fn engine_game_with_wall_death() -> EngineGame {
+        let mut engine_game = create_test_engine_game();
+        engine_game.board.snakes.push(Snake {
+            id: "s2".to_string(),
+            body: vec![Point::new(-1, 7), Point::new(0, 7), Point::new(1, 7)],
+            health: 80,
+            eliminated_cause: EliminationCause::OutOfBounds,
+            eliminated_by: String::new(),
+            eliminated_on_turn: 10,
+        });
+        engine_game
+            .snake_names
+            .insert("s2".to_string(), "Snake 2".to_string());
+        engine_game
+    }
+
+    /// Official-engine parity: `board.snakes` only lists living snakes, so a
+    /// dead snake's off-board head never reaches anyone's /move.
+    #[test]
+    fn test_eliminated_snakes_are_not_on_the_board() {
+        let engine_game = engine_game_with_wall_death();
+
+        let wire = Game::from_engine_game(&engine_game, "s1", &HashMap::new(), &HashMap::new());
+
+        let ids: Vec<&str> = wire.board.snakes.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["s1"]);
+        for snake in &wire.board.snakes {
+            for p in &snake.body {
+                assert!(
+                    p.x >= 0 && p.x < 11 && p.y >= 0 && p.y < 11,
+                    "off-board segment ({}, {}) on the wire",
+                    p.x,
+                    p.y
+                );
+            }
+        }
+    }
+
+    /// /end for the loser: `you` is its own final state, while the board
+    /// shows only the survivor -- so the snake can tell who won.
+    #[test]
+    fn test_end_request_for_dead_snake_shows_winner_only() {
+        let engine_game = engine_game_with_wall_death();
+
+        let wire = Game::from_engine_game(&engine_game, "s2", &HashMap::new(), &HashMap::new());
+
+        assert_eq!(wire.you.id, "s2");
+        assert_eq!(wire.you.length, 3);
+        let ids: Vec<&str> = wire.board.snakes.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["s1"]);
+    }
+
+    #[test]
+    fn test_reported_latency_matches_official_engine() {
+        // Timeouts report the full budget, never "0".
+        assert_eq!(reported_latency_ms(None, true, 500), Some(500));
+        assert_eq!(reported_latency_ms(Some(731), true, 500), Some(500));
+        // Measured latency is clamped to [1, timeout].
+        assert_eq!(reported_latency_ms(Some(0), false, 500), Some(1));
+        assert_eq!(reported_latency_ms(Some(123), false, 500), Some(123));
+        assert_eq!(reported_latency_ms(Some(512), false, 500), Some(500));
+        // No measurement (engine-side fault) stays unknown.
+        assert_eq!(reported_latency_ms(None, false, 500), None);
+    }
+
+    /// The request after a timeout carries `you.latency = "<timeout>"`,
+    /// consistent with the frame's "timeout".
+    #[test]
+    fn test_latency_after_timeout_is_timeout_value() {
+        let engine_game = create_test_engine_game();
+        let mut contexts = HashMap::new();
+        contexts.insert(
+            "s1".to_string(),
+            SnakeContext {
+                latency_ms: reported_latency_ms(None, true, engine_game.meta.timeout),
+                shout: None,
+            },
+        );
+
+        let wire = Game::from_engine_game(&engine_game, "s1", &contexts, &HashMap::new());
+
+        assert_eq!(wire.you.latency, "500");
+    }
+
+    /// Collect every leaf of a JSON value as `path:type`, descending into
+    /// the first element of arrays as `path[]`.
+    fn leaf_paths(value: &Value, path: &str, out: &mut Vec<String>) {
+        match value {
+            Value::Object(map) => {
+                for (key, child) in map {
+                    let child_path = if path.is_empty() {
+                        key.clone()
+                    } else {
+                        format!("{path}.{key}")
+                    };
+                    leaf_paths(child, &child_path, out);
+                }
+            }
+            Value::Array(items) => {
+                let first = items.first().expect("golden fixture arrays are non-empty");
+                leaf_paths(first, &format!("{path}[]"), out);
+            }
+            Value::String(_) => out.push(format!("{path}:string")),
+            Value::Number(_) => out.push(format!("{path}:number")),
+            Value::Bool(_) => out.push(format!("{path}:bool")),
+            Value::Null => out.push(format!("{path}:null")),
+        }
+    }
+
+    /// Golden schema: the serialized request has exactly the keys (and JSON
+    /// types) of the official `client.SnakeRequest` in
+    /// BattlesnakeOfficial/rules `client/models.go` -- nothing renamed,
+    /// nothing missing, nothing extra.
+    #[test]
+    fn test_request_schema_matches_official_client_models() {
+        let mut engine_game = engine_game_with_wall_death();
+        engine_game.board.hazards = vec![Point::new(0, 0)];
+        engine_game.meta.ruleset_name = "royale".to_string();
+        engine_game.meta.royale = Some(rules::RoyaleSettings {
+            shrink_every_n_turns: 25,
+            seed: 1,
+        });
+
+        let wire = Game::from_engine_game(&engine_game, "s1", &HashMap::new(), &HashMap::new());
+        let json: Value = serde_json::to_value(&wire).unwrap();
+
+        let snake_fields = |prefix: &str| {
+            [
+                "id:string",
+                "name:string",
+                "latency:string",
+                "health:number",
+                "body[].x:number",
+                "body[].y:number",
+                "head.x:number",
+                "head.y:number",
+                "length:number",
+                "shout:string",
+                "squad:string",
+                "customizations.color:string",
+                "customizations.head:string",
+                "customizations.tail:string",
+            ]
+            .map(|f| format!("{prefix}.{f}"))
+        };
+        let mut expected: Vec<String> = [
+            "game.id:string",
+            "game.ruleset.name:string",
+            "game.ruleset.version:string",
+            "game.ruleset.settings.foodSpawnChance:number",
+            "game.ruleset.settings.minimumFood:number",
+            "game.ruleset.settings.hazardDamagePerTurn:number",
+            "game.ruleset.settings.hazardMap:string",
+            "game.ruleset.settings.hazardMapAuthor:string",
+            "game.ruleset.settings.royale.shrinkEveryNTurns:number",
+            "game.ruleset.settings.squad.allowBodyCollisions:bool",
+            "game.ruleset.settings.squad.sharedElimination:bool",
+            "game.ruleset.settings.squad.sharedHealth:bool",
+            "game.ruleset.settings.squad.sharedLength:bool",
+            "game.map:string",
+            "game.timeout:number",
+            "game.source:string",
+            "turn:number",
+            "board.height:number",
+            "board.width:number",
+            "board.food[].x:number",
+            "board.food[].y:number",
+            "board.hazards[].x:number",
+            "board.hazards[].y:number",
+        ]
+        .map(String::from)
+        .into_iter()
+        .chain(snake_fields("board.snakes[]"))
+        .chain(snake_fields("you"))
+        .collect();
+        expected.sort();
+
+        let mut actual = Vec::new();
+        leaf_paths(&json, "", &mut actual);
+        actual.sort();
+
+        assert_eq!(actual, expected);
+        assert_eq!(
+            json["game"]["ruleset"]["settings"]["hazardDamagePerTurn"],
+            15
+        );
+        assert_eq!(
+            json["game"]["ruleset"]["settings"]["royale"]["shrinkEveryNTurns"],
+            25
+        );
+    }
+
+    /// Solo games look exactly like play's single-snake games: the standard
+    /// ruleset on the standard map with standard food/hazard settings (set
+    /// by `create_initial_game`). Only the engine's game-over check differs.
+    #[test]
+    fn test_solo_game_serializes_as_standard() {
         let mut engine_game = create_test_engine_game();
         engine_game.meta.ruleset_name = "solo".to_string();
 
@@ -575,8 +826,8 @@ mod tests {
         let wire = Game::from_engine_game(&engine_game, "s1", &contexts, &customizations);
         let json: Value = serde_json::to_value(&wire).unwrap();
 
-        assert_eq!(json["game"]["ruleset"]["name"], "solo");
-        assert_eq!(json["game"]["map"], "");
+        assert_eq!(json["game"]["ruleset"]["name"], "standard");
+        assert_eq!(json["game"]["map"], "standard");
         let settings = &json["game"]["ruleset"]["settings"];
         assert_eq!(settings["foodSpawnChance"], 15);
         assert_eq!(settings["minimumFood"], 1);
@@ -665,8 +916,8 @@ mod tests {
             food_spawn_chance: 15,
             minimum_food: 1,
             hazard_damage_per_turn: 15,
-            hazard_map: None,
-            hazard_map_author: None,
+            hazard_map: String::new(),
+            hazard_map_author: String::new(),
             royale: RoyaleSettings {
                 shrink_every_n_turns: 0,
             },
