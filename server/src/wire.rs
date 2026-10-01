@@ -235,7 +235,7 @@ impl Game {
             .snakes
             .iter()
             .find(|s| s.id == you_snake_id)
-            .map(&convert_snake)
+            .map(convert_snake)
             .unwrap_or_else(|| BattleSnake {
                 id: "dummy".to_string(),
                 name: "Dummy".to_string(),
