@@ -307,28 +307,29 @@ table.data td.rating { font-family: var(--mono); font-weight: 600; font-size: 15
 .global-rankings th:nth-child(2) { width: 48%; }
 .global-rankings th:nth-child(3) { width: 18%; }
 .global-rankings th:nth-child(4) { width: 24%; }
-table.data.global-rankings td.rank { width: auto; }
 .global-rankings .ranking-heading-short { display: none; }
 .global-rankings .player, .global-rankings .snake-cell { min-width: 0; }
 .global-rankings .name { min-width: 0; overflow-wrap: anywhere; }
+.global-rankings a.name, .profile-rating a { display: inline-flex; align-items: center; min-height: 44px; }
 .global-rankings .ranking-avatar { width: 38px; height: 38px; flex: none; }
+.global-rankings .board-suffix { display: inline; }
 .profile-rating strong { font-family: var(--mono); font-size: 25px; }
 @media (max-width: 640px) {
-  .global-rankings th, .global-rankings td { padding: 8px 5px; font-size: 12px; }
+  table.data.global-rankings th, table.data.global-rankings td { padding: 8px 5px; }
+  table.data.global-rankings tbody td { font-size: 16px; }
   .global-rankings th { letter-spacing: 0; }
-  .global-rankings .ranking-avatar { width: 28px; height: 28px; }
+  .global-rankings .ranking-avatar { width: 24px; height: 24px; }
   .global-rankings .snake-cell { gap: 5px; }
-  .global-rankings td.rank, .global-rankings td.rating, .global-rankings td.num { font-size: 12px; }
 }
 @media (max-width: 420px) {
   .global-rankings .ranking-heading-full { display: none; }
   .global-rankings .ranking-heading-short { display: inline; }
-  .global-rankings th:nth-child(1) { width: 11%; }
-  .global-rankings th:nth-child(2) { width: 40%; }
-  .global-rankings th:nth-child(3) { width: 20%; }
-  .global-rankings th:nth-child(4) { width: 29%; }
-  .global-rankings th, .global-rankings td { padding-left: 3px; padding-right: 3px; }
-  .global-rankings .ranking-avatar { width: 24px; height: 24px; }
+  .global-rankings th:nth-child(1) { width: 9%; }
+  .global-rankings th:nth-child(2) { width: 52%; }
+  .global-rankings th:nth-child(3) { width: 23%; }
+  .global-rankings th:nth-child(4) { width: 16%; }
+  table.data.global-rankings th, table.data.global-rankings td { padding-left: 2px; padding-right: 2px; }
+  .global-rankings .ranking-avatar, .global-rankings .board-suffix { display: none; }
 }
 
 .snake-cell { display: flex; align-items: center; gap: 12px; }

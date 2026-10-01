@@ -38,6 +38,8 @@ test('rankings, profile and committed score changes are public', async ({ authen
     await expect(page.locator('.profile-rating')).toContainText('Unranked');
     await capture(page, 'unranked-desktop');
     await page.setViewportSize({ width: 375, height: 812 });
+    await expect(page.locator('.profile-rating p')).toHaveCSS('font-size', '16px');
+    expect((await page.locator('.profile-rating a').boundingBox())?.height).toBeGreaterThanOrEqual(44);
     await capture(page, 'unranked-mobile');
     await page.setViewportSize({ width: 1280, height: 900 });
 
@@ -50,6 +52,8 @@ test('rankings, profile and committed score changes are public', async ({ authen
     await expect(page.locator('.profile-rating')).toContainText('1 leaderboard');
     await capture(page, 'ranked-desktop');
     await page.setViewportSize({ width: 375, height: 812 });
+    await expect(page.locator('.profile-rating p')).toHaveCSS('font-size', '16px');
+    expect((await page.locator('.profile-rating a').boundingBox())?.height).toBeGreaterThanOrEqual(44);
     await capture(page, 'ranked-mobile');
     await page.setViewportSize({ width: 1280, height: 900 });
 
@@ -61,7 +65,6 @@ test('rankings, profile and committed score changes are public', async ({ authen
     await expect(row.locator('td')).toHaveCount(4);
     await expect(row.locator('td.num')).toHaveText('1 board');
     await expect(row.locator('td.rating')).toHaveText(oldRating);
-    await capture(page, 'rankings-desktop');
 
     await query(
       `UPDATE leaderboard_entries SET display_score = 20
@@ -87,10 +90,8 @@ test('rankings, profile and committed score changes are public', async ({ authen
           .map((cell) => ({ text: cell.textContent?.trim(), width: cell.clientWidth, scroll: cell.scrollWidth })),
       };
     });
-    await capture(page, 'rankings-mobile');
     expect(widths.document).toBeLessThanOrEqual(375);
     expect(widths.table, JSON.stringify(widths)).toBeLessThanOrEqual(widths.client);
-    await expect(row.locator('td')).toHaveCount(4);
   } finally {
     await query('DELETE FROM battlesnakes WHERE battlesnake_id = $1', [snake.battlesnake_id]);
   }
@@ -98,14 +99,18 @@ test('rankings, profile and committed score changes are public', async ({ authen
 
 test('rankings pages past fifty rows', async ({ page }) => {
   const prefix = `global_rank_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
+  const longLogin = `a${Date.now()}${Math.floor(Math.random() * 10000)}${'x'.repeat(39)}`.slice(0, 39);
+  const longDisplayName = `A player with a deliberately long display name ${prefix}`;
   const [board] = await query<{ leaderboard_id: string }>(
     'SELECT leaderboard_id FROM leaderboards WHERE disabled_at IS NULL ORDER BY name LIMIT 1',
   );
   try {
     await query(
       `WITH inserted_users AS (
-         INSERT INTO users (external_github_id, github_login, github_access_token)
-         SELECT 800000000000000 + $1::bigint * 100 + n, $2 || '_' || n, 'test'
+         INSERT INTO users (external_github_id, github_login, github_access_token, display_name)
+         SELECT 800000000000000 + $1::bigint * 100 + n,
+                CASE WHEN n = 1 THEN $4 ELSE $2 || '_' || n END, 'test',
+                CASE WHEN n = 2 THEN $5 ELSE NULL END
          FROM generate_series(1, 55) n RETURNING user_id, github_login
        ), inserted_snakes AS (
          INSERT INTO battlesnakes (user_id, name, url)
@@ -113,19 +118,45 @@ test('rankings pages past fifty rows', async ({ page }) => {
          RETURNING battlesnake_id
        )
        INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id, games_played, display_score)
-       SELECT $3, battlesnake_id, 10, 15 FROM inserted_snakes`,
-      [Date.now(), prefix, board.leaderboard_id],
+       SELECT $3, battlesnake_id, 10, 100 FROM inserted_snakes`,
+      [Date.now(), prefix, board.leaderboard_id, longLogin, longDisplayName],
     );
     await page.goto('/rankings');
+    await capture(page, 'rankings-desktop');
+    await page.setViewportSize({ width: 375, height: 812 });
+    await page.reload();
+    await page.evaluate(() => document.fonts.ready);
+    const widths = await page.evaluate(() => {
+      const table = document.querySelector('table.global-rankings');
+      return {
+        document: document.documentElement.scrollWidth,
+        table: table?.scrollWidth ?? 0,
+        client: table?.clientWidth ?? 0,
+      };
+    });
+    expect(widths.document).toBeLessThanOrEqual(375);
+    expect(widths.table, JSON.stringify(widths)).toBeLessThanOrEqual(widths.client);
+    await expect(page.locator('table.global-rankings tbody tr')).toHaveCount(50);
+    expect(await page.locator('.pager a').count()).toBeGreaterThan(0);
+    await expect(page.locator('table.global-rankings a.name', { hasText: longDisplayName })).toBeVisible();
+    await expect(page.locator(`table.global-rankings a.name[href*="${longLogin}"]`)).toBeVisible();
+    for (const cell of await page.locator('table.global-rankings tbody td').all()) {
+      expect(parseFloat(await cell.evaluate((element) => getComputedStyle(element).fontSize))).toBeGreaterThanOrEqual(16);
+    }
+    for (const link of await page.locator('table.global-rankings a.name, .pager a').all()) {
+      expect((await link.boundingBox())?.height).toBeGreaterThanOrEqual(44);
+    }
+    await capture(page, 'rankings-mobile');
     let found = 0;
     for (;;) {
       found += await page.locator(`table.global-rankings a.name[href*="${prefix}"]`).count();
+      found += await page.locator(`table.global-rankings a.name[href*="${longLogin}"]`).count();
       const next = page.getByRole('link', { name: 'Next ›', exact: true });
       if (await next.count() === 0) break;
       await next.click();
     }
     expect(found).toBe(55);
   } finally {
-    await query('DELETE FROM users WHERE github_login LIKE $1', [`${prefix}%`]);
+    await query('DELETE FROM users WHERE github_login LIKE $1 OR github_login = $2', [`${prefix}%`, longLogin]);
   }
 });

@@ -302,8 +302,8 @@ fn render_global_rankings(
                                     }
                                     td class="rating" { (rating.display_value()) }
                                     td class="num" {
-                                        (row.score.contributing_leaderboards()) " "
-                                        (if row.score.contributing_leaderboards() == 1 { "board" } else { "boards" })
+                                        (row.score.contributing_leaderboards())
+                                        span class="board-suffix" { " " (if row.score.contributing_leaderboards() == 1 { "board" } else { "boards" }) }
                                     }
                                 }
                             }
@@ -577,8 +577,8 @@ mod tests {
         assert!(html.contains("<td class=\"rank\">51</td>"));
         assert!(html.contains("<td class=\"rank\">52</td>"));
         assert!(html.contains("1824"));
-        assert!(html.contains("1 board"));
-        assert!(html.contains("2 boards"));
+        assert!(html.contains("1<span class=\"board-suffix\"> board</span>"));
+        assert!(html.contains("2<span class=\"board-suffix\"> boards</span>"));
         assert!(html.contains("/rankings?page=0"));
         assert!(html.contains("/rankings?page=2"));
     }
