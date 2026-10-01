@@ -981,7 +981,7 @@ mod tests {
         for server in [&doomed, &late, &survivor] {
             for endpoint in ["/move", "/end"] {
                 for request in received_bodies(server, endpoint).await {
-                    assert_eq!(request["game"]["source"], "ladder");
+                    assert_eq!(request["game"]["source"], "arena");
                     assert_eq!(request["game"]["map"], "standard");
                     assert_eq!(request["game"]["ruleset"]["settings"]["hazardMap"], "");
 

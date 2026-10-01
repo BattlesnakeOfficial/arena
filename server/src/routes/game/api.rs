@@ -611,7 +611,7 @@ mod tests {
             ruleset_name,
             rules_stages,
             map,
-            source: "ladder".to_string(),
+            source: "arena".to_string(),
             snake_timeout: crate::engine::MOVE_TIMEOUT_MS,
             max_turns: crate::engine::MAX_TURNS,
             food_spawns: Vec::new(),
@@ -861,7 +861,7 @@ mod tests {
     }
 
     /// `GET /api/games/{id}` serves the legacy engine's `{Game, LastFrame}`:
-    /// a ladder game reports `Source: "ladder"`, `LastFrame` is the latest
+    /// a ladder game reports `Source: "arena"`, `LastFrame` is the latest
     /// turn, and a frame persisted before DEV-1502 (Latency "timeout", no
     /// engine fields) is served in the engine's shape.
     #[sqlx::test(migrations = "../migrations")]
@@ -907,7 +907,7 @@ mod tests {
 
         let game = &json["Game"];
         assert_eq!(game["Status"], "complete");
-        assert_eq!(game["Source"], "ladder");
+        assert_eq!(game["Source"], "arena");
         assert_eq!(game["RulesetName"], "standard");
         assert_eq!(game["Map"], "standard");
         assert_eq!(game["Ruleset"]["name"], "standard");

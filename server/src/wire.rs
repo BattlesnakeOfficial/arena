@@ -612,7 +612,7 @@ mod tests {
     #[test]
     fn test_source_reflects_game_origin() {
         for (source, expected) in [
-            (crate::engine::GameSource::Ladder, "ladder"),
+            (crate::engine::GameSource::Ladder, "arena"),
             (crate::engine::GameSource::Tournament, "tournament"),
             (crate::engine::GameSource::Custom, "custom"),
         ] {
@@ -623,6 +623,26 @@ mod tests {
             let json: Value = serde_json::to_value(&wire).unwrap();
 
             assert_eq!(json["game"]["source"], expected);
+        }
+    }
+
+    /// Every `game.source` arena sends is in the documented set. Strict
+    /// parsers (e.g. `battlesnake-game-types`' `Source` enum) 400 on anything
+    /// else, which made a ladder snake lose every game when arena sent
+    /// Play's undocumented "ladder" (DEV-1505).
+    #[test]
+    fn test_source_values_are_documented() {
+        const DOCUMENTED: [&str; 5] = ["tournament", "league", "arena", "challenge", "custom"];
+        for source in [
+            crate::engine::GameSource::Ladder,
+            crate::engine::GameSource::Tournament,
+            crate::engine::GameSource::Custom,
+        ] {
+            assert!(
+                DOCUMENTED.contains(&source.as_str()),
+                "{source:?} serializes as undocumented {:?}",
+                source.as_str()
+            );
         }
     }
 

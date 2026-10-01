@@ -35,11 +35,17 @@ pub struct GameMeta {
     pub source: GameSource,
 }
 
-/// Origin of a game, sent to snakes as `game.source` using the values
-/// play.battlesnake.com sent (`Game.SourceType` in play's core models).
+/// Origin of a game, sent to snakes as `game.source` (and as the engine
+/// API's `Game.Source`).
+///
+/// Values come from the documented set (docs.battlesnake.com, Game object:
+/// `tournament`, `league`, `arena`, `challenge`, `custom`), NOT what Play
+/// actually sent: Play sent an undocumented `"ladder"` for ladder games, and
+/// strict doc-following parsers (e.g. `battlesnake-game-types`' `Source`
+/// enum) reject it with a 400 on every request (DEV-1505).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum GameSource {
-    /// A leaderboard (ladder) matchmaker game.
+    /// A leaderboard (ladder) matchmaker game; documented as `arena`.
     Ladder,
     /// A tournament match game.
     Tournament,
@@ -51,7 +57,7 @@ pub enum GameSource {
 impl GameSource {
     pub fn as_str(self) -> &'static str {
         match self {
-            GameSource::Ladder => "ladder",
+            GameSource::Ladder => "arena",
             GameSource::Tournament => "tournament",
             GameSource::Custom => "custom",
         }
