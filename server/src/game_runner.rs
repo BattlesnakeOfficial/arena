@@ -7,7 +7,7 @@ use crate::customizations;
 use crate::engine::MAX_TURNS;
 use crate::engine::frame::{DeathInfo, SnakeCustomizations, game_to_frame};
 use crate::game_progress::phase;
-use crate::models::game::{GameStatus, get_game_by_id, update_game_status};
+use crate::models::game::{GameStatus, get_game_by_id, get_game_source, update_game_status};
 use crate::snake_client::{
     ProxyClients, SnakeEndpoint, request_end_routed_parallel, request_info_routed_parallel,
     request_moves_routed_parallel, request_start_routed_parallel,
@@ -33,10 +33,12 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
     tracing::info!(game_id = %game_id, "Starting run_game");
 
     // Get the game details
-    let game = phase(game_id, "load_game", None, async {
-        get_game_by_id(pool, game_id)
+    let (game, game_source) = phase(game_id, "load_game", None, async {
+        let game = get_game_by_id(pool, game_id)
             .await?
-            .ok_or_else(|| cja::color_eyre::eyre::eyre!("Game not found"))
+            .ok_or_else(|| cja::color_eyre::eyre::eyre!("Game not found"))?;
+        let source = get_game_source(pool, game_id).await?;
+        Ok((game, source))
     })
     .await?;
 
@@ -226,6 +228,7 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
     // Create the initial game state
     let mut engine_game =
         crate::engine::create_initial_game(game_id, game.board_size, game.game_type, &battlesnakes);
+    engine_game.meta.source = game_source;
 
     // Get timeout from game settings
     let timeout = std::time::Duration::from_millis(engine_game.meta.timeout as u64);
@@ -317,7 +320,11 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
             snake_contexts.insert(
                 result.snake_id.clone(),
                 wire::SnakeContext {
-                    latency_ms: result.latency_ms,
+                    latency_ms: wire::reported_latency_ms(
+                        result.latency_ms,
+                        result.timed_out,
+                        engine_game.meta.timeout,
+                    ),
                     shout: result.shout.clone(),
                 },
             );
@@ -776,6 +783,252 @@ mod tests {
         run_game(&app_state, game_id).await?;
 
         assert_eq!(count_jobs(&pool, "ScreenShoutsJob").await?, 1);
+
+        Ok(())
+    }
+
+    /// Scripted wiremock Battlesnake. Moves cautiously (any in-bounds cell
+    /// not on a body or next to another head) until `suicide_from_turn`,
+    /// then always "left" into the wall. `timeout_on_turn` delays that
+    /// turn's /move past the 500ms budget.
+    struct ScriptedSnake {
+        suicide_from_turn: i64,
+        timeout_on_turn: Option<i64>,
+    }
+
+    impl ScriptedSnake {
+        fn choose_move(&self, request: &serde_json::Value) -> &'static str {
+            let turn = request["turn"].as_i64().unwrap_or(0);
+            if turn >= self.suicide_from_turn {
+                return "left";
+            }
+            let width = request["board"]["width"].as_i64().unwrap_or(0);
+            let height = request["board"]["height"].as_i64().unwrap_or(0);
+            let you_id = request["you"]["id"].as_str().unwrap_or_default();
+            let point = |p: &serde_json::Value| {
+                (
+                    p["x"].as_i64().unwrap_or_default(),
+                    p["y"].as_i64().unwrap_or_default(),
+                )
+            };
+            let mut blocked = std::collections::HashSet::new();
+            for snake in request["board"]["snakes"].as_array().into_iter().flatten() {
+                for segment in snake["body"].as_array().into_iter().flatten() {
+                    blocked.insert(point(segment));
+                }
+                if snake["id"].as_str() != Some(you_id) {
+                    let (x, y) = point(&snake["head"]);
+                    blocked.extend([(x, y + 1), (x + 1, y), (x, y - 1), (x - 1, y)]);
+                }
+            }
+            let (x, y) = point(&request["you"]["head"]);
+            [
+                ("up", (x, y + 1)),
+                ("right", (x + 1, y)),
+                ("down", (x, y - 1)),
+                ("left", (x - 1, y)),
+            ]
+            .into_iter()
+            .find(|(_, (nx, ny))| {
+                (0..width).contains(nx)
+                    && (0..height).contains(ny)
+                    && !blocked.contains(&(*nx, *ny))
+            })
+            .map_or("up", |(direction, _)| direction)
+        }
+    }
+
+    impl wiremock::Respond for ScriptedSnake {
+        fn respond(&self, request: &wiremock::Request) -> wiremock::ResponseTemplate {
+            if !request.url.path().ends_with("/move") {
+                return wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "apiversion": "1" }));
+            }
+            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap_or_default();
+            let response = wiremock::ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({ "move": self.choose_move(&body) }));
+            if self.timeout_on_turn == body["turn"].as_i64() {
+                response.set_delay(std::time::Duration::from_millis(800))
+            } else {
+                response
+            }
+        }
+    }
+
+    /// Request bodies a scripted snake received on `endpoint`.
+    async fn received_bodies(
+        server: &wiremock::MockServer,
+        endpoint: &str,
+    ) -> Vec<serde_json::Value> {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|r| r.url.path().ends_with(endpoint))
+            .map(|r| serde_json::from_slice(&r.body).expect("request body is JSON"))
+            .collect()
+    }
+
+    /// End-to-end snake API parity with the official engine (DEV-1496),
+    /// checked on the bodies real snakes receive from a full ladder game:
+    /// - `board.snakes` lists exactly the snakes alive in that turn's frame,
+    ///   so no eliminated snake (or off-board head) is ever sent;
+    /// - after a timed-out move the next request reports `you.latency` as
+    ///   the timeout ("500"), matching the frame's "timeout";
+    /// - `game.map` / `game.source` are filled in.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn snake_requests_match_official_engine(pool: PgPool) -> cja::Result<()> {
+        let app_state = crate::state::AppState::test_from_pool(pool.clone());
+        let game_id = fixture_game(&pool, "waiting").await?;
+        let user_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO users (external_github_id, github_login, github_access_token)
+             VALUES (424242, 'test-user', 'test-token') RETURNING user_id",
+        )
+        .fetch_one(&pool)
+        .await?;
+        let leaderboard_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO leaderboards (name) VALUES ('parity') RETURNING leaderboard_id",
+        )
+        .fetch_one(&pool)
+        .await?;
+        sqlx::query("INSERT INTO leaderboard_games (leaderboard_id, game_id) VALUES ($1, $2)")
+            .bind(leaderboard_id)
+            .bind(game_id)
+            .execute(&pool)
+            .await?;
+
+        // Doomed: times out on turn 0, then drives into the wall (dead by
+        // turn 11 on 11x11). Late: cautious, then suicidal from turn 15, so
+        // two snakes keep receiving /move after the first death. Survivor:
+        // cautious throughout.
+        let doomed = wiremock::MockServer::start().await;
+        let late = wiremock::MockServer::start().await;
+        let survivor = wiremock::MockServer::start().await;
+        for (name, server, script) in [
+            (
+                "doomed",
+                &doomed,
+                ScriptedSnake {
+                    suicide_from_turn: 1,
+                    timeout_on_turn: Some(0),
+                },
+            ),
+            (
+                "late",
+                &late,
+                ScriptedSnake {
+                    suicide_from_turn: 15,
+                    timeout_on_turn: None,
+                },
+            ),
+            (
+                "survivor",
+                &survivor,
+                ScriptedSnake {
+                    suicide_from_turn: i64::MAX,
+                    timeout_on_turn: None,
+                },
+            ),
+        ] {
+            wiremock::Mock::given(wiremock::matchers::any())
+                .respond_with(script)
+                .mount(server)
+                .await;
+            let battlesnake_id: Uuid = sqlx::query_scalar(
+                "INSERT INTO battlesnakes (user_id, name, url) VALUES ($1, $2, $3)
+                 RETURNING battlesnake_id",
+            )
+            .bind(user_id)
+            .bind(name)
+            .bind(server.uri())
+            .fetch_one(&pool)
+            .await?;
+            sqlx::query("INSERT INTO game_battlesnakes (game_id, battlesnake_id) VALUES ($1, $2)")
+                .bind(game_id)
+                .bind(battlesnake_id)
+                .execute(&pool)
+                .await?;
+        }
+
+        run_game(&app_state, game_id).await?;
+
+        // Living snake IDs per turn, from the persisted frames.
+        let frames: Vec<(i32, serde_json::Value)> = sqlx::query_as(
+            "SELECT turn_number, frame_data FROM turns WHERE game_id = $1 ORDER BY turn_number",
+        )
+        .bind(game_id)
+        .fetch_all(&pool)
+        .await?;
+        let alive_at = |turn: i64| -> Vec<String> {
+            let (_, frame) = frames
+                .iter()
+                .find(|(t, _)| i64::from(*t) == turn)
+                .expect("a frame exists for every requested turn");
+            let mut ids: Vec<String> = frame["Snakes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|s| s["EliminatedCause"].as_str().unwrap_or_default().is_empty())
+                .filter_map(|s| s["ID"].as_str().map(String::from))
+                .collect();
+            ids.sort();
+            ids
+        };
+
+        let mut saw_dead_snake_filtered = false;
+        for server in [&doomed, &late, &survivor] {
+            for endpoint in ["/move", "/end"] {
+                for request in received_bodies(server, endpoint).await {
+                    assert_eq!(request["game"]["source"], "ladder");
+                    assert_eq!(request["game"]["map"], "standard");
+                    assert_eq!(request["game"]["ruleset"]["settings"]["hazardMap"], "");
+
+                    let turn = request["turn"].as_i64().expect("turn is a number");
+                    let mut on_board: Vec<String> = request["board"]["snakes"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|s| s["id"].as_str().map(String::from))
+                        .collect();
+                    on_board.sort();
+                    let alive = alive_at(turn);
+                    assert_eq!(on_board, alive, "{endpoint} at turn {turn}");
+                    if alive.len() < 3 {
+                        saw_dead_snake_filtered = true;
+                    }
+                }
+            }
+        }
+        assert!(
+            saw_dead_snake_filtered,
+            "some request must have been sent after an elimination"
+        );
+
+        let doomed_moves = received_bodies(&doomed, "/move").await;
+        let turn_one = doomed_moves
+            .iter()
+            .find(|r| r["turn"] == 1)
+            .expect("the doomed snake survives turn 0");
+        assert_eq!(turn_one["you"]["latency"], "500");
+        let doomed_id = turn_one["you"]["id"].as_str().unwrap_or_default();
+        let (_, frame_one) = frames
+            .iter()
+            .find(|(t, _)| *t == 1)
+            .expect("frame 1 exists");
+        let frame_latency = frame_one["Snakes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|s| s["ID"] == doomed_id)
+            .map(|s| s["Latency"].clone());
+        assert_eq!(frame_latency, Some(serde_json::json!("timeout")));
+
+        // /end goes to every snake, dead or alive, and each sees itself.
+        for server in [&doomed, &late, &survivor] {
+            let ends = received_bodies(server, "/end").await;
+            assert_eq!(ends.len(), 1);
+        }
 
         Ok(())
     }

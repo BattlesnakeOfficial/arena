@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            EXISTS (SELECT 1 FROM leaderboard_games WHERE game_id = $1) AS \"ladder!\",\n            EXISTS (SELECT 1 FROM match_games WHERE game_id = $1) AS \"tournament!\"\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "ladder!",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 1,
+        "name": "tournament!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "cfd954795f4414779214ccd9f33309dd70e10a761ecae94511f77e99167dc8cf"
+}
