@@ -1,10 +1,10 @@
 use color_eyre::eyre::Context as _;
-use sqlx::{FromRow, PgPool};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::leaderboard::MIN_GAMES_FOR_RANKING;
 
-#[derive(Debug, Clone, FromRow)]
+#[derive(Debug, Clone)]
 pub struct GlobalPlayerScore {
     pub user_id: Uuid,
     pub best_scores: Vec<f64>,
@@ -58,7 +58,6 @@ pub fn combined_rating(best_per_board: &[f64], enabled_leaderboards: usize) -> O
     z.is_finite().then(|| 1.0 / (1.0 + (-z).exp()))
 }
 
-#[derive(FromRow)]
 struct FlatRankingEntry {
     user_id: Uuid,
     best_scores: Vec<f64>,
@@ -86,11 +85,13 @@ impl From<FlatRankingEntry> for GlobalRankingEntry {
 }
 
 pub async fn count_global_players(pool: &PgPool) -> cja::Result<i64> {
-    sqlx::query_scalar("SELECT COUNT(*) FROM global_player_scores($1)")
-        .bind(MIN_GAMES_FOR_RANKING)
-        .fetch_one(pool)
-        .await
-        .wrap_err("Failed to count globally ranked players")
+    sqlx::query_scalar!(
+        "SELECT COUNT(*) AS \"count!\" FROM global_player_scores($1)",
+        MIN_GAMES_FOR_RANKING
+    )
+    .fetch_one(pool)
+    .await
+    .wrap_err("Failed to count globally ranked players")
 }
 
 pub async fn get_global_players_paginated(
@@ -98,20 +99,22 @@ pub async fn get_global_players_paginated(
     page: i64,
     per_page: i64,
 ) -> cja::Result<Vec<GlobalRankingEntry>> {
-    let rows: Vec<FlatRankingEntry> = sqlx::query_as(
-        r#"SELECT g.user_id, g.best_scores, g.total_score, g.enabled_leaderboards,
+    let rows: Vec<FlatRankingEntry> = sqlx::query_as!(
+        FlatRankingEntry,
+        r#"SELECT g.user_id AS "user_id!", g.best_scores AS "best_scores!", g.total_score AS "total_score!",
+                  g.enabled_leaderboards AS "enabled_leaderboards!",
                   u.github_login, u.github_avatar_url,
-                  COALESCE(NULLIF(u.display_name, ''), u.github_login) AS public_name
+                  COALESCE(NULLIF(u.display_name, ''), u.github_login) AS "public_name!"
            FROM global_player_scores($1) g
            JOIN users u ON u.user_id = g.user_id
            ORDER BY g.total_score DESC,
                     LOWER(COALESCE(NULLIF(u.display_name, ''), u.github_login)) ASC,
                     LOWER(u.github_login) ASC, u.user_id ASC
            LIMIT $2 OFFSET $3"#,
+        MIN_GAMES_FOR_RANKING,
+        per_page,
+        page * per_page
     )
-    .bind(MIN_GAMES_FOR_RANKING)
-    .bind(per_page)
-    .bind(page * per_page)
     .fetch_all(pool)
     .await
     .wrap_err("Failed to fetch global rankings")?;
@@ -122,12 +125,17 @@ pub async fn get_global_player_score(
     pool: &PgPool,
     user_id: Uuid,
 ) -> cja::Result<Option<GlobalPlayerScore>> {
-    sqlx::query_as("SELECT g.* FROM global_player_scores($1) g WHERE g.user_id = $2")
-        .bind(MIN_GAMES_FOR_RANKING)
-        .bind(user_id)
-        .fetch_optional(pool)
-        .await
-        .wrap_err("Failed to fetch global player score")
+    sqlx::query_as!(
+        GlobalPlayerScore,
+        "SELECT g.user_id AS \"user_id!\", g.best_scores AS \"best_scores!\", g.total_score AS \"total_score!\",
+                g.enabled_leaderboards AS \"enabled_leaderboards!\"
+         FROM global_player_scores($1) g WHERE g.user_id = $2",
+        MIN_GAMES_FOR_RANKING,
+        user_id
+    )
+    .fetch_optional(pool)
+    .await
+    .wrap_err("Failed to fetch global player score")
 }
 
 #[cfg(test)]
@@ -195,10 +203,12 @@ mod tests {
     proptest! {
         #[test]
         fn rating_is_bounded_and_monotone(
-            scores in proptest::collection::vec(-100.0f64..100.0, 1..=8),
+            case in (1usize..=8).prop_flat_map(|n| {
+                (Just(n), proptest::collection::vec(-100.0f64..100.0, 1..=n))
+            }),
             increase in 0.0f64..50.0,
         ) {
-            let n = scores.len();
+            let (n, scores) = case;
             let before = combined_rating(&scores, n).unwrap();
             prop_assert!(before > 0.0 && before < 1.0);
             let mut improved = scores;
