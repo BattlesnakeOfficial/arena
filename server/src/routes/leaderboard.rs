@@ -364,7 +364,7 @@ pub async fn show_leaderboard(
                                                     }
                                                     span class="owner" {
                                                         "by "
-                                                        a href={"/users/"(entry.owner_login)} { (entry.owner_login) }
+                                                        a href={"/users/"(entry.owner_login)} { (entry.owner_name) }
                                                         @if is_you { " — you" }
                                                     }
                                                     (snake_tag_chips(snake_tags.get(&entry.battlesnake_id).map(Vec::as_slice).unwrap_or(&[])))
@@ -435,7 +435,7 @@ pub async fn show_leaderboard(
                                                         }
                                                         span class="owner" {
                                                             "by "
-                                                            a href={"/users/"(entry.owner_login)} { (entry.owner_login) }
+                                                            a href={"/users/"(entry.owner_login)} { (entry.owner_name) }
                                                         }
                                                         (snake_tag_chips(snake_tags.get(&entry.battlesnake_id).map(Vec::as_slice).unwrap_or(&[])))
                                                     }
@@ -542,7 +542,7 @@ pub async fn show_leaderboard(
                                             }
                                             span class="owner-inline" {
                                                 " by "
-                                                a href={"/users/"(eater.owner_login)} { (eater.owner_login) }
+                                                a href={"/users/"(eater.owner_login)} { (eater.owner_name) }
                                             }
                                             " · "
                                             span class="place" { (eater.food_score) " food" }
@@ -613,10 +613,12 @@ pub async fn show_leaderboard_entry(
         .await
         .wrap_err("Failed to fetch owner")?;
 
-    let owner_login = owner
-        .as_ref()
-        .map(|o| o.github_login.clone())
-        .unwrap_or_else(|| "Unknown".to_string());
+    // `owner_login` is the `/users/{login}` URL key; `owner_name` is the
+    // public name shown as text.
+    let (owner_login, owner_name) = owner.as_ref().map_or_else(
+        || ("Unknown".to_string(), "Unknown".to_string()),
+        |o| (o.github_login.clone(), o.public_name().to_string()),
+    );
     let owner_avatar = owner.as_ref().and_then(|o| o.github_avatar_url.clone());
 
     let per_page: i64 = 20;
@@ -749,7 +751,7 @@ pub async fn show_leaderboard_entry(
 
     let description = format!(
         "{} by {} on the {} leaderboard — rating {:.1}, {} games played.",
-        snake.name, owner_login, lb.name, entry.display_score, entry.games_played
+        snake.name, owner_name, lb.name, entry.display_score, entry.games_played
     );
 
     Ok(page_factory.create_page(
@@ -763,7 +765,7 @@ pub async fn show_leaderboard_entry(
             }
 
             div class="page-head" {
-                (user_avatar(owner_avatar.as_deref(), &owner_login, "entry-avatar"))
+                (user_avatar(owner_avatar.as_deref(), &owner_name, "entry-avatar"))
                 div {
                     h1 {
                         a href={"/battlesnakes/"(snake.battlesnake_id)"/profile"} { (snake.name) }
@@ -771,9 +773,9 @@ pub async fn show_leaderboard_entry(
                     div class="sub" {
                         "by "
                         @if owner.is_some() {
-                            a href={"/users/"(owner_login)} { (owner_login) }
+                            a href={"/users/"(owner_login)} { (owner_name) }
                         } @else {
-                            (owner_login)
+                            (owner_name)
                         }
                         " on "
                         a href={"/leaderboards/"(leaderboard_id)} { (lb.name) }
@@ -1211,6 +1213,187 @@ mod tests {
             render_score_delta(0.049, "delta up", "delta down")
                 .into_string()
                 .contains(r#"title="+0.049""#)
+        );
+    }
+}
+
+#[cfg(test)]
+mod owner_name_route_tests {
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode, header},
+    };
+    use sqlx::PgPool;
+    use tower::ServiceExt as _;
+    use uuid::Uuid;
+
+    use crate::models::leaderboard::{self, MIN_GAMES_FOR_RANKING};
+    use crate::state::AppState;
+
+    async fn get(pool: &PgPool, path: &str) -> (StatusCode, String) {
+        let app = crate::routes::routes(AppState::test_from_pool(pool.clone()))
+            .layer(tower_cookies::CookieManagerLayer::new());
+        let mut builder = Request::builder().uri(path);
+        if path.starts_with("/api/") {
+            builder = builder.header(header::ORIGIN, "https://example.com");
+        }
+        let response = app
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        (status, String::from_utf8_lossy(&body).into_owned())
+    }
+
+    async fn owner(pool: &PgPool, github_id: i64, login: &str, display_name: Option<&str>) -> Uuid {
+        sqlx::query_scalar!(
+            "INSERT INTO users (external_github_id, github_login, github_access_token, display_name)
+             VALUES ($1, $2, 'token', $3) RETURNING user_id",
+            github_id,
+            login,
+            display_name
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    /// Adds a snake to the leaderboard with the given games played and food
+    /// score, returning its leaderboard entry id.
+    async fn entry(
+        pool: &PgPool,
+        leaderboard_id: Uuid,
+        user_id: Uuid,
+        name: &str,
+        games_played: i32,
+        food_score: i64,
+    ) -> Uuid {
+        let battlesnake_id = sqlx::query_scalar!(
+            "INSERT INTO battlesnakes (user_id, name, url)
+             VALUES ($1, $2, 'http://snake') RETURNING battlesnake_id",
+            user_id,
+            name
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        let entry_id = leaderboard::get_or_create_entry(pool, leaderboard_id, battlesnake_id)
+            .await
+            .unwrap()
+            .leaderboard_entry_id;
+        sqlx::query!(
+            "UPDATE leaderboard_entries SET games_played = $2 WHERE leaderboard_entry_id = $1",
+            entry_id,
+            games_played
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query!(
+            "INSERT INTO food_eaten_stats (leaderboard_entry_id, food_score) VALUES ($1, $2)",
+            entry_id,
+            food_score
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        entry_id
+    }
+
+    /// Leaderboard surfaces show the owner's display name as link text while
+    /// keeping the GitHub login as the `/users/{login}` URL key; owners
+    /// without a display name fall back to their login.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn leaderboard_pages_show_owner_display_name(pool: PgPool) {
+        // The homepage features the first active leaderboard, so use it.
+        let leaderboard_id = leaderboard::get_active_leaderboards(&pool)
+            .await
+            .unwrap()
+            .first()
+            .expect("migrations seed an active leaderboard")
+            .leaderboard_id;
+
+        let named = owner(&pool, 9930001, "gh-display", Some("Display Person")).await;
+        let plain = owner(&pool, 9930002, "gh-plain", None).await;
+        let named_entry = entry(
+            &pool,
+            leaderboard_id,
+            named,
+            "named-ranked",
+            MIN_GAMES_FOR_RANKING + 5,
+            7,
+        )
+        .await;
+        entry(&pool, leaderboard_id, named, "named-placement", 1, 0).await;
+        entry(
+            &pool,
+            leaderboard_id,
+            plain,
+            "plain-ranked",
+            MIN_GAMES_FOR_RANKING,
+            2,
+        )
+        .await;
+
+        let named_link = r#"<a href="/users/gh-display">Display Person</a>"#;
+        let plain_link = r#"<a href="/users/gh-plain">gh-plain</a>"#;
+
+        // Ranked table, placement table, and top-eaters rail.
+        let (status, body) = get(&pool, &format!("/leaderboards/{leaderboard_id}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body.matches(named_link).count(), 3, "{body}");
+        assert_eq!(body.matches(plain_link).count(), 2, "{body}");
+        assert!(!body.contains(">gh-display<"), "login shown as text");
+
+        let (status, body) = get(
+            &pool,
+            &format!("/leaderboards/{leaderboard_id}/entries/{named_entry}"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains(named_link), "{body}");
+        assert!(body.contains("named-ranked by Display Person on the"));
+        assert!(!body.contains(">gh-display<"), "login shown as text");
+
+        let (status, body) = get(&pool, "/").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("by Display Person"), "{body}");
+        assert!(!body.contains("by gh-display"));
+
+        let (status, body) = get(
+            &pool,
+            &format!("/api/leaderboards/{leaderboard_id}/rankings"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let owners = |key: &str| -> Vec<(String, String)> {
+            let mut rows: Vec<(String, String)> = json[key]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|e| {
+                    (
+                        e["owner"].as_str().unwrap().to_string(),
+                        e["owner_name"].as_str().unwrap().to_string(),
+                    )
+                })
+                .collect();
+            rows.sort();
+            rows
+        };
+        let pair = |login: &str, name: &str| (login.to_string(), name.to_string());
+        assert_eq!(
+            owners("ranked"),
+            vec![
+                pair("gh-display", "Display Person"),
+                pair("gh-plain", "gh-plain")
+            ]
+        );
+        assert_eq!(
+            owners("placement"),
+            vec![pair("gh-display", "Display Person")]
         );
     }
 }

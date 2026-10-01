@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO food_eaten_stats (leaderboard_entry_id, food_score)\n                     VALUES ($1, 3)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f5c1d3c0116501e6f004a960f02e61af18c6496dc15e1c84c7f1fbf542e15b78"
+}

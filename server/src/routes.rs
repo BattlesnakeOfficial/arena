@@ -721,7 +721,7 @@ fn home_ladder_grid(
                                                 } @else {
                                                     span class="name" { (entry.snake_name) }
                                                 }
-                                                span class="owner" { "by " (entry.owner_login) }
+                                                span class="owner" { "by " (entry.owner_name) }
                                             }
                                         }
                                     }

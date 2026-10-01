@@ -25,6 +25,18 @@ pub struct User {
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
+impl User {
+    /// Name shown publicly: the chosen display name when set, otherwise the
+    /// GitHub login. SQL mirrors this with
+    /// `COALESCE(NULLIF(display_name, ''), github_login)`.
+    pub fn public_name(&self) -> &str {
+        self.display_name
+            .as_deref()
+            .filter(|n| !n.is_empty())
+            .unwrap_or(&self.github_login)
+    }
+}
+
 /// Valid values for `users.site_theme` (mirrors the DB CHECK constraint).
 pub const SITE_THEMES: [&str; 3] = ["system", "light", "dark"];
 /// Valid values for `users.theater_theme` (mirrors the DB CHECK constraint).

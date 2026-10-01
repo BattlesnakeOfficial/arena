@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT\n                    le.leaderboard_entry_id,\n                    le.battlesnake_id,\n                    b.user_id,\n                    le.display_score,\n                    le.games_played,\n                    le.first_place_finishes,\n                    le.non_first_finishes,\n                    le.mu,\n                    le.sigma,\n                    b.name as snake_name,\n                    b.color as snake_color,\n                    u.github_login as owner_login\n                 FROM leaderboard_entries le\n                 JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id\n                 JOIN users u ON b.user_id = u.user_id\n                 LEFT JOIN food_eaten_stats fes ON le.leaderboard_entry_id = fes.leaderboard_entry_id\n                 WHERE le.leaderboard_id = $1\n                   AND le.disabled_at IS NULL\n                   AND le.games_played >= $2\n                 ORDER BY COALESCE(fes.food_score, 0) DESC\n                 LIMIT $3 OFFSET $4",
+  "query": "SELECT\n                    le.leaderboard_entry_id,\n                    le.battlesnake_id,\n                    b.user_id,\n                    le.display_score,\n                    le.games_played,\n                    le.first_place_finishes,\n                    le.non_first_finishes,\n                    le.mu,\n                    le.sigma,\n                    b.name as snake_name,\n                    b.color as snake_color,\n                    u.github_login as owner_login,\n                    COALESCE(NULLIF(u.display_name, ''), u.github_login) AS \"owner_name!\"\n                 FROM leaderboard_entries le\n                 JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id\n                 JOIN users u ON b.user_id = u.user_id\n                 WHERE le.leaderboard_id = $1\n                   AND le.disabled_at IS NULL\n                   AND le.games_played >= $2\n                 ORDER BY le.display_score DESC\n                 LIMIT $3 OFFSET $4",
   "describe": {
     "columns": [
       {
@@ -62,6 +62,11 @@
         "ordinal": 11,
         "name": "owner_login",
         "type_info": "Text"
+      },
+      {
+        "ordinal": 12,
+        "name": "owner_name!",
+        "type_info": "Text"
       }
     ],
     "parameters": {
@@ -84,8 +89,9 @@
       false,
       false,
       false,
-      false
+      false,
+      null
     ]
   },
-  "hash": "54c9acd9bb914e0f21a3b7e6977ba5eb02fed3751e6bcaf46fa67bdaf254bf86"
+  "hash": "cfc9e347bb742a9eff31cdc745cddc2a0cf00847b1114eab28185d429d328bfb"
 }

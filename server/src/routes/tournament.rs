@@ -2783,6 +2783,7 @@ mod tests {
             snake_name: "ranked-snake".to_string(),
             snake_color: "#888888".to_string(),
             owner_login: "ranked-owner".to_string(),
+            owner_name: "Ranked Owner".to_string(),
         }
     }
 
