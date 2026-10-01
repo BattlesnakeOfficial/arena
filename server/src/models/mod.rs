@@ -5,6 +5,7 @@ pub mod email_log;
 pub mod flow;
 pub mod game;
 pub mod game_battlesnake;
+pub mod global_ranking;
 pub mod imported_account;
 pub mod leaderboard;
 pub mod moderation_flag;

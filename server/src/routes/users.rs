@@ -14,6 +14,7 @@ use crate::{
     errors::ServerResult,
     models::{
         battlesnake::{self, Visibility},
+        global_ranking::{self, CombinedRating, GlobalRankingEntry},
         leaderboard, saved_game, tag,
         user::{self, PlayerDirectoryEntry, User},
     },
@@ -92,6 +93,18 @@ async fn render_user_profile(
     page_factory: PageFactory,
 ) -> ServerResult<Page, StatusCode> {
     let is_self = viewer.as_ref().is_some_and(|v| v.user_id == user.user_id);
+    let global_score = global_ranking::get_global_player_score(&state.db, user.user_id)
+        .await
+        .wrap_err("Failed to fetch combined rating")?;
+    let profile_rating = match global_score {
+        Some(score) => Some((
+            score.combined_rating().ok_or_else(|| {
+                color_eyre::eyre::eyre!("Invalid global score for user {}", user.user_id)
+            })?,
+            score.contributing_leaderboards(),
+        )),
+        None => None,
+    };
 
     let snakes = battlesnake::get_battlesnakes_by_user_id(&state.db, user.user_id)
         .await
@@ -140,6 +153,8 @@ async fn render_user_profile(
                     a href="/battlesnakes" class="btn" { "Manage Battlesnakes" }
                 }
             }
+
+            (render_profile_rating(profile_rating))
 
             section class="section" {
                 h2 { "Battlesnakes" }
@@ -221,6 +236,117 @@ async fn render_user_profile(
             }
         }),
     ))
+}
+
+fn render_profile_rating(rating: Option<(CombinedRating, usize)>) -> Markup {
+    html! {
+        section class="section profile-rating" {
+            h2 { "Combined rating" }
+            @if let Some((rating, boards)) = rating {
+                p { strong { (rating.display_value()) } " across " (boards) " " (if boards == 1 { "leaderboard" } else { "leaderboards" }) }
+            } @else {
+                p { strong { "Unranked" } }
+            }
+            a href="/rankings" { "View global rankings" }
+        }
+    }
+}
+
+const RANKINGS_PER_PAGE: i64 = 50;
+
+#[derive(Debug, serde::Deserialize)]
+pub struct GlobalRankingParams {
+    pub page: Option<i64>,
+}
+
+fn render_global_rankings(
+    rows: &[(GlobalRankingEntry, CombinedRating)],
+    page: i64,
+    total_pages: i64,
+    total: i64,
+) -> Markup {
+    html! {
+        div class="page-head" {
+            h1 { "Global rankings" }
+            div class="sub" { "Combined ratings across every enabled leaderboard." }
+        }
+        @if total == 0 {
+            p class="empty" { "No players are ranked yet." }
+        } @else {
+            section class="section" {
+                @if rows.is_empty() {
+                    p class="empty" { "No players remain on this page." }
+                } @else {
+                    table class="data global-rankings" {
+                        thead { tr {
+                            th aria-label="Rank" {
+                                span class="ranking-heading-full" { "Rank" }
+                                span class="ranking-heading-short" { "#" }
+                            }
+                            th { "Player" }
+                            th { "Rating" }
+                            th aria-label="Contributing leaderboards" {
+                                span class="ranking-heading-full" { "Leaderboards" }
+                                span class="ranking-heading-short" { "Boards" }
+                            }
+                        } }
+                        tbody {
+                            @for (index, (row, rating)) in rows.iter().enumerate() {
+                                tr {
+                                    td class="rank" { (page * RANKINGS_PER_PAGE + index as i64 + 1) }
+                                    td class="player" {
+                                        div class="snake-cell" {
+                                            (user_avatar(row.github_avatar_url.as_deref(), &row.public_name, "ranking-avatar"))
+                                            a class="name" href={"/users/"(row.github_login)"/"(row.score.user_id)} { (row.public_name) }
+                                        }
+                                    }
+                                    td class="rating" { (rating.display_value()) }
+                                    td class="num" {
+                                        (row.score.contributing_leaderboards()) " "
+                                        (if row.score.contributing_leaderboards() == 1 { "board" } else { "boards" })
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                div class="pager" {
+                    @if page > 0 { a href={"/rankings?page="(page - 1)} { "‹ Prev" } }
+                    @if total_pages > 1 { span class="cur" { "Page " (page + 1) " of " (total_pages) } }
+                    @if page < total_pages - 1 { a href={"/rankings?page="(page + 1)} { "Next ›" } }
+                }
+            }
+        }
+    }
+}
+
+/// GET /rankings — current, combined player ratings.
+pub async fn list_global_rankings(
+    State(state): State<AppState>,
+    Query(params): Query<GlobalRankingParams>,
+    page_factory: PageFactory,
+) -> ServerResult<impl IntoResponse, StatusCode> {
+    let total = global_ranking::count_global_players(&state.db).await?;
+    let (page, total_pages) = resolve_page(params.page, total, RANKINGS_PER_PAGE);
+    let entries =
+        global_ranking::get_global_players_paginated(&state.db, page, RANKINGS_PER_PAGE).await?;
+    let rows = entries
+        .into_iter()
+        .map(|entry| {
+            let rating = entry.score.combined_rating().ok_or_else(|| {
+                color_eyre::eyre::eyre!("Invalid global score for user {}", entry.score.user_id)
+            })?;
+            Ok((entry, rating))
+        })
+        .collect::<cja::Result<Vec<_>>>()?;
+    Ok(page_factory
+        .create_page(
+            "Global rankings".to_string(),
+            Box::new(render_global_rankings(&rows, page, total_pages, total)),
+        )
+        .with_description(
+            "Compare combined player ratings across every Battlesnake Arena leaderboard.",
+        ))
 }
 
 /// Rows per page in the public `/players` directory.
@@ -414,6 +540,70 @@ pub async fn list_players(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ranking_entry(
+        user_id: Uuid,
+        login: &str,
+        name: &str,
+        boards: usize,
+    ) -> (GlobalRankingEntry, CombinedRating) {
+        (
+            GlobalRankingEntry {
+                score: global_ranking::GlobalPlayerScore {
+                    user_id,
+                    best_scores: vec![15.0; boards],
+                    total_score: 15.0 * boards as f64,
+                    enabled_leaderboards: 4,
+                },
+                github_login: login.to_string(),
+                public_name: name.to_string(),
+                github_avatar_url: None,
+            },
+            CombinedRating::new(0.182_425_523_806_356_35).unwrap(),
+        )
+    }
+
+    #[test]
+    fn rankings_render_stable_links_ranks_and_pager() {
+        let first = Uuid::from_u128(1);
+        let second = Uuid::from_u128(2);
+        let rows = vec![
+            ranking_entry(first, "twin", "First", 1),
+            ranking_entry(second, "TWIN", "TWIN", 2),
+        ];
+        let html = render_global_rankings(&rows, 1, 3, 102).into_string();
+        assert!(html.contains(&format!(r#"href="/users/twin/{first}""#)));
+        assert!(html.contains(&format!(r#"href="/users/TWIN/{second}""#)));
+        assert!(html.contains("<td class=\"rank\">51</td>"));
+        assert!(html.contains("<td class=\"rank\">52</td>"));
+        assert!(html.contains("1824"));
+        assert!(html.contains("1 board"));
+        assert!(html.contains("2 boards"));
+        assert!(html.contains("/rankings?page=0"));
+        assert!(html.contains("/rankings?page=2"));
+    }
+
+    #[test]
+    fn rankings_empty_states_and_profile_rating() {
+        assert!(
+            render_global_rankings(&[], 0, 1, 0)
+                .into_string()
+                .contains("No players are ranked yet.")
+        );
+        let racing = render_global_rankings(&[], 1, 3, 101).into_string();
+        assert!(racing.contains("No players remain on this page."));
+        assert!(racing.contains("/rankings?page=0"));
+        let unranked = render_profile_rating(None).into_string();
+        assert!(unranked.contains("Unranked"));
+        assert!(unranked.contains("/rankings"));
+        let ranked = render_profile_rating(Some((
+            CombinedRating::new(0.182_425_523_806_356_35).unwrap(),
+            2,
+        )))
+        .into_string();
+        assert!(ranked.contains("1824"));
+        assert!(ranked.contains("2 leaderboards"));
+    }
 
     fn test_user(display_name: Option<&str>) -> User {
         User {

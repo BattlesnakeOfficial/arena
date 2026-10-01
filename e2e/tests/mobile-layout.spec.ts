@@ -3,7 +3,7 @@ import { test, expect, createMockUser } from '../fixtures/test';
 import { query } from '../fixtures/db';
 
 const PHONE = { width: 375, height: 812 };
-const PAGES = ['/', '/me', '/games/new', '/leaderboards', '/battlesnakes', '/players?q=snake', '/snakes?q=snake'];
+const PAGES = ['/', '/me', '/games/new', '/leaderboards', '/battlesnakes', '/players?q=snake', '/rankings', '/snakes?q=snake'];
 
 async function assertNoHorizontalOverflow(page: Page, path: string) {
   await page.setViewportSize(PHONE);

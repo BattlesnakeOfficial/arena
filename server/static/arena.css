@@ -302,6 +302,34 @@ table.data td.rank { font-family: var(--mono); color: var(--muted); font-size: 1
 table.data tr.top td.rank { color: var(--pink-deep); font-weight: 600; }
 table.data td.num { font-family: var(--mono); font-size: 14px; }
 table.data td.rating { font-family: var(--mono); font-weight: 600; font-size: 15px; }
+.global-rankings { table-layout: fixed; }
+.global-rankings th:nth-child(1) { width: 10%; }
+.global-rankings th:nth-child(2) { width: 48%; }
+.global-rankings th:nth-child(3) { width: 18%; }
+.global-rankings th:nth-child(4) { width: 24%; }
+table.data.global-rankings td.rank { width: auto; }
+.global-rankings .ranking-heading-short { display: none; }
+.global-rankings .player, .global-rankings .snake-cell { min-width: 0; }
+.global-rankings .name { min-width: 0; overflow-wrap: anywhere; }
+.global-rankings .ranking-avatar { width: 38px; height: 38px; flex: none; }
+.profile-rating strong { font-family: var(--mono); font-size: 25px; }
+@media (max-width: 640px) {
+  .global-rankings th, .global-rankings td { padding: 8px 5px; font-size: 12px; }
+  .global-rankings th { letter-spacing: 0; }
+  .global-rankings .ranking-avatar { width: 28px; height: 28px; }
+  .global-rankings .snake-cell { gap: 5px; }
+  .global-rankings td.rank, .global-rankings td.rating, .global-rankings td.num { font-size: 12px; }
+}
+@media (max-width: 420px) {
+  .global-rankings .ranking-heading-full { display: none; }
+  .global-rankings .ranking-heading-short { display: inline; }
+  .global-rankings th:nth-child(1) { width: 11%; }
+  .global-rankings th:nth-child(2) { width: 40%; }
+  .global-rankings th:nth-child(3) { width: 20%; }
+  .global-rankings th:nth-child(4) { width: 29%; }
+  .global-rankings th, .global-rankings td { padding-left: 3px; padding-right: 3px; }
+  .global-rankings .ranking-avatar { width: 24px; height: 24px; }
+}
 
 .snake-cell { display: flex; align-items: center; gap: 12px; }
 .chip {
@@ -788,6 +816,7 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
   box-shadow: 0 10px 26px -14px rgba(0, 0, 0, .45);
 }
 .profile-head .who { min-width: 0; }
+.profile-head h1 { overflow-wrap: anywhere; }
 .profile-head h2 { font-weight: 800; letter-spacing: -.02em; font-size: clamp(24px, 3vw, 32px); line-height: 1.15; overflow-wrap: anywhere; }
 .profile-head .meta { font-family: var(--mono); font-size: 13px; color: var(--muted); margin-top: 4px; }
 .profile-head .bio { font-size: 15px; color: var(--muted); margin-top: 8px; max-width: 60ch; white-space: pre-wrap; overflow-wrap: break-word; }
