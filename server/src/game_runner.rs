@@ -162,7 +162,7 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
                         color: String::new(),
                         head: String::new(),
                         tail: String::new(),
-                        author: bs.owner_login.clone(),
+                        author: bs.owner_name.clone(),
                     },
                 );
                 if let Some(info) = info_results.get(&snake_id) {
@@ -213,7 +213,7 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
                             color,
                             head,
                             tail,
-                            author: bs.owner_login.clone(),
+                            author: bs.owner_name.clone(),
                         },
                     );
                 }

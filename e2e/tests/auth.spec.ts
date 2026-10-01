@@ -5,7 +5,8 @@ test.describe('Authentication via Mock OAuth', () => {
     // authenticatedPage starts at home page after OAuth redirect
     await authenticatedPage.goto('/');
 
-    // Should show the welcome message with user's github login
+    // Should show the welcome message; new users have no display name, so it
+    // falls back to their GitHub login
     await expect(authenticatedPage.getByText(`Welcome, ${mockUser.login}!`)).toBeVisible();
   });
 

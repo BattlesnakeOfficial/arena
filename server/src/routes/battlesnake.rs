@@ -325,7 +325,7 @@ fn render_public_battlesnake_list(
                                                 }
                                                 span class="owner" {
                                                     "by "
-                                                    a href={"/users/"(snake.owner_login)} { (snake.owner_login) }
+                                                    a href={"/users/"(snake.owner_login)} { (snake.owner_name) }
                                                 }
                                             }
                                         }
@@ -1155,6 +1155,7 @@ enum ProfileViewer {
 struct ProfileView<'a> {
     snake: &'a battlesnake::Battlesnake,
     owner_login: &'a str,
+    owner_name: &'a str,
     owner_avatar_url: Option<&'a str>,
     owner_exists: bool,
     owner_pronouns: &'a str,
@@ -1233,11 +1234,11 @@ fn render_battlesnake_profile(view: &ProfileView<'_>) -> Markup {
                     h1 { (snake.name) }
                     div class="sub owner-line" {
                         "by "
-                        (user_avatar(view.owner_avatar_url, view.owner_login, "owner-avatar"))
+                        (user_avatar(view.owner_avatar_url, view.owner_name, "owner-avatar"))
                         @if view.owner_exists {
-                            a href={"/users/"(view.owner_login)} { (view.owner_login) }
+                            a href={"/users/"(view.owner_login)} { (view.owner_name) }
                         } @else {
-                            (view.owner_login)
+                            (view.owner_name)
                         }
                         @if !view.owner_pronouns.is_empty() {
                             " · " (view.owner_pronouns)
@@ -1525,9 +1526,10 @@ pub async fn view_battlesnake_profile(
     .wrap_err("Failed to get recent latency")?;
 
     let stats = compute_stats(&history);
-    let owner_login = owner
-        .as_ref()
-        .map_or_else(|| "Unknown User".to_string(), |o| o.github_login.clone());
+    let (owner_login, owner_name) = owner.as_ref().map_or_else(
+        || ("Unknown User".to_string(), "Unknown User".to_string()),
+        |o| (o.github_login.clone(), o.public_name().to_string()),
+    );
     let owner_pronouns = owner
         .as_ref()
         .map(|o| o.pronouns.clone())
@@ -1536,6 +1538,7 @@ pub async fn view_battlesnake_profile(
     let content = render_battlesnake_profile(&ProfileView {
         snake: &snake,
         owner_login: &owner_login,
+        owner_name: &owner_name,
         owner_avatar_url: owner.as_ref().and_then(|o| o.github_avatar_url.as_deref()),
         owner_exists: owner.is_some(),
         owner_pronouns: &owner_pronouns,
@@ -1798,6 +1801,7 @@ mod public_list_tests {
             name: name.to_string(),
             color: "#ff0000".to_string(),
             owner_login: owner.to_string(),
+            owner_name: owner.to_string(),
         }
     }
 
@@ -1827,6 +1831,7 @@ mod public_list_tests {
     fn rows_link_to_snake_profile_and_owner() {
         let mut snake = item("Solid Snake", "kojima");
         snake.battlesnake_id = Uuid::from_u128(1);
+        snake.owner_name = "Hideo Kojima".to_string();
 
         let html = render_public_battlesnake_list(&[snake], true, "", 0, 1, 1).into_string();
 
@@ -1834,7 +1839,7 @@ mod public_list_tests {
             r#"href="/battlesnakes/{}/profile""#,
             Uuid::from_u128(1)
         )));
-        assert!(html.contains(r#"href="/users/kojima""#));
+        assert!(html.contains(r#"<a href="/users/kojima">Hideo Kojima</a>"#));
         assert!(html.contains("Solid Snake"));
         assert!(html.contains("Showing 1–1 of 1 public snakes"));
     }

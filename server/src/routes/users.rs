@@ -119,7 +119,7 @@ async fn render_user_profile(
         name.clone(),
         Box::new(html! {
             header class="profile-head" {
-                (user_avatar(user.github_avatar_url.as_deref(), &user.github_login, "avatar"))
+                (user_avatar(user.github_avatar_url.as_deref(), &name, "avatar"))
                 div class="who" {
                     h1 { (name) }
                     div class="meta" {

@@ -42,6 +42,8 @@ pub mod health;
 pub mod leaderboard;
 pub mod pagination;
 pub mod policy;
+#[cfg(test)]
+mod public_name_tests;
 pub mod redirects;
 pub mod saved_games;
 pub mod settings;
@@ -479,9 +481,9 @@ async fn root_page(
             div class="home" {
                 @if let Some(user) = &user {
                     section class="welcome" {
-                        (user_avatar(user.github_avatar_url.as_deref(), &user.github_login, "welcome-avatar"))
+                        (user_avatar(user.github_avatar_url.as_deref(), user.public_name(), "welcome-avatar"))
                         div class="who" {
-                            h1 { "Welcome, " (user.github_login) "!" }
+                            h1 { "Welcome, " (user.public_name()) "!" }
                             p class="sub" {
                                 @if user_snakes.is_empty() {
                                     "No snakes in your stable yet — deploy a server and claim a spot on the ladder."
@@ -833,13 +835,9 @@ async fn profile_page(
             }
 
             header class="profile-head" {
-                (user_avatar(user.github_avatar_url.as_deref(), &user.github_login, "avatar"))
+                (user_avatar(user.github_avatar_url.as_deref(), user.public_name(), "avatar"))
                 div class="who" {
-                    @if let Some(name) = user.display_name.as_ref().filter(|n| !n.is_empty()) {
-                        h2 { (name) }
-                    } @else {
-                        h2 { (user.github_login) }
-                    }
+                    h2 { (user.public_name()) }
                     div class="meta" {
                         "@" (user.github_login)
                         @if !user.pronouns.is_empty() { " · " (user.pronouns) }

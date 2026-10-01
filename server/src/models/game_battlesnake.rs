@@ -47,7 +47,10 @@ pub struct GameBattlesnakeWithDetails {
     pub color: String,
     pub head: String,
     pub tail: String,
+    /// Owner's GitHub login — the `/users/{login}` URL key, not display text.
     pub owner_login: String,
+    /// Owner's public name: `display_name` when set, else the GitHub login.
+    pub owner_name: String,
 }
 
 // Database functions for game battlesnake management
@@ -77,7 +80,8 @@ pub async fn get_battlesnakes_by_game_id(
             b.color,
             b.head,
             b.tail,
-            u.github_login AS owner_login
+            u.github_login AS owner_login,
+            COALESCE(NULLIF(u.display_name, ''), u.github_login) AS owner_name
         FROM game_battlesnakes gb
         LEFT JOIN leaderboard_entries le ON gb.leaderboard_entry_id = le.leaderboard_entry_id
         JOIN battlesnakes b
