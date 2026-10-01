@@ -622,6 +622,7 @@ mod tests {
                 timeout: 500,
                 settings: StandardSettings::default(),
                 royale: None,
+                source: crate::engine::GameSource::Custom,
             },
             snake_names,
         }
