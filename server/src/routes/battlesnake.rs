@@ -262,6 +262,10 @@ fn public_snakes_href(search: &str, page: i64) -> String {
     format!("/snakes?{}", query.finish())
 }
 
+fn profile_history_href(battlesnake_id: Uuid, page: i64) -> String {
+    format!("/battlesnakes/{battlesnake_id}/profile?page={page}")
+}
+
 fn render_public_battlesnake_list(
     snakes: &[battlesnake::PublicBattlesnakeListItem],
     is_authenticated: bool,
@@ -1009,76 +1013,12 @@ pub async fn delete_battlesnake(
     Ok(Redirect::to("/battlesnakes").into_response())
 }
 
-struct BattlesnakeStats {
-    total_games: usize,
-    finished_games: usize,
-    wins: usize,
-    second_places: usize,
-    third_places: usize,
-    fourth_places: usize,
-    win_rate: f64,
-    average_placement: f64,
-}
+const PROFILE_HISTORY_PER_PAGE: i64 = 50;
 
-fn compute_stats(history: &[game_battlesnake::GameHistoryEntry]) -> BattlesnakeStats {
-    use crate::models::game::{GameStatus, GameType};
-
-    let total_games = history.len();
-    let mut finished_games = 0usize;
-    let mut wins = 0usize;
-    let mut second_places = 0usize;
-    let mut third_places = 0usize;
-    let mut fourth_places = 0usize;
-    let mut placement_sum = 0i64;
-    let mut placement_count = 0usize;
-
-    for entry in history {
-        // Solo games are single-snake survival runs: placement is always 1 by
-        // construction, so counting them would make every Solo run a free win.
-        // They stay in `total_games` and the history table; they don't feed the
-        // competitive accumulators.
-        if entry.game_type == GameType::Solo {
-            continue;
-        }
-
-        if entry.status == GameStatus::Finished {
-            finished_games += 1;
-            if let Some(placement) = entry.placement {
-                match placement {
-                    1 => wins += 1,
-                    2 => second_places += 1,
-                    3 => third_places += 1,
-                    4 => fourth_places += 1,
-                    _ => {}
-                }
-                placement_sum += i64::from(placement);
-                placement_count += 1;
-            }
-        }
-    }
-
-    let win_rate = if finished_games > 0 {
-        (wins as f64 / finished_games as f64) * 100.0
-    } else {
-        0.0
-    };
-
-    let average_placement = if placement_count > 0 {
-        placement_sum as f64 / placement_count as f64
-    } else {
-        0.0
-    };
-
-    BattlesnakeStats {
-        total_games,
-        finished_games,
-        wins,
-        second_places,
-        third_places,
-        fourth_places,
-        win_rate,
-        average_placement,
-    }
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct ProfilePagination {
+    #[serde(default)]
+    page: Option<i64>,
 }
 
 /// POST /battlesnakes/{id}/reactivate — owner recovery from a health-sweeper
@@ -1160,7 +1100,9 @@ struct ProfileView<'a> {
     owner_pronouns: &'a str,
     viewer: ProfileViewer,
     history: &'a [game_battlesnake::GameHistoryEntry],
-    stats: &'a BattlesnakeStats,
+    stats: &'a game_battlesnake::GameHistoryStats,
+    page: i64,
+    total_pages: i64,
     leaderboard_entries: &'a [leaderboard::BattlesnakeLeaderboardSummary],
     health_status: Option<&'a snake_health_status::SnakeHealthStatus>,
     tags: &'a [tag::Tag],
@@ -1318,6 +1260,7 @@ fn render_battlesnake_profile(view: &ProfileView<'_>) -> Markup {
                         (stats.total_games)
                         small { (stats.wins) " won" }
                     }
+                    div class="stat-detail" { "all modes" }
                 }
                 div class="stat" {
                     div class="label" { "Win Rate" }
@@ -1410,7 +1353,7 @@ fn render_battlesnake_profile(view: &ProfileView<'_>) -> Markup {
 
             section class="section" {
                 h2 { "Game History" }
-                @if view.history.is_empty() {
+                @if stats.total_games == 0 {
                     p class="empty" { "No games played yet." }
                 } @else {
                     table class="data" {
@@ -1465,6 +1408,23 @@ fn render_battlesnake_profile(view: &ProfileView<'_>) -> Markup {
                         }
                     }
                 }
+                @if view.total_pages > 1 {
+                    div class="pager" {
+                        @if view.page > 0 {
+                            a href=(profile_history_href(battlesnake_id, view.page - 1)) { "‹ Prev" }
+                        }
+                        span class="cur" { "Page " (view.page + 1) " of " (view.total_pages) }
+                        @if view.page + 1 < view.total_pages {
+                            a href=(profile_history_href(battlesnake_id, view.page + 1)) { "Next ›" }
+                        }
+                        @if !view.history.is_empty() {
+                            span class="spacer" {}
+                            span { "Showing " (view.page * PROFILE_HISTORY_PER_PAGE + 1) "–"
+                                (view.page * PROFILE_HISTORY_PER_PAGE + view.history.len() as i64)
+                                " of " (stats.total_games) " games" }
+                        }
+                    }
+                }
             }
         }
     }
@@ -1477,6 +1437,7 @@ pub async fn view_battlesnake_profile(
     State(state): State<AppState>,
     OptionalUser(user): OptionalUser,
     UuidPath(battlesnake_id): UuidPath,
+    Query(params): Query<ProfilePagination>,
     page_factory: PageFactory,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
     let Some(snake) = battlesnake::get_battlesnake_by_id(&state.db, battlesnake_id)
@@ -1498,9 +1459,19 @@ pub async fn view_battlesnake_profile(
         .await
         .wrap_err("Failed to get owner user")?;
 
-    let history = game_battlesnake::get_game_history_for_battlesnake(&state.db, battlesnake_id)
+    let stats = game_battlesnake::get_game_stats_for_battlesnake(&state.db, battlesnake_id)
         .await
-        .wrap_err("Failed to get game history")?;
+        .wrap_err("Failed to get game stats")?;
+    let (page, total_pages) =
+        resolve_page(params.page, stats.total_games, PROFILE_HISTORY_PER_PAGE);
+    let history = game_battlesnake::get_game_history_for_battlesnake(
+        &state.db,
+        battlesnake_id,
+        PROFILE_HISTORY_PER_PAGE,
+        page * PROFILE_HISTORY_PER_PAGE,
+    )
+    .await
+    .wrap_err("Failed to get game history")?;
 
     let leaderboard_entries = leaderboard::get_entries_for_battlesnake(&state.db, battlesnake_id)
         .await
@@ -1524,7 +1495,6 @@ pub async fn view_battlesnake_profile(
     .await
     .wrap_err("Failed to get recent latency")?;
 
-    let stats = compute_stats(&history);
     let owner_login = owner
         .as_ref()
         .map_or_else(|| "Unknown User".to_string(), |o| o.github_login.clone());
@@ -1542,6 +1512,8 @@ pub async fn view_battlesnake_profile(
         viewer,
         history: &history,
         stats: &stats,
+        page,
+        total_pages,
         leaderboard_entries: &leaderboard_entries,
         health_status: health_status.as_ref(),
         tags: &snake_tags,
@@ -1948,71 +1920,6 @@ mod public_list_tests {
 }
 
 #[cfg(test)]
-mod stats_tests {
-    use super::compute_stats;
-    use crate::models::game::{GameBoardSize, GameStatus, GameType};
-    use crate::models::game_battlesnake::GameHistoryEntry;
-
-    fn entry(game_type: GameType, placement: Option<i32>) -> GameHistoryEntry {
-        GameHistoryEntry {
-            game_id: uuid::Uuid::new_v4(),
-            board_size: GameBoardSize::Medium,
-            game_type,
-            status: GameStatus::Finished,
-            placement,
-            snake_count: 1,
-            winner_name: None,
-            created_at: chrono::Utc::now(),
-        }
-    }
-
-    #[test]
-    fn mixed_history_excludes_solo_from_competitive_stats() {
-        let history = vec![
-            entry(GameType::Solo, Some(1)),
-            entry(GameType::Standard, Some(3)),
-        ];
-
-        let stats = compute_stats(&history);
-        assert_eq!(stats.total_games, 2, "total_games still counts Solo");
-        assert_eq!(stats.finished_games, 1);
-        assert_eq!(stats.wins, 0);
-        assert_eq!(stats.win_rate, 0.0);
-        assert_eq!(stats.average_placement, 3.0);
-    }
-
-    #[test]
-    fn solo_only_history_has_no_competitive_games() {
-        let history = vec![
-            entry(GameType::Solo, Some(1)),
-            entry(GameType::Solo, Some(1)),
-        ];
-
-        let stats = compute_stats(&history);
-        assert_eq!(stats.total_games, history.len());
-        assert_eq!(stats.finished_games, 0);
-        assert_eq!(stats.wins, 0);
-        assert_eq!(stats.win_rate, 0.0);
-    }
-
-    #[test]
-    fn standard_only_history_unchanged() {
-        let history = vec![
-            entry(GameType::Standard, Some(1)),
-            entry(GameType::Standard, Some(2)),
-        ];
-
-        let stats = compute_stats(&history);
-        assert_eq!(stats.total_games, 2);
-        assert_eq!(stats.finished_games, 2);
-        assert_eq!(stats.wins, 1);
-        assert_eq!(stats.win_rate, 50.0);
-        assert_eq!(stats.average_placement, 1.5);
-        assert_eq!(stats.second_places, 1);
-    }
-}
-
-#[cfg(test)]
 mod deleted_snake_route_tests {
     use axum::{
         body::{Body, to_bytes},
@@ -2212,8 +2119,16 @@ mod profile_page_tests {
         }
 
         async fn get(&self, session: Option<Uuid>) -> (StatusCode, String) {
-            let mut builder =
-                Request::builder().uri(format!("/battlesnakes/{}/profile", self.snake_id));
+            self.get_page(session, None).await
+        }
+
+        async fn get_page(&self, session: Option<Uuid>, page: Option<i64>) -> (StatusCode, String) {
+            let uri = if let Some(page) = page {
+                profile_history_href(self.snake_id, page)
+            } else {
+                format!("/battlesnakes/{}/profile", self.snake_id)
+            };
+            let mut builder = Request::builder().uri(uri);
             if let Some(session_id) = session {
                 builder = builder.header(
                     header::COOKIE,
@@ -2249,6 +2164,75 @@ mod profile_page_tests {
 
     fn challenge_form(snake_id: Uuid) -> String {
         format!(r#"action="/battlesnakes/{snake_id}/challenge""#)
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn profile_history_paginates_leaderboard_and_direct_games(db: PgPool) {
+        let fx = Fixture::new(db, "public").await;
+        let (_, empty) = fx.get(None).await;
+        assert!(empty.contains("No games played yet."));
+        assert!(!empty.contains("class=\"pager\""));
+        let entry_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id, games_played)
+             SELECT leaderboard_id, $1, 7 FROM leaderboards ORDER BY created_at LIMIT 1
+             RETURNING leaderboard_entry_id",
+        )
+        .bind(fx.snake_id)
+        .fetch_one(&fx.db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO games (game_id, board_size, game_type, status, created_at)
+             SELECT md5('profile-route-' || n)::uuid, '11x11', 'Standard', 'finished',
+                    now() - n * interval '1 minute'
+             FROM generate_series(0, 52) n",
+        )
+        .execute(&fx.db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO game_battlesnakes
+                 (game_id, battlesnake_id, leaderboard_entry_id, placement, created_at)
+             SELECT g.game_id, CASE WHEN n >= 51 THEN $1 ELSE NULL END,
+                    CASE WHEN n < 51 THEN $2 ELSE NULL END,
+                    CASE WHEN n IN (0, 51) THEN 1 ELSE 2 END, g.created_at
+             FROM generate_series(0, 52) n
+             JOIN games g ON g.game_id = md5('profile-route-' || n)::uuid",
+        )
+        .bind(fx.snake_id)
+        .bind(entry_id)
+        .execute(&fx.db)
+        .await
+        .unwrap();
+
+        for (requested, expected_rows, pager_link, label, showing) in [
+            (None, 50, 1, "Page 1 of 2", "Showing 1–50 of 53 games"),
+            (Some(1), 3, 0, "Page 2 of 2", "Showing 51–53 of 53 games"),
+            (Some(-1), 50, 1, "Page 1 of 2", "Showing 1–50 of 53 games"),
+            (Some(999), 3, 0, "Page 2 of 2", "Showing 51–53 of 53 games"),
+        ] {
+            let (status, html) = fx.get_page(None, requested).await;
+            assert_eq!(status, StatusCode::OK);
+            let history = html.split("Game History").nth(1).unwrap();
+            let tbody = history.split("</tbody>").next().unwrap();
+            assert_eq!(tbody.matches("class=\"btn sm\"").count(), expected_rows);
+            assert!(html.contains("53<small>2 won</small>"));
+            assert!(html.contains("all modes"));
+            assert!(html.contains("<span class=\"cur\">"));
+            assert!(html.contains(label));
+            assert!(html.contains(showing));
+            assert!(html.contains(&format!(
+                "href=\"/battlesnakes/{}/profile?page={pager_link}\"",
+                fx.snake_id
+            )));
+            assert!(html.contains("<td class=\"r num hide-sm\">7</td>"));
+            if pager_link == 1 {
+                assert!(html.contains("Next ›"));
+                assert!(history.contains("Profile Snake"));
+            } else {
+                assert!(html.contains("‹ Prev"));
+            }
+        }
     }
 
     #[sqlx::test(migrations = "../migrations")]
