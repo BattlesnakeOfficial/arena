@@ -14,7 +14,7 @@ use crate::{
     errors::ServerResult,
     models::{
         battlesnake::{self, Visibility},
-        global_ranking::{self, CombinedRating, GlobalRankingEntry},
+        global_ranking::{self, GlobalPlayerScore, GlobalRankingEntry},
         leaderboard, saved_game, tag,
         user::{self, PlayerDirectoryEntry, User},
     },
@@ -96,16 +96,6 @@ async fn render_user_profile(
     let global_score = global_ranking::get_global_player_score(&state.db, user.user_id)
         .await
         .wrap_err("Failed to fetch combined rating")?;
-    let profile_rating = match global_score {
-        Some(score) => Some((
-            score.combined_rating().ok_or_else(|| {
-                color_eyre::eyre::eyre!("Invalid global score for user {}", user.user_id)
-            })?,
-            score.contributing_leaderboards(),
-        )),
-        None => None,
-    };
-
     let snakes = battlesnake::get_battlesnakes_by_user_id(&state.db, user.user_id)
         .await
         .wrap_err("Failed to fetch user's battlesnakes")?;
@@ -154,7 +144,7 @@ async fn render_user_profile(
                 }
             }
 
-            (render_profile_rating(profile_rating))
+            (render_profile_rating(global_score.as_ref()))
 
             section class="section" {
                 h2 { "Battlesnakes" }
@@ -238,12 +228,17 @@ async fn render_user_profile(
     ))
 }
 
-fn render_profile_rating(rating: Option<(CombinedRating, usize)>) -> Markup {
+fn render_profile_rating(score: Option<&GlobalPlayerScore>) -> Markup {
     html! {
         section class="section profile-rating" {
             h2 { "Combined rating" }
-            @if let Some((rating, boards)) = rating {
-                p { strong { (rating.display_value()) } " across " (boards) " " (if boards == 1 { "leaderboard" } else { "leaderboards" }) }
+            @if let Some(score) = score {
+                @let boards = score.contributing_leaderboards();
+                p { strong { (score.display_total()) } " across " (boards) " " (if boards == 1 { "leaderboard" } else { "leaderboards" }) }
+                div class="rating-note" {
+                    "The sum of the best snake score on each leaderboard. A leaderboard without one counts as 0. "
+                    "Average per leaderboard played: " (score.display_average()) "."
+                }
             } @else {
                 p { strong { "Unranked" } }
             }
@@ -260,7 +255,7 @@ pub struct GlobalRankingParams {
 }
 
 fn render_global_rankings(
-    rows: &[(GlobalRankingEntry, CombinedRating)],
+    rows: &[GlobalRankingEntry],
     page: i64,
     total_pages: i64,
     total: i64,
@@ -268,7 +263,7 @@ fn render_global_rankings(
     html! {
         div class="page-head" {
             h1 { "Global rankings" }
-            div class="sub" { "Combined ratings across every enabled leaderboard." }
+            div class="sub" { "Each player's rating is the sum of their best snake score on every leaderboard, so a leaderboard they're not on counts as 0. The average covers only the leaderboards they play." }
         }
         @if total == 0 {
             p class="empty" { "No players are ranked yet." }
@@ -291,7 +286,7 @@ fn render_global_rankings(
                             }
                         } }
                         tbody {
-                            @for (index, (row, rating)) in rows.iter().enumerate() {
+                            @for (index, row) in rows.iter().enumerate() {
                                 tr {
                                     td class="rank" { (page * RANKINGS_PER_PAGE + index as i64 + 1) }
                                     td class="player" {
@@ -300,7 +295,10 @@ fn render_global_rankings(
                                             a class="name" href={"/users/"(row.github_login)"/"(row.score.user_id)} { (row.public_name) }
                                         }
                                     }
-                                    td class="rating" { (rating.display_value()) }
+                                    td class="rating" {
+                                        span class="total" { (row.score.display_total()) }
+                                        span class="avg" { "avg " (row.score.display_average()) }
+                                    }
                                     td class="num" {
                                         (row.score.contributing_leaderboards())
                                         span class="board-suffix" { " " (if row.score.contributing_leaderboards() == 1 { "board" } else { "boards" }) }
@@ -330,19 +328,10 @@ pub async fn list_global_rankings(
     let (page, total_pages) = resolve_page(params.page, total, RANKINGS_PER_PAGE);
     let entries =
         global_ranking::get_global_players_paginated(&state.db, page, RANKINGS_PER_PAGE).await?;
-    let rows = entries
-        .into_iter()
-        .map(|entry| {
-            let rating = entry.score.combined_rating().ok_or_else(|| {
-                color_eyre::eyre::eyre!("Invalid global score for user {}", entry.score.user_id)
-            })?;
-            Ok((entry, rating))
-        })
-        .collect::<cja::Result<Vec<_>>>()?;
     Ok(page_factory
         .create_page(
             "Global rankings".to_string(),
-            Box::new(render_global_rankings(&rows, page, total_pages, total)),
+            Box::new(render_global_rankings(&entries, page, total_pages, total)),
         )
         .with_description(
             "Compare combined player ratings across every Battlesnake Arena leaderboard.",
@@ -541,26 +530,18 @@ pub async fn list_players(
 mod tests {
     use super::*;
 
-    fn ranking_entry(
-        user_id: Uuid,
-        login: &str,
-        name: &str,
-        boards: usize,
-    ) -> (GlobalRankingEntry, CombinedRating) {
-        (
-            GlobalRankingEntry {
-                score: global_ranking::GlobalPlayerScore {
-                    user_id,
-                    best_scores: vec![15.0; boards],
-                    total_score: 15.0 * boards as f64,
-                    enabled_leaderboards: 4,
-                },
-                github_login: login.to_string(),
-                public_name: name.to_string(),
-                github_avatar_url: None,
+    fn ranking_entry(user_id: Uuid, login: &str, name: &str, boards: usize) -> GlobalRankingEntry {
+        GlobalRankingEntry {
+            score: GlobalPlayerScore {
+                user_id,
+                best_scores: vec![15.0; boards],
+                total_score: 15.0 * boards as f64,
+                enabled_leaderboards: 4,
             },
-            CombinedRating::new(0.182_425_523_806_356_35).unwrap(),
-        )
+            github_login: login.to_string(),
+            public_name: name.to_string(),
+            github_avatar_url: None,
+        }
     }
 
     #[test]
@@ -576,7 +557,12 @@ mod tests {
         assert!(html.contains(&format!(r#"href="/users/TWIN/{second}""#)));
         assert!(html.contains("<td class=\"rank\">51</td>"));
         assert!(html.contains("<td class=\"rank\">52</td>"));
-        assert!(html.contains("1824"));
+        assert!(
+            html.contains(r#"<span class="total">15.0</span><span class="avg">avg 15.0</span>"#)
+        );
+        assert!(
+            html.contains(r#"<span class="total">30.0</span><span class="avg">avg 15.0</span>"#)
+        );
         assert!(html.contains("1<span class=\"board-suffix\"> board</span>"));
         assert!(html.contains("2<span class=\"board-suffix\"> boards</span>"));
         assert!(html.contains("/rankings?page=0"));
@@ -596,13 +582,10 @@ mod tests {
         let unranked = render_profile_rating(None).into_string();
         assert!(unranked.contains("Unranked"));
         assert!(unranked.contains("/rankings"));
-        let ranked = render_profile_rating(Some((
-            CombinedRating::new(0.182_425_523_806_356_35).unwrap(),
-            2,
-        )))
-        .into_string();
-        assert!(ranked.contains("1824"));
-        assert!(ranked.contains("2 leaderboards"));
+        let ranked = ranking_entry(Uuid::nil(), "two", "Two", 2).score;
+        let ranked = render_profile_rating(Some(&ranked)).into_string();
+        assert!(ranked.contains("<strong>30.0</strong> across 2 leaderboards"));
+        assert!(ranked.contains("Average per leaderboard played: 15.0."));
     }
 
     fn test_user(display_name: Option<&str>) -> User {

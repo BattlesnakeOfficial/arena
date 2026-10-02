@@ -17,12 +17,38 @@ impl GlobalPlayerScore {
         self.best_scores.len()
     }
 
-    pub fn combined_rating(&self) -> Option<CombinedRating> {
-        combined_rating(
-            &self.best_scores,
-            self.enabled_leaderboards.try_into().ok()?,
-        )
-        .and_then(CombinedRating::new)
+    /// Combined rating in tenths: the sum of the player's best score on each
+    /// leaderboard, each rounded to one decimal the way leaderboards display
+    /// it, so the shown total adds up from the shown parts. A leaderboard the
+    /// player isn't on adds nothing. Rankings sort by the unrounded
+    /// `total_score`.
+    fn total_tenths(&self) -> i64 {
+        self.best_scores
+            .iter()
+            .map(|score| (score * 10.0).round() as i64)
+            .sum()
+    }
+
+    /// The combined rating as displayed.
+    pub fn display_total(&self) -> String {
+        format_score(self.total_tenths() as f64 / 10.0)
+    }
+
+    /// Average best score over the leaderboards the player is on. Unlike the
+    /// combined rating, skipping a leaderboard doesn't lower it.
+    pub fn display_average(&self) -> String {
+        let boards = self.contributing_leaderboards().max(1) as f64;
+        format_score(self.total_tenths() as f64 / 10.0 / boards)
+    }
+}
+
+/// One decimal, matching per-leaderboard scores, without a "-0.0".
+fn format_score(value: f64) -> String {
+    let formatted = format!("{value:.1}");
+    if formatted == "-0.0" {
+        "0.0".to_string()
+    } else {
+        formatted
     }
 }
 
@@ -32,30 +58,6 @@ pub struct GlobalRankingEntry {
     pub github_login: String,
     pub public_name: String,
     pub github_avatar_url: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct CombinedRating(f64);
-
-impl CombinedRating {
-    pub fn new(value: f64) -> Option<Self> {
-        (value.is_finite() && (0.0..=1.0).contains(&value)).then_some(Self(value))
-    }
-
-    pub fn display_value(self) -> i32 {
-        (self.0 * 10_000.0) as i32
-    }
-}
-
-pub fn combined_rating(best_per_board: &[f64], enabled_leaderboards: usize) -> Option<f64> {
-    if best_per_board.is_empty() || enabled_leaderboards == 0 {
-        return None;
-    }
-    const MU: f64 = 25.0;
-    const SIGMA: f64 = MU / 3.0;
-    let n = enabled_leaderboards as f64;
-    let z = (best_per_board.iter().sum::<f64>() - MU * n) / (SIGMA * n);
-    z.is_finite().then(|| 1.0 / (1.0 + (-z).exp()))
 }
 
 struct FlatRankingEntry {
@@ -181,39 +183,55 @@ mod tests {
         Ok((snake_id, entry_id))
     }
 
-    #[test]
-    fn known_rating_truncates() {
-        // (30,5) and (25,5) expose to 15 and 10. z=(25-50)/(50/3)=-1.5.
-        let rating = combined_rating(&[15.0, 10.0], 2).unwrap();
-        assert!((rating - 0.182_425_523_806_356_35).abs() < 1e-12);
-        assert_eq!(CombinedRating::new(rating).unwrap().display_value(), 1824);
+    fn score(best_scores: Vec<f64>) -> GlobalPlayerScore {
+        GlobalPlayerScore {
+            user_id: Uuid::nil(),
+            total_score: best_scores.iter().sum(),
+            best_scores,
+            enabled_leaderboards: 4,
+        }
     }
 
     #[test]
-    fn empty_or_zero_boards_is_unranked() {
-        assert_eq!(combined_rating(&[], 4), None);
-        assert_eq!(combined_rating(&[15.0], 0), None);
+    fn total_adds_up_from_the_displayed_parts() {
+        // Odiodin on prod, 2026-10-01: the parts display as 56.1 + 45.7 + 41.4 + 25.7.
+        let odiodin = score(vec![
+            56.053_639_800_838_26,
+            45.703_613_265_834_47,
+            41.394_509_841_322_66,
+            25.681_469_501_569_946,
+        ]);
+        assert_eq!(odiodin.display_total(), "168.9");
+        assert_eq!(odiodin.display_average(), "42.2");
     }
 
     #[test]
-    fn missing_positive_board_lowers_rating() {
-        assert!(combined_rating(&[15.0], 2) < combined_rating(&[15.0, 15.0], 2));
+    fn missing_board_lowers_total_but_not_average() {
+        let everywhere = score(vec![15.0, 15.0]);
+        let one_board = score(vec![15.0]);
+        assert_eq!(everywhere.display_total(), "30.0");
+        assert_eq!(one_board.display_total(), "15.0");
+        assert_eq!(everywhere.display_average(), one_board.display_average());
+    }
+
+    #[test]
+    fn negative_scores_display_without_negative_zero() {
+        assert_eq!(score(vec![-0.04]).display_total(), "0.0");
+        assert_eq!(score(vec![-0.1, 0.0, 0.0, 0.0]).display_average(), "0.0");
+        assert_eq!(score(vec![-3.25, 1.0]).display_total(), "-2.3");
     }
 
     proptest! {
         #[test]
-        fn rating_is_bounded_and_monotone(
-            case in (1usize..=8).prop_flat_map(|n| {
-                (Just(n), proptest::collection::vec(-100.0f64..100.0, 1..=n))
-            }),
+        fn total_is_monotone_in_each_best_score(
+            scores in proptest::collection::vec(-100.0f64..100.0, 1..=8),
             increase in 0.0f64..50.0,
         ) {
-            let (n, scores) = case;
-            let before = combined_rating(&scores, n).unwrap();
-            prop_assert!(before > 0.0 && before < 1.0);
+            let before = score(scores.clone());
             let mut improved = scores;
             improved[0] += increase;
-            prop_assert!(combined_rating(&improved, n).unwrap() >= before);
+            let after = score(improved);
+            prop_assert!(after.total_tenths() >= before.total_tenths());
         }
     }
 
@@ -228,7 +246,6 @@ mod tests {
         assert_eq!(before.best_scores, after.best_scores);
         assert_eq!(before.total_score, after.total_score);
         assert_eq!(after.contributing_leaderboards(), 1);
-        assert_eq!(before.combined_rating(), after.combined_rating());
         Ok(())
     }
 
@@ -263,7 +280,6 @@ mod tests {
                 before.contributing_leaderboards(),
                 after.contributing_leaderboards()
             );
-            assert_eq!(before.combined_rating(), after.combined_rating());
         }
         Ok(())
     }
