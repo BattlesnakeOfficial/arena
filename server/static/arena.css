@@ -320,6 +320,8 @@ table.data td.rating { font-family: var(--mono); font-weight: 600; font-size: 15
 @media (max-width: 640px) {
   table.data.global-rankings th, table.data.global-rankings td { padding: 8px 5px; }
   table.data.global-rankings tbody td { font-size: 16px; }
+  .global-rankings th:nth-child(2) { width: 42%; }
+  .global-rankings th:nth-child(3) { width: 24%; }
   .global-rankings th { letter-spacing: 0; }
   .global-rankings .ranking-avatar { width: 24px; height: 24px; }
   .global-rankings .snake-cell { gap: 5px; }
@@ -328,8 +330,8 @@ table.data td.rating { font-family: var(--mono); font-weight: 600; font-size: 15
   .global-rankings .ranking-heading-full { display: none; }
   .global-rankings .ranking-heading-short { display: inline; }
   .global-rankings th:nth-child(1) { width: 9%; }
-  .global-rankings th:nth-child(2) { width: 52%; }
-  .global-rankings th:nth-child(3) { width: 23%; }
+  .global-rankings th:nth-child(2) { width: 46%; }
+  .global-rankings th:nth-child(3) { width: 29%; }
   .global-rankings th:nth-child(4) { width: 16%; }
   table.data.global-rankings th, table.data.global-rankings td { padding-left: 2px; padding-right: 2px; }
   .global-rankings .ranking-avatar, .global-rankings .board-suffix { display: none; }
