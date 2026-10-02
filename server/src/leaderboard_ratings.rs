@@ -81,10 +81,16 @@ pub async fn update_ratings(app_state: &AppState, leaderboard_game_id: Uuid) -> 
         return Ok(());
     }
 
-    // Look up each snake's leaderboard entry with FOR UPDATE to lock the rows
+    // Look up each snake's leaderboard entry with FOR UPDATE to lock the rows.
+    // Lock in one fixed order (entry id, then snake id), never placement order:
+    // two games with the same snakes that finish together in different orders
+    // would otherwise lock the rows in opposite orders and deadlock (DEV-1519).
+    let mut lock_order: Vec<_> = game_snakes.iter().collect();
+    lock_order.sort_by_key(|gs| (gs.leaderboard_entry_id, gs.battlesnake_id));
+
     let mut entries_with_placements: Vec<(leaderboard::LeaderboardEntry, i32, Uuid)> = Vec::new();
 
-    for gs in &game_snakes {
+    for gs in lock_order {
         let placement = gs.placement.unwrap_or(game_snakes.len() as i32);
 
         // Use leaderboard_entry_id if stored (deterministic lookup by PK).
@@ -161,4 +167,155 @@ pub async fn update_ratings(app_state: &AppState, leaderboard_game_id: Uuid) -> 
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::game::{self, CreateGame, GameBoardSize, GameType};
+    use crate::scoring::{
+        ScoringRegistry, food_eaten::FoodEatenScoring, weng_lin::WengLinScoring,
+        win_rate::WinRateScoring,
+    };
+    use sqlx::PgPool;
+    use std::time::Duration;
+
+    async fn create_user(pool: &PgPool, github_id: i64) -> cja::Result<Uuid> {
+        let row = sqlx::query!(
+            "INSERT INTO users (external_github_id, github_login, github_access_token)
+             VALUES ($1, $2, 'test-token')
+             RETURNING user_id",
+            github_id,
+            format!("gh-user-{github_id}"),
+        )
+        .fetch_one(pool)
+        .await?;
+        Ok(row.user_id)
+    }
+
+    async fn create_snake(pool: &PgPool, user_id: Uuid, name: &str) -> cja::Result<Uuid> {
+        let id = sqlx::query_scalar!(
+            "INSERT INTO battlesnakes (user_id, name, url)
+             VALUES ($1, $2, 'http://example.com/snake')
+             RETURNING battlesnake_id",
+            user_id,
+            name,
+        )
+        .fetch_one(pool)
+        .await?;
+        Ok(id)
+    }
+
+    /// A leaderboard game the given entries finished in the given places.
+    async fn finished_game(
+        pool: &PgPool,
+        leaderboard_id: Uuid,
+        placements: &[(Uuid, i32)],
+    ) -> cja::Result<Uuid> {
+        let game = game::create_game(
+            pool,
+            CreateGame {
+                board_size: GameBoardSize::Medium,
+                game_type: GameType::Standard,
+            },
+        )
+        .await?;
+        for &(entry_id, placement) in placements {
+            sqlx::query!(
+                "INSERT INTO game_battlesnakes (game_id, leaderboard_entry_id, placement)
+                 VALUES ($1, $2, $3)",
+                game.game_id,
+                entry_id,
+                placement,
+            )
+            .execute(pool)
+            .await?;
+        }
+        let lb_game =
+            leaderboard::create_leaderboard_game(pool, leaderboard_id, game.game_id).await?;
+        Ok(lb_game.leaderboard_game_id)
+    }
+
+    /// Wait until `n` sessions in this test's database are blocked on a lock.
+    async fn wait_for_lock_waiters(pool: &PgPool, n: i64) -> cja::Result<()> {
+        for _ in 0..500 {
+            let waiting = sqlx::query_scalar!(
+                r#"SELECT COUNT(*) AS "count!" FROM pg_stat_activity
+                   WHERE datname = current_database() AND wait_event_type = 'Lock'"#
+            )
+            .fetch_one(pool)
+            .await?;
+            if waiting >= n {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        Err(cja::color_eyre::eyre::eyre!(
+            "timed out waiting for {n} lock waiters"
+        ))
+    }
+
+    /// Replays the 2026-10-02 prod deadlock: two games with the same snakes
+    /// finished in opposite orders, rated at the same moment. Locking in
+    /// placement order made one job take A then B and the other B then A.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn concurrent_games_with_opposite_placements_do_not_deadlock(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        let user_id = create_user(&pool, 15190).await?;
+        let snake_a = create_snake(&pool, user_id, "snake-a").await?;
+        let snake_b = create_snake(&pool, user_id, "snake-b").await?;
+        let leaderboard_id = sqlx::query_scalar!(
+            "INSERT INTO leaderboards (name) VALUES ($1) RETURNING leaderboard_id",
+            "Deadlock Board",
+        )
+        .fetch_one(&pool)
+        .await?;
+        let a = leaderboard::get_or_create_entry(&pool, leaderboard_id, snake_a)
+            .await?
+            .leaderboard_entry_id;
+        let b = leaderboard::get_or_create_entry(&pool, leaderboard_id, snake_b)
+            .await?
+            .leaderboard_entry_id;
+
+        let a_won = finished_game(&pool, leaderboard_id, &[(a, 1), (b, 2)]).await?;
+        let b_won = finished_game(&pool, leaderboard_id, &[(b, 1), (a, 2)]).await?;
+        let mut state = AppState::test_from_pool(pool.clone());
+        let mut scoring = ScoringRegistry::new();
+        scoring.register(Box::new(WengLinScoring));
+        scoring.register(Box::new(WinRateScoring));
+        scoring.register(Box::new(FoodEatenScoring));
+        state.scoring = std::sync::Arc::new(scoring);
+
+        // Hold A so both jobs queue up behind it, the A-won job first. Under
+        // placement-order locking the B-won job grabs B before it blocks, and
+        // releasing A closes the cycle.
+        let mut holder = pool.begin().await?;
+        leaderboard::get_entry_for_update_by_id(&mut *holder, a).await?;
+
+        let first_state = state.clone();
+        let first = tokio::spawn(async move { update_ratings(&first_state, a_won).await });
+        wait_for_lock_waiters(&pool, 1).await?;
+        let second_state = state.clone();
+        let second = tokio::spawn(async move { update_ratings(&second_state, b_won).await });
+        wait_for_lock_waiters(&pool, 2).await?;
+        holder.rollback().await?;
+
+        let (first, second) = tokio::time::timeout(Duration::from_secs(30), async {
+            (first.await, second.await)
+        })
+        .await?;
+        first??;
+        second??;
+
+        assert_eq!(
+            leaderboard::count_game_results_for_entry(&pool, a).await?,
+            2
+        );
+        assert_eq!(
+            leaderboard::count_game_results_for_entry(&pool, b).await?,
+            2
+        );
+        Ok(())
+    }
 }
