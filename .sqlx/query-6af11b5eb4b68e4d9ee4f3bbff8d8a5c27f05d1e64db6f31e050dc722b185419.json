@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE leaderboard_entries\n         SET health_consecutive_failures = CASE\n                 WHEN health_last_checked_at IS NULL\n                   OR health_last_checked_at <= $3::timestamptz - make_interval(mins => $4)\n                 THEN health_consecutive_failures + 1\n                 ELSE GREATEST(health_consecutive_failures, 1)\n             END,\n             health_last_failure = $2,\n             health_last_checked_at = $3\n         WHERE leaderboard_entry_id = $1 AND disabled_at IS NULL\n         RETURNING health_consecutive_failures",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "health_consecutive_failures",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Timestamptz",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "6af11b5eb4b68e4d9ee4f3bbff8d8a5c27f05d1e64db6f31e050dc722b185419"
+}

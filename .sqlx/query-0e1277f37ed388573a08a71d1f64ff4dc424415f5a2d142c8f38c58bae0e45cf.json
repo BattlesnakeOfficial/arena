@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO turns (game_id, turn_number) VALUES ($1, $2) RETURNING turn_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "turn_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "0e1277f37ed388573a08a71d1f64ff4dc424415f5a2d142c8f38c58bae0e45cf"
+}

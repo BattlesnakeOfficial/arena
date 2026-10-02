@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE leaderboards SET disabled_at = NOW() WHERE name = 'Retired'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "841ac6a840b7cd3a1d7b96c909bf6a5aab1265bc8ce2efcd86531d1747e33e94"
+}

@@ -163,6 +163,12 @@ pub async fn get_leaderboard_by_id(
 // --- Leaderboard entry queries ---
 
 /// Opt-in a snake to a leaderboard. Returns the existing entry if one already exists.
+///
+/// Joining means "put this snake in rotation": a paused entry (manually or
+/// by the health sweeper) is re-enabled with its health streaks reset, so a
+/// streak from before the owner's fix can't re-pause it on the next failed
+/// probe. Re-joining an entry that's already in rotation changes nothing — an
+/// idempotent retry mustn't wipe a real failing streak.
 pub async fn get_or_create_entry(
     pool: &PgPool,
     leaderboard_id: Uuid,
@@ -173,7 +179,17 @@ pub async fn get_or_create_entry(
         r#"INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id)
          VALUES ($1, $2)
          ON CONFLICT (leaderboard_id, battlesnake_id) DO UPDATE
-            SET disabled_at = NULL, disabled_reason = NULL, updated_at = NOW()
+            SET disabled_at = NULL, disabled_reason = NULL, updated_at = NOW(),
+                health_consecutive_failures = CASE
+                    WHEN leaderboard_entries.disabled_at IS NULL
+                    THEN leaderboard_entries.health_consecutive_failures
+                    ELSE 0
+                END,
+                health_consecutive_successes = 0,
+                health_last_failure = CASE
+                    WHEN leaderboard_entries.disabled_at IS NULL
+                    THEN leaderboard_entries.health_last_failure
+                END
          RETURNING
             leaderboard_entry_id, leaderboard_id, battlesnake_id,
             mu, sigma, display_score, games_played, first_place_finishes, non_first_finishes,
@@ -983,6 +999,7 @@ pub struct BattlesnakeLeaderboardSummary {
     pub first_place_finishes: i32,
     pub non_first_finishes: i32,
     pub disabled_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub disabled_reason: Option<String>,
 }
 
 /// Get all leaderboard entries for a battlesnake
@@ -1000,7 +1017,8 @@ pub async fn get_entries_for_battlesnake(
             le.games_played,
             le.first_place_finishes,
             le.non_first_finishes,
-            le.disabled_at
+            le.disabled_at,
+            le.disabled_reason
          FROM leaderboard_entries le
          JOIN leaderboards l ON le.leaderboard_id = l.leaderboard_id
          WHERE le.battlesnake_id = $1

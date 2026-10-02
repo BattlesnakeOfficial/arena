@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE leaderboard_entries\n         SET health_consecutive_failures = 0,\n             health_last_failure = NULL,\n             health_last_checked_at = $2\n         WHERE leaderboard_entry_id = $1 AND disabled_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "48052d680bcae24dc48e7f68e094f4add64dba5a7c8c17432c5bf8a34023a725"
+}

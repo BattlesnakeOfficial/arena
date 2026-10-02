@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT disabled_at IS NOT NULL AS \"disabled!\", disabled_reason,\n                      health_consecutive_failures, health_consecutive_successes,\n                      health_last_failure, health_last_checked_at\n             FROM leaderboard_entries WHERE leaderboard_entry_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "disabled!",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 1,
+        "name": "disabled_reason",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "health_consecutive_failures",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 3,
+        "name": "health_consecutive_successes",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 4,
+        "name": "health_last_failure",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "health_last_checked_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null,
+      true,
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "c8a9a20053d0009c8faac1f8df804a2a2d8e7da182f5eef605f6254edf0076c2"
+}

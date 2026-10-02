@@ -1,0 +1,47 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT le.leaderboard_entry_id,\n                  l.name AS leaderboard_name,\n                  le.disabled_at AS \"paused_at!\",\n                  le.health_consecutive_failures AS consecutive_failures,\n                  le.health_last_failure AS last_failure\n         FROM leaderboard_entries le\n         JOIN leaderboards l ON l.leaderboard_id = le.leaderboard_id\n         WHERE le.battlesnake_id = $1\n           AND le.disabled_reason = $2\n           AND le.disabled_at IS NOT NULL\n           AND l.disabled_at IS NULL\n         ORDER BY le.disabled_at, l.name",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "leaderboard_entry_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "leaderboard_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "paused_at!",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 3,
+        "name": "consecutive_failures",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 4,
+        "name": "last_failure",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "425c8b5062624e390bdcaefeae6fef230ab6d70ac49b1b0f6a748a1ed063115d"
+}

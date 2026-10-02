@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO leaderboards (name) VALUES ('sweep-board') RETURNING leaderboard_id",
+  "query": "SELECT leaderboard_id FROM leaderboard_entries WHERE leaderboard_entry_id = $1",
   "describe": {
     "columns": [
       {
@@ -10,11 +10,13 @@
       }
     ],
     "parameters": {
-      "Left": []
+      "Left": [
+        "Uuid"
+      ]
     },
     "nullable": [
       false
     ]
   },
-  "hash": "876b459fccb22b6557a798c7c7728adbe0c08da02157eaa195545a5402516f9f"
+  "hash": "d11d68a89ba3a2ec42126448b44dbe6eebda9877724fd7f657c3e409d9d07a3b"
 }

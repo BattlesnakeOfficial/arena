@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE leaderboard_entries\n         SET disabled_at = NOW(),\n             disabled_reason = $2,\n             health_consecutive_successes = 0,\n             updated_at = NOW()\n         WHERE leaderboard_entry_id = $1 AND disabled_at IS NULL\n         RETURNING leaderboard_entry_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "leaderboard_entry_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "a27ffd61ae586b9b52c0c8ac9663d731d4ab022658ccafd17c1ba2722638edce"
+}

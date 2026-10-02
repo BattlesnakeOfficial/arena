@@ -218,10 +218,11 @@ impl Job<AppState> for RateLimitPruneJob {
     }
 }
 
-/// Cron job that health-checks every snake in leaderboard matchmaking and
-/// pulls the ones that keep failing (BS-3534). All bookkeeping is idempotent
-/// and the owner email is CAS-gated, so retries and duplicate enqueues are
-/// safe; see [`crate::snake_health_sweeper`].
+/// Cron job that health-checks leaderboard entries whose games show
+/// timeouts or errors and pulls the ones that keep failing (BS-3534,
+/// DEV-1515). All bookkeeping is idempotent and the owner emails are gated by
+/// the pause/resume transitions, so retries and duplicate enqueues are safe;
+/// see [`crate::snake_health_sweeper`].
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SnakeHealthSweeperJob;
 

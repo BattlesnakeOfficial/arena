@@ -46,31 +46,47 @@ pub fn account_claimed(
 }
 
 /// Sent to a snake's owner when the health sweeper pulls the snake from
-/// leaderboard matchmaking after repeated failed probes. Mirrors play's
-/// arena_matchmaking_deactivated notice: says what happened, why, and how to
-/// get back in.
+/// matchmaking on one or more leaderboards after repeated failed probes.
+/// Mirrors play's arena_matchmaking_deactivated notice: says what happened,
+/// where, why, and how to get back in. `pulled` is `(leaderboard, most recent
+/// problem)` per leaderboard, in the order to list them.
 pub fn matchmaking_deactivated(
     to_email: &str,
     snake_name: &str,
-    failure_summary: &str,
+    pulled: &[(String, String)],
     profile_url: &str,
 ) -> EmailMessage {
+    let where_ = if pulled.len() == 1 {
+        "this Arena leaderboard"
+    } else {
+        "these Arena leaderboards"
+    };
+    let problems: String = pulled
+        .iter()
+        .map(|(leaderboard, problem)| format!("- {leaderboard}: {problem}\n"))
+        .collect();
     let text = format!(
         "Hi,\n\
          \n\
          Your Battlesnake \"{snake_name}\" has been temporarily removed from \
-         Arena leaderboard matchmaking due to repeated timeouts or errors \
-         from its server.\n\
+         matchmaking on {where_} because its server kept timing out or \
+         erroring in our health checks there:\n\
          \n\
-         Most recent problem: {failure_summary}\n\
+         {problems}\
          \n\
-         Its ratings are safe — we stop matching it so a down server doesn't \
-         hurt its standing. Once your snake is fixed, resume matchmaking from \
-         its profile page:\n\
+         We test each leaderboard with a game shaped like its matches (same \
+         mode, board size and number of snakes), so a snake can be healthy on \
+         one leaderboard and not another. Its ratings are safe — we stop \
+         matching it so a broken server doesn't hurt its standing.\n\
+         \n\
+         We'll keep checking and put it back automatically once it passes \
+         again. Or, once your snake is fixed, resume matchmaking right away \
+         from its profile page:\n\
          \n\
          {profile_url}\n\
          \n\
-         (The \"Test Snake\" button there runs the same checks we do.)\n\
+         (The \"Test Snake\" button there plays the same games we do, one per \
+         leaderboard.)\n\
          \n\
          — Battlesnake Arena\n"
     );
@@ -82,21 +98,23 @@ pub fn matchmaking_deactivated(
     }
 }
 
-/// Sent when the health sweeper puts a previously deactivated snake back
-/// into matchmaking on its own, after enough consecutive healthy probes.
-/// Closes the loop on [`matchmaking_deactivated`] so the owner isn't left
-/// thinking they still need to press Resume.
+/// Sent when the health sweeper puts a snake's previously paused entries
+/// back into matchmaking on its own, after enough consecutive healthy
+/// probes. Closes the loop on [`matchmaking_deactivated`] so the owner isn't
+/// left thinking they still need to press Resume.
 pub fn matchmaking_reactivated(
     to_email: &str,
     snake_name: &str,
+    leaderboards: &[String],
     profile_url: &str,
 ) -> EmailMessage {
+    let leaderboards = leaderboards.join(", ");
     let text = format!(
         "Hi,\n\
          \n\
-         Good news — your Battlesnake \"{snake_name}\" is responding again \
-         and has been put back into Arena leaderboard matchmaking \
-         automatically. No action needed.\n\
+         Good news — your Battlesnake \"{snake_name}\" is passing our health \
+         checks again and has been put back into Arena matchmaking \
+         automatically on: {leaderboards}. No action needed.\n\
          \n\
          You can see its status any time on its profile page:\n\
          \n\
@@ -152,16 +170,40 @@ mod tests {
         let msg = matchmaking_deactivated(
             "owner@example.com",
             "Hissy",
-            "POST /move: request timed out",
+            &[(
+                "Royale 11x11".to_string(),
+                "POST /move (turn 0): Returned non-success HTTP status 500".to_string(),
+            )],
             "https://arena.example.com/battlesnakes/abc/profile",
         );
         assert_eq!(msg.to, "owner@example.com");
         assert_eq!(msg.subject, "Hissy was paused from Arena matchmaking");
         assert!(msg.text.contains("\"Hissy\""));
-        assert!(msg.text.contains("POST /move: request timed out"));
+        assert!(msg.text.contains("on this Arena leaderboard because"));
+        assert!(msg.text.contains(
+            "- Royale 11x11: POST /move (turn 0): Returned non-success HTTP status 500\n"
+        ));
         assert!(
             msg.text
                 .contains("https://arena.example.com/battlesnakes/abc/profile")
+        );
+    }
+
+    #[test]
+    fn matchmaking_deactivated_lists_every_pulled_leaderboard() {
+        let msg = matchmaking_deactivated(
+            "owner@example.com",
+            "Hissy",
+            &[
+                ("Royale 11x11".to_string(), "boom".to_string()),
+                ("Constrictor 11x11".to_string(), "bang".to_string()),
+            ],
+            "https://arena.example.com/battlesnakes/abc/profile",
+        );
+        assert!(msg.text.contains("on these Arena leaderboards because"));
+        assert!(
+            msg.text
+                .contains("- Royale 11x11: boom\n- Constrictor 11x11: bang\n")
         );
     }
 
@@ -170,12 +212,16 @@ mod tests {
         let msg = matchmaking_reactivated(
             "owner@example.com",
             "Hissy",
+            &["Royale 11x11".to_string(), "Duels 11x11".to_string()],
             "https://arena.example.com/battlesnakes/abc/profile",
         );
         assert_eq!(msg.to, "owner@example.com");
         assert_eq!(msg.subject, "Hissy is back in Arena matchmaking");
         assert!(msg.text.contains("\"Hissy\""));
-        assert!(msg.text.contains("automatically"));
+        assert!(
+            msg.text
+                .contains("automatically on: Royale 11x11, Duels 11x11.")
+        );
         assert!(
             msg.text
                 .contains("https://arena.example.com/battlesnakes/abc/profile")
