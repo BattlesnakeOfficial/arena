@@ -41,10 +41,15 @@ use crate::snake_health::{
 use crate::state::AppState;
 
 /// Share of an entry's recent moves that must have timed out or errored
-/// before it's probed. Arena-side stalls make roughly 1 in 1,000 moves of
-/// every snake time out (DEV-1498), so a single bad move proves nothing; a
-/// dead or crashing snake is near 100%.
-pub const SUSPECT_BAD_MOVE_PERCENT: i32 = 10;
+/// before it's probed. The snakes the probe can actually catch sit near 100%:
+/// a dead server, a crash on this leaderboard's payloads, or a snake that's
+/// always over the move budget. Healthy snakes sit far below: arena-side
+/// stalls time out roughly 1 in 1,000 moves of every snake (DEV-1498), and
+/// snakes that search right up to the deadline overshoot 8-10% of moves (in
+/// prod on 2026-10-02, none of the busiest one's 198 games reached 50%) while
+/// passing most probes. Snakes that only break late in a game fall in
+/// between, but the probe only plays turns 0-1 and couldn't confirm them.
+pub const SUSPECT_BAD_MOVE_PERCENT: i32 = 50;
 
 /// How far back to look for an entry's games when weighing its moves.
 /// Comfortably more than the 30-minute sweep interval, so a missed sweep
@@ -664,6 +669,11 @@ mod tests {
         seed.game(playing, 10, 0, 150, Bad::TimedOut).await?;
         // One arena-side stall is noise, not evidence.
         seed.game(playing, 5, 1, 149, Bad::TimedOut).await?;
+        // Neither is a snake that searches right up to the deadline and
+        // often overshoots it: just under the threshold, it plays.
+        let deadline_pusher = seed.join("Constrictor", "Constrictor", 4).await?;
+        seed.game(deadline_pusher, 10, 49, 51, Bad::TimedOut)
+            .await?;
 
         run_sweep(&AppState::test_from_pool(pool.clone())).await?;
 
@@ -678,7 +688,7 @@ mod tests {
         let server = healthy_snake_server().await;
         let seed = Seed::new(&pool, &server.uri()).await?;
         let royale = seed.join("Royale", "Royale", 4).await?;
-        seed.game(royale, 10, 10, 30, Bad::TimedOut).await?;
+        seed.game(royale, 10, 30, 10, Bad::TimedOut).await?;
         let app_state = AppState::test_from_pool(pool.clone());
 
         run_sweep(&app_state).await?;
@@ -709,7 +719,8 @@ mod tests {
         let server = healthy_snake_server().await;
         let seed = Seed::new(&pool, &server.uri()).await?;
         let entry = seed.join("Standard", "Standard", 4).await?;
-        seed.game(entry, 10, 5, 20, Bad::Errored).await?;
+        // Exactly at the threshold counts.
+        seed.game(entry, 10, 25, 25, Bad::Errored).await?;
 
         run_sweep(&AppState::test_from_pool(pool.clone())).await?;
 
