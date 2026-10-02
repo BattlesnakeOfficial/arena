@@ -62,7 +62,7 @@ test.describe('Homepage - Authenticated User', () => {
 });
 
 test.describe('Homepage - calm surfaces', () => {
-  test('ticker strip is static and capped, live dot is solid', async ({ page, authenticatedPage }) => {
+  test('no recent-games strip, rail is capped, live dot is solid', async ({ page, authenticatedPage }) => {
     const snakeName = `Home Ticker Snake ${Date.now()}`;
 
     // Seed enough activity (12 games) to overflow the 8-item feed cap on the
@@ -104,21 +104,15 @@ test.describe('Homepage - calm surfaces', () => {
       );
     }
 
-    // Anonymous visit: strip and rail render logged-out
+    // Anonymous visit: rail renders logged-out
     await page.goto('/');
 
-    // Exactly one copy of the ticker content inside the strip
-    const strip = page.locator('.strip .inner');
-    await expect(strip).toHaveCount(1);
+    // Feed is capped at 8: 12 seeded games produce exactly 8 rail rows.
+    await expect(page.locator('.rail .feed li')).toHaveCount(8);
 
-    // Feed is capped at 8: each event renders one .sep, so 12 seeded games
-    // produce exactly 8. If the duplicated marquee is ever re-added, the
-    // count doubles and this fails.
-    expect(await strip.locator('.sep').count()).toBe(8);
-
-    // No marquee animation on the strip
-    const anim = await page.$eval('.strip .inner', (el) => getComputedStyle(el).animationName);
-    expect(anim).toBe('none');
+    // The recent-games ticker strip was removed; activity exists, so its
+    // absence isn't just the empty-feed branch.
+    await expect(page.locator('.home .strip')).toHaveCount(0);
 
     // The live dot is still present but no longer pulses
     await expect(page.locator('.live-dot').first()).toBeVisible();

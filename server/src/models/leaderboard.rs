@@ -1091,7 +1091,7 @@ pub async fn get_top_eaters(
 }
 
 /// The user-independent slice of the homepage: featured ladder, its recent
-/// games (strip + rail), and the top-five preview. Bundled so it can sit
+/// games (rail), and the top-five preview. Bundled so it can sit
 /// behind a single TTL cache entry.
 pub struct HomeFeed {
     pub featured: Option<Leaderboard>,

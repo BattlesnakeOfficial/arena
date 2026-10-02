@@ -454,7 +454,7 @@ async fn root_page(
     page_factory: PageFactory,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
     // The home page features the first active leaderboard: its recent games
-    // feed the ticker + rail, and its top five make the ladder preview.
+    // feed the rail, and its top five make the ladder preview.
     // User-independent, so it sits behind a short TTL cache — this is the
     // highest-traffic anonymous page.
     let feed = match state.home_feed_cache.get() {
@@ -557,14 +557,6 @@ async fn root_page(
                     }
                 }
 
-                @if let (Some(lb), false) = (featured, activity.is_empty()) {
-                    div class="strip" aria-hidden="true" {
-                        div class="inner" {
-                            (home_ticker_items(activity, &lb.name))
-                        }
-                    }
-                }
-
                 @if user.is_none() {
                     section class="features" {
                         div class="feature" {
@@ -661,27 +653,6 @@ fn home_board() -> Markup {
             @for (class, style) in &cells {
                 div class=(class) style=[style.as_deref()] {}
             }
-        }
-    }
-}
-
-/// One pass of ticker copy for the static homepage strip (truncates on overflow).
-fn home_ticker_items(activity: &[ActivityFeedEntry], leaderboard_name: &str) -> Markup {
-    html! {
-        @for event in activity {
-            b { (event.snake_name) }
-            @if event.placement == 1 {
-                " won on "
-            } @else {
-                " placed " (home_ordinal(event.placement)) " on "
-            }
-            (leaderboard_name)
-            " "
-            @match home_delta(event.display_score_change) {
-                (true, delta) => span class="win" { (delta) },
-                (false, delta) => span class="lose" { (delta) },
-            }
-            span class="sep" { "/" }
         }
     }
 }
@@ -797,7 +768,7 @@ fn home_ordinal(n: i32) -> String {
     format!("{n}{suffix}")
 }
 
-/// Rating delta for the home ticker and activity rail, rounded to display
+/// Rating delta for the home activity rail, rounded to display
 /// precision *before* the sign check so a −0.04 change can't render as a red
 /// "-0.0". Returns the up/down flag alongside the formatted string so the CSS
 /// class always agrees with the printed sign.
