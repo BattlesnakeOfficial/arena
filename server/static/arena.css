@@ -680,24 +680,6 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
   text-overflow: ellipsis;
 }
 
-/* recent-games strip (static) */
-.home .strip {
-  border-top: 1px solid var(--hairline);
-  border-bottom: 1px solid var(--hairline);
-  margin-top: 64px;
-  overflow: hidden;
-  white-space: nowrap;
-  font-family: var(--mono);
-  font-size: 13px;
-  color: var(--muted);
-  padding: 12px 0;
-}
-.home .strip .inner { display: inline-block; }
-.home .strip b { font-weight: 600; color: var(--ink); }
-.home .strip .win { color: var(--pink-deep); font-weight: 600; }
-.home .strip .lose { color: var(--muted); font-weight: 600; }
-.home .strip .sep { margin: 0 26px; color: var(--hairline-dark); }
-
 /* editorial features (logged out) */
 .home .features { padding: 72px 0 16px; display: grid; grid-template-columns: repeat(3, 1fr); }
 .home .feature { padding: 8px 36px 8px 0; }
@@ -770,8 +752,6 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
 }
 @media (max-width: 640px) {
   .home .hero { gap: 44px; }
-  .home .strip { margin-top: 48px; }
-  .home .strip .sep { margin: 0 18px; }
   .home .board { gap: 3px; padding: 10px; border-radius: 16px; }
   .home .statement { padding: 64px 0 16px; }
   .home .srow .badge { display: none; }
