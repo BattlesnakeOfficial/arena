@@ -21,7 +21,7 @@ use crate::{
     cron::MATCHMAKER_INTERVAL_SECS,
     customizations::chip_color,
     errors::{ServerResult, WithRedirect},
-    models::snake_health_status,
+    models::leaderboard_entry_health,
     models::{
         battlesnake,
         leaderboard::{self, MIN_GAMES_FOR_RANKING},
@@ -483,7 +483,7 @@ pub async fn show_leaderboard(
                                         span class="chip" style={"background:"(chip_color(&snake.color))} {}
                                         span class="mname" { (snake.name) }
                                         @if entry.disabled_at.is_some() {
-                                            @if entry.disabled_reason.as_deref() == Some(snake_health_status::DISABLED_REASON_HEALTH) {
+                                            @if entry.disabled_reason.as_deref() == Some(leaderboard_entry_health::DISABLED_REASON_HEALTH) {
                                                 a class="badge warn" href={"/battlesnakes/"(snake.battlesnake_id)"/profile"}
                                                     title="Automatically paused: this snake is failing health checks. Resume re-tests it — details on its profile." {
                                                     "Auto-paused"
@@ -1021,19 +1021,12 @@ pub async fn join_leaderboard(
         ));
     }
 
-    // Opt-in (or resume if paused)
+    // Opt-in (or resume if paused). Resuming also clears the entry's health
+    // streak, so a snake the sweeper pulled isn't re-paused on the very next
+    // sweep (see `get_or_create_entry`).
     let entry = leaderboard::get_or_create_entry(&state.db, leaderboard_id, form.battlesnake_id)
         .await
         .wrap_err("Failed to join leaderboard")
-        .with_redirect(redirect.clone())?;
-
-    // A snake the health sweeper pulled keeps its failure streak until it's
-    // reactivated, so resuming only the entry would get re-paused on the
-    // very next sweep. Resume means "put my snake back in rotation": clear
-    // the streak too, exactly like the profile page's Resume Matchmaking.
-    snake_health_status::reactivate(&state.db, form.battlesnake_id)
-        .await
-        .wrap_err("Failed to reset snake health status")
         .with_redirect(redirect.clone())?;
 
     // Initialize scoring algorithm entries

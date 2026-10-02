@@ -171,11 +171,11 @@ pub struct AppConfig {
     pub game_creation_rate_limit: i64,
     /// Length of the game-creation sliding window, in minutes.
     pub game_creation_rate_limit_window_minutes: i32,
-    /// Consecutive failed health probes before the sweeper pulls a snake
-    /// from leaderboard matchmaking (BS-3534).
+    /// Consecutive failed health probes before the sweeper pulls an entry
+    /// from that leaderboard's matchmaking (BS-3534, DEV-1515).
     pub snake_health_failure_threshold: i32,
-    /// Consecutive healthy probes of a deactivated snake before the sweeper
-    /// puts it back into matchmaking on its own.
+    /// Consecutive healthy probes of a health-paused entry before the
+    /// sweeper puts it back into matchmaking on its own.
     pub snake_health_recovery_threshold: i32,
     /// Max age (from `created_at`) a non-tournament game may sit in
     /// `waiting`/`running` before the stuck-game sweeper marks it `failed`.

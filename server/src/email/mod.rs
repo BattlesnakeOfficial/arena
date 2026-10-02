@@ -88,7 +88,8 @@ impl Mailer {
     }
 
     /// Notify a snake's owner that the health sweeper pulled their snake
-    /// from leaderboard matchmaking. Same fire-and-forget contract as
+    /// from matchmaking on the `pulled` leaderboards (`(leaderboard, most
+    /// recent problem)` each). Same fire-and-forget contract as
     /// [`Mailer::notify_account_claimed`]: the sweep never waits on or fails
     /// because of an email.
     pub fn notify_matchmaking_deactivated(
@@ -97,11 +98,10 @@ impl Mailer {
         hourly_limit: i64,
         to_email: &str,
         snake_name: &str,
-        failure_summary: &str,
+        pulled: &[(String, String)],
         profile_url: &str,
     ) {
-        let message =
-            messages::matchmaking_deactivated(to_email, snake_name, failure_summary, profile_url);
+        let message = messages::matchmaking_deactivated(to_email, snake_name, pulled, profile_url);
         self.spawn_limited_send(
             pool.clone(),
             hourly_limit,
@@ -111,17 +111,19 @@ impl Mailer {
     }
 
     /// Notify a snake's owner that the sweeper put their recovered snake
-    /// back into matchmaking automatically. Fire-and-forget like
-    /// [`Mailer::notify_matchmaking_deactivated`].
+    /// back into matchmaking on `leaderboards` automatically. Fire-and-forget
+    /// like [`Mailer::notify_matchmaking_deactivated`].
     pub fn notify_matchmaking_reactivated(
         &self,
         pool: &sqlx::PgPool,
         hourly_limit: i64,
         to_email: &str,
         snake_name: &str,
+        leaderboards: &[String],
         profile_url: &str,
     ) {
-        let message = messages::matchmaking_reactivated(to_email, snake_name, profile_url);
+        let message =
+            messages::matchmaking_reactivated(to_email, snake_name, leaderboards, profile_url);
         self.spawn_limited_send(
             pool.clone(),
             hourly_limit,

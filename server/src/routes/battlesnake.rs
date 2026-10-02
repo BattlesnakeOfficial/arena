@@ -18,8 +18,8 @@ use crate::{
     models::battlesnake::{self, CreateBattlesnake, EngineRegion, UpdateBattlesnake, Visibility},
     models::game_battlesnake,
     models::leaderboard,
+    models::leaderboard_entry_health,
     models::session,
-    models::snake_health_status,
     models::snake_latency,
     models::tag,
     models::user::get_user_by_id,
@@ -1023,8 +1023,8 @@ pub(crate) struct ProfilePagination {
 
 /// POST /battlesnakes/{id}/reactivate — owner recovery from a health-sweeper
 /// deactivation (BS-3534). Re-enables exactly the leaderboard entries the
-/// sweeper disabled (manual pauses stay paused) and resets the failure
-/// streak so the next sweep starts fresh.
+/// sweeper disabled (manual pauses stay paused) and resets their health
+/// streaks so the next sweep starts fresh.
 pub async fn reactivate_battlesnake(
     State(state): State<AppState>,
     CurrentUserWithSession { user, session }: CurrentUserWithSession,
@@ -1041,12 +1041,11 @@ pub async fn reactivate_battlesnake(
         .with_status(StatusCode::FORBIDDEN);
     }
 
-    let was_deactivated = snake_health_status::get(&state.db, battlesnake_id)
+    let resumed = leaderboard_entry_health::reactivate_snake(&state.db, battlesnake_id)
         .await
-        .wrap_err("Failed to get snake health status")?
-        .is_some_and(|s| s.deactivated_at.is_some());
+        .wrap_err("Failed to reactivate battlesnake")?;
 
-    if !was_deactivated {
+    if resumed == 0 {
         session::set_flash_message(
             &state.db,
             session.session_id,
@@ -1061,13 +1060,10 @@ pub async fn reactivate_battlesnake(
         );
     }
 
-    snake_health_status::reactivate(&state.db, battlesnake_id)
-        .await
-        .wrap_err("Failed to reactivate battlesnake")?;
-
     tracing::info!(
         battlesnake_id = %battlesnake_id,
         user_id = %user.user_id,
+        resumed_entries = resumed,
         "Owner reactivated snake for leaderboard matchmaking"
     );
 
@@ -1105,7 +1101,8 @@ struct ProfileView<'a> {
     page: i64,
     total_pages: i64,
     leaderboard_entries: &'a [leaderboard::BattlesnakeLeaderboardSummary],
-    health_status: Option<&'a snake_health_status::SnakeHealthStatus>,
+    /// Entries the health sweeper pulled; only ever shown to the owner.
+    health_paused: &'a [leaderboard_entry_health::HealthPausedEntry],
     tags: &'a [tag::Tag],
     latency: &'a snake_latency::RecentLatency,
 }
@@ -1151,11 +1148,7 @@ fn render_battlesnake_profile(view: &ProfileView<'_>) -> Markup {
         "https://exporter.battlesnake.com/avatars/head:{display_head}/tail:{display_tail}/color:{url_color}/320x100.svg"
     );
 
-    let deactivation = if is_owner {
-        view.health_status.filter(|s| s.deactivated_at.is_some())
-    } else {
-        None
-    };
+    let health_paused: &[_] = if is_owner { view.health_paused } else { &[] };
     let overall_latency = view.latency.overall;
 
     html! {
@@ -1234,19 +1227,27 @@ fn render_battlesnake_profile(view: &ProfileView<'_>) -> Markup {
             }
 
             // Auto-deactivation notice: the health sweeper pulled this snake
-            // from matchmaking; the owner can resume once it's fixed.
-            @if let Some(status) = deactivation {
+            // from matchmaking on some leaderboards; the owner can resume
+            // once it's fixed.
+            @if !health_paused.is_empty() {
                 div class="form-error snake-paused" {
                     p {
                         strong { "Paused from leaderboard matchmaking. " }
-                        "This snake failed " (status.consecutive_failures)
-                        " health checks in a row, so we stopped matching it to protect its rating."
+                        "This snake kept failing our health checks, so we stopped matching it to protect its rating on:"
                     }
-                    @if let Some(failure) = status.last_failure.as_ref() {
-                        p class="fine" { "Most recent problem: " (failure) }
+                    ul class="fine" {
+                        @for entry in health_paused {
+                            li {
+                                strong { (entry.leaderboard_name) }
+                                " — failed " (entry.consecutive_failures) " checks in a row"
+                                @if let Some(failure) = entry.last_failure.as_ref() {
+                                    ". Most recent problem: " (failure)
+                                }
+                            }
+                        }
                     }
                     p class="fine" {
-                        "Fix your snake (Test Snake runs the same checks), then resume."
+                        "Fix your snake (Test Snake plays the same games, one per leaderboard), then resume."
                     }
                     form action={"/battlesnakes/"(battlesnake_id)"/reactivate"} method="post" {
                         button type="submit" class="btn solid sm" { "Resume Matchmaking" }
@@ -1341,7 +1342,11 @@ fn render_battlesnake_profile(view: &ProfileView<'_>) -> Markup {
                                         }
                                     }
                                     td class="r" {
-                                        @if entry.disabled_at.is_some() {
+                                        @if entry.disabled_at.is_some()
+                                            && entry.disabled_reason.as_deref() == Some(leaderboard_entry_health::DISABLED_REASON_HEALTH)
+                                        {
+                                            span class="badge warn" title="Automatically paused: this snake is failing health checks on this leaderboard." { "Auto-paused" }
+                                        } @else if entry.disabled_at.is_some() {
                                             span class="badge" { "Paused" }
                                         } @else {
                                             span class="badge ok" { "Active" }
@@ -1480,10 +1485,10 @@ pub async fn view_battlesnake_profile(
         .await
         .wrap_err("Failed to get leaderboard entries")?;
 
-    // Health-sweeper state, for the owner-facing deactivation banner
-    let health_status = snake_health_status::get(&state.db, battlesnake_id)
+    // Health-sweeper pauses, for the owner-facing deactivation banner
+    let health_paused = leaderboard_entry_health::health_paused_entries(&state.db, battlesnake_id)
         .await
-        .wrap_err("Failed to get snake health status")?;
+        .wrap_err("Failed to get health-paused entries")?;
 
     // Curated language/platform tags for this snake
     let snake_tags = tag::get_tags_for_battlesnake(&state.db, battlesnake_id)
@@ -1520,7 +1525,7 @@ pub async fn view_battlesnake_profile(
         page,
         total_pages,
         leaderboard_entries: &leaderboard_entries,
-        health_status: health_status.as_ref(),
+        health_paused: &health_paused,
         tags: &snake_tags,
         latency: &recent_latency,
     });
@@ -1540,9 +1545,10 @@ pub async fn view_battlesnake_profile(
 //
 // Owner-only: the snake URL may be publicly visible, but the test makes the
 // server poke the user's infrastructure on demand, so only the owner can
-// trigger it. Renders the results page directly from the POST (a flash +
-// redirect would lose the per-call details).
-#[allow(clippy::too_many_lines)]
+// trigger it. Plays one test game per active leaderboard (enrolled or not),
+// shaped like that leaderboard's matches, so owners see exactly where their
+// snake would break. Renders the results page directly from the POST (a
+// flash + redirect would lose the per-call details).
 pub async fn test_battlesnake(
     State(state): State<AppState>,
     CurrentUser(user): CurrentUser,
@@ -1562,132 +1568,190 @@ pub async fn test_battlesnake(
             .with_status(StatusCode::FORBIDDEN);
     }
 
+    let mut specs = leaderboard::get_active_leaderboards(&state.db)
+        .await
+        .wrap_err("Failed to get active leaderboards")?
+        .iter()
+        .map(|lb| {
+            snake_health::TestGameSpec::for_leaderboard(
+                &lb.name,
+                &lb.game_type,
+                &lb.board_size,
+                lb.match_size,
+            )
+        })
+        .collect::<cja::Result<Vec<_>>>()?;
+    if specs.is_empty() {
+        specs.push(snake_health::TestGameSpec::fallback());
+    }
+
     // Dedicated client: the shared snake client enforces the real in-game
     // budget (600ms hard timeout); the test is deliberately more forgiving
-    // and reports latency so users can see whether they'd fit the budget.
-    // Redirect handling matches the game client (reqwest defaults).
+    // so a slow snake's answer is still visible, and flags moves over the
+    // game budget. Redirect handling matches the game client (reqwest
+    // defaults).
     let client = reqwest::Client::builder()
         .timeout(snake_health::HEALTH_CHECK_TIMEOUT)
         .build()
         .wrap_err("Failed to build HTTP client for snake test")?;
-
-    let (engine_game, snake_id) = snake_health::build_test_game(&snake);
     let clients = crate::snake_client::ProxyClients {
         direct: &client,
         east: &state.proxy_east_health_client,
         europe: &state.proxy_europe_health_client,
         config: &state.config.engine_proxy,
     };
-    let report = snake_health::run_health_check_routed(
-        &clients,
-        &snake.url,
-        snake.engine_region,
-        &engine_game,
-        &snake_id,
-        snake_health::FailureMode::RunAll,
-    )
-    .await;
-
-    let failures = report.failure_count();
-    let proxy_faults = report.proxy_fault_count();
-    let all_ok = failures == 0 && proxy_faults == 0;
+    let report =
+        snake_health::run_health_check(&clients, &snake, specs, snake_health::FailureMode::RunAll)
+            .await
+            .wrap_err("Failed to run snake health check")?;
 
     Ok(page_factory.create_page(
         format!("Test Results: {}", snake.name),
-        Box::new(html! {
-            div class="container" {
-                h1 { "Test Results: " (snake.name) }
-                p {
-                    "Tested "
-                    a href=(snake.url) target="_blank" { (snake.url) }
-                    " with the same calls a real game makes."
-                }
+        Box::new(render_test_results(&snake, &report)),
+    ))
+}
 
-                @if proxy_faults > 0 {
-                    div class="alert alert-warning" {
-                        p { (proxy_faults) " engine proxy calls failed. Snake health is unknown; try again shortly." }
-                    }
-                } @else if all_ok {
-                    div class="alert alert-success" {
-                        p { "All " (report.calls.len()) " checks passed. This snake looks ready to play!" }
-                    }
-                } @else {
-                    div class="alert alert-danger" {
-                        p { (failures) " of " (report.calls.len()) " checks failed. See details below." }
-                    }
-                }
+fn render_test_results(
+    snake: &battlesnake::Battlesnake,
+    report: &snake_health::HealthCheckReport,
+) -> Markup {
+    let battlesnake_id = snake.battlesnake_id;
+    let failures = report.failure_count();
+    let warnings = report.warning_count();
+    let proxy_faults = report.proxy_fault_count();
+    let total = report.calls().count();
+    let failing_games: Vec<&str> = report
+        .games
+        .iter()
+        .filter(|g| {
+            g.calls
+                .iter()
+                .any(|c| c.status == snake_health::HealthCallStatus::SnakeFailure)
+        })
+        .map(|g| g.spec.label.as_str())
+        .collect();
 
-                table class="table" {
-                    thead {
-                        tr {
-                            th { "Call" }
-                            th { "Result" }
-                            th { "HTTP Status" }
-                            th { "Latency" }
-                            th { "Details" }
+    html! {
+        div class="container" {
+            h1 { "Test Results: " (snake.name) }
+            p {
+                "Played a short game against "
+                a href=(snake.url) target="_blank" { (snake.url) }
+                " for each leaderboard, shaped like its matches (same mode, board size and number of snakes). "
+                "The other snakes turn into their own necks on turn 1, so your snake wins and gets a real "
+                code { "/end" } "."
+            }
+
+            @if proxy_faults > 0 {
+                div class="alert alert-warning" {
+                    p { (proxy_faults) " engine proxy calls failed. Snake health is unknown; try again shortly." }
+                }
+            } @else if failures > 0 {
+                div class="alert alert-danger" {
+                    p {
+                        (failures) " of " (total) " checks failed — real games would break on: "
+                        @if failing_games.is_empty() {
+                            "every leaderboard"
+                        } @else {
+                            (failing_games.join(", "))
                         }
+                        ". See details below."
                     }
-                    tbody {
-                        @for call in &report.calls {
-                            tr {
-                                td { code { (call.name) } }
-                                td {
-                                    @if call.status == snake_health::HealthCallStatus::Healthy {
-                                        span class="badge ok" { "OK" }
-                                    } @else if call.status == snake_health::HealthCallStatus::ProxyFault {
-                                        span class="badge warn" { "Proxy error" }
-                                    } @else {
-                                        span class="badge warn" { "Failed" }
-                                    }
+                }
+            } @else if warnings > 0 {
+                div class="alert alert-warning" {
+                    p {
+                        "Games will run, but " (warnings) " of " (total)
+                        " responses don't follow the Battlesnake API spec. See details below."
+                    }
+                }
+            } @else {
+                div class="alert alert-success" {
+                    p { "All " (total) " checks passed. This snake looks ready to play on every leaderboard!" }
+                }
+            }
+
+            (test_results_table(std::slice::from_ref(&report.identity), report.game_timeout_ms))
+
+            @for game in &report.games {
+                h2 { (game.spec.label) }
+                p class="text-muted" { (game.spec.describe()) }
+                (test_results_table(&game.calls, report.game_timeout_ms))
+            }
+
+            p class="text-muted" {
+                "Each test call was allowed "
+                (snake_health::HEALTH_CHECK_TIMEOUT.as_secs())
+                " seconds so you can see slow answers, but real games only allow "
+                (report.game_timeout_ms)
+                " ms per move — a slower move counts as a failure."
+            }
+
+            div class="mt-4" {
+                form action={"/battlesnakes/"(battlesnake_id)"/test"} method="post" class="inline" style="display: inline;" {
+                    button type="submit" class="btn btn-primary" { "Run Test Again" }
+                }
+                a href={"/battlesnakes/"(battlesnake_id)"/profile"} class="btn btn-secondary ms-2" { "Back to Profile" }
+            }
+        }
+    }
+}
+
+fn test_results_table(calls: &[snake_health::HealthCheckCall], game_timeout_ms: i64) -> Markup {
+    html! {
+        table class="table" {
+            thead {
+                tr {
+                    th { "Call" }
+                    th { "Result" }
+                    th { "HTTP Status" }
+                    th { "Latency" }
+                    th { "Details" }
+                }
+            }
+            tbody {
+                @for call in calls {
+                    tr {
+                        td { code { (call.name) } }
+                        td {
+                            @match call.status {
+                                snake_health::HealthCallStatus::Healthy => span class="badge ok" { "OK" },
+                                snake_health::HealthCallStatus::Warning => span class="badge warn" { "Warning" },
+                                snake_health::HealthCallStatus::ProxyFault => span class="badge warn" { "Proxy error" },
+                                snake_health::HealthCallStatus::SnakeFailure => span class="badge warn" { "Failed" },
+                            }
+                        }
+                        td {
+                            @if let Some(status) = call.http_status {
+                                (status)
+                            } @else {
+                                "—"
+                            }
+                        }
+                        td {
+                            @if let Some(latency) = call.latency_ms {
+                                (latency) " ms"
+                                @if i64::try_from(latency).is_ok_and(|l| l > game_timeout_ms) {
+                                    " "
+                                    span class="badge bg-warning text-dark" { "over game budget" }
                                 }
-                                td {
-                                    @if let Some(status) = call.http_status {
-                                        (status)
-                                    } @else {
-                                        "—"
-                                    }
-                                }
-                                td {
-                                    @if let Some(latency) = call.latency_ms {
-                                        (latency) " ms"
-                                        @if i64::try_from(latency).is_ok_and(|l| l > report.game_timeout_ms) {
-                                            " "
-                                            span class="badge bg-warning text-dark" { "over game budget" }
-                                        }
-                                    } @else {
-                                        "—"
-                                    }
-                                }
-                                td {
-                                    (call.summary)
-                                    @if let Some(excerpt) = &call.body_excerpt {
-                                        pre style="white-space: pre-wrap; word-break: break-all; margin-top: 8px; font-size: 0.85em;" {
-                                            (excerpt)
-                                        }
-                                    }
+                            } @else {
+                                "—"
+                            }
+                        }
+                        td {
+                            (call.summary)
+                            @if let Some(excerpt) = &call.body_excerpt {
+                                pre style="white-space: pre-wrap; word-break: break-all; margin-top: 8px; font-size: 0.85em;" {
+                                    (excerpt)
                                 }
                             }
                         }
                     }
                 }
-
-                p class="text-muted" {
-                    "Each test call was allowed "
-                    (snake_health::HEALTH_CHECK_TIMEOUT.as_secs())
-                    " seconds, but real games only allow "
-                    (report.game_timeout_ms)
-                    " ms per request — check the latency column to see if your snake fits the in-game budget."
-                }
-
-                div class="mt-4" {
-                    form action={"/battlesnakes/"(battlesnake_id)"/test"} method="post" class="inline" style="display: inline;" {
-                        button type="submit" class="btn btn-primary" { "Run Test Again" }
-                    }
-                    a href={"/battlesnakes/"(battlesnake_id)"/profile"} class="btn btn-secondary ms-2" { "Back to Profile" }
-                }
             }
-        }),
-    ))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2157,16 +2221,113 @@ mod profile_page_tests {
             (status, String::from_utf8(body.to_vec()).unwrap())
         }
 
+        async fn post(&self, session: Uuid, action: &str) -> (StatusCode, String) {
+            let request = Request::builder()
+                .method(axum::http::Method::POST)
+                .uri(format!("/battlesnakes/{}/{action}", self.snake_id))
+                .header(
+                    header::COOKIE,
+                    format!(
+                        "{}={}",
+                        session::SESSION_COOKIE_NAME,
+                        signed_session_cookie(&self.state, session)
+                    ),
+                )
+                .body(Body::empty())
+                .unwrap();
+            let response = self.app.clone().oneshot(request).await.unwrap();
+            let status = response.status();
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            (status, String::from_utf8(body.to_vec()).unwrap())
+        }
+
         async fn deactivate(&self) {
             sqlx::query(
-                "INSERT INTO snake_health_status (battlesnake_id, consecutive_failures, last_failure, deactivated_at)
-                 VALUES ($1, 4, 'POST /move timed out', NOW())",
+                "INSERT INTO leaderboard_entries
+                     (leaderboard_id, battlesnake_id, disabled_at, disabled_reason,
+                      health_consecutive_failures, health_last_failure)
+                 SELECT leaderboard_id, $1, NOW(), 'health', 4, 'POST /move timed out'
+                 FROM leaderboards ORDER BY created_at, leaderboard_id LIMIT 1",
             )
             .bind(self.snake_id)
             .execute(&self.db)
             .await
             .unwrap();
         }
+    }
+
+    /// Test Snake plays one game per active leaderboard — enrolled or not —
+    /// and names the leaderboards a real game would break on.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn test_snake_plays_every_active_leaderboard(db: PgPool) {
+        use wiremock::matchers::{any, body_partial_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"apiversion":"1"}"#))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/move"))
+            .and(body_partial_json(
+                serde_json::json!({"game": {"map": "royale"}}),
+            ))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/move"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"move":"up"}"#))
+            .mount(&server)
+            .await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let fx = Fixture::new(db, "public").await;
+        sqlx::query("UPDATE battlesnakes SET url = $1 WHERE battlesnake_id = $2")
+            .bind(server.uri())
+            .bind(fx.snake_id)
+            .execute(&fx.db)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE leaderboards SET disabled_at = NOW() WHERE name = 'Constrictor 11x11'")
+            .execute(&fx.db)
+            .await
+            .unwrap();
+        let active: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM leaderboards WHERE disabled_at IS NULL")
+                .fetch_all(&fx.db)
+                .await
+                .unwrap();
+        assert!(active.iter().any(|name| name == "Royale 11x11"));
+
+        let (status, _) = fx.post(fx.visitor_session, "test").await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(server.received_requests().await.unwrap().is_empty());
+
+        let (status, html) = fx.post(fx.owner_session, "test").await;
+
+        assert_eq!(status, StatusCode::OK);
+        for name in &active {
+            assert!(html.contains(&format!("<h2>{name}</h2>")), "missing {name}");
+        }
+        assert!(
+            !html.contains("Constrictor 11x11"),
+            "retired boards aren't tested"
+        );
+        assert!(html.contains("4 snakes · Royale · 11x11"));
+        assert!(html.contains("real games would break on: Royale 11x11."));
+        assert!(html.contains("POST /move (turn 1)"));
+        let gets = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| r.method.as_str() == "GET")
+            .count();
+        assert_eq!(gets, 1, "GET / once, not once per leaderboard");
     }
 
     fn challenge_form(snake_id: Uuid) -> String {

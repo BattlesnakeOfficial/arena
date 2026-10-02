@@ -180,7 +180,7 @@ test.describe('Leaderboard Pages', () => {
     await authenticatedPage.getByRole('button', { name: 'Join' }).click();
     await expect(authenticatedPage.getByRole('cell', { name: snakeName })).toBeVisible();
 
-    // Simulate the health sweeper pulling the snake after 3 failed probes
+    // Simulate the health sweeper pulling the entry after 3 failed probes
     const snakes = await query<{ battlesnake_id: string }>(
       'SELECT battlesnake_id FROM battlesnakes WHERE name = $1',
       [snakeName]
@@ -188,13 +188,10 @@ test.describe('Leaderboard Pages', () => {
     const snakeId = snakes[0].battlesnake_id;
     await query(
       `UPDATE leaderboard_entries
-       SET disabled_at = NOW(), disabled_reason = 'health'
+       SET disabled_at = NOW(), disabled_reason = 'health',
+           health_consecutive_failures = 3,
+           health_last_failure = 'POST /move (turn 0): request timed out'
        WHERE battlesnake_id = $1`,
-      [snakeId]
-    );
-    await query(
-      `INSERT INTO snake_health_status (battlesnake_id, consecutive_failures, deactivated_at, last_failure)
-       VALUES ($1, 3, NOW(), 'POST /move: request timed out')`,
       [snakeId]
     );
 
@@ -210,12 +207,16 @@ test.describe('Leaderboard Pages', () => {
       authenticatedPage.locator('.flash-message[data-flash-type="success"]')
     ).toContainText('matchmaking rotation');
 
-    const health = await query<{ consecutive_failures: number; deactivated_at: string | null }>(
-      'SELECT consecutive_failures, deactivated_at FROM snake_health_status WHERE battlesnake_id = $1',
+    const health = await query<{
+      health_consecutive_failures: number;
+      health_last_failure: string | null;
+    }>(
+      `SELECT health_consecutive_failures, health_last_failure
+       FROM leaderboard_entries WHERE battlesnake_id = $1`,
       [snakeId]
     );
-    expect(health[0].consecutive_failures).toBe(0);
-    expect(health[0].deactivated_at).toBeNull();
+    expect(health[0].health_consecutive_failures).toBe(0);
+    expect(health[0].health_last_failure).toBeNull();
   });
 
   test('can pause and resume a snake in a leaderboard', async ({ authenticatedPage }) => {

@@ -13,7 +13,8 @@ use crate::state::AppState;
 pub const MATCHMAKER_INTERVAL_SECS: u64 = 15 * 60;
 
 /// Snake health sweep interval. With the default failure threshold of 3,
-/// a broken snake is pulled from matchmaking after ~90 minutes.
+/// a broken entry is pulled from matchmaking ~90 minutes after its first
+/// failed probe.
 pub const SNAKE_HEALTH_SWEEP_INTERVAL_SECS: u64 = 30 * 60;
 
 /// Stuck-game sweep interval. Fails non-tournament games left in
@@ -53,11 +54,12 @@ pub(crate) fn cron_registry() -> CronRegistry<AppState> {
         Duration::from_secs(6 * 60 * 60),
     );
 
-    // Snake health sweeper: probes leaderboard snakes and pulls ones that
-    // keep failing, emailing the owner (BS-3534)
+    // Snake health sweeper: probes leaderboard entries whose games show
+    // timeouts or errors and pulls ones that keep failing, emailing the
+    // owner (BS-3534, DEV-1515)
     registry.register_job(
         SnakeHealthSweeperJob,
-        Some("Health-check leaderboard snakes and deactivate broken ones"),
+        Some("Health-check failing leaderboard entries and pause broken ones"),
         Duration::from_secs(SNAKE_HEALTH_SWEEP_INTERVAL_SECS),
     );
 

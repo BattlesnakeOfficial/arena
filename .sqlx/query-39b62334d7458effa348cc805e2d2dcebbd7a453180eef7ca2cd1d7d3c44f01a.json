@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO snake_turns\n                         (turn_id, game_battlesnake_id, direction, latency_ms, timed_out, errored, created_at)\n                     VALUES ($1, $2, 'up', $3, $4, $5, NOW() - make_interval(mins => $6))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Int4",
+        "Bool",
+        "Bool",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "39b62334d7458effa348cc805e2d2dcebbd7a453180eef7ca2cd1d7d3c44f01a"
+}
