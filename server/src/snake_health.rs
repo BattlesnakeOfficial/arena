@@ -251,7 +251,7 @@ pub fn build_test_game(snake: &Battlesnake, spec: &TestGameSpec) -> TestGame {
         updated_at: now,
         name,
         url: snake.url.clone(),
-        engine_region: crate::models::battlesnake::EngineRegion::UsWest1,
+        engine_region: EngineRegion::UsWest1,
         user_id: snake.user_id,
         leaderboard_entry_id: None,
         color: snake.color.clone(),
@@ -367,8 +367,7 @@ pub enum FailureMode {
 /// Call `GET /` once. Real games tolerate any answer (they fall back to the
 /// snake's stored customizations), so only no answer at all is a failure.
 pub async fn check_identity(clients: &ProxyClients<'_>, snake: &Battlesnake) -> HealthCheckCall {
-    let outcome =
-        execute_call_routed(clients, snake.engine_region, Method::GET, &snake.url, None).await;
+    let outcome = execute_call_routed(clients, snake, Method::GET, &snake.url, None).await;
     evaluate_call("GET /", &Expectation::Info, outcome)
 }
 
@@ -421,7 +420,6 @@ pub async fn play_test_game(
         customizations,
     } = build_test_game(snake, spec);
     let budget_ms = engine_game.meta.timeout;
-    let region = snake.engine_region;
     let mut calls = Vec::with_capacity(4);
     let should_stop = |call: &HealthCheckCall| {
         failure_mode == FailureMode::AbortOnFailure
@@ -439,7 +437,7 @@ pub async fn play_test_game(
     let start = build_endpoint_url(&snake.url, "start");
     let outcome = execute_call_routed(
         clients,
-        region,
+        snake,
         Method::POST,
         &start,
         Some(&payload(&engine_game, &contexts)),
@@ -458,7 +456,7 @@ pub async fn play_test_game(
         }
         let outcome = execute_call_routed(
             clients,
-            region,
+            snake,
             Method::POST,
             &move_url,
             Some(&payload(&engine_game, &contexts)),
@@ -497,7 +495,7 @@ pub async fn play_test_game(
     let end = build_endpoint_url(&snake.url, "end");
     let outcome = execute_call_routed(
         clients,
-        region,
+        snake,
         Method::POST,
         &end,
         Some(&payload(&engine_game, &contexts)),
@@ -544,11 +542,12 @@ fn parsed_move(outcome: &CallOutcome) -> Option<(Direction, Option<String>)> {
 
 async fn execute_call_routed(
     clients: &ProxyClients<'_>,
-    region: EngineRegion,
+    snake: &Battlesnake,
     method: Method,
     target: &str,
     payload: Option<&wire::Game>,
 ) -> CallOutcome {
+    let region = snake.engine_region;
     let route = build_routed_request(
         clients,
         region,
@@ -603,13 +602,25 @@ async fn execute_call_routed(
             status,
             ..
         } => {
-            log_proxy_fault(region, "health response", Some(status));
+            log_proxy_fault(
+                &snake.battlesnake_id.to_string(),
+                region,
+                "health",
+                "response",
+                Some(status),
+            );
             CallOutcome::ProxyFault {
                 summary: format!("Engine proxy failed (HTTP {status})"),
             }
         }
         ProxyCall::Fault { kind } => {
-            log_proxy_fault(region, kind, None);
+            log_proxy_fault(
+                &snake.battlesnake_id.to_string(),
+                region,
+                "health",
+                kind,
+                None,
+            );
             CallOutcome::ProxyFault {
                 summary: "Engine proxy did not respond".to_string(),
             }

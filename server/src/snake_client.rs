@@ -107,8 +107,18 @@ pub(crate) fn classify_proxy_response(
     }
 }
 
-pub(crate) fn log_proxy_fault(region: EngineRegion, kind: &str, status: Option<StatusCode>) {
-    tracing::warn!(region = region.as_str(), kind, status = ?status,
+/// `snake_id` is the id the call was made for: the game_battlesnake_id in
+/// games (like every other snake-call WARN), the battlesnake_id for health
+/// probes (their test games use synthetic ids). `call` is the endpoint
+/// (move/start/end/info/health); `kind` is how the proxy failed.
+pub(crate) fn log_proxy_fault(
+    snake_id: &str,
+    region: EngineRegion,
+    call: &str,
+    kind: &str,
+    status: Option<StatusCode>,
+) {
+    tracing::warn!(snake_id, region = region.as_str(), call, kind, status = ?status,
         "Engine proxy fault, using fallback");
 }
 
@@ -830,11 +840,23 @@ pub async fn request_move_routed(
             status,
             ..
         } => {
-            log_proxy_fault(endpoint.engine_region, "response", Some(status));
+            log_proxy_fault(
+                &endpoint.snake_id,
+                endpoint.engine_region,
+                "move",
+                "response",
+                Some(status),
+            );
             fallback(None, false)
         }
         ProxyCall::Fault { kind } => {
-            log_proxy_fault(endpoint.engine_region, kind, None);
+            log_proxy_fault(
+                &endpoint.snake_id,
+                endpoint.engine_region,
+                "move",
+                kind,
+                None,
+            );
             fallback(None, false)
         }
     }
@@ -920,9 +942,17 @@ async fn request_lifecycle_routed(
             status,
             ..
         } => {
-            log_proxy_fault(endpoint.engine_region, path, Some(status));
+            log_proxy_fault(
+                &endpoint.snake_id,
+                endpoint.engine_region,
+                path,
+                "response",
+                Some(status),
+            );
         }
-        ProxyCall::Fault { kind } => log_proxy_fault(endpoint.engine_region, kind, None),
+        ProxyCall::Fault { kind } => {
+            log_proxy_fault(&endpoint.snake_id, endpoint.engine_region, path, kind, None)
+        }
         ProxyCall::Response { .. } => {}
     }
 }
@@ -972,11 +1002,23 @@ pub async fn request_info_routed(
             status,
             ..
         } => {
-            log_proxy_fault(endpoint.engine_region, "info", Some(status));
+            log_proxy_fault(
+                &endpoint.snake_id,
+                endpoint.engine_region,
+                "info",
+                "response",
+                Some(status),
+            );
             None
         }
         ProxyCall::Fault { kind } => {
-            log_proxy_fault(endpoint.engine_region, kind, None);
+            log_proxy_fault(
+                &endpoint.snake_id,
+                endpoint.engine_region,
+                "info",
+                kind,
+                None,
+            );
             None
         }
         ProxyCall::Response {
