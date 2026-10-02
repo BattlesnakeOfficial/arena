@@ -64,7 +64,8 @@ test('rankings, profile and committed score changes are public', async ({ authen
     await expect(row).toHaveCount(1);
     await expect(row.locator('td')).toHaveCount(4);
     await expect(row.locator('td.num')).toHaveText('1 board');
-    await expect(row.locator('td.rating')).toHaveText(oldRating);
+    await expect(row.locator('td.rating .total')).toHaveText(oldRating);
+    await expect(row.locator('td.rating .avg')).toHaveText(`avg ${oldRating}`);
 
     await query(
       `UPDATE leaderboard_entries SET display_score = 20
@@ -72,7 +73,7 @@ test('rankings, profile and committed score changes are public', async ({ authen
       [snake.battlesnake_id, board.leaderboard_id],
     );
     row = await findRankingRow(page, profile);
-    const newRating = await row.locator('td.rating').innerText();
+    const newRating = await row.locator('td.rating .total').innerText();
     expect(newRating).not.toBe(oldRating);
     await page.goto(profile);
     await expect(page.locator('.profile-rating strong')).toHaveText(newRating);
