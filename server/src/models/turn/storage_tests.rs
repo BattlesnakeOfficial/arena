@@ -219,7 +219,7 @@ async fn snake_insert_failure_is_identified_inside_its_turn(database: PgPool) {
     let turn = create_turn(&pool, &GameChannels::new(), game_id, 8, None)
         .await
         .unwrap();
-    let error = create_snake_turn(&pool, &turn, Uuid::new_v4(), "up", Some(42), false)
+    let error = create_snake_turn(&pool, &turn, Uuid::new_v4(), "up", Some(42), false, false)
         .await
         .unwrap_err();
     assert!(format!("{error:#}").contains("Failed to create snake turn"));
@@ -257,7 +257,7 @@ async fn successful_snake_insert_keeps_values_and_emits_completion(pool: PgPool)
     let turn = create_turn(&pool, &GameChannels::new(), game_id, 2, None)
         .await
         .unwrap();
-    let saved = create_snake_turn(&pool, &turn, game_snake_id, "left", Some(42), true)
+    let saved = create_snake_turn(&pool, &turn, game_snake_id, "left", Some(42), true, true)
         .await
         .unwrap();
     let rows = get_snake_turns_by_turn_id(&pool, turn.turn_id)
@@ -269,6 +269,7 @@ async fn successful_snake_insert_keeps_values_and_emits_completion(pool: PgPool)
     assert_eq!(rows[0].direction, "left");
     assert_eq!(rows[0].latency_ms, Some(42));
     assert!(rows[0].timed_out);
+    assert!(rows[0].errored);
     assert_eq!(
         &capture.states(game_id)[6..],
         [

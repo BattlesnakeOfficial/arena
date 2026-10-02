@@ -593,6 +593,7 @@ mod tests {
             timed_out: false,
             shout: None,
             status_code: Some(200),
+            errored: false,
         }];
 
         let frame = game_to_frame(
@@ -618,6 +619,7 @@ mod tests {
             timed_out: true,
             shout: None,
             status_code: None,
+            errored: false,
         }];
 
         let frame = game_to_frame(
@@ -646,6 +648,7 @@ mod tests {
             timed_out: false,
             shout: None,
             status_code,
+            errored: false,
         };
 
         let ok = game_to_frame(&game, &[], &[result(Some(200))], &Default::default());
@@ -771,6 +774,7 @@ mod tests {
             timed_out: false,
             shout: Some("Hello from move!".to_string()),
             status_code: Some(200),
+            errored: false,
         }];
 
         let frame = game_to_frame(
@@ -798,6 +802,7 @@ mod tests {
             timed_out: false,
             shout: None,
             status_code: Some(200),
+            errored: false,
         }];
 
         let frame = game_to_frame(

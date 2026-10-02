@@ -383,6 +383,7 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
                             &result.direction.to_string(),
                             result.latency_ms,
                             result.timed_out,
+                            result.errored,
                         )
                         .await?;
                     }
