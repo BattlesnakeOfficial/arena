@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT\n            snake_turn_id,\n            turn_id,\n            game_battlesnake_id,\n            direction,\n            latency_ms,\n            timed_out,\n            created_at\n        FROM snake_turns\n        WHERE turn_id = $1\n        ",
+  "query": "\n        INSERT INTO snake_turns (turn_id, game_battlesnake_id, direction, latency_ms, timed_out, errored)\n        VALUES ($1, $2, $3, $4, $5, $6)\n        RETURNING snake_turn_id, turn_id, game_battlesnake_id, direction, latency_ms, timed_out, errored, created_at\n        ",
   "describe": {
     "columns": [
       {
@@ -35,13 +35,23 @@
       },
       {
         "ordinal": 6,
+        "name": "errored",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 7,
         "name": "created_at",
         "type_info": "Timestamptz"
       }
     ],
     "parameters": {
       "Left": [
-        "Uuid"
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Int4",
+        "Bool",
+        "Bool"
       ]
     },
     "nullable": [
@@ -51,8 +61,9 @@
       false,
       true,
       false,
+      false,
       false
     ]
   },
-  "hash": "4de82d35f24eb1bf9bd6dc77a10726afd444145e2ed00e2700c7bb66d715ddf7"
+  "hash": "2b3ff834a346c4a2d2d7709e63d469886026ddcf3b95bab36d6e9ed163d2cc23"
 }

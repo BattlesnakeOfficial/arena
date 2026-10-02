@@ -267,6 +267,7 @@ pub struct SnakeTurn {
     pub direction: String,
     pub latency_ms: Option<i32>,
     pub timed_out: bool,
+    pub errored: bool,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 /// Create a snake turn record
@@ -277,6 +278,7 @@ pub async fn create_snake_turn(
     direction: &str,
     latency_ms: Option<i64>,
     timed_out: bool,
+    errored: bool,
 ) -> cja::Result<SnakeTurn> {
     let turn_id = turn.turn_id;
     let latency_i32 = latency_ms.map(|ms| ms as i32);
@@ -294,15 +296,16 @@ pub async fn create_snake_turn(
     let row = phase(turn.game_id, "persist_turn.insert_snake", Some(turn.turn_number), async {
         sqlx::query!(
         r#"
-        INSERT INTO snake_turns (turn_id, game_battlesnake_id, direction, latency_ms, timed_out)
-        VALUES ($1, $2, $3, $4, $5)
-        RETURNING snake_turn_id, turn_id, game_battlesnake_id, direction, latency_ms, timed_out, created_at
+        INSERT INTO snake_turns (turn_id, game_battlesnake_id, direction, latency_ms, timed_out, errored)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        RETURNING snake_turn_id, turn_id, game_battlesnake_id, direction, latency_ms, timed_out, errored, created_at
         "#,
         turn_id,
         game_battlesnake_id,
         direction,
         latency_i32,
-        timed_out
+        timed_out,
+        errored
     )
     .fetch_one(&mut *connection)
     .await
@@ -316,6 +319,7 @@ pub async fn create_snake_turn(
         direction: row.direction,
         latency_ms: row.latency_ms,
         timed_out: row.timed_out,
+        errored: row.errored,
         created_at: row.created_at,
     })
 }
@@ -334,6 +338,7 @@ pub async fn get_snake_turns_by_turn_id(
             direction,
             latency_ms,
             timed_out,
+            errored,
             created_at
         FROM snake_turns
         WHERE turn_id = $1
@@ -353,6 +358,7 @@ pub async fn get_snake_turns_by_turn_id(
             direction: row.direction,
             latency_ms: row.latency_ms,
             timed_out: row.timed_out,
+            errored: row.errored,
             created_at: row.created_at,
         })
         .collect();
@@ -428,6 +434,7 @@ mod tests {
             direction: "up".to_string(),
             latency_ms: Some(123),
             timed_out: false,
+            errored: false,
             created_at: chrono::Utc::now(),
         };
 
@@ -447,6 +454,7 @@ mod tests {
                 direction: direction.to_string(),
                 latency_ms: None,
                 timed_out: false,
+                errored: false,
                 created_at: chrono::Utc::now(),
             };
             assert_eq!(snake_turn.direction, direction);
@@ -462,6 +470,7 @@ mod tests {
             direction: "up".to_string(),
             latency_ms: None,
             timed_out: true,
+            errored: false,
             created_at: chrono::Utc::now(),
         };
         assert!(snake_turn.timed_out);

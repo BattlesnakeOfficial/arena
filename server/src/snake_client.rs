@@ -271,6 +271,11 @@ pub struct MoveResult {
     /// (timeout, transport error, engine-proxy fault). Surfaced in frames as
     /// `StatusCode` like the legacy engine.
     pub status_code: Option<u16>,
+    /// The snake answered but the answer was unusable: a non-2xx status, a
+    /// body that isn't a move response, or an unrecognized direction. Kept
+    /// apart from `timed_out` (no answer at all), and false for engine-proxy
+    /// faults, which are never the snake's fault.
+    pub errored: bool,
 }
 
 /// Build the request body for a specific snake
@@ -392,15 +397,16 @@ pub async fn request_move(
             match read_body_capped(response, BODY_READ_CAP_BYTES).await {
                 Ok(body) => match serde_json::from_str::<MoveResponse>(&body) {
                     Ok(move_response) => {
-                        let direction = parse_direction(&move_response.direction)
-                            .unwrap_or_else(|| last_direction.unwrap_or(Direction::Up));
+                        let parsed = parse_direction(&move_response.direction);
                         MoveResult {
                             snake_id: snake_id.to_string(),
-                            direction,
+                            direction: parsed
+                                .unwrap_or_else(|| last_direction.unwrap_or(Direction::Up)),
                             latency_ms: Some(elapsed),
                             timed_out: false,
                             shout: sanitize_shout(move_response.shout),
                             status_code: status,
+                            errored: move_errored(status, parsed),
                         }
                     }
                     Err(e) => invalid_move_response(snake_id, last_direction, elapsed, status, &e),
@@ -422,6 +428,7 @@ pub async fn request_move(
                 timed_out: true,
                 shout: None,
                 status_code: None,
+                errored: false,
             }
         }
         Err(_) => {
@@ -438,6 +445,7 @@ pub async fn request_move(
                 timed_out: true,
                 shout: None,
                 status_code: None,
+                errored: false,
             }
         }
     }
@@ -462,7 +470,15 @@ fn invalid_move_response(
         timed_out: false,
         shout: None,
         status_code,
+        errored: true,
     }
+}
+
+/// Whether a parsed move response still counts as an error: real games use
+/// the move anyway, but a non-2xx status or an unrecognized direction means
+/// the snake's server is misbehaving.
+fn move_errored(status: Option<u16>, direction: Option<Direction>) -> bool {
+    direction.is_none() || !status.is_some_and(|s| (200..300).contains(&s))
 }
 
 /// Call /start endpoint (fire and forget, no response expected)
@@ -741,6 +757,7 @@ pub async fn request_move_routed(
         timed_out,
         shout: None,
         status_code: None,
+        errored: false,
     };
     match execute_proxy(builder.json(&body), timeout).await {
         ProxyCall::Response {
@@ -748,15 +765,18 @@ pub async fn request_move_routed(
             body,
             status,
         } => match serde_json::from_str::<MoveResponse>(&body) {
-            Ok(moved) => MoveResult {
-                snake_id: endpoint.snake_id.clone(),
-                direction: parse_direction(&moved.direction)
-                    .unwrap_or_else(|| last_direction.unwrap_or(Direction::Up)),
-                latency_ms: Some(latency_ms),
-                timed_out: false,
-                shout: sanitize_shout(moved.shout),
-                status_code: Some(status.as_u16()),
-            },
+            Ok(moved) => {
+                let parsed = parse_direction(&moved.direction);
+                MoveResult {
+                    snake_id: endpoint.snake_id.clone(),
+                    direction: parsed.unwrap_or_else(|| last_direction.unwrap_or(Direction::Up)),
+                    latency_ms: Some(latency_ms),
+                    timed_out: false,
+                    shout: sanitize_shout(moved.shout),
+                    status_code: Some(status.as_u16()),
+                    errored: move_errored(Some(status.as_u16()), parsed),
+                }
+            }
             Err(error) => invalid_move_response(
                 &endpoint.snake_id,
                 last_direction,
@@ -1165,6 +1185,7 @@ mod tests {
         assert_eq!(result.direction, Direction::Right);
         assert_eq!(result.latency_ms, Some(28));
         assert!(!result.timed_out);
+        assert!(!result.errored);
     }
 
     #[tokio::test]
@@ -1223,6 +1244,9 @@ mod tests {
             .await;
             assert_eq!(result.direction, direction);
             assert_eq!(result.timed_out, timed_out);
+            // Transport failures are timeouts, and the 407 retry reached a
+            // healthy snake: neither is an unusable answer.
+            assert!(!result.errored);
             if status != 407 {
                 assert_eq!(result.latency_ms, latency);
             }
@@ -1273,6 +1297,8 @@ mod tests {
             assert_eq!(result.direction, Direction::Down);
             assert_eq!(result.latency_ms, Some(41));
             assert!(!result.timed_out);
+            // The move is still used, but a non-2xx answer is the snake erroring.
+            assert!(result.errored);
         }
     }
 
@@ -1361,6 +1387,7 @@ mod tests {
         .await;
         assert!(start.elapsed() < Duration::from_secs(1));
         assert!(!result.timed_out);
+        assert!(!result.errored, "a proxy fault is never the snake's error");
         assert!(result.latency_ms.is_none());
     }
 
@@ -1589,7 +1616,73 @@ mod tests {
         assert_eq!(result.direction, Direction::Left);
         assert!(result.shout.is_none());
         assert!(!result.timed_out);
+        assert!(result.errored);
         assert!(result.latency_ms.is_some());
+    }
+
+    #[tokio::test]
+    async fn unusable_move_answers_are_errored_but_not_timed_out() {
+        let game = create_test_engine_game_with_snakes(vec!["snake-1"]);
+        for (status, body, errored) in [
+            (200, r#"{"move":"up"}"#, false),
+            (200, r#"{"move":"DOWN","shout":"hi"}"#, false),
+            (201, r#"{"move":"left"}"#, false),
+            (200, r#"{"move":"north"}"#, true),
+            (200, r#"{"shout":"no move"}"#, true),
+            (200, "not json", true),
+            (500, r#"{"move":"up"}"#, true),
+            (500, "Internal Server Error", true),
+            (404, "", true),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/move"))
+                .respond_with(ResponseTemplate::new(status).set_body_string(body))
+                .mount(&server)
+                .await;
+            let result = request_move(
+                &Client::new(),
+                &server.uri(),
+                &game,
+                "snake-1",
+                Duration::from_secs(2),
+                Some(Direction::Left),
+                &HashMap::new(),
+                &HashMap::new(),
+            )
+            .await;
+            assert_eq!(result.errored, errored, "{status} {body}");
+            assert!(!result.timed_out, "{status} {body}");
+            assert!(result.latency_ms.is_some(), "{status} {body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn timed_out_move_is_not_errored() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/move"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(r#"{"move":"up"}"#)
+                    .set_delay(Duration::from_millis(500)),
+            )
+            .mount(&server)
+            .await;
+        let game = create_test_engine_game_with_snakes(vec!["snake-1"]);
+        let result = request_move(
+            &Client::new(),
+            &server.uri(),
+            &game,
+            "snake-1",
+            Duration::from_millis(50),
+            None,
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .await;
+        assert!(result.timed_out);
+        assert!(!result.errored);
     }
 
     #[test]
@@ -1706,6 +1799,7 @@ mod tests {
             timed_out: false,
             shout: Some("hello".to_string()),
             status_code: Some(200),
+            errored: false,
         };
         let cloned = result.clone();
         assert_eq!(cloned.snake_id, "test");
