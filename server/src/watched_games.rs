@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{
     collections::{HashMap, HashSet},
     str::FromStr,
-    sync::Arc,
+    sync::{Arc, PoisonError},
     time::Duration,
 };
 
@@ -208,7 +208,7 @@ impl WatchedGames {
                 .entry
                 .last_turn_id
                 .lock()
-                .expect("turn ID mutex poisoned") = turn_id;
+                .unwrap_or_else(PoisonError::into_inner) = turn_id;
             subscription
                 .entry
                 .readiness
@@ -242,7 +242,10 @@ impl WatchedGames {
                     *id,
                     entry.clone(),
                     cursor,
-                    *entry.last_turn_id.lock().expect("turn ID mutex poisoned"),
+                    *entry
+                        .last_turn_id
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner),
                 ))
             })
             .collect()
@@ -334,7 +337,11 @@ async fn poll_batch(
             .get(&id)
             .is_some_and(|current| Arc::ptr_eq(current, &entry))
             || *entry.readiness.borrow() != (Readiness::Active { cursor })
-            || *entry.last_turn_id.lock().expect("turn ID mutex poisoned") != turn_id
+            || *entry
+                .last_turn_id
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                != turn_id
         {
             continue;
         }
@@ -360,7 +367,10 @@ async fn poll_batch(
         if let Some(frames) = grouped.remove(&id) {
             if let Some(last) = frames.last() {
                 next_cursor = last.turn_number;
-                *entry.last_turn_id.lock().expect("turn ID mutex poisoned") = Some(last.turn_id);
+                *entry
+                    .last_turn_id
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = Some(last.turn_id);
             }
             let _ = entry
                 .updates
