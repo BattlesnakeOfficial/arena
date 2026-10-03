@@ -8,8 +8,10 @@
 //!
 //! The template generator must use exactly these colours. The guides layer uses the
 //! Multiply blend mode, so guides that sit over the reference ghost come out as the
-//! product of the two colours; [`EXCLUDED`] includes those products, and the exclusion
-//! also covers anti-aliased blends of each colour towards white (or towards the ghost).
+//! product of the two colours. Those products are dark (navy and crimson), so they are
+//! only excluded when the ghost itself is visible in the image; otherwise a navy or
+//! crimson drawing would vanish. The exclusion also covers anti-aliased blends of each
+//! colour towards white (or of each product towards the ghost).
 
 /// An sRGB colour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,17 +75,15 @@ pub const EVIDENCE_DISTANCE: u32 = 24;
 pub const EVIDENCE_MIN_CHROMA: u8 = 12;
 
 /// Share of all pixels that must be guide evidence before `guides_visible` fires (0.1%).
+/// The same share of ghost-coloured pixels counts as a visible reference.
 const EVIDENCE_MIN_PER_MILLE: usize = 1;
 
-/// Colours that are never ink: the guide colours, the ghost, and every guide colour
-/// multiplied over the ghost (guides drawn over a visible reference).
-pub(crate) const EXCLUDED: [Rgb; 11] = [
-    GRID,
-    GUIDE,
-    LABEL,
-    ATTACH,
-    ATTACH_LABEL,
-    REFERENCE_GHOST,
+/// Colours that are never ink: the guide colours and the ghost.
+pub(crate) const TEMPLATE: [Rgb; 6] = [GRID, GUIDE, LABEL, ATTACH, ATTACH_LABEL, REFERENCE_GHOST];
+
+/// Every guide colour multiplied over the ghost: guides drawn over a visible reference.
+/// Not ink either, but only when the ghost is visible (they are dark).
+pub(crate) const GHOST_PRODUCTS: [Rgb; 5] = [
     GRID.multiply(REFERENCE_GHOST),
     GUIDE.multiply(REFERENCE_GHOST),
     LABEL.multiply(REFERENCE_GHOST),
@@ -94,20 +94,24 @@ pub(crate) const EXCLUDED: [Rgb; 11] = [
 const WHITE: Rgb = Rgb::new(255, 255, 255);
 
 /// Anti-aliased guide edges are blends between two colours, so the exclusion covers the
-/// line segments between them: every template colour towards white (label halos and the
-/// white background) and every guide-over-ghost product towards the ghost.
-const BLENDS: [(Rgb, Rgb); 11] = [
+/// line segments between them: every template colour towards white (the white
+/// background) ...
+const BLENDS: [(Rgb, Rgb); 6] = [
     (GRID, WHITE),
     (GUIDE, WHITE),
     (LABEL, WHITE),
     (ATTACH, WHITE),
     (ATTACH_LABEL, WHITE),
     (REFERENCE_GHOST, WHITE),
-    (EXCLUDED[6], REFERENCE_GHOST),
-    (EXCLUDED[7], REFERENCE_GHOST),
-    (EXCLUDED[8], REFERENCE_GHOST),
-    (EXCLUDED[9], REFERENCE_GHOST),
-    (EXCLUDED[10], REFERENCE_GHOST),
+];
+
+/// ... and, when the ghost is visible, every guide-over-ghost product towards the ghost.
+const GHOST_BLENDS: [(Rgb, Rgb); 5] = [
+    (GHOST_PRODUCTS[0], REFERENCE_GHOST),
+    (GHOST_PRODUCTS[1], REFERENCE_GHOST),
+    (GHOST_PRODUCTS[2], REFERENCE_GHOST),
+    (GHOST_PRODUCTS[3], REFERENCE_GHOST),
+    (GHOST_PRODUCTS[4], REFERENCE_GHOST),
 ];
 
 fn dist_sq(a: Rgb, b: Rgb) -> u32 {
@@ -115,9 +119,12 @@ fn dist_sq(a: Rgb, b: Rgb) -> u32 {
     d(a.r, b.r).pow(2) + d(a.g, b.g).pow(2) + d(a.b, b.b).pow(2)
 }
 
-fn min_dist_sq(c: Rgb) -> u32 {
-    EXCLUDED
+/// Squared distance to the nearest excluded colour.
+fn min_dist_sq(c: Rgb, ghost: bool) -> u32 {
+    let products: &[Rgb] = if ghost { &GHOST_PRODUCTS } else { &[] };
+    TEMPLATE
         .iter()
+        .chain(products)
         .map(|&p| dist_sq(c, p))
         .min()
         .unwrap_or(u32::MAX)
@@ -139,10 +146,12 @@ fn segment_dist_sq(c: Rgb, p: Rgb, q: Rgb) -> f32 {
 }
 
 /// Within [`NEAR_DISTANCE`] of a template colour or of an anti-aliased blend of one.
-fn near_template(c: Rgb) -> bool {
+fn near_template(c: Rgb, ghost: bool) -> bool {
     let near = NEAR_DISTANCE.pow(2) as f32;
+    let ghost_blends: &[(Rgb, Rgb)] = if ghost { &GHOST_BLENDS } else { &[] };
     BLENDS
         .iter()
+        .chain(ghost_blends)
         .any(|&(p, q)| segment_dist_sq(c, p, q) <= near)
 }
 
@@ -210,10 +219,19 @@ struct Class {
     soft: bool,
 }
 
-fn classify(rgb: Rgb, a: u8, alpha_mode: bool) -> Class {
+/// Composite over white (also flattens any non-meaningful alpha).
+fn over_white(rgb: Rgb, a: u8) -> Rgb {
+    let over =
+        |ch: u8| -> u8 { ((ch as u32 * a as u32 + 255 * (255 - a as u32) + 127) / 255) as u8 };
+    Rgb::new(over(rgb.r), over(rgb.g), over(rgb.b))
+}
+
+/// `ghost`: the reference ghost is visible, so guide-over-ghost products aren't ink.
+fn classify(rgb: Rgb, a: u8, alpha_mode: bool, ghost: bool) -> Class {
     let near = NEAR_DISTANCE.pow(2);
-    let evidence =
-        |c: Rgb| min_dist_sq(c) <= EVIDENCE_DISTANCE.pow(2) && chroma(c) >= EVIDENCE_MIN_CHROMA;
+    let evidence = |c: Rgb| {
+        min_dist_sq(c, ghost) <= EVIDENCE_DISTANCE.pow(2) && chroma(c) >= EVIDENCE_MIN_CHROMA
+    };
     if alpha_mode {
         if a == 0 {
             return Class::default();
@@ -225,7 +243,7 @@ fn classify(rgb: Rgb, a: u8, alpha_mode: bool) -> Class {
                 ..Class::default()
             };
         }
-        if near_template(rgb) {
+        if near_template(rgb, ghost) {
             return Class {
                 evidence: solid && evidence(rgb),
                 ..Class::default()
@@ -239,11 +257,8 @@ fn classify(rgb: Rgb, a: u8, alpha_mode: bool) -> Class {
             ..Class::default()
         }
     } else {
-        // Composite over white (also flattens any non-meaningful alpha).
-        let over =
-            |ch: u8| -> u8 { ((ch as u32 * a as u32 + 255 * (255 - a as u32) + 127) / 255) as u8 };
-        let rgb = Rgb::new(over(rgb.r), over(rgb.g), over(rgb.b));
-        if near_template(rgb) {
+        let rgb = over_white(rgb, a);
+        if near_template(rgb, ghost) {
             return Class {
                 evidence: evidence(rgb),
                 ..Class::default()
@@ -257,11 +272,43 @@ fn classify(rgb: Rgb, a: u8, alpha_mode: bool) -> Class {
     }
 }
 
+/// The colour the ink rule judges a pixel by, and whether it is solid: the raw colour
+/// in an alpha raster, the colour composited over white otherwise.
+fn judged(rgb: Rgb, a: u8, alpha_mode: bool) -> (Rgb, bool) {
+    if alpha_mode {
+        (rgb, a >= 128)
+    } else {
+        (over_white(rgb, a), true)
+    }
+}
+
+/// At least 0.1% of the pixels are solid and the ghost's colour: the reference layer was
+/// left visible.
+fn ghost_visible(px: &Pixels, alpha_mode: bool) -> bool {
+    let total = px.width * px.height;
+    let mut ghost_px = 0usize;
+    let mut last: Option<((Rgb, u8), bool)> = None;
+    for p in px.data.chunks_exact(px.channels) {
+        let key = Pixels::pixel(p);
+        let is_ghost = match last {
+            Some((k, g)) if k == key => g,
+            _ => {
+                let (c, solid) = judged(key.0, key.1, alpha_mode);
+                let g = solid && dist_sq(c, REFERENCE_GHOST) <= EVIDENCE_DISTANCE.pow(2);
+                last = Some((key, g));
+                g
+            }
+        };
+        ghost_px += usize::from(is_ghost);
+    }
+    ghost_px > 0 && ghost_px * 1000 >= total * EVIDENCE_MIN_PER_MILLE
+}
+
 /// The template-aware ink rule.
 ///
 /// * **Alpha raster** (at least 0.5% transparent and 0.1% opaque pixels): coverage is the
 ///   pixel's alpha, unless its colour is near a template colour or near white (white
-///   details and the white halo behind template labels become holes).
+///   details become holes).
 /// * **Opaque raster** (everything else, including all JPEGs): composite over white, then
 ///   coverage is the darkness `255 - luma`, unless the colour is near a template colour.
 ///   After resampling, coverage is thresholded at 50%, i.e. luma < 0.5 is ink.
@@ -281,6 +328,7 @@ pub(crate) fn ink(px: &Pixels) -> Ink {
     } else {
         false
     };
+    let ghost = ghost_visible(px, alpha_mode);
 
     let mut coverage = Vec::with_capacity(total);
     let (mut evidence_px, mut coloured_px, mut light_dropped_px) = (0usize, 0usize, 0usize);
@@ -292,7 +340,7 @@ pub(crate) fn ink(px: &Pixels) -> Ink {
         let class = match last {
             Some((k, class)) if k == key => class,
             _ => {
-                let class = classify(key.0, key.1, alpha_mode);
+                let class = classify(key.0, key.1, alpha_mode, ghost);
                 last = Some((key, class));
                 class
             }
@@ -305,16 +353,15 @@ pub(crate) fn ink(px: &Pixels) -> Ink {
         soft_px += usize::from(class.soft);
     }
 
-    let guides_visible = evidence_px > 0 && evidence_px * 1000 >= total * EVIDENCE_MIN_PER_MILLE;
+    let per_mille = |n: usize| n * 1000 >= total;
     Ink {
         coverage,
-        guides_visible,
-        // 1% of the canvas in a clear colour, or 0.1% of white areas dropped (unless the
-        // template guides, whose labels have white halos, explain the white).
-        colours_flattened: coloured_px * 100 >= total
-            || (light_dropped_px * 1000 >= total && !guides_visible),
-        // More than 5% of the visible drawing is between 10% and 90% opaque.
-        semi_transparent: visible_px > 0 && soft_px * 20 > visible_px,
+        guides_visible: evidence_px > 0 && evidence_px * 1000 >= total * EVIDENCE_MIN_PER_MILLE,
+        // 1% of the canvas in a clear colour, or 0.1% of it white and dropped.
+        colours_flattened: coloured_px * 100 >= total || per_mille(light_dropped_px),
+        // More than 5% of the visible drawing, and at least 0.1% of the canvas, is
+        // between 10% and 90% opaque (a stray anti-aliased pixel doesn't count).
+        semi_transparent: soft_px * 20 > visible_px && per_mille(soft_px),
     }
 }
 
@@ -325,9 +372,26 @@ mod tests {
     #[test]
     fn multiply_products_are_dark_enough_to_need_excluding() {
         // Guides over the ghost come out darker than either colour; at least one is
-        // below 50% luma, which is why the products are in EXCLUDED.
-        let darkest = EXCLUDED[6..].iter().map(|&c| luma(c)).min().unwrap_or(255);
+        // below 50% luma, which is why the products are excluded when the ghost shows,
+        // and why they must not be otherwise.
+        let darkest = GHOST_PRODUCTS.iter().map(|&c| luma(c)).min().unwrap_or(255);
         assert!(darkest < 128, "{darkest}");
+    }
+
+    #[test]
+    fn dark_navy_and_crimson_are_ink_unless_the_ghost_shows() {
+        // Each is within 24 of a guide-over-ghost product but far from every template
+        // colour.
+        for c in [Rgb::new(20, 70, 130), Rgb::new(150, 25, 70)] {
+            let alone = classify(c, 255, false, false);
+            assert!(alone.coverage > 128 && !alone.evidence, "{}", c.to_hex());
+            let with_ghost = classify(c, 255, false, true);
+            assert!(
+                with_ghost.coverage == 0 && with_ghost.evidence,
+                "{}",
+                c.to_hex()
+            );
+        }
     }
 
     #[test]
@@ -362,5 +426,6 @@ mod tests {
         });
         assert_eq!(ink.coverage, vec![255, 0, 0, 0, 0]);
         assert!(ink.guides_visible);
+        assert!(!ink.semi_transparent && !ink.colours_flattened);
     }
 }

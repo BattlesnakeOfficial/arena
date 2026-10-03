@@ -13,8 +13,8 @@ use arena::design_kit::{
 use common::design_kit::*;
 use proptest::prelude::*;
 
-fn run(bytes: &[u8], fix: Option<Fix>) -> Result<CleanShape, ProcessError> {
-    let r = process_upload(bytes, &Limits::default(), fix);
+fn run(bytes: &[u8], fixes: &[Fix]) -> Result<CleanShape, ProcessError> {
+    let r = process_upload(bytes, &Limits::default(), fixes);
     if let Ok(s) = &r {
         assert_clean(s);
     }
@@ -113,12 +113,12 @@ fn sniffing_gives_exact_variants() {
         assert_eq!(sniff(&bytes), want, "{name}");
         // The pipeline reports sniffing errors unchanged.
         if let Err(e) = want {
-            assert_eq!(run(&bytes, None).err(), Some(e), "{name}");
+            assert_eq!(run(&bytes, &[]).err(), Some(e), "{name}");
         }
     }
 
     // SVG is recognised but not processed until PR 2.
-    let e = run(svg, None).expect_err("svg is not supported yet");
+    let e = run(svg, &[]).expect_err("svg is not supported yet");
     assert_eq!(e, NotYetSupported(Svg));
     assert_eq!(e.code(), "not_yet_supported");
     assert!(!e.is_internal());
@@ -236,28 +236,28 @@ fn roughen(rgba: &[u8], side: usize) -> Vec<u8> {
 fn check_round_trip(kind: AssetKind, slug: &str, side: u32, how: Export) -> CleanShape {
     let svg = catalog_svg(kind, slug);
     let label = format!("{}/{slug} @{side} {how:?}", kind_dir(kind));
-    let shape = run(&export(&svg, side, how), None).unwrap_or_else(|e| panic!("{label}: {e:?}"));
+    let shape = run(&export(&svg, side, how), &[]).unwrap_or_else(|e| panic!("{label}: {e:?}"));
     let score = iou(&alpha(&svg, 400), &shape_alpha(&shape, 400));
     println!(
         "{label}: IoU {score:.4}, left edge {:.1}%, d {} B",
-        shape.metrics.left_edge_pct,
-        shape.path_d.len()
+        shape.metrics().left_edge_pct,
+        shape.path_d().len()
     );
     assert!(score >= 0.97, "{label}: IoU {score:.4}");
     assert!(
-        shape.metrics.left_edge_pct >= 95.0,
+        shape.metrics().left_edge_pct >= 95.0,
         "{label}: left edge {:?}",
-        shape.metrics
+        shape.metrics()
     );
     assert!(
         shape.passes(kind),
         "{label}: official assets pass every check, got {:?}",
-        shape.lints
+        shape.lints()
     );
     assert!(
-        !shape.info.contains(&Lint::GuidesVisible),
+        !shape.info().contains(&Lint::GuidesVisible),
         "{label}: {:?}",
-        shape.info
+        shape.info()
     );
     shape
 }
@@ -306,11 +306,11 @@ fn roughened_drawings_round_trip() {
         let shape = check_round_trip(kind, slug, 1024, Export::Rough);
         assert!(
             shape
-                .info
+                .info()
                 .iter()
                 .any(|l| matches!(l, Lint::SpecksRemoved { count } if *count > 0)),
             "{slug}: {:?}",
-            shape.info
+            shape.info()
         );
     }
 }
@@ -323,13 +323,140 @@ fn jpeg_q80_round_trips() {
         (AssetKind::Tail, "bolt"),
     ] {
         let shape = check_round_trip(kind, slug, 1024, Export::Jpeg80);
-        assert_eq!(shape.input, InputFormat::Jpeg);
+        assert_eq!(shape.input(), InputFormat::Jpeg);
         assert!(
-            !shape.info.contains(&Lint::ColoursFlattened),
+            !shape.info().contains(&Lint::ColoursFlattened),
             "{:?}",
-            shape.info
+            shape.info()
         );
     }
+}
+
+#[test]
+fn navy_and_crimson_drawings_are_ink() {
+    // Each is within 24 of a guide colour multiplied over the reference ghost, so they
+    // would vanish if those products were excluded without a visible ghost.
+    for fill in ["#144682", "#961946"] {
+        let svg = board_svg(&catalog_inner(AssetKind::Head, "default"), fill);
+        let rgba = straight_rgba(&render(&svg, 512));
+        let exports = [
+            (
+                "transparent",
+                encode_png(512, 512, png::ColorType::Rgba, &rgba),
+            ),
+            (
+                "opaque",
+                encode_png(512, 512, png::ColorType::Rgb, &over_white(&rgba)),
+            ),
+        ];
+        for (how, png) in exports {
+            let s = run(&png, &[]).unwrap_or_else(|e| panic!("{fill} {how}: {e:?}"));
+            let score = iou(&alpha(&head("default"), 400), &shape_alpha(&s, 400));
+            assert!(score >= 0.97, "{fill} {how}: IoU {score:.4}");
+            assert_eq!(s.info(), [Lint::ColoursFlattened], "{fill} {how}");
+            assert!(s.passes(AssetKind::Head), "{fill} {how}: {:?}", s.lints());
+        }
+    }
+}
+
+/// An opaque JPEG of `svg` with an EXIF APP1 segment giving `orientation`.
+fn jpeg_with_orientation(svg: &str, side: u32, orientation: u16) -> Vec<u8> {
+    let rgb = over_white(&straight_rgba(&render(svg, side)));
+    // TIFF, little-endian: IFD0 at 8 with one entry, tag 0x0112 (SHORT, count 1).
+    let mut exif = b"Exif\0\0II*\0\x08\0\0\0\x01\0\x12\x01\x03\0\x01\0\0\0".to_vec();
+    exif.extend_from_slice(&orientation.to_le_bytes());
+    exif.extend_from_slice(&[0; 6]); // value padding, then "no next IFD"
+    let mut out = Vec::new();
+    let mut enc = jpeg_encoder::Encoder::new(&mut out, 90);
+    enc.add_app_segment(1, exif).expect("APP1");
+    enc.encode(&rgb, side as u16, side as u16, jpeg_encoder::ColorType::Rgb)
+        .expect("jpeg encode");
+    out
+}
+
+#[test]
+fn exif_orientation_is_applied() {
+    // An iPad camera stores the pixels turned and says "rotate 90° clockwise to view"
+    // (orientation 6). The browser shows the artist an upright head; so must we.
+    let stored = transformed(AssetKind::Head, "default", "rotate(-90 50 50)");
+    let s = run(&jpeg_with_orientation(&stored, 512, 6), &[]).expect("orientation 6");
+    let score = iou(&alpha(&head("default"), 400), &shape_alpha(&s, 400));
+    assert!(score >= 0.97, "IoU {score:.4}");
+    assert!(s.passes(AssetKind::Head), "{:?}", s.lints());
+    // Without the tag the same pixels are a head facing up.
+    let plain = run(&jpeg_with_orientation(&stored, 512, 1), &[]).expect("orientation 1");
+    assert_eq!(codes(&plain.lints().head), ["faces_up_down"]);
+    // Orientation 2 is a mirror: the stored mirror image reads as the original.
+    let mirrored = transformed(AssetKind::Head, "default", MIRROR);
+    let s = run(&jpeg_with_orientation(&mirrored, 512, 2), &[]).expect("orientation 2");
+    assert!(s.passes(AssetKind::Head), "{:?}", s.lints());
+}
+
+#[test]
+fn progressive_jpegs_have_a_smaller_size_cap() {
+    // Progressive JPEGs hold every coefficient until the last scan, so colour ones are
+    // capped at max_side / sqrt(2). Scaled down here to keep the test fast.
+    let limits = Limits {
+        max_raster_side: 512,
+        ..Limits::default()
+    };
+    let encode = |side: u16, progressive: bool, colour: jpeg_encoder::ColorType| {
+        let channels = if colour == jpeg_encoder::ColorType::Luma {
+            1
+        } else {
+            3
+        };
+        let mut data = vec![255u8; side as usize * side as usize * channels];
+        data[..side as usize * channels * 40].fill(0);
+        let mut out = Vec::new();
+        let mut enc = jpeg_encoder::Encoder::new(&mut out, 80);
+        enc.set_progressive(progressive);
+        enc.encode(&data, side, side, colour).expect("jpeg encode");
+        out
+    };
+    let rgb = jpeg_encoder::ColorType::Rgb;
+    assert_eq!(
+        process_upload(&encode(400, true, rgb), &limits, &[]).err(),
+        Some(ProcessError::ImageTooLarge {
+            width: 400,
+            height: 400,
+            max_side: 362
+        })
+    );
+    // Baseline at the same size, and progressive within the cap or in greyscale, are fine.
+    for (side, progressive, colour) in [
+        (400, false, rgb),
+        (360, true, rgb),
+        (400, true, jpeg_encoder::ColorType::Luma),
+    ] {
+        let r = process_upload(&encode(side, progressive, colour), &limits, &[]);
+        assert!(r.is_ok(), "{side} progressive={progressive}: {:?}", r.err());
+    }
+}
+
+#[test]
+fn png_metadata_chunks_are_skipped() {
+    // An ICC profile that inflates to 8 MiB and 3 MiB of plain text: the decoder's own
+    // allocations are capped at 4 MiB, so reading these chunks would either inflate a
+    // profile we never use or fail the upload. They are skipped instead.
+    let rgba = straight_rgba(&render(&head("default"), 256));
+    let mut info = png::Info::with_size(256, 256);
+    info.color_type = png::ColorType::Rgba;
+    info.bit_depth = png::BitDepth::Eight;
+    info.icc_profile = Some(std::borrow::Cow::Owned(vec![0; 8 << 20]));
+    let mut out = Vec::new();
+    {
+        let mut enc = png::Encoder::with_info(&mut out, info).expect("png info");
+        enc.add_text_chunk("Comment".into(), "a".repeat(3 << 20))
+            .expect("tEXt");
+        enc.write_header()
+            .expect("png header")
+            .write_image_data(&rgba)
+            .expect("png data");
+    }
+    assert!(out.len() < 4 << 20, "{} bytes", out.len());
+    let s = run(&out, &[]).expect("PNG with big metadata");
+    assert!(s.passes(AssetKind::Head), "{:?}", s.lints());
 }
 
 // ---------------------------------------------------------------------------------------
@@ -418,7 +545,7 @@ fn ink_matrix(kind: AssetKind, drawing: &str, reference: &str, guide_png: &str) 
     let guides = premul_layer(&guides_rgba);
     let white = vec![[1.0f32; 4]; (side * side) as usize];
 
-    let clean = run(&export_stack(&draw, side), None).expect("clean drawing");
+    let clean = run(&export_stack(&draw, side), &[]).expect("clean drawing");
     let original = alpha(&catalog_svg(kind, drawing), 400);
     let clean_alpha = shape_alpha(&clean, 400);
     assert!(iou(&original, &clean_alpha) >= 0.97);
@@ -445,7 +572,7 @@ fn ink_matrix(kind: AssetKind, drawing: &str, reference: &str, guide_png: &str) 
                      reference={show_reference}",
                     kind_dir(kind)
                 );
-                let shape = match run(&export_stack(&stack, side), None) {
+                let shape = match run(&export_stack(&stack, side), &[]) {
                     Ok(s) => s,
                     Err(e) => {
                         failures.push(format!("{label}: {e:?}"));
@@ -453,7 +580,7 @@ fn ink_matrix(kind: AssetKind, drawing: &str, reference: &str, guide_png: &str) 
                     }
                 };
                 let score = iou(&clean_alpha, &shape_alpha(&shape, 400));
-                println!("{label}: IoU vs clean {score:.4}, info {:?}", shape.info);
+                println!("{label}: IoU vs clean {score:.4}, info {:?}", shape.info());
                 if score < 0.99 {
                     failures.push(format!("{label}: IoU vs clean {score:.4}"));
                 }
@@ -464,11 +591,11 @@ fn ink_matrix(kind: AssetKind, drawing: &str, reference: &str, guide_png: &str) 
                 } else {
                     vec![]
                 };
-                if shape.info != want {
-                    failures.push(format!("{label}: info {:?}", shape.info));
+                if shape.info() != want {
+                    failures.push(format!("{label}: info {:?}", shape.info()));
                 }
                 if !shape.passes(kind) {
-                    failures.push(format!("{label}: {:?}", shape.lints));
+                    failures.push(format!("{label}: {:?}", shape.lints()));
                 }
             }
         }
@@ -499,11 +626,15 @@ fn ink_rule_ignores_tail_template_layers() {
 #[test]
 fn guides_alone_are_empty_with_a_hint() {
     let guides = fixture("template/head-guide.png");
-    let e = run(&guides, None).expect_err("guides alone are not a drawing");
+    let e = run(&guides, &[]).expect_err("guides alone are not a drawing");
+    // Where the pink attach label meets a blue guide line (around x 35, y 500 of the
+    // overlay), the anti-aliased purple between them is no template colour. Those few
+    // pixels are cleaned up as specks; a drawing covers that spot anyway (it's inside
+    // the neck), so the ink matrix above sees exactly [guides_visible].
     assert_eq!(
         e,
         ProcessError::Empty {
-            info: vec![Lint::GuidesVisible]
+            info: vec![Lint::GuidesVisible, Lint::SpecksRemoved { count: 3 }]
         }
     );
     assert!(e.user_message().contains("guides"), "{}", e.user_message());
@@ -514,14 +645,14 @@ fn guides_alone_are_empty_with_a_hint() {
 // ---------------------------------------------------------------------------------------
 
 fn lint_case(name: &str, png: &[u8], want_head: &[&str], want_tail: &[&str]) -> CleanShape {
-    let shape = run(png, None).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+    let shape = run(png, &[]).unwrap_or_else(|e| panic!("{name}: {e:?}"));
     assert_eq!(
-        (codes(&shape.lints.head), codes(&shape.lints.tail)),
+        (codes(&shape.lints().head), codes(&shape.lints().tail)),
         (want_head.to_vec(), want_tail.to_vec()),
         "{name}: metrics {:?}",
-        shape.metrics
+        shape.metrics()
     );
-    for l in shape.lints.head.iter().chain(&shape.lints.tail) {
+    for l in shape.lints().head.iter().chain(&shape.lints().tail) {
         assert_eq!(l.severity(), Severity::Warn, "{name}: {l:?}");
         assert!(l.guide_anchor().starts_with('#'));
         assert!(!l.message().is_empty());
@@ -540,7 +671,7 @@ fn round_blob_has_a_neck_gap() {
     );
     assert!(!s.passes(AssetKind::Head) && !s.passes(AssetKind::Tail));
     // The gap brackets cover the top and bottom of the left edge.
-    let gaps = &s.metrics.left_edge_gaps;
+    let gaps = &s.metrics().left_edge_gaps;
     assert_eq!(gaps.len(), 2, "{gaps:?}");
     assert!(gaps[0][0] == 0.0 && gaps[1][1] == 100.0, "{gaps:?}");
 }
@@ -553,9 +684,9 @@ fn mirrored_head_faces_left_and_offers_flip() {
         &["faces_left"],
         &["tail_reversed"],
     );
-    assert_eq!(s.lints.head[0].fix(), Some(Fix::Flip));
+    assert_eq!(s.lints().head[0].fix(), Some(Fix::Flip));
     assert_eq!(
-        s.lints.tail[0],
+        s.lints().tail[0],
         Lint::TailReversed {
             attach_edge: Edge::Right
         }
@@ -577,14 +708,138 @@ fn rotated_heads_face_up_or_down() {
         &["faces_up_down"],
         &["tail_reversed"],
     );
-    assert_eq!(s.lints.head[0].fix(), None);
+    assert_eq!(s.lints().head[0].fix(), None);
     assert_eq!(
-        s.lints.tail[0],
+        s.lints().tail[0],
         Lint::TailReversed {
             attach_edge: Edge::Top
         }
     );
-    assert_eq!(s.lints.tail[0].fix(), None, "Flip can't fix a rotation");
+    assert_eq!(s.lints().tail[0].fix(), None, "Flip can't fix a rotation");
+}
+
+#[test]
+fn a_quarter_turn_is_judged_by_the_neck_edge_not_the_centre_of_mass() {
+    // beluga's mass sits above centre (y 46.7), so a clockwise quarter turn moves it
+    // right of x = 52, which alone would read as a mirrored head. The full-height side
+    // is the top: it's rotated, and Flip can't fix that.
+    let s = lint_case(
+        "rotated beluga",
+        &svg_to_png(&transformed(AssetKind::Head, "beluga", ROTATE_CW), 512),
+        &["faces_up_down"],
+        &["tail_reversed"],
+    );
+    let [cx, _] = s.metrics().centroid.expect("centroid");
+    assert!(cx > 52.0, "centroid x {cx}");
+    assert_eq!(s.lints().head[0].fix(), None);
+    assert_eq!(
+        s.lints().tail[0],
+        Lint::TailReversed {
+            attach_edge: Edge::Top
+        }
+    );
+}
+
+#[test]
+fn a_mirror_is_judged_by_the_neck_edge_not_the_centre_of_mass() {
+    // guitar's centre of mass is at x 48.5, so mirrored it is 51.5: not past 52. The
+    // full-height right side gives the mirror away, and Flip fixes it.
+    let png = svg_to_png(&transformed(AssetKind::Head, "guitar", MIRROR), 512);
+    let s = lint_case("mirrored guitar", &png, &["faces_left"], &["tail_reversed"]);
+    let [cx, _] = s.metrics().centroid.expect("centroid");
+    assert!(cx < 52.0, "centroid x {cx}");
+    assert_eq!(s.lints().head[0].fix(), Some(Fix::Flip));
+    let flipped = run(&png, &[Fix::Flip]).expect("flipped");
+    assert!(flipped.passes(AssetKind::Head), "{:?}", flipped.lints());
+}
+
+#[test]
+fn a_short_drawing_is_not_offered_a_fit_that_does_nothing() {
+    // The default head squashed to 80% height: the neck is on the left, it's just short.
+    // It already spans the width, so Fit (which keeps the aspect ratio) couldn't make it
+    // taller; the margin warning asks for a taller drawing and the neck gap is reported.
+    let s = lint_case(
+        "short head",
+        &svg_to_png(
+            &transformed(AssetKind::Head, "default", "scale(1 0.8)"),
+            512,
+        ),
+        &["neck_gap", "margins"],
+        &["neck_gap", "margins"],
+    );
+    let margins = &s.lints().head[1];
+    assert_eq!(margins.fix(), None);
+    assert!(
+        margins.message().contains("taller"),
+        "{}",
+        margins.message()
+    );
+}
+
+#[test]
+fn a_wide_drawing_is_fitted_once() {
+    // A padded head twice as wide as it is tall. Fit helps (it moves it to the neck edge
+    // and makes it bigger) but can only reach half the height, so it doesn't hide the
+    // neck gap, and afterwards it isn't offered again.
+    let png = svg_to_png(
+        &transformed(
+            AssetKind::Head,
+            "default",
+            "translate(10 30) scale(0.8 0.4)",
+        ),
+        512,
+    );
+    let s = lint_case(
+        "wide padded head",
+        &png,
+        &["neck_gap", "margins"],
+        &["neck_gap", "margins"],
+    );
+    assert_eq!(s.lints().head[1].fix(), Some(Fix::Fit));
+    let fitted = run(&png, &[Fix::Fit]).expect("fitted");
+    assert_eq!(codes(&fitted.lints().head), ["neck_gap", "margins"]);
+    assert_eq!(
+        fitted.lints().head[1].fix(),
+        None,
+        "Fit again would change nothing"
+    );
+    let b = fitted.metrics().bbox.expect("bbox");
+    assert!(
+        b[0] < 0.6 && b[2] > 99.4 && (b[1] - 25.0).abs() < 1.0 && (b[3] - 75.0).abs() < 1.0,
+        "{b:?}"
+    );
+    assert!(
+        (fitted.metrics().left_edge_pct - 50.0).abs() < 2.0,
+        "{:?}",
+        fitted.metrics()
+    );
+}
+
+#[test]
+fn fixes_combine_in_one_request() {
+    // A mirrored head with Procreate-style padding needs both Flip and Fit. The studio
+    // sends every fix tapped so far; they apply Flip first, whatever the order.
+    let png = svg_to_png(
+        &transformed(AssetKind::Head, "default", &format!("{SCALE_80} {MIRROR}")),
+        512,
+    );
+    lint_case(
+        "mirrored, padded head",
+        &png,
+        &["margins", "faces_left"],
+        &["margins", "tail_reversed"],
+    );
+    let both = run(&png, &[Fix::Flip, Fix::Fit]).expect("flip + fit");
+    let reordered = run(&png, &[Fix::Fit, Fix::Flip, Fix::Fit]).expect("fit + flip");
+    assert_eq!(both.path_d(), reordered.path_d());
+    assert!(both.passes(AssetKind::Head), "{:?}", both.lints());
+    let score = iou(&alpha(&head("default"), 400), &shape_alpha(&both, 400));
+    assert!(score >= 0.97, "IoU {score:.4}");
+    // One at a time, each leaves the other problem.
+    let flipped = run(&png, &[Fix::Flip]).expect("flip");
+    assert_eq!(codes(&flipped.lints().head), ["margins"]);
+    let fitted = run(&png, &[Fix::Fit]).expect("fit");
+    assert_eq!(codes(&fitted.lints().head), ["faces_left"]);
 }
 
 #[test]
@@ -595,7 +850,7 @@ fn reversed_tail_offers_flip() {
         &["faces_left"],
         &["tail_reversed"],
     );
-    assert_eq!(s.lints.tail[0].fix(), Some(Fix::Flip));
+    assert_eq!(s.lints().tail[0].fix(), Some(Fix::Flip));
 }
 
 #[test]
@@ -611,7 +866,7 @@ fn outline_only_drawing() {
         &["outline_only"],
         &["outline_only"],
     );
-    assert!(s.metrics.hole_pct > 55.0, "{:?}", s.metrics);
+    assert!(s.metrics().hole_pct > 55.0, "{:?}", s.metrics());
 }
 
 #[test]
@@ -622,8 +877,8 @@ fn margins_suppress_the_neck_gap_they_explain() {
         &["margins"],
         &["margins"],
     );
-    assert!(s.metrics.left_edge_pct < 85.0, "the gap is there");
-    assert_eq!(s.lints.head[0].fix(), Some(Fix::Fit));
+    assert!(s.metrics().left_edge_pct < 85.0, "the gap is there");
+    assert_eq!(s.lints().head[0].fix(), Some(Fix::Fit));
 }
 
 #[test]
@@ -650,10 +905,10 @@ fn solid_square_is_only_wrong_for_heads() {
 
 #[test]
 fn official_shapes_pass() {
-    let s = run(&svg_to_png(&head("smile"), 512), None).expect("smile");
-    assert!(s.passes(AssetKind::Head), "{:?}", s.lints);
-    let s = run(&svg_to_png(&tail("block-bum"), 512), None).expect("block-bum");
-    assert!(s.passes(AssetKind::Tail), "{:?}", s.lints);
+    let s = run(&svg_to_png(&head("smile"), 512), &[]).expect("smile");
+    assert!(s.passes(AssetKind::Head), "{:?}", s.lints());
+    let s = run(&svg_to_png(&tail("block-bum"), 512), &[]).expect("block-bum");
+    assert!(s.passes(AssetKind::Tail), "{:?}", s.lints());
     assert!(!s.passes(AssetKind::Head), "a solid square is not a head");
 }
 
@@ -671,30 +926,30 @@ fn input_facts() {
             });
         }
     }
-    let s = run(&encode_png(w, h, png::ColorType::Rgba, &data), None).expect("non-square");
+    let s = run(&encode_png(w, h, png::ColorType::Rgba, &data), &[]).expect("non-square");
     assert_eq!(
-        s.info,
+        s.info(),
         vec![Lint::NonSquare {
             width: 600,
             height: 300
         }]
     );
-    assert_eq!(s.info[0].severity(), Severity::Tip);
-    let b = s.metrics.bbox.expect("bbox");
+    assert_eq!(s.info()[0].severity(), Severity::Tip);
+    let b = s.metrics().bbox.expect("bbox");
     assert!(
         b[0] < 0.5 && (b[1] - 25.0).abs() < 0.6 && (b[2] - 50.0).abs() < 0.6,
         "{b:?}"
     );
 
     // Tiny image: low_resolution tip.
-    let s = run(&svg_to_png(&head("default"), 96), None).expect("tiny");
+    let s = run(&svg_to_png(&head("default"), 96), &[]).expect("tiny");
     assert!(
-        s.info.contains(&Lint::LowResolution {
+        s.info().contains(&Lint::LowResolution {
             width: 96,
             height: 96
         }),
         "{:?}",
-        s.info
+        s.info()
     );
 
     // Coloured drawing on white: flattened to one colour.
@@ -702,11 +957,11 @@ fn input_facts() {
     let rgba = straight_rgba(&render(&red, 512));
     let s = run(
         &encode_png(512, 512, png::ColorType::Rgb, &over_white(&rgba)),
-        None,
+        &[],
     )
     .expect("red head");
-    assert!(s.info.contains(&Lint::ColoursFlattened), "{:?}", s.info);
-    assert_eq!(s.info[0].severity(), Severity::Info);
+    assert!(s.info().contains(&Lint::ColoursFlattened), "{:?}", s.info());
+    assert_eq!(s.info()[0].severity(), Severity::Info);
 
     // White eye painted over a transparent-background head: the eye becomes a hole.
     let white_eye = board_svg(
@@ -720,9 +975,9 @@ fn input_facts() {
             rgba[(y * 512 + x) * 4 + 3] = 0;
         }
     }
-    let s = run(&encode_png(512, 512, png::ColorType::Rgba, &rgba), None).expect("eye");
-    assert!(s.info.contains(&Lint::ColoursFlattened), "{:?}", s.info);
-    assert_eq!(s.metrics.holes, 1, "{:?}", s.metrics);
+    let s = run(&encode_png(512, 512, png::ColorType::Rgba, &rgba), &[]).expect("eye");
+    assert!(s.info().contains(&Lint::ColoursFlattened), "{:?}", s.info());
+    assert_eq!(s.metrics().holes, 1, "{:?}", s.metrics());
 
     // Soft brush: semi-transparent ink.
     let soft = rgba_png(512, |x, y| x < 70.0 && y > 5.0 && y < 95.0);
@@ -736,8 +991,8 @@ fn input_facts() {
             p[3] = 200;
         }
     }
-    let s = run(&encode_png(512, 512, png::ColorType::Rgba, &buf), None).expect("soft");
-    assert!(s.info.contains(&Lint::SemiTransparent), "{:?}", s.info);
+    let s = run(&encode_png(512, 512, png::ColorType::Rgba, &buf), &[]).expect("soft");
+    assert!(s.info().contains(&Lint::SemiTransparent), "{:?}", s.info());
 }
 
 // ---------------------------------------------------------------------------------------
@@ -750,8 +1005,8 @@ fn shape_alpha_with(shape: &CleanShape, transform: &str) -> Vec<u8> {
         &format!(
             "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\"><g \
              transform=\"{transform}\"><path fill-rule=\"{}\" d=\"{}\"/></g></svg>",
-            shape.fill_rule.as_svg(),
-            shape.path_d
+            shape.fill_rule().as_svg(),
+            shape.path_d()
         ),
         400,
     )
@@ -760,10 +1015,10 @@ fn shape_alpha_with(shape: &CleanShape, transform: &str) -> Vec<u8> {
 #[test]
 fn flip_fixes_a_mirrored_head() {
     let png = svg_to_png(&transformed(AssetKind::Head, "default", MIRROR), 512);
-    let before = run(&png, None).expect("mirrored");
-    let after = run(&png, Some(Fix::Flip)).expect("flipped");
-    assert_eq!(codes(&before.lints.head), ["faces_left"]);
-    assert!(after.passes(AssetKind::Head), "{:?}", after.lints.head);
+    let before = run(&png, &[]).expect("mirrored");
+    let after = run(&png, &[Fix::Flip]).expect("flipped");
+    assert_eq!(codes(&before.lints().head), ["faces_left"]);
+    assert!(after.passes(AssetKind::Head), "{:?}", after.lints().head);
     // Flipping back gives the unfixed shape; and the fix gives the original head.
     let undone = shape_alpha_with(&after, MIRROR);
     let score = iou(&shape_alpha(&before, 400), &undone);
@@ -775,14 +1030,18 @@ fn flip_fixes_a_mirrored_head() {
 #[test]
 fn fit_fixes_a_padded_head() {
     let png = svg_to_png(&transformed(AssetKind::Head, "default", SCALE_80), 512);
-    let before = run(&png, None).expect("80%");
-    let after = run(&png, Some(Fix::Fit)).expect("fitted");
-    assert_eq!(codes(&before.lints.head), ["margins"]);
-    assert!(after.passes(AssetKind::Head), "{:?}", after.lints.head);
-    assert!(after.passes(AssetKind::Tail), "{:?}", after.lints.tail);
-    assert!(after.metrics.left_edge_pct >= 95.0, "{:?}", after.metrics);
+    let before = run(&png, &[]).expect("80%");
+    let after = run(&png, &[Fix::Fit]).expect("fitted");
+    assert_eq!(codes(&before.lints().head), ["margins"]);
+    assert!(after.passes(AssetKind::Head), "{:?}", after.lints().head);
+    assert!(after.passes(AssetKind::Tail), "{:?}", after.lints().tail);
+    assert!(
+        after.metrics().left_edge_pct >= 95.0,
+        "{:?}",
+        after.metrics()
+    );
     // Undo the fit using the unfixed bounds; compare with the unfixed shape.
-    let [x0, y0, x1, y1] = before.metrics.bbox.expect("bbox");
+    let [x0, y0, x1, y1] = before.metrics().bbox.expect("bbox");
     let s = (x1 - x0).max(y1 - y0) / 100.0;
     let undo = format!("translate({x0} {y0}) scale({s})");
     let score = iou(&shape_alpha(&before, 400), &shape_alpha_with(&after, &undo));
@@ -844,7 +1103,7 @@ fn hostile_rasters_fail_exactly() {
     // A 100000x100000 header is rejected from IHDR alone, without allocating.
     let t = std::time::Instant::now();
     assert_eq!(
-        run(&png_with_header(100_000, 100_000), None).err(),
+        run(&png_with_header(100_000, 100_000), &[]).err(),
         Some(ProcessError::ImageTooLarge {
             width: 100_000,
             height: 100_000,
@@ -855,7 +1114,7 @@ fn hostile_rasters_fail_exactly() {
 
     // Just over the side limit.
     assert!(matches!(
-        run(&png_with_header(2049, 10), None),
+        run(&png_with_header(2049, 10), &[]),
         Err(ProcessError::ImageTooLarge { width: 2049, .. })
     ));
 
@@ -868,7 +1127,7 @@ fn hostile_rasters_fail_exactly() {
     jpeg[sof + 5..sof + 7].copy_from_slice(&3000u16.to_be_bytes());
     jpeg[sof + 7..sof + 9].copy_from_slice(&4000u16.to_be_bytes());
     assert_eq!(
-        run(&jpeg, None).err(),
+        run(&jpeg, &[]).err(),
         Some(ProcessError::ImageTooLarge {
             width: 4000,
             height: 3000,
@@ -880,7 +1139,7 @@ fn hostile_rasters_fail_exactly() {
     let mut big = rgba_png(64, |x, _| x < 50.0);
     big.resize(4 * 1024 * 1024 + 1, 0);
     assert_eq!(
-        run(&big, None).err(),
+        run(&big, &[]).err(),
         Some(ProcessError::TooLarge {
             bytes: 4 * 1024 * 1024 + 1,
             max: 4 * 1024 * 1024
@@ -891,29 +1150,44 @@ fn hostile_rasters_fail_exactly() {
     let good = svg_to_png(&head("default"), 256);
     assert!(
         matches!(
-            run(&good[..good.len() / 2], None),
+            run(&good[..good.len() / 2], &[]),
             Err(ProcessError::InvalidImage(_))
         ),
         "{:?}",
-        run(&good[..good.len() / 2], None).err()
+        run(&good[..good.len() / 2], &[]).err()
     );
     assert!(
         matches!(
-            run(&png_with_header(0, 100), None),
+            run(&png_with_header(0, 100), &[]),
             Err(ProcessError::InvalidImage(_))
         ),
         "{:?}",
-        run(&png_with_header(0, 100), None).err()
+        run(&png_with_header(0, 100), &[]).err()
     );
+
+    // A truncated JPEG is an error, not a drawing with grey filler rows.
+    let jpeg = encode_jpeg(
+        512,
+        512,
+        &over_white(&straight_rgba(&render(&head("smile"), 512))),
+        80,
+    );
+    for cut in [jpeg.len() / 5, jpeg.len() / 2, jpeg.len() - 10] {
+        assert!(
+            matches!(run(&jpeg[..cut], &[]), Err(ProcessError::InvalidImage(_))),
+            "cut at {cut}: {:?}",
+            run(&jpeg[..cut], &[]).err()
+        );
+    }
 
     // Nothing drawn.
     assert_eq!(
-        run(&rgba_png(256, |_, _| false), None).err(),
+        run(&rgba_png(256, |_, _| false), &[]).err(),
         Some(ProcessError::Empty { info: vec![] })
     );
     let white = encode_png(256, 256, png::ColorType::Rgb, &[255; 256 * 256 * 3]);
     assert_eq!(
-        run(&white, None).err(),
+        run(&white, &[]).err(),
         Some(ProcessError::Empty { info: vec![] })
     );
 }
@@ -926,7 +1200,7 @@ fn noise_is_too_complex() {
     for _ in 0..side * side {
         data.extend_from_slice(&[0, 0, 0, if rng.next().is_multiple_of(2) { 255 } else { 0 }]);
     }
-    let r = run(&encode_png(side, side, png::ColorType::Rgba, &data), None);
+    let r = run(&encode_png(side, side, png::ColorType::Rgba, &data), &[]);
     assert!(
         matches!(r, Err(ProcessError::TooComplex(_))),
         "{:?}",
@@ -938,7 +1212,7 @@ fn noise_is_too_complex() {
 fn checkerboards_are_too_complex() {
     // 12 px squares: too many separate shapes. 24 px: the outline is too long.
     for square in [12, 24] {
-        let r = run(&checkerboard(1024, square), None);
+        let r = run(&checkerboard(1024, square), &[]);
         let e = r.expect_err("checkerboard");
         assert!(
             matches!(e, ProcessError::TooComplex(_)),
@@ -946,6 +1220,71 @@ fn checkerboards_are_too_complex() {
         );
         assert_eq!(e.code(), "too_complex");
     }
+}
+
+/// A 1024 px greyscale PNG, black where `ink(x, y)`.
+fn grey_png(ink: impl Fn(usize, usize) -> bool) -> Vec<u8> {
+    let n = 1024;
+    let mut data = Vec::with_capacity(n * n);
+    for y in 0..n {
+        for x in 0..n {
+            data.push(if ink(x, y) { 0 } else { 255 });
+        }
+    }
+    encode_png(n as u32, n as u32, png::ColorType::Grayscale, &data)
+}
+
+#[test]
+fn crafted_rasters_are_rejected_before_tracing() {
+    // Each of these is a few KB. Before the trace budget, the stripes and rings took 1-2
+    // s of CPU in release and still came back `ok`, and the comb and the serpentine
+    // panicked inside visioncortex (a u16 cluster index overflow; a "STUCK" outline walk
+    // past 1,000,000 steps). The budget's message proves they were stopped before
+    // visioncortex ran.
+    let c = 511.5f64;
+    let ring = |x: usize, y: usize| (x as f64 - c).abs().max((y as f64 - c).abs()) as usize;
+    let diamond = |x: usize, y: usize| ((x as f64 - c).abs() + (y as f64 - c).abs()) as usize;
+    let cases: [(&str, Vec<u8>); 6] = [
+        (
+            "diagonal stripes, period 4",
+            grey_png(|x, y| (x + y) % 4 < 2),
+        ),
+        (
+            "diagonal stripes, period 8",
+            grey_png(|x, y| (x + y) % 8 < 4),
+        ),
+        ("square rings", grey_png(|x, y| ring(x, y) % 4 < 2)),
+        ("diamond rings", grey_png(|x, y| diamond(x, y) % 4 < 2)),
+        (
+            "comb",
+            grey_png(|x, y| (y % 3 == 1 && x % 2 == 0) || y % 3 == 2),
+        ),
+        (
+            "1 px serpentine",
+            grey_png(|x, y| y % 2 == 0 || (y % 4 == 1 && x == 1023) || (y % 4 == 3 && x == 0)),
+        ),
+    ];
+    for (name, png) in cases {
+        assert_eq!(
+            run(&png, &[]).err(),
+            Some(ProcessError::TooComplex("the outline is too long")),
+            "{name}"
+        );
+    }
+
+    // A short enough outline in huge bounding boxes: six thin concentric rings near the
+    // canvas edge (each ring and the hole inside it span most of the canvas, about 11×
+    // the canvas in total). The tracer rescans every box.
+    let target = grey_png(|x, y| {
+        let from_edge = 511usize.saturating_sub(ring(x, y));
+        from_edge / 12 < 6 && from_edge % 12 < 4
+    });
+    assert_eq!(
+        run(&target, &[]).err(),
+        Some(ProcessError::TooComplex(
+            "too many large or interleaved shapes"
+        ))
+    );
 }
 
 #[test]
@@ -974,6 +1313,12 @@ fn errors_have_codes_and_messages() {
     }
     let msg = all[5].user_message();
     assert!(msg.contains("2048") && msg.contains("1000 × 1000"), "{msg}");
+    // Only black is promised to work: dark colours near the template's are dropped.
+    let msg = all[8].user_message();
+    assert!(
+        msg.contains("solid black") && !msg.contains("any dark"),
+        "{msg}"
+    );
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1016,7 +1361,12 @@ proptest! {
     fn every_output_is_one_clean_path(
         blobs in prop::collection::vec(blob(), 1..7),
         opaque in any::<bool>(),
-        fix in prop_oneof![Just(None), Just(Some(Fix::Flip)), Just(Some(Fix::Fit))],
+        fixes in prop_oneof![
+            Just(vec![]),
+            Just(vec![Fix::Flip]),
+            Just(vec![Fix::Fit]),
+            Just(vec![Fix::Fit, Fix::Flip]),
+        ],
     ) {
         let inside = |b: &Blob, x: f32, y: f32| {
             let (dx, dy) = ((x - b.cx) / b.rx, (y - b.cy) / b.ry);
@@ -1044,12 +1394,12 @@ proptest! {
         } else {
             rgba_png(256, f)
         };
-        match process_upload(&png, &Limits::default(), fix) {
+        match process_upload(&png, &Limits::default(), &fixes) {
             Ok(shape) => {
                 assert_clean(&shape);
                 let svg = shape.to_svg();
                 prop_assert!(svg.starts_with("<svg"));
-                prop_assert!(!shape.path_d.is_empty());
+                prop_assert!(!shape.path_d().is_empty());
             }
             Err(e) => prop_assert!(
                 matches!(e, ProcessError::Empty { .. } | ProcessError::TooComplex(_)),

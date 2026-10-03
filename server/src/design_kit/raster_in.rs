@@ -1,4 +1,9 @@
 //! PNG / JPEG -> ink coverage -> square binary grid (<= `trace_side`) -> traced path.
+//!
+//! Memory: a 2048 px RGBA PNG peaks at about 23 MB for the whole process. The decoders
+//! are kept near that: PNG metadata chunks we don't use (ICC profiles, text) are skipped
+//! rather than inflated, and progressive JPEGs, which keep every DCT coefficient until
+//! the last scan, get a smaller size cap (see [`progressive_max_pixels`]).
 
 use super::lints::Lint;
 use super::palette::{self, Pixels};
@@ -15,16 +20,18 @@ pub(crate) fn process(
     format: InputFormat,
     limits: &Limits,
 ) -> Result<Traced, ProcessError> {
-    let pixels = match format {
-        InputFormat::Png => decode_png(bytes, limits)?,
+    let (pixels, orientation) = match format {
+        InputFormat::Png => (decode_png(bytes, limits)?, Orientation::default()),
         InputFormat::Jpeg => decode_jpeg(bytes, limits)?,
         InputFormat::Svg => {
             return Err(ProcessError::Internal("SVG passed to the raster pipeline"));
         }
     };
-    let (w, h) = (pixels.width, pixels.height);
     let ink = palette::ink(&pixels);
+    let (stored_w, stored_h) = (pixels.width, pixels.height);
     drop(pixels);
+    // Upright, as the artist's preview showed it.
+    let (coverage, w, h) = orientation.apply(ink.coverage, stored_w, stored_h);
 
     let mut info = Vec::new();
     if ink.guides_visible {
@@ -53,8 +60,8 @@ pub(crate) fn process(
     // Big images are box-downscaled to `trace_side`; small ones bilinearly upscaled to
     // >= 512 px so the splines come out smooth.
     let side = w.max(h).clamp(512, (limits.trace_side as usize).max(512));
-    let mask = resample_to_square(&ink.coverage, w, h, side);
-    drop(ink);
+    let mask = resample_to_square(&coverage, w, h, side);
+    drop(coverage);
     let traced = trace::trace_mask(mask, side, limits)?;
     if traced.specks_removed > 0 {
         info.push(Lint::SpecksRemoved {
@@ -67,14 +74,22 @@ pub(crate) fn process(
     Ok(Traced { path, info })
 }
 
+/// The PNG decoder's own allocation cap: a few 16-bit RGBA rows at 2048 px plus the
+/// small chunks it still parses.
+const PNG_DECODER_BYTES: usize = 4 << 20;
+
 fn decode_png(bytes: &[u8], limits: &Limits) -> Result<Pixels, ProcessError> {
-    let side_cap = limits.max_raster_side as usize;
     let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
     // Expand palette/low-bit-depth/tRNS and strip 16-bit to 8-bit gray/GA/RGB/RGBA.
     decoder.set_transformations(png::Transformations::normalize_to_color8());
-    // Decoder-internal allocation cap (defends against huge iCCP/zTXt chunks etc.).
+    // We never use colour profiles or text, and a compressed iCCP or zTXt chunk would
+    // otherwise be inflated in full.
+    decoder.set_ignore_iccp_chunk(true);
+    decoder.set_ignore_text_chunk(true);
+    // Decoder-internal allocations only (row buffers and the chunks it still reads); the
+    // frame buffer below is ours and is sized from the checked header.
     decoder.set_limits(png::Limits {
-        bytes: side_cap * side_cap * 8 + (1 << 20),
+        bytes: PNG_DECODER_BYTES,
     });
     let mut reader = decoder
         .read_info()
@@ -135,16 +150,18 @@ fn decode_png(bytes: &[u8], limits: &Limits) -> Result<Pixels, ProcessError> {
     })
 }
 
-fn decode_jpeg(bytes: &[u8], limits: &Limits) -> Result<Pixels, ProcessError> {
+fn decode_jpeg(bytes: &[u8], limits: &Limits) -> Result<(Pixels, Orientation), ProcessError> {
     use zune_jpeg::zune_core::bytestream::ZCursor;
     use zune_jpeg::zune_core::colorspace::ColorSpace;
     use zune_jpeg::zune_core::options::DecoderOptions;
 
     // Let the header parse succeed for any size so we can report the real dimensions;
-    // our own limit is checked before the pixels are decoded.
+    // our own limit is checked before the pixels are decoded. Strict mode turns a
+    // truncated or corrupt scan into an error instead of grey filler rows.
     let options = DecoderOptions::default()
         .set_max_width(u16::MAX as usize)
         .set_max_height(u16::MAX as usize)
+        .set_strict_mode(true)
         .jpeg_set_out_colorspace(ColorSpace::RGB);
     let mut decoder = zune_jpeg::JpegDecoder::new_with_options(ZCursor::new(bytes), options);
     decoder
@@ -155,6 +172,20 @@ fn decode_jpeg(bytes: &[u8], limits: &Limits) -> Result<Pixels, ProcessError> {
         .ok_or(ProcessError::Internal("JPEG headers decoded without info"))?;
     let (w, h) = (u32::from(info.width), u32::from(info.height));
     check_dimensions(w, h, limits)?;
+    if !info.sof.is_sequential_dct() {
+        let max = progressive_max_pixels(limits, info.components);
+        if w as usize * h as usize > max {
+            return Err(ProcessError::ImageTooLarge {
+                width: w,
+                height: h,
+                max_side: max.isqrt() as u32,
+            });
+        }
+    }
+    let orientation = decoder
+        .exif()
+        .and_then(|tiff| Orientation::from_exif(tiff))
+        .unwrap_or_default();
     let data = decoder
         .decode()
         .map_err(|e| ProcessError::InvalidImage(e.to_string()))?;
@@ -165,12 +196,100 @@ fn decode_jpeg(bytes: &[u8], limits: &Limits) -> Result<Pixels, ProcessError> {
             data.len()
         )));
     }
-    Ok(Pixels {
+    let pixels = Pixels {
         width: w,
         height: h,
         channels: 3,
         data,
-    })
+    };
+    Ok((pixels, orientation))
+}
+
+/// Most pixels in a progressive JPEG. zune-jpeg keeps a 2-byte coefficient per sample
+/// until the last scan, on top of the RGB output, so a 2048 px progressive RGB JPEG
+/// would need about 40 MB. This holds the coefficients to the size of the largest RGB
+/// output we accept (`max_raster_side`² × 3 bytes): 1448 px square for colour, the full
+/// 2048 for greyscale.
+fn progressive_max_pixels(limits: &Limits, components: u8) -> usize {
+    let side = limits.max_raster_side as usize;
+    side * side * 3 / (2 * usize::from(components.max(1)))
+}
+
+/// EXIF orientation: how the stored pixels must be turned to show the image upright.
+/// Browsers apply it to the artist's preview (an iPad camera stores landscape pixels
+/// with "rotate 90°"), so we apply it too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Orientation(u8);
+
+impl Default for Orientation {
+    fn default() -> Self {
+        Orientation(1)
+    }
+}
+
+impl Orientation {
+    /// Tag 0x0112 of IFD0 in a TIFF-structured EXIF block (what follows `Exif\0\0`).
+    /// `None` when it's missing, malformed or out of range.
+    pub(crate) fn from_exif(tiff: &[u8]) -> Option<Orientation> {
+        let little = match tiff.get(0..4)? {
+            b"II*\0" => true,
+            b"MM\0*" => false,
+            _ => return None,
+        };
+        let u16_at = |i: usize| {
+            let b: [u8; 2] = tiff.get(i..i.checked_add(2)?)?.try_into().ok()?;
+            Some(if little {
+                u16::from_le_bytes(b)
+            } else {
+                u16::from_be_bytes(b)
+            })
+        };
+        let u32_at = |i: usize| {
+            let b: [u8; 4] = tiff.get(i..i.checked_add(4)?)?.try_into().ok()?;
+            Some(if little {
+                u32::from_le_bytes(b)
+            } else {
+                u32::from_be_bytes(b)
+            })
+        };
+        let ifd = usize::try_from(u32_at(4)?).ok()?;
+        let entries = usize::from(u16_at(ifd)?);
+        (0..entries).find_map(|n| {
+            let entry = ifd.checked_add(2 + n * 12)?;
+            // Tag 0x0112, type SHORT: the value is in the first 2 bytes of the value field.
+            if u16_at(entry)? != 0x0112 || u16_at(entry + 2)? != 3 {
+                return None;
+            }
+            let v = u8::try_from(u16_at(entry + 8)?).ok()?;
+            (1..=8).contains(&v).then_some(Orientation(v))
+        })
+    }
+
+    /// Turn a `w`x`h` row-major buffer upright. Returns it with its new width and height.
+    pub(crate) fn apply(self, src: Vec<u8>, w: usize, h: usize) -> (Vec<u8>, usize, usize) {
+        if self.0 == 1 || src.len() != w * h {
+            return (src, w, h);
+        }
+        // 5-8 are transposed (a quarter turn, with or without a mirror).
+        let (dw, dh) = if self.0 >= 5 { (h, w) } else { (w, h) };
+        let mut out = vec![0u8; src.len()];
+        for dy in 0..dh {
+            for dx in 0..dw {
+                let (sx, sy) = match self.0 {
+                    2 => (w - 1 - dx, dy),
+                    3 => (w - 1 - dx, h - 1 - dy),
+                    4 => (dx, h - 1 - dy),
+                    5 => (dy, dx),
+                    6 => (dy, h - 1 - dx),
+                    7 => (w - 1 - dy, h - 1 - dx),
+                    8 => (w - 1 - dy, dx),
+                    _ => (dx, dy),
+                };
+                out[dy * dw + dx] = src[sy * w + sx];
+            }
+        }
+        (out, dw, dh)
+    }
 }
 
 fn check_dimensions(w: u32, h: u32, limits: &Limits) -> Result<(), ProcessError> {
@@ -246,6 +365,55 @@ fn resample_to_square(ink: &[u8], w: usize, h: usize, side: usize) -> Vec<bool> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A 3x2 image, stored the way EXIF `orientation` describes, read back upright.
+    fn upright(orientation: u8) -> (Vec<u8>, usize, usize) {
+        // Upright it reads 1 2 3 / 4 5 6. Store it as the camera would.
+        let stored: (Vec<u8>, usize, usize) = match orientation {
+            1 => (vec![1, 2, 3, 4, 5, 6], 3, 2),
+            2 => (vec![3, 2, 1, 6, 5, 4], 3, 2),
+            3 => (vec![6, 5, 4, 3, 2, 1], 3, 2),
+            4 => (vec![4, 5, 6, 1, 2, 3], 3, 2),
+            5 => (vec![1, 4, 2, 5, 3, 6], 2, 3),
+            // "Rotate 90° clockwise to view": the stored left column is the top row.
+            6 => (vec![3, 6, 2, 5, 1, 4], 2, 3),
+            7 => (vec![6, 3, 5, 2, 4, 1], 2, 3),
+            _ => (vec![4, 1, 5, 2, 6, 3], 2, 3),
+        };
+        Orientation(orientation).apply(stored.0, stored.1, stored.2)
+    }
+
+    #[test]
+    fn every_exif_orientation_reads_upright() {
+        for o in 1..=8 {
+            assert_eq!(
+                upright(o),
+                (vec![1, 2, 3, 4, 5, 6], 3, 2),
+                "orientation {o}"
+            );
+        }
+    }
+
+    #[test]
+    fn exif_orientation_is_parsed_from_either_byte_order() {
+        // Little-endian TIFF header, IFD0 at 8 with two entries; orientation is second.
+        let mut le = b"II*\0\x08\0\0\0\x02\0".to_vec();
+        le.extend_from_slice(&[0x0f, 0x01, 2, 0, 4, 0, 0, 0, 0, 0, 0, 0]); // Make, ASCII
+        le.extend_from_slice(&[0x12, 0x01, 3, 0, 1, 0, 0, 0, 6, 0, 0, 0]);
+        assert_eq!(Orientation::from_exif(&le), Some(Orientation(6)));
+        let mut be = b"MM\0*\0\0\0\x08\0\x01".to_vec();
+        be.extend_from_slice(&[0x01, 0x12, 0, 3, 0, 0, 0, 1, 0, 8, 0, 0]);
+        assert_eq!(Orientation::from_exif(&be), Some(Orientation(8)));
+        // Out of range, truncated, or not TIFF.
+        let mut bad = le.clone();
+        bad[30] = 9;
+        assert_eq!(Orientation::from_exif(&bad), None);
+        assert_eq!(Orientation::from_exif(&le[..25]), None);
+        assert_eq!(Orientation::from_exif(b"JFIF"), None);
+        // An IFD offset or entry count pointing past the end doesn't panic.
+        assert_eq!(Orientation::from_exif(b"II*\0\xff\xff\xff\xff"), None);
+        assert_eq!(Orientation::from_exif(b"II*\0\x08\0\0\0\xff\xff"), None);
+    }
 
     #[test]
     fn resample_centres_a_wide_canvas() {

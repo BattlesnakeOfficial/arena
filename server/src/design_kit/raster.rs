@@ -33,27 +33,25 @@ pub struct Metrics {
     pub left_edge_gaps: Vec<[f32; 2]>,
     /// Ink bounds `[x0, y0, x1, y1]` on the mask; `None` when nothing is filled.
     pub bbox: Option<[f32; 4]>,
+    /// Edge coverage of the drawing itself, `[left, right, top, bottom]`: the 1-unit
+    /// strip along each side of `bbox`, over the rows (or columns) `bbox` spans. The same
+    /// as the square's edges when the drawing reaches every edge; for a padded or short
+    /// drawing it still shows which side is full height (where the neck is). All 0 when
+    /// nothing is filled.
+    pub drawing_edges: [f32; 4],
     /// Centre of mass of the ink `[x, y]`; `None` when nothing is filled.
     pub centroid: Option<[f32; 2]>,
-    /// Left-edge coverage the shape would have after Fit: the strip at the left side of
-    /// `bbox`, over the rows `bbox` spans.
-    pub fit_left_edge_pct: f32,
     /// Enclosed holes as a share of the silhouette with its holes filled in. High for
     /// outline drawings.
     pub hole_pct: f32,
-    /// Enclosed holes (4-connected background regions not touching the border).
+    /// Enclosed holes: 4-connected background regions that don't touch the border (the
+    /// same holes `hole_pct` and SVG's fill rules see).
     pub holes: usize,
-    /// Separate filled pieces (4-connected).
-    pub pieces: usize,
-    /// Subpaths in the clean path (0 when measured from a mask alone).
-    pub subpaths: usize,
-    /// Segments in the clean path (0 when measured from a mask alone).
-    pub segments: usize,
 }
 
 impl Metrics {
     /// Measure a `side`x`side` alpha mask (row-major, 0..=255) covering the 100x100 box.
-    /// The lint thresholds assume `side == METRIC_SIDE`. Path statistics are left at 0.
+    /// The lint thresholds assume `side == METRIC_SIDE`.
     pub fn from_alpha(alpha: &[u8], side: usize) -> Metrics {
         let ink: Vec<bool> = alpha.iter().map(|&a| a > 127).collect();
         Metrics::from_mask(&ink, side)
@@ -117,20 +115,38 @@ impl Metrics {
                 }
             }
         }
-        let (bbox, centroid, fit_left_edge_pct) = if filled == 0 {
-            (None, None, 0.0)
+        let (bbox, centroid, drawing_edges) = if filled == 0 {
+            (None, None, [0.0; 4])
         } else {
             let u = units_per_px as f64;
-            let fit_rows = (y0..y1)
-                .filter(|&y| strip_full((x0..(x0 + k).min(side)).filter(|&x| at(x, y)).count()))
-                .count();
+            // Strips along the sides of the drawing's own bounds.
+            let (rows, cols) = (y0..y1, x0..x1);
+            let left = (x0..(x0 + k).min(x1)).collect::<Vec<_>>();
+            let right = (x1.saturating_sub(k).max(x0)..x1).collect::<Vec<_>>();
+            let top = (y0..(y0 + k).min(y1)).collect::<Vec<_>>();
+            let bottom = (y1.saturating_sub(k).max(y0)..y1).collect::<Vec<_>>();
+            let full_rows = |strip: &[usize]| {
+                rows.clone()
+                    .filter(|&y| strip_full(strip.iter().filter(|&&x| at(x, y)).count()))
+                    .count()
+            };
+            let full_cols = |strip: &[usize]| {
+                cols.clone()
+                    .filter(|&x| strip_full(strip.iter().filter(|&&y| at(x, y)).count()))
+                    .count()
+            };
             (
                 Some([x0, y0, x1, y1].map(|v| v as f32 * units_per_px)),
                 Some([
                     (sx / filled as f64 * u) as f32,
                     (sy / filled as f64 * u) as f32,
                 ]),
-                pct(fit_rows, y1 - y0),
+                [
+                    pct(full_rows(&left), y1 - y0),
+                    pct(full_rows(&right), y1 - y0),
+                    pct(full_cols(&top), x1 - x0),
+                    pct(full_cols(&bottom), x1 - x0),
+                ],
             )
         };
 
@@ -138,7 +154,6 @@ impl Metrics {
         let (_, bg) = components(ink, side, side, false);
         let enclosed: Vec<&Component> = bg.iter().filter(|c| !c.touches_border).collect();
         let hole_area: usize = enclosed.iter().map(|c| c.area).sum();
-        let (_, pieces) = components(ink, side, side, true);
 
         Metrics {
             fill_pct: pct(filled, n),
@@ -148,27 +163,17 @@ impl Metrics {
             bottom_edge_pct: pct(bottom, side),
             left_edge_gaps,
             bbox,
+            drawing_edges,
             centroid,
-            fit_left_edge_pct,
             hole_pct: pct(hole_area, filled + hole_area),
             holes: enclosed.len(),
-            pieces: pieces.len(),
-            subpaths: 0,
-            segments: 0,
         }
     }
 
     /// Measure a clean path (0..100 space) on a [`METRIC_SIDE`] mask.
     pub(crate) fn of_path(path: &tiny_skia::Path, rule: FillRule) -> Result<Metrics, ProcessError> {
         let alpha = render_alpha(path, rule, METRIC_SIDE)?;
-        let mut m = Metrics::from_alpha(&alpha, METRIC_SIDE as usize);
-        for seg in path.segments() {
-            m.segments += 1;
-            if matches!(seg, tiny_skia::PathSegment::MoveTo(_)) {
-                m.subpaths += 1;
-            }
-        }
-        Ok(m)
+        Ok(Metrics::from_alpha(&alpha, METRIC_SIDE as usize))
     }
 }
 
@@ -206,6 +211,14 @@ pub(crate) fn render_alpha(
 pub(crate) struct Component {
     pub area: usize,
     pub touches_border: bool,
+    /// Pixel bounds `[x0, y0, x1, y1)`.
+    pub bbox: [usize; 4],
+}
+
+impl Component {
+    pub fn bbox_area(&self) -> usize {
+        (self.bbox[2] - self.bbox[0]) * (self.bbox[3] - self.bbox[1])
+    }
 }
 
 /// 4-connected component labelling of pixels where `mask[i] == want`.
@@ -227,12 +240,19 @@ pub(crate) fn components(
         let mut c = Component {
             area: 0,
             touches_border: false,
+            bbox: [usize::MAX, usize::MAX, 0, 0],
         };
         labels[start] = id;
         stack.push(start);
         while let Some(i) = stack.pop() {
             c.area += 1;
             let (x, y) = (i % w, i / w);
+            c.bbox = [
+                c.bbox[0].min(x),
+                c.bbox[1].min(y),
+                c.bbox[2].max(x + 1),
+                c.bbox[3].max(y + 1),
+            ];
             if x == 0 || y == 0 || x == w - 1 || y == h - 1 {
                 c.touches_border = true;
             }
@@ -286,7 +306,8 @@ mod tests {
         assert_eq!(m.centroid, Some([50.0, 50.0]));
         assert!(m.left_edge_gaps.is_empty());
         assert_eq!(m.hole_pct, 0.0);
-        assert_eq!((m.holes, m.pieces), (0, 1));
+        assert_eq!(m.holes, 0);
+        assert_eq!(m.drawing_edges, [100.0; 4]);
     }
 
     #[test]
@@ -304,7 +325,24 @@ mod tests {
         assert!((m.hole_pct - 36.73).abs() < 0.01, "{m:?}");
         assert_eq!(m.left_edge_gaps, vec![[40.0, 60.0]]);
         assert_eq!(m.left_edge_pct, 80.0);
-        assert_eq!(m.fit_left_edge_pct, 80.0);
+        assert_eq!(m.drawing_edges, [80.0, 100.0, 100.0, 100.0]);
+    }
+
+    #[test]
+    fn drawing_edges_follow_the_drawing_not_the_square() {
+        // A short, padded bar: none of the square's edges are touched, but the drawing's
+        // own left and right sides are full height and its top and bottom full width.
+        let m = Metrics::from_alpha(
+            &mask(|x, y| (20.0..60.0).contains(&x) && (30.0..50.0).contains(&y)),
+            200,
+        );
+        assert_eq!(m.left_edge_pct, 0.0);
+        assert_eq!(m.bbox, Some([20.0, 30.0, 60.0, 50.0]));
+        assert_eq!(m.drawing_edges, [100.0; 4]);
+        // A right triangle (full left side, a point on the right).
+        let m = Metrics::from_alpha(&mask(|x, y| y >= x), 200);
+        assert_eq!(m.drawing_edges[0], 100.0);
+        assert!(m.drawing_edges[1] < 5.0, "{m:?}");
     }
 
     #[test]
@@ -312,6 +350,7 @@ mod tests {
         let m = Metrics::from_alpha(&mask(|_, _| false), 200);
         assert_eq!(m.fill_pct, 0.0);
         assert_eq!(m.bbox, None);
+        assert_eq!(m.drawing_edges, [0.0; 4]);
         assert_eq!(m.left_edge_gaps, vec![[0.0, 100.0]]);
     }
 }

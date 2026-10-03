@@ -31,10 +31,10 @@ impl Severity {
     }
 }
 
-/// Which edge of the square.
+/// Where a reversed or rotated drawing's full-height (attach) side is. Never the left:
+/// that is where it belongs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Edge {
-    Left,
     Right,
     Top,
     Bottom,
@@ -50,14 +50,19 @@ pub enum Lint {
     SolidSquare { fill_pct: f32 },
     /// L3: left-edge coverage < 85%.
     NeckGap { left_edge_pct: f32 },
-    /// L3b: the drawing doesn't reach the edges (x0 > 2, y0 > 3 or y1 < 97).
+    /// L3b: the drawing doesn't reach the edges (x0 > 2, y0 > 3 or y1 < 97). Offers Fit
+    /// unless Fit would change nothing (see [`fit_helps`]).
     Margins { bbox: [f32; 4] },
-    /// L4 (heads): centre of mass right of x = 52.
+    /// L4 (heads): the drawing's full-height side is on the right (mirrored), or, with no
+    /// full-height side anywhere, its centre of mass is right of x = 52.
     FacesLeft { centroid_x: f32 },
-    /// L4b (heads): right-edge coverage > 60% (a flat front, or the neck turned to the
-    /// right), or the full-height edge is the top or bottom one instead of the left.
+    /// L4b (heads): the drawing's full-height side is the top or bottom (rotated), or the
+    /// neck is on the left but the right side is also more than 60% filled (a flat
+    /// front, or a quarter turn of a square-ish head). `right_edge_pct` is the drawing's
+    /// own right side.
     FacesUpDown { right_edge_pct: f32 },
-    /// L4c (tails): the left edge isn't full height (< 85%) but another edge is (≥ 85%).
+    /// L4c (tails): the drawing's left side isn't full height (< 85%) but another side is
+    /// (≥ 85%).
     TailReversed { attach_edge: Edge },
     /// L5: enclosed holes > 55% of the filled-in silhouette.
     OutlineOnly { hole_pct: f32 },
@@ -130,7 +135,7 @@ impl Lint {
     /// The one-tap fix the studio can offer next to this lint.
     pub fn fix(&self) -> Option<Fix> {
         match self {
-            Lint::Margins { .. } => Some(Fix::Fit),
+            Lint::Margins { bbox } if fit_helps(*bbox) => Some(Fix::Fit),
             Lint::FacesLeft { .. }
             | Lint::TailReversed {
                 attach_edge: Edge::Right,
@@ -168,9 +173,12 @@ impl Lint {
                  bottom, or you'll see a notch. In Procreate, drag the colour dot into the shape \
                  to fill it."
                 .into(),
-            Lint::Margins { .. } => "Your drawing doesn't reach the edges of the square, so it'll \
-                 look small and leave a gap at the neck. Tap Fit to stretch it, or draw edge to \
-                 edge."
+            Lint::Margins { bbox } if fit_helps(*bbox) => "Your drawing doesn't reach the edges \
+                 of the square, so it'll look small and leave a gap at the neck. Tap Fit to \
+                 stretch it, or draw edge to edge."
+                .into(),
+            Lint::Margins { .. } => "Your drawing doesn't reach the top and bottom of the \
+                 square, so it'll look squashed on the board. Draw it taller, from edge to edge."
                 .into(),
             Lint::FacesLeft { .. } => {
                 "Heads should face right, and the game turns them for you. Tap Flip.".into()
@@ -219,27 +227,63 @@ fn plural(n: usize) -> &'static str {
     if n == 1 { "" } else { "s" }
 }
 
+/// The drawing has a margin: it doesn't reach the left edge, the top or the bottom.
+fn has_margins(b: [f32; 4]) -> bool {
+    b[0] > MARGIN_MAX_X0 || b[1] > MARGIN_MAX_Y0 || b[3] < MARGIN_MIN_Y1
+}
+
+/// The bounds Fit would give a drawing with bounds `b` (see `fix.rs`): the larger side
+/// scaled to 100, the left side moved to x = 0, centred vertically.
+fn fitted_bbox(b: [f32; 4]) -> [f32; 4] {
+    let (w, h) = (b[2] - b[0], b[3] - b[1]);
+    let span = w.max(h);
+    if span <= 0.0 {
+        return b;
+    }
+    let (w, h) = (w * 100.0 / span, h * 100.0 / span);
+    [0.0, (100.0 - h) / 2.0, w, (100.0 + h) / 2.0]
+}
+
+/// Whether Fit is worth offering for a drawing with margins: it would clear them, or at
+/// least move the drawing to the neck edge or make it noticeably bigger. Fit keeps the
+/// aspect ratio, so a wide, short drawing can't be fitted to full height; once it has
+/// been fitted, Fit is no longer offered (it would do nothing) and the `margins` copy
+/// asks for a taller drawing instead.
+pub(crate) fn fit_helps(b: [f32; 4]) -> bool {
+    let span = (b[2] - b[0]).max(b[3] - b[1]);
+    !has_margins(fitted_bbox(b)) || b[0] > MARGIN_MAX_X0 || span < MARGIN_MIN_Y1
+}
+
 /// Shape lints for one kind.
 ///
+/// Direction is judged from the drawing's own sides (`Metrics::drawing_edges`), so a
+/// padded or short drawing whose neck is on the left isn't mistaken for a rotated one:
+/// * the drawing's left side is full height: the neck is on the left. A head whose
+///   right side is also more than 60% full gets `faces_up_down`;
+/// * otherwise the full-height side, if any, says where the neck went: the right is a
+///   mirror (`faces_left` / `tail_reversed`, both offer Flip), the top or bottom a
+///   rotation (`faces_up_down` / `tail_reversed`, no fix);
+/// * a head with no full-height side anywhere and its mass right of x = 52 gets
+///   `faces_left`.
+///
 /// Suppression, so the artist gets one problem and one fix:
-/// * `neck_gap` is left out when `margins` fires and Fit would close the gap (the strip
-///   at the drawing's own left side is full),
-/// * `neck_gap` is left out when a direction lint (`faces_left`, `faces_up_down`,
-///   `tail_reversed`) fires and the full-height edge is on another side, and
-/// * `faces_up_down` is left out when `faces_left` or `solid_square` fires (a mirrored
-///   head and a solid square have a full right edge too).
+/// * `neck_gap` is left out when `margins` offers Fit and the fitted drawing would have
+///   a full-height left edge,
+/// * `neck_gap` is left out when a direction lint found the full-height side elsewhere,
+/// * `faces_up_down` is left out for a solid square (it has a full right side too).
 pub(crate) fn for_kind(m: &Metrics, kind: AssetKind) -> Vec<Lint> {
     let head = kind == AssetKind::Head;
-    let neck_open = m.left_edge_pct < NECK_GAP_BELOW_PCT;
-    // The full-height (attach) edge is somewhere other than the left.
+    let [own_left, own_right, own_top, own_bottom] = m.drawing_edges;
+    let neck_on_left = own_left >= ATTACH_EDGE_MIN_PCT;
+    // The drawing's full-height (attach) side, when it isn't the left one.
     // On ties the last one wins, so Right (which Flip can fix) is last.
     let attach_elsewhere = [
-        (Edge::Bottom, m.bottom_edge_pct),
-        (Edge::Top, m.top_edge_pct),
-        (Edge::Right, m.right_edge_pct),
+        (Edge::Bottom, own_bottom),
+        (Edge::Top, own_top),
+        (Edge::Right, own_right),
     ]
     .into_iter()
-    .filter(|(_, pct)| neck_open && *pct >= ATTACH_EDGE_MIN_PCT)
+    .filter(|(_, pct)| !neck_on_left && *pct >= ATTACH_EDGE_MIN_PCT)
     .max_by(|a, b| a.1.total_cmp(&b.1))
     .map(|(edge, _)| edge);
 
@@ -249,42 +293,47 @@ pub(crate) fn for_kind(m: &Metrics, kind: AssetKind) -> Vec<Lint> {
             fill_pct: m.fill_pct,
         });
     }
-    if head && m.fill_pct > SOLID_SQUARE_ABOVE_PCT {
+    let solid_square = m.fill_pct > SOLID_SQUARE_ABOVE_PCT;
+    if head && solid_square {
         out.push(Lint::SolidSquare {
             fill_pct: m.fill_pct,
         });
     }
 
-    let margins = m
-        .bbox
-        .filter(|b| b[0] > MARGIN_MAX_X0 || b[1] > MARGIN_MAX_Y0 || b[3] < MARGIN_MIN_Y1);
+    let margins = m.bbox.filter(|b| has_margins(*b));
 
     let mut direction = Vec::new();
     if head {
-        let faces_left = m
-            .centroid
-            .map(|[cx, _]| cx)
-            .filter(|&cx| cx > FACES_LEFT_ABOVE_X);
-        // Right edge filled like a neck, or the neck is on the top or bottom edge. A
-        // mirrored head (faces_left) and a solid square also have a full right edge;
-        // their own lint already explains it.
-        let neck_top_or_bottom = matches!(attach_elsewhere, Some(Edge::Top | Edge::Bottom));
-        let faces_up_down = (m.right_edge_pct > FACES_UP_DOWN_ABOVE_PCT || neck_top_or_bottom)
-            && faces_left.is_none()
-            && m.fill_pct <= SOLID_SQUARE_ABOVE_PCT;
-        if let Some(centroid_x) = faces_left {
-            direction.push(Lint::FacesLeft { centroid_x });
-        }
-        if faces_up_down {
-            direction.push(Lint::FacesUpDown {
-                right_edge_pct: m.right_edge_pct,
-            });
+        let centroid_x = m.centroid.map_or(50.0, |[cx, _]| cx);
+        match attach_elsewhere {
+            Some(Edge::Right) => direction.push(Lint::FacesLeft { centroid_x }),
+            Some(Edge::Top | Edge::Bottom) => direction.push(Lint::FacesUpDown {
+                right_edge_pct: own_right,
+            }),
+            None if neck_on_left => {
+                if own_right > FACES_UP_DOWN_ABOVE_PCT && !solid_square {
+                    direction.push(Lint::FacesUpDown {
+                        right_edge_pct: own_right,
+                    });
+                }
+            }
+            None => {
+                if centroid_x > FACES_LEFT_ABOVE_X {
+                    direction.push(Lint::FacesLeft { centroid_x });
+                }
+            }
         }
     } else if let Some(attach_edge) = attach_elsewhere {
         direction.push(Lint::TailReversed { attach_edge });
     }
 
-    let gap_explained_by_margins = margins.is_some() && m.fit_left_edge_pct >= NECK_GAP_BELOW_PCT;
+    let neck_open = m.left_edge_pct < NECK_GAP_BELOW_PCT;
+    // Fit scales the larger side to 100, so the drawing's own left side ends up covering
+    // `own_left * h / max(w, h)` of the square's height.
+    let gap_explained_by_margins = margins.is_some_and(|b| {
+        let (w, h) = (b[2] - b[0], b[3] - b[1]);
+        fit_helps(b) && own_left * h / w.max(h) >= NECK_GAP_BELOW_PCT
+    });
     let gap_explained_by_direction = attach_elsewhere.is_some() && !direction.is_empty();
     if neck_open && !gap_explained_by_margins && !gap_explained_by_direction {
         out.push(Lint::NeckGap {
@@ -302,4 +351,27 @@ pub(crate) fn for_kind(m: &Metrics, kind: AssetKind) -> Vec<Lint> {
         });
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fit_is_offered_until_it_would_do_nothing() {
+        // Padded square-ish drawing: Fit clears the margins.
+        assert!(fit_helps([10.0, 10.0, 90.0, 90.0]));
+        // Wide and padded: Fit can't reach full height, but it does make it bigger.
+        assert!(fit_helps([10.0, 30.0, 90.0, 70.0]));
+        // ...and once fitted, Fit would change nothing.
+        assert_eq!(
+            fitted_bbox([10.0, 30.0, 90.0, 70.0]),
+            [0.0, 25.0, 100.0, 75.0]
+        );
+        assert!(!fit_helps([0.0, 25.0, 100.0, 75.0]));
+        // Full width but short: Fit would only re-centre it.
+        assert!(!fit_helps([0.0, 0.0, 100.0, 80.0]));
+        // Full width and nearly full height: centring clears the margins.
+        assert!(fit_helps([0.0, 0.0, 100.0, 95.0]));
+    }
 }

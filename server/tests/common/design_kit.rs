@@ -114,18 +114,18 @@ pub fn assert_clean(shape: &CleanShape) {
     assert!(svg.ends_with("\"/></svg>"), "{svg}");
     assert!(
         shape
-            .path_d
+            .path_d()
             .chars()
             .all(|c| matches!(c, 'M' | 'L' | 'Q' | 'C' | 'Z' | '0'..='9' | '.' | '-' | ' ')),
         "unexpected char in d: {}",
-        shape.path_d
+        shape.path_d()
     );
     assert_eq!(svg.matches('<').count(), 3, "{svg}");
     assert_eq!(svg.matches("<path").count(), 1, "{svg}");
     assert!(
-        shape.path_d.starts_with('M'),
+        shape.path_d().starts_with('M'),
         "d must start with M: {}",
-        shape.path_d
+        shape.path_d()
     );
 }
 

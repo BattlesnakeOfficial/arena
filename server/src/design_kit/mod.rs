@@ -10,7 +10,7 @@
 //! 3. Pick the ink with the template-aware rule ([`palette`]).
 //! 4. Fit the canvas into a centred square grid, threshold, remove specks and pinholes,
 //!    and trace with visioncortex.
-//! 5. Optionally apply a one-tap [`Fix`], then emit the path and lint it for both kinds.
+//! 5. Optionally apply one-tap [`Fix`]es, then emit the path and lint it for both kinds.
 //!
 //! Security model: user markup is never echoed. [`CleanShape::to_svg`] fills a fixed
 //! template whose only variable parts are a fill-rule keyword and a path `d` that we
@@ -150,6 +150,10 @@ impl RejectedFormat {
 }
 
 /// A one-tap fix, applied to the clean path before it is emitted and linted.
+///
+/// Fixes form a set: [`process_upload`] applies Flip before Fit whatever order they are
+/// given in (fitting first would move a flipped head away from the neck edge), so the
+/// studio can send every fix the artist has tapped so far, e.g. `?fix=flip,fit`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Fix {
     /// Mirror horizontally (`x -> 100 - x`).
@@ -183,6 +187,14 @@ pub struct Limits {
     pub trace_side: u32,
     /// Most separate traced shapes before the upload counts as too complex.
     pub max_trace_clusters: usize,
+    /// Most outline on the trace grid, in pixel edges (ink next to background) per pixel
+    /// of grid side. Bounds the tracer's work and keeps it clear of visioncortex's
+    /// internal limits; the most detailed official asset needs about 20 (21 roughened).
+    pub max_trace_edges_per_side: usize,
+    /// Most total area of the traced shapes' and holes' bounding boxes, in multiples of
+    /// the trace grid's area (the tracer rescans each box). The official assets need at
+    /// most 2.2.
+    pub max_trace_box_cover: usize,
     /// Longest accepted output `d`, in bytes.
     pub max_path_d_bytes: usize,
 }
@@ -196,6 +208,8 @@ impl Default for Limits {
             min_useful_side: 128,
             trace_side: 1024,
             max_trace_clusters: 2_000,
+            max_trace_edges_per_side: 64,
+            max_trace_box_cover: 8,
             max_path_d_bytes: 64 * 1024,
         }
     }
@@ -219,19 +233,19 @@ impl KindLints {
 }
 
 /// The result of processing: one path in 0..100 space, its metrics and lints.
+///
+/// The fields are private so that the only way to get one is [`process_upload`]: the
+/// `d` it carries is always formatted from numbers by this module, which is what makes
+/// [`CleanShape::to_svg`] safe to serve.
 #[derive(Debug, Clone)]
 pub struct CleanShape {
-    /// Absolute `M`/`L`/`Q`/`C`/`Z` commands; matches `^[MLQCZ0-9 .\-]*$`.
-    pub path_d: String,
-    pub fill_rule: FillRule,
-    pub strategy: Strategy,
-    pub input: InputFormat,
-    /// Measured on the clean path (after any fix).
-    pub metrics: Metrics,
-    /// Shape lints per kind.
-    pub lints: KindLints,
-    /// Kind-independent input facts (tips and info): what we noticed or changed.
-    pub info: Vec<Lint>,
+    path_d: String,
+    fill_rule: FillRule,
+    strategy: Strategy,
+    input: InputFormat,
+    metrics: Metrics,
+    lints: KindLints,
+    info: Vec<Lint>,
 }
 
 impl CleanShape {
@@ -244,6 +258,38 @@ impl CleanShape {
             self.fill_rule.as_svg(),
             self.path_d
         )
+    }
+
+    /// Absolute `M`/`L`/`Q`/`C`/`Z` commands; matches `^[MLQCZ0-9 .\-]*$`.
+    pub fn path_d(&self) -> &str {
+        &self.path_d
+    }
+
+    pub fn fill_rule(&self) -> FillRule {
+        self.fill_rule
+    }
+
+    pub fn strategy(&self) -> Strategy {
+        self.strategy
+    }
+
+    pub fn input(&self) -> InputFormat {
+        self.input
+    }
+
+    /// Measured on the clean path (after any fixes).
+    pub fn metrics(&self) -> &Metrics {
+        &self.metrics
+    }
+
+    /// Shape lints per kind.
+    pub fn lints(&self) -> &KindLints {
+        &self.lints
+    }
+
+    /// Kind-independent input facts (tips and info): what we noticed or changed.
+    pub fn info(&self) -> &[Lint] {
+        &self.info
     }
 
     /// No warn-level lint for this kind: "Passes every check the official heads pass."
@@ -348,11 +394,10 @@ impl ProcessError {
                  the template guides. Draw in black on the \"Draw here\" layer, hide the guides, \
                  then export again."
                 .into(),
-            ProcessError::Empty { .. } => {
-                "We couldn't find a drawing. Draw in solid black (or any \
-                 dark colour) and export as PNG."
-                    .into()
-            }
+            ProcessError::Empty { .. } => "We couldn't find a drawing. Draw in solid black and \
+                 export as PNG. Light colours, and colours close to the template's blue and pink \
+                 guides, are ignored."
+                .into(),
             ProcessError::Internal(_) => {
                 "Something went wrong on our side. Please try again.".into()
             }
@@ -424,14 +469,14 @@ fn looks_like_svg(bytes: &[u8]) -> bool {
     head.first() == Some(&b'<') && head.windows(4).any(|w| w == b"<svg")
 }
 
-/// Untrusted upload bytes -> clean shape.
+/// Untrusted upload bytes -> clean shape, with `fixes` applied (a set; see [`Fix`]).
 ///
 /// CPU-bound and synchronous (tens of milliseconds in release for a 2048 px PNG); run it
 /// off the async runtime, behind a semaphore.
 pub fn process_upload(
     bytes: &[u8],
     limits: &Limits,
-    fix: Option<Fix>,
+    fixes: &[Fix],
 ) -> Result<CleanShape, ProcessError> {
     let input = sniff(bytes)?;
     let max = match input {
@@ -454,7 +499,7 @@ pub fn process_upload(
         Strategy::Traced,
         input,
         traced.info,
-        fix,
+        fixes,
         limits,
     )
 }
@@ -466,13 +511,15 @@ fn finish(
     strategy: Strategy,
     input: InputFormat,
     info: Vec<Lint>,
-    fix: Option<Fix>,
+    fixes: &[Fix],
     limits: &Limits,
 ) -> Result<CleanShape, ProcessError> {
-    let path = match fix {
-        Some(f) => fix::apply(path, f),
-        None => path,
-    };
+    let mut path = path;
+    for f in [Fix::Flip, Fix::Fit] {
+        if fixes.contains(&f) {
+            path = fix::apply(path, f);
+        }
+    }
     let path_d = emit::path_to_d(&path);
     if path_d.len() > limits.max_path_d_bytes {
         return Err(ProcessError::TooComplex("the outline is too detailed"));
