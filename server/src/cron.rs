@@ -9,8 +9,13 @@ use crate::jobs::{
 };
 use crate::state::AppState;
 
-/// Matchmaker cron interval in seconds. Shared with the matchmaker to compute games_per_run.
-pub const MATCHMAKER_INTERVAL_SECS: u64 = 15 * 60;
+/// Nominal rounds per snake per ladder each day.
+pub const GAMES_PER_SNAKE_PER_DAY: u64 = 100;
+/// Nominal interval; worker scheduling and tick work can delay actual rounds.
+pub const MATCHMAKER_INTERVAL_SECS: u64 = 86_400 / GAMES_PER_SNAKE_PER_DAY;
+/// CJA requires elapsed > interval, so a short poll observes the 864s cadence
+/// without rounding each round up to the default 60s poll boundary.
+const CRON_POLL_SECS: u64 = 2;
 
 /// Snake health sweep interval. With the default failure threshold of 3,
 /// a broken entry is pulled from matchmaking ~90 minutes after its first
@@ -31,7 +36,7 @@ pub(crate) fn cron_registry() -> CronRegistry<AppState> {
         Duration::from_secs(60 * 60),
     );
 
-    // Leaderboard matchmaker: runs every 15 minutes, creates match games
+    // Leaderboard matchmaker: one round per derived interval, subject to worker delay.
     registry.register_job(
         LeaderboardMatchmakerJob,
         Some("Create leaderboard match games"),
@@ -79,5 +84,23 @@ pub(crate) async fn run_cron(
     registry: CronRegistry<AppState>,
     shutdown: CancellationToken,
 ) -> cja::Result<()> {
-    Ok(Worker::new(app_state, registry).run(shutdown).await?)
+    Ok(Worker::new_with_timezone(
+        app_state,
+        registry,
+        cja::chrono_tz::UTC,
+        Duration::from_secs(CRON_POLL_SECS),
+    )
+    .run(shutdown)
+    .await?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn matchmaker_cadence() {
+        assert_eq!(MATCHMAKER_INTERVAL_SECS, 864);
+        const { assert!(CRON_POLL_SECS < MATCHMAKER_INTERVAL_SECS) };
+    }
 }

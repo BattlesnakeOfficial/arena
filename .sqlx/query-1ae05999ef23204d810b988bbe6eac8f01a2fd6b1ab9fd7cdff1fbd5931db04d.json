@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT leaderboard_id FROM leaderboards WHERE name = 'Duels 11x11'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "leaderboard_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "1ae05999ef23204d810b988bbe6eac8f01a2fd6b1ab9fd7cdff1fbd5931db04d"
+}

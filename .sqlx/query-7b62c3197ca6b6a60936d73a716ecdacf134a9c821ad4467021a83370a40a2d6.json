@@ -1,0 +1,41 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT COUNT(*) FILTER (WHERE g.enqueued_at >= $2) AS \"backlog_count!\",\n                  MIN(g.enqueued_at) FILTER (WHERE g.enqueued_at >= $2) AS oldest_backlog_enqueued_at,\n                  COUNT(*) FILTER (WHERE g.enqueued_at < $2) AS \"old_waiting_count!\",\n                  MIN(g.enqueued_at) FILTER (WHERE g.enqueued_at < $2) AS oldest_old_waiting_enqueued_at\n           FROM games g\n           JOIN leaderboard_games lg ON lg.game_id = g.game_id\n           WHERE g.status = 'waiting' AND g.enqueued_at IS NOT NULL\n             AND lg.leaderboard_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "backlog_count!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "oldest_backlog_enqueued_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 2,
+        "name": "old_waiting_count!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "oldest_old_waiting_enqueued_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "7b62c3197ca6b6a60936d73a716ecdacf134a9c821ad4467021a83370a40a2d6"
+}
