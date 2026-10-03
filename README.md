@@ -74,6 +74,25 @@ export GITHUB_REDIRECT_URI="http://localhost:3000/auth/github/callback"
 
 If you're using [direnv](https://direnv.net/), run `direnv allow` to load these environment variables.
 
+### Process roles
+
+The same `arena` binary can start each long-running component independently.
+A component is disabled only when its flag is exactly lowercase `true`.
+Every role requires `DATABASE_URL`.
+
+| Role | Environment |
+| --- | --- |
+| Combined | No disabled flags |
+| Web only | `JOBS_DISABLED=true CRON_DISABLED=true` |
+| Jobs only | `SERVER_DISABLED=true CRON_DISABLED=true` |
+| Cron only | `SERVER_DISABLED=true JOBS_DISABLED=true` |
+
+Run exactly one cron-role process. Cron-only can enqueue scheduled jobs with
+`JOBS_DISABLED=true`; a jobs-enabled process must run to execute them. Concurrent
+upgraded cron schedulers sharing a database safely commit one enqueue per due
+interval, but a legacy scheduler overlapping an upgraded one can double enqueue.
+This change does not split the current deployment.
+
 #### Optional: Eyes telemetry
 
 Setting **both** `EYES_ORG_ID` and `EYES_APP_ID` to valid UUIDs turns on the

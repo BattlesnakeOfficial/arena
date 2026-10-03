@@ -97,10 +97,23 @@ pub(crate) async fn run_cron(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cja::jobs::registry::JobRegistry;
 
     #[test]
     fn matchmaker_cadence() {
         assert_eq!(MATCHMAKER_INTERVAL_SECS, 864);
         const { assert!(CRON_POLL_SECS < MATCHMAKER_INTERVAL_SECS) };
+    }
+
+    #[test]
+    fn all_crons_are_registered_jobs() {
+        let registry = cron_registry();
+        assert!(!registry.jobs().is_empty());
+        for name in registry.jobs().keys() {
+            assert!(
+                crate::jobs::Jobs::job_names().contains(name),
+                "cron {name} is missing from the job registry"
+            );
+        }
     }
 }
