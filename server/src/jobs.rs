@@ -17,6 +17,44 @@ impl Job<AppState> for NoopJob {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PlayGrantReconcileJob;
+
+#[async_trait::async_trait]
+impl Job<AppState> for PlayGrantReconcileJob {
+    const NAME: &'static str = "PlayGrantReconcileJob";
+
+    async fn run(&self, app_state: AppState) -> cja::Result<()> {
+        match crate::play_import::run_grant_reconcile(
+            &app_state.config.database_url,
+            "play",
+            &app_state.db,
+        )
+        .await
+        {
+            Ok(None) => {
+                tracing::info!("Play grant reconcile skipped: play database does not exist");
+                Ok(())
+            }
+            Ok(Some(counts)) => {
+                tracing::info!(
+                    play_grants_read = counts.play_grants_read,
+                    newly_staged = counts.newly_staged,
+                    newly_materialized = counts.newly_materialized,
+                    skipped_off_catalog = counts.skipped_off_catalog,
+                    skipped_unknown_account = counts.skipped_unknown_account,
+                    "Play grant reconcile completed"
+                );
+                Ok(())
+            }
+            Err(error) => {
+                tracing::error!("Play grant reconcile failed: {error:#}");
+                Err(error)
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct GameRunnerJob {
     pub game_id: Uuid,
 }
@@ -273,6 +311,7 @@ impl Job<AppState> for ScreenShoutsJob {
 cja::impl_job_registry!(
     AppState,
     NoopJob,
+    PlayGrantReconcileJob,
     GameRunnerJob,
     GameBackupJob,
     BackupSingleGameJob,

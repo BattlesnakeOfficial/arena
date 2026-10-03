@@ -323,7 +323,7 @@ mod tests {
     #[test]
     fn dashboard_items_resolve_to_metrics_of_the_right_shape() {
         let manifest = manifest(
-            &crate::cron::cron_registry(),
+            &crate::cron::cron_registry(&AppConfig::test_default()),
             ProcessIdentity::new(ROLE),
             FeatureFlags {
                 server: true,
@@ -378,7 +378,7 @@ mod tests {
         let identity = ProcessIdentity::new(ROLE);
         let id = identity.instance_id();
         let manifest = manifest(
-            &crate::cron::cron_registry(),
+            &crate::cron::cron_registry(&AppConfig::test_default()),
             identity,
             FeatureFlags {
                 server: true,
@@ -405,7 +405,7 @@ mod tests {
     #[tokio::test]
     async fn manifest_wire_contract_keeps_critical_jobs_and_process_identity() {
         let manifest = manifest(
-            &crate::cron::cron_registry(),
+            &crate::cron::cron_registry(&AppConfig::test_default()),
             ProcessIdentity::new(ROLE),
             FeatureFlags {
                 server: true,

@@ -10,8 +10,14 @@
 //! isn't part of arena's compile-time database.
 
 use color_eyre::eyre::Context as _;
-use sqlx::{PgPool, Row as _};
+use std::{collections::HashSet, str::FromStr};
 
+use sqlx::{
+    PgPool, Postgres, Row as _, Transaction,
+    postgres::{PgConnectOptions, PgPoolOptions},
+};
+
+use crate::customizations::catalog::{Head, Tail};
 use crate::models::battlesnake::EngineRegion;
 
 use crate::models::imported_account::{self, StageAccount, StageSnake};
@@ -24,6 +30,49 @@ pub struct ImportCounts {
     pub snakes_region_unmapped: u64,
     pub grants: u64,
     pub grants_orphaned: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct PlayGrant {
+    play_account_id: String,
+    customization_type: String,
+    slug: String,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct GrantReconcileCounts {
+    pub play_grants_read: u64,
+    pub newly_staged: u64,
+    pub newly_materialized: u64,
+    pub skipped_off_catalog: u64,
+    pub skipped_unknown_account: u64,
+}
+
+async fn read_play_grants<'e, E: sqlx::PgExecutor<'e>>(executor: E) -> cja::Result<Vec<PlayGrant>> {
+    let rows = sqlx::query(
+        r#"SELECT g.account_id, c.customization_type, c.slug
+           FROM core_snakecustomizationgrant g
+           JOIN core_snakecustomization c ON c.id = g.snake_customization_id
+           WHERE c.customization_type IN ('head', 'tail')
+           ORDER BY g.id"#,
+    )
+    .fetch_all(executor)
+    .await
+    .wrap_err("Failed to read play grants")?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok(PlayGrant {
+                play_account_id: row
+                    .try_get("account_id")
+                    .wrap_err("Invalid play grant account_id")?,
+                customization_type: row
+                    .try_get("customization_type")
+                    .wrap_err("Invalid play grant type")?,
+                slug: row.try_get("slug").wrap_err("Invalid play grant slug")?,
+            })
+        })
+        .collect()
 }
 
 /// The Play region tuple is retained even when unknown so import can warn
@@ -210,26 +259,14 @@ pub async fn import_from_play(play: &PgPool, arena: &PgPool) -> cja::Result<Impo
     }
 
     // Head/tail customization grants, staged by (type, slug).
-    let grant_rows = sqlx::query(
-        r#"
-        SELECT g.account_id, c.customization_type, c.slug
-        FROM core_snakecustomizationgrant g
-        JOIN core_snakecustomization c ON c.id = g.snake_customization_id
-        WHERE c.customization_type IN ('head', 'tail')
-        ORDER BY g.id
-        "#,
-    )
-    .fetch_all(play)
-    .await
-    .wrap_err("Failed to read play grants")?;
-
-    for row in grant_rows {
-        let play_account_id: String = row.try_get("account_id")?;
-        let customization_type: String = row.try_get("customization_type")?;
-        let slug: String = row.try_get("slug")?;
-
-        if imported_account::stage_grant(arena, &play_account_id, &customization_type, &slug)
-            .await?
+    for grant in read_play_grants(play).await? {
+        if imported_account::stage_grant(
+            arena,
+            &grant.play_account_id,
+            &grant.customization_type,
+            &grant.slug,
+        )
+        .await?
         {
             counts.grants += 1;
         } else {
@@ -238,6 +275,171 @@ pub async fn import_from_play(play: &PgPool, arena: &PgPool) -> cja::Result<Impo
     }
 
     Ok(counts)
+}
+
+async fn begin_read_only_play_transaction(play: &PgPool) -> cja::Result<Transaction<'_, Postgres>> {
+    let mut tx = play
+        .begin()
+        .await
+        .wrap_err("Failed to begin play transaction")?;
+    sqlx::query("SET TRANSACTION READ ONLY")
+        .execute(&mut *tx)
+        .await
+        .wrap_err("Failed to set play transaction read only")?;
+    let read_only: String = sqlx::query_scalar("SELECT current_setting('transaction_read_only')")
+        .fetch_one(&mut *tx)
+        .await
+        .wrap_err("Failed to verify play transaction read only")?;
+    if read_only != "on" {
+        return Err(color_eyre::eyre::eyre!("Play transaction is not read only"));
+    }
+    Ok(tx)
+}
+
+async fn stage_reconcile_grants(
+    tx: &mut Transaction<'_, Postgres>,
+    grants: &[PlayGrant],
+) -> cja::Result<u64> {
+    let account_ids: Vec<String> = grants.iter().map(|g| g.play_account_id.clone()).collect();
+    let types: Vec<String> = grants
+        .iter()
+        .map(|g| g.customization_type.clone())
+        .collect();
+    let slugs: Vec<String> = grants.iter().map(|g| g.slug.clone()).collect();
+    let result = sqlx::query!(
+        r#"INSERT INTO imported_grants (imported_account_id, customization_type, slug)
+           SELECT ia.imported_account_id, g.customization_type, g.slug
+           FROM UNNEST($1::text[], $2::text[], $3::text[])
+                AS g(play_account_id, customization_type, slug)
+           JOIN imported_accounts ia ON ia.play_account_id = g.play_account_id
+           ORDER BY ia.imported_account_id, g.customization_type, g.slug
+           ON CONFLICT (imported_account_id, customization_type, slug) DO NOTHING"#,
+        &account_ids,
+        &types,
+        &slugs,
+    )
+    .execute(&mut **tx)
+    .await
+    .wrap_err("Failed to stage reconciled play grants")?;
+    Ok(result.rows_affected())
+}
+
+async fn materialize_reconcile_grants(tx: &mut Transaction<'_, Postgres>) -> cja::Result<u64> {
+    let catalog: Vec<(&str, &str)> = Head::ALL
+        .iter()
+        .map(|head| (Head::KIND, head.slug()))
+        .chain(Tail::ALL.iter().map(|tail| (Tail::KIND, tail.slug())))
+        .collect();
+    let types: Vec<String> = catalog
+        .iter()
+        .map(|(kind, _)| (*kind).to_string())
+        .collect();
+    let slugs: Vec<String> = catalog
+        .iter()
+        .map(|(_, slug)| (*slug).to_string())
+        .collect();
+    let result = sqlx::query!(
+        r#"INSERT INTO customization_grants (user_id, customization_type, slug)
+           SELECT ia.claimed_by_user_id, ig.customization_type, ig.slug
+           FROM imported_grants ig
+           JOIN imported_accounts ia ON ia.imported_account_id = ig.imported_account_id
+           JOIN UNNEST($1::text[], $2::text[])
+                AS catalog(customization_type, slug)
+             ON (catalog.customization_type, catalog.slug) = (ig.customization_type, ig.slug)
+           WHERE ia.claimed_by_user_id IS NOT NULL
+           ORDER BY ia.claimed_by_user_id, ig.customization_type, ig.slug
+           ON CONFLICT (user_id, customization_type, slug) DO NOTHING"#,
+        &types,
+        &slugs,
+    )
+    .execute(&mut **tx)
+    .await
+    .wrap_err("Failed to materialize reconciled play grants")?;
+    Ok(result.rows_affected())
+}
+
+pub async fn reconcile_grants(play: &PgPool, arena: &PgPool) -> cja::Result<GrantReconcileCounts> {
+    let mut play_tx = begin_read_only_play_transaction(play).await?;
+    let mut grants = read_play_grants(&mut *play_tx).await?;
+    play_tx
+        .commit()
+        .await
+        .wrap_err("Failed to commit play read-only transaction")?;
+
+    let mut counts = GrantReconcileCounts {
+        play_grants_read: grants.len() as u64,
+        ..Default::default()
+    };
+    grants.sort_unstable();
+    grants.dedup();
+    let mut valid = Vec::with_capacity(grants.len());
+    for grant in grants {
+        let in_catalog = match grant.customization_type.as_str() {
+            "head" => Head::from_slug(&grant.slug).is_some(),
+            "tail" => Tail::from_slug(&grant.slug).is_some(),
+            _ => false,
+        };
+        if in_catalog {
+            valid.push(grant);
+        } else {
+            counts.skipped_off_catalog += 1;
+        }
+    }
+
+    let account_ids: Vec<String> = valid.iter().map(|g| g.play_account_id.clone()).collect();
+    let known: HashSet<String> = sqlx::query_scalar!(
+        "SELECT play_account_id FROM imported_accounts WHERE play_account_id = ANY($1::text[])",
+        &account_ids,
+    )
+    .fetch_all(arena)
+    .await
+    .wrap_err("Failed to find imported play accounts")?
+    .into_iter()
+    .collect();
+    valid.retain(|grant| {
+        if known.contains(&grant.play_account_id) {
+            true
+        } else {
+            counts.skipped_unknown_account += 1;
+            false
+        }
+    });
+
+    let mut arena_tx = arena
+        .begin()
+        .await
+        .wrap_err("Failed to begin arena grant transaction")?;
+    counts.newly_staged = stage_reconcile_grants(&mut arena_tx, &valid).await?;
+    counts.newly_materialized = materialize_reconcile_grants(&mut arena_tx).await?;
+    arena_tx
+        .commit()
+        .await
+        .wrap_err("Failed to commit arena grant transaction")?;
+    Ok(counts)
+}
+
+pub async fn run_grant_reconcile(
+    database_url: &str,
+    database_name: &str,
+    arena: &PgPool,
+) -> cja::Result<Option<GrantReconcileCounts>> {
+    let options = PgConnectOptions::from_str(database_url)
+        .wrap_err("Failed to parse arena database options for play grant reconcile")?
+        .database(database_name);
+    let play = match PgPoolOptions::new()
+        .max_connections(2)
+        .connect_with(options)
+        .await
+    {
+        Ok(play) => play,
+        Err(sqlx::Error::Database(error)) if error.code().as_deref() == Some("3D000") => {
+            return Ok(None);
+        }
+        Err(error) => return Err(error).wrap_err("Failed to connect to play for grant reconcile"),
+    };
+    let result = reconcile_grants(&play, arena).await;
+    play.close().await;
+    result.map(Some)
 }
 
 /// Print deterministic literal SQL inputs without modifying either database.
@@ -372,6 +574,269 @@ pub async fn run_import() -> cja::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::imported_account::{StageAccount, claim_account, stage_account};
+    use uuid::Uuid;
+
+    async fn test_imported_account(pool: &PgPool, number: u32) -> cja::Result<Uuid> {
+        stage_account(
+            pool,
+            &StageAccount {
+                play_user_id: format!("reconcile_user_{number}"),
+                play_account_id: format!("reconcile_account_{number}"),
+                email: format!("reconcile-{number}@example.com"),
+                password_hash: "test-hash".to_string(),
+                is_email_verified: true,
+                username: format!("reconcile_{number}"),
+                display_name: format!("Reconcile {number}"),
+                pronouns: String::new(),
+                country: String::new(),
+                backstory: String::new(),
+                github_uid: None,
+                github_login: None,
+                points: 0,
+                points_high_score: 0,
+                is_staff: false,
+                play_created_at: None,
+            },
+        )
+        .await
+    }
+
+    async fn test_user(pool: &PgPool, number: i64) -> cja::Result<Uuid> {
+        Ok(sqlx::query!(
+            "INSERT INTO users (external_github_id, github_login, github_access_token)
+             VALUES ($1, $2, 'test-token') RETURNING user_id",
+            number,
+            format!("reconcile-gh-{number}")
+        )
+        .fetch_one(pool)
+        .await?
+        .user_id)
+    }
+
+    async fn test_play_grant(
+        pool: &PgPool,
+        id: &str,
+        account: &str,
+        kind: &str,
+        slug: &str,
+    ) -> cja::Result<()> {
+        sqlx::query("INSERT INTO core_snakecustomization (id, customization_type, slug) VALUES ($1, $2, $3)")
+            .bind(id).bind(kind).bind(slug).execute(pool).await?;
+        sqlx::query("INSERT INTO core_snakecustomizationgrant (id, account_id, snake_customization_id) VALUES ($1, $2, $3)")
+            .bind(format!("grant_{id}")).bind(account).bind(id).execute(pool).await?;
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn reconcile_grant_bought_after_claim(pool: PgPool) -> cja::Result<()> {
+        create_play_tables(&pool).await?;
+        let account = test_imported_account(&pool, 1).await?;
+        let user = test_user(&pool, 15281).await?;
+        let claim = claim_account(&pool, account, user)
+            .await?
+            .expect("claim succeeds");
+        assert_eq!(claim.grants_created, 0);
+        assert_eq!(
+            crate::customizations::resolve_head(&pool, user, "alligator").await?,
+            "default"
+        );
+
+        test_play_grant(
+            &pool,
+            "late_head",
+            "reconcile_account_1",
+            "head",
+            "alligator",
+        )
+        .await?;
+        let counts = reconcile_grants(&pool, &pool).await?;
+        assert_eq!(counts.play_grants_read, 1);
+        assert_eq!(counts.newly_staged, 1);
+        assert_eq!(counts.newly_materialized, 1);
+        assert!(
+            crate::customizations::get_granted_slugs(&pool, user)
+                .await?
+                .contains(&("head".to_string(), "alligator".to_string()))
+        );
+        assert_eq!(
+            crate::customizations::resolve_head(&pool, user, "alligator").await?,
+            "alligator"
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn reconcile_grant_bought_before_claim(pool: PgPool) -> cja::Result<()> {
+        create_play_tables(&pool).await?;
+        let account = test_imported_account(&pool, 2).await?;
+        test_play_grant(
+            &pool,
+            "early_head",
+            "reconcile_account_2",
+            "head",
+            "alligator",
+        )
+        .await?;
+        let counts = reconcile_grants(&pool, &pool).await?;
+        assert_eq!((counts.newly_staged, counts.newly_materialized), (1, 0));
+        let staged: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM imported_grants WHERE imported_account_id = $1",
+        )
+        .bind(account)
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(staged, 1);
+
+        let user = test_user(&pool, 15282).await?;
+        let claim = claim_account(&pool, account, user)
+            .await?
+            .expect("claim succeeds");
+        assert_eq!(claim.grants_created, 1);
+        assert!(
+            crate::customizations::get_granted_slugs(&pool, user)
+                .await?
+                .contains(&("head".to_string(), "alligator".to_string()))
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn reconcile_filters_and_is_idempotent(pool: PgPool) -> cja::Result<()> {
+        create_play_tables(&pool).await?;
+        let account = test_imported_account(&pool, 3).await?;
+        let user = test_user(&pool, 15283).await?;
+        claim_account(&pool, account, user)
+            .await?
+            .expect("claim succeeds");
+        crate::customizations::create_grant(&pool, user, "tail", "alligator").await?;
+        test_play_grant(&pool, "valid", "reconcile_account_3", "head", "alligator").await?;
+        sqlx::query("INSERT INTO core_snakecustomizationgrant (id, account_id, snake_customization_id) VALUES ('duplicate', 'reconcile_account_3', 'valid')")
+            .execute(&pool).await?;
+        test_play_grant(
+            &pool,
+            "invalid",
+            "reconcile_account_3",
+            "head",
+            "off-catalog",
+        )
+        .await?;
+        test_play_grant(&pool, "unknown", "missing_account", "head", "beluga").await?;
+        test_play_grant(&pool, "color", "reconcile_account_3", "color", "blue").await?;
+        let first = reconcile_grants(&pool, &pool).await?;
+        assert_eq!(first.play_grants_read, 4);
+        assert_eq!(first.newly_staged, 1);
+        assert_eq!(first.newly_materialized, 1);
+        assert_eq!(first.skipped_off_catalog, 1);
+        assert_eq!(first.skipped_unknown_account, 1);
+        let second = reconcile_grants(&pool, &pool).await?;
+        assert_eq!((second.newly_staged, second.newly_materialized), (0, 0));
+        let accounts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM imported_accounts")
+            .fetch_one(&pool)
+            .await?;
+        let snakes: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM imported_snakes")
+            .fetch_one(&pool)
+            .await?;
+        let staged: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM imported_grants")
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!((accounts, snakes, staged), (1, 0, 1));
+        assert!(
+            crate::customizations::get_granted_slugs(&pool, user)
+                .await?
+                .contains(&("tail".to_string(), "alligator".to_string()))
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn reconcile_repairs_claim_race(pool: PgPool) -> cja::Result<()> {
+        create_play_tables(&pool).await?;
+        let account = test_imported_account(&pool, 4).await?;
+        let user = test_user(&pool, 15284).await?;
+        let grant = PlayGrant {
+            play_account_id: "reconcile_account_4".to_string(),
+            customization_type: "head".to_string(),
+            slug: "alligator".to_string(),
+        };
+        let mut tx = pool.begin().await?;
+        assert_eq!(stage_reconcile_grants(&mut tx, &[grant]).await?, 1);
+        assert_eq!(materialize_reconcile_grants(&mut tx).await?, 0);
+        let claim = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            claim_account(&pool, account, user),
+        )
+        .await??
+        .expect("claim succeeds");
+        assert_eq!(claim.grants_created, 0);
+        tx.commit().await?;
+        let claimed: bool = sqlx::query_scalar(
+            "SELECT claimed_by_user_id = $1 FROM imported_accounts WHERE imported_account_id = $2",
+        )
+        .bind(user)
+        .bind(account)
+        .fetch_one(&pool)
+        .await?;
+        let staged: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM imported_grants WHERE imported_account_id = $1",
+        )
+        .bind(account)
+        .fetch_one(&pool)
+        .await?;
+        assert!(claimed);
+        assert_eq!(staged, 1);
+        let absent: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM customization_grants WHERE user_id = $1")
+                .bind(user)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(absent, 0);
+        let counts = reconcile_grants(&pool, &pool).await?;
+        assert_eq!(counts.newly_staged, 0);
+        assert_eq!(counts.newly_materialized, 1);
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn play_transaction_is_read_only(pool: PgPool) -> cja::Result<()> {
+        create_play_tables(&pool).await?;
+        let mut tx = begin_read_only_play_transaction(&pool).await?;
+        let error = sqlx::query("INSERT INTO core_snakecustomization (id, customization_type, slug) VALUES ('forbidden', 'head', 'alligator')")
+            .execute(&mut *tx).await.expect_err("read-only transaction rejects writes");
+        assert_eq!(
+            error
+                .as_database_error()
+                .and_then(|db| db.code())
+                .as_deref(),
+            Some("25006")
+        );
+        tx.rollback().await?;
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn missing_play_database_is_skipped(pool: PgPool) -> cja::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let missing = format!("missing_play_{}", Uuid::new_v4().simple());
+        assert_eq!(
+            run_grant_reconcile(&database_url, &missing, &pool).await?,
+            None
+        );
+        assert!(
+            run_grant_reconcile(
+                "postgres://invalid:invalid@127.0.0.1:1/arena",
+                "play",
+                &pool
+            )
+            .await
+            .is_err()
+        );
+        let staged: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM imported_grants")
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(staged, 0);
+        Ok(())
+    }
 
     #[test]
     fn play_region_mapping_keeps_unknown_snakes_at_west() {
