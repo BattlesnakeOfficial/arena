@@ -94,7 +94,7 @@ impl Job<AppState> for HistoricalBackupDiscoveryJob {
 }
 
 /// Cron job to create leaderboard match games.
-/// Runs every 15 minutes, creating games for active leaderboards.
+/// Runs once per nominal matchmaker interval, creating one round for each active ladder.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct LeaderboardMatchmakerJob;
 

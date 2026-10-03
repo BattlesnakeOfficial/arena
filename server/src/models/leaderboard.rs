@@ -9,7 +9,6 @@ use uuid::Uuid;
 /// pauses entirely.
 pub const MIN_MATCH_SIZE: usize = 2;
 pub const MIN_GAMES_FOR_RANKING: i32 = 10;
-pub const GAMES_PER_DAY: i32 = 100;
 
 // Leaderboard model
 #[derive(Debug, Serialize, Deserialize, FromRow)]

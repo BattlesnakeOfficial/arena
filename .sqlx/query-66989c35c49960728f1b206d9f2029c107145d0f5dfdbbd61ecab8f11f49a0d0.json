@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE leaderboard_entries SET disabled_at = NOW(), disabled_reason = 'test' WHERE leaderboard_entry_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "66989c35c49960728f1b206d9f2029c107145d0f5dfdbbd61ecab8f11f49a0d0"
+}
