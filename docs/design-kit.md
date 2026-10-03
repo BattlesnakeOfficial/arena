@@ -69,8 +69,10 @@ where `d` uses only absolute `M L Q C Z`, digits, `.`, `-` and spaces (2 decimal
      limit; this is for photos that were cropped or resized and kept the tag.)
 4. **Ink rule** (below) turns pixels into ink coverage 0–255.
 5. **Square grid**: the canvas is fitted uniformly and centred into a square grid of
-   `clamp(max(w, h), 512, 1024)` px (box downscale, bilinear upscale), thresholded at
-   50%. A non-square canvas gets the `non_square` tip.
+   `clamp(max(w, h), 512, 1024)` px (bilinear upscale; box downscale with each source
+   pixel weighted by how much of it the grid pixel covers, so a 1025–2047 px export
+   traces like a 1024 px one), thresholded at 50%. A non-square canvas gets the
+   `non_square` tip.
 6. **Specks and pinholes** smaller than 1 unit² (10 × 10 px on the 1000 px template) are
    removed (`specks_removed`).
 7. **Budget** the tracer's work before it runs (`too_complex` otherwise; see below).
@@ -364,7 +366,8 @@ panics from the decode process.
   px, transparent and opaque, and of some roughened (wobble, blur, grain, specks) and
   JPEG q80 (IoU ≥ 0.97 against the original, outline within 1.25 units of the
   original's, or ¼ unit for the straight-edged samples, left edge ≥ 95%, no warnings);
-  a navy head at six export sizes; navy and crimson drawings, crisp and soft-edged, on
+  samples exported at 1200 and 1536 px (a non-integer downscale) with `d` at most 1.6
+  times its size at 1024; a navy head at six export sizes; navy and crimson drawings, crisp and soft-edged, on
   light grey and inside a soft black outline; EXIF orientation; the progressive JPEG cap
   (including a libjpeg file whose first scan carries every component), the multi-scan
   cap and a JPEG the decoder panics on; skipped PNG metadata; the ink matrix; one case

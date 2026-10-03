@@ -372,6 +372,35 @@ fn the_trace_does_not_depend_on_the_export_size() {
 }
 
 #[test]
+fn exports_between_1025_and_2047_px_trace_like_1024() {
+    // These are box-downscaled onto the 1024 px grid at a non-integer ratio. With every
+    // source pixel in a target pixel's window at full weight the windows' centres
+    // alternated, curves came back as 1 px stairs, and `d` was 1.8 to 4 times its size at
+    // 1024 (still within the outline tolerance).
+    let samples = [
+        (AssetKind::Head, "default"),
+        (AssetKind::Head, "smile"),
+        (AssetKind::Tail, "bolt"),
+        (AssetKind::Tail, "curled"),
+    ];
+    for (kind, slug) in samples {
+        let at_1024 = check_round_trip(kind, slug, 1024, Export::Opaque)
+            .path_d()
+            .len();
+        for side in [1200, 1536] {
+            let d = check_round_trip(kind, slug, side, Export::Opaque)
+                .path_d()
+                .len();
+            assert!(
+                d * 5 <= at_1024 * 8,
+                "{}/{slug} @{side}: d is {d} B, {at_1024} B at 1024 (at most 1.6 times)",
+                kind_dir(kind)
+            );
+        }
+    }
+}
+
+#[test]
 fn roughened_drawings_round_trip() {
     for (kind, slug) in [
         (AssetKind::Head, "smile"),

@@ -383,7 +383,7 @@ fn check_dimensions(w: u32, h: u32, limits: &Limits) -> Result<(), ProcessError>
 }
 
 /// Map a `w`x`h` coverage image into a `side`x`side` boolean grid, uniformly scaled and
-/// centred. Downscale = box average, upscale = bilinear. Threshold at 50%.
+/// centred. Downscale = area-weighted box average, upscale = bilinear. Threshold at 50%.
 fn resample_to_square(ink: &[u8], w: usize, h: usize, side: usize) -> Vec<bool> {
     let src_side = w.max(h) as f64;
     let k = side as f64 / src_side; // dst px per src px
@@ -405,14 +405,23 @@ fn resample_to_square(ink: &[u8], w: usize, h: usize, side: usize) -> Vec<bool> 
                 continue;
             }
             let v = if k < 1.0 {
+                // Each source pixel counts by how much of it this target pixel covers.
+                // At a non-integer ratio (1025 to 2047 px onto 1024) full weights move
+                // the windows' centres back and forth (±1/4 px at 1536), so edges step
+                // unevenly and curves come back as kinked stairs.
                 let (x0, x1) = (sx0.floor().max(0.0) as usize, (sx1.ceil() as usize).min(w));
                 let (y0, y1) = (sy0.floor().max(0.0) as usize, (sy1.ceil() as usize).min(h));
+                let overlap = |p: usize, lo: f64, hi: f64| {
+                    ((p as f64 + 1.0).min(hi) - (p as f64).max(lo)).max(0.0)
+                };
                 let mut sum = 0.0;
                 let mut n = 0.0;
                 for y in y0..y1 {
+                    let wy = overlap(y, sy0, sy1);
                     for x in x0..x1 {
-                        sum += get(x, y);
-                        n += 1.0;
+                        let wxy = overlap(x, sx0, sx1) * wy;
+                        sum += get(x, y) * wxy;
+                        n += wxy;
                     }
                 }
                 if n > 0.0 { sum / n } else { 0.0 }
@@ -568,5 +577,34 @@ mod tests {
         assert!(mask[256 * 512 + 256]);
         assert!(!mask[500 * 512 + 256]);
         assert!(mask[129 * 512] && mask[382 * 512 + 511]);
+    }
+
+    #[test]
+    fn a_downscaled_edge_lands_within_half_a_pixel() {
+        // The ratios of 1200, 1536 and 2000 px exports onto the 1024 px grid, scaled down
+        // to a 64 px grid. Each source pixel counts by how much of it the target pixel
+        // covers. At full weight the windows' centres alternated (1, 2, 4, 5, 7… at 1.5:1
+        // instead of every 1.5 px), so an edge stepped unevenly by up to 2/3 px and
+        // curves came back as kinked stairs.
+        let side = 64;
+        for src in [75, 96, 125] {
+            let k = side as f64 / src as f64;
+            for e in 0..=src {
+                // A one-pixel strip with its first `e` pixels inked, along each axis.
+                let strip: Vec<u8> = (0..src).map(|x| if x < e { 255 } else { 0 }).collect();
+                let across = resample_to_square(&strip, src, 1, side);
+                let down = resample_to_square(&strip, 1, src, side);
+                let inked_x = across[side / 2 * side..][..side].iter().filter(|&&b| b);
+                let inked_y = (0..side).filter(|y| down[y * side + side / 2]);
+                for (axis, inked) in [("x", inked_x.count()), ("y", inked_y.count())] {
+                    let want = e as f64 * k;
+                    assert!(
+                        (inked as f64 - want).abs() <= 0.5 + 1e-9,
+                        "{src} px onto {side}, edge at {e} along {axis}: \
+                         {inked} px inked, want {want:.2}"
+                    );
+                }
+            }
+        }
     }
 }
