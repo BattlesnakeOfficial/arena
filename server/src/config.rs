@@ -188,6 +188,7 @@ pub struct AppConfig {
     // Core
     pub database_url: String,
     pub pg_max_connections: u32,
+    pub play_grant_reconcile_interval_secs: u64,
     /// Public base URL, used to build the board-viewer iframe `engine=` param.
     pub base_url: String,
 
@@ -308,6 +309,11 @@ impl AppConfig {
         Ok(Self {
             database_url,
             pg_max_connections: parse_env("ARENA_PG_MAX_CONNECTIONS", 5),
+            play_grant_reconcile_interval_secs: parse_env(
+                "PLAY_GRANT_RECONCILE_INTERVAL_SECS",
+                3600,
+            )
+            .max(1),
             base_url: resolve_base_url(optional_env("BASE_URL"), gcp_logging),
 
             engine_database_url: optional_env("ENGINE_DATABASE_URL"),
@@ -358,6 +364,7 @@ impl AppConfig {
         Self {
             database_url: String::new(),
             pg_max_connections: 5,
+            play_grant_reconcile_interval_secs: 3600,
             base_url: LOCAL_BASE_URL.to_string(),
             engine_database_url: None,
             gcs_bucket: None,
