@@ -1369,3 +1369,19 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
   /* The chart scales down to fit; enlarge its labels so they stay readable at ~375px. */
   .latency-chart .lbl { font-size: 22px; }
 }
+
+/* --- page: studio ----------------------------------------------------------- */
+
+/* Board preview (components/snake_board.rs), a port of board.battlesnake.com.
+   Grid, page and food colours, the shadow, and the 16px font-size its em-based
+   shadow is measured against are copied exactly from the real board. Snake
+   colour: --snake on one snake's <g>, else --studio-snake from the page. */
+.studio-board, .studio-board.light { font-size: 16px; background: #ffffff; }
+.studio-board .grid, .studio-board.light .grid { fill: #f1f1f1; }
+.studio-board.dark { background: #0f0b19; }
+.studio-board.dark .grid { fill: #393939; }
+.studio-board .snake > svg { fill: var(--snake, var(--studio-snake, #ff4f86)); }
+.studio-board .snake > polyline { stroke: var(--snake, var(--studio-snake, #ff4f86)); }
+.studio-board .snake, .studio-board .food { filter: drop-shadow(0.1em 0.1em 0.05em rgba(0,0,0,.3)); }
+/* `hidden` only hides HTML elements by default; live-loop frames are SVG <g>s. */
+.studio-board .studio-frame[hidden] { display: none; }
