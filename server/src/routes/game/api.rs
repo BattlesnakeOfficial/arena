@@ -520,14 +520,18 @@ async fn handle_game_websocket(socket: WebSocket, state: AppState, game_id: Uuid
         }
     };
     if subscription.created {
-        let cursor = existing_turns
+        let last = existing_turns
             .iter()
             .rev()
-            .find(|turn| turn.frame_data.is_some())
-            .map_or(-1, |turn| turn.turn_number);
+            .find(|turn| turn.frame_data.is_some());
         state
             .watched_games
-            .seed_if_current(game_id, &mut subscription, cursor)
+            .seed_with_turn_id(
+                game_id,
+                &mut subscription,
+                last.map_or(-1, |turn| turn.turn_number),
+                last.map(|turn| turn.turn_id),
+            )
             .await;
     }
     let authors = frame_author_map(&state.db, game_id).await;
@@ -1315,6 +1319,21 @@ mod live_tests {
         .unwrap();
     }
 
+    async fn outage_admin(pool: &PgPool) -> (PgPool, String) {
+        let db_name = sqlx::query_scalar!("SELECT current_database()")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(db_name, "postgres");
+        let admin = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with(pool.connect_options().as_ref().clone().database("postgres"))
+            .await
+            .unwrap();
+        (admin, db_name.replace('"', "\"\""))
+    }
+
     #[sqlx::test(migrations = "../migrations")]
     async fn different_process_receives_every_frame_and_finish(pool: PgPool) {
         let id = game(&pool).await;
@@ -1557,6 +1576,155 @@ mod live_tests {
         })
         .await
         .unwrap();
+        shutdown.cancel();
+        web_shutdown.cancel();
+        listener.await.unwrap().unwrap();
+        web.await.unwrap();
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn failed_listener_rebuild_catches_up_terminal(pool: PgPool) {
+        let id = game(&pool).await;
+        let reader = AppState::test_from_pool(pool.clone());
+        let shutdown = CancellationToken::new();
+        let listener = tokio::spawn(run_watched_games(
+            pool.clone(),
+            pool.connect_options().as_ref().clone(),
+            reader.watched_games.clone(),
+            shutdown.clone(),
+        ));
+        let (base, web_shutdown, web) = start(reader.clone()).await;
+        let mut client = connect(&base, id).await;
+        wait_active(&reader.watched_games, id).await;
+        turn(&pool, &reader, id, 0).await;
+        assert_eq!(next(&mut client).await["Data"]["Turn"], 0);
+
+        // Keep write and admin sessions open while new connections are denied.
+        let (admin_pool, quoted_name) = outage_admin(&pool).await;
+        let mut admin = admin_pool.acquire().await.unwrap();
+        let mut writer = pool.acquire().await.unwrap();
+        sqlx::query(&format!(
+            "ALTER DATABASE \"{quoted_name}\" WITH ALLOW_CONNECTIONS false"
+        ))
+        .execute(&mut *admin)
+        .await
+        .unwrap();
+        let outage = async {
+            sqlx::query!(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = current_database() AND application_name = 'arena-watched-games-listener' AND pid <> pg_backend_pid() LIMIT 1"
+            )
+            .fetch_one(&mut *writer)
+            .await?;
+            for number in 1..8 {
+                sqlx::query!(
+                    "INSERT INTO turns (game_id, turn_number, frame_data) VALUES ($1, $2, $3)",
+                    id,
+                    number,
+                    serde_json::json!({"Turn": number}),
+                )
+                .execute(&mut *writer)
+                .await?;
+            }
+            sqlx::query!("UPDATE games SET status = 'finished' WHERE game_id = $1", id)
+                .execute(&mut *writer)
+                .await?;
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while reader.watched_games.listener_errors() == 0 {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await?;
+            Ok::<(), color_eyre::Report>(())
+        }
+        .await;
+        // Restore even when an outage operation fails. No assertions occur above.
+        sqlx::query(&format!(
+            "ALTER DATABASE \"{quoted_name}\" WITH ALLOW_CONNECTIONS true"
+        ))
+        .execute(&mut *admin)
+        .await
+        .unwrap();
+        outage.unwrap();
+        for number in 1..8 {
+            assert_eq!(next(&mut client).await["Data"]["Turn"], number);
+        }
+        assert_eq!(next(&mut client).await["Type"], "game_end");
+        close(&mut client).await;
+        assert!(reader.watched_games.listener_errors() > 0);
+        assert!(reader.watched_games.reconnect_catchups() > 0);
+        shutdown.cancel();
+        web_shutdown.cancel();
+        listener.await.unwrap().unwrap();
+        web.await.unwrap();
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn listener_outage_rewind_and_regrow_closes_old_stream(pool: PgPool) {
+        let id = game(&pool).await;
+        let state = AppState::test_from_pool(pool.clone());
+        let shutdown = CancellationToken::new();
+        let listener = tokio::spawn(run_watched_games(
+            pool.clone(),
+            pool.connect_options().as_ref().clone(),
+            state.watched_games.clone(),
+            shutdown.clone(),
+        ));
+        let (base, web_shutdown, web) = start(state.clone()).await;
+        let mut client = connect(&base, id).await;
+        wait_active(&state.watched_games, id).await;
+        for number in 0..6 {
+            turn(&pool, &state, id, number).await;
+            assert_eq!(next(&mut client).await["Data"]["Turn"], number);
+        }
+        let (admin_pool, quoted_name) = outage_admin(&pool).await;
+        let mut admin = admin_pool.acquire().await.unwrap();
+        let mut writer = pool.acquire().await.unwrap();
+        let spare = pool.acquire().await.unwrap();
+        drop(spare);
+        sqlx::query(&format!(
+            "ALTER DATABASE \"{quoted_name}\" WITH ALLOW_CONNECTIONS false"
+        ))
+        .execute(&mut *admin)
+        .await
+        .unwrap();
+        let outage = async {
+            sqlx::query!(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = current_database() AND application_name = 'arena-watched-games-listener' AND pid <> pg_backend_pid() LIMIT 1"
+            )
+            .fetch_one(&mut *writer)
+            .await?;
+            crate::models::game::reset_game_state_for_retry(&pool, id).await?;
+            for number in 0..8 {
+                sqlx::query!(
+                    "INSERT INTO turns (game_id, turn_number, frame_data) VALUES ($1, $2, $3)",
+                    id,
+                    number,
+                    serde_json::json!({"Turn": number}),
+                )
+                .execute(&mut *writer)
+                .await?;
+            }
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while state.watched_games.listener_errors() == 0 {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await?;
+            Ok::<(), color_eyre::Report>(())
+        }
+        .await;
+        sqlx::query(&format!(
+            "ALTER DATABASE \"{quoted_name}\" WITH ALLOW_CONNECTIONS true"
+        ))
+        .execute(&mut *admin)
+        .await
+        .unwrap();
+        outage.unwrap();
+        assert_eq!(
+            next(&mut client).await["Data"]["message"],
+            "Game restarted, please reconnect"
+        );
+        close(&mut client).await;
         shutdown.cancel();
         web_shutdown.cancel();
         listener.await.unwrap().unwrap();

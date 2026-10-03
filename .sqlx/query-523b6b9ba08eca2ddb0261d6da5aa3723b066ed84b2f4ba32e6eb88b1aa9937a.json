@@ -1,0 +1,41 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT g.game_id, g.status, (SELECT MAX(t.turn_number) FROM turns t WHERE t.game_id = g.game_id) AS latest_turn,\n                      c.turn_id AS cursor_turn_id\n               FROM unnest($1::uuid[], $2::int[]) AS w(game_id, last_turn)\n               JOIN games g ON g.game_id = w.game_id\n               LEFT JOIN turns c ON c.game_id = w.game_id AND c.turn_number = w.last_turn",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "game_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "status",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "latest_turn",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 3,
+        "name": "cursor_turn_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray",
+        "Int4Array"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      null,
+      true
+    ]
+  },
+  "hash": "523b6b9ba08eca2ddb0261d6da5aa3723b066ed84b2f4ba32e6eb88b1aa9937a"
+}

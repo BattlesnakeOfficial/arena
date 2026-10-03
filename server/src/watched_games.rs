@@ -36,6 +36,7 @@ pub enum Readiness {
 pub struct WatchEntry {
     updates: broadcast::Sender<WatchedGameUpdate>,
     readiness: watch::Sender<Readiness>,
+    last_turn_id: std::sync::Mutex<Option<Uuid>>,
 }
 
 #[derive(Default)]
@@ -57,6 +58,7 @@ struct PollStats {
     range_reads: AtomicUsize,
     batches: Mutex<Vec<(tokio::time::Instant, Vec<Uuid>)>>,
     reconnect_catchups: AtomicUsize,
+    listener_errors: AtomicUsize,
 }
 
 pub struct Subscription {
@@ -137,6 +139,11 @@ impl WatchedGames {
         self.stats.reconnect_catchups.load(Ordering::Relaxed)
     }
 
+    #[cfg(test)]
+    pub fn listener_errors(&self) -> usize {
+        self.stats.listener_errors.load(Ordering::Relaxed)
+    }
+
     pub async fn subscribe(&self, game_id: Uuid) -> Subscription {
         let mut registry = self.registry.lock().await;
         if let Some(entry) = registry.entries.get(&game_id)
@@ -152,7 +159,11 @@ impl WatchedGames {
         }
         let (updates, receiver) = broadcast::channel(256);
         let (readiness, ready_receiver) = watch::channel(Readiness::Pending);
-        let entry = Arc::new(WatchEntry { updates, readiness });
+        let entry = Arc::new(WatchEntry {
+            updates,
+            readiness,
+            last_turn_id: std::sync::Mutex::new(None),
+        });
         registry.entries.insert(game_id, entry.clone());
         Subscription {
             updates: receiver,
@@ -168,11 +179,23 @@ impl WatchedGames {
         }
     }
 
+    #[cfg(test)]
     pub async fn seed_if_current(
         &self,
         game_id: Uuid,
         subscription: &mut Subscription,
         cursor: i32,
+    ) {
+        self.seed_with_turn_id(game_id, subscription, cursor, None)
+            .await;
+    }
+
+    pub async fn seed_with_turn_id(
+        &self,
+        game_id: Uuid,
+        subscription: &mut Subscription,
+        cursor: i32,
+        turn_id: Option<Uuid>,
     ) {
         let registry = self.registry.lock().await;
         if registry
@@ -181,6 +204,11 @@ impl WatchedGames {
             .is_some_and(|entry| Arc::ptr_eq(entry, &subscription.entry))
             && *subscription.entry.readiness.borrow() == Readiness::Pending
         {
+            *subscription
+                .entry
+                .last_turn_id
+                .lock()
+                .expect("turn ID mutex poisoned") = turn_id;
             subscription
                 .entry
                 .readiness
@@ -192,7 +220,10 @@ impl WatchedGames {
         }
     }
 
-    async fn snapshot(&self, ids: Option<&HashSet<Uuid>>) -> Vec<(Uuid, Arc<WatchEntry>, i32)> {
+    async fn snapshot(
+        &self,
+        ids: Option<&HashSet<Uuid>>,
+    ) -> Vec<(Uuid, Arc<WatchEntry>, i32, Option<Uuid>)> {
         let mut registry = self.registry.lock().await;
         registry.entries.retain(|_, entry| {
             entry.updates.receiver_count() > 0 && *entry.readiness.borrow() != Readiness::Retired
@@ -207,7 +238,12 @@ impl WatchedGames {
                 let Readiness::Active { cursor } = *entry.readiness.borrow() else {
                     return None;
                 };
-                Some((*id, entry.clone(), cursor))
+                Some((
+                    *id,
+                    entry.clone(),
+                    cursor,
+                    *entry.last_turn_id.lock().expect("turn ID mutex poisoned"),
+                ))
             })
             .collect()
     }
@@ -227,15 +263,15 @@ impl WatchedGames {
 async fn poll_batch(
     pool: &PgPool,
     watched: &WatchedGames,
-    snapshot: Vec<(Uuid, Arc<WatchEntry>, i32)>,
+    snapshot: Vec<(Uuid, Arc<WatchEntry>, i32, Option<Uuid>)>,
     include_status: bool,
     turn_limits: Option<&HashMap<Uuid, i32>>,
 ) -> cja::Result<()> {
     if snapshot.is_empty() {
         return Ok(());
     }
-    let ids: Vec<Uuid> = snapshot.iter().map(|(id, _, _)| *id).collect();
-    let cursors: Vec<i32> = snapshot.iter().map(|(_, _, cursor)| *cursor).collect();
+    let ids: Vec<Uuid> = snapshot.iter().map(|(id, _, _, _)| *id).collect();
+    let cursors: Vec<i32> = snapshot.iter().map(|(_, _, cursor, _)| *cursor).collect();
     #[cfg(test)]
     watched
         .stats
@@ -247,9 +283,13 @@ async fn poll_batch(
         #[cfg(test)]
         watched.stats.status_reads.fetch_add(1, Ordering::Relaxed);
         Some(sqlx::query!(
-            r#"SELECT g.game_id, g.status, (SELECT MAX(t.turn_number) FROM turns t WHERE t.game_id = g.game_id) AS latest_turn
-               FROM games g WHERE g.game_id = ANY($1::uuid[])"#,
-            &ids
+            r#"SELECT g.game_id, g.status, (SELECT MAX(t.turn_number) FROM turns t WHERE t.game_id = g.game_id) AS latest_turn,
+                      c.turn_id AS cursor_turn_id
+               FROM unnest($1::uuid[], $2::int[]) AS w(game_id, last_turn)
+               JOIN games g ON g.game_id = w.game_id
+               LEFT JOIN turns c ON c.game_id = w.game_id AND c.turn_number = w.last_turn"#,
+            &ids,
+            &cursors
         ).fetch_all(pool).await.wrap_err("Failed to read watched game statuses")?)
     } else {
         None
@@ -288,12 +328,13 @@ async fn poll_batch(
         .collect();
 
     let mut registry = watched.registry.lock().await;
-    for (id, entry, cursor) in snapshot {
+    for (id, entry, cursor, turn_id) in snapshot {
         if !registry
             .entries
             .get(&id)
             .is_some_and(|current| Arc::ptr_eq(current, &entry))
             || *entry.readiness.borrow() != (Readiness::Active { cursor })
+            || *entry.last_turn_id.lock().expect("turn ID mutex poisoned") != turn_id
         {
             continue;
         }
@@ -304,7 +345,12 @@ async fn poll_batch(
             registry.entries.remove(&id);
             continue;
         }
-        if row.is_some_and(|row| row.latest_turn.unwrap_or(-1) < cursor) {
+        // A retry can delete and regrow beyond the old turn number while
+        // LISTEN is disconnected. The UUID at that number still changes.
+        if row.is_some_and(|row| {
+            row.latest_turn.unwrap_or(-1) < cursor
+                || (cursor >= 0 && (row.cursor_turn_id.is_none() || row.cursor_turn_id != turn_id))
+        }) {
             let _ = entry.updates.send(WatchedGameUpdate::Reset);
             entry.readiness.send_replace(Readiness::Retired);
             registry.entries.remove(&id);
@@ -314,6 +360,7 @@ async fn poll_batch(
         if let Some(frames) = grouped.remove(&id) {
             if let Some(last) = frames.last() {
                 next_cursor = last.turn_number;
+                *entry.last_turn_id.lock().expect("turn ID mutex poisoned") = Some(last.turn_id);
             }
             let _ = entry
                 .updates
@@ -342,8 +389,6 @@ const LISTENER_RETRY_INITIAL: Duration = Duration::from_millis(100);
 const LISTENER_RETRY_MAX: Duration = Duration::from_secs(5);
 const CHANNEL: &str = "arena_watched_games";
 
-/// A reset that rewinds and regrows beyond the old cursor during a listener outage
-/// cannot be detected without a persisted attempt generation.
 pub(crate) async fn run_watched_games(
     pool: PgPool,
     listener_options: PgConnectOptions,
@@ -354,6 +399,7 @@ pub(crate) async fn run_watched_games(
         .max_connections(1)
         .max_lifetime(None)
         .idle_timeout(None)
+        .acquire_timeout(Duration::from_secs(2))
         .connect_with(listener_options.application_name("arena-watched-games-listener"))
         .await
         .wrap_err("Failed to connect watched-game listener")?;
@@ -421,11 +467,44 @@ pub(crate) async fn run_watched_games(
             }
             Err(error) => {
                 tracing::error!(error = %format_args!("{error:#}"), "Watched game listener failed");
-                tokio::select! {
-                    () = shutdown.cancelled() => return Ok(()),
-                    () = tokio::time::sleep(retry) => {},
-                }
-                retry = retry.saturating_mul(2).min(LISTENER_RETRY_MAX);
+                #[cfg(test)]
+                watched
+                    .stats
+                    .listener_errors
+                    .fetch_add(1, Ordering::Relaxed);
+                drop(listener);
+                listener = loop {
+                    tokio::select! {
+                        () = shutdown.cancelled() => return Ok(()),
+                        () = tokio::time::sleep(retry) => {},
+                    }
+                    let rebuild = tokio::select! {
+                        () = shutdown.cancelled() => return Ok(()),
+                        result = PgListener::connect_with(&listener_pool) => result,
+                    };
+                    match rebuild {
+                        Ok(mut rebuilt) => match tokio::select! {
+                            () = shutdown.cancelled() => return Ok(()),
+                            result = rebuilt.listen(CHANNEL) => result,
+                        } {
+                            Ok(()) => break rebuilt,
+                            Err(error) => {
+                                tracing::error!(error = %format_args!("{error:#}"), "Watched game LISTEN rebuild failed")
+                            }
+                        },
+                        Err(error) => {
+                            tracing::error!(error = %format_args!("{error:#}"), "Watched game listener rebuild failed")
+                        }
+                    }
+                    retry = retry.saturating_mul(2).min(LISTENER_RETRY_MAX);
+                };
+                retry = LISTENER_RETRY_INITIAL;
+                #[cfg(test)]
+                watched
+                    .stats
+                    .reconnect_catchups
+                    .fetch_add(1, Ordering::Relaxed);
+                reconcile_with_retry(&pool, &watched, &shutdown).await?;
             }
         }
     }
