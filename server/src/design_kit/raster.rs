@@ -14,8 +14,9 @@ pub const METRIC_SIDE: u32 = 200;
 const MAX_GAP_RANGES: usize = 16;
 
 /// Shape metrics of a 100x100 asset. Percentages are 0..=100; positions are in units of
-/// the 100x100 viewBox.
-#[derive(Debug, Clone, PartialEq)]
+/// the 100x100 viewBox. Serialized field for field (the studio brackets the
+/// `left_edge_gaps` on its close-up).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Metrics {
     /// Share of the square covered.
     pub fill_pct: f32,

@@ -39,6 +39,9 @@ pub struct AppState {
     pub stats_cache: Arc<crate::cache::TtlCell<crate::models::stats::StatsSnapshot>>,
     pub stats_refresh: Arc<tokio::sync::Mutex<()>>,
     pub activity_recorder: Arc<crate::activity::ActivityRecorder>,
+    /// Head & Tail Studio guards (upload and processing slots, rate limit) and the
+    /// upload processor (an `arena studio-worker` child process per upload).
+    pub studio: crate::routes::studio::StudioState,
 }
 
 impl AppState {
@@ -189,6 +192,9 @@ impl AppState {
             config.stats_cache_secs,
         )));
 
+        let studio = crate::routes::studio::StudioState::subprocess()
+            .wrap_err("Failed to find this executable for the studio worker")?;
+
         Ok(Self {
             config: Arc::new(config),
             db: pool,
@@ -208,6 +214,7 @@ impl AppState {
             stats_cache,
             stats_refresh: Arc::new(tokio::sync::Mutex::new(())),
             activity_recorder: Arc::new(crate::activity::ActivityRecorder::default()),
+            studio,
         })
     }
 }
@@ -237,6 +244,8 @@ impl AppState {
             stats_cache: Arc::new(crate::cache::TtlCell::new(std::time::Duration::ZERO)),
             stats_refresh: Arc::new(tokio::sync::Mutex::new(())),
             activity_recorder: Arc::new(crate::activity::ActivityRecorder::default()),
+            // The test binary has no `studio-worker` subcommand: process in-process.
+            studio: crate::routes::studio::StudioState::in_process(),
         }
     }
 }

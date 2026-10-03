@@ -119,6 +119,8 @@ simplecss = "=0.2.2"
 # The path, length and viewBox parser usvg uses (the same copy): the prescan reads path
 # data and radii as usvg will, to bound the segments its arcs become (kurbo 0.13.1).
 svgtypes = "=0.16.1"
+# Head & Tail Studio worker (src/studio_worker.rs): setrlimit in the child before exec.
+libc = "0.2"
 
 [lib]
 name = "arena"

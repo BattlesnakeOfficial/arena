@@ -3,16 +3,17 @@
 `server/src/design_kit` (exposed as `arena::design_kit`) turns an untrusted upload of a
 Battlesnake head or tail into **one clean path** in a `0 0 100 100` viewBox, plus shape
 metrics and friendly lints. It is pure and `AppState`-free: no I/O, no database, no async.
-The Head & Tail Studio (a later PR) calls it from an endpoint, through
-`process_on_big_stack` (see [Running it](#running-it-the-stack)); tests call it directly.
+The Head & Tail Studio calls it in a short-lived child process, `arena studio-worker`,
+which runs it through `process_on_big_stack` (see [Running it](#running-it-the-stack) and
+[The studio](#the-studio)); tests call it directly.
 
 Status (DEV-1539):
 
 | PR | Adds |
 |---|---|
 | 1 | core, PNG/JPEG input, the ink rule, lints, fixes |
-| 2 (this) | SVG input and hardening, the full catalog corpus test, reference shapes |
-| 3 | board component, studio page, endpoint and its guards |
+| 2 | SVG input and hardening, the full catalog corpus test, reference shapes |
+| 3 (this) | board component, studio page, endpoint, its guards and the worker process |
 | 4 | templates, guide page, discoverability |
 
 ## Asset contract
@@ -735,6 +736,100 @@ report panics from the decode process.
 | `empty` | nothing drawable (carries info lints; the message names the reason when one explains it: nothing showing in "Draw here", an embedded image, or guides only; with text, it says text isn't supported and how to outline it if the drawing is text, and otherwise to draw in solid black, since the text may be hidden or only a label) |
 | `internal` | a bug |
 
+## The studio
+
+`GET /customizations/studio` (`server/src/routes/studio/page.rs`) is a public page that
+needs no login and stores nothing on the server. Every preview board is server-rendered
+with `components::snake_board`, with the default head and tail in place; the client,
+`server/static/studio.js`, posts uploads and then only sets attributes on placeholders:
+
+| Placeholder | What the page's JS sets |
+|---|---|
+| `path.studio-head`, `path.studio-tail` (every board: 16 live-loop frames, All directions, two Game size boards) | `d` and `fill-rule` of whatever fills that slot: the upload, or the "Pair with" reference |
+| `path#studio-closeup-path`, `g#studio-gaps` | the active slot, and red brackets on its `metrics.left_edge_gaps` |
+| `#studio` | `--studio-snake`, the snake colour (`.studio-board` CSS reads it) |
+| `.studio-board` | `light` / `dark` |
+| `option[data-d][data-fill-rule]` in `#studio-pair-head` / `#studio-pair-tail` | read only; JS adds `option[value=user]` ("Your head"/"Your tail") once that slot holds an upload |
+
+Every `d` and colour is checked (`/^[MLQCZ0-9 .\-]*$/`, `/^#[0-9a-f]{6}$/i`) before use,
+including what `localStorage` (`arena:studio:v1`) restores, and lint text goes in with
+`textContent`. The uploaded file stays in memory only, so Flip and Fit can re-post it.
+"This file is a: Head / Tail" picks the slot the next upload fills; after an upload,
+"Use it as a tail instead" moves the result to the other slot without re-posting (both
+kinds' lints are in the response) and puts back what it replaced.
+
+### The endpoint and its guards
+
+`POST /customizations/studio/process?fix=flip&fix=fit` takes the raw file as the body
+(`server/src/routes/studio/process.rs`). It never touches the database (no
+`PageFactory`, `OptionalUser` or session), every response is `Cache-Control: no-store`,
+and the log line (`event_type="studio_processed"`) holds the outcome, input format,
+strategy, lint codes, fixes, size and duration, never content or IPs. In order:
+
+| Guard | Limit | When exceeded |
+|---|---|---|
+| Upload slots (route middleware, `try_acquire` before anything reads the body) | 3 requests | 503 `busy` |
+| Global token bucket (header-free: `X-Forwarded-For` can be spoofed on `run.app`) | burst 20, 1/s | 429 `rate_limited` |
+| Body (`DefaultBodyLimit`), read within 30 s | 4 MiB | 413 `too_large` (408 `upload_timeout`) |
+| Processing slot (like `BACKUP_SLOT` in `backup.rs`), held until the worker exits | 1, waited for up to 3 s | 503 `busy` |
+| The worker: CPU, memory, wall clock (below) | | 422 `too_complex` or 503 `busy` |
+
+| Outcome | Response |
+|---|---|
+| a clean shape | 200 `{svg, path_d, fill_rule, strategy, input, metrics, lints: {head, tail}, info}` |
+| a `ProcessError` caused by the upload | 422 `{error: {code, message}}` |
+| the worker died (a crash, a resource limit, the OOM killer) | 422 `too_complex`, logged at warn with the exit status |
+| no answer before the deadline (the worker is killed) | 503 `busy`, logged at warn |
+| `internal`, or a worker reply that fails its re-check | 500 |
+
+### The worker process
+
+usvg recursing past the prescan would abort the whole server (no stack is big enough
+for a reference loop), so every upload is processed in a fresh child:
+`arena studio-worker [--fix=flip] [--fix=fit]` (`arena::studio_worker`). `main.rs`
+dispatches to it before Sentry, config, telemetry or the database. It reads the file on
+stdin, runs `process_on_big_stack`, writes one JSON reply to stdout and exits:
+
+| Exit | Meaning |
+|---|---|
+| 0 | `{"shape": ...}` or `{"error": {code, message}}` on stdout |
+| 64 | bad arguments |
+| 70 | `{"internal": ...}` on stdout: a bug |
+| 74 | stdin or stdout failed |
+| a signal | crashed: stack overflow or failed allocation (SIGABRT), CPU limit (SIGXCPU), killed |
+
+The server spawns it from `/proc/self/exe` on Linux (its own executable, even if the
+file was replaced since, so the worker is always the same build) with
+`tokio::process::Command` (`kill_on_drop`, an empty environment, stdin written while stdout and stderr are read, both capped), re-checks the
+reply (the path alphabet, the size limit, the exact SVG template), and sets these
+between fork and exec (`pre_exec`; async-signal-safe calls only):
+
+| Limit | Release | Debug | Why |
+|---|---|---|---|
+| `RLIMIT_CPU` (soft; hard is +1 s) | 5 s | 30 s | the slowest accepted uploads take 0.25 s in release, 7 s in debug |
+| `RLIMIT_DATA` | 192 MiB | 192 MiB | the heaviest legitimate uploads need 88 MiB (below) |
+| `RLIMIT_CORE` | 0 | 0 | a crash never writes a core file |
+| `oom_score_adj` | 1000 | 1000 | if memory runs out, the kernel kills the worker, not the server |
+| wall clock (then SIGKILL) | 10 s | 45 s | a slow answer means a busy machine (the CPU limit catches big uploads first) |
+
+`RLIMIT_DATA` counts private writable mappings, so the 64 MiB processing stack counts in
+full (only its touched pages use memory). Measured on the dev VM with
+`prlimit --data=N arena studio-worker < file` (debug build; peak memory is the same in
+release):
+
+| Upload | Fails at | Passes at | Release time |
+|---|---|---|---|
+| 2048 px PNG, 2048 px JPEG | 80 MiB | 88 MiB | 93 ms, 78 ms |
+| 1448 px progressive JPEG noise (the progressive cap), 1254 px progressive CMYK JPEG | 80 MiB | 88 MiB | 237 ms, 226 ms |
+| 16 nested clipped groups, retraced | 80 MiB | 88 MiB | 63 ms |
+| 361 white dots on black (`too_complex`) | 80 MiB | 88 MiB | 75 ms |
+| 64 patterns or masks x 60 groups, 33 pattern/`<use>` pairs x 58 groups (deepest nesting) | | 72 MiB | 6 ms |
+
+192 MiB is twice the worst legitimate need; a memory bomb can then touch at most about
+128 MiB of heap, which fits in what a 512 MiB instance has free beside the server
+(about 320 MiB idle), so the data limit stops it before the OOM killer has to. The
+integration tests run the real binary (`server/tests/studio_worker.rs`).
+
 ## Tests
 
 - `server/tests/design_kit_raster.rs`: sniffing; round trips of every vendored catalog
@@ -782,6 +877,21 @@ report panics from the decode process.
   2·10^12).
 - `server/tests/design_kit_catalog.rs`: the 184-file corpus described above.
 - `server/tests/design_kit_refs.rs`: the reference table against fresh processing.
+- `server/tests/studio_worker.rs`: the real `arena studio-worker` binary: PNG, JPEG and
+  SVG replies equal in-process processing, fixes reach the worker, user errors come back
+  as rejections, and an abort, a memory bomb (the production data limit), real
+  processing at a tight data limit, a CPU hog and a hang each end only the child with
+  the outcome the endpoint maps (the hang test also reads `/proc` for the limits,
+  `oom_score_adj`, the empty environment and that the killed worker was reaped); the CLI
+  protocol and exit codes.
+- `server/src/studio_worker.rs` (unit): the JSON shapes, reply re-checks, and exit code
+  and signal classification. `server/src/routes/studio/tests.rs`: every status of the
+  endpoint through the real router with an unreachable database (200 for PNG, JPEG and
+  SVG; 422 codes; 413; 503 with the upload slots held, without reading the body; 503
+  with the processing slot held; 429 from the bucket, without reading the body; Flip
+  clearing `faces_left`; the slot held while processing and after an in-process
+  timeout; crashes, timeouts and bugs mapped), the token bucket's clock, and the page
+  (placeholders, every reference with a clean `data-d`).
 - Fixtures live in `server/tests/fixtures/design_kit/`: under `catalog/`, all 184
   official SVGs, the investigation's `metrics_summary.csv` (the corpus oracle) and
   `metrics_detail.csv` (centroid, holes and bounds for the 12 samples the metric oracle
@@ -796,4 +906,7 @@ cargo test -p arena --test design_kit_raster --test design_kit_metrics --test de
   --test design_kit_catalog --test design_kit_refs
 cargo test -p arena --lib design_kit
 cargo test -p arena --bin arena design_kit_refs
+cargo test -p arena --test studio_worker
+cargo test -p arena --lib studio_worker
+cargo test -p arena --bin arena studio
 ```

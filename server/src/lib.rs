@@ -5,3 +5,4 @@
 
 pub mod cli;
 pub mod design_kit;
+pub mod studio_worker;
