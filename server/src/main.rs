@@ -56,6 +56,7 @@ mod components {
     pub mod live_refresh;
     pub mod page;
     pub mod page_factory;
+    pub mod snake_board;
     pub mod snake_tags;
 }
 
