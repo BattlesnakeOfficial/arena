@@ -189,9 +189,19 @@ async fn spawn_application_tasks(
     let manifest = observability::manifest(&cron_registry, identity, features)
         .map_err(|error| eyre!("Invalid Arena observability declarations: {error}"))?;
 
-    if !features.server {
+    if scheduled_tasks(features, job.workers).contains(&ProcessTask::Server) {
+        info!("Server Enabled");
+        supervisor.spawn(
+            "server",
+            run_server_until(
+                routes::routes(app_state.clone()),
+                shutdown.clone().cancelled_owned(),
+            ),
+        );
+    } else {
         info!("Server Disabled");
     }
+
     if features.jobs {
         info!("Jobs Enabled");
         info!("Job poll interval: {}ms", job.poll_interval_ms);
@@ -200,55 +210,46 @@ async fn spawn_application_tasks(
         info!("Job max retries: {}", job.max_retries);
         info!("Job workers: {}", job.workers);
         info!("Job shutdown drain: {}s", job.shutdown_drain_secs);
+
+        for i in scheduled_tasks(features, job.workers)
+            .into_iter()
+            .filter_map(|task| {
+                if let ProcessTask::Jobs(i) = task {
+                    Some(i)
+                } else {
+                    None
+                }
+            })
+        {
+            let name: &'static str = Box::leak(format!("jobs-{i}").into_boxed_str());
+            supervisor.spawn(
+                name,
+                cja::jobs::worker::job_worker_configured(
+                    app_state.clone(),
+                    jobs::Jobs,
+                    Duration::from_millis(job.poll_interval_ms),
+                    job.max_retries,
+                    shutdown.clone(),
+                    cja::jobs::worker::JobLeaseConfig {
+                        heartbeat_interval: Duration::from_secs(job.heartbeat_interval_secs),
+                        reclaim_window: Duration::from_secs(job.lock_timeout_secs),
+                    },
+                    supervisor.budget().job_drain,
+                ),
+            );
+        }
     } else {
         info!("Jobs Disabled");
     }
-    if !features.cron {
+
+    if scheduled_tasks(features, job.workers).contains(&ProcessTask::Cron) {
+        info!("Cron Enabled");
+        supervisor.spawn(
+            "cron",
+            cron::run_cron(app_state.clone(), cron_registry, shutdown.clone()),
+        );
+    } else {
         info!("Cron Disabled");
-    }
-    let mut cron_registry = Some(cron_registry);
-    for task in scheduled_tasks(features, job.workers) {
-        match task {
-            ProcessTask::Server => {
-                info!("Server Enabled");
-                supervisor.spawn(
-                    "server",
-                    run_server_until(
-                        routes::routes(app_state.clone()),
-                        shutdown.clone().cancelled_owned(),
-                    ),
-                );
-            }
-            ProcessTask::Jobs(i) => {
-                let name: &'static str = Box::leak(format!("jobs-{i}").into_boxed_str());
-                supervisor.spawn(
-                    name,
-                    cja::jobs::worker::job_worker_configured(
-                        app_state.clone(),
-                        jobs::Jobs,
-                        Duration::from_millis(job.poll_interval_ms),
-                        job.max_retries,
-                        shutdown.clone(),
-                        cja::jobs::worker::JobLeaseConfig {
-                            heartbeat_interval: Duration::from_secs(job.heartbeat_interval_secs),
-                            reclaim_window: Duration::from_secs(job.lock_timeout_secs),
-                        },
-                        supervisor.budget().job_drain,
-                    ),
-                );
-            }
-            ProcessTask::Cron => {
-                info!("Cron Enabled");
-                supervisor.spawn(
-                    "cron",
-                    cron::run_cron(
-                        app_state.clone(),
-                        cron_registry.take().expect("one cron task"),
-                        shutdown.clone(),
-                    ),
-                );
-            }
-        }
     }
 
     info!("All application tasks spawned successfully");
