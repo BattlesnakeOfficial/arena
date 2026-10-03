@@ -308,3 +308,72 @@ impl Rng {
         (self.next() >> 8) as f32 / (1u32 << 24) as f32
     }
 }
+
+/// A def chain of `links` patterns, masks or pattern/`<use>` pairs, each wrapping its
+/// content in `nest` groups (the critique's probe: under every per-element cap, but
+/// nesting multiplies along the chain).
+pub fn reference_chain(kind: &str, links: usize, nest: usize) -> String {
+    let mut s = String::from(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" \
+         viewBox=\"0 0 100 100\"><defs>",
+    );
+    let open = "<g>".repeat(nest);
+    let close = "</g>".repeat(nest);
+    for i in 0..links {
+        let next = |attr: &str| {
+            if i + 1 < links {
+                format!(" {attr}=\"url(#p{})\"", i + 1)
+            } else {
+                String::new()
+            }
+        };
+        match kind {
+            "pattern" => {
+                let fill = if i + 1 < links {
+                    format!("url(#p{})", i + 1)
+                } else {
+                    "black".into()
+                };
+                s += &format!(
+                    "<pattern id=\"p{i}\" width=\"10\" height=\"10\" \
+                     patternUnits=\"userSpaceOnUse\">{open}<rect width=\"5\" height=\"5\" \
+                     fill=\"{fill}\"/>{close}</pattern>"
+                );
+            }
+            "mask" => {
+                s += &format!(
+                    "<mask id=\"p{i}\">{open}<rect width=\"100\" height=\"100\" \
+                     fill=\"white\"{}/>{close}</mask>",
+                    next("mask")
+                );
+            }
+            "clip" => {
+                s += &format!(
+                    "<clipPath id=\"p{i}\"{}>{open}<rect width=\"100\" height=\"100\"/>{close}\
+                     </clipPath>",
+                    next("clip-path")
+                );
+            }
+            "patuse" => {
+                let fill = if i + 1 < links {
+                    format!("url(#p{})", i + 1)
+                } else {
+                    "black".into()
+                };
+                s += &format!(
+                    "<g id=\"g{i}\">{open}<rect width=\"5\" height=\"5\" \
+                     fill=\"{fill}\"/>{close}</g><pattern id=\"p{i}\" width=\"10\" height=\"10\" \
+                     patternUnits=\"userSpaceOnUse\">{open}<use href=\"#g{i}\"/>{close}</pattern>"
+                );
+            }
+            _ => unreachable!("{kind}"),
+        }
+    }
+    let attr = match kind {
+        "mask" => "mask",
+        "clip" => "clip-path",
+        _ => "fill",
+    };
+    s += &format!("</defs><rect width=\"100\" height=\"100\" {attr}=\"url(#p0)\"/></svg>");
+    s
+}

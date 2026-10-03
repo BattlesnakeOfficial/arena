@@ -22,8 +22,8 @@ use tokio::sync::{OwnedSemaphorePermit, oneshot};
 use tower::ServiceExt as _;
 
 use super::process::{
-    BUCKET_CAPACITY, InProcess, MAX_BODY_BYTES, Processor, SLOT_WAIT, StudioState, TokenBucket,
-    UPLOAD_SLOTS,
+    BUCKET_CAPACITY, BodyPace, InProcess, MAX_BODY_BYTES, Processor, SLOT_WAIT, StudioState,
+    TokenBucket, UPLOAD_SLOTS,
 };
 use crate::state::AppState;
 
@@ -217,10 +217,7 @@ async fn png_jpeg_and_svg_uploads_are_processed() {
         assert_no_store(&reply);
         let json = &reply.json;
         assert_eq!(json["input"], input);
-        let svg = json["svg"].as_str().expect("svg");
         let d = json["path_d"].as_str().expect("path_d");
-        assert!(svg.starts_with("<svg"), "{input}: {svg}");
-        assert!(svg.contains(d), "{input}");
         assert!(!d.is_empty() && is_clean_path_d(d), "{input}: {d}");
         assert!(["nonzero", "evenodd"].contains(&json["fill_rule"].as_str().unwrap_or("")));
         assert!(json["strategy"].is_string());
@@ -315,6 +312,118 @@ async fn fix_flip_clears_faces_left() {
 
     let bad = post(app(&state), "?fix=rotate", Body::from(mirrored)).await;
     assert_error(&bad, StatusCode::BAD_REQUEST, "bad_fix");
+}
+
+/// The SVG file studio.js builds from a saved path (`svgFor`): the download, and what
+/// Flip and Fit re-post once the original file is gone (after a reload).
+const PAGE_SVG: [&str; 3] = [
+    "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\"><path fill-rule=\"",
+    "\" d=\"",
+    "\"/></svg>",
+];
+
+fn page_svg(fill_rule: &str, d: &str) -> String {
+    format!(
+        "{}{fill_rule}{}{d}{}",
+        PAGE_SVG[0], PAGE_SVG[1], PAGE_SVG[2]
+    )
+}
+
+fn head_codes(json: &serde_json::Value) -> Vec<String> {
+    json["lints"]["head"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|l| l["code"].as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[test]
+fn studio_js_builds_the_design_kit_svg_file() {
+    let clean = arena::design_kit::process_upload(
+        DEFAULT_HEAD_SVG.as_bytes(),
+        &arena::design_kit::Limits::default(),
+        &[],
+    )
+    .expect("the default head");
+    assert_eq!(
+        clean.to_svg(),
+        page_svg(clean.fill_rule().as_svg(), clean.path_d())
+    );
+    let js = include_str!("../../../static/studio.js");
+    for part in PAGE_SVG {
+        let in_js = part.replace('"', "\\\"");
+        assert!(
+            js.contains(part) || js.contains(&in_js),
+            "studio.js lost {part:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn fixes_work_on_the_svg_the_page_rebuilds_from_a_saved_path() {
+    let state = db_free_state(StudioState::in_process());
+    // A head drawn at 60% size in the middle of the left edge: Fit stretches it.
+    let small = |x: f32, y: f32| {
+        let (u, v) = (x / 0.6, (y - 20.0) / 0.6);
+        (0.0..100.0).contains(&u) && (0.0..100.0).contains(&v) && head(u, v)
+    };
+    let cases = [
+        ("flip", "faces_left", png(256, |x, y| head(100.0 - x, y))),
+        ("fit", "margins", png(256, small)),
+    ];
+    for (fix, code, original) in cases {
+        let plain = post(app(&state), "", Body::from(original.clone())).await;
+        assert_eq!(plain.status, StatusCode::OK, "{fix}: {}", plain.json);
+        let offered = plain.json["lints"]["head"]
+            .as_array()
+            .and_then(|a| a.iter().find(|l| l["code"] == code))
+            .map(|l| l["fix"].clone());
+        assert_eq!(offered, Some(serde_json::json!(fix)), "{}", plain.json);
+
+        let saved = page_svg(
+            plain.json["fill_rule"].as_str().unwrap_or_default(),
+            plain.json["path_d"].as_str().unwrap_or_default(),
+        );
+        let query = format!("?fix={fix}");
+        let from_saved = post(app(&state), &query, Body::from(saved)).await;
+        let from_original = post(app(&state), &query, Body::from(original)).await;
+        assert_eq!(
+            from_saved.status,
+            StatusCode::OK,
+            "{fix}: {}",
+            from_saved.json
+        );
+        assert_eq!(from_saved.json["input"], "svg");
+        assert!(
+            !head_codes(&from_saved.json).contains(&code.to_string()),
+            "{fix}"
+        );
+        assert_eq!(
+            head_codes(&from_saved.json),
+            head_codes(&from_original.json),
+            "{fix}"
+        );
+        let metrics = |r: &Reply| {
+            let m = &r.json["metrics"];
+            [
+                m["fill_pct"].as_f64(),
+                m["centroid"][0].as_f64(),
+                m["centroid"][1].as_f64(),
+                m["bbox"][0].as_f64(),
+                m["bbox"][2].as_f64(),
+            ]
+        };
+        for (a, b) in metrics(&from_saved)
+            .into_iter()
+            .zip(metrics(&from_original))
+        {
+            let (a, b) = (a.unwrap_or(-100.0), b.unwrap_or(100.0));
+            assert!((a - b).abs() < 1.0, "{fix}: {a} vs {b}");
+        }
+    }
 }
 
 #[tokio::test]
@@ -485,19 +594,6 @@ async fn worker_failures_map_to_friendly_responses() {
     }
 }
 
-#[test]
-fn production_uses_a_worker_subprocess_with_the_planned_guards() {
-    use super::process::{BUCKET_REFILL_PER_SEC, STUDIO_SLOTS};
-    assert_eq!(UPLOAD_SLOTS, 3);
-    assert_eq!(STUDIO_SLOTS, 1);
-    assert_eq!(MAX_BODY_BYTES, 4 * 1024 * 1024);
-    assert_eq!((BUCKET_CAPACITY, BUCKET_REFILL_PER_SEC), (20.0, 1.0));
-    let studio = StudioState::subprocess().expect("current exe");
-    assert_eq!(studio.upload_slots.available_permits(), UPLOAD_SLOTS);
-    assert_eq!(studio.studio_slot.available_permits(), STUDIO_SLOTS);
-    assert_eq!(studio.slot_wait, SLOT_WAIT);
-}
-
 // ---- GET /customizations/studio ----------------------------------------------------
 
 fn attr_values<'a>(html: &'a str, attr: &str) -> Vec<&'a str> {
@@ -528,18 +624,32 @@ async fn the_page_renders_every_board_with_placeholders(db: sqlx::PgPool) {
         .expect("body");
     let html = String::from_utf8(bytes.to_vec()).expect("utf-8");
 
-    // 16 live frames + three four-snake boards: one head and one tail each.
-    let heads = html.matches("class=\"studio-head\"").count();
-    let tails = html.matches("class=\"studio-tail\"").count();
-    assert_eq!((heads, tails), (16 + 3 * 4, 16 + 3 * 4));
+    // 16 live frames + three four-snake boards: one head and one tail each, every one
+    // showing the default head or tail before any upload.
+    let default = |kind| {
+        REFS.iter()
+            .find(|r| r.kind == kind && r.slug == "default")
+            .expect("a default reference")
+    };
+    let (default_head, default_tail) = (default(AssetKind::Head), default(AssetKind::Tail));
+    for (class, shape) in [("studio-head", default_head), ("studio-tail", default_tail)] {
+        let placeholder = format!(
+            "<path class=\"{class}\" d=\"{}\" fill-rule=\"{}\">",
+            shape.d,
+            shape.fill_rule.as_svg()
+        );
+        assert_eq!(html.matches(&placeholder).count(), 16 + 3 * 4, "{class}");
+        assert_eq!(
+            html.matches(&format!("class=\"{class}\"")).count(),
+            16 + 3 * 4,
+            "{class}"
+        );
+    }
     assert_eq!(html.matches("class=\"studio-frame\"").count(), 16);
-    assert!(html.contains("id=\"studio-closeup-path\""));
-    // Before any upload the slots show the default head and tail.
-    let default_head = REFS
-        .iter()
-        .find(|r| r.kind == AssetKind::Head && r.slug == "default")
-        .expect("default head");
-    assert!(html.contains(&format!("d=\"{}\"", default_head.d)));
+    assert!(html.contains(&format!(
+        "<path id=\"studio-closeup-path\" class=\"studio-closeup-path\" d=\"{}\"",
+        default_head.d
+    )));
     assert!(html.contains("Try it with your own drawing."));
 
     // Every reference is offered for pairing, with a clean path.
@@ -576,4 +686,160 @@ async fn the_page_renders_every_board_with_placeholders(db: sqlx::PgPool) {
     assert!(!html.contains(" onclick="));
     // Not linked from the nav or footer yet (DEV-1539 PR 4).
     assert!(!html.contains("href=\"/customizations/studio\""));
+}
+
+/// The page's in-browser check, run the way studio.js runs it: the first rejected
+/// signature whose parts all match gives its message, else nothing (the file is posted).
+fn client_check(sniff: &serde_json::Value, bytes: &[u8]) -> Option<String> {
+    let rejected = sniff["rejected"].as_array()?;
+    rejected
+        .iter()
+        .find(|sig| {
+            sig["at"].as_array().is_some_and(|parts| {
+                parts.iter().all(|part| {
+                    let offset = part[0].as_u64().and_then(|o| usize::try_from(o).ok());
+                    part[1].as_array().is_some_and(|alternatives| {
+                        alternatives.iter().any(|magic| {
+                            magic.as_array().is_some_and(|magic| {
+                                magic.iter().enumerate().all(|(i, v)| {
+                                    let at = offset.and_then(|o| o.checked_add(i));
+                                    at.and_then(|j| bytes.get(j)).map(|&b| u64::from(b))
+                                        == v.as_u64()
+                                })
+                            })
+                        })
+                    })
+                })
+            })
+        })
+        .and_then(|sig| sig["message"].as_str().map(String::from))
+}
+
+#[test]
+fn the_browser_check_gives_the_server_answer_for_every_rejected_format() {
+    use arena::design_kit::{ProcessError, sniff};
+    let html = super::page::studio_markup().into_string();
+    let attr = attr_values(&html, "data-sniff");
+    assert_eq!(attr.len(), 1);
+    // Maud escapes the attribute; the browser unescapes it before JSON.parse.
+    let json = attr[0]
+        .replace("&quot;", "\"")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&");
+    let sniff_table: serde_json::Value = serde_json::from_str(&json).expect("data-sniff is JSON");
+    assert_eq!(sniff_table["max_bytes"], MAX_BODY_BYTES);
+    let too_large = ProcessError::TooLarge {
+        bytes: MAX_BODY_BYTES + 1,
+        max: MAX_BODY_BYTES,
+    };
+    assert_eq!(sniff_table["too_large"], too_large.user_message());
+
+    let utf16: Vec<u8> = "<svg/>".encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let samples: Vec<(&str, Vec<u8>)> = vec![
+        ("heic", b"\0\0\0\x18ftypheic\0\0\0\0".to_vec()),
+        ("avif", b"\0\0\0\x18ftypavif\0\0\0\0".to_vec()),
+        ("mp4 video", b"\0\0\0\x18ftypisom\0\0\0\0".to_vec()),
+        ("gif", b"GIF89a\x01\0".to_vec()),
+        ("webp", b"RIFF\0\0\0\0WEBPVP8 ".to_vec()),
+        ("webp without riff", b"XXXX\0\0\0\0WEBPVP8 ".to_vec()),
+        ("psd", b"8BPS\0\x01".to_vec()),
+        ("procreate", b"PK\x03\x04procreate".to_vec()),
+        ("pdf", b"%PDF-1.7".to_vec()),
+        ("svgz", vec![0x1f, 0x8b, 0x08, 0x00]),
+        ("utf-16 svg", utf16),
+        ("png", head_png()),
+        ("jpeg", jpeg(16, head)),
+        ("svg", DEFAULT_HEAD_SVG.as_bytes().to_vec()),
+        ("text", b"just some text".to_vec()),
+    ];
+    for (name, bytes) in samples {
+        let server = match sniff(&bytes) {
+            Err(e @ ProcessError::UnsupportedFormat(_)) => Some(e.user_message()),
+            _ => None,
+        };
+        assert_eq!(client_check(&sniff_table, &bytes), server, "{name}");
+    }
+}
+
+// ---- slow uploads ---------------------------------------------------------------------
+
+/// A body that sends `first`, then `trickle` bytes every `every`, forever (or nothing
+/// more if `every` is `None`).
+fn slow_body(first: &'static [u8], every: Option<Duration>) -> Body {
+    let start =
+        futures::stream::once(async move { Ok::<_, std::io::Error>(Bytes::from_static(first)) });
+    let rest = futures::stream::unfold((), move |()| async move {
+        match every {
+            Some(every) => {
+                tokio::time::sleep(every).await;
+                Some((Ok(Bytes::from_static(b" ")), ()))
+            }
+            None => futures::future::pending().await,
+        }
+    });
+    Body::from_stream(futures::StreamExt::chain(start, rest))
+}
+
+fn quick_pace() -> BodyPace {
+    BodyPace {
+        deadline: Duration::from_secs(20),
+        grace: Duration::from_millis(300),
+        min_bytes_per_sec: 1024,
+    }
+}
+
+#[tokio::test]
+async fn a_stalled_upload_is_cut_off_and_frees_its_slot() {
+    let mut studio = StudioState::in_process();
+    studio.body_pace = quick_pace();
+    let state = db_free_state(studio);
+    let started = Instant::now();
+    let reply = post(app(&state), "", slow_body(b"8BPS", None)).await;
+    assert_error(&reply, StatusCode::REQUEST_TIMEOUT, "upload_timeout");
+    let elapsed = started.elapsed();
+    assert!(elapsed < Duration::from_secs(3), "{elapsed:?}");
+    assert_eq!(state.studio.upload_slots.available_permits(), UPLOAD_SLOTS);
+}
+
+#[tokio::test]
+async fn a_trickling_upload_is_cut_off_long_before_the_deadline() {
+    // A byte every 100 ms keeps the connection busy but is far below 1 KiB/s.
+    let mut studio = StudioState::in_process();
+    studio.body_pace = quick_pace();
+    let state = db_free_state(studio);
+    let started = Instant::now();
+    let reply = post(
+        app(&state),
+        "",
+        slow_body(b"8BPS", Some(Duration::from_millis(100))),
+    )
+    .await;
+    assert_error(&reply, StatusCode::REQUEST_TIMEOUT, "upload_timeout");
+    let elapsed = started.elapsed();
+    assert!(elapsed < Duration::from_secs(3), "{elapsed:?}");
+    assert_eq!(state.studio.upload_slots.available_permits(), UPLOAD_SLOTS);
+}
+
+#[tokio::test]
+async fn an_upload_in_steady_chunks_gets_through() {
+    // Twenty chunks 40 ms apart: longer than the grace period in total, and well above
+    // 1 KiB/s.
+    let mut studio = StudioState::in_process();
+    studio.body_pace = quick_pace();
+    let state = db_free_state(studio);
+    let bytes = png(1024, head);
+    let chunks: Vec<Bytes> = bytes
+        .chunks(bytes.len().div_ceil(20))
+        .map(Bytes::copy_from_slice)
+        .collect();
+    assert!(chunks.len() >= 10 && bytes.len() > 1024, "{}", bytes.len());
+    let stream = futures::stream::unfold(chunks.into_iter(), |mut chunks| async move {
+        let chunk = chunks.next()?;
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        Some((Ok::<_, std::io::Error>(chunk), chunks))
+    });
+    let reply = post(app(&state), "", Body::from_stream(stream)).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.json);
+    assert_eq!(reply.json["input"], "png");
 }

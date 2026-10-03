@@ -4,18 +4,24 @@
 //! in-process answer, and an abort, a memory bomb, a CPU hog and a hang each end only
 //! the child, as the outcome the endpoint maps to a friendly response, while this
 //! process (the "server") carries on.
+//!
+//! Linux only: they read `/proc` and rely on Linux's `RLIMIT_DATA`, which covers `mmap`.
+#![cfg(target_os = "linux")]
 
 mod common;
 
 use std::os::unix::process::ExitStatusExt as _;
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use arena::design_kit::{self, Fix, Limits};
 use arena::studio_worker::{
-    DEFAULT_DATA_LIMIT_BYTES, Outcome, Reply, SUBCOMMAND, ShapeJson, Worker, WorkerLimits, exit,
+    DEFAULT_ADDRESS_SPACE_LIMIT_BYTES, DEFAULT_DATA_LIMIT_BYTES, Outcome, Reply, SUBCOMMAND,
+    ShapeJson, WORKER_NICE, Worker, WorkerLimits, exit,
 };
-use common::design_kit::{encode_jpeg, fixture, rgba_png};
+use common::design_kit::{encode_jpeg, fixture, reference_chain, rgba_png};
+use tokio::sync::Semaphore;
 
 const ARENA: &str = env!("CARGO_BIN_EXE_arena");
 
@@ -56,24 +62,50 @@ fn expect_shape(outcome: Outcome) -> ShapeJson {
     }
 }
 
-/// Children of this process whose command line contains `needle`.
-fn children_with(needle: &str) -> Vec<u32> {
-    let me = std::process::id();
+/// The fields of `/proc/<pid>/stat` after the command name: index 0 is the state, 1
+/// the parent pid, 16 the nice value.
+fn stat_fields(pid: u32) -> Vec<String> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+    // "pid (comm) state ppid ...": comm may hold spaces, so read after the last ')'.
+    stat.rsplit_once(')')
+        .map(|(_, rest)| rest.split_whitespace().map(String::from).collect())
+        .unwrap_or_default()
+}
+
+/// Running children of this process whose arguments are exactly `args` (`arena` and
+/// then these). A killed worker drops out as soon as it dies: a zombie has no command
+/// line. Tests run in parallel, so each uses its own arguments.
+fn children_with(args: &[&str]) -> Vec<u32> {
+    let me = std::process::id().to_string();
     let Ok(dir) = std::fs::read_dir("/proc") else {
         return Vec::new();
     };
     dir.filter_map(|e| e.ok()?.file_name().to_str()?.parse::<u32>().ok())
-        .filter(|pid| {
-            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
-            // "pid (comm) state ppid ...": comm may hold spaces, so read after the ')'.
-            let ppid = stat
-                .rsplit_once(')')
-                .and_then(|(_, rest)| rest.split_whitespace().nth(1))
-                .and_then(|p| p.parse::<u32>().ok());
+        .filter(|&pid| {
             let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
-            ppid == Some(me) && String::from_utf8_lossy(&cmdline).contains(needle)
+            let argv: Vec<&[u8]> = cmdline
+                .split(|&b| b == 0)
+                .filter(|a| !a.is_empty())
+                .collect();
+            stat_fields(pid).get(1) == Some(&me)
+                && argv.len() == args.len() + 1
+                && argv[1..].iter().zip(args).all(|(a, b)| *a == b.as_bytes())
         })
         .collect()
+}
+
+/// Wait up to 5 s for a child with exactly `args` to be running.
+async fn wait_for_child(args: &[&str]) -> Option<u32> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(&pid) = children_with(args).first() {
+            return Some(pid);
+        }
+        if Instant::now() > deadline {
+            return None;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 #[tokio::test]
@@ -88,7 +120,6 @@ async fn uploads_come_back_exactly_as_processed_in_process() {
             .unwrap_or_else(|e| panic!("{name}: {e:?}"));
         let shape = expect_shape(worker().run(&bytes, &[]).await);
         assert_eq!(shape, ShapeJson::from(&expected), "{name}");
-        assert!(shape.svg.starts_with("<svg"), "{name}");
     }
 }
 
@@ -210,8 +241,122 @@ async fn a_cpu_hog_dies_at_the_cpu_limit() {
 }
 
 #[tokio::test]
+async fn the_address_space_limit_stops_a_memory_bomb_on_its_own() {
+    // gVisor (Cloud Run's first generation) applies RLIMIT_DATA to brk only, so a bomb
+    // made of mmap'd allocations meets RLIMIT_AS alone. Lift the data limit to see it
+    // hold by itself.
+    assert_eq!(
+        WorkerLimits::default().address_space_bytes,
+        DEFAULT_ADDRESS_SPACE_LIMIT_BYTES
+    );
+    let as_only = WorkerLimits {
+        data_bytes: libc::RLIM_INFINITY,
+        ..WorkerLimits::default()
+    };
+    match worker()
+        .with_self_test("alloc")
+        .with_limits(as_only)
+        .run(b"", &[])
+        .await
+    {
+        Outcome::Crashed { status, stderr } => {
+            assert_eq!(status.signal(), Some(libc::SIGABRT), "{stderr}");
+            assert!(stderr.contains("memory allocation"), "{stderr}");
+        }
+        other => panic!("expected a crash, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn the_heaviest_legitimate_svgs_fit_the_default_limits() {
+    // The deepest reference chains the caps allow (the most stack), and a 4,900-element
+    // SVG that is rejected as too complex (the most heap before the answer).
+    let rects: String = (0..4900)
+        .map(|i| {
+            format!(
+                "<rect x=\"{}\" y=\"{}\" width=\"0.9\" height=\"0.9\" fill=\"#000000\" stroke=\"none\"/>",
+                i % 100,
+                i / 100
+            )
+        })
+        .collect();
+    let rects =
+        format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\">{rects}</svg>");
+    match worker().run(rects.as_bytes(), &[]).await {
+        Outcome::Rejected(error) => assert_eq!(error.code, "too_complex"),
+        other => panic!("4,900 rects: {other:?}"),
+    }
+    for (kind, links, nest) in [("pattern", 64, 60), ("mask", 64, 60), ("patuse", 33, 58)] {
+        let svg = reference_chain(kind, links, nest);
+        match worker().run(svg.as_bytes(), &[]).await {
+            Outcome::Shape(_) => {}
+            other => panic!("{kind} {links}x{nest}: {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn the_processing_slot_is_held_until_the_worker_is_gone() {
+    let slot = Arc::new(Semaphore::new(1));
+    let permit = slot.clone().try_acquire_owned().expect("a free slot");
+    let args = [SUBCOMMAND, "--fix=flip", "--self-test=hang"];
+    let hung = worker().with_self_test("hang").with_limits(WorkerLimits {
+        wall: Duration::from_millis(1500),
+        ..WorkerLimits::default()
+    });
+    let watch = async {
+        let mut seen = 0;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            // Permits first: if the worker is still running afterwards, it was running
+            // (or not yet started) when they were read, so the slot must be taken.
+            let free = slot.available_permits();
+            if children_with(&args).is_empty() {
+                if seen > 0 {
+                    break;
+                }
+            } else {
+                assert_eq!(free, 0, "the slot was released while the worker ran");
+                seen += 1;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        seen
+    };
+    let (outcome, seen) = tokio::join!(hung.run_holding(b"", &[Fix::Flip], permit), watch);
+    assert!(matches!(outcome, Outcome::TimedOut), "{outcome:?}");
+    assert!(seen > 0, "never saw the worker run");
+    assert_eq!(slot.available_permits(), 1, "the slot came back");
+    assert!(children_with(&args).is_empty());
+}
+
+#[tokio::test]
+async fn a_cancelled_request_kills_the_worker_and_frees_the_slot() {
+    let slot = Arc::new(Semaphore::new(1));
+    let permit = slot.clone().try_acquire_owned().expect("a free slot");
+    let args = [SUBCOMMAND, "--fix=fit", "--self-test=hang"];
+    // A deadline far away: only dropping the future can stop this worker in time.
+    let hung = worker().with_self_test("hang").with_limits(WorkerLimits {
+        wall: Duration::from_secs(60),
+        ..WorkerLimits::default()
+    });
+    let run = hung.run_holding(b"", &[Fix::Fit], permit);
+    tokio::select! {
+        outcome = run => panic!("the hang ended on its own: {outcome:?}"),
+        pid = wait_for_child(&args) => assert!(pid.is_some(), "the worker never started"),
+    }
+    // The request future is gone (the client went away).
+    assert_eq!(slot.available_permits(), 1);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !children_with(&args).is_empty() {
+        assert!(Instant::now() < deadline, "the worker outlived its request");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
 async fn a_hung_worker_is_killed_at_the_deadline_with_its_limits_applied() {
-    let needle = "--self-test=hang";
+    let args = [SUBCOMMAND, "--self-test=hang"];
     let wall = Duration::from_secs(2);
     let limits = WorkerLimits {
         wall,
@@ -221,19 +366,17 @@ async fn a_hung_worker_is_killed_at_the_deadline_with_its_limits_applied() {
     let started = Instant::now();
     let watch = async {
         // Find the worker while it hangs and read what the kernel says about it.
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            if let Some(&pid) = children_with(needle).first() {
-                let read = |file: &str| {
-                    std::fs::read_to_string(format!("/proc/{pid}/{file}")).unwrap_or_default()
-                };
-                return Some((pid, read("limits"), read("oom_score_adj"), read("environ")));
-            }
-            if Instant::now() > deadline {
-                return None;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        let pid = wait_for_child(&args).await?;
+        let read =
+            |file: &str| std::fs::read_to_string(format!("/proc/{pid}/{file}")).unwrap_or_default();
+        let nice = stat_fields(pid).get(16).cloned().unwrap_or_default();
+        Some((
+            pid,
+            read("limits"),
+            read("oom_score_adj"),
+            read("environ"),
+            nice,
+        ))
     };
     let (outcome, seen) = tokio::join!(hung.run(b"", &[]), watch);
     let elapsed = started.elapsed();
@@ -244,7 +387,7 @@ async fn a_hung_worker_is_killed_at_the_deadline_with_its_limits_applied() {
         "{elapsed:?}"
     );
 
-    let (pid, proc_limits, oom, environ) = seen.expect("the hung worker was running");
+    let (pid, proc_limits, oom, environ, nice) = seen.expect("the hung worker was running");
     let line = |name: &str| {
         proc_limits
             .lines()
@@ -262,13 +405,19 @@ async fn a_hung_worker_is_killed_at_the_deadline_with_its_limits_applied() {
         line("Max data size"),
         format!("Max data size {data} {data} bytes")
     );
+    let address_space = limits.address_space_bytes;
+    assert_eq!(
+        line("Max address space"),
+        format!("Max address space {address_space} {address_space} bytes")
+    );
     assert_eq!(line("Max core file size"), "Max core file size 0 0 bytes");
     assert_eq!(oom.trim(), "1000");
+    assert_eq!(nice, WORKER_NICE.to_string(), "the lowest CPU priority");
     assert_eq!(environ, "", "the worker gets an empty environment");
 
     // Killed and reaped: gone, not a zombie.
     assert!(
-        children_with(needle).is_empty(),
+        std::fs::metadata(format!("/proc/{pid}")).is_err(),
         "worker {pid} outlived the deadline"
     );
 }

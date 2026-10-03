@@ -16,15 +16,16 @@
   const COLOR_RE = /^#[0-9a-f]{6}$/i;
   const CODE_RE = /^[a-z_]{1,40}$/;
   const MAX_D = 65536;
-  const MAX_BYTES = 4 * 1024 * 1024;
-  const MAX_SVG_BYTES = 512 * 1024;
   const FRAME_MS = 250;
   const SVG_NS = "http://www.w3.org/2000/svg";
   const VIEWS = ["closeup", "live", "all", "game"];
   const $ = (id) => document.getElementById(id);
   const all = (sel) => Array.from(root.querySelectorAll(sel));
   const other = (kind) => (kind === "head" ? "tail" : "head");
-  const wide = window.matchMedia ? matchMedia("(min-width: 640px)") : { matches: false };
+  const media = (q) => (window.matchMedia ? matchMedia(q) : { matches: false });
+  const wide = media("(min-width: 640px)"); // Close-up and Live side by side
+  const sideBySide = media("(min-width: 980px)"); // the checks beside the preview
+  const reduceMotion = media("(prefers-reduced-motion: reduce)").matches;
   // createElement(NS) + setAttribute + textContent: the only way this script builds DOM.
   function el(tag, attrs, text, ns) {
     const node = ns ? document.createElementNS(ns, tag) : document.createElement(tag);
@@ -42,8 +43,10 @@
     theme: document.documentElement.getAttribute("data-app-theme") === "dark" ? "dark" : "light",
     view: "closeup",
   };
-  // The file being worked on, kept in memory only so Flip/Fit can re-post it.
-  let current = null; // { bytes, kind, fixes, slot, displaced }
+  // The last processed file, kept in memory only, so Flip/Fit can re-post it and it can
+  // move to the other slot: { body, kind, fixes, slot, displaced, info }.
+  let current = null;
+  let pending = null; // the request in flight; a newer one supersedes it
 
   // ---- validation -----------------------------------------------------------------
   const cleanLints = (list) =>
@@ -120,6 +123,9 @@
     return preset ? preset.getAttribute("data-name").toLowerCase() : "custom-coloured (" + state.color + ")";
   }
   function render() {
+    const any = !!(state.slots.head || state.slots.tail);
+    root.classList.toggle("studio-has-upload", any); // the drop zone shrinks to a row
+    $("studio-drop-title").textContent = any ? "Choose another drawing" : "Choose a drawing";
     const head = shapeFor("head");
     const tail = shapeFor("tail");
     all("path.studio-head").forEach((p) => setPath(p, head));
@@ -161,10 +167,12 @@
     for (const i of all('input[name="studio-view"]')) i.checked = i.value === state.view;
     $("studio-panes").setAttribute("data-view", state.view);
     let hint = "";
+    let preset = false;
     for (const i of all('input[name="studio-color"]')) {
       i.checked = i.value === state.color;
-      if (i.checked) hint = i.getAttribute("data-hint") || "";
+      if (i.checked) { preset = true; hint = i.getAttribute("data-hint") || ""; }
     }
+    $("studio-swatch-custom").classList.toggle("active", !preset);
     $("studio-color-custom").value = state.color;
     $("studio-color-hint").textContent = hint;
     $("studio-color-hint").hidden = !hint;
@@ -188,9 +196,11 @@
     $("studio-download-tail").hidden = !state.slots.tail;
     $("studio-new-version").hidden = !any;
     $("studio-clear").hidden = !any;
-    const relabel = $("studio-relabel");
-    relabel.hidden = !(current && current.slot && state.slots[current.kind] === current.slot);
-    if (current) relabel.textContent = "Use it as a " + other(current.kind) + " instead";
+    const to = relabelTarget();
+    const relabelBtn = $("studio-relabel");
+    relabelBtn.hidden = !to;
+    if (to === state.kind) relabelBtn.textContent = "Use the file you just uploaded as your " + to;
+    else if (to) relabelBtn.textContent = "Use it as a " + to + " instead" + (state.slots[to] ? " (replaces your " + to + ")" : "");
   }
 
   const fixLabel = (fix) => (fix === "flip" ? "Flip" : "Fit");
@@ -211,8 +221,7 @@
   }
   function renderLints() {
     const slot = state.slots[state.kind];
-    // Fixes re-post the original file, which only lives in memory.
-    const canFix = !!(current && current.slot && current.slot === slot && current.kind === state.kind);
+    const canFix = !!slot; // see jobFor
     const warns = slot ? slot.lints[state.kind] : [];
     const tips = slot ? slot.info.filter((l) => l.severity === "tip") : [];
     const infos = slot ? slot.info.filter((l) => l.severity === "info") : [];
@@ -244,58 +253,62 @@
     s.textContent = text;
     s.classList.toggle("error", !!isError);
   }
-  // The same magic-byte checks as the server, for instant, friendly answers:
-  // [signature, offset, advice].
-  const ascii = (str) => Array.from(str, (c) => c.charCodeAt(0));
-  const REJECTED = [
-    [ascii("ftyp"), 4, "That's a HEIC or AVIF photo, which we can't read. Share or export it as JPEG or PNG, then upload that."],
-    [ascii("GIF8"), 0, "GIFs aren't supported. Export your drawing as PNG."],
-    [ascii("WEBP"), 8, "WebP isn't supported. Export your drawing as PNG or JPEG."],
-    [ascii("8BPS"), 0, "That's a PSD, like the template. Draw on it, then export a PNG: in Procreate, Actions → Share → PNG."],
-    [[0x50, 0x4b, 0x03, 0x04], 0, "That looks like a Procreate file. In Procreate, tap Actions → Share → PNG, then upload the PNG."],
-    [[0x50, 0x4b, 0x05, 0x06], 0, "That looks like a Procreate file. In Procreate, tap Actions → Share → PNG, then upload the PNG."],
-    [ascii("%PDF"), 0, "That's a PDF or Illustrator file. Use File → Export → SVG or PNG, then upload that."],
-    [ascii("%!PS"), 0, "That's a PDF or Illustrator file. Use File → Export → SVG or PNG, then upload that."],
-    [[0x1f, 0x8b], 0, "That's a compressed SVG (.svgz). Save it as a plain SVG instead, then upload that."],
-  ].concat([[0xff, 0xfe], [0xfe, 0xff], [0x3c, 0], [0, 0x3c]].map((sig) =>
-    [sig, 0, "That SVG is saved as UTF-16 text, which we can't read. Save it again as UTF-8, then upload it."]));
+  const summary = (warns) => warns ? " " + warns + (warns === 1 ? " thing" : " things") + " to check below."
+    : " It passes every check.";
+  // The server's own rules for formats it rejects (rendered into data-sniff), for an
+  // instant answer without uploading. Anything else is posted and the server decides.
+  const drop = $("studio-drop");
+  const SNIFF = (() => {
+    try {
+      const s = JSON.parse(drop.getAttribute("data-sniff") || "null");
+      return s && Array.isArray(s.rejected) && Number.isFinite(s.max_bytes) ? s : null;
+    } catch (e) { return null; }
+  })();
   async function preflight(file) {
-    if (file.size === 0) return "That file is empty. Export your drawing again.";
+    if (!SNIFF) return null;
     const b = new Uint8Array(await file.slice(0, 64).arrayBuffer());
-    const at = (sig, offset) => sig.every((v, i) => b[offset + i] === v);
-    if (at([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0) || at([0xff, 0xd8, 0xff], 0)) {
-      return file.size > MAX_BYTES ? "That file is too big (the limit is 4 MB). Export a PNG at 1000 × 1000 px, the template's size." : null;
-    }
-    const rejected = REJECTED.find(([sig, offset]) => at(sig, offset));
-    if (rejected) return rejected[2];
-    const text = (await file.slice(0, 64 * 1024).text()).replace(/^\uFEFF/, "").trimStart();
-    if (text.startsWith("<") && text.includes("<svg")) {
-      return file.size > MAX_SVG_BYTES ? "That SVG is too big (the limit is 512 KB). Simplify it, or export a PNG instead." : null;
-    }
-    return "We couldn't tell what kind of file this is. Upload a PNG, JPEG or SVG.";
+    const hit = SNIFF.rejected.find((sig) => sig.at.every(([offset, alternatives]) =>
+      alternatives.some((magic) => magic.every((v, i) => b[offset + i] === v))));
+    if (hit) return hit.message;
+    return file.size > SNIFF.max_bytes ? SNIFF.too_large : null;
   }
   async function handleFile(file) {
     if (!file) return;
     const problem = await preflight(file);
     if (problem) return setStatus(problem, true);
-    current = { bytes: await file.arrayBuffer(), kind: state.kind, fixes: [], slot: null, seq: 0,
-      displaced: state.slots[state.kind] };
-    send(current, []);
+    const body = await file.arrayBuffer();
+    send({ body: body, kind: state.kind, fixes: [], slot: null, displaced: state.slots[state.kind], info: null }, []);
   }
-  // Post the file with `fixes` (a set: the server applies Flip before Fit).
+  // The file as the page saves it: the clean path in the design kit's SVG template.
+  const svgFor = (slot) => '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><path fill-rule="' +
+    slot.fillRule + '" d="' + slot.d + '"/></svg>';
+  // The file behind a slot, for Flip and Fit: the upload while it's in memory, else (after
+  // a reload, or once another file was uploaded) the saved path as an SVG. Both fixes are
+  // rewrites of the clean path, so they land in the same place; the notes about the
+  // original file are kept.
+  function jobFor(kind) {
+    const slot = state.slots[kind];
+    if (!slot) return null;
+    if (current && current.kind === kind && current.slot === slot) return current;
+    return { body: svgFor(slot), kind: kind, fixes: [], slot: slot, displaced: null, info: slot.info };
+  }
+  // Post `job.body` with `fixes` (a set: the server applies Flip before Fit). Only a
+  // success changes anything: after an error, the last result and its buttons stay.
   async function send(job, fixes) {
-    const seq = ++job.seq;
+    const ticket = {};
+    pending = ticket;
     setStatus("Processing your drawing…");
     root.setAttribute("aria-busy", "true");
     const query = fixes.map((f) => "fix=" + f).join("&");
     let res = null;
     let body = null;
     try {
-      res = await fetch(ENDPOINT + (query ? "?" + query : ""), { method: "POST", body: job.bytes, credentials: "omit",
+      res = await fetch(ENDPOINT + (query ? "?" + query : ""), { method: "POST", body: job.body, credentials: "omit",
         headers: { "Content-Type": "application/octet-stream" } });
       body = await res.json().catch(() => null);
     } catch (e) { /* network error: res stays null */ }
-    if (job !== current || seq !== job.seq) return; // a newer upload or fix took over
+    if (pending !== ticket) return; // a newer upload or fix took over
+    pending = null;
     root.removeAttribute("aria-busy");
     const slot = res && res.ok && body ? cleanSlot({ d: body.path_d, fillRule: body.fill_rule, lints: body.lints,
       info: body.info, gaps: body.metrics && body.metrics.left_edge_gaps }) : null;
@@ -305,26 +318,41 @@
         : "Something went wrong on our side. Please try again.";
       return setStatus(message, true);
     }
+    if (job.info) slot.info = job.info;
     job.slot = slot;
     job.fixes = fixes;
+    current = job;
     state.slots[job.kind] = slot;
     state.pair[job.kind] = "user";
     state.kind = job.kind;
     render();
-    const warns = slot.lints[job.kind].length;
-    setStatus("Done: your " + job.kind + " is on the board." +
-      (warns ? " " + warns + (warns === 1 ? " thing" : " things") + " to check below." : " It passes every check."));
-    $("studio-result-heading").focus();
+    setStatus("Done: your " + job.kind + " is on the board." + summary(slot.lints[job.kind].length));
+    showResult();
+  }
+  // Focus the result, and bring it into view: the preview where the checks sit beside it,
+  // else the status line (the top warning and the preview follow it).
+  function showResult() {
+    $("studio-result-heading").focus({ preventScroll: true });
+    const target = sideBySide.matches ? root.querySelector(".studio-preview") : $("studio-status");
+    target.scrollIntoView({ block: "start", behavior: reduceMotion ? "auto" : "smooth" });
   }
   function applyFix(fix) {
-    if (current && current.slot && !current.fixes.includes(fix)) send(current, current.fixes.concat(fix));
+    const job = jobFor(state.kind);
+    if (job && !job.fixes.includes(fix)) send(job, job.fixes.concat(fix));
   }
-  // Move the current file to the other slot (both kinds' checks are already here), and
-  // put back what it replaced.
+  // Where the last file can move without re-posting (both kinds' checks are already
+  // here): to the other slot while its own slot is showing, or into the showing slot
+  // while that one is empty (after tapping Tail to say "that was a tail").
+  function relabelTarget() {
+    if (!current || !current.slot || state.slots[current.kind] !== current.slot) return null;
+    if (current.kind === state.kind) return other(current.kind);
+    return state.slots[state.kind] ? null : state.kind;
+  }
+  // Move it, and put back what it replaced.
   function relabel() {
-    if (!current || !current.slot || state.slots[current.kind] !== current.slot) return;
+    const to = relabelTarget();
+    if (!to) return;
     const from = current.kind;
-    const to = other(from);
     state.slots[from] = current.displaced;
     if (!current.displaced && state.pair[from] === "user") state.pair[from] = "default";
     current.displaced = state.slots[to];
@@ -334,6 +362,12 @@
     state.kind = to;
     render();
     setStatus("Moved: this file is now your " + to + ".");
+  }
+  // "Upload as" switched: say what's showing now, and what the next upload fills.
+  function kindChanged() {
+    const slot = state.slots[state.kind];
+    if (slot) setStatus("Showing your " + state.kind + "." + summary(slot.lints[state.kind].length));
+    else setStatus("Your next upload will be your " + state.kind + ".");
   }
 
   // ---- downloads ------------------------------------------------------------------
@@ -346,10 +380,7 @@
   }
   function downloadSvg(kind) {
     const slot = state.slots[kind];
-    if (!slot) return;
-    const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><path fill-rule="' +
-      slot.fillRule + '" d="' + slot.d + '"/></svg>';
-    download(new Blob([svg], { type: "image/svg+xml" }), "my-battlesnake-" + kind + ".svg");
+    if (slot) download(new Blob([svgFor(slot)], { type: "image/svg+xml" }), "my-battlesnake-" + kind + ".svg");
   }
   // A PNG of the All-directions board in the current colour, theme and pairing. The
   // page's CSS doesn't apply inside an image, so the copy carries its own colours and
@@ -402,7 +433,6 @@
   // ---- the live loop --------------------------------------------------------------
   const live = root.querySelector(".studio-live");
   const frames = live ? Array.from(live.querySelectorAll(".studio-frame")) : [];
-  const reduceMotion = window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches;
   let playing = !reduceMotion;
   let onScreen = true;
   let frame = 0;
@@ -416,9 +446,10 @@
     const run = playing && onScreen && !document.hidden && frames.length > 1;
     if (run && !timer) timer = setInterval(step, FRAME_MS);
     if (!run && timer) { clearInterval(timer); timer = null; }
+    // A plain button whose name says what it does next (no aria-pressed: a toggle
+    // button's name must not change with its state).
     const btn = $("studio-play");
     btn.textContent = playing ? "Pause" : "Play";
-    btn.setAttribute("aria-pressed", playing ? "false" : "true");
     btn.setAttribute("aria-label", (playing ? "Pause" : "Play") + " the live preview");
   }
   document.addEventListener("visibilitychange", syncLoop);
@@ -435,7 +466,6 @@
     handleFile(fileInput.files && fileInput.files[0]);
     fileInput.value = ""; // choosing the same file again still fires change
   });
-  const drop = $("studio-drop");
   for (const type of ["dragenter", "dragover"]) {
     drop.addEventListener(type, (e) => { e.preventDefault(); drop.classList.add("dragging"); });
   }
@@ -447,8 +477,11 @@
   });
   root.addEventListener("change", (e) => {
     const t = e.target;
-    if (t.name === "studio-kind") state.kind = t.value === "tail" ? "tail" : "head";
-    else if (t.name === "studio-theme") state.theme = t.value === "dark" ? "dark" : "light";
+    if (t.name === "studio-kind") {
+      state.kind = t.value === "tail" ? "tail" : "head";
+      render();
+      return kindChanged();
+    } else if (t.name === "studio-theme") state.theme = t.value === "dark" ? "dark" : "light";
     else if (t.name === "studio-view" && VIEWS.includes(t.value)) state.view = t.value;
     else if (t.name === "studio-color" && COLOR_RE.test(t.value)) state.color = t.value.toLowerCase();
     else if (t.classList.contains("studio-pair-select")) {
@@ -474,6 +507,8 @@
   });
   $("studio-clear").addEventListener("click", () => {
     current = null;
+    pending = null;
+    root.removeAttribute("aria-busy");
     state.slots = { head: null, tail: null };
     state.pair = { head: "default", tail: "default" };
     render();

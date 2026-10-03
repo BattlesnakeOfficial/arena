@@ -27,11 +27,20 @@
 //! # Limits
 //!
 //! Set in the child between fork and exec ([`WorkerLimits`]): `RLIMIT_CPU` (SIGXCPU at
-//! the soft limit, SIGKILL a second later), `RLIMIT_DATA` (allocations past it fail and
-//! the worker aborts), `RLIMIT_CORE` 0 (a crash never writes a core file), and
-//! `oom_score_adj` 1000 on Linux, so when memory runs out the kernel kills the worker
-//! rather than the server. The parent kills the worker at the wall-clock deadline and
-//! drops it with `kill_on_drop`, so a cancelled request stops the work too.
+//! the soft limit, SIGKILL a second later), `RLIMIT_DATA` and `RLIMIT_AS` (allocations
+//! past them fail and the worker aborts), `RLIMIT_CORE` 0 (a crash never writes a core
+//! file), the lowest CPU priority (nice 19, so live games always win the CPU), and
+//! `oom_score_adj` 1000 on Linux. The parent kills the worker at the wall-clock deadline
+//! and drops it with `kill_on_drop`, so a cancelled request stops the work too.
+//!
+//! The memory limits need two caps because of where the server runs. On a Linux kernel
+//! (Cloud Run's second-generation environment, the dev VM) `RLIMIT_DATA` covers every
+//! private writable mapping, and if the instance still runs out of memory the OOM killer
+//! picks the worker (`oom_score_adj`). gVisor (Cloud Run's first generation) applies
+//! `RLIMIT_DATA` to `brk` only, not to `mmap`, and kills the whole sandbox when memory
+//! runs out, so there `RLIMIT_AS`, which gVisor does enforce on `mmap`, is the only cap.
+//! Run the service on the second generation (`docs/design-kit.md`, "The worker
+//! process").
 //!
 //! The worker must not start anything the server does: `main.rs` dispatches to
 //! [`worker_main`] before Sentry, config, telemetry or the database.
@@ -81,11 +90,10 @@ pub mod exit {
 
 // ---- the JSON the worker writes and the studio endpoint returns ---------------------
 
-/// One processed upload: the studio endpoint's 200 body.
+/// One processed upload: the studio endpoint's 200 body. The page builds the
+/// downloadable SVG (the [`CleanShape::to_svg`] template) from `path_d` and `fill_rule`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ShapeJson {
-    /// The downloadable SVG: exactly [`CleanShape::to_svg`].
-    pub svg: String,
     /// Absolute `M`/`L`/`Q`/`C`/`Z` commands; matches `^[MLQCZ0-9 .\-]*$`.
     pub path_d: String,
     pub fill_rule: FillRule,
@@ -161,7 +169,6 @@ impl From<&CleanShape> for ShapeJson {
     fn from(s: &CleanShape) -> Self {
         let lints = |ls: &[Lint]| ls.iter().map(LintJson::from).collect();
         Self {
-            svg: s.to_svg(),
             path_d: s.path_d().to_string(),
             fill_rule: s.fill_rule(),
             strategy: s.strategy(),
@@ -188,22 +195,14 @@ pub fn is_clean_path_d(d: &str) -> bool {
 
 impl ShapeJson {
     /// Re-check what a worker sent before serving it: the path is clean and within the
-    /// size limit, and the SVG is exactly the fixed template around it.
+    /// size limit (every other field is a closed enum, a number or lint copy that the
+    /// page only ever sets as text).
     fn check(&self) -> Result<(), &'static str> {
         if self.path_d.len() > Limits::default().max_path_d_bytes {
             return Err("path_d is over the size limit");
         }
         if !is_clean_path_d(&self.path_d) {
             return Err("path_d has characters outside the path alphabet");
-        }
-        // The same template as `CleanShape::to_svg` (a test keeps them equal).
-        let svg = format!(
-            "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\"><path fill-rule=\"{}\" d=\"{}\"/></svg>",
-            self.fill_rule.as_svg(),
-            self.path_d
-        );
-        if self.svg != svg {
-            return Err("svg is not the clean-path template");
         }
         Ok(())
     }
@@ -364,8 +363,13 @@ pub struct WorkerLimits {
     /// `RLIMIT_DATA` in bytes: the worker's private writable memory (heap and thread
     /// stacks, including the 64 MiB processing stack, which counts in full although
     /// only the touched pages use memory). Past it, allocations fail and the worker
-    /// aborts.
+    /// aborts. gVisor applies it to `brk` only; see [`WorkerLimits::address_space_bytes`].
     pub data_bytes: u64,
+    /// `RLIMIT_AS` in bytes: every mapping, including the executable, the stacks and
+    /// malloc's reserved arenas. The second memory cap, for gVisor, which doesn't apply
+    /// `RLIMIT_DATA` to `mmap`; sized so that it never binds before `RLIMIT_DATA` on
+    /// Linux.
+    pub address_space_bytes: u64,
     /// Wall-clock deadline: the worker is killed after this long. Waiting this long
     /// means the machine is busy, not that the upload is too big (the CPU limit catches
     /// that first).
@@ -381,15 +385,31 @@ pub struct WorkerLimits {
 /// of heap: within what a 512 MiB Cloud Run instance has free beside the server.
 pub const DEFAULT_DATA_LIMIT_BYTES: u64 = 192 << 20;
 
+/// Default `RLIMIT_AS` for a worker: 320 MiB, [`DEFAULT_DATA_LIMIT_BYTES`] plus 128 MiB
+/// for the mappings `RLIMIT_DATA` doesn't count.
+///
+/// Measured with `prlimit --as` on the debug build (the larger executable): the
+/// mappings every worker has (the executable, the main stack, a malloc arena's
+/// reservation) come to about 125 MiB; the heaviest legitimate uploads need 144 MiB (2048
+/// px PNG and JPEG, progressive JPEGs) and 160 MiB (the deepest reference chains), and
+/// the 4,900-element SVG that is rejected as too complex needs 224 MiB to say so. Under
+/// gVisor this keeps a memory bomb to about 200 MiB.
+pub const DEFAULT_ADDRESS_SPACE_LIMIT_BYTES: u64 = DEFAULT_DATA_LIMIT_BYTES + (128 << 20);
+
+/// The worker's nice value: the lowest CPU priority, so on the server's one vCPU the
+/// game engine always runs first and uploads only use spare time.
+pub const WORKER_NICE: i32 = 19;
+
 impl Default for WorkerLimits {
     /// Release: 5 s of CPU (the slowest accepted uploads take 0.25 s) and 10 s of wall
-    /// clock. Debug builds (local dev and the e2e server) run the pipeline about 30x
+    /// clock. Debug builds (local dev and the e2e server) run the pipeline 20-30x
     /// slower (a 1448 px progressive JPEG takes 7 s), so they get 30 s and 45 s.
     fn default() -> Self {
         let debug = cfg!(debug_assertions);
         Self {
             cpu_secs: if debug { 30 } else { 5 },
             data_bytes: DEFAULT_DATA_LIMIT_BYTES,
+            address_space_bytes: DEFAULT_ADDRESS_SPACE_LIMIT_BYTES,
             wall: Duration::from_secs(if debug { 45 } else { 10 }),
         }
     }
@@ -442,6 +462,15 @@ impl Worker {
     pub fn with_self_test(mut self, mode: &str) -> Self {
         self.self_test = Some(mode.to_string());
         self
+    }
+
+    /// [`Worker::run`] while holding `permit` (the studio's processing slot): it is
+    /// released once the worker has exited and been reaped, or, if this future is
+    /// dropped first (the client went away), as `kill_on_drop` sends the worker SIGKILL.
+    pub async fn run_holding<P: Send>(&self, bytes: &[u8], fixes: &[Fix], permit: P) -> Outcome {
+        let outcome = self.run(bytes, fixes).await;
+        drop(permit);
+        outcome
     }
 
     /// Process one upload in a new worker and wait for it to finish (or kill it at the
@@ -572,19 +601,25 @@ fn classify(status: ExitStatus, stdout: &[u8], overflow: bool, stderr: &[u8]) ->
     }
 }
 
-/// Set the worker's resource limits between fork and exec.
+/// Set the worker's resource limits and priority between fork and exec.
 #[cfg(unix)]
 fn apply_limits(cmd: &mut tokio::process::Command, limits: &WorkerLimits) {
     let cpu: libc::rlim_t = limits.cpu_secs;
     let data: libc::rlim_t = limits.data_bytes;
+    let address_space: libc::rlim_t = limits.address_space_bytes;
     // SAFETY: the closure runs in the forked child before exec, where only
-    // async-signal-safe functions may be called. It calls getrlimit, setrlimit, open,
-    // write and close, captures two integers and allocates nothing.
+    // async-signal-safe code may run. It calls getrlimit, setrlimit, setpriority, open,
+    // write and close (plain system-call wrappers that take no locks), captures three
+    // integers and allocates nothing.
     unsafe {
         cmd.pre_exec(move || {
             lower_limit(libc::RLIMIT_CORE, 0, 0)?;
             lower_limit(libc::RLIMIT_CPU, cpu, cpu.saturating_add(1))?;
             lower_limit(libc::RLIMIT_DATA, data, data)?;
+            lower_limit(libc::RLIMIT_AS, address_space, address_space)?;
+            // Raising the nice value needs no privileges. Best effort: a worker at normal
+            // priority is slower for the games, not unsafe.
+            libc::setpriority(libc::PRIO_PROCESS, 0, WORKER_NICE);
             #[cfg(target_os = "linux")]
             prefer_for_oom_kill();
             Ok(())
@@ -622,8 +657,9 @@ fn lower_limit(resource: Resource, soft: libc::rlim_t, hard: libc::rlim_t) -> st
     Ok(())
 }
 
-/// `oom_score_adj = 1000`: when memory runs out, the kernel kills the worker first.
-/// Raising it needs no privileges. Best effort: without `/proc` the limits still apply.
+/// `oom_score_adj = 1000`: when memory runs out, a Linux kernel kills the worker first
+/// (gVisor ignores it and kills the whole sandbox). Raising it needs no privileges. Best
+/// effort: without `/proc` the limits still apply.
 #[cfg(target_os = "linux")]
 fn prefer_for_oom_kill() {
     const VALUE: &[u8] = b"1000";
@@ -660,7 +696,6 @@ mod tests {
         let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><path d="M0 0H10V10H0Z"/></svg>"#;
         let clean = design_kit::process_upload(svg, &Limits::default(), &[]).unwrap();
         let json = ShapeJson::from(&clean);
-        assert_eq!(json.svg, clean.to_svg());
         assert_eq!(json.path_d, clean.path_d());
         assert_eq!(json.check(), Ok(()));
         let value = serde_json::to_value(&json).unwrap();
@@ -669,6 +704,8 @@ mod tests {
         assert_eq!(value["input"], "svg");
         assert!(value["metrics"]["fill_pct"].is_number());
         assert!(value["lints"]["head"].is_array());
+        // The page builds the SVG file itself; the response carries only the path.
+        assert!(value.get("svg").is_none(), "{value}");
     }
 
     #[test]
@@ -709,7 +746,7 @@ mod tests {
             ));
         }
         let mut bad = shape.clone();
-        bad.svg = format!("<svg onload=x>{}", bad.svg);
+        bad.path_d = "M0 0".repeat(Limits::default().max_path_d_bytes / 4 + 1);
         assert!(matches!(
             classify(ok, &reply_bytes(&Reply::Shape(bad)), false, b""),
             Outcome::Internal(_)

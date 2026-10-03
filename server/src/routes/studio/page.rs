@@ -11,12 +11,14 @@
 //! `path#studio-closeup-path`.
 
 use arena::design_kit::{
-    AssetKind, FillRule,
+    AssetKind, FillRule, ProcessError, SIGNATURES, Sniffed,
     refs::{REFS, RefShape},
 };
 use axum::response::IntoResponse;
 use maud::{Markup, html};
+use serde::Serialize;
 
+use super::process::MAX_BODY_BYTES;
 use crate::{
     components::{
         page_factory::PageFactory,
@@ -80,6 +82,48 @@ fn default_ref(kind: AssetKind) -> &'static RefShape {
         .unwrap_or(&FALLBACK_REF)
 }
 
+/// The browser's instant check before an upload, rendered from the server's own rules
+/// (`data-sniff` on `#studio-drop`): the formats [`design_kit::sniff`] rejects, with the
+/// same advice, and the size limit. Anything else is posted and the server decides.
+///
+/// [`design_kit::sniff`]: arena::design_kit::sniff
+#[derive(Debug, Serialize)]
+pub(crate) struct ClientSniff {
+    pub max_bytes: usize,
+    pub too_large: String,
+    pub rejected: Vec<ClientSignature>,
+}
+
+/// One rejected format: every `[offset, alternatives]` part must match (one of the
+/// alternatives starts at `offset`), as [`arena::design_kit::Signature::matches`].
+#[derive(Debug, Serialize)]
+pub(crate) struct ClientSignature {
+    pub at: Vec<(usize, &'static [&'static [u8]])>,
+    pub message: String,
+}
+
+pub(crate) fn client_sniff() -> ClientSniff {
+    let rejected = SIGNATURES
+        .iter()
+        .filter_map(|sig| match sig.sniffed {
+            Sniffed::Rejected(format) => Some(ClientSignature {
+                at: sig.parts.to_vec(),
+                message: ProcessError::UnsupportedFormat(format).user_message(),
+            }),
+            Sniffed::Accepted(_) => None,
+        })
+        .collect();
+    let too_large = ProcessError::TooLarge {
+        bytes: MAX_BODY_BYTES + 1,
+        max: MAX_BODY_BYTES,
+    };
+    ClientSniff {
+        max_bytes: MAX_BODY_BYTES,
+        too_large: too_large.user_message(),
+        rejected,
+    }
+}
+
 fn placeholder(shape: &'static RefShape, class: &'static str) -> ShapeRef<'static> {
     ShapeRef {
         d: shape.d,
@@ -104,6 +148,8 @@ pub(crate) fn studio_markup() -> Markup {
     let default_head = default_ref(AssetKind::Head);
     let label_all = "Four pink snakes wearing the default head and the default tail, facing \
                      right, left, up and down";
+    // Without the check the browser just posts every file; the server answers anyway.
+    let sniff = serde_json::to_string(&client_sniff()).unwrap_or_default();
     html! {
         div #studio .studio data-testid="studio" {
             div class="page-head" {
@@ -120,14 +166,10 @@ pub(crate) fn studio_markup() -> Markup {
             div class="studio-layout" {
                 section class="studio-panel studio-upload" aria-labelledby="studio-upload-heading" {
                     h2 #studio-upload-heading class="vh" { "Upload" }
-                    label #studio-drop class="studio-drop" data-testid="studio-drop" {
-                        input #studio-file class="studio-file" type="file" name="file"
-                            accept=".png,.jpg,.jpeg,.svg,image/png,image/jpeg,image/svg+xml";
-                        span class="studio-drop-title" { "Choose a drawing" }
-                        span class="studio-drop-hint" { "PNG, JPEG or SVG, or drop it here" }
-                    }
-                    fieldset #studio-kind class="studio-seg" {
-                        legend { "This file is a" }
+                    // Picks the slot the next upload fills, and which slot the close-up
+                    // and the checks show.
+                    fieldset #studio-kind class="studio-seg studio-kind" {
+                        legend { "Upload as" }
                         div class="studio-seg-opts" {
                             label class="studio-seg-opt" {
                                 input type="radio" name="studio-kind" value="head" checked;
@@ -138,6 +180,12 @@ pub(crate) fn studio_markup() -> Markup {
                                 span { "Tail" }
                             }
                         }
+                    }
+                    label #studio-drop class="studio-drop" data-testid="studio-drop" data-sniff=(sniff) {
+                        input #studio-file class="studio-file" type="file" name="file"
+                            accept=".png,.jpg,.jpeg,.svg,image/png,image/jpeg,image/svg+xml";
+                        span #studio-drop-title class="studio-drop-title" { "Choose a drawing" }
+                        span class="studio-drop-hint" { "PNG, JPEG or SVG, or drop it here" }
                     }
                     p #studio-status class="studio-status" role="status" aria-live="polite"
                         data-testid="studio-status" { "Try it with your own drawing." }
@@ -183,9 +231,8 @@ pub(crate) fn studio_markup() -> Markup {
                                 "studio-live light",
                                 "A pink snake wearing the default head and the default tail, moving around the board",
                             )))
-                            button #studio-play class="btn sm studio-play" type="button" aria-pressed="false" {
-                                "Pause"
-                            }
+                            button #studio-play class="btn sm studio-play" type="button"
+                                aria-label="Pause the live preview" { "Pause" }
                         }
                         div class="studio-pane" data-pane="all" {
                             (snake_board(&four_directions_board(head, tail, "studio-all light", label_all)))
@@ -247,9 +294,12 @@ pub(crate) fn studio_markup() -> Markup {
                                     span class="studio-swatch-name" aria-hidden="true" { (name) }
                                 }
                             }
-                            label class="studio-swatch studio-swatch-custom" {
+                            // The colour input covers the label like the radios do; the
+                            // chip shows the custom colour once one is picked.
+                            label #studio-swatch-custom class="studio-swatch studio-swatch-custom" {
                                 input #studio-color-custom type="color" value=(DEFAULT_COLOR)
                                     aria-label="Custom colour";
+                                span class="studio-swatch-chip studio-swatch-chip-custom" {}
                                 span class="studio-swatch-name" aria-hidden="true" { "Custom" }
                             }
                         }
