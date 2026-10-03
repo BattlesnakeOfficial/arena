@@ -10,8 +10,11 @@
 use super::raster::Metrics;
 use super::{AssetKind, Fix};
 
-/// How prominently the studio shows a lint.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+/// How prominently the studio shows a lint. Serialized as [`Severity::as_str`].
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "lowercase")]
 pub enum Severity {
     /// Will look wrong on the board. Shown first, with a fix button when there is one.
     Warn,

@@ -115,6 +115,8 @@ usvg = { version = "=0.48.1", default-features = false }
 # The CSS engine usvg uses (the same copy): the SVG prescan matches selectors exactly as
 # usvg will, to find references made from stylesheets and to bound the matching cost.
 simplecss = "=0.2.2"
+# Head & Tail Studio worker (src/studio_worker.rs): setrlimit in the child before exec.
+libc = "0.2"
 
 [lib]
 name = "arena"

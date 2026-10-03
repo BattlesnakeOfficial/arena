@@ -51,7 +51,8 @@ pub enum AssetKind {
     Tail,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum FillRule {
     NonZero,
     EvenOdd,
@@ -73,8 +74,9 @@ impl FillRule {
     }
 }
 
-/// How the clean path was produced.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// How the clean path was produced. Serialized as [`Strategy::as_str`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Strategy {
     /// A raster (PNG/JPEG) traced into splines.
     Traced,
@@ -95,8 +97,9 @@ impl Strategy {
     }
 }
 
-/// A format we accept.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A format we accept. Serialized as [`InputFormat::as_str`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum InputFormat {
     Png,
     Jpeg,
@@ -182,8 +185,10 @@ impl RejectedFormat {
 ///
 /// Fixes form a set: [`process_upload`] applies Flip before Fit whatever order they are
 /// given in (fitting first would move a flipped head away from the neck edge), so the
-/// studio can send every fix the artist has tapped so far, e.g. `?fix=flip,fit`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// studio can send every fix the artist has tapped so far, e.g. `?fix=flip&fix=fit`.
+/// Serialized as [`Fix::as_str`]; [`Fix::parse`] reads it back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Fix {
     /// Mirror horizontally (`x -> 100 - x`).
     Flip,
@@ -198,6 +203,13 @@ impl Fix {
             Fix::Flip => "flip",
             Fix::Fit => "fit",
         }
+    }
+
+    /// The fix named by [`Fix::as_str`].
+    pub fn parse(name: &str) -> Option<Fix> {
+        [Fix::Flip, Fix::Fit]
+            .into_iter()
+            .find(|f| f.as_str() == name)
     }
 }
 

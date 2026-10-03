@@ -186,6 +186,7 @@ dependencies = [
  "include_dir",
  "is-terminal",
  "jpeg-encoder",
+ "libc",
  "maud",
  "mime_guess",
  "num-bigint",
