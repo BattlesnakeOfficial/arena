@@ -89,6 +89,17 @@ rules = { path = "../rules" }
 tokio-util = { version = "0.7.14", features = ["rt"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 
+# design_kit (DEV-1539): raster upload -> one clean head/tail path. Pure Rust.
+# Rasteriser for lint metrics; no png-format (PNG decoding uses `png` directly).
+tiny-skia = { version = "0.12.0", default-features = false, features = ["std", "simd"] }
+# Tracing engine behind vtracer 0.6.x binary mode.
+visioncortex = "0.8.10"
+png = "0.18.1"
+# Pinned: design_kit::raster_in mirrors 0.5.15 internals (`first_scan_components` walks
+# markers like its header parser; `buffers_coefficients` and `buffered_max_pixels` copy
+# when and how much it buffers). Re-check those, and the JPEG memory caps, before bumping.
+zune-jpeg = "=0.5.15"
+
 [lib]
 name = "arena"
 path = "src/lib.rs"
@@ -119,3 +130,7 @@ tower = { version = "0.4.13", features = ["util"] }
 proptest = "1"
 wiremock = "0.6"
 tower-cookies = { version = "0.11", features = ["private"] }
+# design_kit tests: independent SVG renderer (test oracle only, never at runtime)
+# and a JPEG encoder for JPEG round-trip fixtures.
+resvg = { version = "0.48.1", default-features = false }
+jpeg-encoder = "0.7.1"

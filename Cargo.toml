@@ -5,3 +5,33 @@ resolver = "3"
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
+
+# design_kit (DEV-1539): image decoding, rasterising and tracing do per-pixel work.
+# Unoptimised, they make debug test runs and the debug e2e server many times slower.
+# Profiles only take effect in the workspace root manifest.
+[profile.dev.package.tiny-skia]
+opt-level = 3
+
+[profile.dev.package.tiny-skia-path]
+opt-level = 3
+
+[profile.dev.package.usvg]
+opt-level = 3
+
+[profile.dev.package.resvg]
+opt-level = 3
+
+[profile.dev.package.visioncortex]
+opt-level = 3
+
+[profile.dev.package.png]
+opt-level = 3
+
+[profile.dev.package.fdeflate]
+opt-level = 3
+
+[profile.dev.package.simd-adler32]
+opt-level = 3
+
+[profile.dev.package.zune-jpeg]
+opt-level = 3
