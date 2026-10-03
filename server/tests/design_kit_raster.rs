@@ -233,17 +233,29 @@ fn roughen(rgba: &[u8], side: usize) -> Vec<u8> {
     a.iter().flat_map(|&v| [0, 0, 0, v.round() as u8]).collect()
 }
 
+/// Vendored samples made only of straight edges and sharp corners. Exported cleanly,
+/// they must come back with every corner where it was.
+const STRAIGHT_EDGED: [(AssetKind, &str); 5] = [
+    (AssetKind::Head, "pixel"),
+    (AssetKind::Tail, "default"),
+    (AssetKind::Tail, "bolt"),
+    (AssetKind::Tail, "block-bum"),
+    (AssetKind::Tail, "pixel"),
+];
+
 fn check_round_trip(kind: AssetKind, slug: &str, side: u32, how: Export) -> CleanShape {
     let svg = catalog_svg(kind, slug);
     let label = format!("{}/{slug} @{side} {how:?}", kind_dir(kind));
     let shape = run(&export(&svg, side, how), &[]).unwrap_or_else(|e| panic!("{label}: {e:?}"));
-    let score = iou(&alpha(&svg, 400), &shape_alpha(&shape, 400));
-    println!(
-        "{label}: IoU {score:.4}, left edge {:.1}%, d {} B",
-        shape.metrics().left_edge_pct,
-        shape.path_d().len()
-    );
-    assert!(score >= 0.97, "{label}: IoU {score:.4}");
+    let clean = matches!(how, Export::Alpha | Export::Opaque);
+    let max_error = if clean && STRAIGHT_EDGED.contains(&(kind, slug)) {
+        // One pixel of the comparison: a right angle rounded off with a radius over
+        // about 1 unit fails.
+        0.25
+    } else {
+        MAX_OUTLINE_ERROR
+    };
+    check_faithful(&label, &svg, &shape, max_error);
     assert!(
         shape.metrics().left_edge_pct >= 95.0,
         "{label}: left edge {:?}",
@@ -262,37 +274,100 @@ fn check_round_trip(kind: AssetKind, slug: &str, side: u32, how: Export) -> Clea
     shape
 }
 
-#[test]
-fn every_sample_round_trips_at_1024_with_transparency() {
-    for slug in HEADS {
-        check_round_trip(AssetKind::Head, slug, 1024, Export::Alpha);
-    }
-    for slug in TAILS {
-        check_round_trip(AssetKind::Tail, slug, 1024, Export::Alpha);
+/// How far (units) a trace's outline may stray from the drawing's. A curve cut by a
+/// chord, a bulged flat front or a rounded-off corner shows up here long before it moves
+/// IoU below 0.97: the 45° splice threshold cut 2.75 to 8 units off vendored samples
+/// that still scored up to 0.995.
+const MAX_OUTLINE_ERROR: f64 = 1.25;
+
+/// The trace matches `reference` (an SVG of the intended shape) on 400 px masks: IoU at
+/// least 0.97, and no point where they differ more than `max_error` units from the
+/// reference's outline.
+fn check_faithful(label: &str, reference: &str, shape: &CleanShape, max_error: f64) {
+    let (want, got) = (alpha(reference, 400), shape_alpha(shape, 400));
+    let score = iou(&want, &got);
+    let error = outline_error(&want, &got);
+    println!(
+        "{label}: IoU {score:.4}, outline error {error:.2}, left edge {:.1}%, d {} B",
+        shape.metrics().left_edge_pct,
+        shape.path_d().len()
+    );
+    assert!(score >= 0.97, "{label}: IoU {score:.4}");
+    assert!(
+        error <= max_error,
+        "{label}: outline off by {error:.2} units (at most {max_error})"
+    );
+}
+
+/// Every vendored sample of `kind`, transparent and opaque, exported at `side` px.
+fn every_sample_round_trips_at(kind: AssetKind, side: u32) {
+    let slugs = match kind {
+        AssetKind::Head => HEADS,
+        AssetKind::Tail => TAILS,
+    };
+    for slug in slugs {
+        for how in [Export::Alpha, Export::Opaque] {
+            check_round_trip(kind, slug, side, how);
+        }
     }
 }
 
+// One test per kind and size, so they run in parallel.
+
 #[test]
-fn round_trips_at_512_and_opaque() {
-    for (kind, slug) in [
-        (AssetKind::Head, "default"),
-        (AssetKind::Head, "bendr"),
-        (AssetKind::Tail, "curled"),
-        (AssetKind::Tail, "pixel"),
-    ] {
-        for how in [Export::Alpha, Export::Opaque] {
-            check_round_trip(kind, slug, 512, how);
-        }
-        check_round_trip(kind, slug, 1024, Export::Opaque);
-    }
+fn every_sample_round_trips_at_512() {
+    every_sample_round_trips_at(AssetKind::Head, 512);
+    every_sample_round_trips_at(AssetKind::Tail, 512);
+}
+
+/// The template's own size.
+#[test]
+fn every_head_round_trips_at_1000() {
+    every_sample_round_trips_at(AssetKind::Head, 1000);
 }
 
 #[test]
-fn round_trips_at_2048() {
-    for (kind, slug) in [(AssetKind::Head, "smile"), (AssetKind::Tail, "curled")] {
-        for how in [Export::Alpha, Export::Opaque] {
-            check_round_trip(kind, slug, 2048, how);
-        }
+fn every_tail_round_trips_at_1000() {
+    every_sample_round_trips_at(AssetKind::Tail, 1000);
+}
+
+#[test]
+fn every_head_round_trips_at_1024() {
+    every_sample_round_trips_at(AssetKind::Head, 1024);
+}
+
+#[test]
+fn every_tail_round_trips_at_1024() {
+    every_sample_round_trips_at(AssetKind::Tail, 1024);
+}
+
+/// The largest accepted size, traced on a box-downscaled 1024 px grid.
+#[test]
+fn every_head_round_trips_at_2048() {
+    every_sample_round_trips_at(AssetKind::Head, 2048);
+}
+
+#[test]
+fn every_tail_round_trips_at_2048() {
+    every_sample_round_trips_at(AssetKind::Tail, 2048);
+}
+
+#[test]
+fn the_trace_does_not_depend_on_the_export_size() {
+    // Where the tracer splits an outline into cubics depends on the exact pixel grid.
+    // With a 45° splice threshold one cubic spanned beluga's straight top and the turn
+    // after it, and cut a wedge about 8 units deep off it at 512, 700, 1000 and 1024 px
+    // (IoU 0.949 to 0.958) but not at 1023 or 1025.
+    let svg = board_svg(&catalog_inner(AssetKind::Head, "beluga"), "#1e3a8a");
+    for side in [512, 700, 1000, 1023, 1024, 1025] {
+        let rgba = straight_rgba(&render(&svg, side));
+        let png = encode_png(side, side, png::ColorType::Rgb, &over_white(&rgba));
+        check_coloured(
+            &format!("navy beluga @{side} opaque"),
+            &png,
+            &head("beluga"),
+            AssetKind::Head,
+        );
     }
 }
 
@@ -403,8 +478,7 @@ fn soft_opaque(svg: &str, side: u32, background: [u8; 3], blur: usize) -> Vec<u8
 /// exclusion around that guide colour catches part of the edge.)
 fn check_coloured(label: &str, png: &[u8], reference: &str, kind: AssetKind) {
     let s = run(png, &[]).unwrap_or_else(|e| panic!("{label}: {e:?}"));
-    let score = iou(&alpha(reference, 400), &shape_alpha(&s, 400));
-    assert!(score >= 0.97, "{label}: IoU {score:.4}");
+    check_faithful(label, reference, &s, MAX_OUTLINE_ERROR);
     assert!(
         s.info().first() == Some(&Lint::ColoursFlattened)
             && s.info()[1..]
@@ -543,6 +617,33 @@ fn progressive_jpegs_have_a_smaller_size_cap() {
         max_raster_side: 512,
         ..Limits::default()
     };
+    // libjpeg's standard progressive script (PIL, mozjpeg, most apps) starts with one DC
+    // scan carrying every component, so only the progressive check catches it; the
+    // multi-scan one doesn't. jpeg-encoder writes one component per scan, so its
+    // progressive files below would be caught by either. The fixture is a plain head
+    // saved by PIL 10.4 (400 px, quality 80, progressive, 4:2:0).
+    let libjpeg = fixture("jpeg/progressive-400.jpg");
+    assert!(
+        libjpeg.windows(2).any(|w| w == [0xff, 0xc2]),
+        "SOF2: progressive"
+    );
+    assert_eq!(
+        first_scan_components(&libjpeg),
+        Some(3),
+        "interleaved DC scan"
+    );
+    assert_eq!(
+        process_upload(&libjpeg, &limits, &[]).err(),
+        Some(ProcessError::ImageTooLarge {
+            width: 400,
+            height: 400,
+            max_side: 362
+        })
+    );
+    let s = run(&libjpeg, &[]).expect("within the default cap");
+    assert_eq!(s.input(), InputFormat::Jpeg);
+    assert!(s.passes(AssetKind::Head), "{:?}", s.lints());
+
     let encode = |side: u16, progressive: bool, colour: jpeg_encoder::ColorType| {
         let channels = if colour == jpeg_encoder::ColorType::Luma {
             1
@@ -581,6 +682,12 @@ fn progressive_jpegs_have_a_smaller_size_cap() {
 /// (a literal 0xFF is stuffed as 0xFF 0x00), so every match is a scan header.
 fn scan_count(jpeg: &[u8]) -> usize {
     jpeg.windows(2).filter(|w| w == &[0xff, 0xda]).count()
+}
+
+/// `Ns` of a test JPEG's first scan header: how many components its first scan carries.
+fn first_scan_components(jpeg: &[u8]) -> Option<u8> {
+    let at = jpeg.windows(2).position(|w| w == [0xff, 0xda])?;
+    jpeg.get(at + 4).copied()
 }
 
 #[test]
@@ -1096,29 +1203,56 @@ fn a_wide_drawing_is_fitted_once() {
 
 #[test]
 fn fixes_combine_in_one_request() {
-    // A mirrored head with Procreate-style padding needs both Flip and Fit. The studio
-    // sends every fix tapped so far; they apply Flip first, whatever the order.
-    let png = svg_to_png(
-        &transformed(AssetKind::Head, "default", &format!("{SCALE_80} {MIRROR}")),
-        512,
-    );
+    // A mirrored head, narrower than it is tall, with Procreate-style padding needs both
+    // Flip and Fit. The studio sends every fix tapped so far, in tap order; they apply
+    // Flip first whatever the order, so Fit anchors the flipped neck on the left edge.
+    // The drawing must be taller than it is wide: when Fit fills the width, both orders
+    // give the same shape.
+    let narrow = format!("translate(20 10) scale(0.6 0.8) {MIRROR}");
+    let png = svg_to_png(&transformed(AssetKind::Head, "default", &narrow), 512);
     lint_case(
-        "mirrored, padded head",
+        "mirrored, padded, narrow head",
         &png,
         &["margins", "faces_left"],
         &["margins", "tail_reversed"],
     );
+    // The intended result: the head, full height, 75% wide, neck on the left edge.
+    let intended = alpha(
+        &transformed(AssetKind::Head, "default", "scale(0.75 1)"),
+        400,
+    );
+    for fixes in [
+        [Fix::Flip, Fix::Fit],
+        // Fit tapped first (margins is listed first).
+        [Fix::Fit, Fix::Flip],
+    ] {
+        let s = run(&png, &fixes).unwrap_or_else(|e| panic!("{fixes:?}: {e:?}"));
+        assert!(s.passes(AssetKind::Head), "{fixes:?}: {:?}", s.lints());
+        let b = s.metrics().bbox.expect("bbox");
+        assert!(
+            b[0] < 0.6 && (b[2] - 75.0).abs() < 1.0,
+            "{fixes:?}: bbox {b:?}"
+        );
+        assert!(
+            s.metrics().left_edge_pct >= 95.0,
+            "{fixes:?}: {:?}",
+            s.metrics()
+        );
+        let score = iou(&intended, &shape_alpha(&s, 400));
+        assert!(score >= 0.97, "{fixes:?}: IoU {score:.4}");
+    }
     let both = run(&png, &[Fix::Flip, Fix::Fit]).expect("flip + fit");
-    let reordered = run(&png, &[Fix::Fit, Fix::Flip, Fix::Fit]).expect("fit + flip");
+    let reordered = run(&png, &[Fix::Fit, Fix::Flip, Fix::Fit]).expect("fit + flip + fit");
     assert_eq!(both.path_d(), reordered.path_d());
-    assert!(both.passes(AssetKind::Head), "{:?}", both.lints());
-    let score = iou(&alpha(&head("default"), 400), &shape_alpha(&both, 400));
-    assert!(score >= 0.97, "IoU {score:.4}");
+    // Fitting first would leave the neck 25 units off the left edge, so the order shows.
+    let fitted = run(&png, &[Fix::Fit]).expect("fit");
+    assert_eq!(codes(&fitted.lints().head), ["faces_left"]);
+    let fit_then_flip = shape_alpha_with(&fitted, MIRROR);
+    let score = iou(&intended, &fit_then_flip);
+    assert!(score < 0.8, "Fit then Flip IoU {score:.4}");
     // One at a time, each leaves the other problem.
     let flipped = run(&png, &[Fix::Flip]).expect("flip");
     assert_eq!(codes(&flipped.lints().head), ["margins"]);
-    let fitted = run(&png, &[Fix::Fit]).expect("fit");
-    assert_eq!(codes(&fitted.lints().head), ["faces_left"]);
 }
 
 #[test]

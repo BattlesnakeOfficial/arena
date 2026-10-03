@@ -75,8 +75,10 @@ where `d` uses only absolute `M L Q C Z`, digits, `.`, `-` and spaces (2 decimal
    removed (`specks_removed`).
 7. **Budget** the tracer's work before it runs (`too_complex` otherwise; see below).
 8. **Trace** with visioncortex (the engine behind vtracer's binary mode) inside
-   `catch_unwind`; degenerate splines are dropped. Holes come out with opposite
-   winding, emitted as evenodd.
+   `catch_unwind`; degenerate splines are dropped. Corners are turns of 40° or more;
+   smooth runs get a new cubic every 15° of turn (with vtracer's 45°, one cubic could
+   cut a chord across a curve, at some export sizes only; see `trace.rs`). Holes come
+   out with opposite winding, emitted as evenodd.
 9. **Fixes** (optional, see below), **emit** `d` (over 64 KiB is `too_complex`),
    **measure** on a 200 px mask and **lint** for both kinds.
 
@@ -159,8 +161,9 @@ product of the two colours. A pixel is **never ink** when it is within RGB dista
 - a palette colour, or the segment from it to white (anti-aliased edges over the white
   background);
 - when the reference is visible, also the product of each guide colour and the ghost,
-  or the segment from it to the ghost. The products are dark navy and crimson (luma
-  64–76), so without a visible reference they are ordinary ink.
+  or the segment from it to the ghost. Four of the five products are blues and
+  crimsons dark enough to be ink (luma 64–99; the grid's, a light blue-grey at 170, is
+  never ink), so without a visible reference they are ordinary ink.
 
 The reference is **visible** when at least 1% of the canvas is inside it: solid pixels
 within 24 of the ghost, visibly coloured (chroma ≥ 12), whose whole 3 × 3 neighbourhood
@@ -337,7 +340,9 @@ Not everything is caught. A panic elsewhere in our own code unwinds out of
 `process_upload`, and a failed allocation aborts the process (Rust's allocator does not
 return an error). Callers must isolate it: PR 3 runs it in a child process with a memory
 limit. A caught panic still runs the panic hook, so it reaches Sentry in a process that
-initialises it.
+initialises it. The zune-jpeg panic above needs only a tiny crafted JPEG, so anyone can
+trigger one per request: rate-limit or de-duplicate those reports, or don't report
+panics from the decode process.
 
 | Code | When |
 |---|---|
@@ -346,7 +351,7 @@ initialises it.
 | `unsupported_format` | HEIC, GIF, WebP, PSD, ZIP/.procreate, PDF/.ai |
 | `not_yet_supported` | SVG, until PR 2 |
 | `too_large` | over the byte cap for the format |
-| `image_too_large` | wider or taller than 2048 px |
+| `image_too_large` | wider or taller than 2048 px, or a progressive or multi-scan JPEG over its pixel cap (about 1448 px square for colour, 1254 for CMYK) |
 | `invalid_image` | truncated, corrupt or zero-size |
 | `too_complex` | over the trace budget, or `d` over 64 KiB (noise, checkerboards, photos, crafted stripes) |
 | `empty` | nothing drawable (carries info lints, e.g. guides only) |
@@ -354,12 +359,15 @@ initialises it.
 
 ## Tests
 
-- `server/tests/design_kit_raster.rs`: sniffing; round trips of vendored catalog heads
-  and tails rendered with resvg at 512/1024/2048, transparent and opaque, roughened
-  (wobble, blur, grain, specks) and JPEG q80 (IoU ≥ 0.97 against the original, left edge
-  ≥ 95%, no warnings); navy and crimson drawings, crisp and soft-edged, on light grey
-  and inside a soft black outline; EXIF orientation; the progressive and multi-scan JPEG
-  caps and a JPEG the decoder panics on; skipped PNG metadata; the ink matrix; one case
+- `server/tests/design_kit_raster.rs`: sniffing; round trips of every vendored catalog
+  head and tail rendered with resvg at 512, 1000 (the template's size), 1024 and 2048
+  px, transparent and opaque, and of some roughened (wobble, blur, grain, specks) and
+  JPEG q80 (IoU ≥ 0.97 against the original, outline within 1.25 units of the
+  original's, or ¼ unit for the straight-edged samples, left edge ≥ 95%, no warnings);
+  a navy head at six export sizes; navy and crimson drawings, crisp and soft-edged, on
+  light grey and inside a soft black outline; EXIF orientation; the progressive JPEG cap
+  (including a libjpeg file whose first scan carries every component), the multi-scan
+  cap and a JPEG the decoder panics on; skipped PNG metadata; the ink matrix; one case
   per lint with exact codes for each kind, including a rotated top-heavy head, a
   mirrored centred head, notched necks on flat-topped heads and tails, short and wide
   drawings before and after Fit, and combined fixes; suppression and pass state; fixes
@@ -369,8 +377,8 @@ initialises it.
 - `server/tests/design_kit_metrics.rs`: the metric oracle described above.
 - Fixtures live in `server/tests/fixtures/design_kit/`: catalog samples and the matching
   rows of `metrics_summary.csv` under `catalog/` (plus `heads/guitar.svg` for the
-  direction lints), the template guide overlays under `template/`. Reference-ghost
-  overlays are rendered in the tests.
+  direction lints), the template guide overlays under `template/`, and a PIL
+  progressive JPEG under `jpeg/`. Reference-ghost overlays are rendered in the tests.
 
 ```
 cargo test -p arena --test design_kit_raster --test design_kit_metrics

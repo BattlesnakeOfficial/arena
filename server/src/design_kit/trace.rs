@@ -6,6 +6,19 @@
 //! * the corner threshold is 40° instead of 60°, so 45° joints (chevron tails, smile's
 //!   mouth) stay sharp instead of bulging (tails/default round trip IoU 0.974 -> 0.994,
 //!   smile 0.991 -> 0.997, and shorter output),
+//! * the splice threshold is 15° instead of 45°. visioncortex fits exactly one cubic
+//!   between consecutive splice points, which fall at inflections and wherever the turn
+//!   since the last one reaches the threshold. At 45° one cubic often spanned a straight
+//!   run plus a gentle turn (a canvas-clipped top running into a curve, a flat front
+//!   between two corners) and cut a chord across it, up to 8 units deep, at some export
+//!   sizes only, since inflections depend on the exact pixel grid: navy beluga scored
+//!   IoU 0.949 at 1000 px and 0.999 at 1023. Below the corner threshold, every corner the
+//!   smoother keeps (a turn of at least 40° at one point) also ends a cubic, so corners
+//!   stay sharp (tails/default's 45° joints were rounded off by 2.75 units at 45°). `d`
+//!   grows about 20% on the vendored samples and 35% on the full 184-asset catalog
+//!   (largest 45 KB, under the 64 KiB cap), at the same speed. 20° fixed the chords too
+//!   but left bendr at 2048 px 1.5 units off (0.75 at 15°); 10° was barely better than
+//!   15° for another 17% of `d`,
 //! * the work is budgeted before visioncortex runs (see [`trace_mask`]), and
 //! * geometry stays as numbers instead of an SVG string.
 //!
@@ -22,10 +35,11 @@ use tiny_skia::PathBuilder;
 use visioncortex::{BinaryImage, PathSimplifyMode};
 
 // vtracer 0.6.5 ConverterConfig::default() is corner 60deg, length 4.0, splice 45deg,
-// 10 iterations; we use a 40deg corner threshold (see the module docs).
+// 10 iterations; we use a 40deg corner threshold and a 15deg splice threshold (see the
+// module docs). Keep the splice threshold below the corner threshold.
 const CORNER_THRESHOLD_DEG: f64 = 40.0;
 const LENGTH_THRESHOLD: f64 = 4.0;
-const SPLICE_THRESHOLD_DEG: f64 = 45.0;
+const SPLICE_THRESHOLD_DEG: f64 = 15.0;
 const MAX_ITERATIONS: usize = 10;
 
 pub(crate) struct TraceResult {

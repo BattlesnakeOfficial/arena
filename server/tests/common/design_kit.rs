@@ -105,6 +105,80 @@ pub fn iou(a: &[u8], b: &[u8]) -> f64 {
     if u == 0 { 1.0 } else { i as f64 / u as f64 }
 }
 
+/// How far our outline strays from the reference's, in units, on two square alpha masks
+/// (filled = alpha >= 128): the largest distance from a pixel where they differ to the
+/// reference's outline (3-4 chamfer, within about 6% of Euclidean; ink on the canvas
+/// edge counts as outline). A curve cut by a straight chord scores the thickness of the
+/// sliver it cuts off; anti-aliasing differences score at most a pixel.
+pub fn outline_error(reference: &[u8], got: &[u8]) -> f64 {
+    assert_eq!(reference.len(), got.len());
+    let side = reference.len().isqrt();
+    assert_eq!(side * side, reference.len(), "square masks");
+    let ink = |x: isize, y: isize| {
+        x >= 0
+            && y >= 0
+            && x < side as isize
+            && y < side as isize
+            && reference[y as usize * side + x as usize] >= 128
+    };
+    const FAR: u32 = u32::MAX / 2;
+    // Chamfer distance transform seeded at the reference's outline pixels.
+    let mut d = vec![FAR; side * side];
+    for y in 0..side as isize {
+        for x in 0..side as isize {
+            let here = ink(x, y);
+            if [(-1, 0), (1, 0), (0, -1), (0, 1)]
+                .iter()
+                .any(|(dx, dy)| ink(x + dx, y + dy) != here)
+            {
+                d[y as usize * side + x as usize] = 0;
+            }
+        }
+    }
+    // Two raster passes, each taking the 4 neighbours already visited (+3 straight, +4
+    // diagonal).
+    let n = side as isize;
+    let mut relax = |x: isize, y: isize, s: isize| {
+        let at = |d: &[u32], x: isize, y: isize| {
+            if (0..n).contains(&x) && (0..n).contains(&y) {
+                d[(y * n + x) as usize]
+            } else {
+                FAR
+            }
+        };
+        let best = [
+            at(&d, x - s, y) + 3,
+            at(&d, x - s, y - s) + 4,
+            at(&d, x, y - s) + 3,
+            at(&d, x + s, y - s) + 4,
+        ]
+        .into_iter()
+        .min()
+        .unwrap_or(FAR);
+        let i = (y * n + x) as usize;
+        d[i] = d[i].min(best);
+    };
+    for y in 0..n {
+        for x in 0..n {
+            relax(x, y, 1);
+        }
+    }
+    for y in (0..n).rev() {
+        for x in (0..n).rev() {
+            relax(x, y, -1);
+        }
+    }
+    let worst = reference
+        .iter()
+        .zip(got)
+        .zip(&d)
+        .filter(|((r, g), _)| (**r >= 128) != (**g >= 128))
+        .map(|(_, &dist)| dist)
+        .max()
+        .unwrap_or(0);
+    f64::from(worst) / 3.0 / (side as f64 / 100.0)
+}
+
 /// Output invariants: the exact template, one path, and a numeric `d`.
 pub fn assert_clean(shape: &CleanShape) {
     let svg = shape.to_svg();

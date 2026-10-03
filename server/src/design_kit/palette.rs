@@ -8,8 +8,9 @@
 //!
 //! The template generator must use exactly these colours. The guides layer uses the
 //! Multiply blend mode, so guides that sit over the reference ghost come out as the
-//! product of the two colours. Those products are dark (navy and crimson), so they are
-//! only excluded when the reference itself is clearly visible in the image (see
+//! product of the two colours. Four of those products are blues and crimsons dark enough
+//! to be ink (luma 64-99; the grid's is a light blue-grey), so they are only excluded
+//! when the reference itself is clearly visible in the image (see
 //! [`GHOST_MIN_PERCENT`]); otherwise a navy or crimson drawing would vanish. The
 //! exclusion also covers anti-aliased blends of each colour towards white (or of each
 //! product towards the ghost).

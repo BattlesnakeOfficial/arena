@@ -26,16 +26,10 @@ pub(crate) fn process(
     // colour, at any size). A file the decoder can't handle is the upload's problem: it
     // becomes `InvalidImage` (the panic hook still reports it) rather than unwinding into
     // the caller.
-    let decoded = std::panic::catch_unwind(|| match format {
+    let (pixels, orientation) = guard_decoder(format, || match format {
         InputFormat::Png => Ok((decode_png(bytes, limits)?, Orientation::default())),
         InputFormat::Jpeg => decode_jpeg(bytes, limits),
         InputFormat::Svg => Err(ProcessError::Internal("SVG passed to the raster pipeline")),
-    });
-    let (pixels, orientation) = decoded.unwrap_or_else(|_| {
-        Err(ProcessError::InvalidImage(format!(
-            "the {} decoder failed on this file",
-            format.as_str()
-        )))
     })?;
     let ink = palette::ink(&pixels);
     let (stored_w, stored_h) = (pixels.width, pixels.height);
@@ -160,6 +154,19 @@ fn decode_png(bytes: &[u8], limits: &Limits) -> Result<Pixels, ProcessError> {
     })
 }
 
+/// Runs a decoder on untrusted bytes: a panic becomes `InvalidImage`.
+fn guard_decoder<T>(
+    format: InputFormat,
+    decode: impl FnOnce() -> Result<T, ProcessError> + std::panic::UnwindSafe,
+) -> Result<T, ProcessError> {
+    std::panic::catch_unwind(decode).unwrap_or_else(|_| {
+        Err(ProcessError::InvalidImage(format!(
+            "the {} decoder failed on this file",
+            format.as_str()
+        )))
+    })
+}
+
 fn decode_jpeg(bytes: &[u8], limits: &Limits) -> Result<(Pixels, Orientation), ProcessError> {
     use zune_jpeg::zune_core::bytestream::ZCursor;
     use zune_jpeg::zune_core::colorspace::ColorSpace;
@@ -182,13 +189,11 @@ fn decode_jpeg(bytes: &[u8], limits: &Limits) -> Result<(Pixels, Orientation), P
         .ok_or(ProcessError::Internal("JPEG headers decoded without info"))?;
     let (w, h) = (u32::from(info.width), u32::from(info.height));
     check_dimensions(w, h, limits)?;
-    // zune-jpeg decodes a scan straight to pixels only when it is sequential and its first
-    // scan carries every component. Otherwise (progressive, or one scan per component,
-    // which encoders write when they optimise their Huffman tables) it keeps the whole
-    // image's coefficients until the last scan.
-    let buffers_coefficients =
-        !info.sof.is_sequential_dct() || first_scan_components(bytes) != Some(info.components);
-    if buffers_coefficients {
+    if buffers_coefficients(
+        info.sof.is_sequential_dct(),
+        info.components,
+        first_scan_components(bytes),
+    ) {
         let max = buffered_max_pixels(limits, info.components);
         if w as usize * h as usize > max {
             return Err(ProcessError::ImageTooLarge {
@@ -219,6 +224,15 @@ fn decode_jpeg(bytes: &[u8], limits: &Limits) -> Result<(Pixels, Orientation), P
         data,
     };
     Ok((pixels, orientation))
+}
+
+/// Whether zune-jpeg keeps the whole image's coefficients until the last scan. It decodes
+/// a scan straight to pixels only when the JPEG is sequential and its first scan carries
+/// every component. Otherwise (progressive, or one scan per component, which encoders
+/// write when they optimise their Huffman tables) it buffers them. A first scan we can't
+/// find (`None`) counts as buffered, in case zune-jpeg finds one we don't.
+fn buffers_coefficients(sequential: bool, components: u8, first_scan: Option<u8>) -> bool {
+    !sequential || first_scan != Some(components)
 }
 
 /// Most pixels in a JPEG whose coefficients zune-jpeg buffers (progressive, or not
@@ -517,6 +531,33 @@ mod tests {
             first_scan_components(&[0xff, 0xd8, 0xff, 0xdb, 0xff, 0xff]),
             None
         );
+    }
+
+    #[test]
+    fn coefficients_are_buffered_unless_sequential_and_interleaved() {
+        // Sequential with an interleaved first scan: decoded scan by scan.
+        assert!(!buffers_coefficients(true, 3, Some(3)));
+        assert!(!buffers_coefficients(true, 1, Some(1)));
+        // Progressive, even with an interleaved first scan (libjpeg's DC scan).
+        assert!(buffers_coefficients(false, 3, Some(3)));
+        assert!(buffers_coefficients(false, 1, Some(1)));
+        // One scan per component.
+        assert!(buffers_coefficients(true, 3, Some(1)));
+        assert!(buffers_coefficients(true, 4, Some(1)));
+        // A first scan we couldn't find gets the cap.
+        assert!(buffers_coefficients(true, 3, None));
+    }
+
+    #[test]
+    fn a_decoder_panic_is_invalid_image() {
+        let r: Result<(), _> = guard_decoder(InputFormat::Jpeg, || panic!("decoder bug"));
+        assert_eq!(
+            r,
+            Err(ProcessError::InvalidImage(
+                "the jpeg decoder failed on this file".into()
+            ))
+        );
+        assert_eq!(guard_decoder(InputFormat::Png, || Ok(7)), Ok(7));
     }
 
     #[test]

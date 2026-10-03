@@ -427,6 +427,27 @@ mod tests {
     }
 
     #[test]
+    fn a_tie_between_full_sides_goes_to_the_one_flip_fixes() {
+        // The right and the top are both full, each opposite a front. Either reading is
+        // possible; the mirror is the one with a fix.
+        let tie = [40.0, 100.0, 100.0, 40.0];
+        let head = for_kind(&edges(tie), AssetKind::Head);
+        assert_eq!(
+            head.iter().map(Lint::code).collect::<Vec<_>>(),
+            ["faces_left"]
+        );
+        assert_eq!(head[0].fix(), Some(Fix::Flip));
+        let tail = for_kind(&edges(tie), AssetKind::Tail);
+        assert_eq!(
+            tail,
+            [Lint::TailReversed {
+                attach_edge: Edge::Right
+            }]
+        );
+        assert_eq!(tail[0].fix(), Some(Fix::Flip));
+    }
+
+    #[test]
     fn fit_is_offered_until_it_would_do_nothing() {
         // Padded square-ish drawing: Fit clears the margins.
         assert!(fit_helps([10.0, 10.0, 90.0, 90.0]));

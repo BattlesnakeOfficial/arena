@@ -27,5 +27,11 @@ opt-level = 3
 [profile.dev.package.png]
 opt-level = 3
 
+[profile.dev.package.fdeflate]
+opt-level = 3
+
+[profile.dev.package.simd-adler32]
+opt-level = 3
+
 [profile.dev.package.zune-jpeg]
 opt-level = 3

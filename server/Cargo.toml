@@ -95,7 +95,10 @@ tiny-skia = { version = "0.12.0", default-features = false, features = ["std", "
 # Tracing engine behind vtracer 0.6.x binary mode.
 visioncortex = "0.8.10"
 png = "0.18.1"
-zune-jpeg = "0.5.15"
+# Pinned: design_kit::raster_in mirrors 0.5.15 internals (`first_scan_components` walks
+# markers like its header parser; `buffers_coefficients` and `buffered_max_pixels` copy
+# when and how much it buffers). Re-check those, and the JPEG memory caps, before bumping.
+zune-jpeg = "=0.5.15"
 
 [lib]
 name = "arena"
