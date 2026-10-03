@@ -2,6 +2,7 @@ use color_eyre::eyre::Context as _;
 use std::str::FromStr;
 
 use crate::{
+    cron::MATCHMAKER_INTERVAL_SECS,
     jobs::GameRunnerJob,
     models::{
         game::{self, CreateGame, GameBoardSize, GameType},
@@ -36,21 +37,39 @@ async fn run_matchmaker_for_leaderboard(app_state: &AppState, lb: &Leaderboard) 
     let pool = &app_state.db;
     let leaderboard_id = lb.leaderboard_id;
     let now = chrono::Utc::now();
+    let backlog_cutoff = now - chrono::Duration::seconds((2 * MATCHMAKER_INTERVAL_SECS) as i64);
+
     let backlog = sqlx::query!(
-        r#"SELECT COUNT(*) AS "backlog_count!",
-                  MIN(g.enqueued_at) AS oldest_enqueued_at
+        r#"SELECT COUNT(*) FILTER (WHERE g.enqueued_at >= $2) AS "backlog_count!",
+                  MIN(g.enqueued_at) FILTER (WHERE g.enqueued_at >= $2) AS oldest_backlog_enqueued_at,
+                  COUNT(*) FILTER (WHERE g.enqueued_at < $2) AS "old_waiting_count!",
+                  MIN(g.enqueued_at) FILTER (WHERE g.enqueued_at < $2) AS oldest_old_waiting_enqueued_at
            FROM games g
            JOIN leaderboard_games lg ON lg.game_id = g.game_id
            WHERE g.status = 'waiting' AND g.enqueued_at IS NOT NULL
              AND lg.leaderboard_id = $1"#,
         leaderboard_id,
+        backlog_cutoff,
     )
     .fetch_one(pool)
     .await
     .wrap_err("Failed to check matchmaker backlog")?;
+    if backlog.old_waiting_count > 0 {
+        let oldest_waiting_age_secs = backlog
+            .oldest_old_waiting_enqueued_at
+            .map(|at| (now - at).num_seconds().max(0))
+            .unwrap_or(0);
+        tracing::warn!(
+            leaderboard_id = %leaderboard_id,
+            leaderboard_name = %lb.name,
+            old_waiting_count = backlog.old_waiting_count,
+            oldest_waiting_age_secs,
+            "Ignoring old waiting games when checking matchmaker backlog"
+        );
+    }
     if backlog.backlog_count > 0 {
         let oldest_waiting_age_secs = backlog
-            .oldest_enqueued_at
+            .oldest_backlog_enqueued_at
             .map(|at| (now - at).num_seconds().max(0))
             .unwrap_or(0);
         tracing::warn!(
@@ -608,10 +627,11 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "../migrations")]
-    async fn old_waiting_game_blocks_round(pool: sqlx::PgPool) -> cja::Result<()> {
-        let (lb, _) = seeded_mode(&pool, "Standard 11x11", 4).await?;
+    async fn old_waiting_game_does_not_block_round(pool: sqlx::PgPool) -> cja::Result<()> {
+        let (lb, ids) = seeded_mode(&pool, "Standard 11x11", 4).await?;
         let game_id = insert_backlog_game(&pool, lb.leaderboard_id, true).await?;
-        let old_enqueued_at = chrono::Utc::now() - chrono::Duration::hours(3);
+        let old_enqueued_at = chrono::Utc::now()
+            - chrono::Duration::seconds((2 * MATCHMAKER_INTERVAL_SECS + 1) as i64);
         sqlx::query!(
             "UPDATE games SET enqueued_at = $1 WHERE game_id = $2",
             old_enqueued_at,
@@ -622,8 +642,7 @@ mod tests {
 
         let app_state = crate::state::AppState::test_from_pool(pool.clone());
         run_matchmaker_for_leaderboard(&app_state, &lb).await?;
-        assert_eq!(game_sizes(&pool, lb.leaderboard_id).await?.len(), 0);
-        Ok(())
+        assert_created_round(&pool, &lb, &ids, 1, 4).await
     }
 
     #[sqlx::test(migrations = "../migrations")]
