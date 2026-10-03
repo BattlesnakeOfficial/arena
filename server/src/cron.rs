@@ -11,7 +11,10 @@ use crate::state::AppState;
 
 /// Nominal rounds per snake per ladder each day.
 pub const GAMES_PER_SNAKE_PER_DAY: u64 = 100;
+/// Nominal interval; worker scheduling and tick work can delay actual rounds.
 pub const MATCHMAKER_INTERVAL_SECS: u64 = 86_400 / GAMES_PER_SNAKE_PER_DAY;
+/// CJA requires elapsed > interval, so a short poll observes the 864s cadence
+/// without rounding each round up to the default 60s poll boundary.
 const CRON_POLL_SECS: u64 = 2;
 
 /// Snake health sweep interval. With the default failure threshold of 3,

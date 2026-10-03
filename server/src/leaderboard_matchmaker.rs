@@ -2,6 +2,7 @@ use color_eyre::eyre::Context as _;
 use std::str::FromStr;
 
 use crate::{
+    cron::MATCHMAKER_INTERVAL_SECS,
     jobs::GameRunnerJob,
     models::{
         game::{self, CreateGame, GameBoardSize, GameType},
@@ -35,22 +36,41 @@ pub async fn run_matchmaker(app_state: &AppState) -> cja::Result<()> {
 async fn run_matchmaker_for_leaderboard(app_state: &AppState, lb: &Leaderboard) -> cja::Result<()> {
     let pool = &app_state.db;
     let leaderboard_id = lb.leaderboard_id;
+    let now = chrono::Utc::now();
+    let backlog_cutoff = now - chrono::Duration::seconds((2 * MATCHMAKER_INTERVAL_SECS) as i64);
 
     let backlog = sqlx::query!(
-        r#"SELECT COUNT(*) AS "backlog_count!", MIN(g.enqueued_at) AS oldest_enqueued_at
+        r#"SELECT COUNT(*) FILTER (WHERE g.enqueued_at >= $2) AS "backlog_count!",
+                  MIN(g.enqueued_at) FILTER (WHERE g.enqueued_at >= $2) AS oldest_backlog_enqueued_at,
+                  COUNT(*) FILTER (WHERE g.enqueued_at < $2) AS "old_waiting_count!",
+                  MIN(g.enqueued_at) FILTER (WHERE g.enqueued_at < $2) AS oldest_old_waiting_enqueued_at
            FROM games g
            JOIN leaderboard_games lg ON lg.game_id = g.game_id
            WHERE g.status = 'waiting' AND g.enqueued_at IS NOT NULL
              AND lg.leaderboard_id = $1"#,
         leaderboard_id,
+        backlog_cutoff,
     )
     .fetch_one(pool)
     .await
     .wrap_err("Failed to check matchmaker backlog")?;
+    if backlog.old_waiting_count > 0 {
+        let oldest_waiting_age_secs = backlog
+            .oldest_old_waiting_enqueued_at
+            .map(|at| (now - at).num_seconds().max(0))
+            .unwrap_or(0);
+        tracing::warn!(
+            leaderboard_id = %leaderboard_id,
+            leaderboard_name = %lb.name,
+            old_waiting_count = backlog.old_waiting_count,
+            oldest_waiting_age_secs,
+            "Ignoring old waiting games when checking matchmaker backlog"
+        );
+    }
     if backlog.backlog_count > 0 {
         let oldest_waiting_age_secs = backlog
-            .oldest_enqueued_at
-            .map(|at| (chrono::Utc::now() - at).num_seconds().max(0))
+            .oldest_backlog_enqueued_at
+            .map(|at| (now - at).num_seconds().max(0))
             .unwrap_or(0);
         tracing::warn!(
             leaderboard_id = %leaderboard_id,
@@ -166,6 +186,11 @@ async fn run_matchmaker_for_leaderboard(app_state: &AppState, lb: &Leaderboard) 
     Ok(())
 }
 
+// Bounded rank jitter keeps groups local while varying opponents between ticks.
+const RANK_JITTER: f64 = 4.0;
+// Duels need a wider band to expose edge-ranked snakes to enough opponents.
+const DUEL_RANK_JITTER: f64 = 5.0;
+
 /// Form one rank-banded round, with a rotating full-size game for remainders.
 ///
 /// TODO: Add recently-matched deprioritization to prevent the same group of snakes
@@ -196,7 +221,11 @@ fn select_round(
         0
     };
     let reserved: Vec<usize> = (reserved_start..reserved_start + remainder).collect();
-    let rank_jitter = if match_size == 2 { 5.0 } else { 4.0 };
+    let rank_jitter = if match_size == 2 {
+        DUEL_RANK_JITTER
+    } else {
+        RANK_JITTER
+    };
     let mut assigned: Vec<(usize, f64)> = (0..sorted.len())
         .filter(|rank| !reserved.contains(rank))
         .map(|rank| (rank, rank as f64 + rng.gen_range(-rank_jitter..rank_jitter)))
@@ -217,7 +246,12 @@ fn select_round(
         let mut fillers: Vec<(usize, f64)> = assigned
             .iter()
             .map(|(rank, _)| {
-                let distance = reserved.iter().map(|r| rank.abs_diff(*r)).min().unwrap();
+                // remainder > 0 guarantees at least one reserved rank here.
+                let distance = reserved
+                    .iter()
+                    .map(|r| rank.abs_diff(*r))
+                    .min()
+                    .unwrap_or(usize::MAX);
                 (*rank, distance as f64 + rng.gen_range(0.0..FILLER_NOISE))
             })
             .collect();
@@ -588,6 +622,25 @@ mod tests {
         )
         .execute(&pool)
         .await?;
+        run_matchmaker_for_leaderboard(&app_state, &lb).await?;
+        assert_created_round(&pool, &lb, &ids, 1, 4).await
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn old_waiting_game_does_not_block_round(pool: sqlx::PgPool) -> cja::Result<()> {
+        let (lb, ids) = seeded_mode(&pool, "Standard 11x11", 4).await?;
+        let game_id = insert_backlog_game(&pool, lb.leaderboard_id, true).await?;
+        let old_enqueued_at = chrono::Utc::now()
+            - chrono::Duration::seconds((2 * MATCHMAKER_INTERVAL_SECS + 1) as i64);
+        sqlx::query!(
+            "UPDATE games SET enqueued_at = $1 WHERE game_id = $2",
+            old_enqueued_at,
+            game_id,
+        )
+        .execute(&pool)
+        .await?;
+
+        let app_state = crate::state::AppState::test_from_pool(pool.clone());
         run_matchmaker_for_leaderboard(&app_state, &lb).await?;
         assert_created_round(&pool, &lb, &ids, 1, 4).await
     }
