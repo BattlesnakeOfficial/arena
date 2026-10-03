@@ -1,0 +1,13 @@
+kind,slug,group,free,file,cov,cov_fixed,edgeL1,edgeR1,edgeT1,edgeB1,holes200,holes40,fg_components,thin_loss_r1,lints
+head,default,Standard,True,svg/heads/default.svg,0.787,0.0,1.0,0.17,1.0,1.0,1,1,1,0.0005,
+head,beluga,Standard,True,svg/heads/beluga.svg,0.708,0.0,1.0,0.035,0.51,0.555,1,1,1,0.001,
+head,bendr,Standard,True,svg/heads/bendr.svg,0.826,0.0,1.0,0.205,0.72,0.74,4,4,2,0.0008,
+head,pixel,Standard,True,svg/heads/pixel.svg,0.797,0.0,1.0,0.26,1.0,0.895,1,1,1,0.001,
+head,sand-worm,Standard,True,svg/heads/sand-worm.svg,0.849,0.0,1.0,0.02,0.995,0.995,0,0,1,0.0014,
+head,smile,Standard,True,svg/heads/smile.svg,0.707,0.0,1.0,0.475,0.025,0.035,1,2,1,0.0007,
+tail,default,Standard,True,svg/tails/default.svg,0.75,0.0,1.0,0.015,0.51,0.505,0,0,1,0.0002,
+tail,block-bum,Standard,True,svg/tails/block-bum.svg,1.0,0.0,1.0,1.0,1.0,1.0,0,0,1,0.0003,
+tail,bolt,Standard,True,svg/tails/bolt.svg,0.409,0.0,1.0,0.005,0.01,0.01,0,0,1,0.0021,
+tail,curled,Standard,True,svg/tails/curled.svg,0.538,0.0,1.0,0.025,0.155,0.13,0,0,1,0.0005,
+tail,pixel,Standard,True,svg/tails/pixel.svg,0.755,0.0,1.0,0.11,0.55,0.56,0,0,1,0.0012,
+tail,round-bum,Standard,True,svg/tails/round-bum.svg,0.959,0.0,1.0,0.545,0.735,0.735,0,0,1,0.0002,
