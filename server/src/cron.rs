@@ -30,14 +30,14 @@ pub(crate) fn cron_registry() -> CronRegistry<AppState> {
     let mut registry = CronRegistry::new();
 
     // Game backup discovery: runs every hour, enqueues backup jobs for games from the last 4 hours
-    registry.register_job(
+    registry.register_job_atomic(
         GameBackupJob,
         Some("Enqueue backup jobs for games from the last 4 hours"),
         Duration::from_secs(60 * 60),
     );
 
     // Leaderboard matchmaker: one round per derived interval, subject to worker delay.
-    registry.register_job(
+    registry.register_job_atomic(
         LeaderboardMatchmakerJob,
         Some("Create leaderboard match games"),
         Duration::from_secs(MATCHMAKER_INTERVAL_SECS),
@@ -45,7 +45,7 @@ pub(crate) fn cron_registry() -> CronRegistry<AppState> {
 
     // Stuck-match sweeper: runs every 2 minutes, re-enqueues evaluation for
     // in-progress tournament matches whose driving jobs died
-    registry.register_job(
+    registry.register_job_atomic(
         StuckMatchSweeperJob,
         Some("Re-enqueue evaluation for stuck tournament matches"),
         Duration::from_secs(2 * 60),
@@ -53,7 +53,7 @@ pub(crate) fn cron_registry() -> CronRegistry<AppState> {
 
     // Rate-limit bookkeeping prune: keeps the attempt tables from growing
     // without bound (every request inserts, including rejected ones)
-    registry.register_job(
+    registry.register_job_atomic(
         RateLimitPruneJob,
         Some("Prune rate-limit attempt rows past retention"),
         Duration::from_secs(6 * 60 * 60),
@@ -62,7 +62,7 @@ pub(crate) fn cron_registry() -> CronRegistry<AppState> {
     // Snake health sweeper: probes leaderboard entries whose games show
     // timeouts or errors and pulls ones that keep failing, emailing the
     // owner (BS-3534, DEV-1515)
-    registry.register_job(
+    registry.register_job_atomic(
         SnakeHealthSweeperJob,
         Some("Health-check failing leaderboard entries and pause broken ones"),
         Duration::from_secs(SNAKE_HEALTH_SWEEP_INTERVAL_SECS),
@@ -70,7 +70,7 @@ pub(crate) fn cron_registry() -> CronRegistry<AppState> {
 
     // Stuck-game sweeper: every 30 min, fails non-tournament games left in
     // waiting/running past STUCK_GAME_MAX_AGE_HOURS
-    registry.register_job(
+    registry.register_job_atomic(
         StuckGameSweeperJob,
         Some("Fail non-tournament games stuck in waiting/running"),
         Duration::from_secs(STUCK_GAME_SWEEP_INTERVAL_SECS),
@@ -97,10 +97,24 @@ pub(crate) async fn run_cron(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cja::jobs::registry::JobRegistry;
 
     #[test]
     fn matchmaker_cadence() {
         assert_eq!(MATCHMAKER_INTERVAL_SECS, 864);
         const { assert!(CRON_POLL_SECS < MATCHMAKER_INTERVAL_SECS) };
+    }
+
+    #[test]
+    fn all_crons_are_atomic_registered_jobs() {
+        let registry = cron_registry();
+        assert!(!registry.jobs().is_empty());
+        for (name, cron) in registry.jobs() {
+            assert!(cron.is_atomic(), "cron {name} must be atomic");
+            assert!(
+                crate::jobs::Jobs::job_names().contains(name),
+                "cron {name} is missing from the job registry"
+            );
+        }
     }
 }

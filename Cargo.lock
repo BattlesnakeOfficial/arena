@@ -569,7 +569,7 @@ dependencies = [
 [[package]]
 name = "cja"
 version = "0.0.0"
-source = "git+https://github.com/coreyja/cja?branch=main#0463b39b941d386c6e3dc9425a33aa9b7529fb8e"
+source = "git+https://github.com/coreyja/cja?branch=implement%2FDEV-1542#10adf851318d6b1a7493597d1bc4b65555c361ff"
 dependencies = [
  "async-trait",
  "axum",

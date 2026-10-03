@@ -132,6 +132,27 @@ async fn run_application(config: config::AppConfig) -> cja::Result<()> {
 /// 10 second SIGTERM-to-SIGKILL window, with room left to flush telemetry.
 pub(crate) const SHUTDOWN_EXIT_GRACE: Duration = Duration::from_secs(3);
 
+#[derive(Debug, PartialEq, Eq)]
+enum ProcessTask {
+    Server,
+    Jobs(usize),
+    Cron,
+}
+
+fn scheduled_tasks(features: config::FeatureFlags, job_workers: usize) -> Vec<ProcessTask> {
+    let mut tasks = Vec::new();
+    if features.server {
+        tasks.push(ProcessTask::Server);
+    }
+    if features.jobs {
+        tasks.extend((0..job_workers).map(ProcessTask::Jobs));
+    }
+    if features.cron {
+        tasks.push(ProcessTask::Cron);
+    }
+    tasks
+}
+
 async fn run_instrumented_application(
     config: config::AppConfig,
     identity: eyes_subscriber::ProcessIdentity,
@@ -168,19 +189,9 @@ async fn spawn_application_tasks(
     let manifest = observability::manifest(&cron_registry, identity, features)
         .map_err(|error| eyre!("Invalid Arena observability declarations: {error}"))?;
 
-    if features.server {
-        info!("Server Enabled");
-        supervisor.spawn(
-            "server",
-            run_server_until(
-                routes::routes(app_state.clone()),
-                shutdown.clone().cancelled_owned(),
-            ),
-        );
-    } else {
+    if !features.server {
         info!("Server Disabled");
     }
-
     if features.jobs {
         info!("Jobs Enabled");
         info!("Job poll interval: {}ms", job.poll_interval_ms);
@@ -189,37 +200,55 @@ async fn spawn_application_tasks(
         info!("Job max retries: {}", job.max_retries);
         info!("Job workers: {}", job.workers);
         info!("Job shutdown drain: {}s", job.shutdown_drain_secs);
-
-        for i in 0..job.workers {
-            let name: &'static str = Box::leak(format!("jobs-{i}").into_boxed_str());
-            supervisor.spawn(
-                name,
-                cja::jobs::worker::job_worker_configured(
-                    app_state.clone(),
-                    jobs::Jobs,
-                    Duration::from_millis(job.poll_interval_ms),
-                    job.max_retries,
-                    shutdown.clone(),
-                    cja::jobs::worker::JobLeaseConfig {
-                        heartbeat_interval: Duration::from_secs(job.heartbeat_interval_secs),
-                        reclaim_window: Duration::from_secs(job.lock_timeout_secs),
-                    },
-                    supervisor.budget().job_drain,
-                ),
-            );
-        }
     } else {
         info!("Jobs Disabled");
     }
-
-    if features.cron {
-        info!("Cron Enabled");
-        supervisor.spawn(
-            "cron",
-            cron::run_cron(app_state.clone(), cron_registry, shutdown.clone()),
-        );
-    } else {
+    if !features.cron {
         info!("Cron Disabled");
+    }
+    let mut cron_registry = Some(cron_registry);
+    for task in scheduled_tasks(features, job.workers) {
+        match task {
+            ProcessTask::Server => {
+                info!("Server Enabled");
+                supervisor.spawn(
+                    "server",
+                    run_server_until(
+                        routes::routes(app_state.clone()),
+                        shutdown.clone().cancelled_owned(),
+                    ),
+                );
+            }
+            ProcessTask::Jobs(i) => {
+                let name: &'static str = Box::leak(format!("jobs-{i}").into_boxed_str());
+                supervisor.spawn(
+                    name,
+                    cja::jobs::worker::job_worker_configured(
+                        app_state.clone(),
+                        jobs::Jobs,
+                        Duration::from_millis(job.poll_interval_ms),
+                        job.max_retries,
+                        shutdown.clone(),
+                        cja::jobs::worker::JobLeaseConfig {
+                            heartbeat_interval: Duration::from_secs(job.heartbeat_interval_secs),
+                            reclaim_window: Duration::from_secs(job.lock_timeout_secs),
+                        },
+                        supervisor.budget().job_drain,
+                    ),
+                );
+            }
+            ProcessTask::Cron => {
+                info!("Cron Enabled");
+                supervisor.spawn(
+                    "cron",
+                    cron::run_cron(
+                        app_state.clone(),
+                        cron_registry.take().expect("one cron task"),
+                        shutdown.clone(),
+                    ),
+                );
+            }
+        }
     }
 
     info!("All application tasks spawned successfully");
@@ -230,6 +259,32 @@ async fn spawn_application_tasks(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn process_roles_schedule_only_their_components() {
+        let flags = |server, jobs, cron| config::FeatureFlags { server, jobs, cron };
+        assert_eq!(
+            scheduled_tasks(flags(true, true, true), 2),
+            vec![
+                ProcessTask::Server,
+                ProcessTask::Jobs(0),
+                ProcessTask::Jobs(1),
+                ProcessTask::Cron,
+            ]
+        );
+        assert_eq!(
+            scheduled_tasks(flags(true, false, false), 2),
+            vec![ProcessTask::Server]
+        );
+        assert_eq!(
+            scheduled_tasks(flags(false, true, false), 2),
+            vec![ProcessTask::Jobs(0), ProcessTask::Jobs(1)]
+        );
+        assert_eq!(
+            scheduled_tasks(flags(false, false, true), 2),
+            vec![ProcessTask::Cron]
+        );
+    }
 
     #[test]
     fn boot_manifest_declares_exactly_one_health_monitor() {
