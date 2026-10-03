@@ -80,6 +80,24 @@ pub enum Lint {
     NonSquare { width: u32, height: u32 },
     /// The image is smaller than `Limits::min_useful_side`.
     LowResolution { width: u32, height: u32 },
+    // ---- SVG input facts ----
+    /// Strokes were turned into filled outlines.
+    StrokesConverted { count: usize },
+    /// Gradients or patterns were painted in one colour.
+    Gradient,
+    /// Embedded or linked `<image>`s were ignored (never loaded).
+    ImageIgnored { count: usize },
+    /// Text that wasn't converted to outlines was ignored.
+    TextIgnored,
+    /// Clip paths were applied; masks were ignored (masked shapes show in full).
+    ClipOrMask,
+    /// Filters (blur, shadows, ...) were ignored.
+    FiltersIgnored,
+    /// Scripts, event handlers, embedded HTML, animations or external links were
+    /// dropped. They never reach the output, which is one path.
+    ActiveContentRemoved,
+    /// Part of the drawing is outside the square; the board cuts it off.
+    OutsideCanvas,
 }
 
 /// Thresholds (decision 8 of the DEV-1539 plan), all on the 200 px metrics mask.
@@ -116,6 +134,14 @@ impl Lint {
             Lint::SemiTransparent => "semi_transparent",
             Lint::NonSquare { .. } => "non_square",
             Lint::LowResolution { .. } => "low_resolution",
+            Lint::StrokesConverted { .. } => "strokes_converted",
+            Lint::Gradient => "gradient",
+            Lint::ImageIgnored { .. } => "image_ignored",
+            Lint::TextIgnored => "text_ignored",
+            Lint::ClipOrMask => "clip_or_mask",
+            Lint::FiltersIgnored => "filters_ignored",
+            Lint::ActiveContentRemoved => "active_content_removed",
+            Lint::OutsideCanvas => "outside_canvas",
         }
     }
 
@@ -129,11 +155,20 @@ impl Lint {
             | Lint::FacesUpDown { .. }
             | Lint::TailReversed { .. }
             | Lint::OutlineOnly { .. } => Severity::Warn,
-            Lint::NonSquare { .. } | Lint::LowResolution { .. } => Severity::Tip,
+            Lint::NonSquare { .. }
+            | Lint::LowResolution { .. }
+            | Lint::ImageIgnored { .. }
+            | Lint::TextIgnored => Severity::Tip,
             Lint::SpecksRemoved { .. }
             | Lint::ColoursFlattened
             | Lint::GuidesVisible
-            | Lint::SemiTransparent => Severity::Info,
+            | Lint::SemiTransparent
+            | Lint::StrokesConverted { .. }
+            | Lint::Gradient
+            | Lint::ClipOrMask
+            | Lint::FiltersIgnored
+            | Lint::ActiveContentRemoved
+            | Lint::OutsideCanvas => Severity::Info,
         }
     }
 
@@ -157,11 +192,21 @@ impl Lint {
             Lint::FacesLeft { .. } | Lint::FacesUpDown { .. } | Lint::TailReversed { .. } => {
                 "#direction"
             }
-            Lint::NearlyEmpty { .. } | Lint::OutlineOnly { .. } => "#fill",
+            Lint::NearlyEmpty { .. }
+            | Lint::OutlineOnly { .. }
+            | Lint::StrokesConverted { .. }
+            | Lint::TextIgnored
+            | Lint::ImageIgnored { .. } => "#fill",
             Lint::SolidSquare { .. } => "#holes",
             Lint::SpecksRemoved { .. } | Lint::LowResolution { .. } => "#small",
-            Lint::ColoursFlattened | Lint::SemiTransparent => "#colour",
+            Lint::ColoursFlattened
+            | Lint::SemiTransparent
+            | Lint::Gradient
+            | Lint::ClipOrMask
+            | Lint::FiltersIgnored
+            | Lint::ActiveContentRemoved => "#colour",
             Lint::GuidesVisible => "#guides",
+            Lint::OutsideCanvas => "#margins",
         }
     }
 
@@ -224,6 +269,30 @@ impl Lint {
                 "Your image is only {width} × {height} px, so edges may look soft. Export at \
                  1000 × 1000 px, the template's size."
             ),
+            Lint::StrokesConverted { count } => format!(
+                "We turned {count} stroke{} into filled shapes. To see exactly what you'll get, \
+                 use Outline Stroke (Illustrator) or Stroke to Path (Inkscape) before exporting.",
+                plural(*count)
+            ),
+            Lint::Gradient => "Gradients and patterns became one solid colour: the snake's.".into(),
+            Lint::ImageIgnored { count } => format!(
+                "We ignored {count} embedded image{}. Draw with vector shapes, or upload your \
+                 drawing as a PNG instead.",
+                plural(*count)
+            ),
+            Lint::TextIgnored => "Text isn't supported, so we left it out. Convert it to \
+                 outlines first (Type → Create Outlines, or Path → Object to Path)."
+                .into(),
+            Lint::ClipOrMask => "We applied your clipping paths. Masks are ignored, so masked \
+                 shapes show in full; check the preview."
+                .into(),
+            Lint::FiltersIgnored => "Filters such as blurs and drop shadows are ignored.".into(),
+            Lint::ActiveContentRemoved => "We removed scripts, links and embedded web content. \
+                 Only the shapes are kept."
+                .into(),
+            Lint::OutsideCanvas => {
+                "Part of your drawing is outside the square. The game cuts it off.".into()
+            }
         }
     }
 }
@@ -285,6 +354,9 @@ pub(crate) fn for_kind(m: &Metrics, kind: AssetKind) -> Vec<Lint> {
     // The drawing's full-height (attach) side, when it isn't the left one: full height,
     // with a front or tip opposite. On ties the last one wins, so Right (which Flip can
     // fix) is last.
+    // A drawing whose top and bottom are both full (trans-rights-scarf, whose white
+    // stripe crosses the neck) has no front opposite either, so neither counts: its
+    // left side is the neck, with a gap.
     let attach_elsewhere = [
         (Edge::Bottom, own_bottom, own_top),
         (Edge::Top, own_top, own_bottom),

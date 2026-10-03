@@ -66,7 +66,7 @@ pub(crate) fn process(
     let side = w.max(h).clamp(512, (limits.trace_side as usize).max(512));
     let mask = resample_to_square(&coverage, w, h, side);
     drop(coverage);
-    let traced = trace::trace_mask(mask, side, limits)?;
+    let traced = trace::trace_mask(mask, side, limits, trace::Source::Drawing)?;
     if traced.specks_removed > 0 {
         info.push(Lint::SpecksRemoved {
             count: traced.specks_removed,

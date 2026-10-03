@@ -89,7 +89,7 @@ rules = { path = "../rules" }
 tokio-util = { version = "0.7.14", features = ["rt"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 
-# design_kit (DEV-1539): raster upload -> one clean head/tail path. Pure Rust.
+# design_kit (DEV-1539): PNG/JPEG/SVG upload -> one clean head/tail path. Pure Rust.
 # Rasteriser for lint metrics; no png-format (PNG decoding uses `png` directly).
 tiny-skia = { version = "0.12.0", default-features = false, features = ["std", "simd"] }
 # Tracing engine behind vtracer 0.6.x binary mode.
@@ -99,6 +99,14 @@ png = "0.18.1"
 # markers like its header parser; `buffers_coefficients` and `buffered_max_pixels` copy
 # when and how much it buffers). Re-check those, and the JPEG memory caps, before bumping.
 zune-jpeg = "=0.5.15"
+# SVG input: parsing and normalising to paths. No text/fonts, no svgz, no writer. Its
+# image resolvers are replaced with no-ops (the defaults read local files). resvg is
+# deliberately NOT a runtime dependency: it renders filters and mask layers, which are
+# memory and CPU bombs on untrusted input (see docs/design-kit.md).
+usvg = { version = "0.48.1", default-features = false }
+# The CSS engine usvg uses (same version): the SVG prescan matches selectors exactly as
+# usvg will, to find references made from stylesheets and to bound the matching cost.
+simplecss = "0.2.2"
 
 [lib]
 name = "arena"

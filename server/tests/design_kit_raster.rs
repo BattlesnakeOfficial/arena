@@ -117,11 +117,9 @@ fn sniffing_gives_exact_variants() {
         }
     }
 
-    // SVG is recognised but not processed until PR 2.
-    let e = run(svg, &[]).expect_err("svg is not supported yet");
-    assert_eq!(e, NotYetSupported(Svg));
-    assert_eq!(e.code(), "not_yet_supported");
-    assert!(!e.is_internal());
+    // SVG goes through its own pipeline (design_kit_svg.rs).
+    let shape = run(svg, &[]).expect("svg");
+    assert_eq!(shape.input(), Svg);
 
     // App-specific advice.
     let advice = |r: RejectedFormat| UnsupportedFormat(r).user_message();
@@ -1735,7 +1733,8 @@ fn errors_have_codes_and_messages() {
         ProcessError::EmptyFile,
         ProcessError::UnknownFormat,
         ProcessError::UnsupportedFormat(RejectedFormat::Gif),
-        ProcessError::NotYetSupported(InputFormat::Svg),
+        ProcessError::InvalidXml("x".into()),
+        ProcessError::InvalidSvg("x".into()),
         ProcessError::TooLarge { bytes: 9, max: 8 },
         ProcessError::ImageTooLarge {
             width: 4096,
@@ -1753,10 +1752,10 @@ fn errors_have_codes_and_messages() {
         assert!(!e.user_message().is_empty());
         assert_eq!(e.is_internal(), e.code() == "internal");
     }
-    let msg = all[5].user_message();
+    let msg = all[6].user_message();
     assert!(msg.contains("2048") && msg.contains("1000 × 1000"), "{msg}");
     // Only black is promised to work: dark colours near the template's are dropped.
-    let msg = all[8].user_message();
+    let msg = all[9].user_message();
     assert!(
         msg.contains("solid black") && !msg.contains("any dark"),
         "{msg}"
