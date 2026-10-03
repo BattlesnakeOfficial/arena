@@ -470,7 +470,10 @@ async fn send_terminal(
             // The board stops its reconnecting socket only on game_end.
             let _ = send_message(sender, "game_end", serde_json::json!({})).await;
         }
-        _ => return,
+        _ => {
+            send_error_and_close(sender, receiver, "Game changed, please reconnect").await;
+            return;
+        }
     }
     graceful_close(sender, receiver).await;
 }
@@ -1291,10 +1294,9 @@ mod live_tests {
             .fetch_one(pool).await.unwrap()
     }
 
-    async fn turn(pool: &PgPool, state: &AppState, id: Uuid, number: i32) {
+    async fn turn(pool: &PgPool, _state: &AppState, id: Uuid, number: i32) {
         crate::models::turn::create_turn(
             pool,
-            &state.watched_games,
             id,
             number,
             Some(serde_json::json!({"Turn": number})),
@@ -1322,6 +1324,7 @@ mod live_tests {
         let poll_shutdown = CancellationToken::new();
         let poller = tokio::spawn(run_watched_games(
             pool.clone(),
+            pool.connect_options().as_ref().clone(),
             reader.watched_games.clone(),
             poll_shutdown.clone(),
         ));
@@ -1362,6 +1365,7 @@ mod live_tests {
         let shutdown = CancellationToken::new();
         let poller = tokio::spawn(run_watched_games(
             pool.clone(),
+            pool.connect_options().as_ref().clone(),
             reader.watched_games.clone(),
             shutdown.clone(),
         ));
@@ -1467,6 +1471,7 @@ mod live_tests {
         let shutdown = CancellationToken::new();
         let poller = tokio::spawn(run_watched_games(
             pool.clone(),
+            pool.connect_options().as_ref().clone(),
             state.watched_games.clone(),
             shutdown.clone(),
         ));
@@ -1502,6 +1507,136 @@ mod live_tests {
     }
 
     #[sqlx::test(migrations = "../migrations")]
+    async fn listener_disconnect_catches_up_all_frames(pool: PgPool) {
+        let id = game(&pool).await;
+        let writer = AppState::test_from_pool(pool.clone());
+        let reader = AppState::test_from_pool(pool.clone());
+        let shutdown = CancellationToken::new();
+        let listener = tokio::spawn(run_watched_games(
+            pool.clone(),
+            pool.connect_options().as_ref().clone(),
+            reader.watched_games.clone(),
+            shutdown.clone(),
+        ));
+        let (base, web_shutdown, web) = start(reader.clone()).await;
+        let mut client = connect(&base, id).await;
+        wait_active(&reader.watched_games, id).await;
+        for number in 0..3 {
+            turn(&pool, &writer, id, number).await;
+            assert_eq!(next(&mut client).await["Data"]["Turn"], number);
+        }
+        let terminated = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let result = sqlx::query_scalar!(
+                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = current_database() AND application_name = 'arena-watched-games-listener' AND pid <> pg_backend_pid() LIMIT 1"
+                ).fetch_optional(&pool).await.unwrap();
+                if result.is_some() { break; }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await;
+        terminated.unwrap();
+        for number in 3..8 {
+            turn(&pool, &writer, id, number).await;
+        }
+        sqlx::query!(
+            "UPDATE games SET status = 'finished' WHERE game_id = $1",
+            id
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        for number in 3..8 {
+            assert_eq!(next(&mut client).await["Data"]["Turn"], number);
+        }
+        assert_eq!(next(&mut client).await["Type"], "game_end");
+        close(&mut client).await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while reader.watched_games.reconnect_catchups() == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        shutdown.cancel();
+        web_shutdown.cancel();
+        listener.await.unwrap().unwrap();
+        web.await.unwrap();
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn retry_reset_closes_old_stream_before_regrowth(pool: PgPool) {
+        let id = game(&pool).await;
+        let state = AppState::test_from_pool(pool.clone());
+        let shutdown = CancellationToken::new();
+        let listener = tokio::spawn(run_watched_games(
+            pool.clone(),
+            pool.connect_options().as_ref().clone(),
+            state.watched_games.clone(),
+            shutdown.clone(),
+        ));
+        let (base, web_shutdown, web) = start(state.clone()).await;
+        let mut client = connect(&base, id).await;
+        wait_active(&state.watched_games, id).await;
+        for number in 0..6 {
+            turn(&pool, &state, id, number).await;
+            assert_eq!(next(&mut client).await["Data"]["Turn"], number);
+        }
+        crate::models::game::reset_game_state_for_retry(&pool, id)
+            .await
+            .unwrap();
+        for number in 0..8 {
+            turn(&pool, &state, id, number).await;
+        }
+        assert_eq!(
+            next(&mut client).await["Data"]["message"],
+            "Game restarted, please reconnect"
+        );
+        close(&mut client).await;
+        shutdown.cancel();
+        web_shutdown.cancel();
+        listener.await.unwrap().unwrap();
+        web.await.unwrap();
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn rolled_back_turn_has_no_frame(pool: PgPool) {
+        let id = game(&pool).await;
+        let state = AppState::test_from_pool(pool.clone());
+        let shutdown = CancellationToken::new();
+        let listener = tokio::spawn(run_watched_games(
+            pool.clone(),
+            pool.connect_options().as_ref().clone(),
+            state.watched_games.clone(),
+            shutdown.clone(),
+        ));
+        let (base, web_shutdown, web) = start(state.clone()).await;
+        let mut client = connect(&base, id).await;
+        wait_active(&state.watched_games, id).await;
+        let mut transaction = pool.begin().await.unwrap();
+        sqlx::query!(
+            "INSERT INTO turns (game_id, turn_number, frame_data) VALUES ($1, 0, $2)",
+            id,
+            serde_json::json!({"Turn":0})
+        )
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+        transaction.rollback().await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), client.next())
+                .await
+                .is_err()
+        );
+        turn(&pool, &state, id, 0).await;
+        assert_eq!(next(&mut client).await["Data"]["Turn"], 0);
+        client.close(None).await.unwrap();
+        shutdown.cancel();
+        web_shutdown.cancel();
+        listener.await.unwrap().unwrap();
+        web.await.unwrap();
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
     #[ignore = "controlled local load run: 500 sockets and a job worker"]
     async fn watched_games_local_load_harness(pool: PgPool) {
         use std::{collections::HashMap, sync::Arc, time::Instant};
@@ -1513,6 +1648,7 @@ mod live_tests {
         let poll_shutdown = CancellationToken::new();
         let poller = tokio::spawn(run_watched_games(
             pool.clone(),
+            pool.connect_options().as_ref().clone(),
             watched.clone(),
             poll_shutdown.clone(),
         ));

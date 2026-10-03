@@ -7,7 +7,7 @@ use cja::{
     setup::{TracingConfig, setup_sentry},
     tasks::{ShutdownBudget, Supervisor},
 };
-use color_eyre::eyre::eyre;
+use color_eyre::eyre::{Context as _, eyre};
 use state::AppState;
 use tracing::info;
 
@@ -174,6 +174,11 @@ async fn spawn_application_tasks(
             "watched-games",
             watched_games::run_watched_games(
                 app_state.db.clone(),
+                app_state
+                    .config
+                    .database_url
+                    .parse()
+                    .wrap_err("Invalid listener database URL")?,
                 app_state.watched_games.clone(),
                 shutdown.clone(),
             ),

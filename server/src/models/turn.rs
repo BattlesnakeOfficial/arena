@@ -4,7 +4,6 @@ use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
 use crate::game_progress::phase;
-use crate::watched_games::WatchedGames;
 
 #[cfg(test)]
 mod storage_tests;
@@ -133,10 +132,9 @@ pub async fn get_turns_from(
     Ok(turns)
 }
 
-/// Create a new turn for a game and notify WebSocket subscribers
+/// Create a new turn for a game
 pub async fn create_turn(
     pool: &PgPool,
-    watched_games: &WatchedGames,
     game_id: Uuid,
     turn_number: i32,
     frame_data: Option<serde_json::Value>,
@@ -177,36 +175,7 @@ pub async fn create_turn(
         .await?
     };
 
-    // Release the insert connection before waiting for the registry mutex.
-    phase(game_id, "persist_turn.notify", Some(turn_number), async {
-        watched_games.turn_persisted(game_id).await;
-        Ok(())
-    })
-    .await?;
-
     Ok(turn)
-}
-
-/// Update turn frame data (used after computing game state)
-pub async fn update_turn_frame_data(
-    pool: &PgPool,
-    turn_id: Uuid,
-    frame_data: serde_json::Value,
-) -> cja::Result<()> {
-    sqlx::query!(
-        r#"
-        UPDATE turns
-        SET frame_data = $2
-        WHERE turn_id = $1
-        "#,
-        turn_id,
-        frame_data
-    )
-    .execute(pool)
-    .await
-    .wrap_err("Failed to update turn frame data")?;
-
-    Ok(())
 }
 
 /// Survival stats for a finished Solo game, read from its final persisted

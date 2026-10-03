@@ -8,8 +8,11 @@ use std::{
 };
 
 use color_eyre::eyre::Context as _;
-use sqlx::PgPool;
-use tokio::sync::{Mutex, Notify, broadcast, watch};
+use sqlx::{
+    PgPool,
+    postgres::{PgConnectOptions, PgListener, PgPoolOptions},
+};
+use tokio::sync::{Mutex, broadcast, watch};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -38,13 +41,11 @@ pub struct WatchEntry {
 #[derive(Default)]
 struct Registry {
     entries: HashMap<Uuid, Arc<WatchEntry>>,
-    dirty: HashSet<Uuid>,
 }
 
 #[derive(Clone, Default)]
 pub struct WatchedGames {
     registry: Arc<Mutex<Registry>>,
-    wake: Arc<Notify>,
     #[cfg(test)]
     stats: Arc<PollStats>,
 }
@@ -55,7 +56,7 @@ struct PollStats {
     status_reads: AtomicUsize,
     range_reads: AtomicUsize,
     batches: Mutex<Vec<(tokio::time::Instant, Vec<Uuid>)>>,
-    local_starts: Mutex<Vec<tokio::time::Instant>>,
+    reconnect_catchups: AtomicUsize,
 }
 
 pub struct Subscription {
@@ -88,7 +89,6 @@ impl Drop for PendingGuard {
                 .is_some_and(|current| Arc::ptr_eq(current, &self.entry))
         {
             registry.entries.remove(&self.game_id);
-            registry.dirty.remove(&self.game_id);
         }
     }
 }
@@ -132,6 +132,11 @@ impl WatchedGames {
         )
     }
 
+    #[cfg(test)]
+    pub fn reconnect_catchups(&self) -> usize {
+        self.stats.reconnect_catchups.load(Ordering::Relaxed)
+    }
+
     pub async fn subscribe(&self, game_id: Uuid) -> Subscription {
         let mut registry = self.registry.lock().await;
         if let Some(entry) = registry.entries.get(&game_id)
@@ -149,7 +154,6 @@ impl WatchedGames {
         let (readiness, ready_receiver) = watch::channel(Readiness::Pending);
         let entry = Arc::new(WatchEntry { updates, readiness });
         registry.entries.insert(game_id, entry.clone());
-        registry.dirty.remove(&game_id);
         Subscription {
             updates: receiver,
             readiness: ready_receiver,
@@ -188,57 +192,44 @@ impl WatchedGames {
         }
     }
 
-    pub async fn turn_persisted(&self, game_id: Uuid) {
-        let mut registry = self.registry.lock().await;
-        if registry.entries.get(&game_id).is_some_and(|entry| {
-            matches!(*entry.readiness.borrow(), Readiness::Active { .. })
-                && entry.updates.receiver_count() > 0
-        }) && registry.dirty.insert(game_id)
-        {
-            self.wake.notify_one();
-        }
-    }
-
-    async fn snapshot(&self, full: bool) -> Vec<(Uuid, Arc<WatchEntry>, i32)> {
+    async fn snapshot(&self, ids: Option<&HashSet<Uuid>>) -> Vec<(Uuid, Arc<WatchEntry>, i32)> {
         let mut registry = self.registry.lock().await;
         registry.entries.retain(|_, entry| {
             entry.updates.receiver_count() > 0 && *entry.readiness.borrow() != Readiness::Retired
         });
-        let active_ids: HashSet<_> = registry.entries.keys().copied().collect();
-        registry.dirty.retain(|id| active_ids.contains(id));
-        let selected = if full {
-            let ids: Vec<_> = registry.entries.keys().copied().collect();
-            for id in ids {
-                registry.dirty.remove(&id);
-            }
-            registry
-                .entries
-                .iter()
-                .map(|(id, entry)| (*id, entry.clone()))
-                .collect::<Vec<_>>()
-        } else {
-            let ids = std::mem::take(&mut registry.dirty);
-            ids.into_iter()
-                .filter_map(|id| registry.entries.get(&id).map(|entry| (id, entry.clone())))
-                .collect()
-        };
-        selected
-            .into_iter()
+        registry
+            .entries
+            .iter()
             .filter_map(|(id, entry)| {
+                if ids.is_some_and(|selected| !selected.contains(id)) {
+                    return None;
+                }
                 let Readiness::Active { cursor } = *entry.readiness.borrow() else {
                     return None;
                 };
-                Some((id, entry, cursor))
+                Some((*id, entry.clone(), cursor))
             })
             .collect()
     }
+
+    async fn retire_resets(&self, ids: &HashSet<Uuid>) {
+        let mut registry = self.registry.lock().await;
+        for id in ids {
+            if let Some(entry) = registry.entries.remove(id) {
+                let _ = entry.updates.send(WatchedGameUpdate::Reset);
+                entry.readiness.send_replace(Readiness::Retired);
+            }
+        }
+    }
 }
 
-// Each pass makes two queries regardless of the number of local viewers.
+// A notification batch makes one range query, plus a status query when needed.
 async fn poll_batch(
     pool: &PgPool,
     watched: &WatchedGames,
     snapshot: Vec<(Uuid, Arc<WatchEntry>, i32)>,
+    include_status: bool,
+    turn_limits: Option<&HashMap<Uuid, i32>>,
 ) -> cja::Result<()> {
     if snapshot.is_empty() {
         return Ok(());
@@ -246,20 +237,23 @@ async fn poll_batch(
     let ids: Vec<Uuid> = snapshot.iter().map(|(id, _, _)| *id).collect();
     let cursors: Vec<i32> = snapshot.iter().map(|(_, _, cursor)| *cursor).collect();
     #[cfg(test)]
-    {
+    watched
+        .stats
+        .batches
+        .lock()
+        .await
+        .push((tokio::time::Instant::now(), ids.clone()));
+    let statuses = if include_status {
+        #[cfg(test)]
         watched.stats.status_reads.fetch_add(1, Ordering::Relaxed);
-        watched
-            .stats
-            .batches
-            .lock()
-            .await
-            .push((tokio::time::Instant::now(), ids.clone()));
-    }
-    let statuses = sqlx::query!(
-        r#"SELECT g.game_id, g.status, (SELECT MAX(t.turn_number) FROM turns t WHERE t.game_id = g.game_id) AS latest_turn
-           FROM games g WHERE g.game_id = ANY($1::uuid[])"#,
-        &ids
-    ).fetch_all(pool).await.wrap_err("Failed to read watched game statuses")?;
+        Some(sqlx::query!(
+            r#"SELECT g.game_id, g.status, (SELECT MAX(t.turn_number) FROM turns t WHERE t.game_id = g.game_id) AS latest_turn
+               FROM games g WHERE g.game_id = ANY($1::uuid[])"#,
+            &ids
+        ).fetch_all(pool).await.wrap_err("Failed to read watched game statuses")?)
+    } else {
+        None
+    };
     #[cfg(test)]
     watched.stats.range_reads.fetch_add(1, Ordering::Relaxed);
     let turns = sqlx::query_as!(
@@ -277,9 +271,21 @@ async fn poll_batch(
     .wrap_err("Failed to read watched game frames")?;
     let mut grouped: HashMap<Uuid, Vec<Turn>> = HashMap::new();
     for turn in turns {
+        // A delayed old-run turn notification must not fetch frames from a
+        // newer run before its reset notification is processed.
+        if turn_limits
+            .and_then(|limits| limits.get(&turn.game_id))
+            .is_some_and(|limit| turn.turn_number > *limit)
+        {
+            continue;
+        }
         grouped.entry(turn.game_id).or_default().push(turn);
     }
-    let status_map: HashMap<_, _> = statuses.into_iter().map(|row| (row.game_id, row)).collect();
+    let status_map: HashMap<_, _> = statuses
+        .unwrap_or_default()
+        .into_iter()
+        .map(|row| (row.game_id, row))
+        .collect();
 
     let mut registry = watched.registry.lock().await;
     for (id, entry, cursor) in snapshot {
@@ -291,13 +297,14 @@ async fn poll_batch(
         {
             continue;
         }
-        let Some(row) = status_map.get(&id) else {
+        let row = status_map.get(&id);
+        if include_status && row.is_none() {
             let _ = entry.updates.send(WatchedGameUpdate::Missing);
             entry.readiness.send_replace(Readiness::Retired);
             registry.entries.remove(&id);
             continue;
-        };
-        if row.latest_turn.unwrap_or(-1) < cursor {
+        }
+        if row.is_some_and(|row| row.latest_turn.unwrap_or(-1) < cursor) {
             let _ = entry.updates.send(WatchedGameUpdate::Reset);
             entry.readiness.send_replace(Readiness::Retired);
             registry.entries.remove(&id);
@@ -315,6 +322,7 @@ async fn poll_batch(
                 cursor: next_cursor,
             });
         }
+        let Some(row) = row else { continue };
         match GameStatus::from_str(&row.status) {
             Ok(status @ (GameStatus::Finished | GameStatus::Failed)) => {
                 let _ = entry.updates.send(WatchedGameUpdate::Terminal(status));
@@ -330,38 +338,155 @@ async fn poll_batch(
     Ok(())
 }
 
+const LISTENER_RETRY_INITIAL: Duration = Duration::from_millis(100);
+const LISTENER_RETRY_MAX: Duration = Duration::from_secs(5);
+const CHANNEL: &str = "arena_watched_games";
+
+/// A reset that rewinds and regrows beyond the old cursor during a listener outage
+/// cannot be detected without a persisted attempt generation.
 pub(crate) async fn run_watched_games(
     pool: PgPool,
+    listener_options: PgConnectOptions,
     watched: WatchedGames,
     shutdown: CancellationToken,
 ) -> cja::Result<()> {
-    let mut interval = tokio::time::interval(Duration::from_millis(250));
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut next_local = tokio::time::Instant::now();
-    let mut pending_local = false;
+    let listener_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .max_lifetime(None)
+        .idle_timeout(None)
+        .connect_with(listener_options.application_name("arena-watched-games-listener"))
+        .await
+        .wrap_err("Failed to connect watched-game listener")?;
+    let mut listener = PgListener::connect_with(&listener_pool)
+        .await
+        .wrap_err("Failed to acquire watched-game listener")?;
+    listener
+        .listen(CHANNEL)
+        .await
+        .wrap_err("Failed to LISTEN for watched games")?;
+    catch_up(&pool, &watched).await?;
+    let mut retry = LISTENER_RETRY_INITIAL;
     loop {
-        tokio::select! {
+        let result = tokio::select! {
             () = shutdown.cancelled() => return Ok(()),
-            _ = interval.tick() => {
-                let snapshot = watched.snapshot(true).await;
-                if let Err(error) = poll_batch(&pool, &watched, snapshot).await {
-                    tracing::error!(error = %format_args!("{error:#}"), "Watched game sweep failed");
+            result = listener.try_recv() => result,
+        };
+        match result {
+            Ok(Some(notification)) => {
+                retry = LISTENER_RETRY_INITIAL;
+                let mut ids = HashSet::new();
+                let mut resets = HashSet::new();
+                let mut turn_limits = HashMap::new();
+                let mut include_status = false;
+                collect_notification(
+                    notification.payload(),
+                    &mut ids,
+                    &mut resets,
+                    &mut turn_limits,
+                    &mut include_status,
+                );
+                while let Some(notification) = listener.next_buffered() {
+                    collect_notification(
+                        notification.payload(),
+                        &mut ids,
+                        &mut resets,
+                        &mut turn_limits,
+                        &mut include_status,
+                    );
+                }
+                watched.retire_resets(&resets).await;
+                let snapshot = watched.snapshot(Some(&ids)).await;
+                if let Err(error) = poll_batch(
+                    &pool,
+                    &watched,
+                    snapshot,
+                    include_status,
+                    Some(&turn_limits),
+                )
+                .await
+                {
+                    tracing::error!(error = %format_args!("{error:#}"), "Watched game notification read failed");
+                    reconcile_with_retry(&pool, &watched, &shutdown).await?;
                 }
             }
-            () = watched.wake.notified() => {
-                pending_local = true;
-            }
-            () = tokio::time::sleep_until(next_local), if pending_local => {
-                pending_local = false;
-                next_local = tokio::time::Instant::now() + Duration::from_millis(25);
+            Ok(None) => {
+                // try_recv reconnects and restores LISTEN before returning None.
+                // The old session may have missed committed notifications.
                 #[cfg(test)]
-                watched.stats.local_starts.lock().await.push(tokio::time::Instant::now());
-                let snapshot = watched.snapshot(false).await;
-                if let Err(error) = poll_batch(&pool, &watched, snapshot).await {
-                    tracing::error!(error = %format_args!("{error:#}"), "Watched game local update failed");
+                watched
+                    .stats
+                    .reconnect_catchups
+                    .fetch_add(1, Ordering::Relaxed);
+                reconcile_with_retry(&pool, &watched, &shutdown).await?;
+            }
+            Err(error) => {
+                tracing::error!(error = %format_args!("{error:#}"), "Watched game listener failed");
+                tokio::select! {
+                    () = shutdown.cancelled() => return Ok(()),
+                    () = tokio::time::sleep(retry) => {},
                 }
+                retry = retry.saturating_mul(2).min(LISTENER_RETRY_MAX);
             }
         }
+    }
+}
+
+async fn catch_up(pool: &PgPool, watched: &WatchedGames) -> cja::Result<()> {
+    poll_batch(pool, watched, watched.snapshot(None).await, true, None).await
+}
+
+async fn reconcile_with_retry(
+    pool: &PgPool,
+    watched: &WatchedGames,
+    shutdown: &CancellationToken,
+) -> cja::Result<()> {
+    let mut retry = LISTENER_RETRY_INITIAL;
+    loop {
+        match catch_up(pool, watched).await {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                tracing::error!(error = %format_args!("{error:#}"), "Watched game catch-up failed")
+            }
+        }
+        tokio::select! {
+            () = shutdown.cancelled() => return Ok(()),
+            () = tokio::time::sleep(retry) => {},
+        }
+        retry = retry.saturating_mul(2).min(LISTENER_RETRY_MAX);
+    }
+}
+
+fn collect_notification(
+    payload: &str,
+    ids: &mut HashSet<Uuid>,
+    resets: &mut HashSet<Uuid>,
+    turn_limits: &mut HashMap<Uuid, i32>,
+    include_status: &mut bool,
+) {
+    let mut parts = payload.split(':');
+    let Some(kind) = parts.next() else { return };
+    let Some(id) = parts.next().and_then(|value| Uuid::parse_str(value).ok()) else {
+        return;
+    };
+    match kind {
+        "turn" => {
+            if let Some(number) = parts.next().and_then(|value| value.parse::<i32>().ok()) {
+                ids.insert(id);
+                turn_limits
+                    .entry(id)
+                    .and_modify(|max| *max = (*max).max(number))
+                    .or_insert(number);
+            }
+        }
+        "status" => {
+            ids.insert(id);
+            *include_status = true;
+        }
+        "reset" => {
+            resets.insert(id);
+            *include_status = true;
+        }
+        _ => tracing::warn!(%payload, "Invalid watched game notification"),
     }
 }
 
@@ -407,67 +532,25 @@ mod tests {
                 Err(broadcast::error::TryRecvError::Empty)
             ));
         }
-        watched.turn_persisted(id).await;
-        assert_eq!(watched.registry.lock().await.dirty.len(), 1);
-        watched.turn_persisted(Uuid::new_v4()).await;
-        assert_eq!(watched.registry.lock().await.dirty.len(), 1);
-    }
-
-    #[sqlx::test(migrations = "../migrations")]
-    async fn blocked_notification_releases_turn_connection(database: PgPool) {
-        let id = sqlx::query_scalar!("INSERT INTO games (board_size, game_type, status) VALUES ('11x11', 'Solo', 'running') RETURNING game_id")
-            .fetch_one(&database).await.unwrap();
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(1)
-            .connect_with(database.connect_options().as_ref().clone())
-            .await
-            .unwrap();
-        let watched = WatchedGames::new();
-        let mut subscriber = watched.subscribe(id).await;
-        watched.seed_if_current(id, &mut subscriber, -1).await;
-        let guard = watched.registry.lock().await;
-        let work = crate::models::turn::create_turn(&pool, &watched, id, 0, None);
-        tokio::pin!(work);
-        tokio::time::timeout(Duration::from_secs(5), async {
-            tokio::select! {
-                result = &mut work => panic!("notification must wait for registry: {result:?}"),
-                () = async {
-                    while sqlx::query_scalar!("SELECT count(*) FROM turns WHERE game_id=$1", id)
-                        .fetch_one(&database).await.unwrap() == Some(0) {
-                        tokio::time::sleep(Duration::from_millis(1)).await;
-                    }
-                } => {}
-            }
-            tokio::select! {
-                result = &mut work => panic!("notification must still be blocked: {result:?}"),
-                connection = pool.acquire() => { drop(connection.unwrap()); }
-            }
-        })
-        .await
-        .unwrap();
-        drop(guard);
-        work.await.unwrap();
-        assert!(watched.registry.lock().await.dirty.contains(&id));
     }
 
     #[sqlx::test(migrations = "../migrations")]
     async fn remote_poller_catches_up_and_reports_terminal(pool: PgPool) {
         let id = sqlx::query_scalar!("INSERT INTO games (board_size, game_type, status) VALUES ('11x11', 'Solo', 'running') RETURNING game_id")
             .fetch_one(&pool).await.unwrap();
-        let writer = WatchedGames::new();
         let reader = WatchedGames::new();
         let mut subscription = reader.subscribe(id).await;
         reader.seed_if_current(id, &mut subscription, -1).await;
         let shutdown = CancellationToken::new();
         let task = tokio::spawn(run_watched_games(
             pool.clone(),
+            pool.connect_options().as_ref().clone(),
             reader.clone(),
             shutdown.clone(),
         ));
         for turn in 0..3 {
             crate::models::turn::create_turn(
                 &pool,
-                &writer,
                 id,
                 turn,
                 Some(serde_json::json!({"Turn":turn})),
@@ -502,218 +585,5 @@ mod tests {
         ));
         shutdown.cancel();
         task.await.unwrap().unwrap();
-    }
-}
-
-#[cfg(test)]
-mod batch_tests {
-    use super::*;
-
-    async fn game(pool: &PgPool) -> Uuid {
-        sqlx::query_scalar!("INSERT INTO games (board_size, game_type, status) VALUES ('11x11', 'Solo', 'running') RETURNING game_id")
-            .fetch_one(pool).await.unwrap()
-    }
-
-    #[sqlx::test(migrations = "../migrations")]
-    async fn query_work_is_per_watched_game_not_viewer(pool: PgPool) {
-        let watched = WatchedGames::new();
-        let mut subscriptions = Vec::new();
-        let mut ids = Vec::new();
-        for _ in 0..50 {
-            let id = game(&pool).await;
-            let mut creator = watched.subscribe(id).await;
-            watched.seed_if_current(id, &mut creator, -1).await;
-            subscriptions.push(creator);
-            for _ in 0..9 {
-                subscriptions.push(watched.subscribe(id).await);
-            }
-            ids.push(id);
-        }
-        assert_eq!(subscriptions.len(), 500);
-        poll_batch(&pool, &watched, watched.snapshot(true).await)
-            .await
-            .unwrap();
-        assert_eq!(watched.stats.status_reads.load(Ordering::Relaxed), 1);
-        assert_eq!(watched.stats.range_reads.load(Ordering::Relaxed), 1);
-        assert_eq!(watched.stats.batches.lock().await[0].1.len(), 50);
-
-        for _ in 0..10 {
-            let unwatched = game(&pool).await;
-            crate::models::turn::create_turn(
-                &pool,
-                &watched,
-                unwatched,
-                0,
-                Some(serde_json::json!({"Turn":0})),
-            )
-            .await
-            .unwrap();
-        }
-        assert!(watched.registry.lock().await.dirty.is_empty());
-        assert!(watched.snapshot(false).await.is_empty());
-        assert_eq!(watched.stats.status_reads.load(Ordering::Relaxed), 1);
-        crate::models::turn::create_turn(
-            &pool,
-            &watched,
-            ids[0],
-            0,
-            Some(serde_json::json!({"Turn":0})),
-        )
-        .await
-        .unwrap();
-        poll_batch(&pool, &watched, watched.snapshot(false).await)
-            .await
-            .unwrap();
-        assert_eq!(watched.stats.status_reads.load(Ordering::Relaxed), 2);
-        assert_eq!(watched.stats.range_reads.load(Ordering::Relaxed), 2);
-        assert_eq!(watched.stats.batches.lock().await[1].1, vec![ids[0]]);
-        let mut shared = None;
-        for subscriber in &mut subscriptions[..10] {
-            let WatchedGameUpdate::Frames(frames) = subscriber.updates.recv().await.unwrap() else {
-                panic!("expected shared frame batch");
-            };
-            if let Some(previous) = &shared {
-                assert!(Arc::ptr_eq(previous, &frames));
-            } else {
-                shared = Some(frames);
-            }
-        }
-        drop(subscriptions);
-        poll_batch(&pool, &watched, watched.snapshot(true).await)
-            .await
-            .unwrap();
-        assert_eq!(watched.stats.status_reads.load(Ordering::Relaxed), 2);
-    }
-
-    #[sqlx::test(migrations = "../migrations")]
-    async fn retry_rewind_retires_old_entry_and_starts_at_zero(pool: PgPool) {
-        let id = game(&pool).await;
-        let watched = WatchedGames::new();
-        let mut original = watched.subscribe(id).await;
-        watched.seed_if_current(id, &mut original, -1).await;
-        for number in 0..3 {
-            crate::models::turn::create_turn(
-                &pool,
-                &watched,
-                id,
-                number,
-                Some(serde_json::json!({"Turn":number})),
-            )
-            .await
-            .unwrap();
-        }
-        poll_batch(&pool, &watched, watched.snapshot(true).await)
-            .await
-            .unwrap();
-        crate::models::game::reset_game_state_for_retry(&pool, id)
-            .await
-            .unwrap();
-        poll_batch(&pool, &watched, watched.snapshot(true).await)
-            .await
-            .unwrap();
-        assert!(matches!(
-            original.updates.recv().await.unwrap(),
-            WatchedGameUpdate::Frames(_)
-        ));
-        assert!(matches!(
-            original.updates.recv().await.unwrap(),
-            WatchedGameUpdate::Reset
-        ));
-        let mut replacement = watched.subscribe(id).await;
-        assert!(replacement.created);
-        assert!(!Arc::ptr_eq(&original.entry, &replacement.entry));
-        watched.seed_if_current(id, &mut replacement, -1).await;
-        crate::models::turn::create_turn(
-            &pool,
-            &watched,
-            id,
-            0,
-            Some(serde_json::json!({"Turn":0})),
-        )
-        .await
-        .unwrap();
-        poll_batch(&pool, &watched, watched.snapshot(true).await)
-            .await
-            .unwrap();
-        let WatchedGameUpdate::Frames(frames) = replacement.updates.recv().await.unwrap() else {
-            panic!("expected frames")
-        };
-        assert_eq!(frames[0].turn_number, 0);
-    }
-    #[sqlx::test(migrations = "../migrations")]
-    async fn failed_query_retries_without_losing_frames(pool: PgPool) {
-        let id = game(&pool).await;
-        let watched = WatchedGames::new();
-        let mut subscriber = watched.subscribe(id).await;
-        watched.seed_if_current(id, &mut subscriber, -1).await;
-        sqlx::query!("ALTER TABLE turns RENAME TO turns_hidden")
-            .execute(&pool)
-            .await
-            .unwrap();
-        assert!(
-            poll_batch(&pool, &watched, watched.snapshot(true).await)
-                .await
-                .is_err()
-        );
-        assert_eq!(
-            *subscriber.readiness.borrow(),
-            Readiness::Active { cursor: -1 }
-        );
-        sqlx::query!("ALTER TABLE turns_hidden RENAME TO turns")
-            .execute(&pool)
-            .await
-            .unwrap();
-        crate::models::turn::create_turn(
-            &pool,
-            &WatchedGames::new(),
-            id,
-            0,
-            Some(serde_json::json!({"Turn":0})),
-        )
-        .await
-        .unwrap();
-        poll_batch(&pool, &watched, watched.snapshot(true).await)
-            .await
-            .unwrap();
-        let WatchedGameUpdate::Frames(frames) = subscriber.updates.recv().await.unwrap() else {
-            panic!("expected catch-up frame")
-        };
-        assert_eq!(frames[0].turn_number, 0);
-    }
-
-    #[sqlx::test(migrations = "../migrations")]
-    async fn local_batch_starts_are_spaced(pool: PgPool) {
-        let id = game(&pool).await;
-        let watched = WatchedGames::new();
-        let mut subscriber = watched.subscribe(id).await;
-        watched.seed_if_current(id, &mut subscriber, -1).await;
-        let shutdown = CancellationToken::new();
-        let poller = tokio::spawn(run_watched_games(
-            pool.clone(),
-            watched.clone(),
-            shutdown.clone(),
-        ));
-        for number in 0..10 {
-            crate::models::turn::create_turn(
-                &pool,
-                &watched,
-                id,
-                number,
-                Some(serde_json::json!({"Turn":number})),
-            )
-            .await
-            .unwrap();
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        shutdown.cancel();
-        poller.await.unwrap().unwrap();
-        let starts = watched.stats.local_starts.lock().await;
-        assert!(!starts.is_empty());
-        assert!(
-            starts
-                .windows(2)
-                .all(|pair| pair[1].duration_since(pair[0]) >= Duration::from_millis(25))
-        );
     }
 }
