@@ -9,9 +9,10 @@
 //! The template generator must use exactly these colours. The guides layer uses the
 //! Multiply blend mode, so guides that sit over the reference ghost come out as the
 //! product of the two colours. Those products are dark (navy and crimson), so they are
-//! only excluded when the ghost itself is visible in the image; otherwise a navy or
-//! crimson drawing would vanish. The exclusion also covers anti-aliased blends of each
-//! colour towards white (or of each product towards the ghost).
+//! only excluded when the reference itself is clearly visible in the image (see
+//! [`GHOST_MIN_PERCENT`]); otherwise a navy or crimson drawing would vanish. The
+//! exclusion also covers anti-aliased blends of each colour towards white (or of each
+//! product towards the ghost).
 
 /// An sRGB colour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,21 +66,26 @@ pub const REFERENCE_GHOST: Rgb = Rgb::new(0xc8, 0xc2, 0xd4);
 /// Pixels within this RGB distance of a template colour are never ink.
 pub const NEAR_DISTANCE: u32 = 48;
 
-/// Pixels within this RGB distance of a template colour (and visibly coloured, see
-/// [`EVIDENCE_MIN_CHROMA`]) count as evidence that guides or a reference were exported.
-/// Tighter than [`NEAR_DISTANCE`] so anti-aliased grey edges of black ink never count.
+/// Pixels within this RGB distance of a guide colour (and visibly coloured, see
+/// [`EVIDENCE_MIN_CHROMA`]) count as evidence that guides were exported. Tighter than
+/// [`NEAR_DISTANCE`] so anti-aliased grey edges of black ink never count. The same
+/// distance from the ghost makes a pixel ghost-coloured.
 pub const EVIDENCE_DISTANCE: u32 = 24;
 
-/// Minimum `max(r,g,b) - min(r,g,b)` for a pixel to count as guide evidence. The ghost
-/// has chroma 18; greys (anti-aliasing, pencil, paper) have about 0.
+/// Minimum `max(r,g,b) - min(r,g,b)` for a pixel to count as guide evidence or as
+/// ghost-coloured. The ghost has chroma 18; greys (anti-aliasing of black ink, pencil,
+/// light-grey paper or backgrounds) have about 0.
 pub const EVIDENCE_MIN_CHROMA: u8 = 12;
 
-/// Share of all pixels that must be guide evidence before `guides_visible` fires (0.1%).
-/// The same share of ghost-coloured pixels counts as a visible reference.
+/// Share of all pixels that must be guide evidence (or the inside of a visible
+/// reference, see [`ghost_core_pixels`]) before `guides_visible` fires (0.1%).
 const EVIDENCE_MIN_PER_MILLE: usize = 1;
 
-/// Colours that are never ink: the guide colours and the ghost.
-pub(crate) const TEMPLATE: [Rgb; 6] = [GRID, GUIDE, LABEL, ATTACH, ATTACH_LABEL, REFERENCE_GHOST];
+/// Share of all pixels that must be the inside of a visible reference before the
+/// guide-over-ghost products stop being ink (1%). A visible reference covers tens of
+/// percent; a navy drawing's anti-aliased edge, which passes close to the ghost's
+/// colour, covers about 0.1% at the template's 1000 px and is never "inside" anyway.
+pub const GHOST_MIN_PERCENT: usize = 1;
 
 /// Every guide colour multiplied over the ghost: guides drawn over a visible reference.
 /// Not ink either, but only when the ghost is visible (they are dark).
@@ -119,10 +125,11 @@ fn dist_sq(a: Rgb, b: Rgb) -> u32 {
     d(a.r, b.r).pow(2) + d(a.g, b.g).pow(2) + d(a.b, b.b).pow(2)
 }
 
-/// Squared distance to the nearest excluded colour.
-fn min_dist_sq(c: Rgb, ghost: bool) -> u32 {
+/// Squared distance to the nearest guide colour (or guide-over-ghost product, when the
+/// reference is visible). The ghost itself is judged by [`ghost_core_pixels`].
+fn guide_dist_sq(c: Rgb, ghost: bool) -> u32 {
     let products: &[Rgb] = if ghost { &GHOST_PRODUCTS } else { &[] };
-    TEMPLATE
+    GUIDE_COLOURS
         .iter()
         .chain(products)
         .map(|&p| dist_sq(c, p))
@@ -207,7 +214,8 @@ pub(crate) struct Ink {
 #[derive(Debug, Clone, Copy, Default)]
 struct Class {
     coverage: u8,
-    /// Solid and close to a (chromatic) template colour.
+    /// Solid and close to a (chromatic) guide colour or, with a visible reference, a
+    /// guide-over-ghost product.
     evidence: bool,
     /// Ink in a clear colour rather than black/grey.
     coloured: bool,
@@ -230,7 +238,7 @@ fn over_white(rgb: Rgb, a: u8) -> Rgb {
 fn classify(rgb: Rgb, a: u8, alpha_mode: bool, ghost: bool) -> Class {
     let near = NEAR_DISTANCE.pow(2);
     let evidence = |c: Rgb| {
-        min_dist_sq(c, ghost) <= EVIDENCE_DISTANCE.pow(2) && chroma(c) >= EVIDENCE_MIN_CHROMA
+        guide_dist_sq(c, ghost) <= EVIDENCE_DISTANCE.pow(2) && chroma(c) >= EVIDENCE_MIN_CHROMA
     };
     if alpha_mode {
         if a == 0 {
@@ -282,26 +290,60 @@ fn judged(rgb: Rgb, a: u8, alpha_mode: bool) -> (Rgb, bool) {
     }
 }
 
-/// At least 0.1% of the pixels are solid and the ghost's colour: the reference layer was
-/// left visible.
-fn ghost_visible(px: &Pixels, alpha_mode: bool) -> bool {
-    let total = px.width * px.height;
-    let mut ghost_px = 0usize;
-    let mut last: Option<((Rgb, u8), bool)> = None;
-    for p in px.data.chunks_exact(px.channels) {
-        let key = Pixels::pixel(p);
-        let is_ghost = match last {
-            Some((k, g)) if k == key => g,
-            _ => {
-                let (c, solid) = judged(key.0, key.1, alpha_mode);
-                let g = solid && dist_sq(c, REFERENCE_GHOST) <= EVIDENCE_DISTANCE.pow(2);
-                last = Some((key, g));
-                g
-            }
-        };
-        ghost_px += usize::from(is_ghost);
+/// Solid, visibly coloured and within [`EVIDENCE_DISTANCE`] of the ghost.
+fn ghost_coloured(c: Rgb, solid: bool) -> bool {
+    solid
+        && chroma(c) >= EVIDENCE_MIN_CHROMA
+        && dist_sq(c, REFERENCE_GHOST) <= EVIDENCE_DISTANCE.pow(2)
+}
+
+/// Pixels inside a visible reference: ghost-coloured, with their whole 3x3 neighbourhood
+/// ghost-coloured too.
+///
+/// Colour alone isn't enough. Light greys from about 190 to 213 (a soft black edge, a
+/// light-grey background) are within 24 of the ghost; the chroma floor rules them out.
+/// Part of the anti-aliased edge of a dark-blue drawing on white is within 24 too, and
+/// coloured (chroma about 27), but that edge is a pixel or two wide, so it never fills a
+/// 3x3 block.
+fn ghost_core_pixels(px: &Pixels, alpha_mode: bool) -> usize {
+    let (w, h, c) = (px.width, px.height, px.channels);
+    if w < 3 || h < 3 {
+        return 0;
     }
-    ghost_px > 0 && ghost_px * 1000 >= total * EVIDENCE_MIN_PER_MILLE
+    // Ghost-coloured flags of the last three rows (row y lives in rows[y % 3]).
+    let mut rows = [vec![false; w], vec![false; w], vec![false; w]];
+    let mut last: Option<((Rgb, u8), bool)> = None;
+    let mut core = 0usize;
+    for (y, line) in px.data.chunks_exact(w * c).take(h).enumerate() {
+        let row = &mut rows[y % 3];
+        for (flag, p) in row.iter_mut().zip(line.chunks_exact(c)) {
+            let key = Pixels::pixel(p);
+            *flag = match last {
+                Some((k, g)) if k == key => g,
+                _ => {
+                    let (rgb, solid) = judged(key.0, key.1, alpha_mode);
+                    let g = ghost_coloured(rgb, solid);
+                    last = Some((key, g));
+                    g
+                }
+            };
+        }
+        if y >= 2 {
+            // Count the middle row's pixels whose 3x3 block is all ghost: runs of columns
+            // that are ghost-coloured in all three rows.
+            let [r0, r1, r2] = &rows;
+            let mut run = 0usize;
+            for ((&a, &b), &c) in r0.iter().zip(r1).zip(r2) {
+                if a && b && c {
+                    run += 1;
+                    core += usize::from(run >= 3);
+                } else {
+                    run = 0;
+                }
+            }
+        }
+    }
+    core
 }
 
 /// The template-aware ink rule.
@@ -312,6 +354,9 @@ fn ghost_visible(px: &Pixels, alpha_mode: bool) -> bool {
 /// * **Opaque raster** (everything else, including all JPEGs): composite over white, then
 ///   coverage is the darkness `255 - luma`, unless the colour is near a template colour.
 ///   After resampling, coverage is thresholded at 50%, i.e. luma < 0.5 is ink.
+///
+/// The guide-over-ghost products count as template colours only when at least
+/// [`GHOST_MIN_PERCENT`] of the canvas is inside a visible reference.
 pub(crate) fn ink(px: &Pixels) -> Ink {
     let total = px.width * px.height;
     let c = px.channels;
@@ -328,7 +373,9 @@ pub(crate) fn ink(px: &Pixels) -> Ink {
     } else {
         false
     };
-    let ghost = ghost_visible(px, alpha_mode);
+    // The reference counts as visible when at least 1% of the canvas is inside it.
+    let ghost_core = ghost_core_pixels(px, alpha_mode);
+    let ghost = ghost_core > 0 && ghost_core * 100 >= total * GHOST_MIN_PERCENT;
 
     let mut coverage = Vec::with_capacity(total);
     let (mut evidence_px, mut coloured_px, mut light_dropped_px) = (0usize, 0usize, 0usize);
@@ -354,9 +401,11 @@ pub(crate) fn ink(px: &Pixels) -> Ink {
     }
 
     let per_mille = |n: usize| n * 1000 >= total;
+    // Guides, or the inside of a reference (even a mostly hidden one), left visible.
+    let template_px = evidence_px + ghost_core;
     Ink {
         coverage,
-        guides_visible: evidence_px > 0 && evidence_px * 1000 >= total * EVIDENCE_MIN_PER_MILLE,
+        guides_visible: template_px > 0 && template_px * 1000 >= total * EVIDENCE_MIN_PER_MILLE,
         // 1% of the canvas in a clear colour, or 0.1% of it white and dropped.
         colours_flattened: coloured_px * 100 >= total || per_mille(light_dropped_px),
         // More than 5% of the visible drawing, and at least 0.1% of the canvas, is
@@ -404,6 +453,99 @@ mod tests {
         for c in GUIDE_COLOURS {
             assert!(chroma(c) >= EVIDENCE_MIN_CHROMA, "{}", c.to_hex());
         }
+    }
+
+    fn rgb_pixels(w: usize, h: usize, at: impl Fn(usize, usize) -> Rgb) -> Pixels {
+        let mut data = Vec::with_capacity(w * h * 3);
+        for y in 0..h {
+            for x in 0..w {
+                let c = at(x, y);
+                data.extend_from_slice(&[c.r, c.g, c.b]);
+            }
+        }
+        Pixels {
+            width: w,
+            height: h,
+            channels: 3,
+            data,
+        }
+    }
+
+    #[test]
+    fn only_the_inside_of_a_ghost_coloured_area_is_a_visible_reference() {
+        const NAVY: Rgb = Rgb::new(20, 70, 130);
+        // A navy edge blended 70% towards white: 19 from the ghost, and coloured.
+        let edge = Rgb::new(184, 200, 221);
+        assert!(ghost_coloured(edge, true));
+        // Lines of it two pixels wide (a soft edge) are never inside anything...
+        let lines = rgb_pixels(100, 100, |x, _| if x % 10 < 2 { edge } else { NAVY });
+        assert_eq!(ghost_core_pixels(&lines, false), 0);
+        let ink_lines = ink(&lines);
+        assert!(ink_lines.coverage.iter().filter(|&&c| c > 128).count() >= 8000);
+        assert!(!ink_lines.guides_visible);
+        // ...and light grey isn't the ghost, however much of it there is.
+        let grey = rgb_pixels(100, 100, |x, _| {
+            if x < 50 {
+                Rgb::new(204, 204, 204)
+            } else {
+                NAVY
+            }
+        });
+        assert_eq!(ghost_core_pixels(&grey, false), 0);
+        let ink_grey = ink(&grey);
+        assert!(ink_grey.coverage[99] > 128 && !ink_grey.guides_visible);
+        // A 3x3 block has one inside pixel; a 5x4 block has six.
+        let block = |x0: usize, y0: usize, bw: usize, bh: usize| {
+            rgb_pixels(10, 10, move |x, y| {
+                if (x0..x0 + bw).contains(&x) && (y0..y0 + bh).contains(&y) {
+                    REFERENCE_GHOST
+                } else {
+                    WHITE
+                }
+            })
+        };
+        assert_eq!(ghost_core_pixels(&block(2, 2, 3, 3), false), 1);
+        assert_eq!(ghost_core_pixels(&block(0, 3, 5, 4), false), 6);
+        assert_eq!(ghost_core_pixels(&block(0, 0, 10, 10), false), 64);
+    }
+
+    #[test]
+    fn products_are_ink_until_one_percent_of_the_canvas_is_inside_the_reference() {
+        const NAVY: Rgb = Rgb::new(20, 70, 130);
+        // 100x100 navy with a ghost block; the block's inside is (side - 2)².
+        let canvas = |side: usize| {
+            rgb_pixels(100, 100, move |x, y| {
+                if x < side && y < side {
+                    REFERENCE_GHOST
+                } else {
+                    NAVY
+                }
+            })
+        };
+        // 11x11: 81 inside pixels, 0.81%. The navy is ink, and the reference is
+        // reported.
+        let small = ink(&canvas(11));
+        assert_eq!(small.coverage[99 * 100 + 99], 255 - luma(NAVY) as u8);
+        assert!(small.guides_visible);
+        // 12x12: 100 inside pixels, 1%. The navy is now a guide over the ghost.
+        let big = ink(&canvas(12));
+        assert_eq!(big.coverage[99 * 100 + 99], 0);
+        assert!(big.guides_visible);
+        // 4x4 (4 inside pixels, 0.04%): too little to report.
+        assert!(!ink(&canvas(4)).guides_visible);
+    }
+
+    #[test]
+    fn guides_are_reported_from_a_tenth_of_a_percent_of_the_canvas() {
+        let labels = |n: usize| {
+            rgb_pixels(
+                100,
+                100,
+                move |x, y| if y * 100 + x < n { LABEL } else { WHITE },
+            )
+        };
+        assert!(ink(&labels(10)).guides_visible);
+        assert!(!ink(&labels(9)).guides_visible);
     }
 
     #[test]

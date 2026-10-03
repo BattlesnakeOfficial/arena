@@ -80,9 +80,7 @@ pub(crate) fn trace_mask(
         ));
     }
 
-    // The cluster walker has a few panics ("STUCK", "no way to go?"); never let them
-    // unwind into the caller. A caught panic is a bug, reported as `Internal`.
-    let result = std::panic::catch_unwind(move || {
+    let path = guarded(move || {
         let mut img = BinaryImage::new_w_h(side, side);
         for (i, &m) in mask.iter().enumerate() {
             if m {
@@ -124,14 +122,18 @@ pub(crate) fn trace_mask(
             }
         }
         pb.finish()
-    });
-    match result {
-        Ok(path) => Ok(TraceResult {
-            path,
-            specks_removed,
-        }),
-        Err(_) => Err(ProcessError::Internal("tracer panicked")),
-    }
+    })?;
+    Ok(TraceResult {
+        path,
+        specks_removed,
+    })
+}
+
+/// Run the tracer. visioncortex's cluster walker has a few panics ("STUCK", "no way to
+/// go?"); never let them unwind into the caller. The budget keeps the inputs we know
+/// about clear of them, so a caught panic is a bug, reported as `Internal`.
+fn guarded<T>(trace: impl FnOnce() -> T + std::panic::UnwindSafe) -> Result<T, ProcessError> {
+    std::panic::catch_unwind(trace).map_err(|_| ProcessError::Internal("tracer panicked"))
 }
 
 /// What [`despeckle`] removed and what it left for the tracer.
@@ -224,6 +226,13 @@ mod tests {
         assert!(!mask[side + 1]);
         assert_eq!(mask.iter().filter(|&&m| m).count(), 100);
         assert_eq!(boundary_edges(&mask, side), 40);
+    }
+
+    #[test]
+    fn a_tracer_panic_is_internal() {
+        assert_eq!(guarded(|| 7), Ok(7));
+        let panicked: Result<(), _> = guarded(|| panic!("STUCK"));
+        assert_eq!(panicked, Err(ProcessError::Internal("tracer panicked")));
     }
 
     #[test]

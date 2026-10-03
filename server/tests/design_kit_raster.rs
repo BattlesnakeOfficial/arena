@@ -359,6 +359,149 @@ fn navy_and_crimson_drawings_are_ink() {
     }
 }
 
+/// `svg` composited over an opaque `background`, then softened with `blur` passes of a
+/// 3x3 box blur (a 1 px soft edge per pass, like a slightly soft brush), as an RGB PNG.
+fn soft_opaque(svg: &str, side: u32, background: [u8; 3], blur: usize) -> Vec<u8> {
+    let rgba = straight_rgba(&render(svg, side));
+    let mut rgb: Vec<u8> = rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .flat_map(|p| {
+            let a = p[3] as u32;
+            let c = |v: u8, bg: u8| ((v as u32 * a + bg as u32 * (255 - a) + 127) / 255) as u8;
+            [
+                c(p[0], background[0]),
+                c(p[1], background[1]),
+                c(p[2], background[2]),
+            ]
+        })
+        .collect();
+    let side = side as usize;
+    for _ in 0..blur {
+        // Separable: rows, then columns.
+        for (stride, step) in [(side * 3, 3), (3, side * 3)] {
+            let prev = rgb.clone();
+            for line in 0..side {
+                for i in 0..side {
+                    for ch in 0..3 {
+                        let at = |j: usize| prev[line * stride + j * step + ch] as u32;
+                        let (lo, hi) = (i.saturating_sub(1), (i + 1).min(side - 1));
+                        let sum = at(lo) + at(i) + at(hi);
+                        rgb[line * stride + i * step + ch] = ((sum + 1) / 3) as u8;
+                    }
+                }
+            }
+        }
+    }
+    encode_png(side as u32, side as u32, png::ColorType::Rgb, &rgb)
+}
+
+/// Upload `png` and check it against `reference` (an SVG of the intended shape): a
+/// faithful trace, no warnings, and no template guides or reference reported. (A soft
+/// edge of a blue close to the template's labels can also leave specks: the blend
+/// exclusion around that guide colour catches part of the edge.)
+fn check_coloured(label: &str, png: &[u8], reference: &str, kind: AssetKind) {
+    let s = run(png, &[]).unwrap_or_else(|e| panic!("{label}: {e:?}"));
+    let score = iou(&alpha(reference, 400), &shape_alpha(&s, 400));
+    assert!(score >= 0.97, "{label}: IoU {score:.4}");
+    assert!(
+        s.info().first() == Some(&Lint::ColoursFlattened)
+            && s.info()[1..]
+                .iter()
+                .all(|l| matches!(l, Lint::SpecksRemoved { .. })),
+        "{label}: {:?}",
+        s.info()
+    );
+    assert!(s.passes(kind), "{label}: {:?}", s.lints());
+}
+
+const WHITE_BG: [u8; 3] = [255, 255, 255];
+
+#[test]
+fn soft_edged_navy_and_crimson_drawings_are_ink() {
+    // The template's 1000 px with an ordinary 1 px soft edge. Where navy blends into
+    // white it passes within 11 of the reference ghost's colour, about 0.1% of the
+    // canvas for these heads. That used to count as a visible reference, which turns on
+    // the exclusion of guide-over-ghost products: dark blues and crimson. The drawing
+    // then vanished, with "We only found the template guides".
+    for slug in HEADS {
+        for (fill, side) in [("#283c82", 1000), ("#144682", 512)] {
+            let svg = board_svg(&catalog_inner(AssetKind::Head, slug), fill);
+            check_coloured(
+                &format!("{slug} {fill} soft @{side}"),
+                &soft_opaque(&svg, side, WHITE_BG, 1),
+                &head(slug),
+                AssetKind::Head,
+            );
+        }
+    }
+    for (slug, fill, blur) in [
+        ("default", "#283c82", 2),
+        ("smile", "#1e3a8a", 2),
+        ("beluga", "#961946", 2),
+    ] {
+        let svg = board_svg(&catalog_inner(AssetKind::Head, slug), fill);
+        check_coloured(
+            &format!("{slug} {fill} blur {blur}"),
+            &soft_opaque(&svg, 1000, WHITE_BG, blur),
+            &head(slug),
+            AssetKind::Head,
+        );
+    }
+}
+
+#[test]
+fn navy_and_crimson_fills_inside_a_soft_black_outline_are_ink() {
+    // A black outline's soft edge is grey, and greys from about 190 to 213 are within
+    // 24 of the ghost. They used to switch on the product exclusion, so the fill was
+    // dropped and the head came back as an outline ("fill your shape").
+    let inner = catalog_inner(AssetKind::Head, "smile");
+    let outlined = |fill: &str| {
+        format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\" width=\"100\" \
+             height=\"100\" fill=\"{fill}\" stroke=\"#000\" stroke-width=\"1.5\">{inner}</svg>"
+        )
+    };
+    let reference = outlined("#000");
+    for fill in ["#144682", "#961946", "#1e3a8a"] {
+        check_coloured(
+            &format!("smile {fill} in a black outline"),
+            &soft_opaque(&outlined(fill), 1000, WHITE_BG, 1),
+            &reference,
+            AssetKind::Head,
+        );
+    }
+}
+
+#[test]
+fn navy_and_crimson_drawings_on_light_grey_are_ink() {
+    // A light-grey background (#cccccc is 13 from the ghost) is not a reference.
+    for background in [[0xcc; 3], [0xd0; 3], [0xc8; 3]] {
+        for fill in ["#144682", "#961946"] {
+            let svg = board_svg(&catalog_inner(AssetKind::Head, "smile"), fill);
+            check_coloured(
+                &format!("smile {fill} on {background:?}"),
+                &soft_opaque(&svg, 1000, background, 0),
+                &head("smile"),
+                AssetKind::Head,
+            );
+        }
+    }
+    // White with a small grey drop shadow (0.2% of the canvas).
+    let svg = board_svg(
+        &format!(
+            "<rect x=\"60\" y=\"90\" width=\"10\" height=\"2\" fill=\"#cdcdcd\"/>{}",
+            catalog_inner(AssetKind::Head, "smile")
+        ),
+        "#144682",
+    );
+    let s = run(&soft_opaque(&svg, 1000, WHITE_BG, 0), &[]).expect("smile with a shadow");
+    let score = iou(&alpha(&head("smile"), 400), &shape_alpha(&s, 400));
+    assert!(score >= 0.97, "IoU {score:.4}");
+    assert_eq!(s.info(), [Lint::ColoursFlattened]);
+}
+
 /// An opaque JPEG of `svg` with an EXIF APP1 segment giving `orientation`.
 fn jpeg_with_orientation(svg: &str, side: u32, orientation: u16) -> Vec<u8> {
     let rgb = over_white(&straight_rgba(&render(svg, side)));
@@ -432,6 +575,91 @@ fn progressive_jpegs_have_a_smaller_size_cap() {
         let r = process_upload(&encode(side, progressive, colour), &limits, &[]);
         assert!(r.is_ok(), "{side} progressive={progressive}: {:?}", r.err());
     }
+}
+
+/// How many scans (SOS markers) a JPEG has. Entropy-coded data never contains 0xFF 0xDA
+/// (a literal 0xFF is stuffed as 0xFF 0x00), so every match is a scan header.
+fn scan_count(jpeg: &[u8]) -> usize {
+    jpeg.windows(2).filter(|w| w == &[0xff, 0xda]).count()
+}
+
+#[test]
+fn multi_scan_baseline_jpegs_have_the_progressive_size_cap() {
+    // A baseline JPEG with one scan per component (what encoders write when they optimise
+    // their Huffman tables) also makes zune-jpeg keep every coefficient until the last
+    // scan: a 2048 px CMYK one peaked at 47 MB. It gets the same cap as a progressive one.
+    let limits = Limits {
+        max_raster_side: 512,
+        ..Limits::default()
+    };
+    let encode = |side: u16, colour: jpeg_encoder::ColorType| {
+        let channels = match colour {
+            jpeg_encoder::ColorType::Luma => 1,
+            jpeg_encoder::ColorType::Cmyk => 4,
+            _ => 3,
+        };
+        let mut data = vec![255u8; side as usize * side as usize * channels];
+        data[..side as usize * channels * 40].fill(0);
+        if colour == jpeg_encoder::ColorType::Cmyk {
+            // CMYK is ink, so 0 is white: ink the top rows, leave the rest white.
+            for v in data.iter_mut() {
+                *v = 255 - *v;
+            }
+        }
+        let mut out = Vec::new();
+        let mut enc = jpeg_encoder::Encoder::new(&mut out, 90);
+        enc.set_sampling_factor(jpeg_encoder::SamplingFactor::F_1_1);
+        enc.set_optimized_huffman_tables(true);
+        enc.encode(&data, side, side, colour).expect("jpeg encode");
+        out
+    };
+    let rgb = jpeg_encoder::ColorType::Rgb;
+    let cmyk = jpeg_encoder::ColorType::Cmyk;
+    assert_eq!(scan_count(&encode(64, rgb)), 3, "one scan per component");
+    assert_eq!(
+        process_upload(&encode(400, rgb), &limits, &[]).err(),
+        Some(ProcessError::ImageTooLarge {
+            width: 400,
+            height: 400,
+            max_side: 362
+        })
+    );
+    assert_eq!(scan_count(&encode(64, cmyk)), 4, "one scan per component");
+    assert_eq!(
+        process_upload(&encode(400, cmyk), &limits, &[]).err(),
+        Some(ProcessError::ImageTooLarge {
+            width: 400,
+            height: 400,
+            max_side: 313
+        })
+    );
+    // Within the cap, and greyscale (one component, so its only scan has them all).
+    for (side, colour) in [
+        (360, rgb),
+        (310, cmyk),
+        (400, jpeg_encoder::ColorType::Luma),
+    ] {
+        let r = process_upload(&encode(side, colour), &limits, &[]);
+        assert!(r.is_ok(), "{side} {colour:?}: {:?}", r.err());
+    }
+}
+
+#[test]
+fn a_jpeg_the_decoder_panics_on_is_invalid() {
+    // zune-jpeg 0.5 panics on a CMYK JPEG with one scan per component and subsampled
+    // colour, even a tiny one (a length assertion in its upsampler, which the NEON, AVX2
+    // and scalar versions all make). That must not unwind out of process_upload.
+    let side = 64u16;
+    let mut data = vec![0u8; side as usize * side as usize * 4];
+    data[..side as usize * 4 * 20].fill(255);
+    let mut out = Vec::new();
+    let mut enc = jpeg_encoder::Encoder::new(&mut out, 80);
+    enc.set_sampling_factor(jpeg_encoder::SamplingFactor::F_2_2);
+    enc.set_optimized_huffman_tables(true);
+    enc.encode(&data, side, side, jpeg_encoder::ColorType::Cmyk)
+        .expect("jpeg encode");
+    let r = run(&out, &[]);
+    assert!(matches!(r, Err(ProcessError::InvalidImage(_))), "{r:?}");
 }
 
 #[test]
@@ -674,6 +902,57 @@ fn round_blob_has_a_neck_gap() {
     let gaps = &s.metrics().left_edge_gaps;
     assert_eq!(gaps.len(), 2, "{gaps:?}");
     assert!(gaps[0][0] == 0.0 && gaps[1][1] == 100.0, "{gaps:?}");
+}
+
+/// `inner` in black on white, with `cut` (SVG markup) painted white over it.
+fn cut_png(inner: &str, cut: &str) -> Vec<u8> {
+    let svg = board_svg(&format!("{inner}<g fill=\"#fff\">{cut}</g>"), "#000");
+    export(&svg, 512, Export::Opaque)
+}
+
+/// A 20% notch in the neck: x < 10, y 40–60.
+const NOTCH: &str = "<rect x=\"-1\" y=\"40\" width=\"11\" height=\"20\"/>";
+
+#[test]
+fn a_neck_gap_is_not_mistaken_for_a_turn_when_the_top_and_bottom_are_flat() {
+    // These heads have a full top and bottom as well as the neck, so a notched neck
+    // (left side 80%) used to read as "the full-height side is the top": "This looks
+    // rotated", with the neck gap left out. A rotated head's front is opposite its neck,
+    // and no head's front is more than 47.5% full.
+    let gap_only = |label: &str, png: &[u8], want_head: &[&str]| {
+        let s = lint_case(label, png, want_head, &["neck_gap"]);
+        for l in s.lints().head.iter().chain(&s.lints().tail) {
+            assert_eq!(l.fix(), None, "{label}: {l:?}");
+        }
+    };
+    for slug in ["default", "pixel", "sand-worm"] {
+        gap_only(
+            &format!("notched {slug} head"),
+            &cut_png(&catalog_inner(AssetKind::Head, slug), NOTCH),
+            &["neck_gap"],
+        );
+    }
+    // The eye drawn a little big, so it breaks the neck edge (left side 83%).
+    gap_only(
+        "default head with a big eye",
+        &cut_png(
+            &catalog_inner(AssetKind::Head, "default"),
+            "<circle cx=\"8\" cy=\"28.55\" r=\"11\"/>",
+        ),
+        &["neck_gap"],
+    );
+    // Tails: a notched block (full on every other side) was offered Flip, which moves the
+    // notch to the tip; a flat fishtail was told to rotate.
+    gap_only(
+        "notched block-bum tail",
+        &cut_png(&catalog_inner(AssetKind::Tail, "block-bum"), NOTCH),
+        &["solid_square", "neck_gap"],
+    );
+    gap_only(
+        "notched fishtail",
+        &cut_png("<path d=\"M0 0H100V30L70 50L100 70V100H0Z\"/>", NOTCH),
+        &["neck_gap"],
+    );
 }
 
 #[test]

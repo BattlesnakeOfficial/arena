@@ -2,8 +2,9 @@
 //!
 //! Memory: a 2048 px RGBA PNG peaks at about 23 MB for the whole process. The decoders
 //! are kept near that: PNG metadata chunks we don't use (ICC profiles, text) are skipped
-//! rather than inflated, and progressive JPEGs, which keep every DCT coefficient until
-//! the last scan, get a smaller size cap (see [`progressive_max_pixels`]).
+//! rather than inflated, and JPEGs that make zune-jpeg keep every DCT coefficient until
+//! the last scan (progressive ones, and baseline ones with one scan per component) get a
+//! smaller size cap (see [`buffered_max_pixels`]).
 
 use super::lints::Lint;
 use super::palette::{self, Pixels};
@@ -20,13 +21,22 @@ pub(crate) fn process(
     format: InputFormat,
     limits: &Limits,
 ) -> Result<Traced, ProcessError> {
-    let (pixels, orientation) = match format {
-        InputFormat::Png => (decode_png(bytes, limits)?, Orientation::default()),
-        InputFormat::Jpeg => decode_jpeg(bytes, limits)?,
-        InputFormat::Svg => {
-            return Err(ProcessError::Internal("SVG passed to the raster pipeline"));
-        }
-    };
+    // The decoders are third-party code fed untrusted bytes, and zune-jpeg 0.5 panics on
+    // some files it accepts (a CMYK JPEG with one scan per component and subsampled
+    // colour, at any size). A file the decoder can't handle is the upload's problem: it
+    // becomes `InvalidImage` (the panic hook still reports it) rather than unwinding into
+    // the caller.
+    let decoded = std::panic::catch_unwind(|| match format {
+        InputFormat::Png => Ok((decode_png(bytes, limits)?, Orientation::default())),
+        InputFormat::Jpeg => decode_jpeg(bytes, limits),
+        InputFormat::Svg => Err(ProcessError::Internal("SVG passed to the raster pipeline")),
+    });
+    let (pixels, orientation) = decoded.unwrap_or_else(|_| {
+        Err(ProcessError::InvalidImage(format!(
+            "the {} decoder failed on this file",
+            format.as_str()
+        )))
+    })?;
     let ink = palette::ink(&pixels);
     let (stored_w, stored_h) = (pixels.width, pixels.height);
     drop(pixels);
@@ -172,8 +182,14 @@ fn decode_jpeg(bytes: &[u8], limits: &Limits) -> Result<(Pixels, Orientation), P
         .ok_or(ProcessError::Internal("JPEG headers decoded without info"))?;
     let (w, h) = (u32::from(info.width), u32::from(info.height));
     check_dimensions(w, h, limits)?;
-    if !info.sof.is_sequential_dct() {
-        let max = progressive_max_pixels(limits, info.components);
+    // zune-jpeg decodes a scan straight to pixels only when it is sequential and its first
+    // scan carries every component. Otherwise (progressive, or one scan per component,
+    // which encoders write when they optimise their Huffman tables) it keeps the whole
+    // image's coefficients until the last scan.
+    let buffers_coefficients =
+        !info.sof.is_sequential_dct() || first_scan_components(bytes) != Some(info.components);
+    if buffers_coefficients {
+        let max = buffered_max_pixels(limits, info.components);
         if w as usize * h as usize > max {
             return Err(ProcessError::ImageTooLarge {
                 width: w,
@@ -205,19 +221,63 @@ fn decode_jpeg(bytes: &[u8], limits: &Limits) -> Result<(Pixels, Orientation), P
     Ok((pixels, orientation))
 }
 
-/// Most pixels in a progressive JPEG. zune-jpeg keeps a 2-byte coefficient per sample
-/// until the last scan, on top of the RGB output, so a 2048 px progressive RGB JPEG
-/// would need about 40 MB. This holds the coefficients to the size of the largest RGB
-/// output we accept (`max_raster_side`² × 3 bytes): 1448 px square for colour, the full
+/// Most pixels in a JPEG whose coefficients zune-jpeg buffers (progressive, or not
+/// interleaved). It keeps a 2-byte coefficient per sample until the last scan, on top of
+/// the RGB output, so a 2048 px RGB one would need about 40 MB (47 MB for CMYK). This
+/// holds the coefficients to the size of the largest RGB output we accept
+/// (`max_raster_side`² × 3 bytes): 1448 px square for 3 components, 1254 for 4, the full
 /// 2048 for greyscale.
-fn progressive_max_pixels(limits: &Limits, components: u8) -> usize {
+fn buffered_max_pixels(limits: &Limits, components: u8) -> usize {
     let side = limits.max_raster_side as usize;
     side * side * 3 / (2 * usize::from(components.max(1)))
 }
 
+/// `Ns` of a JPEG's first scan header (SOS): how many components its first scan carries.
+/// `None` when there is no scan header or it is cut off.
+///
+/// Walks the markers the way zune-jpeg 0.5 does, so both find the same scan: every
+/// segment before the first SOS is skipped by its declared length (zune-jpeg's parsers
+/// consume exactly that or fail), `0xFF` and `0x00` fill bytes after an `0xFF` are
+/// skipped, and other stray bytes are ignored.
+fn first_scan_components(bytes: &[u8]) -> Option<u8> {
+    if bytes.get(..2)? != [0xff, 0xd8] {
+        return None;
+    }
+    let mut i = 2usize;
+    let mut last = 0u8;
+    loop {
+        let mut m = *bytes.get(i)?;
+        i += 1;
+        if (m == 0xff || m == 0) && last == 0xff {
+            while m == 0xff || m == 0 {
+                last = m;
+                m = *bytes.get(i)?;
+                i += 1;
+            }
+        }
+        if last == 0xff {
+            match m {
+                // SOS: length (2 bytes), then Ns.
+                0xda => return bytes.get(i.checked_add(2)?).copied(),
+                // EOI before any scan.
+                0xd9 => return None,
+                _ => {
+                    let len = u16::from_be_bytes([*bytes.get(i)?, *bytes.get(i + 1)?]);
+                    if len < 2 {
+                        return None;
+                    }
+                    i = i.checked_add(usize::from(len))?;
+                }
+            }
+        }
+        last = m;
+    }
+}
+
 /// EXIF orientation: how the stored pixels must be turned to show the image upright.
-/// Browsers apply it to the artist's preview (an iPad camera stores landscape pixels
-/// with "rotate 90°"), so we apply it too.
+/// Browsers apply it to the artist's preview (cameras store landscape pixels with
+/// "rotate 90°", and apps that crop or resize a photo often keep the tag), so we apply it
+/// too. Camera originals themselves are larger than `max_raster_side`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Orientation(u8);
 
@@ -413,6 +473,50 @@ mod tests {
         // An IFD offset or entry count pointing past the end doesn't panic.
         assert_eq!(Orientation::from_exif(b"II*\0\xff\xff\xff\xff"), None);
         assert_eq!(Orientation::from_exif(b"II*\0\x08\0\0\0\xff\xff"), None);
+    }
+
+    #[test]
+    fn the_first_scan_is_found_the_way_zune_jpeg_finds_it() {
+        let sos = |ns: u8| {
+            let mut v = vec![0xff, 0xda, 0, 6 + 2 * ns, ns];
+            v.extend(std::iter::repeat_n(0, 2 * usize::from(ns) + 3));
+            v
+        };
+        let jpeg = |segments: &[&[u8]]| {
+            let mut v = vec![0xff, 0xd8];
+            for s in segments {
+                v.extend_from_slice(s);
+            }
+            v
+        };
+        // A DQT-like segment, then a 3-component scan.
+        let dqt: &[u8] = &[0xff, 0xdb, 0, 4, 0xaa, 0xbb];
+        assert_eq!(first_scan_components(&jpeg(&[dqt, &sos(3)])), Some(3));
+        // A scan header inside a segment (an EXIF thumbnail) is skipped with it.
+        let app1: &[u8] = &[0xff, 0xe1, 0, 9, 0xff, 0xda, 0, 8, 1, 0, 0];
+        assert_eq!(first_scan_components(&jpeg(&[app1, &sos(1)])), Some(1));
+        // Fill bytes before a marker, and a few stray bytes between segments.
+        assert_eq!(
+            first_scan_components(&jpeg(&[&[0xff, 0xff, 0xff], dqt, &[1, 2], &sos(4)])),
+            Some(4)
+        );
+        // 0xFF 0x00 is not a marker: the SOS after it is ignored, like zune-jpeg does.
+        assert_eq!(
+            first_scan_components(&jpeg(&[dqt, &[0xff, 0x00, 0xda, 0, 8, 1]])),
+            None
+        );
+        // No SOI, an EOI first, a bad length, or cut off.
+        assert_eq!(first_scan_components(&sos(3)), None);
+        assert_eq!(
+            first_scan_components(&jpeg(&[&[0xff, 0xd9], &sos(3)])),
+            None
+        );
+        assert_eq!(first_scan_components(&jpeg(&[&[0xff, 0xdb, 0, 1]])), None);
+        assert_eq!(first_scan_components(&jpeg(&[&sos(3)[..4]])), None);
+        assert_eq!(
+            first_scan_components(&[0xff, 0xd8, 0xff, 0xdb, 0xff, 0xff]),
+            None
+        );
     }
 
     #[test]

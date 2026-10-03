@@ -53,16 +53,17 @@ pub enum Lint {
     /// L3b: the drawing doesn't reach the edges (x0 > 2, y0 > 3 or y1 < 97). Offers Fit
     /// unless Fit would change nothing (see [`fit_helps`]).
     Margins { bbox: [f32; 4] },
-    /// L4 (heads): the drawing's full-height side is on the right (mirrored), or, with no
-    /// full-height side anywhere, its centre of mass is right of x = 52.
+    /// L4 (heads): the drawing's full-height side is on the right and its left side looks
+    /// like a front (mirrored), or, when no side says it is turned or mirrored, its
+    /// centre of mass is right of x = 52.
     FacesLeft { centroid_x: f32 },
-    /// L4b (heads): the drawing's full-height side is the top or bottom (rotated), or the
-    /// neck is on the left but the right side is also more than 60% filled (a flat
-    /// front, or a quarter turn of a square-ish head). `right_edge_pct` is the drawing's
-    /// own right side.
+    /// L4b (heads): the drawing's full-height side is the top or bottom and the side
+    /// opposite looks like a front (rotated), or the neck is on the left but the right
+    /// side is also more than 60% filled (a flat front, or a quarter turn of a square-ish
+    /// head). `right_edge_pct` is the drawing's own right side.
     FacesUpDown { right_edge_pct: f32 },
     /// L4c (tails): the drawing's left side isn't full height (< 85%) but another side is
-    /// (≥ 85%).
+    /// (≥ 85%), and the side opposite that one looks like a tip (< 60%).
     TailReversed { attach_edge: Edge },
     /// L5: enclosed holes > 55% of the filled-in silhouette.
     OutlineOnly { hole_pct: f32 },
@@ -91,6 +92,10 @@ pub const MARGIN_MIN_Y1: f32 = 97.0;
 pub const FACES_LEFT_ABOVE_X: f32 = 52.0;
 pub const FACES_UP_DOWN_ABOVE_PCT: f32 = 60.0;
 pub const ATTACH_EDGE_MIN_PCT: f32 = 85.0;
+/// A side opposite a full-height side only reads as a front or tip (so the full-height
+/// side as a turned or mirrored attach edge) below this: every official head's front is
+/// at most 47.5% full, and 95% of the tails' tips at most 49.5%.
+pub const FRONT_BELOW_PCT: f32 = 60.0;
 pub const OUTLINE_ONLY_ABOVE_PCT: f32 = 55.0;
 
 impl Lint {
@@ -260,11 +265,13 @@ pub(crate) fn fit_helps(b: [f32; 4]) -> bool {
 /// padded or short drawing whose neck is on the left isn't mistaken for a rotated one:
 /// * the drawing's left side is full height: the neck is on the left. A head whose
 ///   right side is also more than 60% full gets `faces_up_down`;
-/// * otherwise the full-height side, if any, says where the neck went: the right is a
-///   mirror (`faces_left` / `tail_reversed`, both offer Flip), the top or bottom a
-///   rotation (`faces_up_down` / `tail_reversed`, no fix);
-/// * a head with no full-height side anywhere and its mass right of x = 52 gets
-///   `faces_left`.
+/// * otherwise a full-height side whose opposite side looks like a front or tip (below
+///   [`FRONT_BELOW_PCT`]) says where the neck went: the right is a mirror (`faces_left` /
+///   `tail_reversed`, both offer Flip), the top or bottom a rotation (`faces_up_down` /
+///   `tail_reversed`, no fix). A full-height side whose opposite is full too (a head
+///   with a flat top and bottom, a block) says nothing: the left side is still the
+///   neck, with a gap in it;
+/// * a head with no such side and its mass right of x = 52 gets `faces_left`.
 ///
 /// Suppression, so the artist gets one problem and one fix:
 /// * `neck_gap` is left out when `margins` offers Fit and the fitted drawing would have
@@ -275,17 +282,20 @@ pub(crate) fn for_kind(m: &Metrics, kind: AssetKind) -> Vec<Lint> {
     let head = kind == AssetKind::Head;
     let [own_left, own_right, own_top, own_bottom] = m.drawing_edges;
     let neck_on_left = own_left >= ATTACH_EDGE_MIN_PCT;
-    // The drawing's full-height (attach) side, when it isn't the left one.
-    // On ties the last one wins, so Right (which Flip can fix) is last.
+    // The drawing's full-height (attach) side, when it isn't the left one: full height,
+    // with a front or tip opposite. On ties the last one wins, so Right (which Flip can
+    // fix) is last.
     let attach_elsewhere = [
-        (Edge::Bottom, own_bottom),
-        (Edge::Top, own_top),
-        (Edge::Right, own_right),
+        (Edge::Bottom, own_bottom, own_top),
+        (Edge::Top, own_top, own_bottom),
+        (Edge::Right, own_right, own_left),
     ]
     .into_iter()
-    .filter(|(_, pct)| !neck_on_left && *pct >= ATTACH_EDGE_MIN_PCT)
+    .filter(|&(_, pct, opposite)| {
+        !neck_on_left && pct >= ATTACH_EDGE_MIN_PCT && opposite < FRONT_BELOW_PCT
+    })
     .max_by(|a, b| a.1.total_cmp(&b.1))
-    .map(|(edge, _)| edge);
+    .map(|(edge, ..)| edge);
 
     let mut out = Vec::new();
     if m.fill_pct < NEARLY_EMPTY_BELOW_PCT {
@@ -356,6 +366,65 @@ pub(crate) fn for_kind(m: &Metrics, kind: AssetKind) -> Vec<Lint> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Metrics of a drawing that reaches every edge of the square, with these sides
+    /// (`[left, right, top, bottom]`) and its centre of mass at x = 45.
+    fn edges(e: [f32; 4]) -> Metrics {
+        Metrics {
+            fill_pct: 70.0,
+            left_edge_pct: e[0],
+            right_edge_pct: e[1],
+            top_edge_pct: e[2],
+            bottom_edge_pct: e[3],
+            left_edge_gaps: Vec::new(),
+            bbox: Some([0.0, 0.0, 100.0, 100.0]),
+            drawing_edges: e,
+            centroid: Some([45.0, 50.0]),
+            hole_pct: 0.0,
+            holes: 0,
+        }
+    }
+
+    fn lint_codes(e: [f32; 4], kind: AssetKind) -> Vec<&'static str> {
+        for_kind(&edges(e), kind).iter().map(Lint::code).collect()
+    }
+
+    #[test]
+    fn a_full_side_is_the_attach_edge_only_opposite_a_front() {
+        use AssetKind::{Head, Tail};
+        // Notched necks: the top and bottom are both full, or the right is full but the
+        // left (its opposite) is mostly there.
+        for e in [
+            [80.0, 17.0, 100.0, 100.0],
+            [80.0, 26.0, 100.0, 89.5],
+            [60.0, 17.0, 100.0, 100.0],
+            [80.0, 100.0, 100.0, 100.0],
+            [60.0, 100.0, 50.0, 50.0],
+        ] {
+            assert_eq!(lint_codes(e, Head), ["neck_gap"], "{e:?}");
+            assert_eq!(lint_codes(e, Tail), ["neck_gap"], "{e:?}");
+        }
+        // Turned: the top is full and the bottom (the old front) isn't.
+        let rotated = [55.5, 51.0, 100.0, 3.5];
+        assert_eq!(lint_codes(rotated, Head), ["faces_up_down"]);
+        let tail = for_kind(&edges(rotated), Tail);
+        assert_eq!(
+            tail,
+            [Lint::TailReversed {
+                attach_edge: Edge::Top
+            }]
+        );
+        assert_eq!(tail[0].fix(), None);
+        // Mirrored: the right is full and the left is a front.
+        let mirrored = [59.0, 100.0, 100.0, 100.0];
+        let head = for_kind(&edges(mirrored), Head);
+        assert_eq!(
+            head.iter().map(Lint::code).collect::<Vec<_>>(),
+            ["faces_left"]
+        );
+        assert_eq!(head[0].fix(), Some(Fix::Flip));
+        assert_eq!(lint_codes(mirrored, Tail), ["tail_reversed"]);
+    }
 
     #[test]
     fn fit_is_offered_until_it_would_do_nothing() {

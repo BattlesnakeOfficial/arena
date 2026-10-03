@@ -304,8 +304,13 @@ impl CleanShape {
 /// Why an upload could not be processed.
 ///
 /// Everything except [`ProcessError::Internal`] is caused by the upload and should be
-/// shown to the user (`user_message()`, HTTP 422). `Internal` is a bug (a caught panic or
-/// a failed allocation) and should be reported as a server error.
+/// shown to the user (`user_message()`, HTTP 422). `Internal` is a bug (a caught tracer
+/// panic, or an internal invariant that didn't hold) and should be reported as a server
+/// error. A decoder panic is caught and reported as `InvalidImage`.
+///
+/// [`process_upload`] does not catch everything: a panic elsewhere in our own code
+/// unwinds out of it, and a failed allocation aborts the process. Run it in an isolated
+/// process with a memory limit.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum ProcessError {
     #[error("the file is empty")]

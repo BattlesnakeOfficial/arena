@@ -55,11 +55,18 @@ where `d` uses only absolute `M L Q C Z`, digits, `.`, `-` and spaces (2 decimal
      only the first APNG frame is used. ICC profiles and text chunks are skipped, not
      inflated, and the decoder's own allocations are capped at 4 MiB.
    - JPEG (`zune-jpeg`, strict mode, so a truncated file is `invalid_image` rather than
-     grey filler rows): decoded to RGB. Progressive JPEGs keep every DCT coefficient
-     until the last scan, so they are capped at `max_raster_side`² × 3 / (2 ×
-     components) pixels (1448 px square for colour, 2048 for greyscale).
-   - EXIF orientation (JPEG) is applied after the ink rule, so a camera photo that the
-     browser shows upright is traced upright.
+     grey filler rows): decoded to RGB. zune-jpeg keeps every DCT coefficient until the
+     last scan when a JPEG is progressive, or when its first scan doesn't carry every
+     component (a baseline file with one scan per component, which encoders write when
+     they optimise their Huffman tables). Such files are capped at `max_raster_side`² ×
+     3 / (2 × components) pixels (1448 px square for 3 components, 1254 for CMYK, 2048
+     for greyscale). The first scan is found by walking the markers the way zune-jpeg
+     does; a file where it can't be found gets the cap too.
+   - A decoder panic (zune-jpeg 0.5 has some, e.g. on a CMYK JPEG with one scan per
+     component and subsampled colour) is caught and reported as `invalid_image`.
+   - EXIF orientation (JPEG) is applied after the ink rule, so a photo that the browser
+     shows upright is traced upright. (Camera originals are 3000–4000 px, over the size
+     limit; this is for photos that were cropped or resized and kept the tag.)
 4. **Ink rule** (below) turns pixels into ink coverage 0–255.
 5. **Square grid**: the canvas is fitted uniformly and centred into a square grid of
    `clamp(max(w, h), 512, 1024)` px (box downscale, bilinear upscale), thresholded at
@@ -84,7 +91,7 @@ semaphore.
 | raster bytes | 4 MiB |
 | raster side | 2048 px (from the header) |
 | min useful side | 128 px (smaller gets the `low_resolution` tip) |
-| progressive JPEG | `max_raster_side`² × 3 / (2 × components) pixels |
+| progressive or multi-scan JPEG | `max_raster_side`² × 3 / (2 × components) pixels |
 | trace grid | 1024 px |
 | traced clusters | 2000 |
 | outline on the trace grid | 64 boundary edges per px of grid side (65,536 at 1024) |
@@ -121,6 +128,7 @@ So the cleaned mask is checked before tracing:
 | 2048 px PNG | 66–72 ms | 23 MB |
 | 2048 px JPEG q80 | 62 ms | 19 MB |
 | 1448 px progressive JPEG (the cap) | | 21 MB |
+| 2048 px baseline JPEG, one scan per component (RGB / CMYK), before the cap | 54–86 ms | 39 / 47 MB; now `image_too_large` |
 | 2048 px PNG with a 57 KB iCCP chunk that inflates to 40 MB | | 23 MB |
 | 1024 px random noise | 57 ms → `too_complex` | |
 | 1024 px checkerboards (12 / 24 px squares) | 22 / 23 ms → `too_complex` | |
@@ -150,10 +158,23 @@ product of the two colours. A pixel is **never ink** when it is within RGB dista
 
 - a palette colour, or the segment from it to white (anti-aliased edges over the white
   background);
-- when the reference ghost is visible (at least 0.1% of the pixels are solid and within
-  24 of it), also the product of each guide colour and the ghost, or the segment from it
-  to the ghost. The products are dark navy and crimson (luma 64–76), so without a
-  visible ghost they are ordinary ink: a navy or crimson drawing still works.
+- when the reference is visible, also the product of each guide colour and the ghost,
+  or the segment from it to the ghost. The products are dark navy and crimson (luma
+  64–76), so without a visible reference they are ordinary ink.
+
+The reference is **visible** when at least 1% of the canvas is inside it: solid pixels
+within 24 of the ghost, visibly coloured (chroma ≥ 12), whose whole 3 × 3 neighbourhood
+is too. A visible reference covers tens of percent. Colour alone would not do: light
+greys from about 190 to 213 (a soft black edge, a light-grey background) are within 24
+of the ghost, and so is part of the anti-aliased edge of a dark-blue drawing on white
+(about 0.1% of the canvas at 1000 px). The chroma floor rules out the greys, and the
+edge is too thin to have an inside.
+
+So a navy or crimson drawing works with crisp or soft edges, on white or light grey,
+and filled inside a black outline. Ink close to the products is dropped only when the
+reference is visible (it can't be told apart from guides over the reference), or on
+paper close to the ghost's colour (a cool lavender-grey), which looks like a reference
+covering the whole canvas.
 
 Then:
 
@@ -166,11 +187,11 @@ Then:
 
 Info lints from the same pass:
 
-- `guides_visible`: at least 0.1% of pixels are within distance 24 of a palette colour
-  (or of a product, when the ghost is visible) *and* visibly coloured (chroma ≥ 12; the
-  ghost has 18). The chroma check keeps grey anti-aliasing of black ink, pencil and
-  paper from counting. "We ignored the template guides. Hide them next time for the
-  cleanest result."
+- `guides_visible`: at least 0.1% of pixels are within distance 24 of a guide colour
+  (or of a product, when the reference is visible) *and* visibly coloured (chroma ≥ 12;
+  the ghost has 18), or are inside a reference as defined above. The chroma check keeps
+  grey anti-aliasing of black ink, pencil and paper from counting. "We ignored the
+  template guides. Hide them next time for the cleanest result."
 - `colours_flattened`: at least 1% of the canvas is ink in a clear colour (chroma ≥ 64),
   or (alpha rasters) at least 0.1% of the canvas was solid white and became holes.
 - `semi_transparent`: more than 5% of the visible ink, and at least 0.1% of the canvas,
@@ -240,9 +261,9 @@ Every asset touches x = 0 and spans y from 0–2 to at least 98.5.
 | `solid_square` | fill > 95% | warn | head | heads max 87.9%; tails exempt (block-bum is 100%) |
 | `neck_gap` | left edge < 85% | warn | both | catalog min 88% (pumpkin head) |
 | `margins` | bbox x0 > 2, y0 > 3 or y1 < 97 | warn, offers **Fit** while it would help | both | every asset touches x = 0 and spans 0–2 … ≥ 98.5 |
-| `faces_left` | the drawing's full-height side is the right one; or no side is full height and centroid x > 52 | warn, offers **Flip** | head | heads' right edge max 47.5%, centroid x max 48.5 |
-| `faces_up_down` | the drawing's full-height side is the top or bottom; or its left side is full height and its right side > 60% (not a solid square) | warn | head | heads' left edge never < 88%, right edge max 47.5% |
-| `tail_reversed` | the drawing's left side < 85% and its right, top or bottom ≥ 85% | warn, offers **Flip** when it's the right side | tail | tails' left edge never < 88% |
+| `faces_left` | the drawing's left side < 85%, its right side ≥ 85% and its left < 60%; or no side qualifies and centroid x > 52 | warn, offers **Flip** | head | heads' right edge max 47.5%, centroid x max 48.5 |
+| `faces_up_down` | the drawing's left side < 85%, its top (bottom) ≥ 85% and its bottom (top) < 60%; or its left side is full height and its right side > 60% (not a solid square) | warn | head | heads' left edge never < 88%, right edge max 47.5% |
+| `tail_reversed` | the drawing's left side < 85%, and its right, top or bottom ≥ 85% with the side opposite < 60% | warn, offers **Flip** when it's the right side | tail | tails' left edge never < 88%; 95% of tips ≤ 49.5% |
 | `outline_only` | hole fraction > 55% | warn | both | catalog max 47.1%; a 6-unit stroke outline is ≈ 77% |
 | `specks_removed` | pieces or holes < 1 unit² removed | info | – | removed automatically |
 | `colours_flattened` | see the ink rule | info | – | |
@@ -256,7 +277,18 @@ by the square's edges or the centre of mass alone. A short or padded drawing who
 left side is full height isn't mistaken for a rotated one, a quarter turn of a
 top-heavy head (beluga's centre of mass moves to x 53.5) isn't mistaken for a mirror, and
 a mirrored head whose mass is near the middle (guitar, x 51.5) still gets Flip. The
-centroid rule only applies when no side is full height.
+centroid rule only applies when no side qualifies.
+
+A full-height side other than the left only says the drawing is turned or mirrored when
+the side opposite it looks like a front or tip (< 60%; every official head's front is at
+most 47.5% full). Many correct heads also have a full top and bottom (`default`, the
+template's reference, and `pixel` and `sand-worm`), and blocks are full on every side,
+so for them a left side under 85% is a neck with a gap in it, not a rotation: they get
+`neck_gap` and no Flip. The rule can't tell a head with one flat side (top or bottom),
+a rounded other side and a notched neck from a rotated head; that case still reads as
+rotated. A turned or mirrored tail whose tip (the side opposite its full-height side)
+is at least 60% full isn't recognised as one; it gets `neck_gap` if its left side is
+under 85%.
 
 Fit keeps the aspect ratio: it scales the larger side to 100, left-anchors the drawing
 and centres it vertically. So Fit is offered only while it would clear the margins or
@@ -269,7 +301,8 @@ So that each problem gets one message and one fix:
 - `margins` suppresses `neck_gap` when it offers Fit and the fitted drawing would have
   a full-height left edge (the drawing's own left side × height / larger side ≥ 85%).
   A small dot or a wide, short drawing keeps both.
-- A direction lint suppresses `neck_gap` when it found the full-height side elsewhere.
+- A direction lint suppresses `neck_gap` when it found the full-height side elsewhere
+  (opposite a front or tip, as above).
 - `solid_square` suppresses `faces_up_down` (a solid square has a full right side too).
 
 When a kind has no warn-level lint, `CleanShape::passes(kind)` is true: "Passes every
@@ -295,9 +328,16 @@ every fix tapped so far (e.g. `?fix=flip,fit`) with the original upload:
 
 `ProcessError` (`thiserror`) has `code()`, `user_message()` and `is_internal()`.
 Everything except `internal` is caused by the upload and should be shown as a 422.
-`internal` (a caught tracer panic, a failed allocation) is a bug: report it as a 500.
-Note that a caught panic still runs the panic hook, so it reaches Sentry. The trace
-budget keeps crafted uploads clear of the panics we know about (see above).
+`internal` (a caught tracer panic, or an internal invariant that didn't hold) is a bug:
+report it as a 500. The trace budget keeps crafted uploads clear of the tracer panics
+we know about (see above). A decoder panic is caught too, but is `invalid_image`: the
+file is one our decoders can't read.
+
+Not everything is caught. A panic elsewhere in our own code unwinds out of
+`process_upload`, and a failed allocation aborts the process (Rust's allocator does not
+return an error). Callers must isolate it: PR 3 runs it in a child process with a memory
+limit. A caught panic still runs the panic hook, so it reaches Sentry in a process that
+initialises it.
 
 | Code | When |
 |---|---|
@@ -317,9 +357,11 @@ budget keeps crafted uploads clear of the panics we know about (see above).
 - `server/tests/design_kit_raster.rs`: sniffing; round trips of vendored catalog heads
   and tails rendered with resvg at 512/1024/2048, transparent and opaque, roughened
   (wobble, blur, grain, specks) and JPEG q80 (IoU ≥ 0.97 against the original, left edge
-  ≥ 95%, no warnings); navy and crimson drawings; EXIF orientation; the progressive
-  JPEG cap; skipped PNG metadata; the ink matrix; one case per lint with exact codes for
-  each kind, including a rotated top-heavy head, a mirrored centred head, short and wide
+  ≥ 95%, no warnings); navy and crimson drawings, crisp and soft-edged, on light grey
+  and inside a soft black outline; EXIF orientation; the progressive and multi-scan JPEG
+  caps and a JPEG the decoder panics on; skipped PNG metadata; the ink matrix; one case
+  per lint with exact codes for each kind, including a rotated top-heavy head, a
+  mirrored centred head, notched necks on flat-topped heads and tails, short and wide
   drawings before and after Fit, and combined fixes; suppression and pass state; fixes
   (including the inverse transform); hostile rasters with exact errors (including
   truncated JPEGs and crafted stripes, rings, a comb and a serpentine stopped by the
