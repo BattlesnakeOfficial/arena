@@ -32,7 +32,9 @@ pub struct ImportCounts {
     pub snakes_skipped_claimed: u64,
     pub accounts_failed: u64,
     pub accountless_users: i64,
+    /// Wall-clock staging durations; exclude these from equality assertions on import data.
     pub stage_max_us: u64,
+    /// Wall-clock staging durations; exclude these from equality assertions on import data.
     pub stage_p99_us: u64,
 }
 
@@ -49,7 +51,8 @@ async fn begin_read_only_play_transaction(play: &PgPool) -> cja::Result<Transact
         "SELECT current_setting('transaction_read_only'), current_setting('transaction_isolation')",
     )
     .fetch_one(&mut *tx)
-    .await?;
+    .await
+    .wrap_err("Failed to verify Play read-only transaction settings")?;
     if read_only != "on" || isolation != "repeatable read" {
         return Err(color_eyre::eyre::eyre!(
             "Play snapshot is not read-only repeatable-read: {read_only}, {isolation}"
@@ -211,6 +214,56 @@ pub async fn import_from_play(play: &PgPool, arena: &PgPool) -> cja::Result<Impo
         .await
         .wrap_err("Failed to finish Play read-only snapshot")?;
 
+    let accounts: Vec<StageAccount> = account_rows
+        .into_iter()
+        .map(|row| -> cja::Result<StageAccount> {
+            let play_user_id: String = row.try_get("play_user_id")?;
+            let github_uid = row
+                .try_get::<Option<String>, _>("github_uid_text")?
+                .and_then(|uid| match uid.parse::<i64>() {
+                    Ok(uid) => Some(uid),
+                    Err(_) => {
+                        tracing::warn!(
+                            play_user_id = %play_user_id,
+                            uid = %uid,
+                            "Non-numeric GitHub uid in play social auth; treating as unlinked"
+                        );
+                        None
+                    }
+                });
+
+            // Prefer the OAuth link's login, then the denormalized account field.
+            let social_login = row
+                .try_get::<Option<String>, _>("github_extra_data")?
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+                .and_then(|v| v.get("login").and_then(|l| l.as_str()).map(String::from));
+            let denormalized_login: String = row.try_get("github_username")?;
+            let github_login = social_login
+                .or_else(|| (!denormalized_login.is_empty()).then_some(denormalized_login))
+                .filter(|login| !login.is_empty());
+
+            Ok(StageAccount {
+                play_user_id,
+                play_account_id: row.try_get("play_account_id")?,
+                email: row.try_get("email")?,
+                password_hash: row.try_get("password")?,
+                is_email_verified: row.try_get("is_email_verified")?,
+                username: row.try_get("username")?,
+                display_name: row.try_get("display_name")?,
+                pronouns: row.try_get("pronouns")?,
+                country: row.try_get("country")?,
+                backstory: row.try_get("backstory")?,
+                github_uid,
+                github_login,
+                points: row.try_get("points")?,
+                points_high_score: row.try_get("points_high_score")?,
+                is_staff: row.try_get("is_staff")?,
+                play_created_at: row.try_get("play_created_at")?,
+            })
+        })
+        .collect::<cja::Result<_>>()
+        .wrap_err("Failed to decode Play account snapshot")?;
+
     let mut snakes_by_account: HashMap<String, Vec<StageSnake>> = HashMap::new();
     for snake in snakes {
         snakes_by_account
@@ -222,10 +275,10 @@ pub async fn import_from_play(play: &PgPool, arena: &PgPool) -> cja::Result<Impo
     for (owner, grant) in grants {
         grants_by_account.entry(owner).or_default().push(grant);
     }
-    let account_ids: HashSet<String> = account_rows
+    let account_ids: HashSet<String> = accounts
         .iter()
-        .map(|row| row.try_get("play_account_id"))
-        .collect::<Result<_, sqlx::Error>>()?;
+        .map(|account| account.play_account_id.clone())
+        .collect();
     for (owner, children) in &snakes_by_account {
         if !account_ids.contains(owner) {
             counts.snakes_orphaned += children.len() as u64;
@@ -239,55 +292,7 @@ pub async fn import_from_play(play: &PgPool, arena: &PgPool) -> cja::Result<Impo
         }
     }
 
-    for row in account_rows {
-        let play_user_id: String = row.try_get("play_user_id")?;
-
-        let github_uid = row
-            .try_get::<Option<String>, _>("github_uid_text")?
-            .and_then(|uid| match uid.parse::<i64>() {
-                Ok(uid) => Some(uid),
-                Err(_) => {
-                    tracing::warn!(
-                        play_user_id = %play_user_id,
-                        uid = %uid,
-                        "Non-numeric GitHub uid in play social auth; treating as unlinked"
-                    );
-                    None
-                }
-            });
-
-        // Prefer the login recorded in the OAuth link's extra_data; fall
-        // back to the denormalized core_account.github_username.
-        let social_login = row
-            .try_get::<Option<String>, _>("github_extra_data")?
-            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-            .and_then(|v| v.get("login").and_then(|l| l.as_str()).map(String::from));
-        let github_login = social_login
-            .or_else(|| {
-                let denormalized: String = row.try_get("github_username").ok()?;
-                (!denormalized.is_empty()).then_some(denormalized)
-            })
-            .filter(|login| !login.is_empty());
-
-        let account = StageAccount {
-            play_user_id,
-            play_account_id: row.try_get("play_account_id")?,
-            email: row.try_get("email")?,
-            password_hash: row.try_get("password")?,
-            is_email_verified: row.try_get("is_email_verified")?,
-            username: row.try_get("username")?,
-            display_name: row.try_get("display_name")?,
-            pronouns: row.try_get("pronouns")?,
-            country: row.try_get("country")?,
-            backstory: row.try_get("backstory")?,
-            github_uid,
-            github_login,
-            points: row.try_get("points")?,
-            points_high_score: row.try_get("points_high_score")?,
-            is_staff: row.try_get("is_staff")?,
-            play_created_at: row.try_get("play_created_at")?,
-        };
-
+    for account in accounts {
         let payload = StagePlayAccount {
             snakes: snakes_by_account
                 .remove(&account.play_account_id)
@@ -350,7 +355,10 @@ pub async fn export_play_regions() -> cja::Result<()> {
     let arena = readonly_pool(&arena_url).await?;
     let mut play_tx = begin_read_only_play_transaction(&play).await?;
     let (snakes, unmapped) = read_play_snakes(&mut *play_tx).await?;
-    play_tx.commit().await?;
+    play_tx
+        .commit()
+        .await
+        .wrap_err("Failed to finish Play region read-only snapshot")?;
     let imported: HashSet<String> = sqlx::query_scalar("SELECT play_snake_id FROM imported_snakes")
         .fetch_all(&arena)
         .await?

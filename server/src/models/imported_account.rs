@@ -125,9 +125,10 @@ pub async fn stage_play_account(
         "SELECT imported_account_id, play_account_id, claimed_by_user_id FROM imported_accounts WHERE play_user_id = $1 FOR UPDATE",
         account.play_user_id
     ).fetch_optional(&mut *tx).await.wrap_err("Failed to lock staged account")?;
-    let (id, created, claimed) = if let Some(row) = existing {
+    let (id, stored_play_account_id, created, claimed) = if let Some(row) = existing {
         (
             row.imported_account_id,
+            row.play_account_id,
             false,
             row.claimed_by_user_id.is_some(),
         )
@@ -140,7 +141,12 @@ pub async fn stage_play_account(
             account.points_high_score, account.is_staff, account.play_created_at
         ).fetch_optional(&mut *tx).await.wrap_err("Failed to insert staged account")?;
         if let Some(row) = inserted {
-            (row.imported_account_id, true, false)
+            (
+                row.imported_account_id,
+                account.play_account_id.clone(),
+                true,
+                false,
+            )
         } else {
             let row = sqlx::query!(
                 "SELECT imported_account_id, play_account_id, claimed_by_user_id FROM imported_accounts WHERE play_user_id = $1 FOR UPDATE",
@@ -148,22 +154,17 @@ pub async fn stage_play_account(
             ).fetch_one(&mut *tx).await.wrap_err("Failed to lock concurrent staged account")?;
             (
                 row.imported_account_id,
+                row.play_account_id,
                 false,
                 row.claimed_by_user_id.is_some(),
             )
         }
     };
-    let stored = sqlx::query!(
-        "SELECT play_account_id FROM imported_accounts WHERE imported_account_id = $1",
-        id
-    )
-    .fetch_one(&mut *tx)
-    .await?;
-    if stored.play_account_id != account.play_account_id {
+    if stored_play_account_id != account.play_account_id {
         return Err(eyre!(
             "Play user {} has staged account {}, incoming {}",
             account.play_user_id,
-            stored.play_account_id,
+            stored_play_account_id,
             account.play_account_id
         ));
     }
@@ -198,7 +199,7 @@ pub async fn stage_play_account(
                 .execute(&mut *tx).await.wrap_err("Failed to release stale GitHub UID")?;
         }
         let claimed_owner = sqlx::query!("SELECT imported_account_id FROM imported_accounts WHERE github_uid = $1 AND imported_account_id <> $2 AND claimed_by_user_id IS NOT NULL", uid, id)
-            .fetch_optional(&mut *tx).await?;
+            .fetch_optional(&mut *tx).await.wrap_err("Failed to recheck claimed GitHub UID owner")?;
         if let Some(owner) = claimed_owner {
             return Err(eyre!(
                 "GitHub UID {} belongs to claimed account {}",
@@ -246,10 +247,14 @@ pub async fn stage_play_account(
         .iter()
         .map(|s| s.play_snake_id.clone())
         .collect();
-    let existing_snakes = sqlx::query!(
-        "SELECT imported_account_id, play_snake_id, name, url, head, tail, color, is_public, engine_region FROM imported_snakes WHERE imported_account_id = $1 OR play_snake_id = ANY($2) FOR UPDATE",
-        id, &incoming_ids
-    ).fetch_all(&mut *tx).await.wrap_err("Failed to lock staged snakes")?;
+    let existing_snakes = if created {
+        Vec::new()
+    } else {
+        sqlx::query!(
+            "SELECT imported_account_id, play_snake_id, name, url, head, tail, color, is_public, engine_region FROM imported_snakes WHERE imported_account_id = $1 OR play_snake_id = ANY($2) FOR UPDATE",
+            id, &incoming_ids
+        ).fetch_all(&mut *tx).await.wrap_err("Failed to lock staged snakes")?
+    };
     let mut snakes_by_id: HashMap<String, _> = existing_snakes
         .into_iter()
         .map(|s| (s.play_snake_id.clone(), s))
@@ -1699,11 +1704,23 @@ mod tests {
 
     #[sqlx::test(migrations = "../migrations")]
     async fn refresh_completes_historical_partial_row(pool: PgPool) -> cja::Result<()> {
-        sqlx::query!("INSERT INTO imported_accounts (play_user_id, play_account_id, email, username) VALUES ('usr_208', 'act_208', 'player208@example.com', 'player208')")
+        let historical = sqlx::query!("INSERT INTO imported_accounts (play_user_id, play_account_id, email, username) VALUES ('usr_208', 'act_208', 'player208@example.com', 'player208') RETURNING imported_account_id")
+            .fetch_one(&pool).await?;
+        sqlx::query!("INSERT INTO imported_grants (imported_account_id, customization_type, slug) VALUES ($1, $2, $3) ON CONFLICT (imported_account_id, customization_type, slug) DO NOTHING",
+            historical.imported_account_id, "tail", "obsolete")
             .execute(&pool).await?;
         let payload = complete_payload(208);
         let result = stage_play_account(&pool, &payload).await?;
         assert_eq!(result.status, StageStatus::Refreshed);
+        let staged_grants = sqlx::query!(
+            "SELECT customization_type, slug FROM imported_grants WHERE imported_account_id=$1",
+            result.imported_account_id
+        )
+        .fetch_all(&pool)
+        .await?;
+        assert_eq!(staged_grants.len(), 1);
+        assert_eq!(staged_grants[0].customization_type, "head");
+        assert_eq!(staged_grants[0].slug, "alligator");
         let user = create_user(&pool, 9208).await?;
         let summary = claim_account(&pool, result.imported_account_id, user)
             .await?

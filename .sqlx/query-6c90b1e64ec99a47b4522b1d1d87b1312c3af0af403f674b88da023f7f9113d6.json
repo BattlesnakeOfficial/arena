@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO imported_accounts (play_user_id, play_account_id, email, username) VALUES ('usr_208', 'act_208', 'player208@example.com', 'player208') RETURNING imported_account_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "imported_account_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "6c90b1e64ec99a47b4522b1d1d87b1312c3af0af403f674b88da023f7f9113d6"
+}
