@@ -74,6 +74,9 @@ pub enum Lint {
     ColoursFlattened,
     /// Template guides or reference shapes were visible in the export and were ignored.
     GuidesVisible,
+    /// The `draw-here` layer held the drawing, and visible shapes on other layers were
+    /// left out.
+    OutsideDrawHereIgnored,
     /// Soft or semi-transparent pixels were thresholded at 50% opacity.
     SemiTransparent,
     /// The canvas wasn't square, so it was centred in one.
@@ -83,14 +86,16 @@ pub enum Lint {
     // ---- SVG input facts ----
     /// Strokes were turned into filled outlines.
     StrokesConverted { count: usize },
-    /// Gradients or patterns were painted in one colour.
+    /// Gradients were painted in one flat colour, their average (dark ones join the shape,
+    /// light or faint ones become holes or are left out); patterns solid.
     Gradient,
     /// Embedded or linked `<image>`s were ignored (never loaded).
     ImageIgnored { count: usize },
     /// Text that wasn't converted to outlines was ignored.
     TextIgnored,
-    /// Clip paths were applied; masks were ignored (masked shapes show in full).
-    ClipOrMask,
+    /// Clip paths were applied (`clipped`) and/or masks were ignored (`masked`: masked
+    /// shapes show in full).
+    ClipOrMask { clipped: bool, masked: bool },
     /// Filters (blur, shadows, ...) were ignored.
     FiltersIgnored,
     /// Scripts, event handlers, embedded HTML, animations or external links were
@@ -131,6 +136,7 @@ impl Lint {
             Lint::SpecksRemoved { .. } => "specks_removed",
             Lint::ColoursFlattened => "colours_flattened",
             Lint::GuidesVisible => "guides_visible",
+            Lint::OutsideDrawHereIgnored => "outside_draw_here_ignored",
             Lint::SemiTransparent => "semi_transparent",
             Lint::NonSquare { .. } => "non_square",
             Lint::LowResolution { .. } => "low_resolution",
@@ -138,7 +144,7 @@ impl Lint {
             Lint::Gradient => "gradient",
             Lint::ImageIgnored { .. } => "image_ignored",
             Lint::TextIgnored => "text_ignored",
-            Lint::ClipOrMask => "clip_or_mask",
+            Lint::ClipOrMask { .. } => "clip_or_mask",
             Lint::FiltersIgnored => "filters_ignored",
             Lint::ActiveContentRemoved => "active_content_removed",
             Lint::OutsideCanvas => "outside_canvas",
@@ -158,14 +164,15 @@ impl Lint {
             Lint::NonSquare { .. }
             | Lint::LowResolution { .. }
             | Lint::ImageIgnored { .. }
-            | Lint::TextIgnored => Severity::Tip,
+            | Lint::TextIgnored
+            | Lint::OutsideDrawHereIgnored => Severity::Tip,
             Lint::SpecksRemoved { .. }
             | Lint::ColoursFlattened
             | Lint::GuidesVisible
             | Lint::SemiTransparent
             | Lint::StrokesConverted { .. }
             | Lint::Gradient
-            | Lint::ClipOrMask
+            | Lint::ClipOrMask { .. }
             | Lint::FiltersIgnored
             | Lint::ActiveContentRemoved
             | Lint::OutsideCanvas => Severity::Info,
@@ -202,10 +209,10 @@ impl Lint {
             Lint::ColoursFlattened
             | Lint::SemiTransparent
             | Lint::Gradient
-            | Lint::ClipOrMask
+            | Lint::ClipOrMask { .. }
             | Lint::FiltersIgnored
             | Lint::ActiveContentRemoved => "#colour",
-            Lint::GuidesVisible => "#guides",
+            Lint::GuidesVisible | Lint::OutsideDrawHereIgnored => "#guides",
             Lint::OutsideCanvas => "#margins",
         }
     }
@@ -258,6 +265,10 @@ impl Lint {
                 "We ignored the template guides. Hide them next time for the cleanest result."
                     .into()
             }
+            Lint::OutsideDrawHereIgnored => "We only used your \"Draw here\" layer and left out \
+                 the shapes on your other layers. Move everything you drew into \"Draw here\", \
+                 or hide the layers you don't want."
+                .into(),
             Lint::SemiTransparent => "Soft or see-through strokes only count where they're at \
                  least half opaque. Use a solid brush at full opacity."
                 .into(),
@@ -274,7 +285,10 @@ impl Lint {
                  use Outline Stroke (Illustrator) or Stroke to Path (Inkscape) before exporting.",
                 plural(*count)
             ),
-            Lint::Gradient => "Gradients and patterns became one solid colour: the snake's.".into(),
+            Lint::Gradient => "Each gradient became one flat colour, its average: dark ones \
+                 joined the shape, and light or faint ones became holes or were left out. \
+                 Patterns became solid shapes. Check the preview."
+                .into(),
             Lint::ImageIgnored { count } => format!(
                 "We ignored {count} embedded image{}. Draw with vector shapes, or upload your \
                  drawing as a PNG instead.",
@@ -283,9 +297,15 @@ impl Lint {
             Lint::TextIgnored => "Text isn't supported, so we left it out. Convert it to \
                  outlines first (Type → Create Outlines, or Path → Object to Path)."
                 .into(),
-            Lint::ClipOrMask => "We applied your clipping paths. Masks are ignored, so masked \
-                 shapes show in full; check the preview."
-                .into(),
+            Lint::ClipOrMask { clipped, masked } => match (clipped, masked) {
+                (true, true) => "We applied your clipping paths. Masks are ignored, so masked \
+                     shapes show in full; check the preview."
+                    .into(),
+                (false, true) => "Masks are ignored, so masked shapes show in full; check the \
+                     preview."
+                    .into(),
+                _ => "We applied your clipping paths; check the preview.".into(),
+            },
             Lint::FiltersIgnored => "Filters such as blurs and drop shadows are ignored.".into(),
             Lint::ActiveContentRemoved => "We removed scripts, links and embedded web content. \
                  Only the shapes are kept."

@@ -3,8 +3,8 @@
 //!
 //! Pure and AppState-free. The pipeline (see `docs/design-kit.md`):
 //!
-//! 1. [`sniff`] the format from magic bytes; reject HEIC, GIF, WebP, PSD, ZIP/.procreate
-//!    and PDF/.ai with app-specific advice.
+//! 1. [`sniff`] the format from magic bytes; reject HEIC, GIF, WebP, PSD, ZIP/.procreate,
+//!    PDF/.ai, compressed (.svgz) and UTF-16 SVGs with app-specific advice.
 //! 2. Apply the per-format byte cap.
 //! 3. Rasters: decode (PNG via `png`, JPEG via `zune-jpeg`), checking the header
 //!    dimensions before any pixel buffer is allocated; pick the ink with the
@@ -126,6 +126,10 @@ pub enum RejectedFormat {
     Zip,
     /// PDF, which is also what Illustrator `.ai` files are; PostScript too.
     Pdf,
+    /// Gzip: a compressed SVG (`.svgz`), as Inkscape and Illustrator can save.
+    Svgz,
+    /// UTF-16 text: an SVG saved with UTF-16 encoding (an Illustrator option).
+    Utf16,
 }
 
 impl RejectedFormat {
@@ -137,6 +141,8 @@ impl RejectedFormat {
             RejectedFormat::Psd => "psd",
             RejectedFormat::Zip => "zip",
             RejectedFormat::Pdf => "pdf",
+            RejectedFormat::Svgz => "svgz",
+            RejectedFormat::Utf16 => "utf16",
         }
     }
 
@@ -159,6 +165,14 @@ impl RejectedFormat {
             RejectedFormat::Pdf => {
                 "That's a PDF or Illustrator file. Use File → Export → SVG or PNG, then upload \
                  that."
+            }
+            RejectedFormat::Svgz => {
+                "That's a compressed SVG (.svgz). Save it as a plain SVG instead (Inkscape: Save \
+                 As → Plain SVG; Illustrator: File → Export → Export As → SVG), then upload that."
+            }
+            RejectedFormat::Utf16 => {
+                "That SVG is saved as UTF-16 text, which we can't read. Save it again as UTF-8 \
+                 (in Illustrator's SVG Options, set Encoding to UTF-8), then upload it."
             }
         }
     }
@@ -450,11 +464,15 @@ impl ProcessError {
                  PNG."
                     .into()
             }
+            ProcessError::InvalidXml(detail) if detail == svg_in::ENTITIES_REJECTED => "That SVG \
+                 declares XML entities, which we don't accept. Export it again as a plain SVG \
+                 (in Illustrator: File → Export → Export As → SVG), or export a PNG."
+                .into(),
             ProcessError::InvalidXml(_) => "That SVG isn't valid XML, so we couldn't read it. \
                  Export it again from your drawing app, or export a PNG."
                 .into(),
             ProcessError::InvalidSvg(_) => "We couldn't read that SVG. Export it again as a \
-                 plain SVG (not compressed .svgz), or export a PNG."
+                 plain SVG, or export a PNG."
                 .into(),
             ProcessError::TooComplex(_) => "That's too detailed to turn into a head or tail. Use \
                  one solid dark colour with a few big cut-outs, and no texture or photo \
@@ -516,6 +534,11 @@ pub fn sniff(bytes: &[u8]) -> Result<InputFormat, ProcessError> {
         Some(RejectedFormat::Zip)
     } else if starts(b"%PDF") || starts(b"%!PS") {
         Some(RejectedFormat::Pdf)
+    } else if starts(&[0x1f, 0x8b]) {
+        Some(RejectedFormat::Svgz)
+    } else if starts(&[0xff, 0xfe]) || starts(&[0xfe, 0xff]) || starts(b"<\0") || starts(b"\0<") {
+        // A UTF-16 byte order mark, or `<` as UTF-16 without one.
+        Some(RejectedFormat::Utf16)
     } else {
         None
     };
@@ -616,24 +639,31 @@ pub fn process_on_big_stack(
     fixes: &[Fix],
     permit: impl Send + 'static,
 ) -> tokio::sync::oneshot::Receiver<Result<CleanShape, ProcessError>> {
-    spawn_processing(PROCESS_STACK_BYTES, bytes, limits, fixes, permit)
-}
-
-fn spawn_processing(
-    stack_bytes: usize,
-    bytes: Vec<u8>,
-    limits: &Limits,
-    fixes: &[Fix],
-    permit: impl Send + 'static,
-) -> tokio::sync::oneshot::Receiver<Result<CleanShape, ProcessError>> {
-    let (tx, rx) = tokio::sync::oneshot::channel();
     let limits = limits.clone();
     let fixes = fixes.to_vec();
+    spawn_processing(
+        PROCESS_STACK_BYTES,
+        move || process_upload(&bytes, &limits, &fixes),
+        permit,
+    )
+}
+
+/// Run `work` on a new thread with a `stack_bytes` stack, holding `permit` until it ends.
+fn spawn_processing<W>(
+    stack_bytes: usize,
+    work: W,
+    permit: impl Send + 'static,
+) -> tokio::sync::oneshot::Receiver<Result<CleanShape, ProcessError>>
+where
+    W: FnOnce() -> Result<CleanShape, ProcessError> + Send + 'static,
+{
+    let (tx, rx) = tokio::sync::oneshot::channel();
     let spawned = std::thread::Builder::new()
         .name("design-kit".into())
         .stack_size(stack_bytes)
         .spawn(move || {
-            let result = std::panic::catch_unwind(|| process_upload(&bytes, &limits, &fixes))
+            // Nothing the work touched outlives a panic: its result is replaced.
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
                 .unwrap_or(Err(ProcessError::Internal("processing panicked")));
             drop(permit);
             // The receiver may be gone (the caller timed out); nothing to do then.
@@ -722,9 +752,7 @@ mod tests {
         // No system can map a 1 PiB stack.
         let rx = spawn_processing(
             1 << 50,
-            b"<svg/>".to_vec(),
-            &Limits::default(),
-            &[],
+            || process_upload(b"<svg/>", &Limits::default(), &[]),
             Permit(released.clone()),
         );
         let result = rx.blocking_recv().expect("a result is sent");
@@ -735,6 +763,93 @@ mod tests {
             ))
         );
         assert!(released.load(Ordering::SeqCst), "the permit is released");
+    }
+
+    #[test]
+    fn the_permit_is_held_until_the_work_ends_even_when_the_caller_stops_waiting() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        /// Reports its drop.
+        struct Permit(mpsc::Sender<()>);
+        impl Drop for Permit {
+            fn drop(&mut self) {
+                let _ = self.0.send(());
+            }
+        }
+        let wait = Duration::from_secs(10);
+
+        // Work that runs until we let it finish.
+        let (released_tx, released) = mpsc::channel();
+        let (started_tx, started) = mpsc::channel();
+        let (finish_tx, finish) = mpsc::channel::<()>();
+        let rx = spawn_processing(
+            1 << 20,
+            move || {
+                let _ = started_tx.send(());
+                let _ = finish.recv();
+                Err(ProcessError::EmptyFile)
+            },
+            Permit(released_tx),
+        );
+        started.recv_timeout(wait).expect("the work starts");
+        assert!(released.try_recv().is_err(), "held while the work runs");
+        // The caller times out and stops waiting; the CPU is still busy.
+        drop(rx);
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(
+            released.try_recv().is_err(),
+            "held after the caller stops waiting"
+        );
+        finish_tx.send(()).expect("the work is waiting");
+        released
+            .recv_timeout(wait)
+            .expect("released when the work ends");
+
+        // A caller that waits gets the result after the permit is gone.
+        let (released_tx, released) = mpsc::channel();
+        let rx = spawn_processing(
+            1 << 20,
+            || Err(ProcessError::EmptyFile),
+            Permit(released_tx),
+        );
+        assert_eq!(
+            rx.blocking_recv().expect("a result").err(),
+            Some(ProcessError::EmptyFile)
+        );
+        assert!(
+            released.try_recv().is_ok(),
+            "released before the result is sent"
+        );
+    }
+
+    #[test]
+    fn compressed_and_utf16_svgs_get_their_own_advice() {
+        assert_eq!(
+            sniff(&[0x1f, 0x8b, 0x08, 0x00]),
+            Err(ProcessError::UnsupportedFormat(RejectedFormat::Svgz))
+        );
+        let utf16: Vec<u8> = "\u{feff}<svg/>"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        assert_eq!(
+            sniff(&utf16),
+            Err(ProcessError::UnsupportedFormat(RejectedFormat::Utf16))
+        );
+        let utf16be: Vec<u8> = "<svg/>".encode_utf16().flat_map(u16::to_be_bytes).collect();
+        assert_eq!(
+            sniff(&utf16be),
+            Err(ProcessError::UnsupportedFormat(RejectedFormat::Utf16))
+        );
+        for f in [RejectedFormat::Svgz, RejectedFormat::Utf16] {
+            let msg = ProcessError::UnsupportedFormat(f).user_message();
+            assert!(msg.contains("SVG"), "{msg}");
+        }
+        assert!(
+            !ProcessError::InvalidSvg("x".into())
+                .user_message()
+                .contains("svgz")
+        );
     }
 
     #[test]

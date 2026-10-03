@@ -6,6 +6,9 @@
 //! * IoU ≥ 0.99 against an independent render: resvg (a dev-dependency, never used at
 //!   runtime) draws the original inside the board's wrapper in black, and near-white
 //!   pixels count as cut-outs (how multi-colour assets draw eyes);
+//! * no detail lost or added: the core of every ink region and every hole (see
+//!   [`missing_details`]) in either render is mostly the same in the other (IoU alone
+//!   lets a whole eye go: a 50 unit² detail is under 1% of a head);
 //! * for single-colour files, fill% and left-edge% within 2 points of
 //!   `catalog/metrics_summary.csv` (rsvg renders from the DEV-1539 investigation, an
 //!   oracle independent of both resvg and our metrics);
@@ -13,14 +16,18 @@
 //!   catalog's range; this is the check that they stay there through the SVG pipeline),
 //!   except the one documented in [`EXCEPTIONS`], which must fire exactly as listed.
 //!
-//! Failures are listed by slug. The files are processed in chunks across threads.
+//! Failures are listed by slug. The files are processed in chunks across threads, each
+//! with the stack production uses (`PROCESS_STACK_BYTES`), so a deep file fails the test
+//! instead of aborting the binary.
 
 mod common;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use arena::design_kit::{AssetKind, CleanShape, Limits, Severity, Strategy, process_upload};
+use arena::design_kit::{
+    AssetKind, CleanShape, Limits, PROCESS_STACK_BYTES, Severity, Strategy, process_upload,
+};
 use common::design_kit::*;
 
 /// One row of the investigation's `metrics_summary.csv`.
@@ -106,7 +113,7 @@ fn catalog() -> Vec<Asset> {
 /// near-white colours as cut-outs.
 ///
 /// The colours are classified, not the pixels: every colour value in the source is
-/// rewritten to white when its luma is ≥ 0.9 and to black otherwise, and a pixel is ink
+/// rewritten to white when its luma is ≥ 0.9 (230 of 255) and to black otherwise, and a pixel is ink
 /// when it is at least half opaque and at least half black. Classifying rendered pixels
 /// instead (ink = luma < 0.9) would count an edge pixel that is only 10% dark paint over
 /// a white detail as ink, moving every cut-out boundary about 0.4 px into the cut-out at
@@ -128,7 +135,7 @@ fn oracle(kind: AssetKind, slug: &str, side: u32) -> Vec<u8> {
 }
 
 /// Rewrite every `fill`/`stroke`/`stop-color` colour (attribute, `style` or CSS) to black,
-/// or to white when its luma is at least 0.9. `none`, `url(...)` and keywords are kept;
+/// or to white when its luma is at least 230 of 255 (0.9). `none`, `url(...)` and keywords are kept;
 /// an rgba() alpha is kept.
 fn two_tone(svg: &str) -> String {
     let mut out = String::with_capacity(svg.len());
@@ -185,12 +192,89 @@ fn recolour(value: &str) -> String {
     let Some((c, alpha)) = rgb else {
         return value.to_string();
     };
-    let luma = (0.2126 * c[0] as f32 + 0.7152 * c[1] as f32 + 0.0722 * c[2] as f32) / 255.0;
-    let shade = if luma >= 0.9 { 255 } else { 0 };
+    // Rec. 709 luma, light at 230 of 255 (0.9): the pipeline's cut-out rule.
+    let luma = (c[0] as u32 * 2126 + c[1] as u32 * 7152 + c[2] as u32 * 722) / 10_000;
+    let shade = if luma >= 230 { 255 } else { 0 };
     match alpha {
         Some(a) => format!("rgba({shade},{shade},{shade},{a})"),
         None => format!("rgb({shade},{shade},{shade})"),
     }
+}
+
+/// 4-connected regions of `value` in a `side`x`side` mask, as pixel index lists.
+fn regions(mask: &[bool], side: usize, value: bool) -> Vec<Vec<usize>> {
+    let mut seen = vec![false; mask.len()];
+    let mut out = Vec::new();
+    for start in 0..mask.len() {
+        if seen[start] || mask[start] != value {
+            continue;
+        }
+        seen[start] = true;
+        let (mut region, mut stack) = (Vec::new(), vec![start]);
+        while let Some(i) = stack.pop() {
+            region.push(i);
+            let (x, y) = (i % side, i / side);
+            let mut visit = |j: usize| {
+                if !seen[j] && mask[j] == value {
+                    seen[j] = true;
+                    stack.push(j);
+                }
+            };
+            if x > 0 {
+                visit(i - 1);
+            }
+            if x + 1 < side {
+                visit(i + 1);
+            }
+            if y > 0 {
+                visit(i - side);
+            }
+            if y + 1 < side {
+                visit(i + side);
+            }
+        }
+        out.push(region);
+    }
+    out
+}
+
+/// Details of `from` that are mostly gone in `to`. A detail is a region of ink or of
+/// background; its core is the pixels whose 8 neighbours are in it too (outside the
+/// raster counts as in), so a sliver one pixel thick has none, and anti-aliasing along
+/// its edge can't decide the check. Regions whose core covers at least half a unit²
+/// (details from about 1.5 unit²; the trace removes specks under 1 unit²) must keep at
+/// least half of their core in `to`.
+fn missing_details(from: &[bool], to: &[bool], side: usize, what: &str) -> Vec<String> {
+    let px_per_unit = side / 100;
+    let min_core = px_per_unit * px_per_unit / 2;
+    let core = |i: usize| {
+        let (x, y) = ((i % side) as i64, (i / side) as i64);
+        (-1..=1).all(|dy| {
+            (-1..=1).all(|dx| {
+                let (nx, ny) = (x + dx, y + dy);
+                let outside = nx < 0 || ny < 0 || nx >= side as i64 || ny >= side as i64;
+                outside || from[ny as usize * side + nx as usize] == from[i]
+            })
+        })
+    };
+    let mut out = Vec::new();
+    for value in [true, false] {
+        for r in regions(from, side, value) {
+            let core: Vec<usize> = r.iter().copied().filter(|&i| core(i)).collect();
+            let kept = core.iter().filter(|&&i| to[i] == value).count();
+            if core.len() >= min_core && kept * 2 < core.len() {
+                let (x, y) = (core[0] % side, core[0] / side);
+                out.push(format!(
+                    "{what} {} of {:.1} unit² near ({}, {})",
+                    if value { "ink" } else { "background" },
+                    r.len() as f32 / (px_per_unit * px_per_unit) as f32,
+                    x / px_per_unit,
+                    y / px_per_unit
+                ));
+            }
+        }
+    }
+    out
 }
 
 struct Checked {
@@ -211,13 +295,18 @@ fn check(asset: &Asset, rows: &[Row]) -> Result<Checked, String> {
     assert_clean(&shape);
     let mut problems = Vec::new();
 
-    let iou = iou(
-        &oracle(asset.kind, &asset.slug, 400),
-        &shape_alpha(&shape, 400),
-    );
+    let truth = oracle(asset.kind, &asset.slug, 400);
+    let ours = shape_alpha(&shape, 400);
+    let iou = iou(&truth, &ours);
     if iou < 0.99 {
         problems.push(format!("IoU {iou:.4} < 0.99"));
     }
+    let (truth, ours): (Vec<bool>, Vec<bool>) = (
+        truth.iter().map(|&a| a >= 128).collect(),
+        ours.iter().map(|&a| a >= 128).collect(),
+    );
+    problems.extend(missing_details(&truth, &ours, 400, "lost"));
+    problems.extend(missing_details(&ours, &truth, 400, "added"));
 
     let file = format!("svg/{}/{}.svg", kind_dir(asset.kind), asset.slug);
     let row = rows
@@ -292,7 +381,14 @@ fn every_catalog_asset_is_processed_cleanly() {
     let results: Vec<Result<Checked, String>> = std::thread::scope(|s| {
         let handles: Vec<_> = assets
             .chunks(chunk)
-            .map(|part| s.spawn(|| part.iter().map(|a| check(a, &rows)).collect::<Vec<_>>()))
+            .map(|part| {
+                std::thread::Builder::new()
+                    .stack_size(PROCESS_STACK_BYTES)
+                    .spawn_scoped(s, || {
+                        part.iter().map(|a| check(a, &rows)).collect::<Vec<_>>()
+                    })
+                    .expect("corpus thread")
+            })
             .collect();
         handles
             .into_iter()

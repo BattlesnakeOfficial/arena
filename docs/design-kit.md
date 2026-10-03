@@ -44,9 +44,9 @@ where `d` uses only absolute `M L Q C Z`, digits, `.`, `-` and spaces (2 decimal
 `process_upload(bytes, &Limits, &[Fix]) -> Result<CleanShape, ProcessError>`:
 
 1. **Sniff** magic bytes. PNG and JPEG take this path, SVG [its own](#pipeline-svg). HEIC/AVIF
-   (`ftyp` with an image brand), GIF, WebP, PSD (`8BPS`), ZIP/.procreate (`PK\x03\x04`)
-   and PDF/.ai (`%PDF`, `%!PS`) are rejected with app-specific advice
-   (`unsupported_format`).
+   (`ftyp` with an image brand), GIF, WebP, PSD (`8BPS`), ZIP/.procreate (`PK\x03\x04`),
+   PDF/.ai (`%PDF`, `%!PS`), gzip/.svgz (`1f 8b`) and UTF-16 text (a byte order mark, or
+   `<` as UTF-16) are rejected with app-specific advice (`unsupported_format`).
 2. **Byte cap** for the sniffed format (`too_large`).
 3. **Decode** with the header dimensions checked *before* any pixel buffer is allocated
    (`image_too_large`; a 100000² PNG header is rejected in microseconds).
@@ -157,10 +157,19 @@ gets a chance to be expensive:
 1. **Bytes.** Over 512 KiB is `too_large`; not UTF-8 is `invalid_svg`.
 2. **Depth scan.** A recursion-free byte scan bounds element nesting at 64
    (`too_complex`) before roxmltree's recursive tokenizer runs: about 5,000 nested tags
-   overflow a 2 MiB stack (about 200 in a debug build) and abort the process. Quotes and
-   comments can't hide nesting from it.
-3. **No entities.** `<!ENTITY` anywhere is `invalid_xml` (XXE, billion laughs).
-   Illustrator writes a plain `<!DOCTYPE svg PUBLIC …>`, so a DTD itself is allowed.
+   overflow a 2 MiB stack (about 200 in a debug build) and abort the process. Quotes in
+   tags and comments can't hide nesting from it, and it reads the DOCTYPE with roxmltree
+   0.21.1's own grammar (quoted literals in the external ID and entity values, comments
+   and PIs skipped whole; `<!ATTLIST`, `<!ELEMENT` and `<!NOTATION` end at their first
+   `>`, quoted or not, as roxmltree ends them). A DOCTYPE or `<!` declaration it can't
+   follow is `invalid_xml` (roxmltree rejects those too). Skipping more than roxmltree
+   would hide elements: a quoted `[` once made the scan swallow the whole file.
+3. **Entities only as Illustrator writes them.** Illustrator's Save As SVG declares its
+   namespace URIs as entities (`<!ENTITY ns_ai "http://ns.adobe.com/…">`). Every
+   `<!ENTITY` in the file must be exactly `<!ENTITY name "value">`: at most 32, values of
+   at most 256 bytes with no `&` (no nesting, so no billion laughs), `%` or `<`, no
+   `SYSTEM`/`PUBLIC` (no XXE), and all references together may expand to at most 256 KiB.
+   Anything else is `invalid_xml`, with advice to export a plain SVG.
 4. **roxmltree** with a 20,000-node limit (`invalid_xml` over it, or when malformed).
 5. **Prescan** (`svg_scan.rs`, iterative): counts, lint facts, the CSS cost and the
    reference graphs; see [below](#the-svg-prescan).
@@ -168,26 +177,37 @@ gets a chance to be expensive:
    Its image resolvers are replaced with no-ops: the defaults **read local files** named
    by `<image href>` (relative to the working directory when there is no base directory)
    and decode embedded rasters. usvg is built without text, fonts, svgz or the writer.
-7. **Template filter and budgets** (`paint.rs`): what the drawing is (below), and
+7. **Template filter and budgets** (`paint.rs`, which reports `outside_canvas` from
+   the painted ink after its clip paths): what the drawing is (below), and
    path segments ≤ 5,000 (strokes count 5), outline travel ≤ 40,000 units, dashes ≤
    20,000, clipped groups ≤ 16 (`too_complex` otherwise).
 8. **Truth raster.** A bounded tiny-skia painter (not resvg) paints the drawing at
    512 px: fills and stroke outlines in order, group opacity folded into each paint, clip
-   paths as masks; filters are ignored, masked content is painted unmasked, gradients
-   and patterns become one colour. When the drawing uses more than one colour,
-   near-white paints (luma ≥ 0.9) are cut-outs, the way 27 catalog files draw white
+   paths as masks (including those of the groups around `draw-here`); filters are
+   ignored, masked content is painted unmasked, gradients become their stops' average
+   colour and patterns black. When the drawing uses more than one colour, near-white
+   paints (luma ≥ 230 of 255, 0.9) are cut-outs, the way 27 catalog files draw white
    eyes: each paint is drawn in black or white, and a pixel is ink when it is at least
    half opaque and at least half black.
-9. **Vector or retrace.** The vector candidate is every painted fill and stroke outline
-   concatenated. It is emitted as is (`vector_exact`) if it renders the same as the truth
-   within 0.1% of the pixels, trying in order: nonzero, even-odd (white details drawn on
-   top of a dark shape become holes), each shape turned to wind the same way by its
+9. **Vector or retrace.** The vector candidates are every painted fill and stroke
+   outline concatenated, rendered with nonzero and with even-odd (white details drawn on
+   top of a dark shape become holes); each shape turned to wind the same way by its
    signed area (separate shapes that overlap with opposite winding would otherwise
-   cancel), and the same without the light paints (white drawn under dark shapes). If
-   none matches (layered details such as white, black, white, overlaps in an even-odd
-   shape, clips that cut through shapes, opacity), the truth is painted again at the
-   1024 px trace grid and traced (`retraced`), with splines spliced at 10° instead of the
-   45° used for drawings, so long gentle curves stay within about 0.1 unit.
+   cancel); and the same two without the light paints (white drawn under dark shapes).
+   Each is compared with the truth at 512 px. A differing pixel is **edge noise** when
+   both renders have an edge in its 3×3 neighbourhood (anti-aliasing along an outline
+   they share), and **hard** otherwise (a hole one has and the other doesn't, an extra
+   speck). A candidate qualifies with at most 0.1% of the pixels differing and at most
+   13 hard pixels (half the 1 unit² speck the trace removes), so no detail the retrace
+   would keep can be lost or added; the first with no hard pixel wins, else the one
+   with the fewest. Its contours wholly outside the square are dropped (they change
+   nothing inside it), and it is emitted as is (`vector_exact`) if what is left stays
+   within 0.5 units of the square. Otherwise (layered details such as white, black,
+   white, small details no fill rule reproduces, overlaps in an even-odd shape, clips
+   that cut through shapes, opacity, a shape crossing the edge of the square, which Fit
+   would scale into view), the truth is painted again at the 1024 px trace grid and
+   traced (`retraced`), with splines spliced at 10° instead of the 45° used for
+   drawings, so long gentle curves stay within about 0.1 unit.
 10. **Fixes, emit, metrics, lints**, as for rasters.
 
 ### The template filter (SVG)
@@ -196,7 +216,10 @@ The SVG template has layers `reference-*` (hidden), `draw-here` and `guides` (vi
 and every guide and reference uses a template colour (`palette.rs`):
 
 - If a group with id `draw-here` contains anything, only it is the drawing. (Ids match
-  loosely: `Draw_here`, `draw here`, `draw-here-2`.)
+  loosely: `Draw_here`, `draw here`, `draw-here-2`.) Clip paths of the groups around
+  it still apply (Figma wraps every frame in one). If other layers have visible ink
+  (not a template colour, not near-white, at least half opaque), the
+  `outside_draw_here_ignored` tip says they were left out.
 - Otherwise (no such layer, or the artist drew on a new layer) the whole document is,
   minus groups with id `guides` or `reference-*`.
 - Either way, a fill or stroke in exactly a template colour is dropped: Figma and
@@ -277,8 +300,21 @@ pub fn process_on_big_stack(bytes: Vec<u8>, limits: &Limits, fixes: &[Fix],
 spawns a named `design-kit` thread with a 64 MiB stack (`PROCESS_STACK_BYTES`; only the
 touched pages are committed), moves `permit` (an `OwnedSemaphorePermit`) into it and
 drops it when the work ends, before sending the result, so a caller that stops waiting
-doesn't free the CPU slot while the work goes on. A panic, or failing to start the
-thread, is `internal`. Every hostile test that could recurse deeply runs through it.
+doesn't free the CPU slot while the work goes on (a unit test holds the work open,
+drops the receiver and checks the permit is still held). A panic, or failing to start
+the thread, is `internal`. Every SVG test runs through it, and the catalog corpus runs on
+threads with the same stack, so a regression fails a test instead of aborting the test
+binary.
+
+### Pinned versions
+
+The prescan mirrors other crates' code: usvg 0.48.1's reference following, simplecss
+0.2.2's selector matching, svgtypes 0.16.1's IRI parsing and roxmltree 0.21.1's
+tokenizer. A reference loop it misses aborts the process. So `usvg` and `simplecss` (and
+the test-only `resvg`, which would otherwise pull a second usvg) are pinned with `=` in
+`server/Cargo.toml`, and `svg_parsing_crates_are_the_audited_versions` fails when
+`Cargo.lock` holds any other version (or a second copy) of the four. Bumping one means
+re-reading `svg_scan.rs` against its new sources first.
 
 ### Hostile SVGs
 
@@ -289,21 +325,25 @@ release, median of 9, through `process_on_big_stack`.
 |---|---|---|
 | `<script>`, `on*=` handlers, `<foreignObject>`, `<set href>`, `javascript:` and external links, `@import` | Ok, `active_content_removed`; the output is one path | |
 | `<image href>` naming a local file (a temp file: usvg's default resolver loads it, ours doesn't) | Ok, `image_ignored`; not read | |
-| XXE, billion laughs | `invalid_xml` | 0.1 ms |
-| 5,000 nested `<g>`; 200 hidden behind quoted `/>` and comments | `too_complex` | 0.1 ms |
+| XXE, billion laughs, parameter entities, markup in an entity, entity references expanding past 256 KiB | `invalid_xml`, with advice to export a plain SVG | 0.1 ms |
+| Illustrator's Save As header (8 namespace entities, a `<switch>` with a `requiredExtensions` foreignObject and private data) | Ok, nothing reported as removed | 1.5 ms |
+| 256-byte entity referenced 1,000 times (at the expansion cap) | Ok | 1.2 ms |
+| 5,000 nested `<g>`; 200 hidden behind quoted `/>` and comments; 19,000 behind a DOCTYPE with a quoted `[` or `>` in an `ATTLIST` | `too_complex` | 0.1 ms, 0.2 ms (19,000) |
+| A DOCTYPE or `<!` declaration roxmltree can't parse | `invalid_xml` | |
 | 64 patterns or masks × 60 groups; 33 pattern/`<use>` pairs × 58 groups | Ok (about 3,600-3,970 levels deep) | 4-5 ms, 12 MB peak RSS |
 | 60 pattern/`<use>` pairs × 58 groups | `too_complex` (nesting) | 1 ms |
 | three-step pattern, mask, clip, `feImage` and `<use>` cycles; loops made with inherited fills, CSS classes, `style` attributes, `xml:id`, `xml:fill`, a stylesheet in another namespace, `clip-path: inherit` or ids ending in a tab | `too_complex` (loop) | 0.1 ms |
 | 2,000-long clip, mask or pattern chain | `too_complex` (definitions) | |
 | `<use>` bombs (2^25 copies; 400 × 100; 501 uses), pattern fan-out, marker per vertex | `too_complex` (expansion) | 0.1 ms |
 | `<filter>` with 4,000 morphology and blur primitives | Ok, `filters_ignored` | 2.8 ms |
-| 8 nested oversized masks (949 MB with resvg) | Ok, `clip_or_mask` | 0.6 ms |
+| 8 nested oversized masks (949 MB with resvg) | Ok, `clip_or_mask` (masks ignored) | 0.6 ms |
 | backtracking CSS selector; 16,000 declarations (sheet or `style` attribute); 10,000 rules × 3,000 elements; a long `style` attribute copied by 400 `<use>`s | `too_complex` (CSS) | 0.1 ms, 0.4 ms (first two) |
 | 4,990 segments crossing the drawing | `too_complex` (outline travel) | 0.5 ms (350 ms before the budget) |
-| 1,200 segments crossing the drawing (the most the budget allows) | Ok | 62 ms |
+| 1,200 segments crossing the drawing (the most the budget allows) | Ok | 64 ms |
 | 0.001-unit dashes; 20 nested clipped groups; 6,000 segments | `too_complex` | |
 | 25,000 elements | `invalid_xml` (node limit) | |
 | Latin-1 bytes | `invalid_svg` | |
+| gzip (`.svgz`), UTF-16 (with or without a BOM) | `unsupported_format` (`svgz`, `utf16`), with advice to save a plain UTF-8 SVG | |
 | 600 KiB | `too_large` | 0.1 ms |
 | HTML that mentions `<svg>` | `invalid_svg` (root) | |
 
@@ -311,8 +351,8 @@ release, median of 9, through `process_on_big_stack`.
 
 | Input | Time | Peak RSS (whole process) |
 |---|---|---|
-| official SVGs, `vector_exact` (171) | median 1.1 ms, max 4.3 ms | 4.7 MB (smile) |
-| official SVGs, `retraced` (13) | median 38 ms, max 42 ms | 17 MB |
+| official SVGs, `vector_exact` (168) | median 1.2 ms, max 5.6 ms | 4.7 MB (smile) |
+| official SVGs, `retraced` (16) | median 41 ms, max 48 ms | 17 MB |
 | 16 nested clipped groups, retraced | 54 ms | 24 MB |
 
 A debug build takes about 17 ms and 250 ms for the same official SVGs (usvg, simplecss,
@@ -324,10 +364,19 @@ roxmltree, svgtypes and kurbo are built with `opt-level = 3` in dev too).
 Each must succeed, match an independent render (resvg draws the original in the board's
 wrapper with colours classified the same way; IoU ≥ 0.99), match the investigation's
 rsvg metrics (`catalog/metrics_summary.csv`) within 2 points for fill and left edge when
-single-colour, and get no warning for its kind.
+single-colour, lose or add no detail, and get no warning for its kind.
 
-All pass: 171 `vector_exact`, 13 `retraced` (the multi-colour heads and tails whose
-details are layered), worst IoU 0.992. One asset legitimately trips a rule and is listed,
+IoU alone can't see a lost detail: a 50 unit² eye is under 1% of a head. So every ink
+region and every background region of the oracle and of the output is a detail, with a
+core of the pixels whose 8 neighbours are in it too (a sliver one pixel thick has none);
+each detail whose core covers at least half a unit² must keep at least half its core in
+the other render. As a check of the check: with the vector path loosened to take the
+first candidate within 3% of the pixels, it flags 28 assets, three of which (the bull
+and fang heads, the mystic-moon tail) still score IoU ≥ 0.99.
+
+All pass: 168 `vector_exact`, 16 `retraced` (the 13 multi-colour heads and tails whose
+details are layered, and jackolantern, replit-notmark and shades, whose shapes cross the
+edge of the square), worst IoU 0.992. One asset legitimately trips a rule and is listed,
 with the exact warning it must get, in the test's `EXCEPTIONS`: the trans-rights-scarf
 head's middle stripe is explicit white and crosses the neck, so as one colour the head
 has a 20-unit notch there (left edge 80%) and gets `neck_gap`.
@@ -344,7 +393,9 @@ Findings from the corpus changed the pipeline, not the thresholds:
   retraced); it now paints each paint black or white and resolves edges at 50%.
 - fang and others drew separate shapes that overlap with opposite winding, and white
   eyes under the dark shape; the winding-normalised and dark-only candidates made them
-  `vector_exact` (140 → 171), which the reference shapes need.
+  `vector_exact` (140 → 171), which the reference shapes need. Later, five turned out to
+  reach past the square; nr-rocket and nr-booster stay exact once their contours wholly
+  outside it are dropped, and the three that cross its edge are retraced (168).
 - Retraced curves were up to 0.5 units off (IoU 0.976-0.99) with the drawing tracer's 45°
   splice threshold; the SVG retrace now uses 10°.
 - The direction lint called that scarf head rotated (`faces_up_down`) because its top
@@ -497,17 +548,18 @@ Every asset touches x = 0 and spans y from 0–2 to at least 98.5.
 | `specks_removed` | pieces or holes < 1 unit² removed | info | – | removed automatically |
 | `colours_flattened` | see the ink rule | info | – | |
 | `guides_visible` | see the ink rule | info | – | |
+| `outside_draw_here_ignored` | SVG `draw-here` was used alone and other layers had visible ink | tip | – | |
 | `semi_transparent` | see the ink rule | info | – | |
 | `non_square` | canvas not square | tip | – | |
 | `low_resolution` | longer side < 128 px | tip | – | |
 | `image_ignored` | SVG `<image>`s (never loaded) | tip | – | |
 | `text_ignored` | SVG text not converted to outlines | tip | – | |
 | `strokes_converted` | SVG strokes became filled outlines | info | – | |
-| `gradient` | SVG gradients or patterns became one colour | info | – | |
-| `clip_or_mask` | SVG clip paths applied, masks ignored | info | – | |
+| `gradient` | SVG gradients became their average colour (light ones cut-outs), patterns solid | info | – | |
+| `clip_or_mask` | SVG clip paths applied and/or masks ignored; the message names only what happened (`clipped`, `masked`) | info | – | |
 | `filters_ignored` | SVG filters | info | – | |
 | `active_content_removed` | SVG scripts, handlers, embedded HTML, animations, external links | info | – | |
-| `outside_canvas` | an exact SVG path reaches more than 0.5 units outside the square | info | – | |
+| `outside_canvas` | SVG ink (at least half opaque, after its clip paths) reaches more than 0.5 units outside the square, whichever the strategy | info | – | |
 
 For SVG input, `colours_flattened` fires when the drawing uses more than one colour or
 one clearly coloured one (chroma ≥ 64), `semi_transparent` when a paint is less than
@@ -591,11 +643,11 @@ report panics from the decode process.
 |---|---|
 | `empty_file` | zero bytes |
 | `unknown_format` | not PNG, JPEG or SVG, and not a format we recognise |
-| `unsupported_format` | HEIC, GIF, WebP, PSD, ZIP/.procreate, PDF/.ai |
+| `unsupported_format` | HEIC, GIF, WebP, PSD, ZIP/.procreate, PDF/.ai, gzip (.svgz), UTF-16 text |
 | `too_large` | over the byte cap for the format |
 | `image_too_large` | wider or taller than 2048 px, or a progressive or multi-scan JPEG over its pixel cap (about 1448 px square for colour, 1254 for CMYK) |
 | `invalid_image` | truncated, corrupt or zero-size |
-| `invalid_xml` | malformed SVG, over 20,000 nodes, or declaring entities |
+| `invalid_xml` | malformed SVG or DOCTYPE, over 20,000 nodes, or declaring entities other than Illustrator-style plain text (its own message: export a plain SVG) |
 | `invalid_svg` | not UTF-8, the root isn't `<svg>`, or usvg can't read it |
 | `too_complex` | over the trace budget, or `d` over 64 KiB (noise, checkerboards, photos, crafted stripes); for SVGs, over a prescan or painting budget (nesting, loops, expansion, CSS, segments, outline travel, dashes, clips) |
 | `empty` | nothing drawable (carries info lints, e.g. guides only) |
@@ -621,20 +673,29 @@ report panics from the decode process.
   trace budget); and a property test that every output is one clean path.
 - `server/tests/design_kit_metrics.rs`: the metric oracle described above.
 - `server/tests/design_kit_svg.rs`: real-world exports (Illustrator with a DOCTYPE, CSS
-  and a 1000-unit viewBox; shapes and transforms without a viewBox; Inkscape even-odd
-  holes; Figma frame clips; overlapping shapes of opposite winding; white details on,
-  under and beside dark shapes; layered details that must be retraced); every input
-  fact; fixes on SVG input; the template (empty, a head in `draw-here`, ids stripped
-  with guides and references visible, a drawing on a new layer); the hostile table
-  above, with exact outcomes; and the big-stack runner (the permit, and the raster
-  worst cases giving the same answers on it). A unit test in `mod.rs` checks a thread
-  that can't start is `internal`.
+  and a 1000-unit viewBox; Illustrator's Save As with namespace entities and a
+  `<switch>`, `fixtures/design_kit/illustrator/`; shapes and transforms without a
+  viewBox; Inkscape even-odd holes; Figma frame clips; overlapping shapes of opposite
+  winding; white details on, under and beside dark shapes; layered details that must be
+  retraced); small holes and marks (a 3×3 even-odd hole, an r = 1.7 eye, 2×2 nostrils
+  beside a 3×3 sparkle) that the vector path must not lose; geometry off the square (a
+  stray shape dropped so Fit works, a shape crossing the edge retraced, a frame clip
+  that already cut the overflow); every input fact; fixes on SVG input; the template
+  (empty, a head in `draw-here`, ids stripped with guides and references visible, a
+  drawing on a new layer, other layers left out beside `draw-here`, a clip around
+  `draw-here`); the hostile table above, with exact outcomes; the big-stack runner (the
+  permit, and the raster worst cases giving the same answers on it); and the pinned
+  versions of the crates the prescan mirrors. Unit tests in `mod.rs` check that the
+  permit is held until the work ends even when the caller stops waiting, and that a
+  thread that can't start is `internal`; in `svg_scan.rs`, that the depth scan reads
+  DOCTYPEs as roxmltree does.
 - `server/tests/design_kit_catalog.rs`: the 184-file corpus described above.
 - `server/tests/design_kit_refs.rs`: the reference table against fresh processing.
 - Fixtures live in `server/tests/fixtures/design_kit/`: under `catalog/`, all 184
   official SVGs, the investigation's `metrics_summary.csv` (the corpus oracle) and
   `metrics_detail.csv` (centroid, holes and bounds for the 12 samples the metric oracle
-  checks); the raw reference SVGs under `refs/`; under `template/`, the guide overlays
+  checks); the raw reference SVGs under `refs/`; an Illustrator Save As export under
+  `illustrator/`; under `template/`, the guide overlays
   and the SVG template (`head-template.svg`), all copies of the template generator's
   output; and a PIL progressive JPEG under `jpeg/`. Reference-ghost overlays are
   rendered in the tests.

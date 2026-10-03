@@ -79,13 +79,13 @@ pub(crate) struct Facts {
 /// Skips comments, CDATA, processing instructions and the DOCTYPE (with its internal
 /// subset), and honours quotes inside tags, so `a="/>"` can't fake a self-closing tag.
 /// Over-estimates are fine: it is only used to reject.
-pub(crate) fn depth_upper_bound(b: &[u8]) -> usize {
+///
+/// `None` when the markup can't be bounded: a DOCTYPE or `<!` declaration that is
+/// malformed or unterminated (roxmltree rejects those too). Skipping more than roxmltree
+/// does would hide elements from the count, so the DOCTYPE is read with roxmltree
+/// 0.21.1's own grammar ([`doctype_end`]), and anything else is refused.
+pub(crate) fn depth_upper_bound(b: &[u8]) -> Option<usize> {
     let n = b.len();
-    let find = |from: usize, pat: &[u8]| -> usize {
-        b.get(from.min(n)..)
-            .and_then(|rest| rest.windows(pat.len()).position(|w| w == pat))
-            .map_or(n, |p| from + p + pat.len())
-    };
     let (mut i, mut depth, mut max) = (0usize, 0usize, 0usize);
     while i < n {
         if b[i] != b'<' {
@@ -94,28 +94,19 @@ pub(crate) fn depth_upper_bound(b: &[u8]) -> usize {
         }
         let rest = &b[i..];
         if rest.starts_with(b"<!--") {
-            i = find(i + 4, b"-->");
+            i = after(b, i + 4, b"-->").unwrap_or(n);
         } else if rest.starts_with(b"<![CDATA[") {
-            i = find(i + 9, b"]]>");
+            i = after(b, i + 9, b"]]>").unwrap_or(n);
         } else if rest.starts_with(b"<?") {
-            i = find(i + 2, b"?>");
+            i = after(b, i + 2, b"?>").unwrap_or(n);
+        } else if rest.starts_with(b"<!DOCTYPE") {
+            i = doctype_end(b, i + 9)?;
         } else if rest.starts_with(b"<!") {
-            // DOCTYPE, possibly with an [internal subset].
-            let mut j = i + 2;
-            let mut bracket = 0i64;
-            while j < n {
-                match b[j] {
-                    b'[' => bracket += 1,
-                    b']' => bracket -= 1,
-                    b'>' if bracket <= 0 => break,
-                    _ => {}
-                }
-                j += 1;
-            }
-            i = j + 1;
+            // roxmltree accepts no other declaration outside the DOCTYPE.
+            return None;
         } else if rest.starts_with(b"</") {
             depth = depth.saturating_sub(1);
-            i = find(i + 2, b">");
+            i = after(b, i + 2, b">").unwrap_or(n);
         } else {
             let mut j = i + 1;
             let mut quote = 0u8;
@@ -140,7 +131,81 @@ pub(crate) fn depth_upper_bound(b: &[u8]) -> usize {
             i = j + 1;
         }
     }
-    max
+    Some(max)
+}
+
+/// The index just past the first `pat` at or after `from`.
+fn after(b: &[u8], from: usize, pat: &[u8]) -> Option<usize> {
+    b.get(from..)?
+        .windows(pat.len())
+        .position(|w| w == pat)
+        .map(|p| from + p + pat.len())
+}
+
+/// The index just past a DOCTYPE whose `<!DOCTYPE` ends before `j`, read as roxmltree
+/// 0.21.1 reads it (`tokenizer.rs`, `parse_doctype`):
+///
+/// * before the internal subset, quoted literals (the external ID) are skipped whole,
+///   up to `[` or `>`;
+/// * in the subset: `<!ENTITY ...>` with quoted values, comments, processing
+///   instructions, and `<!ELEMENT`, `<!ATTLIST` and `<!NOTATION`, which roxmltree skips
+///   to the first `>` **without** honouring quotes (so `<!ATTLIST a b CDATA ">">` ends
+///   at the first `>`, and so must we); then `]`, spaces and `>`.
+///
+/// `None` for anything else, or at the end of the input: roxmltree fails there too.
+fn doctype_end(b: &[u8], mut j: usize) -> Option<usize> {
+    let n = b.len();
+    let quoted = |j: usize| -> Option<usize> {
+        let q = b[j];
+        b.get(j + 1..)?
+            .iter()
+            .position(|&c| c == q)
+            .map(|p| j + 1 + p + 1)
+    };
+    let space = |c: u8| matches!(c, b' ' | b'\t' | b'\r' | b'\n');
+    loop {
+        match *b.get(j)? {
+            b'"' | b'\'' => j = quoted(j)?,
+            b'>' => return Some(j + 1),
+            b'[' => break,
+            _ => j += 1,
+        }
+    }
+    j += 1;
+    loop {
+        while j < n && space(b[j]) {
+            j += 1;
+        }
+        let rest = b.get(j..)?;
+        if rest.starts_with(b"<!ENTITY") {
+            j += 8;
+            loop {
+                match *b.get(j)? {
+                    b'"' | b'\'' => j = quoted(j)?,
+                    b'>' => break,
+                    _ => j += 1,
+                }
+            }
+            j += 1;
+        } else if rest.starts_with(b"<!--") {
+            j = after(b, j + 4, b"-->")?;
+        } else if rest.starts_with(b"<?") {
+            j = after(b, j + 2, b"?>")?;
+        } else if rest.starts_with(b"<!ELEMENT")
+            || rest.starts_with(b"<!ATTLIST")
+            || rest.starts_with(b"<!NOTATION")
+        {
+            j = after(b, j, b">")?;
+        } else if rest.starts_with(b"]") {
+            j += 1;
+            while j < n && space(b[j]) {
+                j += 1;
+            }
+            return (b.get(j) == Some(&b'>')).then_some(j + 1);
+        } else {
+            return None;
+        }
+    }
 }
 
 /// How a reference behaves.
@@ -225,6 +290,23 @@ const ACTIVE: [&str; 15] = [
     "discard",
     "handler",
 ];
+
+const XHTML_NS: &str = "http://www.w3.org/1999/xhtml";
+
+/// Illustrator's "Save As SVG" with editing data: `<switch><foreignObject
+/// requiredExtensions="&ns_ai;">` holding a reference to its private data, then the
+/// drawing as the fallback. Not web content (no HTML inside), and usvg skips any branch
+/// with `requiredExtensions`.
+fn illustrator_fallback(node: Node) -> bool {
+    node.tag_name().name() == "foreignObject"
+        && node.has_attribute("requiredExtensions")
+        && node
+            .parent_element()
+            .is_some_and(|p| p.tag_name().name() == "switch")
+        && !node
+            .descendants()
+            .any(|d| d.tag_name().namespace() == Some(XHTML_NS))
+}
 
 /// Definitions that usvg resolves by reference (counted against `max_svg_defs`).
 const DEFS: [&str; 8] = [
@@ -318,7 +400,7 @@ pub(crate) fn scan(doc: &roxmltree::Document, limits: &Limits) -> Result<Facts, 
                 "use" => uses += 1,
                 _ => {}
             }
-            if ACTIVE.contains(&name) {
+            if ACTIVE.contains(&name) && !illustrator_fallback(node) {
                 facts.active = true;
             }
             if DEFS.contains(&name) {
@@ -829,16 +911,52 @@ mod tests {
 
     #[test]
     fn depth_scan_counts_open_tags() {
-        assert_eq!(depth_upper_bound(b"<svg><g><g/></g></svg>"), 2);
+        assert_eq!(depth_upper_bound(b"<svg><g><g/></g></svg>"), Some(2));
         assert_eq!(
             depth_upper_bound(b"<svg><!-- <g><g><g> --><g></g></svg>"),
-            2
+            Some(2)
         );
         assert_eq!(
             depth_upper_bound(b"<!DOCTYPE svg [<!ELEMENT g ANY>]><svg><g a=\"/>\"></g></svg>"),
-            2
+            Some(2)
         );
-        assert_eq!(depth_upper_bound(b"<svg><![CDATA[<g><g>]]></svg>"), 1);
+        assert_eq!(depth_upper_bound(b"<svg><![CDATA[<g><g>]]></svg>"), Some(1));
+    }
+
+    #[test]
+    fn depth_scan_reads_the_doctype_as_roxmltree_does() {
+        let nested = "<svg><g><g></g></g></svg>";
+        let depth = |doctype: &str| depth_upper_bound(format!("{doctype}{nested}").as_bytes());
+        // Each of these is a DOCTYPE that roxmltree parses before the three elements.
+        for doctype in [
+            "<!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.1//EN\" \"http://x/svg11.dtd\">",
+            "<!DOCTYPE svg PUBLIC \"a>b\" 'c]>'>",
+            // A quoted `[` (the review's bypass: counting brackets swallowed the file).
+            "<!DOCTYPE svg [<!ATTLIST svg a CDATA \"[\">]>",
+            // roxmltree ends ATTLIST, ELEMENT and NOTATION at the first `>`, quoted or not.
+            "<!DOCTYPE svg [<!ATTLIST svg a CDATA \">]>",
+            "<!DOCTYPE svg [<!ELEMENT svg '>]>",
+            // Entity values, comments and PIs are skipped whole.
+            "<!DOCTYPE svg [<!ENTITY a \">]>\"> <!ENTITY b SYSTEM 'x>]'>]>",
+            "<!DOCTYPE svg [ <!-- ]> --> <?pi ]> ?> ]\n>",
+        ] {
+            assert_eq!(depth(doctype), Some(3), "{doctype}");
+        }
+        // Anything roxmltree doesn't parse can't be bounded.
+        for bad in [
+            "<!DOCTYPE svg [<!ENTITY a \"x\">",
+            "<!DOCTYPE svg [<!FOO>]>",
+            "<!DOCTYPE svg [<!ATTLIST svg a CDATA \"x\"]>",
+            "<!DOCTYPE svg [<!-- ]>",
+            "<!DOCTYPE svg \"",
+            "<!doctype svg>",
+            "<!FOO>",
+        ] {
+            assert_eq!(depth(bad), None, "{bad}");
+        }
+        // An unterminated comment, CDATA section or tag is the end of the input for
+        // roxmltree too.
+        assert_eq!(depth_upper_bound(b"<svg><g><!-- <g>"), Some(2));
     }
 
     #[test]

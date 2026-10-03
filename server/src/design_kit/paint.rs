@@ -8,32 +8,39 @@
 //!
 //! * paints fills and strokes in order, with group opacity folded into each paint (no
 //!   layers), in black, or in white for the light colours of a multi-colour drawing;
-//! * applies clip paths as coverage masks (at most `Limits::max_svg_clips` of them);
+//! * applies clip paths as coverage masks (at most `Limits::max_svg_clips` of them),
+//!   including those of the groups around `draw-here`;
 //! * ignores filters, paints masked content unmasked, and replaces gradients and
 //!   patterns with one colour (their stops' average; black for patterns);
 //! * bounds its own work: path segments, dashes and clip masks are counted first, and
 //!   the vertical travel of every outline is charged before it is filled ([`travel`]).
 //!
-//! When the drawing uses more than one colour, near-white paints (luma ≥ 0.9) are
+//! When the drawing uses more than one colour, near-white paints (luma ≥ 230 of 255) are
 //! cut-outs, the way white eyes on a black head are drawn. Ink is a pixel that is at
 //! least half opaque and at least half black.
 //!
 //! **Template filter** (the SVG template's contract, `palette.rs`): if a group with id
-//! `draw-here` contains anything, only it is used. Otherwise everything is used except
-//! groups with id `guides` or `reference-*` (so an artist who drew on a new layer and
-//! left `draw-here` empty still gets her drawing). Either way, paints in exactly a
-//! template colour are dropped: Figma and some exporters strip ids, but keep colours.
-//! Hidden content (`display:none`, `visibility:hidden`) never reaches us: usvg drops it.
+//! `draw-here` contains anything, only it is used (and the shapes left out on other
+//! layers are reported). Otherwise everything is used except groups with id `guides` or
+//! `reference-*` (so an artist who drew on a new layer and left `draw-here` empty still
+//! gets her drawing). Either way, paints in exactly a template colour are dropped: Figma
+//! and some exporters strip ids, but keep colours. Hidden content (`display:none`,
+//! `visibility:hidden`) never reaches us: usvg drops it.
 
 use std::collections::BTreeSet;
 
 use tiny_skia::{Mask, Paint, PathSegment, Pixmap, Transform};
 
-use super::palette::{Rgb, TEMPLATE};
+use super::palette::{self, Rgb, TEMPLATE};
 use super::{Limits, ProcessError};
 
-/// Luma (0..1) at or above which a colour is a cut-out in a multi-colour drawing.
-pub(crate) const LIGHT_LUMA: f32 = 0.9;
+/// Luma (0..=255, [`palette::luma`]) at or above which a colour is a cut-out in a
+/// multi-colour drawing (0.9 of white).
+const LIGHT_LUMA: u32 = 230;
+
+/// How far (in units) ink may reach outside the square before `outside_canvas` is
+/// reported, and how far an exact vector path may reach before it is retraced instead.
+pub(crate) const OUTSIDE_SLACK: f32 = 0.5;
 
 /// Most clip-path renders (a chain of clip paths on clip paths is one render each). Only
 /// two masks of a chain are alive at once; `Limits::max_svg_clips` bounds the masks
@@ -50,10 +57,15 @@ pub(crate) struct Facts {
     pub gradient: bool,
     /// A paint less than fully opaque.
     pub semi: bool,
-    pub clip_or_mask: bool,
+    /// Clip paths were applied.
+    pub clipped: bool,
+    /// Masks were ignored.
+    pub masked: bool,
     pub filters: bool,
     /// Template guides or references were present and left out.
     pub guides_dropped: bool,
+    /// `draw-here` was used alone, and other layers had visible ink that was left out.
+    pub outside_draw_here: bool,
 }
 
 impl Facts {
@@ -65,7 +77,7 @@ impl Facts {
 /// Which part of the tree is the drawing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
-    /// Only the content of the first `draw-here` group.
+    /// Only the content of the `draw-here` groups.
     DrawHere,
     /// Everything except template layers.
     Full,
@@ -83,6 +95,9 @@ pub(crate) struct Painted {
     pub ink: Vec<bool>,
     /// Every painted fill and stroke outline, in paint order, in 0..100 space.
     pub shapes: Vec<Shape>,
+    /// Some ink, after its clip paths, reaches more than [`OUTSIDE_SLACK`] outside the
+    /// square (where the board cuts it off).
+    pub outside: bool,
 }
 
 /// One painted fill or stroke outline.
@@ -127,6 +142,10 @@ fn is_template_colour(paint: &usvg::Paint) -> bool {
     }
 }
 
+fn is_light(rgb: [u8; 3]) -> bool {
+    palette::luma(Rgb::new(rgb[0], rgb[1], rgb[2])) >= LIGHT_LUMA
+}
+
 /// The fill and stroke paints of a path; none when it is hidden.
 fn visible_paints(p: &usvg::Path) -> impl Iterator<Item = &usvg::Paint> {
     let visible = p.is_visible();
@@ -161,6 +180,36 @@ fn find_draw_here(g: &usvg::Group) -> Option<&usvg::Group> {
     })
 }
 
+/// One child of a group, as the template filter sees it. Shared by the survey and the
+/// painter, so the budget is counted on exactly what is painted.
+enum Child<'a> {
+    /// A group, and whether its content is part of the drawing.
+    Group(&'a usvg::Group, bool),
+    /// A template layer (`guides`, `reference-*`): never the drawing.
+    TemplateLayer(&'a usvg::Group),
+    /// A visible path that is part of the drawing.
+    Path(&'a usvg::Path),
+    /// A visible path that is not (outside `draw-here` in that mode).
+    Ignored(&'a usvg::Path),
+}
+
+/// The children of `g`. `active`: `g`'s content is part of the drawing.
+fn children(g: &usvg::Group, mode: Mode, active: bool) -> impl Iterator<Item = Child<'_>> {
+    g.children().iter().filter_map(move |c| match c {
+        usvg::Node::Group(cg) if is_template_layer(cg.id()) => Some(Child::TemplateLayer(cg)),
+        usvg::Node::Group(cg) => Some(Child::Group(
+            cg,
+            active || (mode == Mode::DrawHere && is_draw_here(cg.id())),
+        )),
+        usvg::Node::Path(p) if p.is_visible() => Some(if active {
+            Child::Path(p)
+        } else {
+            Child::Ignored(p)
+        }),
+        _ => None,
+    })
+}
+
 /// Decide what the drawing is and check that painting it fits the budget.
 pub(crate) fn plan(tree: &usvg::Tree, limits: &Limits) -> Result<Plan, ProcessError> {
     let mode = match find_draw_here(tree.root()) {
@@ -175,7 +224,7 @@ pub(crate) fn plan(tree: &usvg::Tree, limits: &Limits) -> Result<Plan, ProcessEr
         clip_renders: 0,
         dashes: 0.0,
     };
-    survey.group(tree.root(), 1.0, mode == Mode::Full);
+    survey.group(tree.root(), 1.0, mode == Mode::Full, &mut Vec::new());
     if survey.segments > limits.max_svg_segments {
         return Err(ProcessError::TooComplex("too many path segments"));
     }
@@ -207,43 +256,70 @@ struct Survey {
 
 impl Survey {
     /// `active`: content here is part of the drawing (inside `draw-here` in that mode).
-    fn group(&mut self, g: &usvg::Group, parent_opacity: f32, active: bool) {
+    /// `around`: the groups with effects (clip, mask, filter) outside the drawing that
+    /// enclose `g`; they apply to any drawing found inside it.
+    fn group<'a>(
+        &mut self,
+        g: &'a usvg::Group,
+        parent_opacity: f32,
+        active: bool,
+        around: &mut Vec<&'a usvg::Group>,
+    ) {
         let opacity = parent_opacity * g.opacity().get();
+        let enclosing = !active && has_effects(g);
         if active {
-            if !g.filters().is_empty() {
-                self.facts.filters = true;
-            }
-            if g.mask().is_some() {
-                self.facts.clip_or_mask = true;
-            }
-            if g.clip_path().is_some() {
-                self.facts.clip_or_mask = true;
-                self.clips += 1;
-            }
-            let mut clip = g.clip_path();
-            while let Some(cp) = clip {
-                self.clip_renders += 1;
-                self.segments = self.segments.saturating_add(segments(cp.root()));
-                clip = cp.clip_path();
-                if self.clip_renders > MAX_CLIP_RENDERS {
-                    break;
+            self.effects(g);
+        } else if enclosing {
+            around.push(g);
+        }
+        for child in children(g, self.mode, active) {
+            match child {
+                Child::TemplateLayer(cg) => {
+                    if active && has_paint(cg) {
+                        self.facts.guides_dropped = true;
+                    }
+                }
+                Child::Group(cg, child_active) => {
+                    if child_active && !active {
+                        // Entering the drawing: the clips around it apply to it.
+                        for a in around.iter() {
+                            self.effects(a);
+                        }
+                    }
+                    self.group(cg, opacity, child_active, around);
+                }
+                Child::Path(p) => self.path(p, opacity),
+                Child::Ignored(p) => {
+                    if ignored_ink(p, opacity) {
+                        self.facts.outside_draw_here = true;
+                    }
                 }
             }
         }
-        for child in g.children() {
-            match child {
-                usvg::Node::Group(cg) => {
-                    if is_template_layer(cg.id()) {
-                        if active && has_paint(cg) {
-                            self.facts.guides_dropped = true;
-                        }
-                        continue;
-                    }
-                    let active = active || (self.mode == Mode::DrawHere && is_draw_here(cg.id()));
-                    self.group(cg, opacity, active);
-                }
-                usvg::Node::Path(p) if active && p.is_visible() => self.path(p, opacity),
-                _ => {}
+        if enclosing {
+            around.pop();
+        }
+    }
+
+    /// A group's clip path, mask and filters, as they apply to the drawing.
+    fn effects(&mut self, g: &usvg::Group) {
+        if !g.filters().is_empty() {
+            self.facts.filters = true;
+        }
+        if g.mask().is_some() {
+            self.facts.masked = true;
+        }
+        if g.clip_path().is_some() {
+            self.facts.clipped = true;
+            self.clips += 1;
+        }
+        let mut clip = g.clip_path();
+        while let Some(cp) = clip {
+            self.clip_renders += 1;
+            self.segments = self.segments.saturating_add(segments(cp.root()));
+            clip = cp.clip_path();
+            if self.clip_renders > MAX_CLIP_RENDERS {
+                break;
             }
         }
     }
@@ -286,6 +362,24 @@ impl Survey {
     }
 }
 
+fn has_effects(g: &usvg::Group) -> bool {
+    g.clip_path().is_some() || g.mask().is_some() || !g.filters().is_empty()
+}
+
+/// Would `p`, left out of the drawing, have added ink: a paint that isn't a template
+/// colour or near-white (a white background layer is common and harmless), and is at
+/// least half opaque.
+fn ignored_ink(p: &usvg::Path, opacity: f32) -> bool {
+    let fill = p.fill().map(|f| (f.paint(), f.opacity().get()));
+    let stroke = p.stroke().map(|s| (s.paint(), s.opacity().get()));
+    fill.into_iter()
+        .chain(stroke)
+        .any(|(paint, paint_opacity)| {
+            let (rgb, a) = paint_colour(paint);
+            !is_template_colour(paint) && !is_light(rgb) && opacity * paint_opacity * a >= 0.5
+        })
+}
+
 /// Path verbs in a clip path's content.
 fn segments(g: &usvg::Group) -> usize {
     g.children().iter().fold(0usize, |n, c| {
@@ -314,10 +408,18 @@ pub(crate) fn paint(
         side,
         multi: plan.facts.multi_colour(),
         shapes: Vec::new(),
+        outside: false,
         travel: 0.0,
         max_travel: f64::from(max_travel),
     };
-    painter.group(tree.root(), canvas, 1.0, None, plan.mode == Mode::Full)?;
+    painter.group(
+        tree.root(),
+        canvas,
+        1.0,
+        None,
+        plan.mode == Mode::Full,
+        &mut Vec::new(),
+    )?;
     // Paints are black (ink) or white (cut-out), so a pixel is ink when it is mostly
     // opaque and mostly black: an edge between a white detail and a dark shape is
     // resolved at 50%, like any other edge.
@@ -330,11 +432,63 @@ pub(crate) fn paint(
     Ok(Painted {
         ink,
         shapes: painter.shapes,
+        outside: painter.outside,
     })
 }
 
-pub(crate) fn luma(c: [u8; 3]) -> f32 {
-    (0.2126 * c[0] as f32 + 0.7152 * c[1] as f32 + 0.0722 * c[2] as f32) / 255.0
+/// An axis-aligned box in 0..100 space: left, top, right, bottom (empty when left >
+/// right or top > bottom).
+type Bounds = [f32; 4];
+
+const NO_BOUNDS: Bounds = [
+    f32::INFINITY,
+    f32::INFINITY,
+    f32::NEG_INFINITY,
+    f32::NEG_INFINITY,
+];
+
+fn bounds_of(path: &tiny_skia::Path) -> Bounds {
+    path.compute_tight_bounds()
+        .map_or(NO_BOUNDS, |b| [b.left(), b.top(), b.right(), b.bottom()])
+}
+
+fn union(a: Bounds, b: Bounds) -> Bounds {
+    [
+        a[0].min(b[0]),
+        a[1].min(b[1]),
+        a[2].max(b[2]),
+        a[3].max(b[3]),
+    ]
+}
+
+fn intersection(a: Bounds, b: Bounds) -> Bounds {
+    [
+        a[0].max(b[0]),
+        a[1].max(b[1]),
+        a[2].min(b[2]),
+        a[3].min(b[3]),
+    ]
+}
+
+/// Does `path` (0..100 space) reach more than [`OUTSIDE_SLACK`] outside the square?
+pub(crate) fn reaches_outside(path: &tiny_skia::Path) -> bool {
+    leaves_square(bounds_of(path))
+}
+
+/// Non-empty, and reaching more than [`OUTSIDE_SLACK`] outside the 0..100 square.
+fn leaves_square(b: Bounds) -> bool {
+    b[0] <= b[2]
+        && b[1] <= b[3]
+        && (b[0] < -OUTSIDE_SLACK
+            || b[1] < -OUTSIDE_SLACK
+            || b[2] > 100.0 + OUTSIDE_SLACK
+            || b[3] > 100.0 + OUTSIDE_SLACK)
+}
+
+/// A clip region: its coverage on the raster, and a box (0..100 space) that holds it.
+struct Clip {
+    mask: Mask,
+    bounds: Bounds,
 }
 
 struct Painter {
@@ -345,6 +499,7 @@ struct Painter {
     side: u32,
     multi: bool,
     shapes: Vec<Shape>,
+    outside: bool,
     /// Vertical travel of the outlines painted so far, in units.
     travel: f64,
     max_travel: f64,
@@ -355,7 +510,7 @@ struct Painter {
 /// scanlines at a given raster size, and every scanline an edge crosses is work, so
 /// 5000 short segments are cheap and 5000 full-height ones are not. Measured on the
 /// control polygon, which is at least as long as the curve.
-pub(crate) fn travel(path: &tiny_skia::Path) -> f64 {
+fn travel(path: &tiny_skia::Path) -> f64 {
     let (mut total, mut start, mut cur) = (0f64, 0f32, 0f32);
     let step = |from: f32, to: f32| (to as f64 - from as f64).abs();
     for seg in path.segments() {
@@ -398,36 +553,51 @@ impl Painter {
         Ok(())
     }
 
-    fn group(
+    /// `around`: the clip paths (with their user space) of the groups outside the
+    /// drawing that enclose `g`; they are applied to any drawing found inside it.
+    fn group<'a>(
         &mut self,
-        g: &usvg::Group,
+        g: &'a usvg::Group,
         parent_ts: Transform,
         parent_opacity: f32,
-        parent_clip: Option<&Mask>,
+        parent_clip: Option<&Clip>,
         active: bool,
+        around: &mut Vec<(&'a usvg::ClipPath, Transform)>,
     ) -> Result<(), ProcessError> {
         // `ts` maps this group's user space into 0..100.
         let ts = parent_ts.pre_concat(g.transform());
         let opacity = parent_opacity * g.opacity().get();
         let own_clip = match g.clip_path() {
-            Some(cp) if active => Some(self.clip_mask(cp, ts, parent_clip)?),
+            Some(cp) if active => Some(self.clip(cp, ts, parent_clip)?),
             _ => None,
         };
         let clip = own_clip.as_ref().or(parent_clip);
-        for child in g.children() {
-            match child {
-                usvg::Node::Group(cg) => {
-                    if is_template_layer(cg.id()) {
-                        continue;
-                    }
-                    let active = active || (self.mode == Mode::DrawHere && is_draw_here(cg.id()));
-                    self.group(cg, ts, opacity, clip, active)?;
-                }
-                usvg::Node::Path(p) if active && p.is_visible() => {
-                    self.path(p, ts, opacity, clip)?;
-                }
-                _ => {}
+        let enclosing = match g.clip_path() {
+            Some(cp) if !active => {
+                around.push((cp, ts));
+                true
             }
+            _ => false,
+        };
+        for child in children(g, self.mode, active) {
+            match child {
+                Child::Group(cg, true) if !active => {
+                    // Entering the drawing: clip it by the groups around it.
+                    let mut entry: Option<Clip> = None;
+                    for &(cp, cts) in around.iter() {
+                        entry = Some(self.clip(cp, cts, entry.as_ref())?);
+                    }
+                    self.group(cg, ts, opacity, entry.as_ref(), true, around)?;
+                }
+                Child::Group(cg, child_active) => {
+                    self.group(cg, ts, opacity, clip, child_active, around)?;
+                }
+                Child::Path(p) => self.path(p, ts, opacity, clip)?,
+                Child::TemplateLayer(_) | Child::Ignored(_) => {}
+            }
+        }
+        if enclosing {
+            around.pop();
         }
         Ok(())
     }
@@ -437,7 +607,7 @@ impl Painter {
         p: &usvg::Path,
         ts: Transform,
         opacity: f32,
-        clip: Option<&Mask>,
+        clip: Option<&Clip>,
     ) -> Result<(), ProcessError> {
         let stroke_first = p.paint_order() == usvg::PaintOrder::StrokeAndFill;
         if stroke_first {
@@ -453,7 +623,6 @@ impl Painter {
                 usvg::FillRule::EvenOdd => tiny_skia::FillRule::EvenOdd,
             };
             self.fill(&path, rgb, opacity * fill.opacity().get() * a, rule, clip)?;
-            self.add_candidate(&path, rgb);
         }
         if !stroke_first {
             self.stroke(p, ts, opacity, clip)?;
@@ -466,7 +635,7 @@ impl Painter {
         p: &usvg::Path,
         ts: Transform,
         opacity: f32,
-        clip: Option<&Mask>,
+        clip: Option<&Clip>,
     ) -> Result<(), ProcessError> {
         let Some(stroke) = p.stroke() else {
             return Ok(());
@@ -491,89 +660,94 @@ impl Painter {
             opacity * stroke.opacity().get() * a,
             tiny_skia::FillRule::Winding,
             clip,
-        )?;
-        self.add_candidate(&outline, rgb);
-        Ok(())
-    }
-
-    fn add_candidate(&mut self, path: &tiny_skia::Path, rgb: [u8; 3]) {
-        self.shapes.push(Shape {
-            path: path.clone(),
-            light: self.multi && luma(rgb) >= LIGHT_LUMA,
-        });
+        )
     }
 
     /// Paint `path` in black, or in white when it is a light paint in a multi-colour
-    /// drawing (a cut-out). Only that distinction matters for the truth.
+    /// drawing (a cut-out): only that distinction matters for the truth. Also keeps the
+    /// path as a vector candidate, and notes ink that reaches outside the square.
     fn fill(
         &mut self,
         path: &tiny_skia::Path,
         rgb: [u8; 3],
         alpha: f32,
         rule: tiny_skia::FillRule,
-        clip: Option<&Mask>,
+        clip: Option<&Clip>,
     ) -> Result<(), ProcessError> {
         self.charge(path)?;
-        let mut paint = Paint::default();
+        let light = self.multi && is_light(rgb);
         let a = (alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
-        let shade = if self.multi && luma(rgb) >= LIGHT_LUMA {
-            255
-        } else {
-            0
-        };
+        let shade = if light { 255 } else { 0 };
+        if !light && a >= 128 && !self.outside {
+            let visible = clip.map_or(bounds_of(path), |c| intersection(bounds_of(path), c.bounds));
+            self.outside = leaves_square(visible);
+        }
+        let mut paint = Paint::default();
         paint.set_color_rgba8(shade, shade, shade, a);
         paint.anti_alias = true;
-        self.pm.fill_path(path, &paint, rule, self.px, clip);
+        self.pm
+            .fill_path(path, &paint, rule, self.px, clip.map(|c| &c.mask));
+        self.shapes.push(Shape {
+            path: path.clone(),
+            light,
+        });
         Ok(())
     }
 
     /// A clip path as a coverage mask, intersected with its own nested clip paths and
     /// with `parent`. Iterative over nested clips: at most two masks live at once.
-    fn clip_mask(
+    fn clip(
         &mut self,
         cp: &usvg::ClipPath,
         ts: Transform,
-        parent: Option<&Mask>,
-    ) -> Result<Mask, ProcessError> {
+        parent: Option<&Clip>,
+    ) -> Result<Clip, ProcessError> {
         let side = self.side;
         let alloc = || {
             Mask::new(side, side).ok_or(ProcessError::Internal("could not allocate a clip mask"))
         };
-        let mut acc: Option<Mask> = None;
+        let mut acc: Option<Clip> = None;
         let mut current = Some((cp, ts));
         while let Some((cp, ts)) = current {
             let ts = ts.pre_concat(cp.transform());
             let mut mask = alloc()?;
-            self.add_to_mask(cp.root(), ts, &mut mask)?;
+            let bounds = self.add_to_mask(cp.root(), ts, &mut mask)?;
             acc = Some(match acc {
-                None => mask,
+                None => Clip { mask, bounds },
                 Some(mut a) => {
-                    intersect(&mut a, &mask);
+                    intersect(&mut a.mask, &mask);
+                    a.bounds = intersection(a.bounds, bounds);
                     a
                 }
             });
             current = cp.clip_path().map(|inner| (inner, ts));
         }
-        let mut mask = match acc {
-            Some(m) => m,
-            None => alloc()?,
+        let mut clip = match acc {
+            Some(c) => c,
+            None => Clip {
+                mask: alloc()?,
+                bounds: NO_BOUNDS,
+            },
         };
         if let Some(p) = parent {
-            intersect(&mut mask, p);
+            intersect(&mut clip.mask, &p.mask);
+            clip.bounds = intersection(clip.bounds, p.bounds);
         }
-        Ok(mask)
+        Ok(clip)
     }
 
+    /// Fill `g`'s shapes into `mask`; returns their bounds.
     fn add_to_mask(
         &mut self,
         g: &usvg::Group,
         parent_ts: Transform,
         mask: &mut Mask,
-    ) -> Result<(), ProcessError> {
+    ) -> Result<Bounds, ProcessError> {
         let ts = parent_ts.pre_concat(g.transform());
+        let mut bounds = NO_BOUNDS;
         for c in g.children() {
             match c {
-                usvg::Node::Group(cg) => self.add_to_mask(cg, ts, mask)?,
+                usvg::Node::Group(cg) => bounds = union(bounds, self.add_to_mask(cg, ts, mask)?),
                 usvg::Node::Path(p) if p.is_visible() => {
                     let rule = match p.fill().map(usvg::Fill::rule) {
                         Some(usvg::FillRule::EvenOdd) => tiny_skia::FillRule::EvenOdd,
@@ -582,12 +756,13 @@ impl Painter {
                     if let Some(path) = p.data().clone().transform(ts) {
                         self.charge(&path)?;
                         mask.fill_path(&path, rule, true, self.px);
+                        bounds = union(bounds, bounds_of(&path));
                     }
                 }
                 _ => {}
             }
         }
-        Ok(())
+        Ok(bounds)
     }
 }
 

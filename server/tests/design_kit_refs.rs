@@ -11,7 +11,7 @@
 mod common;
 
 use arena::design_kit::refs::{REFS, RefShape, find, of_kind};
-use arena::design_kit::{AssetKind, CleanShape, Limits, Strategy, process_upload};
+use arena::design_kit::{AssetKind, CleanShape, Limits, Strategy, process_on_big_stack};
 use common::design_kit::*;
 
 /// The reference shapes, in table order, with their catalog display names
@@ -39,7 +39,9 @@ const SHAPES: [(AssetKind, &str, &str); 18] = [
 
 fn processed(kind: AssetKind, slug: &str) -> CleanShape {
     let bytes = fixture(&format!("refs/{}/{slug}.svg", kind_dir(kind)));
-    let shape = process_upload(&bytes, &Limits::default(), &[])
+    let shape = process_on_big_stack(bytes, &Limits::default(), &[], ())
+        .blocking_recv()
+        .expect("a result")
         .unwrap_or_else(|e| panic!("{}/{slug}: {e:?}", kind_dir(kind)));
     assert_clean(&shape);
     shape

@@ -1,7 +1,8 @@
 //! Untrusted SVG -> one clean path in 0..100 space.
 //!
-//! 1. UTF-8, a byte-level depth scan (before roxmltree's recursive tokenizer runs), no
-//!    entity declarations (XXE, billion laughs), roxmltree with a node limit.
+//! 1. UTF-8, a byte-level depth scan (before roxmltree's recursive tokenizer runs), only
+//!    short plain-text entity declarations (Illustrator's namespace block; no XXE, no
+//!    billion laughs), roxmltree with a node limit.
 //! 2. [`svg_scan::scan`]: counts, lint facts, the CSS cost, and the reference graphs
 //!    (cycles, nesting along reference chains, expansion).
 //! 3. usvg converts shapes, transforms, CSS, `<use>` and the viewBox into plain paths.
@@ -10,27 +11,41 @@
 //!    colours), and the segment, dash and clip budgets.
 //! 5. The truth raster ([`paint::paint`], which also bounds the outline travel) at
 //!    512 px, and vector candidates built from every painted fill and stroke outline
-//!    (see [`exact_candidate`]). One that renders the same as the truth (within 0.1% of
-//!    the pixels) is emitted as is (`VectorExact`). Otherwise (layered white and dark
-//!    details, clips that cut through shapes, opacity...), or when its `d` would be too
-//!    long, the truth is painted again at the trace grid size and traced (`Retraced`).
+//!    (see [`exact_candidate`]). The one that renders closest to the truth is emitted as
+//!    is (`VectorExact`) when it differs only along edges (anti-aliasing) and stays
+//!    inside the square. Otherwise (layered white and dark details, small details no
+//!    fill rule reproduces, clips that cut through shapes, opacity, shapes reaching off
+//!    the square...), or when its `d` would be too long, the truth is painted again at
+//!    the trace grid size and traced (`Retraced`).
 
-use tiny_skia::{PathBuilder, PathSegment, Point, Transform};
+use tiny_skia::{PathBuilder, PathSegment, Point};
 use usvg::roxmltree;
 
 use super::lints::Lint;
 use super::paint::{self, Painted, Shape};
+use super::palette::{self, Rgb};
 use super::raster::render_alpha;
-use super::{FillRule, Limits, ProcessError, Strategy, emit, svg_scan, trace};
+use super::{FillRule, Limits, ProcessError, SPECK_UNITS, Strategy, emit, svg_scan, trace};
 
 /// Most pixels (as a share of the comparison raster) on which the vector candidate may
-/// differ from the truth and still be emitted as is.
+/// differ from the truth along edges (anti-aliasing) and still be emitted as is.
 const EXACT_TOLERANCE: f64 = 0.001;
 /// Side of the raster the candidate is compared on.
 const COMPARE_SIDE: u32 = 512;
-/// How far (in units) the emitted path may reach outside the square before
-/// `outside_canvas` is reported.
-const OUTSIDE_SLACK: f32 = 0.5;
+
+/// Entity declarations: Illustrator's "Save As SVG" declares its namespace URIs as
+/// entities in the DOCTYPE (`<!ENTITY ns_ai "http://ns.adobe.com/...">`). Only short
+/// plain-text values are accepted: no `&` (so no nesting: no billion laughs), no
+/// `SYSTEM`/`PUBLIC` (no XXE), no `%` (no parameter entities), no `<` (no markup), and
+/// every reference to them may add at most this much text in total.
+const MAX_ENTITIES: usize = 32;
+const MAX_ENTITY_VALUE_BYTES: usize = 256;
+const MAX_ENTITY_EXPANSION_BYTES: usize = 256 * 1024;
+
+/// The `InvalidXml` detail for a rejected entity declaration (its message names
+/// Illustrator's export).
+pub(crate) const ENTITIES_REJECTED: &str =
+    "entity declarations other than short plain text are not allowed";
 
 /// A converted SVG, before fixes, metrics and lints.
 pub(crate) struct SvgShape {
@@ -46,16 +61,15 @@ pub(crate) fn process(bytes: &[u8], limits: &Limits) -> Result<SvgShape, Process
     // roxmltree's tokenizer recurses once per nesting level: ~5000 nested tags overflow
     // a 2 MiB stack (~200 in a debug build) and abort the process. Bound the depth from
     // the bytes first.
-    if svg_scan::depth_upper_bound(bytes) > limits.max_svg_depth {
+    let depth = svg_scan::depth_upper_bound(bytes).ok_or_else(|| {
+        ProcessError::InvalidXml("a DOCTYPE or declaration is malformed or unterminated".into())
+    })?;
+    if depth > limits.max_svg_depth {
         return Err(ProcessError::TooComplex("elements are nested too deeply"));
     }
     // Illustrator emits `<!DOCTYPE svg PUBLIC ...>`, so a DTD is allowed, but entity
-    // declarations have no use in a drawing: refuse them (XXE, billion laughs).
-    if text.contains("<!ENTITY") {
-        return Err(ProcessError::InvalidXml(
-            "entity declarations are not allowed".into(),
-        ));
-    }
+    // declarations only as Illustrator writes them.
+    check_entities(text)?;
     let xml_options = roxmltree::ParsingOptions {
         allow_dtd: true,
         nodes_limit: limits.max_svg_nodes,
@@ -85,7 +99,14 @@ pub(crate) fn process(bytes: &[u8], limits: &Limits) -> Result<SvgShape, Process
     let size = tree.size();
     let (w, h) = (size.width(), size.height());
     let s = 100.0 / w.max(h);
-    let canvas = Transform::from_row(s, 0.0, 0.0, s, (100.0 - w * s) / 2.0, (100.0 - h * s) / 2.0);
+    let canvas = tiny_skia::Transform::from_row(
+        s,
+        0.0,
+        0.0,
+        s,
+        (100.0 - w * s) / 2.0,
+        (100.0 - h * s) / 2.0,
+    );
 
     let plan = paint::plan(&tree, limits)?;
     let facts = &plan.facts;
@@ -93,7 +114,15 @@ pub(crate) fn process(bytes: &[u8], limits: &Limits) -> Result<SvgShape, Process
     if facts.guides_dropped {
         info.push(Lint::GuidesVisible);
     }
-    if facts.multi_colour() || facts.colours.iter().any(|&c| coloured(c)) {
+    if facts.outside_draw_here {
+        info.push(Lint::OutsideDrawHereIgnored);
+    }
+    if facts.multi_colour()
+        || facts
+            .colours
+            .iter()
+            .any(|&[r, g, b]| palette::coloured(Rgb::new(r, g, b)))
+    {
         info.push(Lint::ColoursFlattened);
     }
     if facts.strokes > 0 {
@@ -107,8 +136,11 @@ pub(crate) fn process(bytes: &[u8], limits: &Limits) -> Result<SvgShape, Process
     if facts.semi {
         info.push(Lint::SemiTransparent);
     }
-    if facts.clip_or_mask {
-        info.push(Lint::ClipOrMask);
+    if facts.clipped || facts.masked {
+        info.push(Lint::ClipOrMask {
+            clipped: facts.clipped,
+            masked: facts.masked,
+        });
     }
     if facts.filters || scanned.filters {
         info.push(Lint::FiltersIgnored);
@@ -131,23 +163,29 @@ pub(crate) fn process(bytes: &[u8], limits: &Limits) -> Result<SvgShape, Process
         });
     }
 
-    let Painted { ink, shapes } =
-        paint::paint(&tree, &plan, canvas, COMPARE_SIDE, limits.max_svg_travel)?;
+    let Painted {
+        ink,
+        shapes,
+        outside,
+    } = paint::paint(&tree, &plan, canvas, COMPARE_SIDE, limits.max_svg_travel)?;
     if !ink.iter().any(|&b| b) {
         return Err(ProcessError::Empty { info });
     }
+    if outside {
+        info.push(Lint::OutsideCanvas);
+    }
 
+    // The exact path must stay inside the square. Contours wholly outside it are
+    // dropped (they change nothing inside it). One that crosses the edge sends the
+    // drawing to the trace: the board hides the part outside, but Fit would scale it
+    // into view, and the artist's own clip (which the candidates don't carry) may have
+    // cut it already.
     let exact = exact_candidate(&shapes, &ink)?
-        .filter(|(path, _)| emit::path_to_d(path).len() <= limits.max_path_d_bytes);
+        .and_then(|(path, rule)| Some((without_outside_contours(&path)?, rule)))
+        .filter(|(path, _)| {
+            !paint::reaches_outside(path) && emit::path_to_d(path).len() <= limits.max_path_d_bytes
+        });
     if let Some((path, fill_rule)) = exact {
-        if let Some(b) = path.compute_tight_bounds()
-            && (b.left() < -OUTSIDE_SLACK
-                || b.top() < -OUTSIDE_SLACK
-                || b.right() > 100.0 + OUTSIDE_SLACK
-                || b.bottom() > 100.0 + OUTSIDE_SLACK)
-        {
-            info.push(Lint::OutsideCanvas);
-        }
         return Ok(SvgShape {
             path,
             fill_rule,
@@ -176,17 +214,110 @@ pub(crate) fn process(bytes: &[u8], limits: &Limits) -> Result<SvgShape, Process
     })
 }
 
-/// "Visibly coloured", as for rasters: chroma ≥ 64.
-fn coloured(c: [u8; 3]) -> bool {
-    let (max, min) = (c.iter().max(), c.iter().min());
-    matches!((max, min), (Some(max), Some(min)) if max - min >= 64)
+/// Accept only Illustrator-style entity declarations (see [`MAX_ENTITIES`]). Every
+/// `<!ENTITY` in the text counts, wherever it is (even in a comment): rejecting a
+/// harmless one is fine, missing a harmful one is not.
+fn check_entities(text: &str) -> Result<(), ProcessError> {
+    let reject = || ProcessError::InvalidXml(ENTITIES_REJECTED.into());
+    let mut declared: Vec<(&str, &str)> = Vec::new();
+    let mut rest = text;
+    while let Some(i) = rest.find("<!ENTITY") {
+        let (name, value, tail) = plain_entity(&rest[i + "<!ENTITY".len()..]).ok_or_else(reject)?;
+        declared.push((name, value));
+        if declared.len() > MAX_ENTITIES {
+            return Err(reject());
+        }
+        rest = tail;
+    }
+    let mut expansion = 0usize;
+    for (name, value) in declared {
+        let refs = text.matches(&format!("&{name};")).count();
+        expansion = expansion.saturating_add(refs.saturating_mul(value.len()));
+    }
+    if expansion > MAX_ENTITY_EXPANSION_BYTES {
+        return Err(reject());
+    }
+    Ok(())
 }
 
-/// The vector candidate and fill rule that reproduce the truth, if any do.
+/// After `<!ENTITY`: `S Name S ("value" | 'value') S? '>'`, with an ASCII name and a short
+/// value free of `&`, `%` and `<`. Returns the name, the value and the text after `>`.
+fn plain_entity(s: &str) -> Option<(&str, &str, &str)> {
+    let space = |c: char| matches!(c, ' ' | '\t' | '\r' | '\n');
+    let s0 = s.trim_start_matches(space);
+    if s0.len() == s.len() || !s0.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') {
+        return None;
+    }
+    let name_len = s0
+        .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')))
+        .unwrap_or(s0.len());
+    let (name, s1) = s0.split_at(name_len);
+    let s2 = s1.trim_start_matches(space);
+    if s2.len() == s1.len() {
+        return None;
+    }
+    let quote = s2.chars().next().filter(|&c| c == '"' || c == '\'')?;
+    let body = &s2[1..];
+    let end = body.find(quote)?;
+    let value = &body[..end];
+    if value.len() > MAX_ENTITY_VALUE_BYTES || value.contains(['&', '%', '<']) {
+        return None;
+    }
+    let tail = body[end + 1..]
+        .trim_start_matches(space)
+        .strip_prefix('>')?;
+    Some((name, value, tail))
+}
+
+/// Most differing pixels away from every edge (of the truth or of the candidate): half
+/// the area of the smallest detail the trace keeps ([`SPECK_UNITS`]), so losing or adding
+/// a detail that a retrace would keep always rules the candidate out.
+fn max_hard_pixels() -> usize {
+    let speck_px = COMPARE_SIDE as f32 / 100.0 * SPECK_UNITS;
+    (speck_px * speck_px / 2.0) as usize
+}
+
+/// How a candidate's render differs from the truth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct Diff {
+    /// Differing pixels with no edge of the truth and of the candidate next to them: a
+    /// detail one has and the other doesn't (a filled-in hole, an extra speck).
+    hard: usize,
+    /// All differing pixels; the rest are anti-aliasing along shared edges.
+    total: usize,
+}
+
+fn compare(cand: &[bool], truth: &[bool], side: usize) -> Diff {
+    let mut d = Diff { hard: 0, total: 0 };
+    for (i, (&c, &t)) in cand.iter().zip(truth).enumerate() {
+        if c == t {
+            continue;
+        }
+        d.total += 1;
+        let (x, y) = (i % side, i / side);
+        if !(has_edge(truth, side, x, y) && has_edge(cand, side, x, y)) {
+            d.hard += 1;
+        }
+    }
+    d
+}
+
+/// Does the 3x3 neighbourhood of (x, y) hold both values?
+fn has_edge(m: &[bool], side: usize, x: usize, y: usize) -> bool {
+    let v = m[y * side + x];
+    let (x0, x1) = (x.saturating_sub(1), (x + 1).min(side - 1));
+    let (y0, y1) = (y.saturating_sub(1), (y + 1).min(side - 1));
+    (y0..=y1).any(|yy| (x0..=x1).any(|xx| m[yy * side + xx] != v))
+}
+
+/// The vector candidate and fill rule that reproduce the truth best, if one does: it
+/// may differ only along edges (at most [`EXACT_TOLERANCE`] of the pixels, and at most
+/// [`max_hard_pixels`] away from any edge). The first that differs only along edges is
+/// taken; otherwise the one with the fewest differences.
 ///
-/// Candidates, first match wins:
-/// 1. every paint concatenated, nonzero then even-odd. Even-odd also covers white
-///    details drawn over a dark shape: both outlines are there, so the detail is a hole.
+/// Candidates:
+/// 1. every paint concatenated, nonzero and even-odd. Even-odd also covers white details
+///    drawn over a dark shape: both outlines are there, so the detail is a hole.
 /// 2. every paint with each shape turned to wind the same way (by its signed area),
 ///    nonzero: separate shapes that overlap with opposite winding would otherwise
 ///    cancel out where they overlap, but each shape's own holes still wind against it.
@@ -198,6 +329,7 @@ fn exact_candidate(
 ) -> Result<Option<(tiny_skia::Path, FillRule)>, ProcessError> {
     let side = COMPARE_SIDE as usize;
     let tolerance = (EXACT_TOLERANCE * (side * side) as f64) as usize;
+    let max_hard = max_hard_pixels();
     let multi = shapes.iter().any(|s| s.light);
     let all = || shapes.iter();
     let dark = || shapes.iter().filter(|s| !s.light);
@@ -215,23 +347,80 @@ fn exact_candidate(
         ));
         candidates.push((concat(dark(), true), &[FillRule::NonZero]));
     }
+    let mut best: Option<(Diff, tiny_skia::Path, FillRule)> = None;
     for (path, rules) in candidates {
         let Some(path) = path else {
             continue;
         };
         for &rule in rules {
-            let alpha = render_alpha(&path, rule, COMPARE_SIDE)?;
-            let diff = alpha
+            let cand: Vec<bool> = render_alpha(&path, rule, COMPARE_SIDE)?
                 .iter()
-                .zip(truth)
-                .filter(|(a, t)| (**a >= 128) != **t)
-                .count();
-            if diff <= tolerance {
-                return Ok(Some((path, rule)));
+                .map(|&a| a >= 128)
+                .collect();
+            let diff = compare(&cand, truth, side);
+            if diff.hard > max_hard || diff.total > tolerance {
+                continue;
+            }
+            if best.as_ref().is_none_or(|(b, _, _)| diff < *b) {
+                let edges_only = diff.hard == 0;
+                best = Some((diff, path.clone(), rule));
+                if edges_only {
+                    return Ok(best.map(|(_, p, r)| (p, r)));
+                }
             }
         }
     }
-    Ok(None)
+    Ok(best.map(|(_, p, r)| (p, r)))
+}
+
+/// `path` without the contours that lie wholly outside the square. They change nothing
+/// inside it (a closed contour winds zero times around any point outside its bounding
+/// box), the board never shows them, and Fit would otherwise measure them.
+fn without_outside_contours(path: &tiny_skia::Path) -> Option<tiny_skia::Path> {
+    let mut pb = PathBuilder::new();
+    let mut contour: Vec<PathSegment> = Vec::new();
+    let mut flush = |contour: &mut Vec<PathSegment>| {
+        let mut b = [
+            f32::INFINITY,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NEG_INFINITY,
+        ];
+        for seg in contour.iter() {
+            let pts: &[Point] = match seg {
+                PathSegment::MoveTo(p) | PathSegment::LineTo(p) => std::slice::from_ref(p),
+                PathSegment::QuadTo(c, p) => &[*c, *p],
+                PathSegment::CubicTo(c1, c2, p) => &[*c1, *c2, *p],
+                PathSegment::Close => &[],
+            };
+            for p in pts {
+                b = [b[0].min(p.x), b[1].min(p.y), b[2].max(p.x), b[3].max(p.y)];
+            }
+        }
+        // The control points hold the curve, so this only ever keeps too much.
+        if b[0] <= 100.0 && b[2] >= 0.0 && b[1] <= 100.0 && b[3] >= 0.0 {
+            for seg in contour.iter() {
+                match *seg {
+                    PathSegment::MoveTo(p) => pb.move_to(p.x, p.y),
+                    PathSegment::LineTo(p) => pb.line_to(p.x, p.y),
+                    PathSegment::QuadTo(c, p) => pb.quad_to(c.x, c.y, p.x, p.y),
+                    PathSegment::CubicTo(c1, c2, p) => {
+                        pb.cubic_to(c1.x, c1.y, c2.x, c2.y, p.x, p.y)
+                    }
+                    PathSegment::Close => pb.close(),
+                }
+            }
+        }
+        contour.clear();
+    };
+    for seg in path.segments() {
+        if matches!(seg, PathSegment::MoveTo(_)) {
+            flush(&mut contour);
+        }
+        contour.push(seg);
+    }
+    flush(&mut contour);
+    pb.finish()
 }
 
 /// Concatenate shapes into one path, optionally turning each to positive winding.

@@ -103,10 +103,18 @@ zune-jpeg = "=0.5.15"
 # image resolvers are replaced with no-ops (the defaults read local files). resvg is
 # deliberately NOT a runtime dependency: it renders filters and mask layers, which are
 # memory and CPU bombs on untrusted input (see docs/design-kit.md).
-usvg = { version = "0.48.1", default-features = false }
-# The CSS engine usvg uses (same version): the SVG prescan matches selectors exactly as
+#
+# PINNED EXACTLY, with simplecss below: the SVG prescan (src/design_kit/svg_scan.rs)
+# mirrors usvg 0.48.1's reference following, simplecss's selector matching and
+# roxmltree's tokenizer, and a reference loop it misses aborts the whole process (a stack
+# overflow can't be caught). Bumping any of usvg, simplecss, roxmltree or svgtypes means
+# re-checking svg_scan.rs against the new sources;
+# `svg_parsing_crates_are_the_audited_versions` (tests/design_kit_svg.rs) fails until the
+# versions there are updated too.
+usvg = { version = "=0.48.1", default-features = false }
+# The CSS engine usvg uses (the same copy): the SVG prescan matches selectors exactly as
 # usvg will, to find references made from stylesheets and to bound the matching cost.
-simplecss = "0.2.2"
+simplecss = "=0.2.2"
 
 [lib]
 name = "arena"
@@ -140,5 +148,5 @@ wiremock = "0.6"
 tower-cookies = { version = "0.11", features = ["private"] }
 # design_kit tests: independent SVG renderer (test oracle only, never at runtime)
 # and a JPEG encoder for JPEG round-trip fixtures.
-resvg = { version = "0.48.1", default-features = false }
+resvg = { version = "=0.48.1", default-features = false }
 jpeg-encoder = "0.7.1"

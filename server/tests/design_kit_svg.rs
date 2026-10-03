@@ -1,22 +1,28 @@
 //! design_kit SVG input: real-world exports, the template filter, input-fact lints,
 //! hostile files with exact outcomes, and the big-stack runner.
 //!
-//! Hostile inputs that could recurse deeply inside usvg are run through
-//! `process_on_big_stack`, as production does: on a 2 MiB test thread some of them
-//! would overflow the stack and abort the whole test binary.
+//! Every SVG here is processed through `process_on_big_stack`, as production does: on a
+//! 2 MiB test thread a hostile one could overflow the stack and abort the whole test
+//! binary instead of failing.
 
 mod common;
 
 use std::time::{Duration, Instant};
 
 use arena::design_kit::{
-    AssetKind, CleanShape, FillRule, Fix, InputFormat, Limits, Lint, ProcessError, Severity,
-    Strategy, process_on_big_stack, process_upload,
+    AssetKind, CleanShape, FillRule, Fix, InputFormat, Limits, Lint, ProcessError, RejectedFormat,
+    Severity, Strategy, process_on_big_stack, process_upload,
 };
 use common::design_kit::*;
 
 fn run(svg: &str) -> Result<CleanShape, ProcessError> {
-    let r = process_upload(svg.as_bytes(), &Limits::default(), &[]);
+    run_bytes(svg.as_bytes(), &[])
+}
+
+fn run_bytes(bytes: &[u8], fixes: &[Fix]) -> Result<CleanShape, ProcessError> {
+    let r = process_on_big_stack(bytes.to_vec(), &Limits::default(), fixes, ())
+        .blocking_recv()
+        .expect("the processing thread sends a result");
     if let Ok(s) = &r {
         assert_clean(s);
         assert_eq!(s.input(), InputFormat::Svg);
@@ -49,6 +55,40 @@ fn info(shape: &CleanShape) -> Vec<&'static str> {
 }
 
 const SVG_OPEN: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\">";
+
+/// The box around every point of a clean path (`d` is absolute, numbers in pairs).
+fn d_bounds(d: &str) -> [f32; 4] {
+    let nums: Vec<f32> = d
+        .split(|c: char| c.is_ascii_alphabetic() || c == ' ')
+        .filter(|t| !t.is_empty())
+        .map(|t| t.parse().expect("a number"))
+        .collect();
+    nums.chunks(2).fold(
+        [
+            f32::INFINITY,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NEG_INFINITY,
+        ],
+        |b, p| {
+            [
+                b[0].min(p[0]),
+                b[1].min(p[1]),
+                b[2].max(p[0]),
+                b[3].max(p[1]),
+            ]
+        },
+    )
+}
+
+/// The clean path stays within half a unit of the square.
+fn assert_inside_square(shape: &CleanShape) {
+    let b = d_bounds(shape.path_d());
+    assert!(
+        b[0] >= -0.5 && b[1] >= -0.5 && b[2] <= 100.5 && b[3] <= 100.5,
+        "{b:?}"
+    );
+}
 
 const SMILE_D: &str = "M75.58 58.33L64 69.91 53.42 59.33H46l-2.17-2h10.42L64 67.09l10.75-10.76H100V28.55L0 0v100l100-22.33V58.33zM12.52 37.8a9.26 9.26 0 1 1 9.26-9.26 9.26 9.26 0 0 1-9.26 9.26z";
 
@@ -117,6 +157,31 @@ fn illustrator_clipping_mask_symbol_and_gradient() {
     );
     assert!(score > 0.995, "{score}");
     assert!(shape.passes(AssetKind::Head), "{:?}", shape.lints());
+}
+
+#[test]
+fn illustrator_save_as_with_editing_data() {
+    // Illustrator's legacy File > Save As > SVG ("Preserve Illustrator Editing
+    // Capabilities"): namespace URIs declared as entities in the DOCTYPE, and a
+    // `<switch>` whose first branch is a foreignObject pointing at Illustrator's private
+    // data. The entities are plain text, so they are accepted; the switch branch isn't
+    // web content, so nothing is reported as removed.
+    let svg = fixture("illustrator/save-as-editing-data.svg");
+    let shape = run_bytes(&svg, &[]).expect("illustrator save as");
+    assert!(shape.info().is_empty(), "{:?}", shape.info());
+    let score = iou(
+        &alpha(&catalog_svg(AssetKind::Head, "smile"), 400),
+        &shape_alpha(&shape, 400),
+    );
+    assert!(score > 0.995, "{score}");
+    assert!(shape.passes(AssetKind::Head), "{:?}", shape.lints());
+    // HTML in such a branch is still web content.
+    let html = String::from_utf8(svg).expect("utf-8").replace(
+        "<i:aipgfRef",
+        "<iframe xmlns=\"http://www.w3.org/1999/xhtml\"/><i:aipgfRef",
+    );
+    let shape = run(&html).expect("with html");
+    assert_eq!(info(&shape), vec!["active_content_removed"]);
 }
 
 #[test]
@@ -224,13 +289,118 @@ fn layered_details_that_no_fill_rule_reproduces_are_retraced() {
 }
 
 #[test]
+fn small_holes_and_marks_are_never_lost_on_the_vector_path() {
+    // A detail far smaller than the tolerance on differing pixels (0.1%, about 10 unit²)
+    // used to be dropped silently: the first candidate within it won. Each of these is
+    // at least 2 unit², which the retrace keeps (it removes details under 1 unit²).
+
+    // A 3x3 even-odd hole in a square: nonzero fills it in, even-odd keeps it.
+    let shape = run(&format!(
+        "{SVG_OPEN}<path fill-rule=\"evenodd\" d=\"M0 0H100V100H0Z M68 28h3v3h-3Z\"/></svg>"
+    ))
+    .expect("3x3 hole");
+    assert_eq!(
+        (shape.strategy(), shape.fill_rule()),
+        (Strategy::VectorExact, FillRule::EvenOdd)
+    );
+    assert!(!filled_at(&shape, 69.5, 29.5), "the hole is kept");
+    assert_eq!(shape.metrics().holes, 1);
+
+    // A white eye of radius 1.7 (35 px on the 1000 px template) on a black head.
+    let shape = run(&format!(
+        "{SVG_OPEN}<path d=\"M0 0H70L100 50L70 100H0Z\"/><circle cx=\"40\" cy=\"30\" \
+         r=\"1.7\" fill=\"#fff\"/></svg>"
+    ))
+    .expect("small eye");
+    assert_eq!(shape.strategy(), Strategy::VectorExact);
+    assert!(!filled_at(&shape, 40.0, 30.0), "the eye is a hole");
+    assert_eq!(shape.metrics().holes, 1);
+
+    // Two 2x2 white nostrils on the head and a 3x3 white sparkle beside it: the
+    // nostrils are holes and the sparkle is nothing. No fill rule gives both, so it is
+    // retraced.
+    let shape = run(&format!(
+        "{SVG_OPEN}<path d=\"M0 0H80V100H0Z\"/><rect x=\"60\" y=\"40\" width=\"2\" \
+         height=\"2\" fill=\"#fff\"/><rect x=\"60\" y=\"56\" width=\"2\" height=\"2\" \
+         fill=\"#fff\"/><rect x=\"88\" y=\"20\" width=\"3\" height=\"3\" fill=\"#fff\"/></svg>"
+    ))
+    .expect("nostrils and sparkle");
+    assert_eq!(shape.strategy(), Strategy::Retraced);
+    assert!(!filled_at(&shape, 61.0, 41.0) && !filled_at(&shape, 61.0, 57.0));
+    assert!(!filled_at(&shape, 89.5, 21.5), "the sparkle isn't ink");
+    assert!(filled_at(&shape, 40.0, 50.0));
+    assert_eq!(shape.metrics().holes, 2);
+}
+
+#[test]
+fn geometry_off_the_square_never_reaches_the_output() {
+    // A stray shape wholly off the square is dropped from the exact path; before, it
+    // stayed in `d` and Fit measured it, so Fit did nothing.
+    let stray = format!(
+        "{SVG_OPEN}<path d=\"M0 15H50L70 50L50 85H0Z\"/><rect x=\"150\" y=\"5\" \
+         width=\"10\" height=\"90\"/></svg>"
+    );
+    let shape = run(&stray).expect("stray");
+    assert_eq!(shape.strategy(), Strategy::VectorExact);
+    assert_inside_square(&shape);
+    assert_eq!(info(&shape), vec!["outside_canvas"]);
+    assert!(codes(&shape.lints().head).contains(&"margins"));
+    let fitted = run_bytes(stray.as_bytes(), &[Fix::Fit]).expect("fitted");
+    assert!(
+        !codes(&fitted.lints().head).contains(&"margins"),
+        "{:?}",
+        fitted.lints()
+    );
+    let b = fitted.metrics().bbox.expect("bbox");
+    assert!(b[1] < 1.0 && b[3] > 99.0, "{b:?}");
+
+    // A shape that crosses the edge is retraced (the trace only sees the square), and
+    // reported on either path.
+    let crossing = format!("{SVG_OPEN}<path d=\"M0 0H90L130 50L90 100H0Z\"/></svg>");
+    let shape = run(&crossing).expect("crossing");
+    assert_eq!(shape.strategy(), Strategy::Retraced);
+    assert_inside_square(&shape);
+    assert_eq!(info(&shape), vec!["outside_canvas"]);
+    let layered = format!(
+        "{SVG_OPEN}<path d=\"M0 0H90L130 50L90 100H0Z\"/><circle cx=\"40\" cy=\"40\" \
+         r=\"20\" fill=\"#fff\"/><circle cx=\"45\" cy=\"40\" r=\"10\"/><circle \
+         cx=\"52\" cy=\"35\" r=\"5\" fill=\"#fff\"/></svg>"
+    );
+    let shape = run(&layered).expect("layered");
+    assert_eq!(shape.strategy(), Strategy::Retraced);
+    assert_eq!(info(&shape), vec!["colours_flattened", "outside_canvas"]);
+
+    // The artist's own clip already cut the overflow (a Figma frame): nothing is
+    // outside, and the clip's cut is what comes out.
+    let framed = r##"<svg width="100" height="100" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <g clip-path="url(#clip0_1_2)"><path d="M0 0H130V100H0Z" fill="black"/>
+      <circle cx="40" cy="30" r="6" fill="white"/></g>
+      <defs><clipPath id="clip0_1_2"><rect width="100" height="100" fill="white"/></clipPath></defs></svg>"##;
+    let shape = run(framed).expect("framed");
+    assert_inside_square(&shape);
+    assert_eq!(info(&shape), vec!["colours_flattened", "clip_or_mask"]);
+    assert!(!filled_at(&shape, 40.0, 30.0));
+    assert!(shape.metrics().fill_pct > 97.0, "{:?}", shape.metrics());
+}
+
+#[test]
 fn a_figma_frame_clip_is_applied() {
     let svg = r##"<svg width="100" height="100" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
       <g clip-path="url(#clip0_1_2)"><rect x="-20" y="-20" width="140" height="140" fill="#000"/>
       <circle cx="50" cy="50" r="10" fill="#000"/></g>
       <defs><clipPath id="clip0_1_2"><rect width="100" height="60" fill="white"/></clipPath></defs></svg>"##;
     let shape = run(svg).expect("figma");
-    assert_eq!(info(&shape), vec!["clip_or_mask"]);
+    let clip_only = Lint::ClipOrMask {
+        clipped: true,
+        masked: false,
+    };
+    assert_eq!(shape.info(), vec![clip_only.clone()]);
+    // Figma clips every frame; there is no mask to warn about.
+    assert!(
+        !clip_only.message().to_lowercase().contains("mask"),
+        "{}",
+        clip_only.message()
+    );
     assert!(filled_at(&shape, 50.0, 30.0));
     assert!(!filled_at(&shape, 50.0, 80.0), "the clipped area is empty");
 }
@@ -244,6 +414,7 @@ fn input_facts_are_reported() {
       <rect width="100" height="100" fill="url(#g)" filter="url(#f)"/>
       <path d="M10 10L90 90" stroke="#000" stroke-width="4"/>
       <rect x="90" y="0" width="30" height="10" fill="#000" opacity="0.4" mask="url(#m)"/>
+      <rect x="95" y="90" width="10" height="5" fill="#000"/>
       <text x="10" y="50">hi</text>
       <image href="data:image/png;base64,iVBORw0KGgo=" width="10" height="10"/>
     </svg>"##;
@@ -264,6 +435,11 @@ fn input_facts_are_reported() {
     );
     assert!(shape.info().contains(&Lint::StrokesConverted { count: 1 }));
     assert!(shape.info().contains(&Lint::ImageIgnored { count: 1 }));
+    // A mask, and no clip path: the message is about the mask only.
+    assert!(shape.info().contains(&Lint::ClipOrMask {
+        clipped: false,
+        masked: true
+    }));
     for lint in shape.info() {
         assert!(!lint.message().is_empty());
         assert!(lint.guide_anchor().starts_with('#'));
@@ -321,8 +497,7 @@ fn fixes_apply_to_svg_input() {
     );
     let shape = run(&mirrored).expect("mirrored");
     assert!(codes(&shape.lints().head).contains(&"faces_left"));
-    let fixed =
-        process_upload(mirrored.as_bytes(), &Limits::default(), &[Fix::Flip]).expect("flipped");
+    let fixed = run_bytes(mirrored.as_bytes(), &[Fix::Flip]).expect("flipped");
     assert!(fixed.passes(AssetKind::Head), "{:?}", fixed.lints());
     let score = iou(
         &alpha(&catalog_svg(AssetKind::Head, "smile"), 400),
@@ -430,6 +605,67 @@ fn a_drawing_on_a_new_layer_beside_an_empty_draw_here_is_found() {
     assert_eq!(info(&shape), vec!["guides_visible"]);
 }
 
+#[test]
+fn layers_left_out_beside_draw_here_are_reported() {
+    // The body in draw-here and a horn on a new layer: only draw-here is used, so the
+    // horn is left out, and she is told.
+    let with_layer = |layer: &str| {
+        let t = template_with("<rect width=\"60\" height=\"100\"/>");
+        let close = t.rfind("</svg>").expect("root end");
+        format!("{}{layer}{}", &t[..close], &t[close..])
+    };
+    let shape = run(&with_layer(
+        "<g id=\"Layer 2\"><rect x=\"60\" y=\"20\" width=\"40\" height=\"60\" fill=\"#000\"/></g>",
+    ))
+    .expect("two layers");
+    assert!(
+        (shape.metrics().fill_pct - 60.0).abs() < 0.5,
+        "{:?}",
+        shape.metrics()
+    );
+    assert_eq!(info(&shape), vec!["outside_draw_here_ignored"]);
+    let lint = &shape.info()[0];
+    assert_eq!(lint.severity(), Severity::Tip);
+    assert!(lint.message().contains("Draw here"), "{}", lint.message());
+    // A white background layer, or a faint sketch, isn't ink: nothing to report.
+    for harmless in [
+        "<g id=\"Background\"><rect width=\"100\" height=\"100\" fill=\"#fff\"/></g>",
+        "<g id=\"Sketch\" opacity=\"0.3\"><rect x=\"60\" width=\"40\" height=\"100\"/></g>",
+    ] {
+        let shape = run(&with_layer(harmless)).expect("harmless layer");
+        assert!(shape.info().is_empty(), "{harmless}: {:?}", shape.info());
+    }
+}
+
+#[test]
+fn clips_around_draw_here_apply_to_it() {
+    // Figma exports wrap layers in a clipped frame. The clip of a group around
+    // draw-here applies to the drawing, as in the artist's app.
+    let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+      <defs><clipPath id="half"><rect width="100" height="50"/></clipPath></defs>
+      <g id="template" clip-path="url(#half)">
+        <g id="guides"><path d="M0 50H100" stroke="#2f8fd6"/></g>
+        <g id="draw-here"><rect width="100" height="100"/></g>
+      </g></svg>"##;
+    let shape = run(svg).expect("clipped draw-here");
+    assert!(
+        (shape.metrics().fill_pct - 50.0).abs() < 0.5,
+        "{:?}",
+        shape.metrics()
+    );
+    assert!(filled_at(&shape, 50.0, 25.0) && !filled_at(&shape, 50.0, 75.0));
+    assert_eq!(
+        shape.info(),
+        vec![Lint::ClipOrMask {
+            clipped: true,
+            masked: false
+        }]
+    );
+    // The same file without the template's names (everything is the drawing) agrees.
+    let plain = run(&svg.replace("draw-here", "layer-1")).expect("plain");
+    assert_eq!(plain.path_d(), shape.path_d());
+}
+
 // ---------------------------------------------------------------------------------------
 // Hostile SVGs, each with its exact outcome
 // ---------------------------------------------------------------------------------------
@@ -509,14 +745,18 @@ fn local_files_named_by_href_are_not_read() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+const ENTITIES_REJECTED: &str = "entity declarations other than short plain text are not allowed";
+
 #[test]
 fn entity_declarations_are_invalid_xml() {
+    let rejected = Some(ProcessError::InvalidXml(ENTITIES_REJECTED.into()));
     let xxe = r#"<?xml version="1.0"?><!DOCTYPE svg [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><svg xmlns="http://www.w3.org/2000/svg"><text>&xxe;</text><rect width="10" height="10"/></svg>"#;
-    assert_eq!(
-        run(xxe).err(),
-        Some(ProcessError::InvalidXml(
-            "entity declarations are not allowed".into()
-        ))
+    let e = run(xxe).expect_err("xxe");
+    assert_eq!(Some(e.clone()), rejected);
+    assert!(
+        e.user_message().contains("Export As"),
+        "{}",
+        e.user_message()
     );
     let mut lol = String::from("<?xml version=\"1.0\"?><!DOCTYPE svg [<!ENTITY lol0 \"lol\">");
     for i in 1..10 {
@@ -527,17 +767,34 @@ fn entity_declarations_are_invalid_xml() {
     }
     lol.push_str("]><svg xmlns=\"http://www.w3.org/2000/svg\"><text>&lol9;</text></svg>");
     let t = Instant::now();
-    assert_eq!(
-        run(&lol).err(),
-        Some(ProcessError::InvalidXml(
-            "entity declarations are not allowed".into()
-        ))
-    );
+    assert_eq!(run(&lol).err(), rejected);
     assert!(
         t.elapsed() < Duration::from_millis(100),
         "{:?}",
         t.elapsed()
     );
+    // Plain-text entities as Illustrator writes them are accepted (see
+    // `illustrator_save_as_with_editing_data`), but not parameter entities, markup in a
+    // value, or references that expand to too much text.
+    let doc = |decls: &str, body: &str| {
+        format!(
+            "<!DOCTYPE svg [{decls}]><svg xmlns=\"http://www.w3.org/2000/svg\" \
+             viewBox=\"0 0 100 100\">{body}<rect width=\"50\" height=\"100\"/></svg>"
+        )
+    };
+    for bad in [
+        doc("<!ENTITY % p \"x\">", ""),
+        doc("<!ENTITY a \"<g/>\">", "<g>&a;</g>"),
+        doc("<!ENTITY a PUBLIC \"x\" \"http://evil.example/x\">", ""),
+        doc(
+            &format!("<!ENTITY a \"{}\">", "x".repeat(200)),
+            &"<desc>&a;</desc>".repeat(2_000),
+        ),
+        doc(&format!("<!ENTITY a \"{}\">", "x".repeat(300)), ""),
+    ] {
+        assert_eq!(run(&bad).err(), rejected, "{}", &bad[..80]);
+    }
+    assert!(run(&doc("<!ENTITY a \"#000\">", "<desc>&a;</desc>")).is_ok());
     // A broken document is invalid XML too. (A plain DOCTYPE, as Illustrator writes,
     // is fine: see the Illustrator export test.)
     assert!(matches!(
@@ -568,6 +825,32 @@ fn deep_nesting_is_too_complex_before_parsing() {
         run(&tricky).err(),
         Some(ProcessError::TooComplex("elements are nested too deeply"))
     );
+    // Nor can the DOCTYPE: a quoted `[` once made the scan swallow the whole file (and
+    // 19,000 nested groups overflowed a 2 MiB stack in roxmltree). roxmltree ends an
+    // ATTLIST at its first `>`, quoted or not, so the scan must too.
+    for doctype in [
+        "<!DOCTYPE svg [<!ATTLIST svg a CDATA \"[\">]>",
+        "<!DOCTYPE svg [<!ATTLIST svg a CDATA \">]>",
+    ] {
+        let bypass = format!(
+            "<?xml version=\"1.0\"?>{doctype}<svg xmlns=\"http://www.w3.org/2000/svg\">{}\
+             <rect width=\"9\" height=\"9\"/>{}</svg>",
+            "<g>".repeat(19_000),
+            "</g>".repeat(19_000)
+        );
+        assert_eq!(
+            run(&bypass).err(),
+            Some(ProcessError::TooComplex("elements are nested too deeply")),
+            "{doctype}"
+        );
+    }
+    // A DOCTYPE the scan can't follow (roxmltree can't either) is refused.
+    assert!(matches!(
+        run(
+            "<!DOCTYPE svg [<!ATTLIST svg a CDATA \"x\"]><svg xmlns=\"http://www.w3.org/2000/svg\"/>"
+        ),
+        Err(ProcessError::InvalidXml(_))
+    ));
     // The deepest allowed (63 groups in the root) with a `<use>` deep inside is fine.
     let ok = format!(
         "{SVG_OPEN}{}<rect id=\"r\" width=\"100\" height=\"100\"/><use href=\"#r\"/>{}</svg>",
@@ -984,7 +1267,13 @@ fn nested_oversized_masks_are_painted_unmasked() {
     svg.push_str("</defs><rect width=\"100\" height=\"100\" mask=\"url(#m0)\"/></svg>");
     let (r, elapsed) = run_big(&svg);
     let shape = r.expect("masks are ignored");
-    assert_eq!(info(&shape), vec!["clip_or_mask"]);
+    assert_eq!(
+        shape.info(),
+        vec![Lint::ClipOrMask {
+            clipped: false,
+            masked: true
+        }]
+    );
     assert!(shape.metrics().fill_pct > 99.0);
     assert!(elapsed < Duration::from_millis(500), "{elapsed:?}");
 }
@@ -1057,7 +1346,7 @@ fn junk_is_rejected_cleanly() {
     // Not UTF-8 (Latin-1 é in a comment).
     let mut latin1 = b"<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?><svg xmlns=\"http://www.w3.org/2000/svg\"><!-- caf".to_vec();
     latin1.extend_from_slice(b"\xe9 --><rect width=\"9\" height=\"9\"/></svg>");
-    let e = process_upload(&latin1, &Limits::default(), &[]).expect_err("latin-1");
+    let e = run_bytes(&latin1, &[]).expect_err("latin-1");
     assert!(matches!(e, ProcessError::InvalidSvg(_)), "{e:?}");
     assert_eq!(e.code(), "invalid_svg");
     // 600 KiB.
@@ -1070,6 +1359,20 @@ fn junk_is_rejected_cleanly() {
             bytes: big.len(),
             max: 512 * 1024
         })
+    );
+    // Compressed (.svgz) and UTF-16 SVGs are recognised, with their own advice.
+    let svgz = [0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03];
+    assert_eq!(
+        run_bytes(&svgz, &[]).err(),
+        Some(ProcessError::UnsupportedFormat(RejectedFormat::Svgz))
+    );
+    let utf16: Vec<u8> = format!("\u{feff}{SVG_OPEN}<rect width=\"9\" height=\"9\"/></svg>")
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    assert_eq!(
+        run_bytes(&utf16, &[]).err(),
+        Some(ProcessError::UnsupportedFormat(RejectedFormat::Utf16))
     );
     // An HTML document that mentions <svg> isn't an SVG.
     assert!(matches!(
@@ -1113,7 +1416,8 @@ fn the_permit_is_released_when_the_work_ends() {
             Permit(released.clone()),
         );
         let r = rx.blocking_recv().expect("a result");
-        // Dropped before the result was sent.
+        // Released by the time the result arrives. (That it is held until the work ends,
+        // even when the caller stops waiting, is a unit test in design_kit/mod.rs.)
         assert!(released.load(std::sync::atomic::Ordering::SeqCst));
         if let Ok(shape) = r {
             assert!(codes(&shape.lints().head).contains(&"faces_left"));
@@ -1156,4 +1460,39 @@ fn raster_worst_cases_also_run_on_the_big_stack() {
     assert_eq!(shape.strategy(), Strategy::Traced);
     assert_eq!(shape.path_d(), direct.path_d());
     assert!(shape.passes(AssetKind::Head), "{:?}", shape.lints());
+}
+
+// ---------------------------------------------------------------------------------------
+// The prescan models these crates' sources
+// ---------------------------------------------------------------------------------------
+
+#[test]
+fn svg_parsing_crates_are_the_audited_versions() {
+    // svg_scan.rs mirrors usvg's reference following, simplecss's selector matching,
+    // svgtypes' IRI parsing and roxmltree's tokenizer at exactly these versions; a
+    // reference loop it misses aborts the process. Cargo.toml pins usvg and simplecss
+    // exactly; this also catches a second copy, or a bump of the crates usvg pulls in.
+    // After re-checking svg_scan.rs against a new version's sources, update it here.
+    let lock = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../Cargo.lock"),
+    )
+    .expect("the workspace Cargo.lock");
+    for (name, audited) in [
+        ("usvg", "0.48.1"),
+        ("simplecss", "0.2.2"),
+        ("roxmltree", "0.21.1"),
+        ("svgtypes", "0.16.1"),
+    ] {
+        let versions: Vec<&str> = lock
+            .split("[[package]]")
+            .filter(|p| p.contains(&format!("\nname = \"{name}\"\n")))
+            .filter_map(|p| p.lines().find_map(|l| l.strip_prefix("version = ")))
+            .map(|v| v.trim_matches('"'))
+            .collect();
+        assert_eq!(
+            versions,
+            vec![audited],
+            "{name}: re-check src/design_kit/svg_scan.rs against the new version"
+        );
+    }
 }
