@@ -22,7 +22,7 @@ use crate::wire;
 #[tracing::instrument(name = "arena.game", skip(app_state), fields(game_id = %game_id), err(Debug))]
 pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
     let pool = &app_state.db;
-    let game_channels = &app_state.game_channels;
+    let watched_games = &app_state.watched_games;
     let proxy_clients = ProxyClients {
         direct: &app_state.http_client,
         east: &app_state.proxy_east_client,
@@ -62,7 +62,6 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
                 enqueue_post_completion_jobs(app_state, game_id),
             )
             .await?;
-            game_channels.cleanup(game_id).await;
             return Ok(());
         }
         GameStatus::Running => {
@@ -92,7 +91,6 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
                 game_id = %game_id,
                 "Game is marked failed; skipping re-run"
             );
-            game_channels.cleanup(game_id).await;
             return Ok(());
         }
     }
@@ -266,7 +264,7 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
 
     tracing::info!(game_id = %game_id, "Storing turn 0");
     phase(game_id, "persist_turn", Some(0), async {
-        crate::models::turn::create_turn(pool, game_channels, game_id, 0, Some(frame_0_json))
+        crate::models::turn::create_turn(pool, watched_games, game_id, 0, Some(frame_0_json))
             .await?;
         Ok(())
     })
@@ -366,7 +364,7 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
                 tracing::debug!(game_id = %game_id, turn = engine_game.board.turn, "Storing turn");
                 let turn = crate::models::turn::create_turn(
                     pool,
-                    game_channels,
+                    watched_games,
                     game_id,
                     engine_game.board.turn,
                     Some(frame_json),
@@ -573,9 +571,6 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
         enqueue_post_completion_jobs(app_state, game_id),
     )
     .await?;
-
-    // Clean up game channel (will be removed when no subscribers)
-    game_channels.cleanup(game_id).await;
 
     Ok(())
 }

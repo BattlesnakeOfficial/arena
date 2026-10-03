@@ -107,8 +107,9 @@ async fn pool_wait_precedes_insert_and_keeps_creation_identity(database: PgPool)
     let game_id = game(&database).await;
     let pool = single_connection(&database).await;
     let held = pool.acquire().await.unwrap();
-    let channels = GameChannels::new();
+    let channels = WatchedGames::new();
     let mut receiver = channels.subscribe(game_id).await;
+    channels.seed_if_current(game_id, &mut receiver, -1).await;
     let frame = serde_json::json!({"test_frame": "retained in storage only"});
     let work = create_turn(&pool, &channels, game_id, 7, Some(frame.clone()));
     tokio::pin!(work);
@@ -126,7 +127,10 @@ async fn pool_wait_precedes_insert_and_keeps_creation_identity(database: PgPool)
         .unwrap()
         .unwrap();
     assert_eq!(turn.frame_data, Some(frame));
-    assert_eq!(receiver.try_recv().unwrap().turn_number, 7);
+    assert!(matches!(
+        receiver.updates.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
     let states = capture.states(game_id);
     assert_eq!(
         states,
@@ -155,7 +159,7 @@ async fn failed_frame_insert_never_notifies_and_returns_connection(database: PgP
     let capture = Capture::shared();
     let pool = single_connection(&database).await;
     let game_id = Uuid::new_v4(); // No matching game: the real INSERT fails its FK.
-    let channels = GameChannels::new();
+    let channels = WatchedGames::new();
     let mut receiver = channels.subscribe(game_id).await;
     let error = create_turn(&pool, &channels, game_id, 3, None)
         .await
@@ -171,7 +175,7 @@ async fn failed_frame_insert_never_notifies_and_returns_connection(database: PgP
         ]
     );
     assert!(matches!(
-        receiver.try_recv(),
+        receiver.updates.try_recv(),
         Err(tokio::sync::broadcast::error::TryRecvError::Empty)
     ));
     let _connection = tokio::time::timeout(Duration::from_secs(1), pool.acquire())
@@ -186,7 +190,7 @@ async fn cancelling_pool_wait_emits_no_insert_or_completion(database: PgPool) {
     let game_id = game(&database).await;
     let pool = single_connection(&database).await;
     let _held = pool.acquire().await.unwrap();
-    let channels = GameChannels::new();
+    let channels = WatchedGames::new();
     assert!(
         tokio::time::timeout(
             Duration::from_millis(30),
@@ -216,7 +220,7 @@ async fn snake_insert_failure_is_identified_inside_its_turn(database: PgPool) {
     let capture = Capture::shared();
     let game_id = game(&database).await;
     let pool = single_connection(&database).await;
-    let turn = create_turn(&pool, &GameChannels::new(), game_id, 8, None)
+    let turn = create_turn(&pool, &WatchedGames::new(), game_id, 8, None)
         .await
         .unwrap();
     let error = create_snake_turn(&pool, &turn, Uuid::new_v4(), "up", Some(42), false, false)
@@ -254,7 +258,7 @@ async fn successful_snake_insert_keeps_values_and_emits_completion(pool: PgPool)
         .fetch_one(&pool).await.unwrap();
     let game_snake_id = sqlx::query_scalar!("INSERT INTO game_battlesnakes (game_id, battlesnake_id) VALUES ($1, $2) RETURNING game_battlesnake_id", game_id, snake_id)
         .fetch_one(&pool).await.unwrap();
-    let turn = create_turn(&pool, &GameChannels::new(), game_id, 2, None)
+    let turn = create_turn(&pool, &WatchedGames::new(), game_id, 2, None)
         .await
         .unwrap();
     let saved = create_snake_turn(&pool, &turn, game_snake_id, "left", Some(42), true, true)

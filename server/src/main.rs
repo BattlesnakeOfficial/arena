@@ -24,7 +24,6 @@ mod engine;
 mod engine_models;
 mod errors;
 mod flasher;
-mod game_channels;
 mod game_progress;
 mod game_runner;
 mod github;
@@ -46,6 +45,7 @@ mod stuck_game_sweeper;
 mod telemetry;
 mod tournament_bracket;
 mod tournament_match;
+mod watched_games;
 mod wire;
 
 /// Frontend UI components only - do not place backend logic here
@@ -170,6 +170,14 @@ async fn spawn_application_tasks(
 
     if features.server {
         info!("Server Enabled");
+        supervisor.spawn(
+            "watched-games",
+            watched_games::run_watched_games(
+                app_state.db.clone(),
+                app_state.watched_games.clone(),
+                shutdown.clone(),
+            ),
+        );
         supervisor.spawn(
             "server",
             run_server_until(

@@ -1,0 +1,47 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            turn_id,\n            game_id,\n            turn_number,\n            frame_data,\n            created_at\n        FROM turns\n        WHERE game_id = $1 AND turn_number >= $2\n        ORDER BY turn_number ASC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "turn_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "game_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "turn_number",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 3,
+        "name": "frame_data",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 4,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "f0ca6447677b8cb1822928280c9a5f02cab07a59e5440dfbc501339d7f119093"
+}

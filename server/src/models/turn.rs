@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
-use crate::game_channels::{GameChannels, TurnNotification};
 use crate::game_progress::phase;
+use crate::watched_games::WatchedGames;
 
 #[cfg(test)]
 mod storage_tests;
@@ -110,7 +110,8 @@ pub async fn get_turns_from(
     game_id: Uuid,
     from_turn: i32,
 ) -> cja::Result<Vec<Turn>> {
-    let turns = sqlx::query_as::<_, Turn>(
+    let turns = sqlx::query_as!(
+        Turn,
         r#"
         SELECT
             turn_id,
@@ -122,9 +123,9 @@ pub async fn get_turns_from(
         WHERE game_id = $1 AND turn_number >= $2
         ORDER BY turn_number ASC
         "#,
+        game_id,
+        from_turn
     )
-    .bind(game_id)
-    .bind(from_turn)
     .fetch_all(pool)
     .await
     .wrap_err("Failed to fetch turns from database")?;
@@ -135,7 +136,7 @@ pub async fn get_turns_from(
 /// Create a new turn for a game and notify WebSocket subscribers
 pub async fn create_turn(
     pool: &PgPool,
-    game_channels: &GameChannels,
+    watched_games: &WatchedGames,
     game_id: Uuid,
     turn_number: i32,
     frame_data: Option<serde_json::Value>,
@@ -176,15 +177,9 @@ pub async fn create_turn(
         .await?
     };
 
-    // Return the connection before waiting on the channel map, as fetch_one(pool)
-    // did. A blocked notification must not hold scarce database capacity.
+    // Release the insert connection before waiting for the registry mutex.
     phase(game_id, "persist_turn.notify", Some(turn_number), async {
-        game_channels
-            .notify(TurnNotification {
-                game_id,
-                turn_number,
-            })
-            .await;
+        watched_games.turn_persisted(game_id).await;
         Ok(())
     })
     .await?;
