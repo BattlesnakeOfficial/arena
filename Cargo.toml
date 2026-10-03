@@ -35,3 +35,16 @@ opt-level = 3
 
 [profile.dev.package.zune-jpeg]
 opt-level = 3
+
+# usvg's own parsing dependencies (SVG input).
+[profile.dev.package.roxmltree]
+opt-level = 3
+
+[profile.dev.package.simplecss]
+opt-level = 3
+
+[profile.dev.package.svgtypes]
+opt-level = 3
+
+[profile.dev.package.kurbo]
+opt-level = 3

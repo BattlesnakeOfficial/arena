@@ -42,6 +42,28 @@ const LENGTH_THRESHOLD: f64 = 4.0;
 const SPLICE_THRESHOLD_DEG: f64 = 15.0;
 const MAX_ITERATIONS: usize = 10;
 
+/// What the mask came from, which decides how closely the splines follow it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Source {
+    /// A drawing (PNG/JPEG): the 15° splice threshold (see the module docs), loose
+    /// enough to smooth away the wobble of a hand-drawn edge.
+    Drawing,
+    /// An SVG rendered to the grid: its edges are exact, so splines are spliced at 10°
+    /// and follow long, gentle curves closely. At vtracer's 45° the catalog's retraced
+    /// multi-colour heads lost up to 0.5 units along such curves (orca: IoU 0.981 against
+    /// the source; 0.995 at 10°).
+    Vector,
+}
+
+impl Source {
+    fn splice_threshold_deg(self) -> f64 {
+        match self {
+            Source::Drawing => SPLICE_THRESHOLD_DEG,
+            Source::Vector => 10.0,
+        }
+    }
+}
+
 pub(crate) struct TraceResult {
     /// `None` when nothing survived speck removal.
     pub path: Option<tiny_skia::Path>,
@@ -67,6 +89,7 @@ pub(crate) fn trace_mask(
     mut mask: Vec<bool>,
     side: usize,
     limits: &Limits,
+    source: Source,
 ) -> Result<TraceResult, ProcessError> {
     let px_per_unit = side as f32 / 100.0;
     let min_area = (SPECK_UNITS * px_per_unit).powi(2).ceil() as usize;
@@ -110,7 +133,7 @@ pub(crate) fn trace_mask(
                 CORNER_THRESHOLD_DEG.to_radians(),
                 LENGTH_THRESHOLD,
                 MAX_ITERATIONS,
-                SPLICE_THRESHOLD_DEG.to_radians(),
+                source.splice_threshold_deg().to_radians(),
             );
             for el in compound.iter() {
                 if let visioncortex::CompoundPathElement::Spline(s) = el {

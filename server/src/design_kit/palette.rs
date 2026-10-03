@@ -168,12 +168,18 @@ fn chroma(c: Rgb) -> u8 {
 }
 
 /// Rec. 709 luma on the encoded values, 0..=255.
-fn luma(c: Rgb) -> u32 {
+pub(crate) fn luma(c: Rgb) -> u32 {
     (c.r as u32 * 2126 + c.g as u32 * 7152 + c.b as u32 * 722) / 10_000
 }
 
 /// "Visibly coloured" for the `colours_flattened` lint.
 const COLOURED_MIN_CHROMA: u8 = 64;
+
+/// A visibly coloured paint (not black, white or grey): the `colours_flattened` rule,
+/// shared by raster and SVG input.
+pub(crate) fn coloured(c: Rgb) -> bool {
+    chroma(c) >= COLOURED_MIN_CHROMA
+}
 
 /// A decoded raster in 8-bit straight (non-premultiplied) channels, tightly packed.
 pub(crate) struct Pixels {
@@ -260,7 +266,7 @@ fn classify(rgb: Rgb, a: u8, alpha_mode: bool, ghost: bool) -> Class {
         }
         Class {
             coverage: a,
-            coloured: solid && chroma(rgb) >= COLOURED_MIN_CHROMA,
+            coloured: solid && coloured(rgb),
             visible: a >= 26,
             soft: (26..=229).contains(&a),
             ..Class::default()
@@ -275,7 +281,7 @@ fn classify(rgb: Rgb, a: u8, alpha_mode: bool, ghost: bool) -> Class {
         }
         Class {
             coverage: (255 - luma(rgb)) as u8,
-            coloured: chroma(rgb) >= COLOURED_MIN_CHROMA,
+            coloured: coloured(rgb),
             ..Class::default()
         }
     }
