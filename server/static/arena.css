@@ -88,6 +88,7 @@ h3 { font-weight: 700; font-size: 16px; }
 }
 .wordmark .glyph { width: 22px; height: 22px; flex-shrink: 0; }
 .site-nav .links { display: flex; gap: 26px; font-size: 14.5px; font-weight: 500; color: var(--muted); }
+.site-nav .links a { white-space: nowrap; }
 .site-nav .links a:hover { color: var(--ink); }
 .site-nav .links a.active { color: var(--pink); }
 .site-nav .spacer { flex: 1; }
@@ -196,8 +197,8 @@ html[data-app-theme="dark"] .ic-moon { display: none; }
 .mobile-menu { display: none; position: relative; }
 .mobile-menu summary {
   list-style: none;
-  width: 44px;
-  height: 44px;
+  width: 38px;
+  height: 38px;
   border-radius: 50%;
   border: 1.5px solid var(--hairline-dark);
   color: var(--ink);
@@ -1087,6 +1088,14 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
 }
 
 /* --- responsive ---------------------------------------------------------- */
+/* The logged-in link row (8 links + wordmark + controls + user chip) needs
+   ~1210px; collapse it into the hamburger menu below that so links never
+   wrap or push the controls off-screen. Kept separate from the 980px query
+   so page layout still switches at 980. */
+@media (max-width: 1220px) {
+  .site-nav .links { display: none; }
+  .mobile-menu { display: block; }
+}
 @media (max-width: 980px) {
   .grid { grid-template-columns: 1fr; }
   .hide-md { display: none; }
@@ -1114,6 +1123,7 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
     border: 0;
   }
   .theme-btn { width: 44px; height: 44px; }
+  .mobile-menu summary { width: 44px; height: 44px; }
   .appearance { right: 16px; left: 16px; width: auto; top: 80px; }
   .page { padding: 28px 20px 96px; }
   .flash-message { width: calc(100% - 40px); }
