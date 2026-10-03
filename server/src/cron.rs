@@ -3,9 +3,10 @@ use std::time::Duration;
 use cja::cron::{CronRegistry, Worker};
 use tokio_util::sync::CancellationToken;
 
+use crate::config::AppConfig;
 use crate::jobs::{
-    GameBackupJob, LeaderboardMatchmakerJob, RateLimitPruneJob, SnakeHealthSweeperJob,
-    StuckGameSweeperJob, StuckMatchSweeperJob,
+    GameBackupJob, LeaderboardMatchmakerJob, PlayGrantReconcileJob, RateLimitPruneJob,
+    SnakeHealthSweeperJob, StuckGameSweeperJob, StuckMatchSweeperJob,
 };
 use crate::state::AppState;
 
@@ -26,8 +27,14 @@ pub const SNAKE_HEALTH_SWEEP_INTERVAL_SECS: u64 = 30 * 60;
 /// waiting/running past the configured max age.
 pub const STUCK_GAME_SWEEP_INTERVAL_SECS: u64 = 30 * 60;
 
-pub(crate) fn cron_registry() -> CronRegistry<AppState> {
+pub(crate) fn cron_registry(config: &AppConfig) -> CronRegistry<AppState> {
     let mut registry = CronRegistry::new();
+
+    registry.register_job(
+        PlayGrantReconcileJob,
+        Some("Reconcile play customization grants"),
+        Duration::from_secs(config.play_grant_reconcile_interval_secs),
+    );
 
     // Game backup discovery: runs every hour, enqueues backup jobs for games from the last 4 hours
     registry.register_job(
@@ -102,5 +109,30 @@ mod tests {
     fn matchmaker_cadence() {
         assert_eq!(MATCHMAKER_INTERVAL_SECS, 864);
         const { assert!(CRON_POLL_SECS < MATCHMAKER_INTERVAL_SECS) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cja::cron::{IntervalSchedule, Schedule};
+
+    #[test]
+    fn play_reconcile_job_is_registered_with_configured_interval() {
+        assert!(
+            <crate::jobs::Jobs as cja::jobs::registry::JobRegistry<AppState>>::job_names()
+                .contains(&"PlayGrantReconcileJob")
+        );
+        let mut config = AppConfig::test_default();
+        for interval in [3600, 15] {
+            config.play_grant_reconcile_interval_secs = interval;
+            let registry = cron_registry(&config);
+            let job = registry
+                .get("PlayGrantReconcileJob")
+                .expect("cron registered");
+            assert!(
+                matches!(&job.schedule, Schedule::Interval(IntervalSchedule(duration)) if *duration == Duration::from_secs(interval))
+            );
+        }
     }
 }
