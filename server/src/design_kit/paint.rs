@@ -31,7 +31,7 @@ use std::collections::BTreeSet;
 
 use tiny_skia::{Mask, Paint, PathSegment, Pixmap, Transform};
 
-use super::palette::{self, Rgb, TEMPLATE};
+use super::palette::{self, GUIDE_COLOURS, REFERENCE_GHOST, Rgb};
 use super::{Limits, ProcessError};
 
 /// Luma (0..=255, [`palette::luma`]) at or above which a colour is a cut-out in a
@@ -137,7 +137,10 @@ fn is_template_layer(id: &str) -> bool {
 
 fn is_template_colour(paint: &usvg::Paint) -> bool {
     match paint {
-        usvg::Paint::Color(c) => TEMPLATE.contains(&Rgb::new(c.red, c.green, c.blue)),
+        usvg::Paint::Color(c) => {
+            let rgb = Rgb::new(c.red, c.green, c.blue);
+            rgb == REFERENCE_GHOST || GUIDE_COLOURS.contains(&rgb)
+        }
         _ => false,
     }
 }

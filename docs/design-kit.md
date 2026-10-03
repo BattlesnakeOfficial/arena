@@ -206,7 +206,7 @@ gets a chance to be expensive:
    white, small details no fill rule reproduces, overlaps in an even-odd shape, clips
    that cut through shapes, opacity, a shape crossing the edge of the square, which Fit
    would scale into view), the truth is painted again at the 1024 px trace grid and
-   traced (`retraced`), with splines spliced at 10° instead of the 45° used for
+   traced (`retraced`), with splines spliced at 10° instead of the 15° used for
    drawings, so long gentle curves stay within about 0.1 unit.
 10. **Fixes, emit, metrics, lints**, as for rasters.
 
@@ -396,8 +396,8 @@ Findings from the corpus changed the pipeline, not the thresholds:
   `vector_exact` (140 → 171), which the reference shapes need. Later, five turned out to
   reach past the square; nr-rocket and nr-booster stay exact once their contours wholly
   outside it are dropped, and the three that cross its edge are retraced (168).
-- Retraced curves were up to 0.5 units off (IoU 0.976-0.99) with the drawing tracer's 45°
-  splice threshold; the SVG retrace now uses 10°.
+- Retraced curves were up to 0.5 units off (IoU 0.976-0.99) with the drawing tracer's
+  then 45° splice threshold (drawings now use 15°); the SVG retrace now uses 10°.
 - The direction lint called that scarf head rotated (`faces_up_down`) because its top
   and bottom are full width. A quarter turn puts the neck on the top or bottom and the
   front opposite, and a front is never that full, so when both are full neither counts

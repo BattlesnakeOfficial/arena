@@ -45,11 +45,11 @@ const MAX_ITERATIONS: usize = 10;
 /// What the mask came from, which decides how closely the splines follow it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Source {
-    /// A drawing (PNG/JPEG): vtracer's 45° splice threshold smooths away the wobble of
-    /// a hand-drawn edge.
+    /// A drawing (PNG/JPEG): the 15° splice threshold (see the module docs), loose
+    /// enough to smooth away the wobble of a hand-drawn edge.
     Drawing,
     /// An SVG rendered to the grid: its edges are exact, so splines are spliced at 10°
-    /// and follow long, gentle curves closely. At 45° the catalog's retraced
+    /// and follow long, gentle curves closely. At vtracer's 45° the catalog's retraced
     /// multi-colour heads lost up to 0.5 units along such curves (orca: IoU 0.981 against
     /// the source; 0.995 at 10°).
     Vector,
