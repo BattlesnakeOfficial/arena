@@ -10,23 +10,27 @@
 //! 2. A global token bucket ([`TokenBucket`], [`BUCKET_CAPACITY`] refilling
 //!    [`BUCKET_REFILL_PER_SEC`]): 429 `rate_limited`, still before the body is read.
 //!    Global because `X-Forwarded-For` can't be trusted on the `run.app` URL.
-//! 3. The body, up to [`MAX_BODY_BYTES`] (`DefaultBodyLimit`): 413 `too_large`.
+//! 3. The body, up to [`MAX_BODY_BYTES`] (`DefaultBodyLimit`): 413 `too_large`. It must
+//!    keep arriving ([`BodyPace`]): a client that stalls or trickles is cut off with 408
+//!    `upload_timeout` within seconds, so it can't hold an upload slot for free.
 //! 4. [`STUDIO_SLOTS`] processing slot, waited for up to [`SLOT_WAIT`]: 503 `busy`.
 //! 5. The [`Processor`]: in production a short-lived `arena studio-worker` child
-//!    ([`arena::studio_worker`]) with CPU and memory limits, killed at
-//!    [`PROCESS_DEADLINE`]. The slot is held until the worker has exited.
+//!    ([`arena::studio_worker`]) with CPU and memory limits, killed at the wall-clock
+//!    deadline [`arena::studio_worker::WorkerLimits::wall`] (10 s in release). The slot
+//!    is held until the worker has exited.
 //!
 //! No `PageFactory`, `OptionalUser` or session: the route never touches the database.
 //! Every response is `Cache-Control: no-store`, and the log never holds content or IPs.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use arena::design_kit::{self, Fix, Limits, ProcessError};
-use arena::studio_worker::{ErrorJson, Outcome, Worker};
+use arena::studio_worker::{ErrorJson, Outcome, Worker, WorkerLimits};
 use axum::{
     Json,
-    body::Bytes,
+    body::{Body, Bytes},
     extract::{DefaultBodyLimit, FromRequest, RawQuery, Request, State},
     http::{HeaderValue, StatusCode, header},
     middleware::Next,
@@ -34,6 +38,7 @@ use axum::{
     routing::{MethodRouter, post},
 };
 use color_eyre::eyre::{Context as _, eyre};
+use futures::StreamExt as _;
 use serde::Serialize;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
@@ -54,13 +59,77 @@ pub const MAX_BODY_BYTES: usize = 4 * 1024 * 1024;
 /// How long an upload waits for the processing slot before giving up with 503.
 pub const SLOT_WAIT: Duration = Duration::from_secs(3);
 
-/// How long processing may take (wall clock) before the worker is killed and the
-/// request gets 503.
-pub const PROCESS_DEADLINE: Duration = Duration::from_secs(10);
+/// How fast a request body must arrive. A body being received holds one of the
+/// [`UPLOAD_SLOTS`], so a client that opens a request and then stalls, or sends a byte
+/// now and then, would otherwise keep other artists out for the whole deadline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BodyPace {
+    /// The whole body must arrive within this.
+    pub deadline: Duration,
+    /// Time allowed before the rate counts (connection set-up, a slow first packet).
+    pub grace: Duration,
+    /// After `grace`, the body must keep up an average of this many bytes a second: at
+    /// time `t` at least `(t - grace) * min_bytes_per_sec` bytes have arrived. A stalled
+    /// client is cut off at about `grace` plus what it sent divided by the rate.
+    pub min_bytes_per_sec: u64,
+}
 
-/// How long receiving the body may take: a slow upload holds an [`UPLOAD_SLOTS`] slot.
-/// Generous for a 4 MB upload on a slow phone connection.
-pub const BODY_READ_TIMEOUT: Duration = Duration::from_secs(30);
+impl Default for BodyPace {
+    /// 30 s for the whole body (a 4 MB upload needs about 1 Mbit/s); after 5 s, at
+    /// least 16 KiB a second, which a phone on a poor connection clears easily.
+    fn default() -> Self {
+        Self {
+            deadline: Duration::from_secs(30),
+            grace: Duration::from_secs(5),
+            min_bytes_per_sec: 16 * 1024,
+        }
+    }
+}
+
+impl BodyPace {
+    /// The latest time the next chunk may arrive, given `received` bytes so far.
+    fn next_chunk_by(&self, start: tokio::time::Instant, received: u64) -> tokio::time::Instant {
+        let earned =
+            Duration::from_secs_f64(received as f64 / self.min_bytes_per_sec.max(1) as f64);
+        (start + self.grace + earned).min(start + self.deadline)
+    }
+}
+
+/// A body that is too slow: see [`BodyPace`].
+#[derive(Debug, thiserror::Error)]
+#[error("the request body arrived too slowly")]
+struct TooSlow;
+
+/// `body`, cut off with an error (and `too_slow` set) once it falls behind `pace`.
+fn paced(body: Body, pace: BodyPace, too_slow: Arc<AtomicBool>) -> Body {
+    let start = tokio::time::Instant::now();
+    let chunks = body.into_data_stream();
+    let stream = futures::stream::unfold(
+        (chunks, 0u64, false),
+        move |(mut chunks, received, ended)| {
+            let too_slow = too_slow.clone();
+            async move {
+                if ended {
+                    return None;
+                }
+                let by = pace.next_chunk_by(start, received);
+                match tokio::time::timeout_at(by, chunks.next()).await {
+                    Ok(Some(Ok(chunk))) => {
+                        let received = received + chunk.len() as u64;
+                        Some((Ok(chunk), (chunks, received, false)))
+                    }
+                    Ok(Some(Err(e))) => Some((Err(e), (chunks, received, true))),
+                    Ok(None) => None,
+                    Err(_elapsed) => {
+                        too_slow.store(true, Ordering::SeqCst);
+                        Some((Err(axum::Error::new(TooSlow)), (chunks, received, true)))
+                    }
+                }
+            }
+        },
+    );
+    Body::from_stream(stream)
+}
 
 /// Global token bucket: a burst of 20 uploads, then one a second.
 pub const BUCKET_CAPACITY: f64 = 20.0;
@@ -91,12 +160,7 @@ impl Processor for Subprocess {
         fixes: Vec<Fix>,
         permit: OwnedSemaphorePermit,
     ) -> Outcome {
-        // `run` returns once the worker has exited and been reaped, at the latest when
-        // it is killed at the deadline. If this future is dropped instead (the client
-        // went away), `kill_on_drop` sends SIGKILL as the permit is released.
-        let outcome = self.0.run(&bytes, &fixes).await;
-        drop(permit);
-        outcome
+        self.0.run_holding(&bytes, &fixes, permit).await
     }
 }
 
@@ -171,6 +235,7 @@ pub struct StudioState {
     pub(crate) clock: Arc<dyn Fn() -> Instant + Send + Sync>,
     pub(crate) processor: Arc<dyn Processor>,
     pub(crate) slot_wait: Duration,
+    pub(crate) body_pace: BodyPace,
 }
 
 impl StudioState {
@@ -185,6 +250,7 @@ impl StudioState {
             clock: Arc::new(Instant::now),
             processor,
             slot_wait: SLOT_WAIT,
+            body_pace: BodyPace::default(),
         }
     }
 
@@ -194,11 +260,12 @@ impl StudioState {
         Ok(Self::new(Arc::new(Subprocess(worker))))
     }
 
-    /// Processing in this process (tests: the test binary has no worker subcommand).
+    /// Processing in this process (tests: the test binary has no worker subcommand),
+    /// with the worker's wall-clock deadline.
     pub fn in_process() -> Self {
         Self::new(Arc::new(InProcess {
             limits: Limits::default(),
-            deadline: PROCESS_DEADLINE,
+            deadline: WorkerLimits::default().wall,
         }))
     }
 
@@ -323,35 +390,41 @@ pub async fn process(
         return Ok(rate_limited());
     }
 
-    let bytes =
-        match tokio::time::timeout(BODY_READ_TIMEOUT, Bytes::from_request(request, &state)).await {
-            Ok(Ok(bytes)) => bytes,
-            Ok(Err(rejection)) if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE => {
-                let too_large = ProcessError::TooLarge {
-                    bytes: MAX_BODY_BYTES + 1,
-                    max: MAX_BODY_BYTES,
-                };
-                return Ok(error_response(
-                    StatusCode::PAYLOAD_TOO_LARGE,
-                    ErrorJson::from(&too_large),
-                ));
-            }
-            Ok(Err(rejection)) => {
-                return Ok(error_response(
-                    rejection.status(),
-                    ErrorJson::new("bad_request", "We couldn't receive that file. Try again."),
-                ));
-            }
-            Err(_elapsed) => {
-                return Ok(error_response(
-                    StatusCode::REQUEST_TIMEOUT,
-                    ErrorJson::new(
-                        "upload_timeout",
-                        "The upload took too long. Check your connection and try again.",
-                    ),
-                ));
-            }
-        };
+    let too_slow = Arc::new(AtomicBool::new(false));
+    let pace = studio.body_pace;
+    let request = request.map(|body| paced(body, pace, too_slow.clone()));
+    let read = tokio::time::timeout(pace.deadline, Bytes::from_request(request, &state)).await;
+    let upload_timeout = || {
+        tracing::info!(event_type = "studio_processed", outcome = "upload_timeout");
+        error_response(
+            StatusCode::REQUEST_TIMEOUT,
+            ErrorJson::new(
+                "upload_timeout",
+                "The upload was too slow. Check your connection and try again.",
+            ),
+        )
+    };
+    let bytes = match read {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(rejection)) if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE => {
+            let too_large = ProcessError::TooLarge {
+                bytes: MAX_BODY_BYTES + 1,
+                max: MAX_BODY_BYTES,
+            };
+            return Ok(error_response(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                ErrorJson::from(&too_large),
+            ));
+        }
+        Ok(Err(_)) if too_slow.load(Ordering::SeqCst) => return Ok(upload_timeout()),
+        Ok(Err(rejection)) => {
+            return Ok(error_response(
+                rejection.status(),
+                ErrorJson::new("bad_request", "We couldn't receive that file. Try again."),
+            ));
+        }
+        Err(_elapsed) => return Ok(upload_timeout()),
+    };
 
     let permit =
         match tokio::time::timeout(studio.slot_wait, studio.studio_slot.clone().acquire_owned())

@@ -1428,7 +1428,13 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
 .studio-file { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; }
 .studio-drop-title { font-family: var(--display); font-weight: 700; font-size: 19px; }
 .studio-drop-hint { color: var(--muted); font-size: 14px; }
+/* After the first upload the zone shrinks to one row, so the result fits on screen. */
+.studio-has-upload .studio-drop { flex-direction: row; flex-wrap: wrap; gap: 2px 10px; min-height: 52px; padding: 8px 14px; }
+.studio-has-upload .studio-drop-title { font-size: 16px; }
+.studio-has-upload .studio-drop-hint { font-size: 13px; }
 .studio-status { margin-top: 12px; font-size: 15px; }
+/* Where studio.js scrolls a result into view. */
+.studio-status, .studio-preview { scroll-margin-top: 12px; }
 .studio-status.error { color: var(--down); font-weight: 600; }
 .studio-relabel { margin-top: 8px; }
 .studio-top-warning {
@@ -1439,13 +1445,14 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
 
 /* Segmented controls: radios cover their label, so the label is the target. */
 .studio-seg { border: 0; margin-top: 14px; min-width: 0; }
+.studio-kind { margin: 0 0 12px; }
 .studio-seg legend, .studio-colors legend {
   font-family: var(--mono); font-size: 11.5px; text-transform: uppercase; letter-spacing: .12em;
   color: var(--muted); margin-bottom: 7px;
 }
 .studio-seg-opts { display: flex; flex-wrap: wrap; gap: 6px; }
 .studio-seg-opt { position: relative; display: inline-flex; }
-.studio-seg-opt input, .studio-swatch input[type="radio"] {
+.studio-seg-opt input, .studio-swatch input {
   position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer;
 }
 .studio-seg-opt > span {
@@ -1507,20 +1514,24 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
 
 /* Style controls. */
 .studio-colors { border: 0; min-width: 0; }
-.studio-swatches { display: flex; flex-wrap: wrap; gap: 6px; }
+.studio-swatches { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 6px; }
 .studio-swatch {
   position: relative; display: inline-flex; flex-direction: column; align-items: center; gap: 2px;
   min-width: 52px; min-height: 44px; padding: 4px; border-radius: 10px; border: 1.5px solid transparent; cursor: pointer;
 }
-.studio-swatch:has(input:checked) { border-color: var(--ink); }
+.studio-swatch:has(input:checked), .studio-swatch-custom.active { border-color: var(--ink); }
 .studio-swatch:has(input:focus-visible) { outline: 2px solid var(--pink); outline-offset: 2px; }
 .studio-swatch-chip { width: 26px; height: 26px; border-radius: 50%; border: 1px solid rgba(0,0,0,.15); }
 /* Charcoal (#3d3d3d) all but vanishes on the dark card without a light rim. */
 html[data-app-theme="dark"] .studio-swatch-chip { border-color: rgba(255,255,255,.35); }
 .studio-swatch-name { font-size: 12px; color: var(--muted); }
-.studio-swatch-custom input[type="color"] {
-  width: 44px; height: 44px; padding: 0; border: 1px solid var(--hairline-dark); border-radius: 10px;
-  background: none; cursor: pointer;
+/* Custom: a colour wheel, with the picked colour in the middle once it's in use. */
+.studio-swatch-chip-custom {
+  background: conic-gradient(#e5383b, #f7c948, #2bb673, #3a86ff, #8f5cf7, #ff4f86, #e5383b);
+}
+.studio-swatch-custom.active .studio-swatch-chip-custom {
+  background: radial-gradient(circle, var(--studio-snake) 0 50%, transparent 53%),
+    conic-gradient(#e5383b, #f7c948, #2bb673, #3a86ff, #8f5cf7, #ff4f86, #e5383b);
 }
 #studio-color-hint { margin-top: 6px; }
 .studio-pair { margin-top: 16px; }

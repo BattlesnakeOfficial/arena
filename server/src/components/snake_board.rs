@@ -81,7 +81,7 @@ pub struct ShapeRef<'a> {
     pub d: &'a str,
     pub fill_rule: FillRule,
     /// Marks a placeholder `<path>` the page's JS fills in later, e.g.
-    /// `"studio-user-head"`.
+    /// `"studio-head"`.
     pub class: Option<&'a str>,
 }
 
@@ -863,11 +863,11 @@ mod tests {
     #[test]
     fn four_directions_snapshot() {
         let head = ShapeRef {
-            class: Some("studio-user-head"),
+            class: Some("studio-head"),
             ..HEAD
         };
         let tail = ShapeRef {
-            class: Some("studio-pair-tail"),
+            class: Some("studio-tail"),
             fill_rule: FillRule::EvenOdd,
             ..TAIL
         };
@@ -987,12 +987,12 @@ mod tests {
         let head = ShapeRef {
             d: "M0 0H100V100H0Z",
             fill_rule: FillRule::EvenOdd,
-            class: Some("studio-user-head"),
+            class: Some("studio-head"),
         };
         let out = snake_board(&four_directions_board(head, TAIL, "", "")).into_string();
         assert_eq!(
             out.matches(
-                "<path class=\"studio-user-head\" d=\"M0 0H100V100H0Z\" fill-rule=\"evenodd\"></path>"
+                "<path class=\"studio-head\" d=\"M0 0H100V100H0Z\" fill-rule=\"evenodd\"></path>"
             )
             .count(),
             4

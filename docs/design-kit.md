@@ -753,10 +753,26 @@ with `components::snake_board`, with the default head and tail in place; the cli
 
 Every `d` and colour is checked (`/^[MLQCZ0-9 .\-]*$/`, `/^#[0-9a-f]{6}$/i`) before use,
 including what `localStorage` (`arena:studio:v1`) restores, and lint text goes in with
-`textContent`. The uploaded file stays in memory only, so Flip and Fit can re-post it.
-"This file is a: Head / Tail" picks the slot the next upload fills; after an upload,
-"Use it as a tail instead" moves the result to the other slot without re-posting (both
-kinds' lints are in the response) and puts back what it replaced.
+`textContent`.
+
+- **Upload as: Head / Tail** (above the drop zone) picks the slot the next upload fills
+  and the slot the close-up and the checks show; switching says which in the status line.
+- **Moving a result.** Right after an upload, "Use it as a tail instead" moves the
+  result to the other slot without re-posting (both kinds' lints are in the response)
+  and puts back what it replaced. Tapping Tail while the tail slot is empty offers "Use
+  the file you just uploaded as your tail" instead, so either way of correcting a
+  mislabelled upload works, and an upload is never moved over the other slot's upload by
+  accident.
+- **Flip and Fit always work.** The uploaded file stays in memory only; once it's gone
+  (a reload, another upload), they re-post the saved path as the downloadable SVG.
+  Both fixes are rewrites of the clean path, so the result matches fixing the original
+  (a route test checks the metrics agree within 1%); the original file's notes are kept.
+- **A failed request changes nothing**: the last result, and its buttons, stay.
+- **The instant format check** before uploading comes from the server: `#studio-drop`
+  carries `data-sniff`, the rejected entries of `design_kit::SIGNATURES` with their
+  advice and the size limit. Anything else is posted and the server decides.
+- After a result, the drop zone shrinks to one row and the page scrolls to the preview
+  (with the checks beside it, at 980px+) or to the status line.
 
 ### The endpoint and its guards
 
@@ -770,13 +786,14 @@ strategy, lint codes, fixes, size and duration, never content or IPs. In order:
 |---|---|---|
 | Upload slots (route middleware, `try_acquire` before anything reads the body) | 3 requests | 503 `busy` |
 | Global token bucket (header-free: `X-Forwarded-For` can be spoofed on `run.app`) | burst 20, 1/s | 429 `rate_limited` |
-| Body (`DefaultBodyLimit`), read within 30 s | 4 MiB | 413 `too_large` (408 `upload_timeout`) |
+| Body (`DefaultBodyLimit`) | 4 MiB | 413 `too_large` |
+| Body pace (`BodyPace`): all of it within 30 s, and after 5 s at least 16 KiB/s on average, so a stalled or trickling client is cut off in seconds instead of holding an upload slot | | 408 `upload_timeout` |
 | Processing slot (like `BACKUP_SLOT` in `backup.rs`), held until the worker exits | 1, waited for up to 3 s | 503 `busy` |
 | The worker: CPU, memory, wall clock (below) | | 422 `too_complex` or 503 `busy` |
 
 | Outcome | Response |
 |---|---|
-| a clean shape | 200 `{svg, path_d, fill_rule, strategy, input, metrics, lints: {head, tail}, info}` |
+| a clean shape | 200 `{path_d, fill_rule, strategy, input, metrics, lints: {head, tail}, info}` (the page builds the SVG file from `path_d` and `fill_rule`) |
 | a `ProcessError` caused by the upload | 422 `{error: {code, message}}` |
 | the worker died (a crash, a resource limit, the OOM killer) | 422 `too_complex`, logged at warn with the exit status |
 | no answer before the deadline (the worker is killed) | 503 `busy`, logged at warn |
@@ -800,17 +817,32 @@ stdin, runs `process_on_big_stack`, writes one JSON reply to stdout and exits:
 
 The server spawns it from `/proc/self/exe` on Linux (its own executable, even if the
 file was replaced since, so the worker is always the same build) with
-`tokio::process::Command` (`kill_on_drop`, an empty environment, stdin written while stdout and stderr are read, both capped), re-checks the
-reply (the path alphabet, the size limit, the exact SVG template), and sets these
-between fork and exec (`pre_exec`; async-signal-safe calls only):
+`tokio::process::Command` (`kill_on_drop`, an empty environment, stdin written while
+stdout and stderr are read, both capped), re-checks the reply (the path alphabet and
+the size limit), and sets these between fork and exec (`pre_exec`; plain system-call
+wrappers only). The processing slot is held until the worker has exited and been
+reaped (`Worker::run_holding`), or until it is killed when the request goes away.
 
 | Limit | Release | Debug | Why |
 |---|---|---|---|
 | `RLIMIT_CPU` (soft; hard is +1 s) | 5 s | 30 s | the slowest accepted uploads take 0.25 s in release, 7 s in debug |
 | `RLIMIT_DATA` | 192 MiB | 192 MiB | the heaviest legitimate uploads need 88 MiB (below) |
+| `RLIMIT_AS` | 320 MiB | 320 MiB | the second memory cap, for gVisor (below); legitimate uploads need at most 160 MiB |
 | `RLIMIT_CORE` | 0 | 0 | a crash never writes a core file |
-| `oom_score_adj` | 1000 | 1000 | if memory runs out, the kernel kills the worker, not the server |
+| nice | 19 | 19 | the lowest CPU priority: on the one vCPU, live games always run first |
+| `oom_score_adj` | 1000 | 1000 | if memory runs out, a Linux kernel kills the worker, not the server |
 | wall clock (then SIGKILL) | 10 s | 45 s | a slow answer means a busy machine (the CPU limit catches big uploads first) |
+
+**Run the service on Cloud Run's second-generation execution environment.** The
+memory protection above assumes a Linux kernel: there `RLIMIT_DATA` covers every private
+writable mapping, and `oom_score_adj` makes the OOM killer pick the worker. The first
+generation runs on gVisor, which applies `RLIMIT_DATA` to `brk` only (not `mmap`, which
+is where big allocations and the 64 MiB stack live; gVisor `mm/syscalls.go`, issue 156)
+and kills the whole sandbox, server and games included, when the instance runs out of
+memory. `RLIMIT_AS`, which gVisor does enforce on `mmap`, keeps a bomb there to about
+200 MiB, but only the second generation makes the OOM killer pick the worker.
+`tf-arena` sets no execution environment yet: pin
+`execution_environment = "EXECUTION_ENVIRONMENT_GEN2"` before the studio is linked.
 
 `RLIMIT_DATA` counts private writable mappings, so the 64 MiB processing stack counts in
 full (only its touched pages use memory). Measured on the dev VM with
@@ -820,6 +852,7 @@ release):
 | Upload | Fails at | Passes at | Release time |
 |---|---|---|---|
 | 2048 px PNG, 2048 px JPEG | 80 MiB | 88 MiB | 93 ms, 78 ms |
+| 2048 px black and white noise PNG (accepted: a 38 KB path; 3.8 s in debug) | | | 161 ms |
 | 1448 px progressive JPEG noise (the progressive cap), 1254 px progressive CMYK JPEG | 80 MiB | 88 MiB | 237 ms, 226 ms |
 | 16 nested clipped groups, retraced | 80 MiB | 88 MiB | 63 ms |
 | 361 white dots on black (`too_complex`) | 80 MiB | 88 MiB | 75 ms |
@@ -827,8 +860,19 @@ release):
 
 192 MiB is twice the worst legitimate need; a memory bomb can then touch at most about
 128 MiB of heap, which fits in what a 512 MiB instance has free beside the server
-(about 320 MiB idle), so the data limit stops it before the OOM killer has to. The
-integration tests run the real binary (`server/tests/studio_worker.rs`).
+(about 320 MiB idle), so the data limit stops it before the OOM killer has to.
+
+`RLIMIT_AS` counts every mapping: the executable, the main stack and a malloc arena's
+reservation come to about 125 MiB before any work (debug build; release is smaller).
+With `prlimit --as`, the 2048 px uploads and progressive JPEGs need 144 MiB, the deepest
+reference chains 160 MiB, and the 4,900-element SVG that is rejected as too complex 224
+MiB. 320 MiB (the data limit plus 128 MiB) never binds before `RLIMIT_DATA` on Linux.
+
+The integration tests run the real binary (`server/tests/studio_worker.rs`, Linux only):
+the limits, nice value, `oom_score_adj` and empty environment as `/proc` shows them; an
+abort, a memory bomb (under the data limit, and under the address-space limit alone), a
+CPU hog and a hang; the heaviest legitimate SVGs under the default limits; and the
+processing slot held until the worker is gone, including when the request is dropped.
 
 ## Tests
 
@@ -877,21 +921,28 @@ integration tests run the real binary (`server/tests/studio_worker.rs`).
   2·10^12).
 - `server/tests/design_kit_catalog.rs`: the 184-file corpus described above.
 - `server/tests/design_kit_refs.rs`: the reference table against fresh processing.
-- `server/tests/studio_worker.rs`: the real `arena studio-worker` binary: PNG, JPEG and
-  SVG replies equal in-process processing, fixes reach the worker, user errors come back
-  as rejections, and an abort, a memory bomb (the production data limit), real
-  processing at a tight data limit, a CPU hog and a hang each end only the child with
-  the outcome the endpoint maps (the hang test also reads `/proc` for the limits,
-  `oom_score_adj`, the empty environment and that the killed worker was reaped); the CLI
-  protocol and exit codes.
+- `server/tests/studio_worker.rs` (Linux only): the real `arena studio-worker` binary:
+  PNG, JPEG and SVG replies equal in-process processing, fixes reach the worker, user
+  errors come back as rejections, and an abort, a memory bomb (the production data
+  limit, and the address-space limit alone, as under gVisor), real processing at a
+  tight data limit, a CPU hog and a hang each end only the child with the outcome the
+  endpoint maps (the hang test also reads `/proc` for the limits, the nice value,
+  `oom_score_adj`, the empty environment and that the killed worker was reaped); the
+  heaviest legitimate SVGs under the default limits; the processing slot held until the
+  worker is gone, and freed (with the worker killed) when the request is dropped; the
+  CLI protocol and exit codes.
 - `server/src/studio_worker.rs` (unit): the JSON shapes, reply re-checks, and exit code
   and signal classification. `server/src/routes/studio/tests.rs`: every status of the
   endpoint through the real router with an unreachable database (200 for PNG, JPEG and
-  SVG; 422 codes; 413; 503 with the upload slots held, without reading the body; 503
-  with the processing slot held; 429 from the bucket, without reading the body; Flip
-  clearing `faces_left`; the slot held while processing and after an in-process
-  timeout; crashes, timeouts and bugs mapped), the token bucket's clock, and the page
-  (placeholders, every reference with a clean `data-d`).
+  SVG; 422 codes; 413; 408 for a stalled or trickling body, and a body in steady chunks
+  getting through; 503 with the upload slots held, without reading the body; 503 with
+  the processing slot held; 429 from the bucket, without reading the body; Flip
+  clearing `faces_left`; Flip and Fit on the SVG the page rebuilds from a saved path
+  matching the original file's fix; the slot held while processing and after an
+  in-process timeout; crashes, timeouts and bugs mapped), the token bucket's clock, and
+  the page (every placeholder carrying the default head or tail, every reference with a
+  clean `data-d`, the browser's format check giving the server's answer for every
+  rejected format, and studio.js building the design kit's SVG file).
 - Fixtures live in `server/tests/fixtures/design_kit/`: under `catalog/`, all 184
   official SVGs, the investigation's `metrics_summary.csv` (the corpus oracle) and
   `metrics_detail.csv` (centroid, holes and bounds for the 12 samples the metric oracle

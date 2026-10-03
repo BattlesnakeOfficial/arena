@@ -12,7 +12,6 @@ const fixture = (name: string) => path.join(FIXTURES, name);
 
 /** The parts of a 200 from the processing endpoint the page uses. */
 interface Processed {
-  svg: string;
   path_d: string;
   fill_rule: 'nonzero' | 'evenodd';
   input: string;
@@ -47,24 +46,41 @@ async function openStudio(page: Page) {
 
 const isProcess = (r: Response) => r.url().includes(ENDPOINT) && r.request().method() === 'POST';
 
-/** Pick the kind ("This file is a"), upload `name`, and return the endpoint's answer. */
-async function upload(page: Page, name: string, kind: 'head' | 'tail' = 'head'): Promise<Processed> {
-  await page.locator(`input[name="studio-kind"][value="${kind}"]`).check();
+/** Do `act` and return the endpoint's answer to it, retrying capacity answers. */
+async function answerTo(page: Page, act: () => Promise<unknown>, match = isProcess): Promise<Response> {
   for (let attempt = 0; ; attempt++) {
-    const answer = page.waitForResponse(isProcess);
-    await page.locator('#studio-file').setInputFiles(fixture(name));
+    const answer = page.waitForResponse(match);
+    await act();
     const response = await answer;
     if (CAPACITY.includes(response.status()) && attempt < 2) {
       const wait = Number(response.headers()['retry-after'] ?? '2');
       await page.waitForTimeout(Math.min(Math.max(wait, 1), 10) * 1000);
       continue;
     }
-    expect(response.status(), `${name}: ${await response.text()}`).toBe(200);
-    const body = (await response.json()) as Processed;
-    await expect(page.locator('#studio-status')).toContainText(`Done: your ${kind} is on the board`);
-    return body;
+    return response;
   }
 }
+
+/** Pick the kind ("Upload as"), upload `name`, and return the endpoint's answer. */
+async function upload(page: Page, name: string, kind: 'head' | 'tail' = 'head'): Promise<Processed> {
+  await page.locator(`input[name="studio-kind"][value="${kind}"]`).check();
+  const response = await answerTo(page, () => page.locator('#studio-file').setInputFiles(fixture(name)));
+  expect(response.status(), `${name}: ${await response.text()}`).toBe(200);
+  const body = (await response.json()) as Processed;
+  await expect(page.locator('#studio-status')).toContainText(`Done: your ${kind} is on the board`);
+  return body;
+}
+
+/** Tap a Flip/Fit button and return the fixed shape. */
+async function applyFix(page: Page, button: Locator, fix: 'flip' | 'fit'): Promise<Processed> {
+  const response = await answerTo(page, () => button.click(), (r) => isProcess(r) && r.url().includes(`fix=${fix}`));
+  expect(response.status(), await response.text()).toBe(200);
+  return (await response.json()) as Processed;
+}
+
+/** The SVG file the page builds from a saved path (downloads, and Flip/Fit after a reload). */
+const pageSvg = (r: Processed) =>
+  `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><path fill-rule="${r.fill_rule}" d="${r.path_d}"/></svg>`;
 
 /** Every attribute value of `attr` on the elements `locator` matches. */
 async function attrs(locator: Locator, attr: string): Promise<(string | null)[]> {
@@ -112,7 +128,7 @@ test.describe('Head & Tail Studio', () => {
       await openStudio(page);
       const result = await upload(page, name);
       expect(result.input).toBe(input);
-      expect(result.svg.startsWith('<svg')).toBe(true);
+      expect(result, 'the page builds the SVG file itself').not.toHaveProperty('svg');
       expect(result.lints.head, 'a catalog head passes every head check').toEqual([]);
 
       await expectAllPaths(page, 'path.studio-head', result.path_d, result.fill_rule);
@@ -148,9 +164,7 @@ test.describe('Head & Tail Studio', () => {
     const flip = warning.locator('.studio-fix[data-fix="flip"]');
     await expect(flip).toHaveText('Flip');
 
-    const answer = page.waitForResponse((r) => isProcess(r) && r.url().includes('fix=flip'));
-    await flip.click();
-    const flipped = (await (await answer).json()) as Processed;
+    const flipped = await applyFix(page, flip, 'flip');
     expect(flipped.lints.head).toEqual([]);
     await expect(page.locator('#studio-status')).toContainText('It passes every check');
     await expect(page.locator('#studio-warnings li')).toHaveCount(0);
@@ -265,9 +279,7 @@ test.describe('Head & Tail Studio', () => {
     expect(download.suggestedFilename()).toBe('my-battlesnake-head.svg');
     const file = await download.path();
     const svg = await readFile(file, 'utf8');
-    expect(svg.startsWith('<svg')).toBe(true);
-    expect(svg).toContain(`d="${result.path_d}"`);
-    expect(svg).toContain('viewBox="0 0 100 100"');
+    expect(svg).toBe(pageSvg(result));
   });
 
   test('Save preview image downloads a PNG when sharing files is unavailable', async ({ page }) => {
@@ -364,6 +376,152 @@ test.describe('Head & Tail Studio', () => {
   });
 });
 
+test.describe('Head & Tail Studio: recovering', () => {
+  test('Flip still works after a reload, by re-posting the saved path', async ({ page }) => {
+    await openStudio(page);
+    const mirrored = await upload(page, 'mirrored-head.png');
+    await page.reload();
+    await expect(page.locator('#studio-status')).toHaveText('Welcome back: your last preview is restored.');
+    const flip = page.locator('#studio-warnings li[data-code="faces_left"] .studio-fix[data-fix="flip"]');
+    await expect(flip).toBeVisible();
+    await expect(page.locator('#studio-top-fix')).toBeVisible();
+
+    const sent = page.waitForRequest((r) => r.url().includes(ENDPOINT) && r.url().includes('fix=flip'));
+    const flipped = await applyFix(page, flip, 'flip');
+    expect((await sent).postDataBuffer()?.toString('utf8')).toBe(pageSvg(mirrored));
+    expect(flipped.input).toBe('svg');
+    expect(flipped.lints.head).toEqual([]);
+    await expect(page.locator('#studio-warnings li')).toHaveCount(0);
+    await expect(page.getByTestId('studio-pass')).toBeVisible();
+    await expectAllPaths(page, 'path.studio-head', flipped.path_d);
+  });
+
+  test('a failed upload keeps the last result, and its Flip still works', async ({ page }) => {
+    await openStudio(page);
+    await upload(page, 'mirrored-head.png');
+    const status = page.locator('#studio-status');
+    // Not a format the browser can rule out, so the server answers.
+    const rejected = await answerTo(page, () =>
+      page.locator('#studio-file').setInputFiles({ name: 'notes.png', mimeType: 'image/png', buffer: Buffer.from('just some text') }));
+    expect(rejected.status()).toBe(422);
+    await expect(status).toHaveText("We couldn't tell what kind of file this is. Upload a PNG, JPEG or SVG.");
+    await expect(status).toHaveClass(/error/);
+
+    const flip = page.locator('#studio-warnings .studio-fix[data-fix="flip"]');
+    await expect(flip).toBeVisible();
+    const flipped = await applyFix(page, flip, 'flip');
+    expect(flipped.lints.head).toEqual([]);
+    await expect(status).toContainText('It passes every check');
+    await expectAllPaths(page, 'path.studio-head', flipped.path_d);
+  });
+
+  test('Tail after uploading a tail as a head offers to move it, never over your own', async ({ page }) => {
+    await openStudio(page);
+    const defaultHead = await refPath(page, '#studio-pair-head', 'default');
+    const status = page.locator('#studio-status');
+    const relabel = page.locator('#studio-relabel');
+    const tail = await upload(page, 'tail.svg', 'head'); // the wrong kind
+    await expect(relabel).toHaveText('Use it as a tail instead');
+
+    await page.locator('input[name="studio-kind"][value="tail"]').check();
+    await expect(status).toHaveText('Your next upload will be your tail.');
+    await expect(page.locator('#studio-closeup')).toHaveAttribute('aria-label', 'Close-up of the default tail');
+    await expect(relabel).toHaveText('Use the file you just uploaded as your tail');
+    await relabel.click();
+    await expect(status).toHaveText('Moved: this file is now your tail.');
+    await expectAllPaths(page, 'path.studio-tail', tail.path_d);
+    await expectAllPaths(page, 'path.studio-head', defaultHead);
+    await expect(page.locator('#studio-closeup-path')).toHaveAttribute('d', tail.path_d);
+    await expect(page.getByTestId('studio-pass')).toBeVisible();
+
+    // With both slots filled, switching shows the other one and offers no move that
+    // would replace it.
+    const head = await upload(page, 'head.png', 'head');
+    await page.locator('input[name="studio-kind"][value="tail"]').check();
+    await expect(status).toHaveText('Showing your tail. It passes every check.');
+    await expect(relabel).toBeHidden();
+    await page.locator('input[name="studio-kind"][value="head"]').check();
+    await expect(status).toHaveText('Showing your head. It passes every check.');
+    await expect(relabel).toHaveText('Use it as a tail instead (replaces your tail)');
+    await expectAllPaths(page, 'path.studio-head', head.path_d);
+    await expectAllPaths(page, 'path.studio-tail', tail.path_d);
+  });
+
+  test("the instant format check gives the server's own advice", async ({ page }) => {
+    await openStudio(page);
+    const status = page.locator('#studio-status');
+    const posted: string[] = [];
+    page.on('request', (r) => { if (r.url().includes(ENDPOINT)) posted.push(r.url()); });
+    await page.locator('#studio-file').setInputFiles({
+      name: 'head.svgz', mimeType: 'image/svg+xml', buffer: Buffer.from([0x1f, 0x8b, 0x08, 0, 0, 0, 0, 0]),
+    });
+    await expect(status).toContainText('Inkscape: Save As → Plain SVG');
+    expect(posted, 'answered in the browser').toEqual([]);
+
+    // A video shares HEIC's container but isn't a photo: no HEIC advice; the server decides.
+    const video = Buffer.concat([Buffer.from([0, 0, 0, 0x18]), Buffer.from('ftypisom\0\0\0\0isommp41', 'latin1')]);
+    const response = await answerTo(page, () =>
+      page.locator('#studio-file').setInputFiles({ name: 'clip.mp4', mimeType: 'video/mp4', buffer: video }));
+    expect(response.status()).toBe(422);
+    expect((await response.json()).error.code).toBe('unknown_format');
+    await expect(status).toHaveText("We couldn't tell what kind of file this is. Upload a PNG, JPEG or SVG.");
+  });
+});
+
+test.describe('Head & Tail Studio: details', () => {
+  test('Play/Pause is a plain button named for what it does next', async ({ page }) => {
+    await openStudio(page);
+    const play = page.locator('#studio-play');
+    await expect(play).not.toHaveAttribute('aria-pressed');
+    await expect(play).toHaveAccessibleName('Pause the live preview');
+    await play.click();
+    await expect(play).toHaveText('Play');
+    await expect(play).toHaveAccessibleName('Play the live preview');
+    await expect(play).not.toHaveAttribute('aria-pressed');
+  });
+
+  test('the colour swatches line up, the custom one included', async ({ page }) => {
+    await openStudio(page);
+    const geometry = () => page.locator('.studio-swatch').evaluateAll((els) => els.map((el) => {
+      const box = el.getBoundingClientRect();
+      const name = el.querySelector('.studio-swatch-name')?.getBoundingClientRect();
+      return { height: Math.round(box.height), nameOffset: Math.round((name?.top ?? 0) - box.top) };
+    }));
+    const swatches = await geometry();
+    expect(swatches.length).toBe(10);
+    expect(new Set(swatches.map((s) => s.height)).size, JSON.stringify(swatches)).toBe(1);
+    expect(new Set(swatches.map((s) => s.nameOffset)).size, JSON.stringify(swatches)).toBe(1);
+
+    const custom = page.locator('#studio-swatch-custom');
+    await expect(custom).not.toHaveClass(/active/);
+    await page.getByLabel('Custom colour').fill('#123456');
+    await expect(custom).toHaveClass(/active/);
+    expect(await geometry()).toEqual(swatches);
+  });
+
+  for (const [name, size, target] of [
+    ['iPad landscape', { width: 1180, height: 820 }, '#studio-closeup'],
+    ['phone', { width: 375, height: 812 }, '#studio-status'],
+  ] as const) {
+    test(`after an upload the result is in view (${name})`, async ({ page }) => {
+      await page.setViewportSize(size);
+      await openStudio(page);
+      const before = (await page.locator('#studio-drop').boundingBox())?.height ?? 0;
+      await upload(page, 'round-blob.png');
+      await expect(page.locator('#studio-drop-title')).toHaveText('Choose another drawing');
+      const after = (await page.locator('#studio-drop').boundingBox())?.height ?? 0;
+      expect(after, 'the drop zone shrinks to a row').toBeLessThan(Math.min(before, 80));
+      // Scrolled so the target's top sits in the top half of the screen.
+      await expect.poll(() => page.locator(target).evaluate((el) => {
+        const top = el.getBoundingClientRect().top;
+        return top >= 0 && top < window.innerHeight / 2;
+      })).toBe(true);
+      await expect(page.locator('#studio-result-heading')).toBeFocused();
+      await expect(page.locator('#studio-closeup')).toBeInViewport({ ratio: name === 'phone' ? 0.2 : 0.5 });
+    });
+  }
+});
+
 test.describe('Head & Tail Studio layout', () => {
   // Every visible studio control: buttons, selects, inputs (radios cover their
   // labels), the file input (covers the drop zone), and the Details summary.
@@ -398,6 +556,14 @@ test.describe('Head & Tail Studio layout', () => {
         // File, kind x2, views, Flip x2, relabel, swatches x10, theme x2, pair, actions.
         expect(checked, `controls checked in the ${view} view`).toBeGreaterThanOrEqual(20);
       }
+      // The longest button: the offer to move the upload into the empty tail slot.
+      await page.locator('input[name="studio-kind"][value="tail"]').check();
+      const relabel = page.locator('#studio-relabel');
+      await expect(relabel).toHaveText('Use the file you just uploaded as your tail');
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+      const box = await relabel.boundingBox();
+      expect(box?.height ?? 0).toBeGreaterThanOrEqual(44);
+      expect((box?.x ?? 0) + (box?.width ?? 0)).toBeLessThanOrEqual(width);
       for (const input of await page.locator('#studio :is(input, select, textarea)').all()) {
         const size = await input.evaluate((el) => parseFloat(getComputedStyle(el).fontSize));
         expect(size, `font size of ${await input.evaluate((el) => el.outerHTML.slice(0, 80))}`).toBeGreaterThanOrEqual(16);
