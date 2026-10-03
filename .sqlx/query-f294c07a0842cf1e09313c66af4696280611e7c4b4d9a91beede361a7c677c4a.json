@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO jobs (job_id, name, payload, context, priority, locked_by, locked_at)\n         VALUES ($1, 'HealthyProbeJob', 'null', 'lease-probe', 0,\n                 'lease:live-elsewhere', NOW() - interval '180 seconds')\n         RETURNING locked_at",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "locked_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "f294c07a0842cf1e09313c66af4696280611e7c4b4d9a91beede361a7c677c4a"
+}

@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT error_count, last_error_message, payload\n                 FROM dead_letter_jobs WHERE original_job_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "error_count",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 1,
+        "name": "last_error_message",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "payload",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "72e9437855d716f7301f2521fb1c90decc52e61af6ea30df8a0c639e1a2b82b3"
+}

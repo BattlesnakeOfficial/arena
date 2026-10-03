@@ -21,14 +21,22 @@ pub const ARENA_PUBLIC_BASE_URL: &str = "https://arena.battlesnake.com";
 
 /// Default for [`JobConfig::shutdown_drain_secs`].
 pub const DEFAULT_JOB_SHUTDOWN_DRAIN_SECS: u64 = 5;
+/// Default for `ARENA_JOB_LOCK_TIMEOUT_SECS`: 240 seconds tolerates roughly 30-second
+/// Neon/DB stalls across several heartbeat attempts while meeting the five-minute
+/// dead-worker reclaim target; the window must be at least 3x the heartbeat.
 pub const DEFAULT_JOB_RECLAIM_WINDOW_SECS: u64 = 240;
 
 /// Background job worker tuning.
 #[derive(Clone, Debug)]
 pub struct JobConfig {
     pub poll_interval_ms: u64,
+    /// `ARENA_JOB_HEARTBEAT_INTERVAL_SECS` defaults to cja's
+    /// `DEFAULT_HEARTBEAT_INTERVAL` (30 seconds). Production sets neither lease
+    /// env var, so the defaults apply there.
     pub heartbeat_interval_secs: u64,
-    /// Seconds since the last successful heartbeat before another worker may reclaim the job.
+    /// `ARENA_JOB_LOCK_TIMEOUT_SECS`: seconds since the last successful heartbeat
+    /// before another worker may reclaim the job. The field and env names are
+    /// retained for compatibility; this value is now the reclaim window.
     pub lock_timeout_secs: u64,
     /// How long an in-flight job may keep running after a shutdown signal
     /// before it is dropped and its lock released. Cloud Run sends SIGKILL
@@ -39,6 +47,7 @@ pub struct JobConfig {
     pub workers: usize,
 }
 
+/// Mirror cja `JobLeaseConfig` validation so boot errors name Arena's env keys.
 fn validate_job_lease(job: &JobConfig) -> cja::Result<()> {
     let minimum_window = job.heartbeat_interval_secs.checked_mul(3);
     if job.heartbeat_interval_secs == 0

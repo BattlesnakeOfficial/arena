@@ -171,38 +171,39 @@ async fn panicking_job_is_charged_and_arena_worker_continues(pool: PgPool) -> cj
         (panic_id, "PanicProbeJob", 10),
         (healthy_id, "HealthyProbeJob", 0),
     ] {
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO jobs (job_id, name, payload, context, priority)
              VALUES ($1, $2, 'null', 'lease-probe', $3)",
+            id,
+            name,
+            priority,
         )
-        .bind(id)
-        .bind(name)
-        .bind(priority)
         .execute(&pool)
         .await?;
     }
     let mut worker = ProbeWorker::start(pool.clone(), DEFAULT_MAX_RETRIES);
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let row: (
-                i32,
-                Option<String>,
-                Option<chrono::DateTime<chrono::Utc>>,
-                Option<String>,
-            ) = sqlx::query_as(
+            let row = sqlx::query!(
                 "SELECT error_count, locked_by, locked_at, last_error_message
                      FROM jobs WHERE job_id = $1",
+                panic_id,
             )
-            .bind(panic_id)
             .fetch_one(&pool)
             .await?;
-            let healthy_count: i64 =
-                sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE job_id = $1")
-                    .bind(healthy_id)
+            let healthy_count =
+                sqlx::query_scalar!("SELECT COUNT(*) FROM jobs WHERE job_id = $1", healthy_id)
                     .fetch_one(&pool)
                     .await?;
-            if row.0 == 1 && row.1.is_none() && row.2.is_none() && healthy_count == 0 {
-                assert!(row.3.as_deref().is_some_and(|m| m.contains("poison job")));
+            if row.error_count >= 1
+                && row.locked_by.is_none()
+                && row.locked_at.is_none()
+                && row
+                    .last_error_message
+                    .as_deref()
+                    .is_some_and(|m| m.contains("poison job"))
+                && healthy_count == Some(0)
+            {
                 break Ok::<(), cja::color_eyre::Report>(());
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
@@ -217,65 +218,72 @@ async fn panicking_job_is_charged_and_arena_worker_continues(pool: PgPool) -> cj
 #[sqlx::test(migrations = "../migrations")]
 async fn arena_job_lease_uses_240_second_reclaim_window(pool: PgPool) -> cja::Result<()> {
     let stale_id = uuid::Uuid::new_v4();
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO jobs (job_id, name, payload, context, priority, locked_by, locked_at)
          VALUES ($1, 'HealthyProbeJob', '{\"probe\":true}', 'lease-probe', 0,
                  'lease:dead-worker', NOW() - interval '5 minutes')",
+        stale_id,
     )
-    .bind(stale_id)
     .execute(&pool)
     .await?;
     let mut worker = ProbeWorker::start(pool.clone(), 0);
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let row: Option<(i32, String, serde_json::Value)> = sqlx::query_as(
+            let row = sqlx::query!(
                 "SELECT error_count, last_error_message, payload
                  FROM dead_letter_jobs WHERE original_job_id = $1",
+                stale_id,
             )
-            .bind(stale_id)
             .fetch_optional(&pool)
             .await?;
-            if let Some((count, message, payload)) = row {
-                assert_eq!(count, 1);
-                assert!(message.contains("lease:dead-worker"));
-                assert_eq!(payload, serde_json::json!({"probe": true}));
+            if let Some(row) = row {
+                assert_eq!(row.error_count, 1);
+                assert!(
+                    row.last_error_message
+                        .as_deref()
+                        .is_some_and(|m| m.contains("lease:dead-worker"))
+                );
+                assert_eq!(row.payload, serde_json::json!({"probe": true}));
                 break Ok::<(), cja::color_eyre::Report>(());
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
     })
     .await??;
-    let active_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE job_id = $1")
-        .bind(stale_id)
+    let active_count = sqlx::query_scalar!("SELECT COUNT(*) FROM jobs WHERE job_id = $1", stale_id)
         .fetch_one(&pool)
         .await?;
-    assert_eq!(active_count, 0);
+    assert_eq!(active_count, Some(0));
     worker.stop().await;
 
     let live_id = uuid::Uuid::new_v4();
-    let locked_at: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+    let locked_at = sqlx::query_scalar!(
         "INSERT INTO jobs (job_id, name, payload, context, priority, locked_by, locked_at)
          VALUES ($1, 'HealthyProbeJob', 'null', 'lease-probe', 0,
                  'lease:live-elsewhere', NOW() - interval '180 seconds')
          RETURNING locked_at",
+        live_id,
     )
-    .bind(live_id)
     .fetch_one(&pool)
     .await?;
     let mut worker = ProbeWorker::start(pool.clone(), 0);
     tokio::time::sleep(Duration::from_secs(1)).await;
-    let row: (String, chrono::DateTime<chrono::Utc>, i32) =
-        sqlx::query_as("SELECT locked_by, locked_at, error_count FROM jobs WHERE job_id = $1")
-            .bind(live_id)
-            .fetch_one(&pool)
-            .await?;
-    assert_eq!(row, ("lease:live-elsewhere".to_string(), locked_at, 0));
-    let archived_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM dead_letter_jobs WHERE original_job_id = $1")
-            .bind(live_id)
-            .fetch_one(&pool)
-            .await?;
-    assert_eq!(archived_count, 0);
+    let row = sqlx::query!(
+        "SELECT locked_by, locked_at, error_count FROM jobs WHERE job_id = $1",
+        live_id
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(row.locked_by.as_deref(), Some("lease:live-elsewhere"));
+    assert_eq!(row.locked_at, locked_at);
+    assert_eq!(row.error_count, 0);
+    let archived_count = sqlx::query_scalar!(
+        "SELECT COUNT(*) FROM dead_letter_jobs WHERE original_job_id = $1",
+        live_id
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(archived_count, Some(0));
     worker.stop().await;
     Ok(())
 }
