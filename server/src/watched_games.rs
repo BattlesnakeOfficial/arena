@@ -78,10 +78,18 @@ impl Drop for PendingGuard {
         if !self.armed {
             return;
         }
-        let watched = self.watched.clone();
-        let game_id = self.game_id;
-        let entry = self.entry.clone();
-        tokio::spawn(async move { watched.retire_pending(game_id, &entry).await });
+        // Wake waiters synchronously. If a poll currently holds the registry,
+        // subscribe/snapshot will replace or prune this retired entry later.
+        self.entry.readiness.send_replace(Readiness::Retired);
+        if let Ok(mut registry) = self.watched.registry.try_lock()
+            && registry
+                .entries
+                .get(&self.game_id)
+                .is_some_and(|current| Arc::ptr_eq(current, &self.entry))
+        {
+            registry.entries.remove(&self.game_id);
+            registry.dirty.remove(&self.game_id);
+        }
     }
 }
 
@@ -180,20 +188,6 @@ impl WatchedGames {
         }
     }
 
-    async fn retire_pending(&self, game_id: Uuid, entry: &Arc<WatchEntry>) {
-        let mut registry = self.registry.lock().await;
-        if registry
-            .entries
-            .get(&game_id)
-            .is_some_and(|current| Arc::ptr_eq(current, entry))
-            && *entry.readiness.borrow() == Readiness::Pending
-        {
-            entry.readiness.send_replace(Readiness::Retired);
-            registry.entries.remove(&game_id);
-            registry.dirty.remove(&game_id);
-        }
-    }
-
     pub async fn turn_persisted(&self, game_id: Uuid) {
         let mut registry = self.registry.lock().await;
         if registry.entries.get(&game_id).is_some_and(|entry| {
@@ -207,9 +201,9 @@ impl WatchedGames {
 
     async fn snapshot(&self, full: bool) -> Vec<(Uuid, Arc<WatchEntry>, i32)> {
         let mut registry = self.registry.lock().await;
-        registry
-            .entries
-            .retain(|_, entry| entry.updates.receiver_count() > 0);
+        registry.entries.retain(|_, entry| {
+            entry.updates.receiver_count() > 0 && *entry.readiness.borrow() != Readiness::Retired
+        });
         let active_ids: HashSet<_> = registry.entries.keys().copied().collect();
         registry.dirty.retain(|id| active_ids.contains(id));
         let selected = if full {

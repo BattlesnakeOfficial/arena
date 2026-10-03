@@ -467,6 +467,8 @@ async fn send_terminal(
                 serde_json::json!({"message":"Game failed"}),
             )
             .await;
+            // The board stops its reconnecting socket only on game_end.
+            let _ = send_message(sender, "game_end", serde_json::json!({})).await;
         }
         _ => return,
     }
@@ -488,25 +490,22 @@ async fn handle_game_websocket(socket: WebSocket, state: AppState, game_id: Uuid
         }
     };
     let mut subscription = state.watched_games.subscribe(game_id).await;
+    let mut retired_before_history = false;
     if !subscription.created {
         loop {
             let readiness = *subscription.readiness.borrow_and_update();
             match readiness {
                 Readiness::Active { .. } => break,
                 Readiness::Retired => {
-                    send_error_and_close(
-                        &mut sender,
-                        &mut receiver,
-                        "Game changed, please reconnect",
-                    )
-                    .await;
-                    return;
+                    // A terminal update may already be queued. Read history and
+                    // authoritative status before deciding how to close.
+                    retired_before_history = true;
+                    break;
                 }
                 Readiness::Pending => {}
             }
-            if subscription.readiness.changed().await.is_err() {
-                return;
-            }
+            // Subscription owns the entry and therefore its watch sender.
+            let _ = subscription.readiness.changed().await;
         }
     }
     let existing_turns = match get_turns_by_game_id(&state.db, game_id).await {
@@ -553,6 +552,11 @@ async fn handle_game_websocket(socket: WebSocket, state: AppState, game_id: Uuid
             .await;
             return;
         }
+        Ok(Some(_)) if retired_before_history => {
+            send_error_and_close(&mut sender, &mut receiver, "Game changed, please reconnect")
+                .await;
+            return;
+        }
         Ok(Some(_)) => {}
         Ok(None) => {
             send_error_and_close(&mut sender, &mut receiver, "Game not found").await;
@@ -593,26 +597,9 @@ async fn handle_game_websocket(socket: WebSocket, state: AppState, game_id: Uuid
                     return;
                 }
                 Err(broadcast::error::RecvError::Closed) => {
-                    let turns = match crate::models::turn::get_turns_from(&state.db, game_id, last_sent_turn.saturating_add(1)).await {
-                        Ok(turns) => turns,
-                        Err(error) => {
-                            tracing::error!(%game_id, error = %format_args!("{error:#}"), "Failed to drain frames after channel close");
-                            send_error_and_close(&mut sender, &mut receiver, "Failed to fetch game frames").await;
-                            return;
-                        }
-                    };
-                    if !send_frames(&mut sender, &turns, &mut last_sent_turn, &context).await { return; }
-                    match get_game_by_id(&state.db, game_id).await {
-                        Ok(Some(game)) if matches!(game.status, GameStatus::Finished | GameStatus::Failed) => {
-                            send_terminal(&mut sender, &mut receiver, &state, game_id, game.status, &mut last_sent_turn, &context).await;
-                        }
-                        Ok(Some(_)) => send_error_and_close(&mut sender, &mut receiver, "Game changed, please reconnect").await,
-                        Ok(None) => send_error_and_close(&mut sender, &mut receiver, "Game not found").await,
-                        Err(error) => {
-                            tracing::error!(%game_id, error = %format_args!("{error:#}"), "Failed to read game after channel close");
-                            send_error_and_close(&mut sender, &mut receiver, "Internal server error").await;
-                        }
-                    }
+                    // Subscription owns the broadcast sender, so this is unreachable
+                    // during normal operation. Close once if that invariant changes.
+                    send_error_and_close(&mut sender, &mut receiver, "Game changed, please reconnect").await;
                     return;
                 }
             }
@@ -1391,15 +1378,86 @@ mod live_tests {
             next(&mut client).await,
             serde_json::json!({"Type":"error","Data":{"message":"Game failed"}})
         );
+        assert_eq!(
+            next(&mut client).await,
+            serde_json::json!({"Type":"game_end","Data":{}})
+        );
         close(&mut client).await;
         let mut replay = connect(&base, id).await;
         assert_eq!(next(&mut replay).await["Data"]["Turn"], 0);
         assert_eq!(next(&mut replay).await["Data"]["message"], "Game failed");
+        assert_eq!(next(&mut replay).await["Type"], "game_end");
         close(&mut replay).await;
         shutdown.cancel();
         web_shutdown.cancel();
         poller.await.unwrap().unwrap();
         web.await.unwrap();
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn terminal_with_stale_cursor_drains_frames_before_game_end(pool: PgPool) {
+        use axum::{Router, extract::WebSocketUpgrade, routing::get};
+
+        let id = game(&pool).await;
+        let state = AppState::test_from_pool(pool.clone());
+        for number in 0..3 {
+            turn(&pool, &state, id, number).await;
+        }
+        sqlx::query!(
+            "UPDATE games SET status = 'finished' WHERE game_id = $1",
+            id
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/stale",
+            get(move |upgrade: WebSocketUpgrade| {
+                let state = state.clone();
+                async move {
+                    upgrade.on_upgrade(move |socket| async move {
+                        let (mut sender, mut receiver) = socket.split();
+                        let authors = std::collections::HashMap::new();
+                        let suppressed = std::collections::HashMap::new();
+                        let context = FrameContext {
+                            authors: &authors,
+                            suppressed: &suppressed,
+                        };
+                        let mut cursor = -1;
+                        send_terminal(
+                            &mut sender,
+                            &mut receiver,
+                            &state,
+                            id,
+                            GameStatus::Finished,
+                            &mut cursor,
+                            &context,
+                        )
+                        .await;
+                    })
+                }
+            }),
+        );
+        let shutdown = CancellationToken::new();
+        let server_shutdown = shutdown.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(server_shutdown.cancelled_owned())
+                .await
+                .unwrap()
+        });
+        let (mut client, _) = tokio_tungstenite::connect_async(format!("ws://{address}/stale"))
+            .await
+            .unwrap();
+        for number in 0..3 {
+            assert_eq!(next(&mut client).await["Data"]["Turn"], number);
+        }
+        assert_eq!(next(&mut client).await["Type"], "game_end");
+        close(&mut client).await;
+        shutdown.cancel();
+        server.await.unwrap();
     }
 
     #[sqlx::test(migrations = "../migrations")]
