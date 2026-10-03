@@ -1,10 +1,19 @@
 use std::{path::Path, process::Command, time::Duration};
 
-use cja::jobs::worker::{DEFAULT_LOCK_TIMEOUT, DEFAULT_MAX_RETRIES, job_worker};
+use cja::jobs::worker::{DEFAULT_MAX_RETRIES, JobLeaseConfig, job_worker_configured};
 use sqlx::PgPool;
 use tokio_util::sync::CancellationToken;
 
 use super::{AppState, Jobs};
+use crate::config::{AppConfig, DEFAULT_JOB_SHUTDOWN_DRAIN_SECS};
+
+fn test_lease() -> JobLeaseConfig {
+    let job = AppConfig::test_default().job;
+    JobLeaseConfig {
+        heartbeat_interval: Duration::from_secs(job.heartbeat_interval_secs),
+        reclaim_window: Duration::from_secs(job.lock_timeout_secs),
+    }
+}
 
 #[sqlx::test(migrations = "../migrations")]
 async fn exhausted_job_is_archived_and_worker_continues(pool: PgPool) -> cja::Result<()> {
@@ -30,13 +39,14 @@ async fn exhausted_job_is_archived_and_worker_continues(pool: PgPool) -> cja::Re
     .await?;
 
     let shutdown = CancellationToken::new();
-    let worker = job_worker(
+    let worker = job_worker_configured(
         AppState::test_from_pool(pool.clone()),
         Jobs,
         Duration::from_millis(10),
         DEFAULT_MAX_RETRIES,
         shutdown.clone(),
-        DEFAULT_LOCK_TIMEOUT,
+        test_lease(),
+        Duration::from_secs(DEFAULT_JOB_SHUTDOWN_DRAIN_SECS),
     );
     let observe = async {
         // Cancel even on a query failure or timeout, so the worker always exits.
@@ -71,13 +81,210 @@ async fn exhausted_job_is_archived_and_worker_continues(pool: PgPool) -> cja::Re
     assert_eq!(archived.payload, serde_json::json!({"reference": 713}));
     assert_eq!(archived.context, "migration-test");
     assert_eq!(archived.priority, 10);
-    assert_eq!(archived.error_count, DEFAULT_MAX_RETRIES);
+    assert_eq!(archived.error_count, DEFAULT_MAX_RETRIES + 1);
     assert_eq!(
         archived.last_error_message.as_deref(),
         Some("Unknown job type: MigrationTestFailure")
     );
     assert_eq!(archived.created_at, created_at);
     assert!(archived.failed_at >= created_at);
+    Ok(())
+}
+
+mod lease_probes {
+    use super::AppState;
+    use cja::jobs::Job;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+    pub struct PanicProbeJob;
+
+    #[async_trait::async_trait]
+    impl Job<AppState> for PanicProbeJob {
+        const NAME: &'static str = "PanicProbeJob";
+
+        async fn run(&self, _state: AppState) -> cja::Result<()> {
+            panic!("poison job");
+        }
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+    pub struct HealthyProbeJob;
+
+    #[async_trait::async_trait]
+    impl Job<AppState> for HealthyProbeJob {
+        const NAME: &'static str = "HealthyProbeJob";
+
+        async fn run(&self, _state: AppState) -> cja::Result<()> {
+            Ok(())
+        }
+    }
+
+    cja::impl_job_registry!(AppState, PanicProbeJob, HealthyProbeJob);
+}
+
+struct ProbeWorker {
+    shutdown: CancellationToken,
+    handle: tokio::task::JoinHandle<cja::Result<()>>,
+}
+
+impl ProbeWorker {
+    fn start(pool: PgPool, max_retries: i32) -> Self {
+        let shutdown = CancellationToken::new();
+        let handle = tokio::spawn(job_worker_configured(
+            AppState::test_from_pool(pool),
+            lease_probes::Jobs,
+            Duration::from_millis(50),
+            max_retries,
+            shutdown.clone(),
+            test_lease(),
+            Duration::from_secs(DEFAULT_JOB_SHUTDOWN_DRAIN_SECS),
+        ));
+        Self { shutdown, handle }
+    }
+
+    async fn stop(&mut self) {
+        self.shutdown.cancel();
+        assert!(matches!(
+            tokio::time::timeout(
+                Duration::from_secs(DEFAULT_JOB_SHUTDOWN_DRAIN_SECS + 1),
+                &mut self.handle,
+            )
+            .await,
+            Ok(Ok(Ok(())))
+        ));
+    }
+}
+
+impl Drop for ProbeWorker {
+    fn drop(&mut self) {
+        self.shutdown.cancel();
+        self.handle.abort();
+    }
+}
+
+#[sqlx::test(migrations = "../migrations")]
+async fn panicking_job_is_charged_and_arena_worker_continues(pool: PgPool) -> cja::Result<()> {
+    let panic_id = uuid::Uuid::new_v4();
+    let healthy_id = uuid::Uuid::new_v4();
+    for (id, name, priority) in [
+        (panic_id, "PanicProbeJob", 10),
+        (healthy_id, "HealthyProbeJob", 0),
+    ] {
+        sqlx::query!(
+            "INSERT INTO jobs (job_id, name, payload, context, priority)
+             VALUES ($1, $2, 'null', 'lease-probe', $3)",
+            id,
+            name,
+            priority,
+        )
+        .execute(&pool)
+        .await?;
+    }
+    let mut worker = ProbeWorker::start(pool.clone(), DEFAULT_MAX_RETRIES);
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let row = sqlx::query!(
+                "SELECT error_count, locked_by, locked_at, last_error_message
+                     FROM jobs WHERE job_id = $1",
+                panic_id,
+            )
+            .fetch_one(&pool)
+            .await?;
+            let healthy_count =
+                sqlx::query_scalar!("SELECT COUNT(*) FROM jobs WHERE job_id = $1", healthy_id)
+                    .fetch_one(&pool)
+                    .await?;
+            if row.error_count >= 1
+                && row.locked_by.is_none()
+                && row.locked_at.is_none()
+                && row
+                    .last_error_message
+                    .as_deref()
+                    .is_some_and(|m| m.contains("poison job"))
+                && healthy_count == Some(0)
+            {
+                break Ok::<(), cja::color_eyre::Report>(());
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await??;
+    assert!(!worker.handle.is_finished(), "panic ended Arena's worker");
+    worker.stop().await;
+    Ok(())
+}
+
+#[sqlx::test(migrations = "../migrations")]
+async fn arena_job_lease_uses_240_second_reclaim_window(pool: PgPool) -> cja::Result<()> {
+    let stale_id = uuid::Uuid::new_v4();
+    sqlx::query!(
+        "INSERT INTO jobs (job_id, name, payload, context, priority, locked_by, locked_at)
+         VALUES ($1, 'HealthyProbeJob', '{\"probe\":true}', 'lease-probe', 0,
+                 'lease:dead-worker', NOW() - interval '5 minutes')",
+        stale_id,
+    )
+    .execute(&pool)
+    .await?;
+    let mut worker = ProbeWorker::start(pool.clone(), 0);
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let row = sqlx::query!(
+                "SELECT error_count, last_error_message, payload
+                 FROM dead_letter_jobs WHERE original_job_id = $1",
+                stale_id,
+            )
+            .fetch_optional(&pool)
+            .await?;
+            if let Some(row) = row {
+                assert_eq!(row.error_count, 1);
+                assert!(
+                    row.last_error_message
+                        .as_deref()
+                        .is_some_and(|m| m.contains("lease:dead-worker"))
+                );
+                assert_eq!(row.payload, serde_json::json!({"probe": true}));
+                break Ok::<(), cja::color_eyre::Report>(());
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await??;
+    let active_count = sqlx::query_scalar!("SELECT COUNT(*) FROM jobs WHERE job_id = $1", stale_id)
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(active_count, Some(0));
+    worker.stop().await;
+
+    let live_id = uuid::Uuid::new_v4();
+    let locked_at = sqlx::query_scalar!(
+        "INSERT INTO jobs (job_id, name, payload, context, priority, locked_by, locked_at)
+         VALUES ($1, 'HealthyProbeJob', 'null', 'lease-probe', 0,
+                 'lease:live-elsewhere', NOW() - interval '180 seconds')
+         RETURNING locked_at",
+        live_id,
+    )
+    .fetch_one(&pool)
+    .await?;
+    let mut worker = ProbeWorker::start(pool.clone(), 0);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let row = sqlx::query!(
+        "SELECT locked_by, locked_at, error_count FROM jobs WHERE job_id = $1",
+        live_id
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(row.locked_by.as_deref(), Some("lease:live-elsewhere"));
+    assert_eq!(row.locked_at, locked_at);
+    assert_eq!(row.error_count, 0);
+    let archived_count = sqlx::query_scalar!(
+        "SELECT COUNT(*) FROM dead_letter_jobs WHERE original_job_id = $1",
+        live_id
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(archived_count, Some(0));
+    worker.stop().await;
     Ok(())
 }
 
