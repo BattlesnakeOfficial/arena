@@ -37,3 +37,9 @@
   width: 1280
   height: 900
   wait: 3000
+
+- url: https://arena.battlesnake.com/customizations/studio
+  output: screenshots/studio.png
+  width: 1280
+  height: 1100
+  wait: 3000
