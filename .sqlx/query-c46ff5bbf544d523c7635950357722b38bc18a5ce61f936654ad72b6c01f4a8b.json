@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT imported_account_id FROM imported_accounts WHERE github_uid = $1 AND imported_account_id <> $2 AND claimed_by_user_id IS NOT NULL",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "imported_account_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "c46ff5bbf544d523c7635950357722b38bc18a5ce61f936654ad72b6c01f4a8b"
+}

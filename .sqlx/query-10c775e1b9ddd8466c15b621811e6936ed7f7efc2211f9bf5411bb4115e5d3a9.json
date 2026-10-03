@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO imported_grants (imported_account_id, customization_type, slug) VALUES ($1,$2,$3) ON CONFLICT (imported_account_id, customization_type, slug) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "10c775e1b9ddd8466c15b621811e6936ed7f7efc2211f9bf5411bb4115e5d3a9"
+}

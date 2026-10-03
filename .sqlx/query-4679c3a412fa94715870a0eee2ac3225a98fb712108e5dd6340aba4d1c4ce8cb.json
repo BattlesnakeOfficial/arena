@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE imported_snakes SET name=$2, url=$3, head=$4, tail=$5, color=$6, is_public=$7, engine_region=$8 WHERE play_snake_id=$1 AND imported_account_id=$9",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Bool",
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4679c3a412fa94715870a0eee2ac3225a98fb712108e5dd6340aba4d1c4ce8cb"
+}
