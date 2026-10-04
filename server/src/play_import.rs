@@ -89,6 +89,7 @@ pub struct GrantReconcileCounts {
     pub skipped_off_catalog: u64,
     pub newly_staged_accounts: u64,
     pub skipped_identity_conflict: u64,
+    pub failed_account_staging: u64,
 }
 
 /// The Play region tuple is retained even when unknown so import can warn
@@ -516,37 +517,45 @@ pub async fn reconcile_grants(play: &PgPool, arena: &PgPool) -> cja::Result<Gran
                 .unwrap_or_default(),
             account,
         };
-        let result = imported_account::stage_play_account(arena, &payload)
-            .await
-            .wrap_err("Failed to atomically stage new play account")?;
-        match result.status {
-            StageStatus::Created => {
-                counts.newly_staged_accounts += 1;
-                counts.newly_staged += payload.grants.len() as u64;
+        let result = imported_account::stage_play_account(arena, &payload).await;
+        match result {
+            Err(error) => {
+                counts.failed_account_staging += 1;
+                tracing::warn!(
+                    play_account_id = %payload.account.play_account_id,
+                    error = %format!("{error:#}"),
+                    "Failed to atomically stage new play account"
+                );
             }
-            StageStatus::SkippedIdentityConflict(conflict) => {
-                counts.skipped_identity_conflict += 1;
-                match conflict {
-                    imported_account::IdentityConflict::GithubUid(uid) => tracing::warn!(
-                        play_account_id = %payload.account.play_account_id,
-                        github_uid = uid,
-                        "Play account skipped due to claimed identity conflict"
-                    ),
-                    imported_account::IdentityConflict::SnakeId(snake_id) => tracing::warn!(
-                        play_account_id = %payload.account.play_account_id,
-                        play_snake_id = %snake_id,
-                        "Play account skipped due to claimed identity conflict"
-                    ),
+            Ok(result) => match result.status {
+                StageStatus::Created => {
+                    counts.newly_staged_accounts += 1;
+                    counts.newly_staged += payload.grants.len() as u64;
                 }
-            }
-            StageStatus::Refreshed | StageStatus::Unchanged | StageStatus::SkippedClaimed => {
-                // Another run published this account after the lookup.
-                existing_grants.extend(payload.grants.into_iter().map(|grant| PlayGrant {
-                    play_account_id: payload.account.play_account_id.clone(),
-                    customization_type: grant.customization_type,
-                    slug: grant.slug,
-                }));
-            }
+                StageStatus::SkippedIdentityConflict(conflict) => {
+                    counts.skipped_identity_conflict += 1;
+                    match conflict {
+                        imported_account::IdentityConflict::GithubUid(uid) => tracing::warn!(
+                            play_account_id = %payload.account.play_account_id,
+                            github_uid = uid,
+                            "Play account skipped due to claimed identity conflict"
+                        ),
+                        imported_account::IdentityConflict::SnakeId(snake_id) => tracing::warn!(
+                            play_account_id = %payload.account.play_account_id,
+                            play_snake_id = %snake_id,
+                            "Play account skipped due to claimed identity conflict"
+                        ),
+                    }
+                }
+                StageStatus::Refreshed | StageStatus::Unchanged | StageStatus::SkippedClaimed => {
+                    // Another run published this account after the lookup.
+                    existing_grants.extend(payload.grants.into_iter().map(|grant| PlayGrant {
+                        play_account_id: payload.account.play_account_id.clone(),
+                        customization_type: grant.customization_type,
+                        slug: grant.slug,
+                    }));
+                }
+            },
         }
     }
     let mut arena_tx = arena
