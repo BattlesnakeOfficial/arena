@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        UPDATE imported_accounts\n        SET claimed_by_user_id = $2, claimed_at = NOW()\n        WHERE imported_account_id = $1 AND claimed_by_user_id IS NULL\n        RETURNING username, display_name, email, pronouns, country, backstory\n        ",
+  "query": "\n        UPDATE imported_accounts\n        SET claimed_by_user_id = $2, claimed_at = NOW()\n        WHERE imported_account_id = $1 AND claimed_by_user_id IS NULL\n          AND ($3::bigint IS NULL OR github_uid = $3)\n        RETURNING username, display_name, email, pronouns, country, backstory\n        ",
   "describe": {
     "columns": [
       {
@@ -37,7 +37,8 @@
     "parameters": {
       "Left": [
         "Uuid",
-        "Uuid"
+        "Uuid",
+        "Int8"
       ]
     },
     "nullable": [
@@ -49,5 +50,5 @@
       false
     ]
   },
-  "hash": "2d802b25e76767608ca127fd389bd80a686fd9b2c2a3df6faee6f332401dc936"
+  "hash": "4774b6941582cd08c1cdea238bebc72232935d01299e0034d6ee7eba6336d946"
 }

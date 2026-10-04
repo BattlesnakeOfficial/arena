@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM imported_snakes WHERE play_snake_id=$1 AND imported_account_id=$2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "17a3920b574aa7759f384c63c9f942bbc1cd2513f4f1eee24334dc650995a3aa"
+}

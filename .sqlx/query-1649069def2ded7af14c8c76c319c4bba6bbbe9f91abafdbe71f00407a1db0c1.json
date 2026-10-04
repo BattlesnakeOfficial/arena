@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM imported_grants WHERE imported_account_id=$1 AND customization_type=$2 AND slug=$3",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "1649069def2ded7af14c8c76c319c4bba6bbbe9f91abafdbe71f00407a1db0c1"
+}
