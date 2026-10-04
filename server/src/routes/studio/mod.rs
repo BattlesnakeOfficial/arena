@@ -8,8 +8,8 @@
 //! - [`process`]: `POST /customizations/studio/process`, the guarded processing
 //!   endpoint, which runs each upload in an `arena studio-worker` child process.
 //!
-//! Nothing is stored on the server. Linked from the footer and the customizations page;
-//! `/studio` redirects here.
+//! Nothing is stored on the server. Not linked from the rest of the site yet (DEV-1539:
+//! no footer or `/customizations` link until launch); `/studio` redirects here.
 
 pub mod guide;
 pub mod page;

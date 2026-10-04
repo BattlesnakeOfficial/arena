@@ -227,7 +227,6 @@ impl Page {
                 div class="inner" {
                     span { "Battlesnake Arena" }
                     div class="spacer" {}
-                    a href="/customizations/studio" { "Head & Tail Studio" }
                     a href="/conduct" { "Code of Conduct" }
                     a href="/privacy" { "Privacy Policy" }
                     a href="/terms" { "Terms of Service" }

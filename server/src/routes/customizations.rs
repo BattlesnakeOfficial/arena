@@ -69,12 +69,6 @@ pub async fn list_customizations(
                 " and tell us which one!"
             }
 
-            p class="cz-note" {
-                "Design your own head or tail in the "
-                a href="/customizations/studio" { "Head & Tail Studio" }
-                "."
-            }
-
             @if user.is_none() {
                 p class="cz-note" {
                     "Browsing as a guest — "
