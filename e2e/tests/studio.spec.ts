@@ -1,11 +1,13 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { test, expect, type Locator, type Page, type Response } from '@playwright/test';
+import { TEMPLATES, expectKitDownloads, kitFile } from '../fixtures/design-kit';
 
 // Head & Tail Studio (/customizations/studio). Runs logged out (no login is needed),
 // on chromium and on the WebKit iPad project.
 
 const STUDIO = '/customizations/studio';
+const GUIDE = '/customizations/studio/guide';
 const ENDPOINT = '/customizations/studio/process';
 const FIXTURES = path.join(__dirname, '..', 'fixtures', 'studio');
 const fixture = (name: string) => path.join(FIXTURES, name);
@@ -584,7 +586,182 @@ test.describe('Head & Tail Studio: details', () => {
   }
 });
 
+test.describe('Head & Tail Studio: start here', () => {
+  const isOpen = (start: Locator) => start.evaluate((el) => (el as HTMLDetailsElement).open);
+
+  test('"Start here" is open before the first upload and one tap away after', async ({ page }) => {
+    await openStudio(page);
+    const start = page.getByTestId('studio-start');
+    const summary = start.locator('summary');
+    const example = page.locator('#studio-example');
+    expect(await isOpen(start)).toBe(true);
+    for (const step of ['Get a template', 'Draw', 'Upload here']) {
+      await expect(start.getByRole('heading', { level: 3, name: step })).toBeVisible();
+    }
+    await expect(start.getByRole('link', { name: 'Read the guide' })).toHaveAttribute('href', GUIDE);
+    await expect(example).toBeVisible();
+    // Before the upload panel, so it's the first thing on the page.
+    expect(await start.evaluate((el) =>
+      !!(el.compareDocumentPosition(document.querySelector('.studio-upload') as Node) & Node.DOCUMENT_POSITION_FOLLOWING))).toBe(true);
+
+    await upload(page, 'head.png');
+    await expect.poll(() => isOpen(start), 'closed after the first upload').toBe(false);
+    await expect(summary).toBeVisible();
+    await expect(example).toBeHidden();
+    await summary.click();
+    expect(await isOpen(start)).toBe(true);
+    await expect(example).toBeVisible();
+    // It stays however the artist left it: another upload doesn't close it.
+    await upload(page, 'mirrored-head.png');
+    expect(await isOpen(start)).toBe(true);
+    await summary.click();
+    expect(await isOpen(start)).toBe(false);
+
+    // A restored preview counts as an upload; Clear opens it again.
+    await page.reload();
+    await expect(page.locator('#studio-status')).toHaveText('Welcome back: your last preview is restored.');
+    expect(await isOpen(start)).toBe(false);
+    await page.locator('#studio-clear').click();
+    await expect.poll(() => isOpen(start), 'open again after Clear').toBe(true);
+    await expect(example).toBeVisible();
+  });
+
+  test('every template link has a download attribute and serves the committed file', async ({ page, request }) => {
+    await openStudio(page);
+    const start = page.getByTestId('studio-start');
+    await expectKitDownloads(request, start, TEMPLATES);
+    for (const kind of ['head', 'tail']) {
+      await expect(start.getByRole('link', { name: `Procreate (PSD), ${kind} template`, exact: true })).toBeVisible();
+      await expect(start.getByRole('link', { name: `Illustrator · Inkscape · Affinity (SVG), ${kind} template`, exact: true })).toBeVisible();
+    }
+    // Tapping one saves the file and leaves the studio where it was.
+    const psd = start.getByRole('link', { name: 'Procreate (PSD), head template', exact: true });
+    const [download] = await Promise.all([page.waitForEvent('download'), psd.click()]);
+    expect(download.suggestedFilename()).toBe('battlesnake-head-template.psd');
+    expect((await readFile(await download.path())).equals(await kitFile('battlesnake-head-template.psd'))).toBe(true);
+    expect(new URL(page.url()).pathname).toBe(STUDIO);
+    await expect(page.locator('#studio-status')).toHaveText('Try it with your own drawing.');
+  });
+
+  test('"Try an example" runs the example drawing through the endpoint into the head slot', async ({ page }) => {
+    await openStudio(page);
+    const defaultTail = await refPath(page, '#studio-pair-tail', 'default');
+    // Even with Tail picked: the example is a head.
+    await page.locator('input[name="studio-kind"][value="tail"]').check();
+    const fetched = page.waitForResponse((r) => r.url().includes('/static/design-kit/example-drawing.png'));
+    const response = await answerTo(page, () => page.locator('#studio-example').click());
+    const asset = await fetched;
+    expect(asset.status()).toBe(200);
+    expect(asset.url(), 'a versioned asset URL').toMatch(/example-drawing\.png\?v=[0-9a-f]{16}$/);
+    expect(response.status(), await response.text()).toBe(200);
+    expect(response.request().postDataBuffer()?.equals(await kitFile('example-drawing.png')), 'posts the committed file').toBe(true);
+
+    const result = (await response.json()) as Processed;
+    expect(result.input).toBe('png');
+    expect(result.lints.head, 'the example passes every head check').toEqual([]);
+    await expect(page.locator('#studio-status')).toHaveText('Done: your head is on the board. It passes every check.');
+    await expect(page.locator('input[name="studio-kind"][value="head"]')).toBeChecked();
+    await expectAllPaths(page, 'path.studio-head', result.path_d, result.fill_rule);
+    await expectAllPaths(page, 'path.studio-tail', defaultTail);
+    await expect(page.locator('#studio-closeup-path')).toHaveAttribute('d', result.path_d);
+    await expect(page.getByTestId('studio-pass')).toBeVisible();
+    await expect(page.locator('#studio-warnings li')).toHaveCount(0);
+    await expect(page.getByTestId('studio-top-warning')).toBeHidden();
+    await expect(page.locator('#studio-result-heading')).toBeFocused();
+    await expect(page.locator('#studio-download-head')).toBeVisible();
+    expect(await isOpen(page.getByTestId('studio-start'))).toBe(false);
+  });
+
+  test('"Learn more" on each check opens its section of the guide', async ({ page }) => {
+    await openStudio(page);
+    const anchors = new Map<string, string>();
+    for (const name of ['mirrored-head.png', 'round-blob.png']) {
+      await upload(page, name);
+      const checks = page.locator('#studio-warnings li.studio-lint');
+      expect(await checks.count(), name).toBeGreaterThan(0);
+      for (const check of await checks.all()) {
+        const code = (await check.getAttribute('data-code')) as string;
+        const learn = check.locator('a.studio-learn');
+        await expect(learn, `${code} links to the guide`).toHaveCount(1);
+        await expect(learn).toHaveText(/^Learn more/);
+        await expect(learn).toHaveAccessibleName(/^Learn more about /);
+        const href = (await learn.getAttribute('href')) as string;
+        expect(href, code).toMatch(new RegExp(`^${GUIDE}#[a-z-]+$`));
+        anchors.set(code, href.split('#')[1]);
+        // The icon sits beside the message's first line, and "Learn more" lines up
+        // under the message.
+        const layout = await check.evaluate((li) => {
+          const text = (li.querySelector('.studio-lint-text') as Element).getBoundingClientRect();
+          const icon = (li.querySelector('.studio-lint-icon') as Element).getBoundingClientRect();
+          const words = document.createRange();
+          words.selectNodeContents((li.querySelector('a.studio-learn') as Element).firstChild as Node);
+          return { textLeft: text.left, textTop: text.top, iconTop: icon.top, iconRight: icon.right, learnLeft: words.getBoundingClientRect().left };
+        });
+        expect(Math.abs(layout.learnLeft - layout.textLeft), `${code}: ${JSON.stringify(layout)}`).toBeLessThanOrEqual(1);
+        expect(Math.abs(layout.iconTop - layout.textTop), `${code}: ${JSON.stringify(layout)}`).toBeLessThanOrEqual(6);
+        expect(layout.iconRight, `${code}: ${JSON.stringify(layout)}`).toBeLessThanOrEqual(layout.textLeft);
+      }
+    }
+    expect(anchors.get('faces_left')).toBe('direction');
+    expect(anchors.get('neck_gap')).toBe('neck');
+
+    // The guide has every one of those sections.
+    await page.goto(GUIDE);
+    for (const [code, anchor] of anchors) {
+      await expect(page.locator(`.guide [id="${anchor}"]`), `${code} -> #${anchor}`).toHaveCount(1);
+    }
+
+    // The top warning's link goes to the first warning's section.
+    await page.goto(STUDIO);
+    await expect(page.locator('#studio-status')).toHaveText('Welcome back: your last preview is restored.');
+    const firstHref = await page.locator('#studio-warnings li.studio-lint.warn a.studio-learn').first().getAttribute('href');
+    const top = page.locator('#studio-top-learn');
+    await expect(top).toBeVisible();
+    await expect(top).toHaveAttribute('href', firstHref as string);
+    const topLayout = await page.getByTestId('studio-top-warning').evaluate((box) => {
+      const words = document.createRange();
+      words.selectNodeContents((box.querySelector('#studio-top-learn') as Element).firstChild as Node);
+      return {
+        textLeft: (box.querySelector('#studio-top-warning-text') as Element).getBoundingClientRect().left,
+        learnLeft: words.getBoundingClientRect().left,
+      };
+    });
+    expect(Math.abs(topLayout.learnLeft - topLayout.textLeft), JSON.stringify(topLayout)).toBeLessThanOrEqual(1);
+    await top.click();
+    await expect(page).toHaveURL(new RegExp(`${GUIDE}#[a-z-]+$`));
+    const section = page.locator(`[id="${(firstHref as string).split('#')[1]}"]`);
+    await expect(section).toBeInViewport();
+  });
+});
+
 test.describe('Head & Tail Studio layout', () => {
+  for (const width of [320, 375, 820, 1180]) {
+    test(`"Start here" has no overflow and 44px controls at ${width}px`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 900 });
+      await openStudio(page);
+      await page.evaluate(() => document.fonts.ready);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+
+      const controls = page.locator('#studio-start :is(a[href], button, summary)');
+      // Summary, 4 templates, the guide, the example.
+      expect(await controls.count()).toBe(7);
+      for (const control of await controls.all()) {
+        await expect(control).toBeVisible();
+        const box = await control.boundingBox();
+        const name = (await control.getAttribute('aria-label')) || (await control.innerText()).trim().slice(0, 40);
+        expect(box?.width, `${name} width at ${width}px`).toBeGreaterThanOrEqual(44);
+        expect(box?.height, `${name} height at ${width}px`).toBeGreaterThanOrEqual(44);
+        expect((box?.x ?? 0) + (box?.width ?? 0), `${name} inside the screen`).toBeLessThanOrEqual(width);
+      }
+      // The short labels stay on one line.
+      for (const label of ['Read the guide', 'Try an example', 'Procreate (PSD)']) {
+        const box = await page.locator('#studio-start').getByText(label, { exact: true }).first().boundingBox();
+        expect(box?.height, `"${label}" wraps at ${width}px`).toBeLessThan(56);
+      }
+    });
+  }
+
+
   // Every visible studio control: buttons, selects, inputs (radios cover their
   // labels), the file input (covers the drop zone), and the Details summary.
   const CONTROLS = '#studio :is(button, select, input, summary, a[href])';
