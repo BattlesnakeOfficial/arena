@@ -3,7 +3,6 @@ use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
-use crate::game_channels::{GameChannels, TurnNotification};
 use crate::game_progress::phase;
 
 #[cfg(test)]
@@ -110,7 +109,8 @@ pub async fn get_turns_from(
     game_id: Uuid,
     from_turn: i32,
 ) -> cja::Result<Vec<Turn>> {
-    let turns = sqlx::query_as::<_, Turn>(
+    let turns = sqlx::query_as!(
+        Turn,
         r#"
         SELECT
             turn_id,
@@ -122,9 +122,9 @@ pub async fn get_turns_from(
         WHERE game_id = $1 AND turn_number >= $2
         ORDER BY turn_number ASC
         "#,
+        game_id,
+        from_turn
     )
-    .bind(game_id)
-    .bind(from_turn)
     .fetch_all(pool)
     .await
     .wrap_err("Failed to fetch turns from database")?;
@@ -132,10 +132,9 @@ pub async fn get_turns_from(
     Ok(turns)
 }
 
-/// Create a new turn for a game and notify WebSocket subscribers
+/// Create a new turn for a game
 pub async fn create_turn(
     pool: &PgPool,
-    game_channels: &GameChannels,
     game_id: Uuid,
     turn_number: i32,
     frame_data: Option<serde_json::Value>,
@@ -176,42 +175,7 @@ pub async fn create_turn(
         .await?
     };
 
-    // Return the connection before waiting on the channel map, as fetch_one(pool)
-    // did. A blocked notification must not hold scarce database capacity.
-    phase(game_id, "persist_turn.notify", Some(turn_number), async {
-        game_channels
-            .notify(TurnNotification {
-                game_id,
-                turn_number,
-            })
-            .await;
-        Ok(())
-    })
-    .await?;
-
     Ok(turn)
-}
-
-/// Update turn frame data (used after computing game state)
-pub async fn update_turn_frame_data(
-    pool: &PgPool,
-    turn_id: Uuid,
-    frame_data: serde_json::Value,
-) -> cja::Result<()> {
-    sqlx::query!(
-        r#"
-        UPDATE turns
-        SET frame_data = $2
-        WHERE turn_id = $1
-        "#,
-        turn_id,
-        frame_data
-    )
-    .execute(pool)
-    .await
-    .wrap_err("Failed to update turn frame data")?;
-
-    Ok(())
 }
 
 /// Survival stats for a finished Solo game, read from its final persisted

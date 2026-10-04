@@ -6,7 +6,7 @@ use sqlx::{PgPool, postgres::PgPoolOptions};
 use crate::config::AppConfig;
 use crate::discord::DiscordNotifier;
 use crate::email::Mailer;
-use crate::game_channels::GameChannels;
+use crate::watched_games::WatchedGames;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -17,8 +17,8 @@ pub struct AppState {
     pub cookie_key: cja::server::cookies::CookieKey,
     /// Connection to the legacy Battlesnake Engine database (for game backup)
     pub engine_db: Option<sqlx::Pool<sqlx::Postgres>>,
-    /// Broadcast channels for live game updates
-    pub game_channels: GameChannels,
+    /// Process-local viewers, shared by clones of this state.
+    pub watched_games: WatchedGames,
     /// HTTP client for calling snake APIs
     pub http_client: reqwest::Client,
     pub proxy_east_client: reqwest::Client,
@@ -200,7 +200,7 @@ impl AppState {
             db: pool,
             cookie_key,
             engine_db,
-            game_channels: GameChannels::new(),
+            watched_games: WatchedGames::new(),
             http_client,
             proxy_east_client,
             proxy_europe_client,
@@ -230,7 +230,7 @@ impl AppState {
             cookie_key: cja::server::cookies::CookieKey::from_env_or_generate()
                 .expect("failed to generate a test cookie key"),
             engine_db: None,
-            game_channels: GameChannels::new(),
+            watched_games: WatchedGames::new(),
             http_client: reqwest::Client::new(),
             proxy_east_client: reqwest::Client::new(),
             proxy_europe_client: reqwest::Client::new(),
