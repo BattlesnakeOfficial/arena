@@ -684,8 +684,268 @@ async fn the_page_renders_every_board_with_placeholders(db: sqlx::PgPool) {
     assert!(html.contains("immediately discarded"));
     // No inline handlers.
     assert!(!html.contains(" onclick="));
-    // Not linked from the nav or footer yet (DEV-1539 PR 4).
-    assert!(!html.contains("href=\"/customizations/studio\""));
+
+    // Start here: open before any upload, with both templates for each kind (labelled
+    // by app), the guide, and the example studio.js posts as a head.
+    assert!(html.contains("<details id=\"studio-start\""));
+    assert!(html.contains(" open>"));
+    assert_eq!(html.matches(">Procreate (PSD)</a>").count(), 2);
+    assert_eq!(
+        html.matches(">Illustrator · Inkscape · Affinity (SVG)</a>")
+            .count(),
+        2
+    );
+    assert!(html.contains(&format!("href=\"{}\"", super::guide::GUIDE_PATH)));
+    assert!(html.contains(&format!("data-guide=\"{}\"", super::guide::GUIDE_PATH)));
+    let example = attr_values(&html, "data-src");
+    assert_eq!(example.len(), 1);
+    assert!(
+        example[0].starts_with("/static/design-kit/example-drawing.png?v="),
+        "{example:?}"
+    );
+    // The footer links here too.
+    assert!(html.contains("href=\"/customizations/studio\""));
+}
+
+// ---- GET /customizations/studio/guide, downloads, links in -------------------------
+
+async fn get_html(app: Router, path: &str) -> (StatusCode, HeaderMap, String) {
+    let response = app
+        .oneshot(Request::get(path).body(Body::empty()).expect("request"))
+        .await
+        .expect("response");
+    let status = response.status();
+    let headers = response.headers().clone();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    (
+        status,
+        headers,
+        String::from_utf8_lossy(&bytes).into_owned(),
+    )
+}
+
+/// Every `<a>` tag (the whole start tag) with a `download` attribute.
+fn download_tags(html: &str) -> Vec<&str> {
+    html.match_indices("<a ")
+        .filter_map(|(i, _)| {
+            let tag = &html[i..i + html[i..].find('>')?];
+            tag.contains(" download=\"").then_some(tag)
+        })
+        .collect()
+}
+
+fn page_app(db: sqlx::PgPool) -> Router {
+    let state = AppState::test_from_pool(db);
+    crate::routes::routes(state).layer(tower_cookies::CookieManagerLayer::new())
+}
+
+#[sqlx::test(migrations = "../migrations")]
+async fn the_guide_renders_every_section_the_checks_link_to(db: sqlx::PgPool) {
+    use super::guide::{GUIDE_PATH, RULE_ANCHORS};
+    let (status, _, html) = get_html(page_app(db), GUIDE_PATH).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("<h1>Make your own head &amp; tail</h1>"));
+    assert!(html.contains("<meta name=\"description\" content=\"How to draw a Battlesnake"));
+    for id in RULE_ANCHORS.iter().chain(&[
+        "templates",
+        "anatomy",
+        "first-head",
+        "procreate",
+        "vector",
+        "next",
+    ]) {
+        assert!(html.contains(&format!("id=\"{id}\"")), "#{id}");
+    }
+    // Every anchor a check links to is a section of the guide.
+    for lint in every_lint() {
+        let anchor = lint.guide_anchor();
+        assert!(
+            RULE_ANCHORS.contains(&anchor.trim_start_matches('#')),
+            "{} links to {anchor}",
+            lint.code()
+        );
+    }
+    // The illustrations: the default head and tail on a real board, and close up.
+    let default = |kind| {
+        REFS.iter()
+            .find(|r| r.kind == kind && r.slug == "default")
+            .expect("a default reference")
+    };
+    for kind in [AssetKind::Head, AssetKind::Tail] {
+        assert!(
+            html.contains(&format!("d=\"{}\"", default(kind).d)),
+            "{kind:?}"
+        );
+    }
+    assert!(html.contains("class=\"studio-board guide-directions light\""));
+    assert_eq!(html.matches("class=\"guide-closeup\"").count(), 2);
+    // Four templates (two per kind) and the guides-only PNGs, each a download.
+    assert_eq!(download_tags(&html).len(), 6);
+    // The Procreate steps the artist needs.
+    for step in [
+        "Files → Downloads",
+        "<strong>Import</strong>",
+        "Insert a file",
+        "Studio Pen",
+        "Monoline",
+        "Erase for holes",
+        "Hide Guides and Reference; leave Background on.",
+        "Actions (wrench) → Share → PNG → Save to Files",
+    ] {
+        assert!(html.contains(step), "{step}");
+    }
+    assert!(html.contains("href=\"/discord\""));
+    assert!(html.contains("href=\"/customizations/studio\""));
+    assert!(html.contains("keep every detail and every gap at least 40 px"));
+}
+
+/// One of every lint (the values don't matter, only the variant).
+fn every_lint() -> Vec<arena::design_kit::Lint> {
+    use arena::design_kit::{Edge, Lint};
+    vec![
+        Lint::NearlyEmpty { fill_pct: 1.0 },
+        Lint::SolidSquare { fill_pct: 99.0 },
+        Lint::NeckGap {
+            left_edge_pct: 50.0,
+        },
+        Lint::Margins {
+            bbox: [10.0, 10.0, 90.0, 90.0],
+        },
+        Lint::FacesLeft { centroid_x: 60.0 },
+        Lint::FacesUpDown {
+            right_edge_pct: 90.0,
+        },
+        Lint::TailReversed {
+            attach_edge: Edge::Right,
+        },
+        Lint::OutlineOnly { hole_pct: 80.0 },
+        Lint::SpecksRemoved { count: 2 },
+        Lint::ColoursFlattened,
+        Lint::GuidesVisible,
+        Lint::OutsideDrawHereIgnored,
+        Lint::SemiTransparent,
+        Lint::NonSquare {
+            width: 10,
+            height: 20,
+        },
+        Lint::LowResolution {
+            width: 10,
+            height: 10,
+        },
+        Lint::StrokesConverted { count: 1 },
+        Lint::Gradient,
+        Lint::ImageIgnored { count: 1 },
+        Lint::TextIgnored,
+        Lint::ClipOrMask {
+            clipped: true,
+            masked: false,
+        },
+        Lint::FiltersIgnored,
+        Lint::ActiveContentRemoved,
+        Lint::OutsideCanvas,
+    ]
+}
+
+#[sqlx::test(migrations = "../migrations")]
+async fn every_design_kit_link_downloads_the_committed_file(db: sqlx::PgPool) {
+    let app = page_app(db);
+    let static_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("static");
+    let mut checked = std::collections::BTreeSet::new();
+    for page in ["/customizations/studio", super::guide::GUIDE_PATH] {
+        let (status, _, html) = get_html(app.clone(), page).await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        let mut links: Vec<(String, Option<String>)> = download_tags(&html)
+            .into_iter()
+            .map(|tag| {
+                let href = attr_values(tag, "href").first().map(|h| h.to_string());
+                let name = attr_values(tag, "download").first().map(|d| d.to_string());
+                (href.expect("download links have an href"), name)
+            })
+            .collect();
+        // "Try an example" fetches its drawing the same way.
+        links.extend(
+            attr_values(&html, "data-src")
+                .into_iter()
+                .map(|src| (src.to_string(), None)),
+        );
+        assert!(links.len() >= 5, "{page}: {links:?}");
+        for (href, name) in links {
+            // asset_url: the file exists in the embedded static dir (so it carries a
+            // content hash), and the download name is the file's own.
+            let (path, version) = href
+                .strip_prefix("/static/")
+                .and_then(|rest| rest.split_once("?v="))
+                .unwrap_or_else(|| panic!("{page}: {href} is not a versioned asset_url"));
+            assert!(path.starts_with("design-kit/"), "{href}");
+            assert_eq!(version.len(), 16, "{href}");
+            if let Some(name) = name {
+                assert_eq!(path.rsplit('/').next(), Some(name.as_str()), "{href}");
+            }
+            let on_disk = std::fs::read(static_dir.join(path))
+                .unwrap_or_else(|e| panic!("{page}: {path}: {e}"));
+            let response = app
+                .clone()
+                .oneshot(Request::get(&href).body(Body::empty()).expect("request"))
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::OK, "{href}");
+            let served = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body");
+            assert!(served == on_disk, "{href} serves the committed file");
+            checked.insert(path.to_string());
+        }
+    }
+    // Every file in the kit is offered somewhere.
+    let kit: std::collections::BTreeSet<String> = std::fs::read_dir(static_dir.join("design-kit"))
+        .expect("static/design-kit")
+        .map(|e| {
+            format!(
+                "design-kit/{}",
+                e.expect("entry").file_name().to_string_lossy()
+            )
+        })
+        .collect();
+    assert_eq!(checked, kit);
+}
+
+#[tokio::test]
+async fn studio_redirects_to_the_studio() {
+    let app = app(&db_free_state(StudioState::in_process()));
+    for (path, location) in [
+        ("/studio", "/customizations/studio"),
+        (
+            "/studio?utm_source=discord",
+            "/customizations/studio?utm_source=discord",
+        ),
+    ] {
+        let (status, headers, _) = get_html(app.clone(), path).await;
+        assert!(status.is_redirection(), "{path}: {status}");
+        assert_eq!(
+            headers.get(header::LOCATION).map(|v| v.as_bytes()),
+            Some(location.as_bytes()),
+            "{path}"
+        );
+    }
+}
+
+#[sqlx::test(migrations = "../migrations")]
+async fn the_customizations_page_links_to_the_studio(db: sqlx::PgPool) {
+    let (status, _, html) = get_html(page_app(db), "/customizations").await;
+    assert_eq!(status, StatusCode::OK);
+    let note = html
+        .find("Design your own head or tail in the ")
+        .expect("the studio note");
+    assert!(
+        html[note..].starts_with(
+            "Design your own head or tail in the <a href=\"/customizations/studio\">Head &amp; \
+             Tail Studio</a>."
+        ),
+        "{}",
+        &html[note..note + 120]
+    );
 }
 
 /// The page's in-browser check, run the way studio.js runs it: the first rejected

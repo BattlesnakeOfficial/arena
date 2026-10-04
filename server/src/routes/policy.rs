@@ -269,5 +269,6 @@ mod tests {
         assert!(html.contains(r#"href="/conduct""#));
         assert!(html.contains(r#"href="/privacy""#));
         assert!(html.contains(r#"href="/terms""#));
+        assert!(html.contains(r#"href="/customizations/studio""#));
     }
 }
