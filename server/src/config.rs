@@ -327,7 +327,7 @@ impl AppConfig {
             // Limit 0 is a deliberate "block all game creation" switch; a
             // zero or negative WINDOW, though, would silently disable the
             // limit (nothing is ever "within" an empty window), so clamp it.
-            game_creation_rate_limit: parse_env("GAME_CREATION_RATE_LIMIT", 20),
+            game_creation_rate_limit: parse_env("GAME_CREATION_RATE_LIMIT", 40),
             game_creation_rate_limit_window_minutes: parse_env(
                 "GAME_CREATION_RATE_LIMIT_WINDOW_MINUTES",
                 10,
@@ -373,7 +373,7 @@ impl AppConfig {
             discord_webhook_url: None,
             moderation: ModerationConfig::default(),
             engine_proxy: EngineProxyConfig::default(),
-            game_creation_rate_limit: 20,
+            game_creation_rate_limit: 40,
             game_creation_rate_limit_window_minutes: 10,
             snake_health_failure_threshold: 3,
             snake_health_recovery_threshold: 2,
