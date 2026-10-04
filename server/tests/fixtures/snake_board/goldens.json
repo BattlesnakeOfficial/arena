@@ -1,0 +1,1989 @@
+[
+ {
+  "turn": 0,
+  "source": "render.mjs port",
+  "width": 11,
+  "height": 11,
+  "food": [
+   [
+    4,
+    10
+   ],
+   [
+    0,
+    4
+   ],
+   [
+    4,
+    0
+   ],
+   [
+    10,
+    4
+   ],
+   [
+    5,
+    5
+   ]
+  ],
+  "snakes": [
+   {
+    "body": [
+     [
+      5,
+      9
+     ],
+     [
+      5,
+      9
+     ],
+     [
+      5,
+      9
+     ]
+    ],
+    "eliminated": false
+   },
+   {
+    "body": [
+     [
+      1,
+      5
+     ],
+     [
+      1,
+      5
+     ],
+     [
+      1,
+      5
+     ]
+    ],
+    "eliminated": false
+   },
+   {
+    "body": [
+     [
+      5,
+      1
+     ],
+     [
+      5,
+      1
+     ],
+     [
+      5,
+      1
+     ]
+    ],
+    "eliminated": false
+   },
+   {
+    "body": [
+     [
+      9,
+      5
+     ],
+     [
+      9,
+      5
+     ],
+     [
+      9,
+      5
+     ]
+    ],
+    "eliminated": false
+   }
+  ],
+  "expected": {
+   "view_box": "0 0 280 280",
+   "snakes": [
+    {
+     "eliminated": false,
+     "tail": null,
+     "polylines": [],
+     "head": {
+      "dir": "right",
+      "x": "130",
+      "y": "34",
+      "transform": ""
+     }
+    },
+    {
+     "eliminated": false,
+     "tail": null,
+     "polylines": [],
+     "head": {
+      "dir": "right",
+      "x": "34",
+      "y": "130",
+      "transform": ""
+     }
+    },
+    {
+     "eliminated": false,
+     "tail": null,
+     "polylines": [],
+     "head": {
+      "dir": "right",
+      "x": "130",
+      "y": "226",
+      "transform": ""
+     }
+    },
+    {
+     "eliminated": false,
+     "tail": null,
+     "polylines": [],
+     "head": {
+      "dir": "right",
+      "x": "226",
+      "y": "130",
+      "transform": ""
+     }
+    }
+   ],
+   "food": [
+    {
+     "cx": "116",
+     "cy": "20",
+     "r": "6.15"
+    },
+    {
+     "cx": "20",
+     "cy": "164",
+     "r": "6.15"
+    },
+    {
+     "cx": "116",
+     "cy": "260",
+     "r": "6.15"
+    },
+    {
+     "cx": "260",
+     "cy": "164",
+     "r": "6.15"
+    },
+    {
+     "cx": "140",
+     "cy": "140",
+     "r": "6.15"
+    }
+   ]
+  }
+ },
+ {
+  "turn": 1,
+  "source": "render.mjs port",
+  "width": 11,
+  "height": 11,
+  "food": [
+   [
+    4,
+    10
+   ],
+   [
+    0,
+    4
+   ],
+   [
+    4,
+    0
+   ],
+   [
+    10,
+    4
+   ],
+   [
+    5,
+    5
+   ]
+  ],
+  "snakes": [
+   {
+    "body": [
+     [
+      5,
+      10
+     ],
+     [
+      5,
+      9
+     ],
+     [
+      5,
+      9
+     ]
+    ],
+    "eliminated": false
+   },
+   {
+    "body": [
+     [
+      0,
+      5
+     ],
+     [
+      1,
+      5
+     ],
+     [
+      1,
+      5
+     ]
+    ],
+    "eliminated": false
+   },
+   {
+    "body": [
+     [
+      5,
+      0
+     ],
+     [
+      5,
+      1
+     ],
+     [
+      5,
+      1
+     ]
+    ],
+    "eliminated": false
+   },
+   {
+    "body": [
+     [
+      8,
+      5
+     ],
+     [
+      9,
+      5
+     ],
+     [
+      9,
+      5
+     ]
+    ],
+    "eliminated": false
+   }
+  ],
+  "expected": {
+   "view_box": "0 0 280 280",
+   "snakes": [
+    {
+     "eliminated": false,
+     "tail": {
+      "x": "130",
+      "y": "34",
+      "transform": "scale(-1,1) translate(-100,0) rotate(90, 50, 50)"
+     },
+     "polylines": [
+      "140,29.9 140,34.1"
+     ],
+     "head": {
+      "dir": "up",
+      "x": "130",
+      "y": "10",
+      "transform": "rotate(-90, 50, 50)"
+     }
+    },
+    {
+     "eliminated": false,
+     "tail": {
+      "x": "34",
+      "y": "130",
+      "transform": ""
+     },
+     "polylines": [
+      "29.9,140 34.1,140"
+     ],
+     "head": {
+      "dir": "left",
+      "x": "10",
+      "y": "130",
+      "transform": "scale(-1,1) translate(-100, 0)"
+     }
+    },
+    {
+     "eliminated": false,
+     "tail": {
+      "x": "130",
+      "y": "226",
+      "transform": "scale(-1,1) translate(-100,0) rotate(-90, 50, 50)"
+     },
+     "polylines": [
+      "140,250.1 140,245.9"
+     ],
+     "head": {
+      "dir": "down",
+      "x": "130",
+      "y": "250",
+      "transform": "rotate(90, 50, 50)"
+     }
+    },
+    {
+     "eliminated": false,
+     "tail": {
+      "x": "226",
+      "y": "130",
+      "transform": ""
+     },
+     "polylines": [
+      "221.9,140 226.1,140"
+     ],
+     "head": {
+      "dir": "left",
+      "x": "202",
+      "y": "130",
+      "transform": "scale(-1,1) translate(-100, 0)"
+     }
+    }
+   ],
+   "food": [
+    {
+     "cx": "116",
+     "cy": "20",
+     "r": "6.15"
+    },
+    {
+     "cx": "20",
+     "cy": "164",
+     "r": "6.15"
+    },
+    {
+     "cx": "116",
+     "cy": "260",
+     "r": "6.15"
+    },
+    {
+     "cx": "260",
+     "cy": "164",
+     "r": "6.15"
+    },
+    {
+     "cx": "140",
+     "cy": "140",
+     "r": "6.15"
+    }
+   ]
+  }
+ },
+ {
+  "turn": 2,
+  "source": "render.mjs port",
+  "width": 11,
+  "height": 11,
+  "food": [
+   [
+    4,
+    10
+   ],
+   [
+    10,
+    4
+   ],
+   [
+    5,
+    5
+   ]
+  ],
+  "snakes": [
+   {
+    "body": [
+     [
+      6,
+      10
+     ],
+     [
+      5,
+      10
+     ],
+     [
+      5,
+      9
+     ]
+    ],
+    "eliminated": false
+   },
+   {
+    "body": [
+     [
+      0,
+      4
+     ],
+     [
+      0,
+      5
+     ],
+     [
+      1,
+      5
+     ],
+     [
+      1,
+      5
+     ]
+    ],
+    "eliminated": false
+   },
+   {
+    "body": [
+     [
+      4,
+      0
+     ],
+     [
+      5,
+      0
+     ],
+     [
+      5,
+      1
+     ],
+     [
+      5,
+      1
+     ]
+    ],
+    "eliminated": false
+   },
+   {
+    "body": [
+     [
+      7,
+      5
+     ],
+     [
+      8,
+      5
+     ],
+     [
+      9,
+      5
+     ]
+    ],
+    "eliminated": false
+   }
+  ],
+  "expected": {
+   "view_box": "0 0 280 280",
+   "snakes": [
+    {
+     "eliminated": false,
+     "tail": {
+      "x": "130",
+      "y": "34",
+      "transform": "scale(-1,1) translate(-100,0) rotate(90, 50, 50)"
+     },
+     "polylines": [
+      "154.1,20 140,20 140,34.1"
+     ],
+     "head": {
+      "dir": "right",
+      "x": "154",
+      "y": "10",
+      "transform": ""
+     }
+    },
+    {
+     "eliminated": false,
+     "tail": {
+      "x": "34",
+      "y": "130",
+      "transform": ""
+     },
+     "polylines": [
+      "20,154.1 20,140 34.1,140"
+     ],
+     "head": {
+      "dir": "down",
+      "x": "10",
+      "y": "154",
+      "transform": "rotate(90, 50, 50)"
+     }
+    },
+    {
+     "eliminated": false,
+     "tail": {
+      "x": "130",
+      "y": "226",
+      "transform": "scale(-1,1) translate(-100,0) rotate(-90, 50, 50)"
+     },
+     "polylines": [
+      "125.9,260 140,260 140,245.9"
+     ],
+     "head": {
+      "dir": "left",
+      "x": "106",
+      "y": "250",
+      "transform": "scale(-1,1) translate(-100, 0)"
+     }
+    },
+    {
+     "eliminated": false,
+     "tail": {
+      "x": "226",
+      "y": "130",
+      "transform": ""
+     },
+     "polylines": [
+      "197.9,140 212,140 226.1,140"
+     ],
+     "head": {
+      "dir": "left",
+      "x": "178",
+      "y": "130",
+      "transform": "scale(-1,1) translate(-100, 0)"
+     }
+    }
+   ],
+   "food": [
+    {
+     "cx": "116",
+     "cy": "20",
+     "r": "6.15"
+    },
+    {
+     "cx": "260",
+     "cy": "164",
+     "r": "6.15"
+    },
+    {
+     "cx": "140",
+     "cy": "140",
+     "r": "6.15"
+    }
+   ]
+  }
+ },
+ {
+  "turn": 3,
+  "source": "live board.battlesnake.com DOM",
+  "width": 11,
+  "height": 11,
+  "food": [
+   [
+    4,
+    10
+   ],
+   [
+    10,
+    4
+   ],
+   [
+    5,
+    5
+   ]
+  ],
+  "snakes": [
+   {
+    "body": [
+     [
+      7,
+      10
+     ],
+     [
+      6,
+      10
+     ],
+     [
+      5,
+      10
+     ]
+    ],
+    "eliminated": false
+   },
+   {
+    "body": [
+     [
+      1,
+      4
+     ],
+     [
+      0,
+      4
+     ],
+     [
+      0,
+      5
+     ],
+     [
+      1,
+      5
+     ]
+    ],
+    "eliminated": false
+   },
+   {
+    "body": [
+     [
+      4,
+      1
+     ],
+     [
+      4,
+      0
+     ],
+     [
+      5,
+      0
+     ],
+     [
+      5,
+      1
+     ]
+    ],
+    "eliminated": false
+   },
+   {
+    "body": [
+     [
+      6,
+      5
+     ],
+     [
+      7,
+      5
+     ],
+     [
+      8,
+      5
+     ]
+    ],
+    "eliminated": false
+   }
+  ],
+  "expected": {
+   "view_box": "0 0 280 280",
+   "snakes": [
+    {
+     "eliminated": false,
+     "tail": {
+      "x": "130",
+      "y": "10",
+      "transform": "scale(-1,1) translate(-100,0)"
+     },
+     "polylines": [
+      "178.1,20 164,20 149.9,20"
+     ],
+     "head": {
+      "dir": "right",
+      "x": "178",
+      "y": "10",
+      "transform": ""
+     }
+    },
+    {
+     "eliminated": false,
+     "tail": {
+      "x": "34",
+      "y": "130",
+      "transform": ""
+     },
+     "polylines": [
+      "34.1,164 20,164 20,140 34.1,140"
+     ],
+     "head": {
+      "dir": "right",
+      "x": "34",
+      "y": "154",
+      "transform": ""
+     }
+    },
+    {
+     "eliminated": false,
+     "tail": {
+      "x": "130",
+      "y": "226",
+      "transform": "scale(-1,1) translate(-100,0) rotate(-90, 50, 50)"
+     },
+     "polylines": [
+      "116,245.9 116,260 140,260 140,245.9"
+     ],
+     "head": {
+      "dir": "up",
+      "x": "106",
+      "y": "226",
+      "transform": "rotate(-90, 50, 50)"
+     }
+    },
+    {
+     "eliminated": false,
+     "tail": {
+      "x": "202",
+      "y": "130",
+      "transform": ""
+     },
+     "polylines": [
+      "173.9,140 188,140 202.1,140"
+     ],
+     "head": {
+      "dir": "left",
+      "x": "154",
+      "y": "130",
+      "transform": "scale(-1,1) translate(-100, 0)"
+     }
+    }
+   ],
+   "food": [
+    {
+     "cx": "116",
+     "cy": "20",
+     "r": "6.15"
+    },
+    {
+     "cx": "260",
+     "cy": "164",
+     "r": "6.15"
+    },
+    {
+     "cx": "140",
+     "cy": "140",
+     "r": "6.15"
+    }
+   ]
+  }
+ },
+ {
+  "turn": 4,
+  "source": "live board.battlesnake.com DOM",
+  "width": 11,
+  "height": 11,
+  "food": [
+   [
+    4,
+    10
+   ],
+   [
+    10,
+    4
+   ]
+  ],
+  "snakes": [
+   {
+    "body": [
+     [
+      8,
+      10
+     ],
+     [
+      7,
+      10
+     ],
+     [
+      6,
+      10
+     ]
+    ],
+    "eliminated": false
+   },
+   {
+    "body": [
+     [
+      1,
+      5
+     ],
+     [
+      1,
+      4
+     ],
+     [
+      0,
+      4
+     ],
+     [
+      0,
+      5
+     ]
+    ],
+    "eliminated": false
+   },
+   {
+    "body": [
+     [
+      4,
+      2
+     ],
+     [
+      4,
+      1
+     ],
+     [
+      4,
+      0
+     ],
+     [
+      5,
+      0
+     ]
+    ],
+    "eliminated": false
+   },
+   {
+    "body": [
+     [
+      5,
+      5
+     ],
+     [
+      6,
+      5
+     ],
+     [
+      7,
+      5
+     ],
+     [
+      7,
+      5
+     ]
+    ],
+    "eliminated": false
+   }
+  ],
+  "expected": {
+   "view_box": "0 0 280 280",
+   "snakes": [
+    {
+     "eliminated": false,
+     "tail": {
+      "x": "154",
+      "y": "10",
+      "transform": "scale(-1,1) translate(-100,0)"
+     },
+     "polylines": [
+      "202.1,20 188,20 173.9,20"
+     ],
+     "head": {
+      "dir": "right",
+      "x": "202",
+      "y": "10",
+      "transform": ""
+     }
+    },
+    {
+     "eliminated": false,
+     "tail": {
+      "x": "10",
+      "y": "130",
+      "transform": "scale(-1,1) translate(-100,0) rotate(-90, 50, 50)"
+     },
+     "polylines": [
+      "44,149.9 44,164 20,164 20,149.9"
+     ],
+     "head": {
+      "dir": "up",
+      "x": "34",
+      "y": "130",
+      "transform": "rotate(-90, 50, 50)"
+     }
+    },
+    {
+     "eliminated": false,
+     "tail": {
+      "x": "130",
+      "y": "250",
+      "transform": ""
+     },
+     "polylines": [
+      "116,221.9 116,236 116,260 130.1,260"
+     ],
+     "head": {
+      "dir": "up",
+      "x": "106",
+      "y": "202",
+      "transform": "rotate(-90, 50, 50)"
+     }
+    },
+    {
+     "eliminated": false,
+     "tail": {
+      "x": "178",
+      "y": "130",
+      "transform": ""
+     },
+     "polylines": [
+      "149.9,140 164,140 178.1,140"
+     ],
+     "head": {
+      "dir": "left",
+      "x": "130",
+      "y": "130",
+      "transform": "scale(-1,1) translate(-100, 0)"
+     }
+    }
+   ],
+   "food": [
+    {
+     "cx": "116",
+     "cy": "20",
+     "r": "6.15"
+    },
+    {
+     "cx": "260",
+     "cy": "164",
+     "r": "6.15"
+    }
+   ]
+  }
+ },
+ {
+  "turn": 10,
+  "source": "live board.battlesnake.com DOM",
+  "width": 11,
+  "height": 11,
+  "food": [
+   [
+    4,
+    10
+   ],
+   [
+    10,
+    4
+   ]
+  ],
+  "snakes": [
+   {
+    "body": [
+     [
+      5,
+      7
+     ],
+     [
+      6,
+      7
+     ],
+     [
+      7,
+      7
+     ]
+    ],
+    "eliminated": false
+   },
+   {
+    "body": [
+     [
+      3,
+      9
+     ],
+     [
+      2,
+      9
+     ],
+     [
+      2,
+      8
+     ],
+     [
+      2,
+      7
+     ]
+    ],
+    "eliminated": false
+   },
+   {
+    "body": [
+     [
+      10,
+      2
+     ],
+     [
+      9,
+      2
+     ],
+     [
+      8,
+      2
+     ],
+     [
+      7,
+      2
+     ]
+    ],
+    "eliminated": false
+   },
+   {
+    "body": [
+     [
+      4,
+      6
+     ],
+     [
+      4,
+      5
+     ],
+     [
+      3,
+      5
+     ],
+     [
+      3,
+      6
+     ]
+    ],
+    "eliminated": false
+   }
+  ],
+  "expected": {
+   "view_box": "0 0 280 280",
+   "snakes": [
+    {
+     "eliminated": false,
+     "tail": {
+      "x": "178",
+      "y": "82",
+      "transform": ""
+     },
+     "polylines": [
+      "149.9,92 164,92 178.1,92"
+     ],
+     "head": {
+      "dir": "left",
+      "x": "130",
+      "y": "82",
+      "transform": "scale(-1,1) translate(-100, 0)"
+     }
+    },
+    {
+     "eliminated": false,
+     "tail": {
+      "x": "58",
+      "y": "82",
+      "transform": "scale(-1,1) translate(-100,0) rotate(90, 50, 50)"
+     },
+     "polylines": [
+      "82.1,44 68,44 68,68 68,82.1"
+     ],
+     "head": {
+      "dir": "right",
+      "x": "82",
+      "y": "34",
+      "transform": ""
+     }
+    },
+    {
+     "eliminated": false,
+     "tail": {
+      "x": "178",
+      "y": "202",
+      "transform": "scale(-1,1) translate(-100,0)"
+     },
+     "polylines": [
+      "250.1,212 236,212 212,212 197.9,212"
+     ],
+     "head": {
+      "dir": "right",
+      "x": "250",
+      "y": "202",
+      "transform": ""
+     }
+    },
+    {
+     "eliminated": false,
+     "tail": {
+      "x": "82",
+      "y": "106",
+      "transform": "scale(-1,1) translate(-100,0) rotate(-90, 50, 50)"
+     },
+     "polylines": [
+      "116,125.9 116,140 92,140 92,125.9"
+     ],
+     "head": {
+      "dir": "up",
+      "x": "106",
+      "y": "106",
+      "transform": "rotate(-90, 50, 50)"
+     }
+    }
+   ],
+   "food": [
+    {
+     "cx": "116",
+     "cy": "20",
+     "r": "6.15"
+    },
+    {
+     "cx": "260",
+     "cy": "164",
+     "r": "6.15"
+    }
+   ]
+  }
+ },
+ {
+  "turn": 22,
+  "source": "live board.battlesnake.com DOM",
+  "width": 11,
+  "height": 11,
+  "food": [
+   [
+    10,
+    7
+   ]
+  ],
+  "snakes": [
+   {
+    "body": [
+     [
+      4,
+      8
+     ],
+     [
+      4,
+      7
+     ],
+     [
+      5,
+      7
+     ]
+    ],
+    "eliminated": false
+   },
+   {
+    "body": [
+     [
+      3,
+      1
+     ],
+     [
+      3,
+      2
+     ],
+     [
+      3,
+      3
+     ],
+     [
+      3,
+      4
+     ],
+     [
+      3,
+      5
+     ],
+     [
+      3,
+      5
+     ]
+    ],
+    "eliminated": false
+   },
+   {
+    "body": [
+     [
+      6,
+      4
+     ],
+     [
+      6,
+      5
+     ],
+     [
+      6,
+      6
+     ],
+     [
+      7,
+      6
+     ],
+     [
+      7,
+      7
+     ]
+    ],
+    "eliminated": false
+   },
+   {
+    "body": [
+     [
+      4,
+      4
+     ],
+     [
+      5,
+      4
+     ],
+     [
+      5,
+      3
+     ],
+     [
+      4,
+      3
+     ]
+    ],
+    "eliminated": false
+   }
+  ],
+  "expected": {
+   "view_box": "0 0 280 280",
+   "snakes": [
+    {
+     "eliminated": false,
+     "tail": {
+      "x": "130",
+      "y": "82",
+      "transform": ""
+     },
+     "polylines": [
+      "116,77.9 116,92 130.1,92"
+     ],
+     "head": {
+      "dir": "up",
+      "x": "106",
+      "y": "58",
+      "transform": "rotate(-90, 50, 50)"
+     }
+    },
+    {
+     "eliminated": false,
+     "tail": {
+      "x": "82",
+      "y": "130",
+      "transform": "scale(-1,1) translate(-100,0) rotate(-90, 50, 50)"
+     },
+     "polylines": [
+      "92,226.1 92,212 92,188 92,164 92,149.9"
+     ],
+     "head": {
+      "dir": "down",
+      "x": "82",
+      "y": "226",
+      "transform": "rotate(90, 50, 50)"
+     }
+    },
+    {
+     "eliminated": false,
+     "tail": {
+      "x": "178",
+      "y": "82",
+      "transform": "scale(-1,1) translate(-100,0) rotate(-90, 50, 50)"
+     },
+     "polylines": [
+      "164,154.1 164,140 164,116 188,116 188,101.9"
+     ],
+     "head": {
+      "dir": "down",
+      "x": "154",
+      "y": "154",
+      "transform": "rotate(90, 50, 50)"
+     }
+    },
+    {
+     "eliminated": false,
+     "tail": {
+      "x": "106",
+      "y": "178",
+      "transform": "scale(-1,1) translate(-100,0)"
+     },
+     "polylines": [
+      "125.9,164 140,164 140,188 125.9,188"
+     ],
+     "head": {
+      "dir": "left",
+      "x": "106",
+      "y": "154",
+      "transform": "scale(-1,1) translate(-100, 0)"
+     }
+    }
+   ],
+   "food": [
+    {
+     "cx": "260",
+     "cy": "92",
+     "r": "6.15"
+    }
+   ]
+  }
+ },
+ {
+  "turn": 60,
+  "source": "live board.battlesnake.com DOM",
+  "width": 11,
+  "height": 11,
+  "food": [
+   [
+    5,
+    0
+   ]
+  ],
+  "snakes": [
+   {
+    "body": [
+     [
+      9,
+      9
+     ],
+     [
+      9,
+      8
+     ],
+     [
+      10,
+      8
+     ],
+     [
+      10,
+      7
+     ],
+     [
+      10,
+      6
+     ]
+    ],
+    "eliminated": false
+   },
+   {
+    "body": [
+     [
+      8,
+      8
+     ],
+     [
+      8,
+      7
+     ],
+     [
+      8,
+      6
+     ],
+     [
+      8,
+      5
+     ],
+     [
+      8,
+      4
+     ],
+     [
+      9,
+      4
+     ],
+     [
+      10,
+      4
+     ],
+     [
+      10,
+      3
+     ],
+     [
+      10,
+      2
+     ],
+     [
+      10,
+      1
+     ]
+    ],
+    "eliminated": false
+   },
+   {
+    "body": [
+     [
+      6,
+      6
+     ],
+     [
+      6,
+      7
+     ],
+     [
+      7,
+      7
+     ],
+     [
+      7,
+      6
+     ],
+     [
+      7,
+      5
+     ]
+    ],
+    "eliminated": false
+   },
+   {
+    "body": [
+     [
+      9,
+      0
+     ],
+     [
+      8,
+      0
+     ],
+     [
+      7,
+      0
+     ],
+     [
+      6,
+      0
+     ]
+    ],
+    "eliminated": true
+   }
+  ],
+  "expected": {
+   "view_box": "0 0 280 280",
+   "snakes": [
+    {
+     "eliminated": true,
+     "tail": {
+      "x": "154",
+      "y": "250",
+      "transform": "scale(-1,1) translate(-100,0)"
+     },
+     "polylines": [
+      "226.1,260 212,260 188,260 173.9,260"
+     ],
+     "head": {
+      "dir": "right",
+      "x": "226",
+      "y": "250",
+      "transform": ""
+     }
+    },
+    {
+     "eliminated": false,
+     "tail": {
+      "x": "250",
+      "y": "106",
+      "transform": "scale(-1,1) translate(-100,0) rotate(90, 50, 50)"
+     },
+     "polylines": [
+      "236,53.9 236,68 260,68 260,92 260,106.1"
+     ],
+     "head": {
+      "dir": "up",
+      "x": "226",
+      "y": "34",
+      "transform": "rotate(-90, 50, 50)"
+     }
+    },
+    {
+     "eliminated": false,
+     "tail": {
+      "x": "250",
+      "y": "226",
+      "transform": "scale(-1,1) translate(-100,0) rotate(90, 50, 50)"
+     },
+     "polylines": [
+      "212,77.9 212,92 212,116 212,140 212,164 236,164 260,164 260,188 260,212 260,226.1"
+     ],
+     "head": {
+      "dir": "up",
+      "x": "202",
+      "y": "58",
+      "transform": "rotate(-90, 50, 50)"
+     }
+    },
+    {
+     "eliminated": false,
+     "tail": {
+      "x": "178",
+      "y": "130",
+      "transform": "scale(-1,1) translate(-100,0) rotate(90, 50, 50)"
+     },
+     "polylines": [
+      "164,106.1 164,92 188,92 188,116 188,130.1"
+     ],
+     "head": {
+      "dir": "down",
+      "x": "154",
+      "y": "106",
+      "transform": "rotate(90, 50, 50)"
+     }
+    }
+   ],
+   "food": [
+    {
+     "cx": "140",
+     "cy": "260",
+     "r": "6.15"
+    }
+   ]
+  }
+ },
+ {
+  "turn": 99,
+  "source": "live board.battlesnake.com DOM",
+  "width": 11,
+  "height": 11,
+  "food": [
+   [
+    10,
+    0
+   ],
+   [
+    1,
+    10
+   ]
+  ],
+  "snakes": [
+   {
+    "body": [
+     [
+      8,
+      5
+     ],
+     [
+      8,
+      4
+     ],
+     [
+      8,
+      3
+     ],
+     [
+      7,
+      3
+     ],
+     [
+      7,
+      2
+     ]
+    ],
+    "eliminated": false
+   },
+   {
+    "body": [
+     [
+      10,
+      5
+     ],
+     [
+      10,
+      6
+     ],
+     [
+      10,
+      7
+     ],
+     [
+      10,
+      8
+     ],
+     [
+      10,
+      9
+     ],
+     [
+      9,
+      9
+     ],
+     [
+      9,
+      8
+     ],
+     [
+      9,
+      7
+     ],
+     [
+      8,
+      7
+     ],
+     [
+      8,
+      6
+     ]
+    ],
+    "eliminated": false
+   },
+   {
+    "body": [
+     [
+      7,
+      8
+     ],
+     [
+      7,
+      7
+     ],
+     [
+      6,
+      7
+     ],
+     [
+      5,
+      7
+     ],
+     [
+      5,
+      6
+     ],
+     [
+      6,
+      6
+     ],
+     [
+      6,
+      5
+     ],
+     [
+      6,
+      4
+     ]
+    ],
+    "eliminated": false
+   },
+   {
+    "body": [
+     [
+      9,
+      0
+     ],
+     [
+      8,
+      0
+     ],
+     [
+      7,
+      0
+     ],
+     [
+      6,
+      0
+     ]
+    ],
+    "eliminated": true
+   }
+  ],
+  "expected": {
+   "view_box": "0 0 280 280",
+   "snakes": [
+    {
+     "eliminated": true,
+     "tail": {
+      "x": "154",
+      "y": "250",
+      "transform": "scale(-1,1) translate(-100,0)"
+     },
+     "polylines": [
+      "226.1,260 212,260 188,260 173.9,260"
+     ],
+     "head": {
+      "dir": "right",
+      "x": "226",
+      "y": "250",
+      "transform": ""
+     }
+    },
+    {
+     "eliminated": false,
+     "tail": {
+      "x": "178",
+      "y": "202",
+      "transform": "scale(-1,1) translate(-100,0) rotate(90, 50, 50)"
+     },
+     "polylines": [
+      "212,149.9 212,164 212,188 188,188 188,202.1"
+     ],
+     "head": {
+      "dir": "up",
+      "x": "202",
+      "y": "130",
+      "transform": "rotate(-90, 50, 50)"
+     }
+    },
+    {
+     "eliminated": false,
+     "tail": {
+      "x": "202",
+      "y": "106",
+      "transform": "scale(-1,1) translate(-100,0) rotate(90, 50, 50)"
+     },
+     "polylines": [
+      "260,130.1 260,116 260,92 260,68 260,44 236,44 236,68 236,92 212,92 212,106.1"
+     ],
+     "head": {
+      "dir": "down",
+      "x": "250",
+      "y": "130",
+      "transform": "rotate(90, 50, 50)"
+     }
+    },
+    {
+     "eliminated": false,
+     "tail": {
+      "x": "154",
+      "y": "154",
+      "transform": "scale(-1,1) translate(-100,0) rotate(90, 50, 50)"
+     },
+     "polylines": [
+      "188,77.9 188,92 164,92 140,92 140,116 164,116 164,140 164,154.1"
+     ],
+     "head": {
+      "dir": "up",
+      "x": "178",
+      "y": "58",
+      "transform": "rotate(-90, 50, 50)"
+     }
+    }
+   ],
+   "food": [
+    {
+     "cx": "260",
+     "cy": "260",
+     "r": "6.15"
+    },
+    {
+     "cx": "44",
+     "cy": "20",
+     "r": "6.15"
+    }
+   ]
+  }
+ },
+ {
+  "turn": null,
+  "source": "render.mjs port: four-direction layout (example.mjs)",
+  "width": 7,
+  "height": 5,
+  "food": [
+   [
+    3,
+    2
+   ]
+  ],
+  "snakes": [
+   {
+    "body": [
+     [
+      2,
+      4
+     ],
+     [
+      1,
+      4
+     ],
+     [
+      0,
+      4
+     ],
+     [
+      0,
+      3
+     ]
+    ],
+    "eliminated": false
+   },
+   {
+    "body": [
+     [
+      4,
+      0
+     ],
+     [
+      5,
+      0
+     ],
+     [
+      6,
+      0
+     ],
+     [
+      6,
+      1
+     ]
+    ],
+    "eliminated": false
+   },
+   {
+    "body": [
+     [
+      5,
+      4
+     ],
+     [
+      5,
+      3
+     ],
+     [
+      5,
+      2
+     ],
+     [
+      4,
+      2
+     ]
+    ],
+    "eliminated": false
+   },
+   {
+    "body": [
+     [
+      1,
+      0
+     ],
+     [
+      1,
+      1
+     ],
+     [
+      1,
+      2
+     ],
+     [
+      2,
+      2
+     ]
+    ],
+    "eliminated": false
+   }
+  ],
+  "expected": {
+   "view_box": "0 0 184 136",
+   "snakes": [
+    {
+     "eliminated": false,
+     "tail": {
+      "x": "10",
+      "y": "34",
+      "transform": "scale(-1,1) translate(-100,0) rotate(90, 50, 50)"
+     },
+     "polylines": [
+      "58.1,20 44,20 20,20 20,34.1"
+     ],
+     "head": {
+      "dir": "right",
+      "x": "58",
+      "y": "10",
+      "transform": ""
+     }
+    },
+    {
+     "eliminated": false,
+     "tail": {
+      "x": "154",
+      "y": "82",
+      "transform": "scale(-1,1) translate(-100,0) rotate(-90, 50, 50)"
+     },
+     "polylines": [
+      "125.9,116 140,116 164,116 164,101.9"
+     ],
+     "head": {
+      "dir": "left",
+      "x": "106",
+      "y": "106",
+      "transform": "scale(-1,1) translate(-100, 0)"
+     }
+    },
+    {
+     "eliminated": false,
+     "tail": {
+      "x": "106",
+      "y": "58",
+      "transform": "scale(-1,1) translate(-100,0)"
+     },
+     "polylines": [
+      "140,29.9 140,44 140,68 125.9,68"
+     ],
+     "head": {
+      "dir": "up",
+      "x": "130",
+      "y": "10",
+      "transform": "rotate(-90, 50, 50)"
+     }
+    },
+    {
+     "eliminated": false,
+     "tail": {
+      "x": "58",
+      "y": "58",
+      "transform": ""
+     },
+     "polylines": [
+      "44,106.1 44,92 44,68 58.1,68"
+     ],
+     "head": {
+      "dir": "down",
+      "x": "34",
+      "y": "106",
+      "transform": "rotate(90, 50, 50)"
+     }
+    }
+   ],
+   "food": [
+    {
+     "cx": "92",
+     "cy": "68",
+     "r": "6.15"
+    }
+   ]
+  }
+ },
+ {
+  "turn": null,
+  "source": "render.mjs port: worked-example L (example.mjs)",
+  "width": 7,
+  "height": 5,
+  "food": [
+   [
+    1,
+    3
+   ]
+  ],
+  "snakes": [
+   {
+    "body": [
+     [
+      3,
+      3
+     ],
+     [
+      3,
+      2
+     ],
+     [
+      3,
+      1
+     ],
+     [
+      4,
+      1
+     ],
+     [
+      5,
+      1
+     ]
+    ],
+    "eliminated": false
+   }
+  ],
+  "expected": {
+   "view_box": "0 0 184 136",
+   "snakes": [
+    {
+     "eliminated": false,
+     "tail": {
+      "x": "130",
+      "y": "82",
+      "transform": ""
+     },
+     "polylines": [
+      "92,53.9 92,68 92,92 116,92 130.1,92"
+     ],
+     "head": {
+      "dir": "up",
+      "x": "82",
+      "y": "34",
+      "transform": "rotate(-90, 50, 50)"
+     }
+    }
+   ],
+   "food": [
+    {
+     "cx": "44",
+     "cy": "44",
+     "r": "6.15"
+    }
+   ]
+  }
+ }
+]

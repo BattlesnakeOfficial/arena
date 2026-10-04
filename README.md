@@ -209,8 +209,11 @@ End-to-end tests use Playwright and are located in the `e2e/` directory.
 ```bash
 cd e2e
 npm install
-npx playwright install chromium
+npx playwright install --with-deps chromium webkit
 ```
+
+WebKit runs the Head & Tail Studio specs as an iPad (`webkit-ipad` project); everything
+else runs on Chromium. Use `--project=chromium` to skip WebKit.
 
 #### Test Database
 

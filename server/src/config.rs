@@ -10,7 +10,9 @@
 //! (The one exception is the `import-play` subcommand, which is a separate
 //! one-shot entry point that exits before `AppState` is built.)
 
-use cja::jobs::worker::{DEFAULT_HEARTBEAT_INTERVAL, DEFAULT_MAX_RETRIES};
+use std::time::Duration;
+
+use cja::jobs::worker::{DEFAULT_HEARTBEAT_INTERVAL, DEFAULT_MAX_RETRIES, JobWorkerConfig};
 
 use crate::email::MailgunConfig;
 use crate::github::auth::GitHubOAuthConfig;
@@ -21,7 +23,7 @@ pub const ARENA_PUBLIC_BASE_URL: &str = "https://arena.battlesnake.com";
 
 /// Default for [`JobConfig::shutdown_drain_secs`].
 pub const DEFAULT_JOB_SHUTDOWN_DRAIN_SECS: u64 = 5;
-/// Default for `ARENA_JOB_LOCK_TIMEOUT_SECS`: 240 seconds tolerates roughly 30-second
+/// Default for `ARENA_JOB_RECLAIM_WINDOW_SECS`: 240 seconds tolerates roughly 30-second
 /// Neon/DB stalls across several heartbeat attempts while meeting the five-minute
 /// dead-worker reclaim target; the window must be at least 3x the heartbeat.
 pub const DEFAULT_JOB_RECLAIM_WINDOW_SECS: u64 = 240;
@@ -34,10 +36,9 @@ pub struct JobConfig {
     /// `DEFAULT_HEARTBEAT_INTERVAL` (30 seconds). Production sets neither lease
     /// env var, so the defaults apply there.
     pub heartbeat_interval_secs: u64,
-    /// `ARENA_JOB_LOCK_TIMEOUT_SECS`: seconds since the last successful heartbeat
-    /// before another worker may reclaim the job. The field and env names are
-    /// retained for compatibility; this value is now the reclaim window.
-    pub lock_timeout_secs: u64,
+    /// `ARENA_JOB_RECLAIM_WINDOW_SECS`: seconds since the last successful heartbeat
+    /// before another worker may reclaim the job.
+    pub reclaim_window_secs: u64,
     /// How long an in-flight job may keep running after a shutdown signal
     /// before it is dropped and its lock released. Cloud Run sends SIGKILL
     /// 10 seconds after SIGTERM, so this plus [`crate::SHUTDOWN_EXIT_GRACE`]
@@ -47,15 +48,25 @@ pub struct JobConfig {
     pub workers: usize,
 }
 
-/// Mirror cja `JobLeaseConfig` validation so boot errors name Arena's env keys.
+impl JobConfig {
+    pub fn worker_config(&self, job_drain: Duration) -> JobWorkerConfig {
+        JobWorkerConfig {
+            heartbeat_interval: Duration::from_secs(self.heartbeat_interval_secs),
+            reclaim_window: Duration::from_secs(self.reclaim_window_secs),
+            shutdown_drain_timeout: job_drain,
+        }
+    }
+}
+
 fn validate_job_lease(job: &JobConfig) -> cja::Result<()> {
     let minimum_window = job.heartbeat_interval_secs.checked_mul(3);
     if job.heartbeat_interval_secs == 0
-        || job.lock_timeout_secs == 0
-        || minimum_window.is_none_or(|minimum| job.lock_timeout_secs < minimum)
+        || minimum_window.is_none_or(|minimum| job.reclaim_window_secs < minimum)
     {
         return Err(cja::color_eyre::eyre::eyre!(
-            "Invalid ARENA_JOB_HEARTBEAT_INTERVAL_SECS and ARENA_JOB_LOCK_TIMEOUT_SECS: reclaim window must be at least three nonzero heartbeat intervals"
+            "Invalid ARENA_JOB_HEARTBEAT_INTERVAL_SECS={} and ARENA_JOB_RECLAIM_WINDOW_SECS={}: heartbeat must be nonzero and reclaim window at least three heartbeat intervals",
+            job.heartbeat_interval_secs,
+            job.reclaim_window_secs,
         ));
     }
     Ok(())
@@ -281,8 +292,8 @@ impl AppConfig {
                 "ARENA_JOB_HEARTBEAT_INTERVAL_SECS",
                 DEFAULT_HEARTBEAT_INTERVAL.as_secs(),
             ),
-            lock_timeout_secs: parse_env(
-                "ARENA_JOB_LOCK_TIMEOUT_SECS",
+            reclaim_window_secs: parse_env(
+                "ARENA_JOB_RECLAIM_WINDOW_SECS",
                 DEFAULT_JOB_RECLAIM_WINDOW_SECS,
             ),
             shutdown_drain_secs: parse_env(
@@ -371,7 +382,7 @@ impl AppConfig {
             job: JobConfig {
                 poll_interval_ms: 60_000,
                 heartbeat_interval_secs: DEFAULT_HEARTBEAT_INTERVAL.as_secs(),
-                lock_timeout_secs: DEFAULT_JOB_RECLAIM_WINDOW_SECS,
+                reclaim_window_secs: DEFAULT_JOB_RECLAIM_WINDOW_SECS,
                 shutdown_drain_secs: DEFAULT_JOB_SHUTDOWN_DRAIN_SECS,
                 max_retries: DEFAULT_MAX_RETRIES,
                 workers: 1,
@@ -477,7 +488,7 @@ mod tests {
     fn job_lease_defaults_are_30_and_240_seconds() {
         let job = AppConfig::test_default().job;
         assert_eq!(job.heartbeat_interval_secs, 30);
-        assert_eq!(job.lock_timeout_secs, 240);
+        assert_eq!(job.reclaim_window_secs, 240);
         validate_job_lease(&job).unwrap();
     }
 
@@ -485,7 +496,7 @@ mod tests {
     fn job_lease_accepts_valid_nondefault_pair() {
         let mut job = AppConfig::test_default().job;
         job.heartbeat_interval_secs = 10;
-        job.lock_timeout_secs = 45;
+        job.reclaim_window_secs = 45;
         validate_job_lease(&job).unwrap();
     }
 
@@ -499,15 +510,17 @@ mod tests {
     #[test]
     fn job_lease_rejects_short_window() {
         let mut job = AppConfig::test_default().job;
-        job.lock_timeout_secs = 89;
-        assert!(validate_job_lease(&job).is_err());
+        job.reclaim_window_secs = 89;
+        let error = validate_job_lease(&job).unwrap_err().to_string();
+        assert!(error.contains("ARENA_JOB_HEARTBEAT_INTERVAL_SECS=30"));
+        assert!(error.contains("ARENA_JOB_RECLAIM_WINDOW_SECS=89"));
     }
 
     #[test]
     fn job_lease_rejects_heartbeat_overflow() {
         let mut job = AppConfig::test_default().job;
         job.heartbeat_interval_secs = u64::MAX;
-        job.lock_timeout_secs = u64::MAX;
+        job.reclaim_window_secs = u64::MAX;
         assert!(validate_job_lease(&job).is_err());
     }
 
