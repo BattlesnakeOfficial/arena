@@ -502,6 +502,9 @@
     } else return;
     render();
   });
+  // Live has no option of its own once it sits beside Close-up: a Split View resize or a
+  // rotation that crosses 640px re-renders, so a view option stays selected.
+  if (wide.addEventListener) wide.addEventListener("change", render);
   $("studio-color-custom").addEventListener("input", (e) => {
     if (COLOR_RE.test(e.target.value)) { state.color = e.target.value.toLowerCase(); render(); }
   });

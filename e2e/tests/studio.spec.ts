@@ -480,6 +480,17 @@ test.describe('Head & Tail Studio: details', () => {
     await expect(play).not.toHaveAttribute('aria-pressed');
   });
 
+  test('a resize from narrow to wide (Split View, rotation) keeps a view selected', async ({ page }) => {
+    await page.setViewportSize({ width: 375, height: 812 });
+    await openStudio(page);
+    await page.locator('input[name="studio-view"][value="live"]').check();
+    await expect(page.locator('#studio-panes')).toHaveAttribute('data-view', 'live');
+    // At 640px+ Live sits beside Close-up and has no option of its own.
+    await page.setViewportSize({ width: 1180, height: 820 });
+    await expect(page.locator('input[name="studio-view"][value="closeup"]')).toBeChecked();
+    await expect(page.locator('#studio-panes')).toHaveAttribute('data-view', 'closeup');
+  });
+
   test('the colour swatches line up, the custom one included', async ({ page }) => {
     await openStudio(page);
     const geometry = () => page.locator('.studio-swatch').evaluateAll((els) => els.map((el) => {
