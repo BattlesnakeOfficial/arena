@@ -18,6 +18,15 @@ pub fn fixture(rel: &str) -> Vec<u8> {
     std::fs::read(&p).unwrap_or_else(|e| panic!("reading {}: {e}", p.display()))
 }
 
+/// A committed design-kit file (`static/design-kit/`, written by
+/// `scripts/design-kit/generate.py`): exactly what artists download.
+pub fn design_kit_file(name: &str) -> Vec<u8> {
+    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("static/design-kit")
+        .join(name);
+    std::fs::read(&p).unwrap_or_else(|e| panic!("reading {}: {e}", p.display()))
+}
+
 /// The vendored catalog samples (single-colour, Standard group).
 pub const HEADS: [&str; 6] = ["default", "smile", "beluga", "bendr", "pixel", "sand-worm"];
 pub const TAILS: [&str; 6] = [
