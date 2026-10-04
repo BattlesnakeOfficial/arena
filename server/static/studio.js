@@ -3,8 +3,9 @@
 // Every board is server-rendered. This script posts an upload to the processing
 // endpoint and then only sets attributes: `d`/`fill-rule` on the placeholder paths
 // (path.studio-head, path.studio-tail, #studio-closeup-path), the --studio-snake
-// colour variable, the board theme class, and the text of the checks. No innerHTML;
-// every path and colour is validated before use, including what localStorage restores.
+// colour variable, the board theme class, and the text of the checks (with links into
+// the guide). No innerHTML; every path, colour and link is validated before use,
+// including what localStorage restores.
 (function () {
   "use strict";
   const root = document.getElementById("studio");
@@ -15,6 +16,12 @@
   const D_RE = /^[MLQCZ0-9 .\-]*$/;
   const COLOR_RE = /^#[0-9a-f]{6}$/i;
   const CODE_RE = /^[a-z_]{1,40}$/;
+  const ANCHOR_RE = /^#[a-z-]{1,24}$/;
+  // The guide's sections the checks link to ("Learn more about ..."); anything else
+  // gets no link.
+  const GUIDE_TOPICS = new Map([["colour", "using one colour"], ["holes", "holes"], ["neck", "the neck"],
+    ["direction", "which way to face"], ["small", "small details"], ["fill", "filling your shape"],
+    ["margins", "drawing edge to edge"], ["guides", "hiding the guides"]]);
   const MAX_D = 65536;
   const FRAME_MS = 250;
   const SVG_NS = "http://www.w3.org/2000/svg";
@@ -55,7 +62,8 @@
         typeof l.message === "string" && l.message.length < 2000)
       .slice(0, 50)
       .map((l) => ({ code: l.code, severity: l.severity, message: l.message,
-        fix: l.fix === "flip" || l.fix === "fit" ? l.fix : null }));
+        fix: l.fix === "flip" || l.fix === "fit" ? l.fix : null,
+        guide: typeof l.guide === "string" && ANCHOR_RE.test(l.guide) ? l.guide : null }));
   const cleanGaps = (list) =>
     (Array.isArray(list) ? list : [])
       .filter((g) => Array.isArray(g) && g.length === 2 && g.every((n) => Number.isFinite(n) && n >= 0 && n <= 100))
@@ -122,8 +130,18 @@
     const preset = all('input[name="studio-color"]').find((i) => i.value === state.color);
     return preset ? preset.getAttribute("data-name").toLowerCase() : "custom-coloured (" + state.color + ")";
   }
+  // "Start here" is open until the first upload, then closes (and opens again after
+  // Clear). Only on those changes, so it stays however the artist leaves it.
+  const start = $("studio-start");
+  let startFor = null;
+  function syncStart(any) {
+    if (!start || startFor === any) return;
+    startFor = any;
+    start.open = !any;
+  }
   function render() {
     const any = !!(state.slots.head || state.slots.tail);
+    syncStart(any);
     root.classList.toggle("studio-has-upload", any); // the drop zone shrinks to a row
     $("studio-drop-title").textContent = any ? "Choose another drawing" : "Choose a drawing";
     const head = shapeFor("head");
@@ -204,12 +222,24 @@
   }
 
   const fixLabel = (fix) => (fix === "flip" ? "Flip" : "Fit");
+  const GUIDE = (root.getAttribute("data-guide") || "").startsWith("/") ? root.getAttribute("data-guide") : "";
+  // Point a "Learn more" link at the guide's section for `lint`; false if there's none.
+  function setLearn(a, lint) {
+    const topic = GUIDE && lint.guide ? GUIDE_TOPICS.get(lint.guide.slice(1)) : null;
+    if (!topic) return false;
+    a.setAttribute("href", GUIDE + lint.guide);
+    empty(a);
+    a.append("Learn more", el("span", { class: "vh" }, " about " + topic));
+    return true;
+  }
   function lintItem(lint, withFix) {
     const warn = lint.severity === "warn";
     const li = el("li", { class: "studio-lint " + lint.severity, "data-code": lint.code });
     li.append(el("span", { class: "studio-lint-icon", "aria-hidden": "true" }, warn ? "!" : "i"),
       el("span", { class: "vh" }, warn ? "Warning: " : "Note: "),
       el("span", { class: "studio-lint-text" }, lint.message));
+    const learn = el("a", { class: "studio-learn" });
+    if (setLearn(learn, lint)) li.appendChild(learn);
     if (withFix && lint.fix) {
       li.appendChild(el("button", { type: "button", class: "btn sm studio-fix", "data-fix": lint.fix }, fixLabel(lint.fix)));
     }
@@ -236,6 +266,7 @@
 
     const top = $("studio-top-warning");
     top.hidden = warns.length === 0;
+    $("studio-top-learn").hidden = !(warns.length && setLearn($("studio-top-learn"), warns[0]));
     if (warns.length) {
       $("studio-top-warning-text").textContent = warns[0].message;
       const fixBtn = $("studio-top-fix");
@@ -271,6 +302,20 @@
       alternatives.some((magic) => magic.every((v, i) => b[offset + i] === v))));
     if (hit) return hit.message;
     return file.size > SNIFF.max_bytes ? SNIFF.too_large : null;
+  }
+  // "Try an example": a finished head drawing from the design kit, through the real
+  // endpoint like any upload.
+  async function tryExample() {
+    const src = $("studio-example").getAttribute("data-src") || "";
+    if (!src.startsWith("/static/")) return;
+    setStatus("Loading the example…");
+    let body = null;
+    try {
+      const res = await fetch(src, { credentials: "omit" });
+      if (res.ok) body = await res.arrayBuffer();
+    } catch (e) { /* network error: body stays null */ }
+    if (!body) return setStatus("We couldn't load the example. Check your connection and try again.", true);
+    send({ body: body, kind: "head", fixes: [], slot: null, displaced: state.slots.head, info: null }, []);
   }
   async function handleFile(file) {
     if (!file) return;
@@ -498,6 +543,7 @@
     if (fix) applyFix(fix.getAttribute("data-fix") === "fit" ? "fit" : "flip");
   });
   $("studio-relabel").addEventListener("click", relabel);
+  $("studio-example").addEventListener("click", () => { tryExample(); });
   $("studio-play").addEventListener("click", () => { playing = !playing; syncLoop(); });
   $("studio-new-version").addEventListener("click", () => fileInput.click());
   $("studio-download-head").addEventListener("click", () => downloadSvg("head"));

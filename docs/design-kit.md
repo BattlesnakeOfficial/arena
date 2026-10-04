@@ -721,7 +721,40 @@ including what `localStorage` (`arena:studio:v1`) restores, and lint text goes i
   carries `data-sniff`, the rejected entries of `design_kit::SIGNATURES` with their
   advice and the size limit. Anything else is posted and the server decides.
 - After a result, the drop zone shrinks to one row and the page scrolls to the preview
-  (with the checks beside it, at 980px+) or to the status line.
+  (with the checks beside it, at 980px+) or to the status line. Focus moves to the
+  Preview heading (`tabindex=-1`) so screen readers announce the result; it draws no
+  focus ring, since it isn't in the tab order.
+- **Start here** (`details#studio-start`) is open until the first upload, then closes
+  (it opens again after Clear, and otherwise stays as the artist leaves it):
+  1. the templates, by app: "Procreate (PSD)" and "Illustrator · Inkscape · Affinity
+     (SVG)" for the head and the tail, each a `download` link;
+  2. the guide;
+  3. upload here.
+
+  **Try an example** fetches `design-kit/example-drawing.png` (its `asset_url` is in
+  `data-src`) and posts it to the endpoint as a head, like any upload.
+- Each check links to its section of the guide ("Learn more", from `Lint::guide_anchor`,
+  sent as `guide` in the JSON). The page knows the guide's sections, so an unknown
+  anchor gets no link.
+
+### The guide and the downloads
+
+`GET /customizations/studio/guide` (`server/src/routes/studio/guide.rs`) is a plain
+server-rendered page: the templates to download, the rules of the medium (the sections
+the checks link to: `#colour`, `#holes`, `#neck`, `#direction`, `#small`, `#fill`,
+`#margins`, `#guides`), an anatomy of the default head and tail drawn with
+`snake_board` and the reference table, "Your first head in 10 minutes" (`#first-head`),
+Procreate (`#procreate`) and vector-app steps, and next steps (the Discord, via
+`/discord`).
+
+The downloads live in `server/static/design-kit/`, written by
+`scripts/design-kit/generate.py` (see its README) and committed:
+`battlesnake-{head,tail}-template.{psd,svg}`, `battlesnake-{head,tail}-guide.png` and
+`example-drawing.png`. They're embedded in the binary like every static file and linked
+through `asset_url`, which versions files in subdirectories too.
+
+The studio is linked from the site footer and the customizations page, and `/studio`
+redirects to it (`routes::redirects::LOCAL_REDIRECTS`).
 
 ### The endpoint and its guards
 
@@ -889,6 +922,11 @@ processing slot held until the worker is gone, including when the request is dro
   exist, an untouched template is `empty`, the PSDs are turned away with the template
   advice, the test fixtures are byte-for-byte copies, and `example-drawing.png` is a
   head with no warnings and no notes.
+- `server/src/routes/studio/tests.rs` also covers the guide (every section a check links
+  to, for every lint; the illustrations; the Procreate steps), every design kit link on
+  the studio and the guide (a versioned `asset_url` that serves the committed file, and
+  every file in the kit offered), the start panel, `/studio`, and the customizations
+  page's link.
 - Fixtures live in `server/tests/fixtures/design_kit/`: under `catalog/`, all 184
   official SVGs, the investigation's `metrics_summary.csv` (the corpus oracle) and
   `metrics_detail.csv` (centroid, holes and bounds for the 12 samples the metric oracle

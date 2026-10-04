@@ -1403,9 +1403,10 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
 @media (min-width: 980px) {
   .studio-layout {
     grid-template-columns: minmax(0, 1fr) minmax(280px, 360px);
-    grid-template-areas: "upload upload" "preview lints" "controls lints" "actions actions";
+    grid-template-areas: "start start" "upload upload" "preview lints" "controls lints" "actions actions";
     align-items: start;
   }
+  .studio-start { grid-area: start; }
   .studio-upload { grid-area: upload; }
   .studio-preview { grid-area: preview; }
   .studio-lints { grid-area: lints; }
@@ -1463,8 +1464,11 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
 .studio-seg-opt input:focus-visible + span { outline: 2px solid var(--pink); outline-offset: 2px; }
 
 /* Preview: one view at a time on phones; Close-up and Live side by side from 640px. */
-.studio-preview h2:focus { outline: none; }
-.studio-preview h2:focus-visible { outline: 2px solid var(--pink); outline-offset: 4px; border-radius: 6px; }
+/* The result heading takes focus after each upload so screen readers announce the
+   result, but it isn't in the tab order, so it never shows a ring. (Chrome and WebKit
+   count focus moved by script after the file picker as :focus-visible.) */
+.studio-preview h2[tabindex="-1"]:focus,
+.studio-preview h2[tabindex="-1"]:focus-visible { outline: none; }
 .studio-views { margin-top: 0; }
 .studio-wide-only { display: none; }
 .studio-panes { margin-top: 14px; }
@@ -1537,9 +1541,87 @@ html[data-app-theme="dark"] .studio-swatch-chip { border-color: rgba(255,255,255
 .studio-pair { margin-top: 16px; }
 .studio-pair select { font-size: 16px; min-height: 46px; }
 
+/* Start here: templates by app, the guide, and an example. A <details>, open until the
+   first upload. */
+.studio-start-summary {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; min-height: 44px;
+  cursor: pointer; list-style: none;
+}
+.studio-start-summary::-webkit-details-marker { display: none; }
+.studio-start-summary::before { content: "▸"; color: var(--muted); align-self: center; transition: transform .15s; }
+.studio-start[open] > .studio-start-summary::before { transform: rotate(90deg); }
+.studio-start-summary h2 { margin: 0; }
+.studio-start-steps { list-style: none; counter-reset: studio-step; display: grid; gap: 16px; margin-top: 12px; }
+.studio-start-steps > li { counter-increment: studio-step; position: relative; padding-left: 38px; min-width: 0; }
+.studio-start-steps > li::before {
+  content: counter(studio-step); position: absolute; left: 0; top: 0; width: 26px; height: 26px; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center; font-weight: 700; font-size: 14px;
+  background: var(--ink); color: var(--paper);
+}
+.studio-start-steps h3 { font-size: 17px; margin-bottom: 2px; }
+.studio-start-steps p { margin-bottom: 8px; }
+.studio-start-kind { margin-top: 10px; }
+.studio-start-kind-name { display: block; font-weight: 700; margin-bottom: 4px; }
+.studio-start-buttons { display: flex; flex-wrap: wrap; gap: 8px; }
+.studio-start .btn { display: inline-flex; align-items: center; justify-content: center; text-align: center; max-width: 100%; }
+.studio-start-example { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--hairline); }
+@media (min-width: 820px) {
+  .studio-start-steps { grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1fr); }
+}
+/* "Learn more" beside a check: a link into the guide, as big a target as a button. */
+.studio-learn {
+  display: inline-flex; align-items: center; min-height: 44px; min-width: 44px; padding: 0 4px;
+  color: var(--pink); font-weight: 600; text-decoration: underline; text-underline-offset: 3px;
+}
+
 /* Save. */
 .studio-action-row { display: flex; flex-wrap: wrap; gap: 10px; }
 .studio-privacy { margin-top: 12px; }
 @media (max-width: 420px) {
   .studio-action-row .btn { flex: 1 1 100%; }
 }
+
+/* --- page: studio guide (/customizations/studio/guide) ----------------------- */
+.guide { max-width: 860px; }
+.guide .page-head h1 { font-size: clamp(32px, 4vw, 48px); }
+.guide-lede { margin-top: 18px; font-size: 17px; max-width: 64ch; }
+.guide a:not(.btn) { color: var(--pink); text-decoration: underline; text-underline-offset: 3px; }
+.guide-toc { margin-top: 18px; }
+.guide-toc ul { list-style: none; display: flex; flex-wrap: wrap; gap: 6px 8px; }
+.guide-toc a:not(.btn) {
+  display: inline-flex; align-items: center; min-height: 36px; padding: 0 12px; border-radius: 999px;
+  background: var(--pill); color: var(--ink); text-decoration: none; font-size: 14px; font-weight: 600;
+}
+.guide-section { margin-top: 40px; scroll-margin-top: 16px; }
+.guide-section > h2 { margin-bottom: 10px; }
+.guide-section p, .guide-section ul, .guide-section ol { max-width: 68ch; }
+.guide-section p + p, .guide-section p + ul, .guide-section ul + p, .guide-section ol + p { margin-top: 10px; }
+.guide-section ul, .guide-steps { padding-left: 1.4em; display: grid; gap: 6px; }
+.guide-steps { gap: 10px; }
+.guide-muted { color: var(--muted); font-size: 14.5px; }
+.guide code { font-family: var(--mono); font-size: .9em; background: var(--pill); padding: 1px 5px; border-radius: 4px; overflow-wrap: anywhere; }
+.guide .btn { display: inline-flex; align-items: center; justify-content: center; min-height: 44px; text-align: center; max-width: 100%; }
+.guide-downloads { display: grid; gap: 16px; margin-top: 14px; }
+@media (min-width: 640px) { .guide-downloads { grid-template-columns: 1fr 1fr; } }
+.guide-download { background: var(--card); border: 1px solid var(--hairline); border-radius: 16px; padding: 16px; min-width: 0; }
+.guide-download h3 { font-size: 18px; margin-bottom: 10px; }
+.guide-download-buttons { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+.guide-rule { margin-top: 20px; scroll-margin-top: 16px; }
+.guide-rule h3 { font-size: 18px; margin-bottom: 4px; }
+.guide-rule:target h3 { color: var(--pink); }
+.guide-figure { margin: 14px 0 0; min-width: 0; }
+.guide-figure figcaption { color: var(--muted); font-size: 14px; margin-top: 6px; }
+.guide-board .studio-board { display: block; width: 100%; max-width: 420px; height: auto; border-radius: 10px; }
+/* The board follows the site theme (the studio has its own switch). */
+html[data-app-theme="dark"] .guide-board .studio-board { background: #0f0b19; }
+html[data-app-theme="dark"] .guide-board .studio-board .grid { fill: #393939; }
+.guide-anatomy { display: grid; gap: 18px; margin: 6px 0 16px; }
+@media (min-width: 640px) { .guide-anatomy { grid-template-columns: 1fr 1fr; } }
+.guide-closeup { display: block; width: 100%; max-width: 300px; height: auto; }
+.guide-closeup-bg { fill: var(--card); }
+.guide-closeup-shape { fill: #ff4f86; }
+.guide-closeup-body { fill: #ff4f86; opacity: .35; }
+.guide-closeup-frame { stroke: var(--muted); stroke-width: .5; stroke-dasharray: 2 2; }
+.guide-marker circle { fill: var(--ink); stroke: var(--card); stroke-width: 1.2; }
+.guide-marker text { fill: var(--paper); font: 700 8px var(--body); text-anchor: middle; }
+.guide-figure .guide-legend { color: var(--ink); font-size: 15px; padding-left: 1.4em; display: grid; gap: 4px; }

@@ -42,9 +42,15 @@ pub const REDIRECTS: &[(&str, &str)] = &[
     ("/youtube", "https://www.youtube.com/battlesnake"),
 ];
 
+/// Short links to pages on this site.
+pub const LOCAL_REDIRECTS: &[(&str, &str)] = &[
+    // Head & Tail Studio (DEV-1539)
+    ("/studio", "/customizations/studio"),
+];
+
 /// Register every short-link route on the given router.
 pub fn register(mut router: axum::Router<AppState>) -> axum::Router<AppState> {
-    for (path, target) in REDIRECTS {
+    for (path, target) in REDIRECTS.iter().chain(LOCAL_REDIRECTS) {
         router =
             router.route(
                 path,
@@ -79,6 +85,21 @@ mod tests {
             assert!(
                 target.starts_with("https://"),
                 "{target} must be an absolute https URL"
+            );
+        }
+    }
+
+    #[test]
+    fn local_redirect_targets_are_site_paths() {
+        for (path, target) in LOCAL_REDIRECTS {
+            assert!(path.starts_with('/'), "{path} must start with /");
+            assert!(
+                target.starts_with('/') && !target.starts_with("//"),
+                "{target} must be a path on this site"
+            );
+            assert!(
+                REDIRECTS.iter().all(|(p, _)| p != path),
+                "{path} is also an external short link"
             );
         }
     }

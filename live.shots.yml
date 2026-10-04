@@ -43,3 +43,9 @@
   width: 1280
   height: 1100
   wait: 3000
+
+- url: https://arena.battlesnake.com/customizations/studio/guide
+  output: screenshots/studio-guide.png
+  width: 1280
+  height: 1100
+  wait: 3000
