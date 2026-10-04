@@ -1135,6 +1135,82 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "../migrations")]
+    async fn reconcile_one_unstageable_new_account_does_not_block_other_grants(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        create_play_tables(&pool).await?;
+        let claimed_account = test_imported_account(&pool, 40).await?;
+        let user = test_user(&pool, 15340).await?;
+        claim_account(&pool, claimed_account, user)
+            .await?
+            .expect("claim succeeds");
+        // An unclaimed staged account owns this snake id in arena's staging.
+        test_play_account(&pool, 41, None).await?;
+        imported_account::stage_play_account(
+            &pool,
+            &StagePlayAccount {
+                account: StageAccount {
+                    play_user_id: "reconcile_user_41".into(),
+                    play_account_id: "reconcile_account_41".into(),
+                    email: "reconcile-41@example.com".into(),
+                    password_hash: "test-hash".into(),
+                    is_email_verified: true,
+                    username: "reconcile_41".into(),
+                    display_name: "Reconcile 41".into(),
+                    pronouns: String::new(),
+                    country: String::new(),
+                    backstory: String::new(),
+                    github_uid: None,
+                    github_login: None,
+                    points: 0,
+                    points_high_score: 0,
+                    is_staff: false,
+                    play_created_at: None,
+                },
+                snakes: vec![StageSnake {
+                    play_snake_id: "moved_snake".into(),
+                    play_account_id: "reconcile_account_41".into(),
+                    name: "Moved".into(),
+                    url: "https://example.com/m".into(),
+                    head: "default".into(),
+                    tail: "default".into(),
+                    color: "#888888".into(),
+                    is_public: false,
+                    engine_region: EngineRegion::UsWest1,
+                }],
+                grants: vec![],
+            },
+        )
+        .await?;
+        // On play the snake now belongs to a brand-new account.
+        test_play_account(&pool, 42, None).await?;
+        sqlx::query("INSERT INTO core_snake (id, account_id, name, url) VALUES ('moved_snake', 'reconcile_account_42', 'Moved', 'https://example.com/m')")
+            .execute(&pool).await?;
+        test_play_grant(
+            &pool,
+            "poison_head",
+            "reconcile_account_40",
+            "head",
+            "alligator",
+        )
+        .await?;
+
+        let counts = reconcile_grants(&pool, &pool).await;
+        assert!(
+            counts.is_ok(),
+            "one unstageable new account must not fail the run: {:#}",
+            counts.as_ref().err().unwrap()
+        );
+        assert!(
+            crate::customizations::get_granted_slugs(&pool, user)
+                .await?
+                .contains(&("head".to_string(), "alligator".to_string())),
+            "claimed account's new grant must still be materialized"
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
     async fn play_transaction_is_read_only(pool: PgPool) -> cja::Result<()> {
         create_play_tables(&pool).await?;
         let mut tx = begin_read_only_play_transaction(&pool).await?;
