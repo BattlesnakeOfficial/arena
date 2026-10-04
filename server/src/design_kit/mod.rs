@@ -54,7 +54,8 @@ pub enum AssetKind {
     Tail,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum FillRule {
     NonZero,
     EvenOdd,
@@ -76,8 +77,9 @@ impl FillRule {
     }
 }
 
-/// How the clean path was produced.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// How the clean path was produced. Serialized as [`Strategy::as_str`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Strategy {
     /// A raster (PNG/JPEG) traced into splines.
     Traced,
@@ -98,8 +100,9 @@ impl Strategy {
     }
 }
 
-/// A format we accept.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A format we accept. Serialized as [`InputFormat::as_str`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum InputFormat {
     Png,
     Jpeg,
@@ -149,7 +152,8 @@ impl RejectedFormat {
         }
     }
 
-    fn advice(self) -> &'static str {
+    /// What to tell the artist (the 422 message for this format).
+    pub fn advice(self) -> &'static str {
         match self {
             RejectedFormat::Heic => {
                 "That's a HEIC or AVIF photo, which we can't read. Share or export it as JPEG \
@@ -185,8 +189,10 @@ impl RejectedFormat {
 ///
 /// Fixes form a set: [`process_upload`] applies Flip before Fit whatever order they are
 /// given in (fitting first would move a flipped head away from the neck edge), so the
-/// studio can send every fix the artist has tapped so far, e.g. `?fix=flip,fit`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// studio can send every fix the artist has tapped so far, e.g. `?fix=flip&fix=fit`.
+/// Serialized as [`Fix::as_str`]; [`Fix::parse`] reads it back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Fix {
     /// Mirror horizontally (`x -> 100 - x`).
     Flip,
@@ -201,6 +207,13 @@ impl Fix {
             Fix::Flip => "flip",
             Fix::Fit => "fit",
         }
+    }
+
+    /// The fix named by [`Fix::as_str`].
+    pub fn parse(name: &str) -> Option<Fix> {
+        [Fix::Flip, Fix::Fit]
+            .into_iter()
+            .find(|f| f.as_str() == name)
     }
 }
 
@@ -538,53 +551,97 @@ fn human_bytes(n: usize) -> String {
     }
 }
 
-/// Identify the upload from its magic bytes.
+/// What a [`Signature`] identifies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sniffed {
+    Accepted(InputFormat),
+    Rejected(RejectedFormat),
+}
+
+/// A magic-byte signature: for every `(offset, alternatives)` part, the bytes at
+/// `offset` start with one of the alternatives.
+#[derive(Debug, Clone, Copy)]
+pub struct Signature {
+    pub parts: &'static [(usize, &'static [&'static [u8]])],
+    pub sniffed: Sniffed,
+}
+
+impl Signature {
+    pub fn matches(&self, bytes: &[u8]) -> bool {
+        self.parts.iter().all(|(offset, alternatives)| {
+            let rest = bytes.get(*offset..).unwrap_or_default();
+            alternatives.iter().any(|magic| rest.starts_with(magic))
+        })
+    }
+}
+
+/// ISO-BMFF major brands of HEIF/AVIF images (videos share the `ftyp` box).
+const HEIF_BRANDS: &[&[u8]] = &[
+    b"heic", b"heix", b"heim", b"heis", b"hevc", b"hevx", b"hevm", b"hevs", b"mif1", b"msf1",
+    b"avif", b"avis",
+];
+
+/// Every magic-byte signature [`sniff`] knows, first match wins. The studio page renders
+/// the rejected ones for its instant in-browser check, so there is one table.
+pub const SIGNATURES: &[Signature] = &[
+    Signature {
+        parts: &[(0, &[b"\x89PNG\r\n\x1a\n"])],
+        sniffed: Sniffed::Accepted(InputFormat::Png),
+    },
+    Signature {
+        parts: &[(0, &[&[0xff, 0xd8, 0xff]])],
+        sniffed: Sniffed::Accepted(InputFormat::Jpeg),
+    },
+    Signature {
+        parts: &[(4, &[b"ftyp"]), (8, HEIF_BRANDS)],
+        sniffed: Sniffed::Rejected(RejectedFormat::Heic),
+    },
+    Signature {
+        parts: &[(0, &[b"GIF87a", b"GIF89a"])],
+        sniffed: Sniffed::Rejected(RejectedFormat::Gif),
+    },
+    Signature {
+        parts: &[(0, &[b"RIFF"]), (8, &[b"WEBP"])],
+        sniffed: Sniffed::Rejected(RejectedFormat::Webp),
+    },
+    Signature {
+        parts: &[(0, &[b"8BPS"])],
+        sniffed: Sniffed::Rejected(RejectedFormat::Psd),
+    },
+    Signature {
+        parts: &[(0, &[b"PK\x03\x04", b"PK\x05\x06"])],
+        sniffed: Sniffed::Rejected(RejectedFormat::Zip),
+    },
+    Signature {
+        parts: &[(0, &[b"%PDF", b"%!PS"])],
+        sniffed: Sniffed::Rejected(RejectedFormat::Pdf),
+    },
+    Signature {
+        parts: &[(0, &[&[0x1f, 0x8b]])],
+        sniffed: Sniffed::Rejected(RejectedFormat::Svgz),
+    },
+    Signature {
+        // A UTF-16 byte order mark, or `<` as UTF-16 without one.
+        parts: &[(0, &[&[0xff, 0xfe], &[0xfe, 0xff], b"<\0", b"\0<"])],
+        sniffed: Sniffed::Rejected(RejectedFormat::Utf16),
+    },
+];
+
+/// Identify the upload from its magic bytes ([`SIGNATURES`]), else as SVG text.
 pub fn sniff(bytes: &[u8]) -> Result<InputFormat, ProcessError> {
-    let starts = |magic: &[u8]| bytes.starts_with(magic);
     if bytes.is_empty() {
         return Err(ProcessError::EmptyFile);
     }
-    if starts(b"\x89PNG\r\n\x1a\n") {
-        return Ok(InputFormat::Png);
+    match SIGNATURES
+        .iter()
+        .find(|s| s.matches(bytes))
+        .map(|s| s.sniffed)
+    {
+        Some(Sniffed::Accepted(format)) => Ok(format),
+        Some(Sniffed::Rejected(r)) => Err(ProcessError::UnsupportedFormat(r)),
+        None if looks_like_svg(bytes) => Ok(InputFormat::Svg),
+        None => Err(ProcessError::UnknownFormat),
     }
-    if starts(&[0xff, 0xd8, 0xff]) {
-        return Ok(InputFormat::Jpeg);
-    }
-    let rejected = if bytes.get(4..8) == Some(b"ftyp") {
-        // ISO-BMFF: HEIF/AVIF images by their major brand (videos share the box).
-        const IMAGE_BRANDS: [&[u8]; 12] = [
-            b"heic", b"heix", b"heim", b"heis", b"hevc", b"hevx", b"hevm", b"hevs", b"mif1",
-            b"msf1", b"avif", b"avis",
-        ];
-        let brand = bytes.get(8..12).unwrap_or_default();
-        IMAGE_BRANDS
-            .contains(&brand)
-            .then_some(RejectedFormat::Heic)
-    } else if starts(b"GIF87a") || starts(b"GIF89a") {
-        Some(RejectedFormat::Gif)
-    } else if starts(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
-        Some(RejectedFormat::Webp)
-    } else if starts(b"8BPS") {
-        Some(RejectedFormat::Psd)
-    } else if starts(b"PK\x03\x04") || starts(b"PK\x05\x06") {
-        Some(RejectedFormat::Zip)
-    } else if starts(b"%PDF") || starts(b"%!PS") {
-        Some(RejectedFormat::Pdf)
-    } else if starts(&[0x1f, 0x8b]) {
-        Some(RejectedFormat::Svgz)
-    } else if starts(&[0xff, 0xfe]) || starts(&[0xfe, 0xff]) || starts(b"<\0") || starts(b"\0<") {
-        // A UTF-16 byte order mark, or `<` as UTF-16 without one.
-        Some(RejectedFormat::Utf16)
-    } else {
-        None
-    };
-    if let Some(r) = rejected {
-        return Err(ProcessError::UnsupportedFormat(r));
-    }
-    if looks_like_svg(bytes) {
-        return Ok(InputFormat::Svg);
-    }
-    Err(ProcessError::UnknownFormat)
 }
 
 /// Text that starts (after a BOM and whitespace) with `<` and has an `<svg` tag early on.

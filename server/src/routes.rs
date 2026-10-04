@@ -48,6 +48,7 @@ pub mod redirects;
 pub mod saved_games;
 pub mod settings;
 pub mod stats;
+pub mod studio;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod tournament;
@@ -133,6 +134,12 @@ pub fn routes(app_state: AppState) -> axum::Router {
         .route("/auth/cli-token", get(github_auth::cli_token_page))
         // Battlesnake routes
         .route("/customizations", get(customizations::list_customizations))
+        // Head & Tail Studio (not linked from anywhere yet; DEV-1539 PR 4)
+        .route("/customizations/studio", get(studio::studio_page))
+        .route(
+            "/customizations/studio/process",
+            studio::process_route(app_state.clone()),
+        )
         .route("/claim", get(claim::claim_page))
         .route("/claim", post(claim::submit_claim))
         .route("/claim/dismiss-prompt", post(claim::dismiss_claim_prompt))
