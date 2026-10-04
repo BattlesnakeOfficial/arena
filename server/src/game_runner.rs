@@ -359,7 +359,6 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
             "persist_turn",
             Some(engine_game.board.turn),
             async {
-                tracing::debug!(game_id = %game_id, turn = engine_game.board.turn, "Storing turn");
                 let turn = crate::models::turn::create_turn(
                     pool,
                     game_id,
