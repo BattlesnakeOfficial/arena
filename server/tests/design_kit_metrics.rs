@@ -1,7 +1,7 @@
 //! Anchors the metric implementation to an independent oracle.
 //!
 //! The lint thresholds were derived from rsvg renders of the official catalog
-//! (`catalog/metrics_summary.csv`, from the DEV-1539 investigation: fill and edges from
+//! (`catalog/metrics_detail.csv`, from the DEV-1539 investigation: fill and edges from
 //! `metrics.py`, centroid and hole fraction as in `lint2.py` but at pixel centres, bounds
 //! from `metrics.json`). Here the same assets are rendered with resvg at the same 200 px
 //! and measured with `Metrics::from_alpha`. Every metric a lint reads must agree:
@@ -27,7 +27,7 @@ struct Row {
 }
 
 fn oracle() -> Vec<Row> {
-    let csv = String::from_utf8(fixture("catalog/metrics_summary.csv")).expect("utf-8");
+    let csv = String::from_utf8(fixture("catalog/metrics_detail.csv")).expect("utf-8");
     let mut lines = csv.lines();
     let header: Vec<&str> = lines.next().expect("header").split(',').collect();
     let col = |name: &str| {

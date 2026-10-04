@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <defs>
+    <style>.cry-t-7{opacity:.4}.cry-t-1{fill:#4d4d4d}.cry-t-2{fill:gray}.cry-t-3{fill:#b3b3b3}.cry-t-4{fill:#666}.cry-t-5{fill:#999}.cry-t-6{fill:#3f3f3f}.cry-t-9{opacity:.4}.cry-t-8,.cry-t-9{fill:#fff}.cry-t-8{opacity:.2}</style>
+  </defs>
+  <g id="crystals">
+    <polygon points="0 0 19.46 17.9 0 59.93 0 0" />
+    <polygon class="cry-t-1" points="40.39 27.78 19.46 17.9 0 59.93 40.39 27.78" />
+    <polygon class="cry-t-2" points="32.38 65.6 40.39 27.78 0 59.93 32.38 65.6" />
+    <polygon class="cry-t-3" points="32.38 65.6 40.39 27.78 65.81 55.99 32.38 65.6" />
+    <polygon class="cry-t-2" points="32.38 65.6 90.47 81.9 65.81 55.85 32.38 65.6" />
+    <polygon class="cry-t-4" points="99.38 51.02 90.47 81.9 65.81 55.85 99.38 51.02" />
+    <polygon class="cry-t-5" points="99.38 51.02 81.56 33.48 65.81 55.85 99.38 51.02" />
+    <polyline class="cry-t-4" points="99.38 51.02 81.56 33.48 99.38 33" />
+    <polyline class="cry-t-3" points="74.09 7.38 81.56 33.48 99.38 33" />
+    <polygon class="cry-t-6" points="32.38 65.6 90.47 81.9 53.38 95 34.91 96.95 32.38 65.6" />
+    <polygon points="17.98 96.76 0 100 0 59.93 17.98 96.76" />
+    <polygon class="cry-t-1" points="32.38 65.6 0 59.93 17.98 96.76 34.91 96.95 32.38 65.6" />
+  </g>
+  <g id="overlay">
+    <path class="cry-t-7" d="M0,0,19.46,17.9l20.93,9.88L65.81,56,81.56,33.48,74.09,7.38,99.38,33V51L90.47,81.9,53.38,95,34.91,97,18,96.76,0,100Z" />
+  </g>
+  <g id="shines">
+    <polygon class="cry-t-8" points="32.38 45.86 31.15 63.06 8.56 41.69 30.89 65.28 15.71 75.9 31.48 67.61 33.97 86.7 33.81 66.46 55.61 72.03 33.6 63.69 32.38 45.86" />
+    <polygon class="cry-t-8" points="32.27 60.35 32.27 64.71 28.82 66.13 32.19 65.8 32.52 69.27 33.22 65.86 37.19 67.5 34.05 65.41 36.09 65.27 33.66 64.61 34.54 62.83 33.15 64.1 32.27 60.35" />
+    <polygon class="cry-t-9" points="74.09 7.38 99.38 33 95.56 41.07 97.34 33.82 85.8 33.36 97.06 32.37 74.09 7.38" />
+  </g>
+</svg>
