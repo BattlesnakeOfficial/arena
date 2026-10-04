@@ -10,8 +10,11 @@
 use super::raster::Metrics;
 use super::{AssetKind, Fix};
 
-/// How prominently the studio shows a lint.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+/// How prominently the studio shows a lint. Serialized as [`Severity::as_str`].
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "lowercase")]
 pub enum Severity {
     /// Will look wrong on the board. Shown first, with a fix button when there is one.
     Warn,
@@ -74,12 +77,35 @@ pub enum Lint {
     ColoursFlattened,
     /// Template guides or reference shapes were visible in the export and were ignored.
     GuidesVisible,
+    /// The `draw-here` layer held the drawing, and visible shapes on other layers were
+    /// left out.
+    OutsideDrawHereIgnored,
     /// Soft or semi-transparent pixels were thresholded at 50% opacity.
     SemiTransparent,
     /// The canvas wasn't square, so it was centred in one.
     NonSquare { width: u32, height: u32 },
     /// The image is smaller than `Limits::min_useful_side`.
     LowResolution { width: u32, height: u32 },
+    // ---- SVG input facts ----
+    /// Strokes were turned into filled outlines.
+    StrokesConverted { count: usize },
+    /// Gradients were painted in one flat colour, their average (dark ones join the shape,
+    /// light or faint ones become holes or are left out); patterns solid.
+    Gradient,
+    /// Embedded or linked `<image>`s were ignored (never loaded).
+    ImageIgnored { count: usize },
+    /// Text that wasn't converted to outlines was ignored.
+    TextIgnored,
+    /// Clip paths were applied (`clipped`) and/or masks were ignored (`masked`: masked
+    /// shapes show in full).
+    ClipOrMask { clipped: bool, masked: bool },
+    /// Filters (blur, shadows, ...) were ignored.
+    FiltersIgnored,
+    /// Scripts, event handlers, embedded HTML, animations or external links were
+    /// dropped. They never reach the output, which is one path.
+    ActiveContentRemoved,
+    /// Part of the drawing is outside the square; the board cuts it off.
+    OutsideCanvas,
 }
 
 /// Thresholds (decision 8 of the DEV-1539 plan), all on the 200 px metrics mask.
@@ -113,9 +139,18 @@ impl Lint {
             Lint::SpecksRemoved { .. } => "specks_removed",
             Lint::ColoursFlattened => "colours_flattened",
             Lint::GuidesVisible => "guides_visible",
+            Lint::OutsideDrawHereIgnored => "outside_draw_here_ignored",
             Lint::SemiTransparent => "semi_transparent",
             Lint::NonSquare { .. } => "non_square",
             Lint::LowResolution { .. } => "low_resolution",
+            Lint::StrokesConverted { .. } => "strokes_converted",
+            Lint::Gradient => "gradient",
+            Lint::ImageIgnored { .. } => "image_ignored",
+            Lint::TextIgnored => "text_ignored",
+            Lint::ClipOrMask { .. } => "clip_or_mask",
+            Lint::FiltersIgnored => "filters_ignored",
+            Lint::ActiveContentRemoved => "active_content_removed",
+            Lint::OutsideCanvas => "outside_canvas",
         }
     }
 
@@ -129,11 +164,21 @@ impl Lint {
             | Lint::FacesUpDown { .. }
             | Lint::TailReversed { .. }
             | Lint::OutlineOnly { .. } => Severity::Warn,
-            Lint::NonSquare { .. } | Lint::LowResolution { .. } => Severity::Tip,
+            Lint::NonSquare { .. }
+            | Lint::LowResolution { .. }
+            | Lint::ImageIgnored { .. }
+            | Lint::TextIgnored
+            | Lint::OutsideDrawHereIgnored => Severity::Tip,
             Lint::SpecksRemoved { .. }
             | Lint::ColoursFlattened
             | Lint::GuidesVisible
-            | Lint::SemiTransparent => Severity::Info,
+            | Lint::SemiTransparent
+            | Lint::StrokesConverted { .. }
+            | Lint::Gradient
+            | Lint::ClipOrMask { .. }
+            | Lint::FiltersIgnored
+            | Lint::ActiveContentRemoved
+            | Lint::OutsideCanvas => Severity::Info,
         }
     }
 
@@ -157,11 +202,21 @@ impl Lint {
             Lint::FacesLeft { .. } | Lint::FacesUpDown { .. } | Lint::TailReversed { .. } => {
                 "#direction"
             }
-            Lint::NearlyEmpty { .. } | Lint::OutlineOnly { .. } => "#fill",
+            Lint::NearlyEmpty { .. }
+            | Lint::OutlineOnly { .. }
+            | Lint::StrokesConverted { .. }
+            | Lint::TextIgnored
+            | Lint::ImageIgnored { .. } => "#fill",
             Lint::SolidSquare { .. } => "#holes",
             Lint::SpecksRemoved { .. } | Lint::LowResolution { .. } => "#small",
-            Lint::ColoursFlattened | Lint::SemiTransparent => "#colour",
-            Lint::GuidesVisible => "#guides",
+            Lint::ColoursFlattened
+            | Lint::SemiTransparent
+            | Lint::Gradient
+            | Lint::ClipOrMask { .. }
+            | Lint::FiltersIgnored
+            | Lint::ActiveContentRemoved => "#colour",
+            Lint::GuidesVisible | Lint::OutsideDrawHereIgnored => "#guides",
+            Lint::OutsideCanvas => "#margins",
         }
     }
 
@@ -213,6 +268,10 @@ impl Lint {
                 "We ignored the template guides. Hide them next time for the cleanest result."
                     .into()
             }
+            Lint::OutsideDrawHereIgnored => "We only used your \"Draw here\" layer and left out \
+                 the shapes on your other layers. Move everything you drew into \"Draw here\", \
+                 or hide the layers you don't want."
+                .into(),
             Lint::SemiTransparent => "Soft or see-through strokes only count where they're at \
                  least half opaque. Use a solid brush at full opacity."
                 .into(),
@@ -224,6 +283,39 @@ impl Lint {
                 "Your image is only {width} × {height} px, so edges may look soft. Export at \
                  1000 × 1000 px, the template's size."
             ),
+            Lint::StrokesConverted { count } => format!(
+                "We turned {count} stroke{} into filled shapes. To see exactly what you'll get, \
+                 use Outline Stroke (Illustrator) or Stroke to Path (Inkscape) before exporting.",
+                plural(*count)
+            ),
+            Lint::Gradient => "Each gradient became one flat colour, its average: dark ones \
+                 joined the shape, and light or faint ones became holes or were left out. \
+                 Patterns became solid shapes. Check the preview."
+                .into(),
+            Lint::ImageIgnored { count } => format!(
+                "We ignored {count} embedded image{}. Draw with vector shapes, or upload your \
+                 drawing as a PNG instead.",
+                plural(*count)
+            ),
+            Lint::TextIgnored => "Text isn't supported, so we left it out. Convert it to \
+                 outlines first (Type → Create Outlines, or Path → Object to Path)."
+                .into(),
+            Lint::ClipOrMask { clipped, masked } => match (clipped, masked) {
+                (true, true) => "We applied your clipping paths. Masks are ignored, so masked \
+                     shapes show in full; check the preview."
+                    .into(),
+                (false, true) => "Masks are ignored, so masked shapes show in full; check the \
+                     preview."
+                    .into(),
+                _ => "We applied your clipping paths; check the preview.".into(),
+            },
+            Lint::FiltersIgnored => "Filters such as blurs and drop shadows are ignored.".into(),
+            Lint::ActiveContentRemoved => "We removed scripts, links and embedded web content. \
+                 Only the shapes are kept."
+                .into(),
+            Lint::OutsideCanvas => {
+                "Part of your drawing is outside the square. The game cuts it off.".into()
+            }
         }
     }
 }
@@ -285,6 +377,9 @@ pub(crate) fn for_kind(m: &Metrics, kind: AssetKind) -> Vec<Lint> {
     // The drawing's full-height (attach) side, when it isn't the left one: full height,
     // with a front or tip opposite. On ties the last one wins, so Right (which Flip can
     // fix) is last.
+    // A drawing whose top and bottom are both full (trans-rights-scarf, whose white
+    // stripe crosses the neck) has no front opposite either, so neither counts: its
+    // left side is the neck, with a gap.
     let attach_elsewhere = [
         (Edge::Bottom, own_bottom, own_top),
         (Edge::Top, own_top, own_bottom),

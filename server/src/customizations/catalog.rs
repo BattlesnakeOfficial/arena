@@ -2198,3 +2198,28 @@ impl Tail {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arena::design_kit::AssetKind;
+    use arena::design_kit::refs::REFS;
+
+    /// The studio's reference shapes (`design_kit::refs`, a static table in the library)
+    /// carry catalog display names and are all free Standard shapes.
+    #[test]
+    fn design_kit_refs_match_the_catalog() {
+        assert!(!REFS.is_empty());
+        for r in REFS {
+            let def = match r.kind {
+                AssetKind::Head => Head::from_slug(r.slug).map(Head::def),
+                AssetKind::Tail => Tail::from_slug(r.slug).map(Tail::def),
+            };
+            let def =
+                def.unwrap_or_else(|| panic!("{:?} {} is not in the catalog", r.kind, r.slug));
+            assert_eq!(def.display_name, r.display_name, "{:?} {}", r.kind, r.slug);
+            assert_eq!(def.group, Group::Standard, "{:?} {}", r.kind, r.slug);
+            assert_eq!(def.cost, 0, "{:?} {}", r.kind, r.slug);
+        }
+    }
+}
