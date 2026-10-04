@@ -1386,7 +1386,7 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
 /* `hidden` only hides HTML elements by default; live-loop frames are SVG <g>s. */
 .studio-board .studio-frame[hidden] { display: none; }
 
-/* Page layout. Mobile first: one column (upload, preview, checks, style, save); at
+/* Page layout. Mobile first: one column (your snake, start here, preview, checks, style, save); at
    980px+ (iPad landscape) the checks sit beside the preview. Every control is at
    least 44x44 at every width, and inputs are 16px so iOS doesn't zoom. */
 .studio { --studio-snake: #ff4f86; }
@@ -1403,11 +1403,11 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
 @media (min-width: 980px) {
   .studio-layout {
     grid-template-columns: minmax(0, 1fr) minmax(280px, 360px);
-    grid-template-areas: "start start" "upload upload" "preview lints" "controls lints" "actions actions";
+    grid-template-areas: "snake snake" "start start" "preview lints" "controls lints" "actions actions";
     align-items: start;
   }
   .studio-start { grid-area: start; }
-  .studio-upload { grid-area: upload; }
+  .studio-snake { grid-area: snake; }
   .studio-preview { grid-area: preview; }
   .studio-lints { grid-area: lints; }
   .studio-controls { grid-area: controls; }
@@ -1417,27 +1417,56 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
   .studio-panel { padding: 14px; border-radius: 14px; }
 }
 
-/* Upload: the file input covers the whole drop zone (a 44px+ target for touch,
-   keyboard and VoiceOver); the label draws the zone. */
-.studio-drop {
-  position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center;
-  gap: 4px; min-height: 120px; padding: 18px; text-align: center; cursor: pointer;
+/* Your snake: a card per slot (head, tail), side by side from 560px, stacked on
+   phones. Each card takes a dropped file; its upload button is a label the file input
+   covers (a 44px+ target for touch, keyboard and VoiceOver). */
+.studio-snake-lede { margin: -4px 0 12px; }
+.studio-slots { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
+@media (min-width: 560px) {
+  .studio-slots { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+}
+.studio-slot {
+  display: grid; grid-template-columns: 64px minmax(0, 1fr); align-items: center; align-content: start;
+  gap: 10px 12px; min-width: 0; padding: 12px;
   border: 2px dashed var(--hairline-dark); border-radius: 14px; background: var(--paper);
 }
-.studio-drop:hover, .studio-drop.dragging { border-color: var(--pink); background: var(--pink-wash); }
-.studio-drop:focus-within { outline: 2px solid var(--pink); outline-offset: 2px; }
-.studio-file { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; }
-.studio-drop-title { font-family: var(--display); font-weight: 700; font-size: 19px; }
-.studio-drop-hint { color: var(--muted); font-size: 14px; }
-/* After the first upload the zone shrinks to one row, so the result fits on screen. */
-.studio-has-upload .studio-drop { flex-direction: row; flex-wrap: wrap; gap: 2px 10px; min-height: 52px; padding: 8px 14px; }
-.studio-has-upload .studio-drop-title { font-size: 16px; }
-.studio-has-upload .studio-drop-hint { font-size: 13px; }
+.studio-slot.dragging { border-color: var(--pink); background: var(--pink-wash); }
+.studio-slot > :is(.studio-slot-upload, .studio-style, .studio-slot-actions, .studio-confirm) {
+  grid-column: 1 / -1;
+}
+.studio-thumb { display: block; width: 64px; height: auto; border-radius: 8px; }
+.studio-thumb-bg { fill: var(--card); }
+.studio-thumb-body { fill: var(--studio-snake); opacity: .35; }
+.studio-thumb-path { fill: var(--studio-snake); }
+.studio-slot-who { min-width: 0; }
+.studio-slot-title {
+  font-family: var(--mono); font-size: 11.5px; font-weight: 400; text-transform: uppercase;
+  letter-spacing: .12em; color: var(--muted);
+}
+.studio-slot-name { font-family: var(--display); font-weight: 700; font-size: 18px; overflow-wrap: anywhere; }
+.studio-slot-upload { position: relative; display: flex; align-items: center; justify-content: center; text-align: center; }
+.studio-slot-upload:focus-within { outline: 2px solid var(--pink); outline-offset: 2px; }
+/* Over the button's 1.5px border too, so the input itself is the full 44px+. */
+.studio-file {
+  position: absolute; inset: -1.5px; width: calc(100% + 3px); height: calc(100% + 3px);
+  margin: 0; opacity: 0; cursor: pointer;
+}
+.studio-style select { font-size: 16px; min-height: 46px; }
+.studio-slot-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.studio-slot-actions:not(:has(button:not([hidden]))) { display: none; }
+.studio-confirm {
+  display: grid; gap: 8px; padding: 10px 12px; font-size: 14.5px;
+  background: var(--pink-wash); border: 1px solid var(--pink); border-radius: 12px;
+}
+.studio-confirm-buttons { display: flex; flex-wrap: wrap; gap: 8px; }
+.studio-slots-hint { margin-top: 8px; }
+/* The bold face's spaces are narrow: "passes · Tail" ran together. */
+.studio-summary { margin-top: 12px; font-weight: 600; font-size: 15px; word-spacing: .14em; }
 .studio-status { margin-top: 12px; font-size: 15px; }
+.studio-summary + .studio-status { margin-top: 4px; }
 /* Where studio.js scrolls a result into view. */
 .studio-status, .studio-preview { scroll-margin-top: 12px; }
 .studio-status.error { color: var(--down); font-weight: 600; }
-.studio-relabel { margin-top: 8px; }
 .studio-top-warning {
   display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 10px; padding: 10px 12px 10px 44px;
   background: var(--pink-wash); border: 1px solid var(--pink); border-radius: 12px; font-size: 14.5px;
@@ -1449,7 +1478,6 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
 
 /* Segmented controls: radios cover their label, so the label is the target. */
 .studio-seg { border: 0; margin-top: 14px; min-width: 0; }
-.studio-kind { margin: 0 0 12px; }
 .studio-seg legend, .studio-colors legend {
   font-family: var(--mono); font-size: 11.5px; text-transform: uppercase; letter-spacing: .12em;
   color: var(--muted); margin-bottom: 7px;
@@ -1488,8 +1516,22 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
   }
   .studio-panes[data-view="closeup"] > [data-pane="live"],
   .studio-panes[data-view="live"] > [data-pane="closeup"] { display: block; }
+  /* The two close-ups stack taller than the live board: it stays beside whichever one
+     is in view. */
+  .studio-panes > [data-pane="live"] { position: sticky; top: 12px; }
 }
 .studio-pane .studio-board, .studio-closeup { display: block; width: 100%; height: auto; border-radius: 10px; }
+/* A close-up per slot: stacked (each as wide as the pane), side by side only where a
+   full-width pane gives each one enough room. */
+.studio-closeups { display: grid; gap: 12px; }
+@media (min-width: 480px) and (max-width: 639px) {
+  .studio-closeups { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+}
+.studio-closeup-fig { margin: 0; min-width: 0; }
+.studio-closeup-title {
+  font-family: var(--mono); font-size: 11.5px; text-transform: uppercase; letter-spacing: .12em;
+  color: var(--muted); margin-bottom: 4px;
+}
 .studio-pane[data-pane="all"] .studio-board { max-width: 560px; }
 .studio-pane-note { color: var(--muted); font-size: 13.5px; margin: 8px 0; }
 .studio-play { margin-top: 10px; }
@@ -1524,6 +1566,11 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
 .studio-pass .studio-lint-icon { background: var(--up); color: #fff; }
 .studio-details { margin-top: 10px; }
 .studio-details summary { display: flex; align-items: center; min-height: 44px; cursor: pointer; font-weight: 600; font-size: 14.5px; }
+/* A group per slot, each with its own heading and pass state. */
+.studio-checks-title { font-size: 16px; margin-bottom: 6px; }
+.studio-checks:not([hidden]) ~ .studio-checks:not([hidden]) {
+  margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--hairline);
+}
 
 /* Style controls. */
 .studio-colors { border: 0; min-width: 0; }
@@ -1547,11 +1594,9 @@ html[data-app-theme="dark"] .studio-swatch-chip { border-color: rgba(255,255,255
     conic-gradient(#e5383b, #f7c948, #2bb673, #3a86ff, #8f5cf7, #ff4f86, #e5383b);
 }
 #studio-color-hint { margin-top: 6px; }
-.studio-pair { margin-top: 16px; }
-.studio-pair select { font-size: 16px; min-height: 46px; }
 
-/* Start here: templates by app, the guide, and an example. A <details>, open until the
-   first upload. */
+/* Start here: templates by app, the guide, and an example. A <details> under the cards,
+   open until the first upload. */
 .studio-start-summary {
   display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; min-height: 44px;
   cursor: pointer; list-style: none;

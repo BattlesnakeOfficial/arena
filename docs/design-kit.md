@@ -15,6 +15,7 @@ Status (DEV-1539):
 | 2 | SVG input and hardening, the full catalog corpus test, reference shapes |
 | 3 (this) | board component, studio page, endpoint, its guards and the worker process |
 | 4 | templates, guide page, the start-here panel, the `/studio` short link |
+| 5 | "Your snake": a head card and a tail card, both on every board, checks per slot |
 
 ## Asset contract
 
@@ -799,56 +800,93 @@ report panics from the decode process.
 `GET /customizations/studio` (`server/src/routes/studio/page.rs`) is a public page that
 needs no login and stores nothing on the server. Every preview board is server-rendered
 with `components::snake_board`, with the default head and tail in place; the client,
-`server/static/studio.js`, posts uploads and then only sets attributes on placeholders:
+`server/static/studio.js`, posts uploads and then only sets attributes and text on
+placeholders. Per-slot ids are `studio-<part>-<kind>` (`page::slot_id`, kind `head` or
+`tail`):
 
 | Placeholder | What the page's JS sets |
 |---|---|
-| `path.studio-head`, `path.studio-tail` (every board: 16 live-loop frames, All directions, two Game size boards) | `d` and `fill-rule` of whatever fills that slot: the upload, or the "Pair with" reference |
-| `path#studio-closeup-path`, `g#studio-gaps` | the active slot, and red brackets on its `metrics.left_edge_gaps` |
+| `path.studio-head`, `path.studio-tail` (every board: 16 live-loop frames, All directions, two Game size boards) | `d` and `fill-rule` of whatever fills that slot: the upload, or the chosen catalog style |
+| `path#studio-closeup-path-<kind>`, `g#studio-gaps-<kind>` (inside `#studio-closeup`) | each slot's close-up, and red brackets on its upload's `metrics.left_edge_gaps` |
+| `path#studio-thumb-path-<kind>`, `#studio-name-<kind>` | the card's thumbnail and name ("Your head", "Example head", "Default head", "Curled tail") |
 | `#studio` | `--studio-snake`, the snake colour (`.studio-board` CSS reads it) |
 | `.studio-board` | `light` / `dark` |
-| `option[data-d][data-fill-rule]` in `#studio-pair-head` / `#studio-pair-tail` | read only; JS adds `option[value=user]` ("Your head"/"Your tail") once that slot holds an upload |
+| `option[data-d][data-fill-rule]` in `#studio-style-head` / `#studio-style-tail` | read only; JS adds `option[value=user]` ("Your head"/"Your tail") first once that slot holds an upload |
 
 Every `d` and colour is checked (`/^[MLQCZ0-9 .\-]*$/`, `/^#[0-9a-f]{6}$/i`) before use,
-including what `localStorage` (`arena:studio:v1`) restores, and lint text goes in with
-`textContent`.
+including what `localStorage` restores, and lint text goes in with `textContent`.
 
-- **Upload as: Head / Tail** (above the drop zone) picks the slot the next upload fills
-  and the slot the close-up and the checks show; switching says which in the status line.
-- **Moving a result.** Right after an upload, "Use it as a tail instead" moves the
-  result to the other slot without re-posting (both kinds' lints are in the response)
-  and puts back what it replaced. Tapping Tail while the tail slot is empty offers "Use
-  the file you just uploaded as your tail" instead, so either way of correcting a
-  mislabelled upload works, and an upload is never moved over the other slot's upload by
-  accident.
-- **Flip and Fit always work.** The uploaded file stays in memory only; once it's gone
-  (a reload, another upload), they re-post the saved path as the downloadable SVG.
+- **Your snake** (`section#studio-snake`): a card per slot, `#studio-slot-head` and
+  `#studio-slot-tail`, side by side from 560px and stacked on phones. Each card shows a
+  thumbnail and the name of what the slot wears, and has its own upload button
+  (`label#studio-upload-<kind>`, covered by `input#studio-file-<kind>`, so it is the file
+  input for touch, keyboard and VoiceOver: "Upload head", then "Upload a new version"),
+  its style select (`#studio-style-<kind>`: the catalog references, with "Your head"
+  first and selected once there is an upload), and, while it wears an upload, "Download
+  SVG", "Remove" (back to the default) and "This is actually a tail/head". After Remove,
+  "Undo" (`#studio-undo-<kind>`, in Remove's place and focused) puts the same upload
+  back, worn, until the slot holds another drawing (in memory only, like moving back).
+  Dropping a file on a card fills that slot. An upload only ever fills its own slot:
+  uploading a head never replaces or hides the tail, and every board, the live loop and
+  the saved image wear both slots. The panel comes first on the page, above Start here,
+  so both upload buttons are near the top on a first visit too.
+- **Moving an upload.** "This is actually a tail" moves the head slot's upload to the
+  tail slot without re-posting (both kinds' lints are in the response) and puts back
+  the head it replaced, if any. Over a tail slot that already holds a drawing it first
+  asks (`#studio-confirm-head`: "Replace your tail" / "Cancel"); it never overwrites
+  silently. Moving it back restores the tail it replaced. While an upload (or the
+  example) is on its way to the other slot, the move waits: the status says so and
+  nothing moves, since that upload would land over the moved drawing.
+- **Checks** are grouped per slot (`#studio-checks-<kind>`, each with its heading, its
+  pass line `#studio-pass-<kind>`, warnings, tips and details); Flip and Fit carry
+  `data-kind` and fix that slot. Under the cards, `#studio-summary` says both ("Head:
+  passes · Tail: 1 thing to check"), the status line says what just happened, and the
+  top warning shows the first warning of either slot ("Tail: …") with its link and fix.
+- **Saved state** is `localStorage` `arena:studio:v2`: `{ v: 2, slots: { head, tail },
+  pick: { head, tail }, color, theme, view }`, where `pick` is `user` (wear the upload)
+  or a reference slug. A v1 save (`arena:studio:v1`, one "Upload as" slot and "Pair
+  with" for the other) is read once if there's no v2: every slot with an upload wears
+  it, an empty slot keeps its pairing; the next save writes v2 and removes v1. Anything
+  that fails validation falls back to the defaults.
+- **Flip and Fit always work.** The uploaded file stays in memory only (per upload);
+  once it's gone (a reload), they re-post the saved path as the downloadable SVG.
   Both fixes are rewrites of the clean path, so the result matches fixing the original
   (a route test checks the metrics agree within 1%); the original file's notes are kept.
-- **A failed request changes nothing**: the last result, and its buttons, stay.
-- **The instant format check** before uploading comes from the server: `#studio-drop`
+- **A failed request changes nothing**: the last result, and its buttons, stay. Each
+  slot has its own request in flight; a newer upload or fix for the same slot
+  supersedes it, and Remove and Undo drop what was on its way to their slot. A move
+  drops a Flip or Fit on its way for either drawing, and waits (moves nothing) while an
+  upload is on its way to the other slot. Flip and Fit never supersede an upload: while
+  a new version is on its way, the old drawing's Flip/Fit says so and posts nothing. A
+  Flip or Fit that lands after the artist picked a catalog style fixes the upload kept
+  in the style list and leaves the pick as it is.
+- **The instant format check** before uploading comes from the server: `#studio-slots`
   carries `data-sniff`, the rejected entries of `design_kit::SIGNATURES` with their
   advice and the size limit. Anything else is posted and the server decides.
-- After a result, the drop zone shrinks to one row and the page scrolls to the preview
-  (with the checks beside it, at 980px+) or to the status line. Focus moves to the
-  Preview heading (`tabindex=-1`) so screen readers announce the result; it draws no
-  focus ring, since it isn't in the tab order. "Processing…" and every error (the
-  instant check, any server answer, a failed image save) scroll the status line into
-  view when it's off screen, since "Upload a new version" and Fix start requests far
-  from it.
+- After a result the page scrolls to the preview (with the checks beside it, at 980px+,
+  or with Start here open between it and the status line) or to the status line. Focus moves to the Preview heading (`tabindex=-1`) so screen
+  readers announce the result; it draws no focus ring, since it isn't in the tab order.
+  "Processing…" and every error (the instant check, any server answer, a failed image
+  save) scroll the status line into view when it's off screen, since "Upload a new
+  version" and Fix start requests far from it.
 - **Start here** (`details#studio-start`) is open until the artist's first upload of
-  their own, then closes (it opens again after Clear, and otherwise stays as the artist
-  leaves it):
+  their own, then closes (it opens again once both slots are back to the catalog, and
+  otherwise stays as the artist leaves it):
   1. the templates, by app: "Procreate (PSD)" and "Illustrator · Inkscape · Affinity
      (SVG)" for the head and the tail, each a `download` link;
   2. the guide;
-  3. upload here.
+  3. upload it, with the cards above.
 
   **Try an example** fetches `design-kit/example-drawing.png` (its `asset_url` is in
-  `data-src`) and posts it to the endpoint as a head, like any upload, but the result is
-  marked as the example (and saved that way): the status and the boards' labels call it
-  "the example head", and it leaves Start here open, so a newcomer who tries it first
-  still has the templates in view, after a reload too.
+  `data-src`) and posts it to the endpoint into the head slot (the tail is untouched),
+  like any upload, but the result is marked as the example (and saved that way): the
+  card, the status and the boards' labels call it "the example head", it can't be moved
+  to the tail slot, and it leaves Start here open, so a newcomer who tries it first
+  still has the templates in view, after a reload too. It never replaces the artist's
+  own head: with one in the slot (worn, or kept in the style list behind a catalog
+  style) or on its way there, the status says how to remove it first and nothing is
+  fetched; one that lands while the example file is still loading wins, and the example
+  is dropped.
 - Each check links to its section of the guide ("Learn more", from `Lint::guide_anchor`,
   sent as `guide` in the JSON). The page hands the script the guide's sections and what
   each is about (`data-guide-topics`, from `guide::RULE_TOPICS`, the one list), so an
@@ -1048,8 +1086,10 @@ processing slot held until the worker is gone, including when the request is dro
   clearing `faces_left`; Flip and Fit on the SVG the page rebuilds from a saved path
   matching the original file's fix; the slot held while processing and after an
   in-process timeout; crashes, timeouts and bugs mapped), the token bucket's clock, and
-  the page (every placeholder carrying the default head or tail, every reference with a
-  clean `data-d`, the browser's format check giving the server's answer for every
+  the page (every placeholder carrying the default head or tail, a card, close-up,
+  thumbnail and check group per slot with every per-slot id once, no "Upload as" or
+  "Pair with" left, every reference offered as a style for its own slot with a clean
+  `data-d`, the browser's format check giving the server's answer for every
   rejected format, and studio.js building the design kit's SVG file).
 - `server/tests/design_kit_templates.rs`: the committed design kit against the template
   contract: the SVG templates' guide colours are exactly `design_kit::palette` (and the
