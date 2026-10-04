@@ -1,14 +1,16 @@
 //! `GET /customizations/studio`: the Head & Tail Studio page.
 //!
 //! Everything is server-rendered: every preview board (with the default head and tail
-//! in place), the reference shapes for "Pair with", and empty containers for the
-//! checks. `static/studio.js` posts uploads to the processing endpoint and then only
-//! sets attributes: `d`/`fill-rule` on the placeholder paths, the `--studio-snake`
-//! colour variable, the board theme class, and the text of the checks.
+//! in place), a card per slot ("Your snake": the head and the tail, each with its
+//! upload button, its catalog styles and a thumbnail), a close-up per slot, and empty
+//! check lists per slot. `static/studio.js` posts uploads to the processing endpoint
+//! and then only sets attributes and text: `d`/`fill-rule` on the placeholder paths,
+//! the `--studio-snake` colour variable, the board theme class, and the checks.
 //!
 //! Placeholder paths: every board's head is `path.studio-head` and every tail
-//! `path.studio-tail`, whichever of them is the artist's own; the close-up is
-//! `path#studio-closeup-path`.
+//! `path.studio-tail`, whatever fills that slot; each slot's close-up is
+//! `path#studio-closeup-path-{head,tail}` and its thumbnail `path#studio-thumb-path-…`.
+//! Every per-slot id is `studio-<part>-<kind>` ([`slot_id`]).
 
 use arena::design_kit::{
     AssetKind, FillRule, ProcessError, SIGNATURES, Sniffed,
@@ -18,7 +20,9 @@ use axum::response::IntoResponse;
 use maud::{Markup, html};
 use serde::Serialize;
 
-use super::guide::{EXAMPLE_DRAWING, GUIDE_PATH, RULE_TOPICS, download_button, templates};
+use super::guide::{
+    EXAMPLE_DRAWING, GUIDE_PATH, RULE_TOPICS, download_button, kind_word, templates,
+};
 use super::process::MAX_BODY_BYTES;
 use crate::{
     components::{
@@ -84,7 +88,7 @@ pub(crate) fn default_ref(kind: AssetKind) -> &'static RefShape {
 }
 
 /// The browser's instant check before an upload, rendered from the server's own rules
-/// (`data-sniff` on `#studio-drop`): the formats [`design_kit::sniff`] rejects, with the
+/// (`data-sniff` on `#studio-slots`): the formats [`design_kit::sniff`] rejects, with the
 /// same advice, and the size limit. Anything else is posted and the server decides.
 ///
 /// [`design_kit::sniff`]: arena::design_kit::sniff
@@ -146,7 +150,6 @@ pub async fn studio_page(page_factory: PageFactory) -> impl IntoResponse {
 pub(crate) fn studio_markup() -> Markup {
     let head = placeholder(default_ref(AssetKind::Head), "studio-head");
     let tail = placeholder(default_ref(AssetKind::Tail), "studio-tail");
-    let default_head = default_ref(AssetKind::Head);
     let label_all = "Four pink snakes wearing the default head and the default tail, facing \
                      right, left, up and down";
     // Without the check the browser just posts every file; the server answers anyway.
@@ -159,8 +162,8 @@ pub(crate) fn studio_markup() -> Markup {
             div class="page-head" {
                 h1 { "Head & Tail Studio" }
                 div class="sub" {
-                    "Upload a head or tail you drew and see it on a real Battlesnake board: "
-                    "any colour, every direction, at game size and close up."
+                    "Upload a head and a tail you drew and see them together on a real "
+                    "Battlesnake board: any colour, every direction, at game size and close up."
                 }
             }
             noscript {
@@ -169,39 +172,28 @@ pub(crate) fn studio_markup() -> Markup {
 
             div class="studio-layout" {
                 (start_here())
-                section class="studio-panel studio-upload" aria-labelledby="studio-upload-heading" {
-                    h2 #studio-upload-heading class="vh" { "Upload" }
-                    // Picks the slot the next upload fills, and which slot the close-up
-                    // and the checks show.
-                    fieldset #studio-kind class="studio-seg studio-kind" {
-                        legend { "Upload as" }
-                        div class="studio-seg-opts" {
-                            label class="studio-seg-opt" {
-                                input type="radio" name="studio-kind" value="head" checked;
-                                span { "Head" }
-                            }
-                            label class="studio-seg-opt" {
-                                input type="radio" name="studio-kind" value="tail";
-                                span { "Tail" }
-                            }
-                        }
+                section #studio-snake class="studio-panel studio-snake" data-testid="studio-snake"
+                    aria-labelledby="studio-snake-heading" {
+                    h2 #studio-snake-heading { "Your snake" }
+                    p class="studio-muted studio-snake-lede" {
+                        "A head and a tail, together on every board. Upload either, or both."
                     }
-                    label #studio-drop class="studio-drop" data-testid="studio-drop" data-sniff=(sniff) {
-                        input #studio-file class="studio-file" type="file" name="file"
-                            accept=".png,.jpg,.jpeg,.svg,image/png,image/jpeg,image/svg+xml";
-                        span #studio-drop-title class="studio-drop-title" { "Choose a drawing" }
-                        span class="studio-drop-hint" { "PNG, JPEG or SVG, or drop it here" }
+                    div #studio-slots class="studio-slots" data-sniff=(sniff) {
+                        (slot_card(AssetKind::Head))
+                        (slot_card(AssetKind::Tail))
                     }
+                    p class="studio-muted studio-slots-hint" {
+                        "PNG, JPEG or SVG. You can also drop a file on a card."
+                    }
+                    p #studio-summary class="studio-summary" data-testid="studio-summary" hidden {}
                     p #studio-status class="studio-status" role="status" aria-live="polite"
                         data-testid="studio-status" { "Try it with your own drawing." }
-                    button #studio-relabel class="btn sm studio-relabel" type="button" hidden {
-                        "Use it as a tail instead"
-                    }
                     div #studio-top-warning class="studio-top-warning" data-testid="studio-top-warning" hidden {
                         span class="studio-lint-icon" aria-hidden="true" { "!" }
                         p #studio-top-warning-text {}
                         a #studio-top-learn class="studio-learn" hidden {}
-                        button #studio-top-fix class="btn sm studio-fix" type="button" hidden {}
+                        button #studio-top-fix class="btn sm studio-fix" type="button"
+                            data-action="fix" hidden {}
                     }
                 }
 
@@ -225,7 +217,10 @@ pub(crate) fn studio_markup() -> Markup {
                     }
                     div #studio-panes class="studio-panes" data-view="closeup" {
                         div class="studio-pane" data-pane="closeup" {
-                            (closeup(default_head))
+                            div #studio-closeup class="studio-closeups" {
+                                (closeup(AssetKind::Head))
+                                (closeup(AssetKind::Tail))
+                            }
                             p class="studio-pane-note" {
                                 "The body joins on the left edge. Red marks show gaps in the neck."
                             }
@@ -272,18 +267,10 @@ pub(crate) fn studio_markup() -> Markup {
                 section #studio-lints class="studio-panel studio-lints" aria-labelledby="studio-lints-heading" {
                     h2 #studio-lints-heading { "Checks" }
                     p #studio-lints-empty class="studio-muted" {
-                        "Upload a drawing to check it against the rules every official head and tail follows."
+                        "Upload a head or a tail to check it against the rules every official one follows."
                     }
-                    p #studio-pass class="studio-pass" data-testid="studio-pass" hidden {
-                        span class="studio-lint-icon" aria-hidden="true" { "✓" }
-                        span #studio-pass-text { "Passes every check the official heads pass." }
-                    }
-                    ul #studio-warnings class="studio-lint-list" data-testid="studio-warnings" {}
-                    ul #studio-tips class="studio-lint-list" data-testid="studio-tips" {}
-                    details #studio-details class="studio-details" hidden {
-                        summary #studio-details-summary { "Details (0)" }
-                        ul #studio-info class="studio-lint-list" data-testid="studio-info" {}
-                    }
+                    (checks(AssetKind::Head))
+                    (checks(AssetKind::Tail))
                 }
 
                 section class="studio-panel studio-controls" aria-labelledby="studio-controls-heading" {
@@ -324,27 +311,123 @@ pub(crate) fn studio_markup() -> Markup {
                             }
                         }
                     }
-                    (pair_select(AssetKind::Tail, "studio-pair-tail", "Pair your head with", false))
-                    (pair_select(AssetKind::Head, "studio-pair-head", "Pair your tail with", true))
                 }
 
                 section class="studio-panel studio-actions" aria-labelledby="studio-actions-heading" {
                     h2 #studio-actions-heading class="vh" { "Save" }
                     div class="studio-action-row" {
-                        button #studio-new-version class="btn solid" type="button" hidden { "Upload a new version" }
-                        button #studio-download-head class="btn" type="button" hidden { "Download head SVG" }
-                        button #studio-download-tail class="btn" type="button" hidden { "Download tail SVG" }
                         button #studio-save-image class="btn" type="button" { "Save preview image" }
-                        button #studio-clear class="btn" type="button" hidden { "Clear" }
                     }
                     p class="studio-privacy studio-muted" {
-                        "Your file is processed and immediately discarded on our servers. "
-                        "Your latest preview is kept only in this browser."
+                        "Your files are processed and immediately discarded on our servers. "
+                        "Your head, your tail and your settings are kept only in this browser."
                     }
                 }
             }
         }
         script src=(asset_url("studio.js")) defer {}
+    }
+}
+
+/// A per-slot element id: `studio-<part>-<kind>`, the same scheme studio.js uses.
+pub(crate) fn slot_id(part: &str, kind: AssetKind) -> String {
+    format!("studio-{part}-{}", kind_word(kind))
+}
+
+fn title_word(kind: AssetKind) -> &'static str {
+    match kind {
+        AssetKind::Head => "Head",
+        AssetKind::Tail => "Tail",
+    }
+}
+
+/// One slot of "Your snake": a thumbnail and the name of what fills the slot, its
+/// upload button (a label the file input covers, so it is the input for keyboard,
+/// touch and VoiceOver; the whole card also takes a dropped file), the catalog styles
+/// to use while the slot isn't the artist's own, and the upload's own actions, which
+/// studio.js shows once there is one.
+fn slot_card(kind: AssetKind) -> Markup {
+    let k = kind_word(kind);
+    let to = kind_word(match kind {
+        AssetKind::Head => AssetKind::Tail,
+        AssetKind::Tail => AssetKind::Head,
+    });
+    let shape = default_ref(kind);
+    let id = |part: &str| slot_id(part, kind);
+    html! {
+        div id=(id("slot")) class="studio-slot" data-kind=(k) data-testid=(id("slot"))
+            role="group" aria-labelledby=(id("title")) {
+            svg id=(id("thumb")) class="studio-thumb" xmlns="http://www.w3.org/2000/svg"
+                viewBox="-20 0 120 100" aria-hidden="true" focusable="false" {
+                rect class="studio-thumb-bg" width="100" height="100" {}
+                rect class="studio-thumb-body" x="-20" width="20" height="100" {}
+                path id=(id("thumb-path")) class="studio-thumb-path" d=(shape.d)
+                    fill-rule=(shape.fill_rule.as_svg()) {}
+            }
+            div class="studio-slot-who" {
+                h3 id=(id("title")) class="studio-slot-title" { (title_word(kind)) }
+                p id=(id("name")) class="studio-slot-name" { "Default " (k) }
+            }
+            label id=(id("upload")) class="btn solid studio-slot-upload" {
+                input id=(id("file")) class="studio-file" type="file" name=(id("file"))
+                    data-kind=(k)
+                    accept=".png,.jpg,.jpeg,.svg,image/png,image/jpeg,image/svg+xml";
+                span id=(id("upload-text")) { "Upload " (k) }
+                span id=(id("upload-vh")) class="vh" {}
+            }
+            div class="field studio-style" {
+                label for=(id("style")) { span class="vh" { (title_word(kind)) " " } "style" }
+                select id=(id("style")) class="studio-style-select" data-kind=(k) {
+                    @for r in refs(kind) {
+                        option value=(r.slug) data-d=(r.d) data-fill-rule=(r.fill_rule.as_svg())
+                            selected[r.slug == "default"] { (r.display_name) }
+                    }
+                }
+            }
+            div class="studio-slot-actions" {
+                button id=(id("download")) class="btn sm" type="button" data-action="download"
+                    data-kind=(k) hidden { "Download SVG" span class="vh" { " of your " (k) } }
+                button id=(id("remove")) class="btn sm" type="button" data-action="remove"
+                    data-kind=(k) hidden { "Remove" span class="vh" { " your " (k) } }
+                button id=(id("relabel")) class="btn sm studio-relabel" type="button"
+                    data-action="relabel" data-kind=(k) hidden { "This is actually a " (to) }
+            }
+            // Moving the upload over the other slot's own drawing needs a second tap here.
+            div id=(id("confirm")) class="studio-confirm" role="group"
+                aria-labelledby=(id("confirm-text")) hidden {
+                p id=(id("confirm-text")) {
+                    "Your " (to) " slot already has a drawing. Replace it with this one?"
+                }
+                div class="studio-confirm-buttons" {
+                    button id=(id("confirm-yes")) class="btn sm solid" type="button"
+                        data-action="relabel-confirm" data-kind=(k) { "Replace your " (to) }
+                    button id=(id("confirm-no")) class="btn sm" type="button"
+                        data-action="relabel-cancel" data-kind=(k) { "Cancel" }
+                }
+            }
+        }
+    }
+}
+
+/// The checks of one slot's upload, under its own heading, with its own pass state.
+fn checks(kind: AssetKind) -> Markup {
+    let k = kind_word(kind);
+    let id = |part: &str| slot_id(part, kind);
+    html! {
+        div id=(id("checks")) class="studio-checks" data-kind=(k) data-testid=(id("checks"))
+            role="group" aria-labelledby=(id("checks-title")) hidden {
+            h3 id=(id("checks-title")) class="studio-checks-title" { (title_word(kind)) }
+            p id=(id("pass")) class="studio-pass" data-testid=(id("pass")) hidden {
+                span class="studio-lint-icon" aria-hidden="true" { "✓" }
+                span { "Passes every check the official " (k) "s pass." }
+            }
+            ul id=(id("warnings")) class="studio-lint-list" data-testid=(id("warnings")) {}
+            ul id=(id("tips")) class="studio-lint-list" data-testid=(id("tips")) {}
+            details id=(id("details")) class="studio-details" hidden {
+                summary id=(id("details-summary")) { "Details (0)" }
+                ul id=(id("info")) class="studio-lint-list" data-testid=(id("info")) {}
+            }
+        }
     }
 }
 
@@ -366,9 +449,7 @@ fn start_here() -> Markup {
                     }
                     @for kind in [AssetKind::Head, AssetKind::Tail] {
                         div class="studio-start-kind" {
-                            span class="studio-start-kind-name" {
-                                @if kind == AssetKind::Head { "Head" } @else { "Tail" }
-                            }
+                            span class="studio-start-kind-name" { (title_word(kind)) }
                             div class="studio-start-buttons" {
                                 @for d in templates(kind) {
                                     (download_button(d, kind, "btn"))
@@ -387,7 +468,10 @@ fn start_here() -> Markup {
                 }
                 li {
                     h3 { "Upload here" }
-                    p { "Hide the guides, export a PNG (or an SVG), and choose it below." }
+                    p {
+                        "Hide the guides, export a PNG (or an SVG), and upload it below as "
+                        "your head or your tail."
+                    }
                 }
             }
             div class="studio-start-example" {
@@ -399,46 +483,34 @@ fn start_here() -> Markup {
     }
 }
 
-/// "Pair with" for the slot of `kind`: every reference of that kind, carrying its path
-/// for the page to swap in. studio.js adds "Your head"/"Your tail" once that slot holds
-/// an upload.
-fn pair_select(kind: AssetKind, id: &str, label: &str, hidden: bool) -> Markup {
-    let kind_name = match kind {
-        AssetKind::Head => "head",
-        AssetKind::Tail => "tail",
-    };
+/// One slot's asset at large size over a checkerboard, with a translucent body stub
+/// where the body joins (the left edge, for heads and tails alike) and room for red
+/// brackets on gaps in it.
+fn closeup(kind: AssetKind) -> Markup {
+    let shape = default_ref(kind);
+    let k = kind_word(kind);
+    let id = |part: &str| slot_id(part, kind);
+    let checker = id("checker");
     html! {
-        div class="field studio-pair" id={ (id) "-field" } hidden[hidden] {
-            label for=(id) { (label) }
-            select id=(id) class="studio-pair-select" data-kind=(kind_name) {
-                @for r in refs(kind) {
-                    option value=(r.slug) data-d=(r.d) data-fill-rule=(r.fill_rule.as_svg())
-                        selected[r.slug == "default"] { (r.display_name) }
+        figure class="studio-closeup-fig" {
+            figcaption class="studio-closeup-title" { (title_word(kind)) }
+            svg id=(id("closeup")) class="studio-closeup" xmlns="http://www.w3.org/2000/svg"
+                viewBox="-24 -6 130 112" role="img" aria-label={ "Close-up of the default " (k) } {
+                defs {
+                    pattern id=(checker) width="10" height="10" patternUnits="userSpaceOnUse" {
+                        rect width="10" height="10" fill="#ece9f1" {}
+                        rect width="5" height="5" fill="#dcd7e4" {}
+                        rect x="5" y="5" width="5" height="5" fill="#dcd7e4" {}
+                    }
                 }
+                rect class="studio-closeup-bg" width="100" height="100"
+                    fill={ "url(#" (checker) ")" } {}
+                rect class="studio-closeup-body" x="-24" width="24" height="100" {}
+                path id=(id("closeup-path")) class="studio-closeup-path" d=(shape.d)
+                    fill-rule=(shape.fill_rule.as_svg()) {}
+                g id=(id("gaps")) class="studio-gaps" {}
+                rect class="studio-closeup-frame" width="100" height="100" fill="none" {}
             }
-        }
-    }
-}
-
-/// The asset at large size over a checkerboard, with a translucent body stub where the
-/// body joins (the left edge) and room for red brackets on gaps in it.
-fn closeup(shape: &RefShape) -> Markup {
-    html! {
-        svg #studio-closeup class="studio-closeup" xmlns="http://www.w3.org/2000/svg"
-            viewBox="-24 -6 130 112" role="img" aria-label="Close-up of the default head" {
-            defs {
-                pattern #studio-checker width="10" height="10" patternUnits="userSpaceOnUse" {
-                    rect width="10" height="10" fill="#ece9f1" {}
-                    rect width="5" height="5" fill="#dcd7e4" {}
-                    rect x="5" y="5" width="5" height="5" fill="#dcd7e4" {}
-                }
-            }
-            rect class="studio-closeup-bg" width="100" height="100" fill="url(#studio-checker)" {}
-            rect class="studio-closeup-body" x="-24" width="24" height="100" {}
-            path #studio-closeup-path class="studio-closeup-path" d=(shape.d)
-                fill-rule=(shape.fill_rule.as_svg()) {}
-            g #studio-gaps class="studio-gaps" {}
-            rect class="studio-closeup-frame" width="100" height="100" fill="none" {}
         }
     }
 }
