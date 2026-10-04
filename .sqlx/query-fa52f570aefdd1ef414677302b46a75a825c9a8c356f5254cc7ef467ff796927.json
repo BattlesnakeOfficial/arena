@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "ALTER TABLE turns_hidden RENAME TO turns",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "fa52f570aefdd1ef414677302b46a75a825c9a8c356f5254cc7ef467ff796927"
+}

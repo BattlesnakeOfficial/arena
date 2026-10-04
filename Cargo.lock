@@ -217,6 +217,7 @@ dependencies = [
  "time",
  "tiny-skia",
  "tokio",
+ "tokio-tungstenite 0.28.0",
  "tokio-util",
  "toml",
  "tower 0.4.13",
