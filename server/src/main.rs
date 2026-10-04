@@ -56,10 +56,19 @@ mod components {
     pub mod live_refresh;
     pub mod page;
     pub mod page_factory;
+    pub mod snake_board;
     pub mod snake_tags;
 }
 
 fn main() -> color_eyre::Result<()> {
+    // Hidden one-shot subcommand: the Head & Tail Studio's upload worker, a child of the
+    // server (see `arena::studio_worker`). It runs before anything else on purpose: no
+    // Sentry, config, telemetry or database, just stdin to stdout.
+    let mut args = std::env::args().skip(1);
+    if args.next().as_deref() == Some(arena::studio_worker::SUBCOMMAND) {
+        std::process::exit(arena::studio_worker::worker_main(args));
+    }
+
     // Initialize Sentry for error tracking
     let _sentry_guard = setup_sentry();
 
