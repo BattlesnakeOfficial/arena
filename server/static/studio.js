@@ -3,8 +3,9 @@
 // Every board is server-rendered. This script posts an upload to the processing
 // endpoint and then only sets attributes: `d`/`fill-rule` on the placeholder paths
 // (path.studio-head, path.studio-tail, #studio-closeup-path), the --studio-snake
-// colour variable, the board theme class, and the text of the checks. No innerHTML;
-// every path and colour is validated before use, including what localStorage restores.
+// colour variable, the board theme class, and the text of the checks (with links into
+// the guide). No innerHTML; every path, colour and link is validated before use,
+// including what localStorage restores.
 (function () {
   "use strict";
   const root = document.getElementById("studio");
@@ -15,6 +16,15 @@
   const D_RE = /^[MLQCZ0-9 .\-]*$/;
   const COLOR_RE = /^#[0-9a-f]{6}$/i;
   const CODE_RE = /^[a-z_]{1,40}$/;
+  const ANCHOR_RE = /^#[a-z-]{1,24}$/;
+  // The guide's sections the checks link to, with what each is about ("Learn more
+  // about ..."), from the page (data-guide-topics); anything else gets no link.
+  const GUIDE_TOPICS = (() => {
+    let pairs = [];
+    try { pairs = JSON.parse(root.getAttribute("data-guide-topics") || "[]"); } catch (e) { /* no links */ }
+    return new Map((Array.isArray(pairs) ? pairs : []).filter((p) => Array.isArray(p) && p.length === 2 &&
+      typeof p[0] === "string" && /^[a-z-]{1,24}$/.test(p[0]) && typeof p[1] === "string" && p[1].length < 80));
+  })();
   const MAX_D = 65536;
   const FRAME_MS = 250;
   const SVG_NS = "http://www.w3.org/2000/svg";
@@ -37,7 +47,7 @@
 
   const state = {
     kind: "head",
-    slots: { head: null, tail: null }, // the artist's results: { d, fillRule, lints, info, gaps }
+    slots: { head: null, tail: null }, // results: { d, fillRule, lints, info, gaps, example }
     pair: { head: "default", tail: "default" }, // the other slot: "user" or a reference slug
     color: "#ff4f86",
     theme: document.documentElement.getAttribute("data-app-theme") === "dark" ? "dark" : "light",
@@ -55,7 +65,8 @@
         typeof l.message === "string" && l.message.length < 2000)
       .slice(0, 50)
       .map((l) => ({ code: l.code, severity: l.severity, message: l.message,
-        fix: l.fix === "flip" || l.fix === "fit" ? l.fix : null }));
+        fix: l.fix === "flip" || l.fix === "fit" ? l.fix : null,
+        guide: typeof l.guide === "string" && ANCHOR_RE.test(l.guide) ? l.guide : null }));
   const cleanGaps = (list) =>
     (Array.isArray(list) ? list : [])
       .filter((g) => Array.isArray(g) && g.length === 2 && g.every((n) => Number.isFinite(n) && n >= 0 && n <= 100))
@@ -65,7 +76,7 @@
     if (s.fillRule !== "nonzero" && s.fillRule !== "evenodd") return null;
     const lints = s.lints || {};
     return { d: s.d, fillRule: s.fillRule, lints: { head: cleanLints(lints.head), tail: cleanLints(lints.tail) },
-      info: cleanLints(s.info), gaps: cleanGaps(s.gaps) };
+      info: cleanLints(s.info), gaps: cleanGaps(s.gaps), example: s.example === true };
   }
 
   // ---- persistence ----------------------------------------------------------------
@@ -109,7 +120,7 @@
   function shapeFor(kind) {
     const slot = state.slots[kind];
     const own = kind === state.kind || state.pair[kind] === "user";
-    if (own && slot) return { d: slot.d, fillRule: slot.fillRule, name: "your " + kind };
+    if (own && slot) return { d: slot.d, fillRule: slot.fillRule, name: (slot.example ? "the example " : "your ") + kind };
     return refShape(kind, kind === state.kind ? "default" : state.pair[kind]);
   }
   function setPath(path, shape) {
@@ -122,8 +133,20 @@
     const preset = all('input[name="studio-color"]').find((i) => i.value === state.color);
     return preset ? preset.getAttribute("data-name").toLowerCase() : "custom-coloured (" + state.color + ")";
   }
+  // "Start here" is open until the artist's first upload of their own (the example
+  // doesn't count), then closes, and opens again after Clear. Only on those changes, so
+  // it stays however the artist leaves it.
+  const start = $("studio-start");
+  let startFor = null;
+  function syncStart(own) {
+    if (!start || startFor === own) return;
+    startFor = own;
+    start.open = !own;
+  }
+  const ownSlot = (kind) => !!(state.slots[kind] && !state.slots[kind].example);
   function render() {
     const any = !!(state.slots.head || state.slots.tail);
+    syncStart(ownSlot("head") || ownSlot("tail"));
     root.classList.toggle("studio-has-upload", any); // the drop zone shrinks to a row
     $("studio-drop-title").textContent = any ? "Choose another drawing" : "Choose a drawing";
     const head = shapeFor("head");
@@ -204,12 +227,24 @@
   }
 
   const fixLabel = (fix) => (fix === "flip" ? "Flip" : "Fit");
+  const GUIDE = (root.getAttribute("data-guide") || "").startsWith("/") ? root.getAttribute("data-guide") : "";
+  // Point a "Learn more" link at the guide's section for `lint`; false if there's none.
+  function setLearn(a, lint) {
+    const topic = GUIDE && lint.guide ? GUIDE_TOPICS.get(lint.guide.slice(1)) : null;
+    if (!topic) return false;
+    a.setAttribute("href", GUIDE + lint.guide);
+    empty(a);
+    a.append("Learn more", el("span", { class: "vh" }, " about " + topic));
+    return true;
+  }
   function lintItem(lint, withFix) {
     const warn = lint.severity === "warn";
     const li = el("li", { class: "studio-lint " + lint.severity, "data-code": lint.code });
     li.append(el("span", { class: "studio-lint-icon", "aria-hidden": "true" }, warn ? "!" : "i"),
       el("span", { class: "vh" }, warn ? "Warning: " : "Note: "),
       el("span", { class: "studio-lint-text" }, lint.message));
+    const learn = el("a", { class: "studio-learn" });
+    if (setLearn(learn, lint)) li.appendChild(learn);
     if (withFix && lint.fix) {
       li.appendChild(el("button", { type: "button", class: "btn sm studio-fix", "data-fix": lint.fix }, fixLabel(lint.fix)));
     }
@@ -236,6 +271,7 @@
 
     const top = $("studio-top-warning");
     top.hidden = warns.length === 0;
+    $("studio-top-learn").hidden = !(warns.length && setLearn($("studio-top-learn"), warns[0]));
     if (warns.length) {
       $("studio-top-warning-text").textContent = warns[0].message;
       const fixBtn = $("studio-top-fix");
@@ -272,6 +308,21 @@
     if (hit) return hit.message;
     return file.size > SNIFF.max_bytes ? SNIFF.too_large : null;
   }
+  // "Try an example": a finished head drawing from the design kit, through the real
+  // endpoint like any upload, but marked as the example: it says so, and it doesn't
+  // close "Start here".
+  async function tryExample() {
+    const src = $("studio-example").getAttribute("data-src") || "";
+    if (!src.startsWith("/static/")) return;
+    setStatus("Loading the example…");
+    let body = null;
+    try {
+      const res = await fetch(src, { credentials: "omit" });
+      if (res.ok) body = await res.arrayBuffer();
+    } catch (e) { /* network error: body stays null */ }
+    if (!body) return setStatus("We couldn't load the example. Check your connection and try again.", true);
+    send({ body: body, kind: "head", fixes: [], slot: null, displaced: state.slots.head, info: null, example: true }, []);
+  }
   async function handleFile(file) {
     if (!file) return;
     const problem = await preflight(file);
@@ -290,7 +341,7 @@
     const slot = state.slots[kind];
     if (!slot) return null;
     if (current && current.kind === kind && current.slot === slot) return current;
-    return { body: svgFor(slot), kind: kind, fixes: [], slot: slot, displaced: null, info: slot.info };
+    return { body: svgFor(slot), kind: kind, fixes: [], slot: slot, displaced: null, info: slot.info, example: slot.example };
   }
   // Post `job.body` with `fixes` (a set: the server applies Flip before Fit). Only a
   // success changes anything: after an error, the last result and its buttons stay.
@@ -319,6 +370,7 @@
       return setStatus(message, true);
     }
     if (job.info) slot.info = job.info;
+    slot.example = !!job.example;
     job.slot = slot;
     job.fixes = fixes;
     current = job;
@@ -326,7 +378,9 @@
     state.pair[job.kind] = "user";
     state.kind = job.kind;
     render();
-    setStatus("Done: your " + job.kind + " is on the board." + summary(slot.lints[job.kind].length));
+    setStatus(slot.example ? "This is the example " + job.kind + "." + summary(slot.lints[job.kind].length) +
+      " Upload your own drawing to replace it."
+      : "Done: your " + job.kind + " is on the board." + summary(slot.lints[job.kind].length));
     showResult();
   }
   // Focus the result, and bring it into view: the preview where the checks sit beside it,
@@ -366,7 +420,7 @@
   // "Upload as" switched: say what's showing now, and what the next upload fills.
   function kindChanged() {
     const slot = state.slots[state.kind];
-    if (slot) setStatus("Showing your " + state.kind + "." + summary(slot.lints[state.kind].length));
+    if (slot) setStatus("Showing " + (slot.example ? "the example " : "your ") + state.kind + "." + summary(slot.lints[state.kind].length));
     else setStatus("Your next upload will be your " + state.kind + ".");
   }
 
@@ -498,6 +552,7 @@
     if (fix) applyFix(fix.getAttribute("data-fix") === "fit" ? "fit" : "flip");
   });
   $("studio-relabel").addEventListener("click", relabel);
+  $("studio-example").addEventListener("click", () => { tryExample(); });
   $("studio-play").addEventListener("click", () => { playing = !playing; syncLoop(); });
   $("studio-new-version").addEventListener("click", () => fileInput.click());
   $("studio-download-head").addEventListener("click", () => downloadSvg("head"));
@@ -518,5 +573,8 @@
   restore();
   render();
   syncLoop();
-  if (state.slots[state.kind]) setStatus("Welcome back: your last preview is restored.");
+  if (state.slots[state.kind]) {
+    setStatus(state.slots[state.kind].example ? "Welcome back: the example " + state.kind +
+      " is still on the board. Upload your own drawing to replace it." : "Welcome back: your last preview is restored.");
+  }
 })();

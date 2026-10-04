@@ -507,12 +507,12 @@ fn fixes_apply_to_svg_input() {
 }
 
 // ---------------------------------------------------------------------------------------
-// The SVG template (fixtures/design_kit/template/head-template.svg, from the template
+// The SVG template (static/design-kit/battlesnake-head-template.svg, from the template
 // generator): draw-here, guides, references, and exports that strip ids.
 // ---------------------------------------------------------------------------------------
 
 fn template() -> String {
-    String::from_utf8(fixture("template/head-template.svg")).expect("utf-8")
+    String::from_utf8(design_kit_file("battlesnake-head-template.svg")).expect("utf-8")
 }
 
 /// The template with `inner` drawn into its `draw-here` layer.

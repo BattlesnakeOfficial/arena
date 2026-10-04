@@ -18,6 +18,7 @@ use axum::response::IntoResponse;
 use maud::{Markup, html};
 use serde::Serialize;
 
+use super::guide::{EXAMPLE_DRAWING, GUIDE_PATH, RULE_TOPICS, download_button, templates};
 use super::process::MAX_BODY_BYTES;
 use crate::{
     components::{
@@ -75,7 +76,7 @@ const FALLBACK_REF: RefShape = RefShape {
 };
 
 /// The `default` reference of a kind: what the slots show before any upload.
-fn default_ref(kind: AssetKind) -> &'static RefShape {
+pub(crate) fn default_ref(kind: AssetKind) -> &'static RefShape {
     refs(kind)
         .find(|r| r.slug == "default")
         .or_else(|| refs(kind).next())
@@ -150,8 +151,11 @@ pub(crate) fn studio_markup() -> Markup {
                      right, left, up and down";
     // Without the check the browser just posts every file; the server answers anyway.
     let sniff = serde_json::to_string(&client_sniff()).unwrap_or_default();
+    // The guide's sections the checks link to, for "Learn more about …".
+    let topics = serde_json::to_string(&RULE_TOPICS).unwrap_or_default();
     html! {
-        div #studio .studio data-testid="studio" {
+        div #studio .studio data-testid="studio" data-guide=(GUIDE_PATH)
+            data-guide-topics=(topics) {
             div class="page-head" {
                 h1 { "Head & Tail Studio" }
                 div class="sub" {
@@ -164,6 +168,7 @@ pub(crate) fn studio_markup() -> Markup {
             }
 
             div class="studio-layout" {
+                (start_here())
                 section class="studio-panel studio-upload" aria-labelledby="studio-upload-heading" {
                     h2 #studio-upload-heading class="vh" { "Upload" }
                     // Picks the slot the next upload fills, and which slot the close-up
@@ -195,6 +200,7 @@ pub(crate) fn studio_markup() -> Markup {
                     div #studio-top-warning class="studio-top-warning" data-testid="studio-top-warning" hidden {
                         span class="studio-lint-icon" aria-hidden="true" { "!" }
                         p #studio-top-warning-text {}
+                        a #studio-top-learn class="studio-learn" hidden {}
                         button #studio-top-fix class="btn sm studio-fix" type="button" hidden {}
                     }
                 }
@@ -339,6 +345,57 @@ pub(crate) fn studio_markup() -> Markup {
             }
         }
         script src=(asset_url("studio.js")) defer {}
+    }
+}
+
+/// Before the first upload: where to get a template, how to draw, and a finished
+/// example to run through the studio. Open until the first upload, then studio.js
+/// closes it (it stays one tap away).
+fn start_here() -> Markup {
+    html! {
+        details #studio-start class="studio-panel studio-start" data-testid="studio-start" open {
+            summary class="studio-start-summary" {
+                h2 { "Start here" }
+                span class="studio-muted studio-start-hint" { "Templates, the guide and an example" }
+            }
+            ol class="studio-start-steps" {
+                li {
+                    h3 { "Get a template" }
+                    p class="studio-muted" {
+                        "A 1000 × 1000 px canvas with the guides on their own layer."
+                    }
+                    @for kind in [AssetKind::Head, AssetKind::Tail] {
+                        div class="studio-start-kind" {
+                            span class="studio-start-kind-name" {
+                                @if kind == AssetKind::Head { "Head" } @else { "Tail" }
+                            }
+                            div class="studio-start-buttons" {
+                                @for d in templates(kind) {
+                                    (download_button(d, kind, "btn"))
+                                }
+                            }
+                        }
+                    }
+                }
+                li {
+                    h3 { "Draw" }
+                    p {
+                        "In black on the \u{201c}Draw here\u{201d} layer: one solid shape, edge "
+                        "to edge, with holes for the eyes and mouth."
+                    }
+                    a class="btn" href=(GUIDE_PATH) { "Read the guide" }
+                }
+                li {
+                    h3 { "Upload here" }
+                    p { "Hide the guides, export a PNG (or an SVG), and choose it below." }
+                }
+            }
+            div class="studio-start-example" {
+                button #studio-example class="btn" type="button"
+                    data-src=(asset_url(EXAMPLE_DRAWING)) { "Try an example" }
+                span class="studio-muted" { "A finished head, run through the studio." }
+            }
+        }
     }
 }
 
