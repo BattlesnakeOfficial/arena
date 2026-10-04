@@ -8,7 +8,7 @@ writes them to `server/static/design-kit/`:
 |---|---|
 | `battlesnake-head-template.psd`, `battlesnake-tail-template.psd` | 1000×1000 layered PSD for Procreate (Gallery → Import) and Illustrator on iPad |
 | `battlesnake-head-template.svg`, `battlesnake-tail-template.svg` | `viewBox="0 0 100 100"`, Inkscape-style layers, for vector apps |
-| `battlesnake-head-guide.png`, `battlesnake-tail-guide.png` | The guides layer alone, transparent, 1000×1000 (for apps that can't open either template, and for test fixtures) |
+| `battlesnake-head-guide.png`, `battlesnake-tail-guide.png` | The guides layer alone, transparent, 1000×1000 (for apps that can't open either template; the design_kit tests composite them with drawings) |
 | `example-drawing.png` | A hand-drawn-looking head used by the studio's "Try an example" button |
 
 Nothing in the server runs this script. It's Python only because psd-tools is
@@ -29,15 +29,8 @@ python3.12 -m venv .venv
 git status ../../server/static/design-kit # review the diff, then commit
 ```
 
-The design_kit tests run against copies of three of the outputs. After a
-regeneration, copy them too (a test fails until you do):
-
-```bash
-cd ../../server
-cp static/design-kit/battlesnake-head-guide.png tests/fixtures/design_kit/template/head-guide.png
-cp static/design-kit/battlesnake-tail-guide.png tests/fixtures/design_kit/template/tail-guide.png
-cp static/design-kit/battlesnake-head-template.svg tests/fixtures/design_kit/template/head-template.svg
-```
+The design_kit tests read the committed outputs directly, so after a
+regeneration run them (see the template contract below) before committing.
 
 `--out DIR` writes somewhere else. If the script isn't inside the arena repo,
 it defaults to `./out`.
@@ -51,11 +44,12 @@ something.
 
 On every run the script also checks its own output and exits non-zero if:
 - the SVG layer ids or colours break the contract below
+- a PSD layer has a mask, or "Draw here" isn't fully transparent
 - `example-drawing.png` would trip any of the studio's head lints (coverage,
   left edge, margins, direction, outline-only)
 
-It prints each PSD's layer list (name, visibility, blend mode, locks) so you
-can eyeball it.
+It prints each PSD's size and layer list (name, visibility, blend mode, locks,
+alpha range) so you can eyeball it.
 
 ## Template contract
 
@@ -80,7 +74,8 @@ one of these six colours, and nothing else (no white halos, no black):
 | `#c8c2d4` | 0.77 | 1.73:1 | reference ghost (baked into the pixels, not layer opacity) |
 
 Why these: the studio treats anything within RGB distance 48 of a template
-colour as "template, not ink". Every colour here is lighter than 50% luma, so
+colour as "template, not ink" (and, when the reference shows, anything within
+32 of a guide colour multiplied over the ghost). Every colour here is lighter than 50% luma, so
 that zone stays clear of the dark colours people draw with (navy, sapphire,
 royal blue, steel blue, crimson, raspberry, teal). The first palette used dark
 blues and a crimson for its labels, and drawings in those colours came back
@@ -113,6 +108,16 @@ stroke is a palette colour, because Figma strips ids on import.
 The guides use Multiply so that an export made with the guides still on keeps
 every ink pixel black.
 
+The document is RGBA, so each layer's shape is its own transparency channel
+and no layer has a mask. (In an RGB document psd-tools stores a layer's alpha
+as a mask over solid pixels: "Draw here" came out solid black under a hide-all
+mask, so paint on it stayed hidden in apps that keep masks, and the canvas
+opened black in apps that drop them.) "Draw here" is fully transparent. The
+merged composite's fourth channel is its transparency (a negative layer
+count), as Photoshop writes a layered document. The script checks this on
+every run, and `server/tests/design_kit_templates.rs` parses the committed
+PSDs and checks it too.
+
 **Copy.** The guides say "keep details ≥ 40 px", and the studio's lint
 messages and the guide page (`server/src/routes/studio/guide.rs`) use the same
 number. Change all three together.
@@ -122,7 +127,7 @@ number. Change all three together.
 - `server/static/` is compiled into the server binary (`include_dir!`) and
   served with a content hash. The Rust build, CI and the Docker image therefore
   need the files to exist, and none of them should need Python or cairo.
-- The palette/id contract test reads the committed SVGs.
+- The contract tests read the committed SVGs, PSDs and guide PNGs.
 - Templates change rarely. A reviewer sees exactly which bytes users will
   download.
 
@@ -142,7 +147,8 @@ number. Change all three together.
   `#c8c2d4` ghost).
 - `example-drawing.png` is original, drawn procedurally by
   `example_drawing.py` (seeded, so it's deterministic). It doesn't copy any
-  catalog head.
+  catalog head, and it follows the guide's own rule: every hole, and every ring
+  of ink or paper between holes, is at least 40 px.
 - Python dependencies (pinned in `requirements.txt`) run only at generation
   time and aren't shipped: psd-tools (MIT), fontTools (MIT), Pillow (MIT-CMU),
   numpy (BSD-3-Clause), CairoSVG (LGPL-3.0).

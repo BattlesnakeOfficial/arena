@@ -597,7 +597,9 @@ test.describe('Head & Tail Studio: start here', () => {
     const result = (await response.json()) as Processed;
     expect(result.input).toBe('png');
     expect(result.lints.head, 'the example passes every head check').toEqual([]);
-    await expect(page.locator('#studio-status')).toHaveText('Done: your head is on the board. It passes every check.');
+    // It says it's the example, not "your head".
+    await expect(page.locator('#studio-status')).toHaveText(
+      'This is the example head. It passes every check. Upload your own drawing to replace it.');
     await expect(page.locator('input[name="studio-kind"][value="head"]')).toBeChecked();
     await expectAllPaths(page, 'path.studio-head', result.path_d, result.fill_rule);
     await expectAllPaths(page, 'path.studio-tail', defaultTail);
@@ -607,7 +609,22 @@ test.describe('Head & Tail Studio: start here', () => {
     await expect(page.getByTestId('studio-top-warning')).toBeHidden();
     await expect(page.locator('#studio-result-heading')).toBeFocused();
     await expect(page.locator('#studio-download-head')).toBeVisible();
-    expect(await isOpen(page.getByTestId('studio-start'))).toBe(false);
+    // The example isn't an upload of the artist's own: the templates stay one glance away.
+    const start = page.getByTestId('studio-start');
+    expect(await isOpen(start)).toBe(true);
+    await expect(page.locator('#studio-closeup')).toHaveAttribute('aria-label', /the example head/);
+
+    // Still the example after a reload, with "Start here" open.
+    await page.reload();
+    await expect(page.locator('#studio-status')).toHaveText(
+      'Welcome back: the example head is still on the board. Upload your own drawing to replace it.');
+    expect(await isOpen(start)).toBe(true);
+    await expectAllPaths(page, 'path.studio-head', result.path_d, result.fill_rule);
+
+    // The artist's own upload replaces it and closes the panel.
+    await upload(page, 'head.png');
+    await expect(page.locator('#studio-status')).toHaveText(/^Done: your head is on the board\./);
+    await expect.poll(() => isOpen(start), 'closed after their own upload').toBe(false);
   });
 
   test('"Learn more" on each check opens its section of the guide', async ({ page }) => {

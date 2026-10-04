@@ -274,8 +274,14 @@ def lock_all(layer) -> None:
 
 
 def build_psd(kind: Kind, path: Path, drawing: Image.Image | None = None) -> None:
-    """Write the layered template. `drawing` (RGBA) is for tests only."""
-    psd = PSDImage.new("RGB", (CANVAS_PX, CANVAS_PX), color=(255, 255, 255))
+    """Write the layered template. `drawing` (RGBA) is for tests only.
+
+    The document is RGBA so each layer's alpha is its transparency channel. In an RGB
+    document psd-tools stores it as a layer mask over solid pixels instead: "Draw here"
+    becomes solid black hidden by a mask, so paint on it stays invisible in apps that
+    keep masks, and the canvas opens black in apps that don't.
+    """
+    psd = PSDImage.new("RGBA", (CANVAS_PX, CANVAS_PX), color=(255, 255, 255, 255))
     # create_pixel_layer adds at the top, so build bottom -> top.
     bg = psd.create_pixel_layer(Image.new("RGBA", (CANVAS_PX, CANVAS_PX), (255, 255, 255, 255)),
                                 name="Background (leave on)")
@@ -295,18 +301,34 @@ def build_psd(kind: Kind, path: Path, drawing: Image.Image | None = None) -> Non
                                     blend_mode=BlendMode.MULTIPLY)
     lock_all(guides)
     # The merged composite (what non-layer-aware readers and thumbnails show)
-    # is written RAW by default: 3 MB. RLE brings the whole file to ~0.6 MB.
+    # is written RAW by default: 4 MB. RLE brings the whole file to about 0.87 MB
+    # (verify_psd prints the size).
     psd._record.image_data.compression = Compression.RLE
+    # A negative layer count marks the composite's 4th channel as its transparency,
+    # as Photoshop writes a layered document; otherwise it reads as a stray "Alpha 1".
+    layer_info = psd._record._get_layer_info()
+    layer_info.layer_count = -abs(layer_info.layer_count)
     psd.save(path)
 
 
 def verify_psd(path: Path) -> list[str]:
+    """Describe the PSD, and fail if a layer has a mask or "Draw here" isn't empty.
+
+    (server/tests/design_kit_templates.rs checks the committed files the same way.)
+    """
     psd = PSDImage.open(path)
-    rows = [f"{path.name}: {psd.width}x{psd.height} mode={psd.color_mode.name} depth={psd.depth}"]
+    rows = [f"{path.name}: {psd.width}x{psd.height} mode={psd.color_mode.name} "
+            f"channels={psd.channels} depth={psd.depth} {path.stat().st_size / 1e6:.2f} MB"]
     for layer in reversed(list(psd)):  # top -> bottom
+        if layer.has_mask():
+            raise SystemExit(f"{path.name}: layer {layer.name!r} has a mask")
+        alpha = layer.topil().getchannel("A")
+        lo, hi = alpha.getextrema()
+        if layer.name == "Draw here (black)" and hi != 0:
+            raise SystemExit(f"{path.name}: 'Draw here' is not empty")
         rows.append(f"  - {layer.name!r:44} visible={layer.visible!s:5} "
                     f"opacity={layer.opacity:3} blend={layer.blend_mode.name:8} locks={hex(layer.locks.value) if layer.locks is not None else None} "
-                    f"bbox={layer.bbox}")
+                    f"bbox={layer.bbox} alpha={lo}..{hi}")
     return rows
 
 

@@ -62,10 +62,10 @@ pub fn register(mut router: axum::Router<AppState>) -> axum::Router<AppState> {
     router
 }
 
-/// Temporary (not permanent) redirects: the targets are external and can
-/// change (Discord invites, social handles) without us wanting browsers to
-/// cache the old destination forever. Query strings pass through so tracking
-/// params on shared links survive.
+/// Temporary (not permanent) redirects: external targets can change (Discord
+/// invites, social handles) and pages on this site can move, without us wanting
+/// browsers to cache the old destination forever. Query strings pass through so
+/// tracking params on shared links survive.
 fn redirect_to(target: &str, query: Option<&str>) -> impl IntoResponse + use<> {
     match query {
         Some(q) if !q.is_empty() => Redirect::temporary(&format!("{target}?{q}")),

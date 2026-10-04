@@ -18,7 +18,7 @@ use axum::response::IntoResponse;
 use maud::{Markup, html};
 use serde::Serialize;
 
-use super::guide::{EXAMPLE_DRAWING, GUIDE_PATH, download_button, templates};
+use super::guide::{EXAMPLE_DRAWING, GUIDE_PATH, RULE_TOPICS, download_button, templates};
 use super::process::MAX_BODY_BYTES;
 use crate::{
     components::{
@@ -151,8 +151,11 @@ pub(crate) fn studio_markup() -> Markup {
                      right, left, up and down";
     // Without the check the browser just posts every file; the server answers anyway.
     let sniff = serde_json::to_string(&client_sniff()).unwrap_or_default();
+    // The guide's sections the checks link to, for "Learn more about …".
+    let topics = serde_json::to_string(&RULE_TOPICS).unwrap_or_default();
     html! {
-        div #studio .studio data-testid="studio" data-guide=(GUIDE_PATH) {
+        div #studio .studio data-testid="studio" data-guide=(GUIDE_PATH)
+            data-guide-topics=(topics) {
             div class="page-head" {
                 h1 { "Head & Tail Studio" }
                 div class="sub" {
