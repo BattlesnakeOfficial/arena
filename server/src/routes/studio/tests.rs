@@ -677,6 +677,7 @@ async fn the_page_renders_every_board_with_placeholders(db: sqlx::PgPool) {
             "download",
             "remove",
             "relabel",
+            "undo",
             "confirm",
             "confirm-yes",
             "confirm-no",
@@ -756,6 +757,11 @@ async fn the_page_renders_every_board_with_placeholders(db: sqlx::PgPool) {
     // by app), the guide, and the example studio.js posts as a head.
     assert!(html.contains("<details id=\"studio-start\""));
     assert!(html.contains(" open>"));
+    // Under "Your snake", so both upload buttons come first on a first visit too.
+    let snake_at = html.find("id=\"studio-snake\"").expect("Your snake");
+    let start_at = html.find("id=\"studio-start\"").expect("Start here");
+    let preview_at = html.find("id=\"studio-result-heading\"").expect("Preview");
+    assert!(snake_at < start_at && start_at < preview_at);
     assert_eq!(html.matches(">Procreate (PSD)</a>").count(), 2);
     assert_eq!(
         html.matches(">Illustrator · Inkscape · Affinity (SVG)</a>")

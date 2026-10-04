@@ -82,6 +82,14 @@ async function answerTo(page: Page, act: () => Promise<unknown>, match = isProce
   }
 }
 
+/** Hold every request `match` routes until the returned release() is called. */
+async function hold(page: Page, match: (url: URL) => boolean): Promise<() => void> {
+  let release = () => {};
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  await page.route(match, async (route) => { await held; await route.continue(); });
+  return release;
+}
+
 /** Upload `name` with the `kind` card's button and return the endpoint's answer. */
 async function upload(page: Page, name: string, kind: Kind = 'head'): Promise<Processed> {
   const response = await answerTo(page, () => part(page, 'file', kind).setInputFiles(fixture(name)));
@@ -306,11 +314,13 @@ test.describe('Head & Tail Studio', () => {
     await expectAllPaths(page, 'tail', again.path_d);
   });
 
-  test('Remove puts one slot back to the catalog and leaves the other', async ({ page }) => {
+  test('Remove puts one slot back to the catalog and leaves the other, and Undo puts it back', async ({ page }) => {
     await openStudio(page);
     const status = page.locator('#studio-status');
-    await upload(page, 'head.png', 'head');
+    const summary = page.getByTestId('studio-summary');
+    const head = await upload(page, 'head.png', 'head');
     const tail = await upload(page, 'tail.svg', 'tail');
+    for (const kind of KINDS) await expect(part(page, 'undo', kind)).toBeHidden();
 
     await part(page, 'remove', 'head').click();
     await expect(status).toHaveText('Removed your head. The board shows the default head.');
@@ -321,23 +331,54 @@ test.describe('Head & Tail Studio', () => {
     await expect(part(page, 'style', 'head')).toHaveValue('default');
     await expect(part(page, 'style', 'head').locator('option[value="user"]')).toHaveCount(0);
     await expect(part(page, 'upload-text', 'head')).toHaveText('Upload head');
-    await expect(part(page, 'file', 'head'), 'focus goes to the emptied card').toBeFocused();
-    await expect(page.getByTestId('studio-summary')).toHaveText('Tail: passes');
+    await expect(summary).toHaveText('Tail: passes');
+    // Undo takes Remove's place, and focus, in case it was a slip.
+    await expect(part(page, 'undo', 'head')).toBeVisible();
+    await expect(part(page, 'undo', 'head')).toHaveAccessibleName('Undo removing your head');
+    await expect(part(page, 'undo', 'head'), 'focus stays where Remove was').toBeFocused();
+    await expect(part(page, 'undo', 'tail')).toBeHidden();
 
-    // And the tail: the studio is back where it started.
+    // Undo: the same head, worn, with its checks, and saved.
+    await part(page, 'undo', 'head').click();
+    await expect(status).toHaveText('Your head is back.');
+    await expectAllPaths(page, 'head', head.path_d);
+    await expectCard(page, 'head', 'Your head', true);
+    await expect(part(page, 'undo', 'head')).toBeHidden();
+    await expect(part(page, 'remove', 'head')).toBeFocused();
+    await expect(summary).toHaveText('Head: passes · Tail: passes');
+    expect(JSON.parse(await page.evaluate((k) => localStorage.getItem(k) as string, STORE)).slots.head.d).toBe(head.path_d);
+
+    // Undo stays through a catalog pick (and wears the upload again), but not once the
+    // slot holds another drawing: here, the head moved into the empty tail slot.
     await part(page, 'remove', 'tail').click();
     await expect(status).toHaveText('Removed your tail. The board shows the default tail.');
+    await part(page, 'style', 'tail').selectOption('bolt');
+    await expect(part(page, 'undo', 'tail')).toBeVisible();
+    await part(page, 'undo', 'tail').click();
+    await expect(part(page, 'style', 'tail')).toHaveValue('user');
+    await expectAllPaths(page, 'tail', tail.path_d);
+    await part(page, 'remove', 'tail').click();
+    await part(page, 'relabel', 'head').click();
+    await expect(status).toHaveText('Moved: that drawing is now your tail.');
+    await expect(part(page, 'undo', 'tail')).toBeHidden();
+    await expectAllPaths(page, 'tail', head.path_d);
+
+    // And the last one: the studio is back where it started.
+    await part(page, 'remove', 'tail').click();
+    await expectAllPaths(page, 'head', await refPath(page, 'head', 'default'));
     await expectAllPaths(page, 'tail', await refPath(page, 'tail', 'default'));
+    await expectCard(page, 'head', 'Default head', false);
     await expectCard(page, 'tail', 'Default tail', false);
-    await expect(page.getByTestId('studio-summary')).toBeHidden();
+    await expect(summary).toBeHidden();
     await expect(page.locator('#studio-lints-empty')).toBeVisible();
 
-    // Nothing comes back after a reload.
+    // Nothing comes back after a reload, and Undo (in memory only) is gone.
     await page.reload();
     await ready(page);
     await expect(status).toHaveText('Try it with your own drawing.');
     await expectAllPaths(page, 'head', await refPath(page, 'head', 'default'));
     await expectAllPaths(page, 'tail', await refPath(page, 'tail', 'default'));
+    for (const kind of KINDS) await expect(part(page, 'undo', kind)).toBeHidden();
   });
 
   test('a round blob warns about the neck, with brackets on the head close-up only', async ({ page }) => {
@@ -664,9 +705,11 @@ test.describe('Head & Tail Studio', () => {
           tail: { d: 'M0 0L1 1Z', fillRule: 'url(#x)' },
         },
       };
+      // In v1 an empty slot's style comes from its pairing, so leave the tail empty there
+      // and the bad pairing is what restore() gets.
       const value = version === 'v2'
         ? { v: 2, ...bad, pick: { head: 'user', tail: '../../etc' } }
-        : { v: 1, kind: 'head', ...bad, pair: { head: 'user', tail: '../../etc' } };
+        : { v: 1, kind: 'head', ...bad, slots: { ...bad.slots, tail: null }, pair: { head: 'user', tail: '../../etc' } };
       await page.evaluate(([k, v]) => {
         localStorage.clear();
         localStorage.setItem(k, v);
@@ -913,6 +956,86 @@ test.describe('Head & Tail Studio: drop and move', () => {
     await expectAllPaths(page, 'head', moved.path_d);
   });
 
+  test('a move never races an upload still on its way to the other slot', async ({ page }) => {
+    await openStudio(page);
+    const status = page.locator('#studio-status');
+    const notYet = "Your tail is still processing, so nothing moved. Try again once it's on the board.";
+    const head = await upload(page, 'head.png', 'head');
+    const tail = await upload(page, 'tail.svg', 'tail');
+
+    // The move question is open when a new tail starts uploading: "Replace your tail"
+    // waits for it rather than racing it.
+    await part(page, 'relabel', 'head').click();
+    await expect(part(page, 'confirm', 'head')).toBeVisible();
+    let release = await hold(page, isEndpoint);
+    await part(page, 'file', 'tail').setInputFiles(fixture('mirrored-head.png'));
+    await expect(status).toHaveText('Processing your tail…');
+    await part(page, 'confirm-yes', 'head').click();
+    await expect(status).toHaveText(notYet);
+    await expect(status).toHaveClass(/error/);
+    await expect(part(page, 'confirm', 'head')).toBeHidden();
+    await expect(part(page, 'relabel', 'head')).toBeFocused();
+    await expectAllPaths(page, 'head', head.path_d);
+    await expectAllPaths(page, 'tail', tail.path_d);
+    let answer = page.waitForResponse(isProcess);
+    release();
+    expect([200, ...CAPACITY]).toContain((await answer).status());
+    await expect(page.getByTestId('studio')).not.toHaveAttribute('aria-busy', 'true');
+    await expectAllPaths(page, 'head', head.path_d);
+    await page.unroute(isEndpoint);
+
+    // Into an empty slot too: the head isn't moved under a tail that's about to land.
+    await part(page, 'remove', 'tail').click();
+    release = await hold(page, isEndpoint);
+    await part(page, 'file', 'tail').setInputFiles(fixture('tail.svg'));
+    await expect(status).toHaveText('Processing your tail…');
+    await part(page, 'relabel', 'head').click();
+    await expect(status).toHaveText(notYet);
+    await expect(part(page, 'confirm', 'head')).toBeHidden();
+    await expectAllPaths(page, 'head', head.path_d);
+    answer = page.waitForResponse(isProcess);
+    release();
+    const landed = await answer;
+    expect([200, ...CAPACITY]).toContain(landed.status());
+    if (landed.status() === 200) {
+      await expect(status).toHaveText('Done: your tail is on the board. It passes every check.');
+      await expectAllPaths(page, 'tail', tail.path_d);
+    }
+    await expect(page.getByTestId('studio')).not.toHaveAttribute('aria-busy', 'true');
+    // Both drawings are still somewhere: the head in its slot, and saved.
+    await expectAllPaths(page, 'head', head.path_d);
+    await expectCard(page, 'head', 'Your head', true);
+    expect(JSON.parse(await page.evaluate((k) => localStorage.getItem(k) as string, STORE)).slots.head.d).toBe(head.path_d);
+  });
+
+  test('a Flip that lands after you pick a catalog style fixes your upload and keeps your pick', async ({ page }) => {
+    await openStudio(page);
+    const status = page.locator('#studio-status');
+    const fang = await refPath(page, 'head', 'fang');
+    await upload(page, 'mirrored-head.png', 'head');
+    const release = await hold(page, isEndpoint);
+    await page.locator('#studio-warnings-head .studio-fix[data-fix="flip"]').click();
+    await expect(status).toHaveText('Processing your head…');
+    await part(page, 'style', 'head').selectOption('fang');
+    await expectAllPaths(page, 'head', fang);
+
+    const answer = page.waitForResponse(isProcess);
+    release();
+    const response = await answer;
+    expect([200, ...CAPACITY]).toContain(response.status());
+    await page.unroute(isEndpoint);
+    test.skip(response.status() !== 200, 'the server was busy: no Flip to land');
+    const flipped = (await response.json()) as Processed;
+    await expect(status).toHaveText('Done: your head is fixed. The head card shows the Fang head, so pick “Your head” in its style list to see it.');
+    await expect(part(page, 'style', 'head')).toHaveValue('fang');
+    await expectAllPaths(page, 'head', fang);
+    await expectCard(page, 'head', 'Fang head', false);
+    // The fixed drawing is the one kept in the style list.
+    await part(page, 'style', 'head').selectOption('user');
+    await expectAllPaths(page, 'head', flipped.path_d);
+    await expect(page.getByTestId('studio-pass-head')).toBeVisible();
+  });
+
   test('a stored upload behind a catalog style still counts as a drawing to ask about', async ({ page }) => {
     await openStudio(page);
     const tail = await upload(page, 'tail.svg', 'tail');
@@ -1153,14 +1276,16 @@ test.describe('Head & Tail Studio: start here', () => {
     const summary = start.locator('summary');
     const example = page.locator('#studio-example');
     expect(await isOpen(start)).toBe(true);
-    for (const step of ['Get a template', 'Draw', 'Upload here']) {
+    for (const step of ['Get a template', 'Draw', 'Upload it']) {
       await expect(start.getByRole('heading', { level: 3, name: step })).toBeVisible();
     }
     await expect(start.getByRole('link', { name: 'Read the guide' })).toHaveAttribute('href', GUIDE);
     await expect(example).toBeVisible();
-    // Before "Your snake", so it's the first thing on the page.
-    expect(await start.evaluate((el) =>
-      !!(el.compareDocumentPosition(document.querySelector('.studio-snake') as Node) & Node.DOCUMENT_POSITION_FOLLOWING))).toBe(true);
+    // Under "Your snake", so both upload buttons come first, and over the preview.
+    expect(await start.evaluate((el) => [
+      !!(el.compareDocumentPosition(document.querySelector('.studio-snake') as Node) & Node.DOCUMENT_POSITION_PRECEDING),
+      !!(el.compareDocumentPosition(document.querySelector('.studio-preview') as Node) & Node.DOCUMENT_POSITION_FOLLOWING),
+    ])).toEqual([true, true]);
 
     await upload(page, 'head.png');
     await expect.poll(() => isOpen(start), 'closed after the first upload').toBe(false);
@@ -1237,6 +1362,8 @@ test.describe('Head & Tail Studio: start here', () => {
     // The example isn't an upload of the artist's own: the templates stay one glance away.
     const start = page.getByTestId('studio-start');
     expect(await isOpen(start)).toBe(true);
+    // Start here is open between the status and the preview: the page shows the preview.
+    await expect(part(page, 'closeup', 'head')).toBeInViewport({ ratio: 0.3 });
     await expect(part(page, 'closeup', 'head')).toHaveAttribute('aria-label', /the example head/);
 
     // Still the example after a reload, with "Start here" open.
@@ -1270,6 +1397,66 @@ test.describe('Head & Tail Studio: start here', () => {
     expect(posted).toEqual([]);
     await expectAllPaths(page, 'head', head.path_d);
     await expectAllPaths(page, 'tail', tail.path_d);
+
+    // Nor one kept in the style list behind a catalog style, and it says where it is.
+    await part(page, 'style', 'head').selectOption('fang');
+    await expect(part(page, 'remove', 'head')).toBeHidden();
+    await page.locator('#studio-example').click();
+    await expect(status).toHaveText("The example is a head, and your own head is kept in the head card's style list. " +
+      'Pick “Your head” there and tap Remove first to try the example.');
+    expect(posted).toEqual([]);
+    await part(page, 'style', 'head').selectOption('user');
+    await expect(part(page, 'remove', 'head')).toBeVisible();
+    await expectAllPaths(page, 'head', head.path_d);
+  });
+
+  test('"Try an example" never lands over a head of your own that is on its way', async ({ page }) => {
+    await openStudio(page);
+    const status = page.locator('#studio-status');
+    const posted: string[] = [];
+    page.on('request', (r) => { if (r.url().includes(ENDPOINT)) posted.push(r.url()); });
+    const isExample = (url: URL) => url.pathname.endsWith('/design-kit/example-drawing.png');
+
+    // Your head is still processing: the example isn't even fetched.
+    const fetches: string[] = [];
+    page.on('request', (r) => { if (isExample(new URL(r.url()))) fetches.push(r.url()); });
+    let release = await hold(page, isEndpoint);
+    await part(page, 'file', 'head').setInputFiles(fixture('head.png'));
+    await expect(status).toHaveText('Processing your head…');
+    await page.locator('#studio-example').click();
+    await expect(status).toHaveText(
+      "The example is a head, and your own head is still processing. Remove it once it's on the board to try the example.");
+    expect(fetches).toEqual([]);
+    expect(posted).toHaveLength(1);
+    const answer = page.waitForResponse(isProcess);
+    release();
+    const first = await answer;
+    expect([200, ...CAPACITY]).toContain(first.status());
+    await page.unroute(isEndpoint);
+    expect(posted, 'nothing posted for the example').toHaveLength(1);
+    if (first.status() === 200) {
+      await expect(status).toHaveText(/^Done: your head is on the board\./);
+      await expectCard(page, 'head', 'Your head', true);
+      await part(page, 'remove', 'head').click();
+    }
+
+    // The example file is slow, and a head of your own lands meanwhile: yours stays.
+    const start = page.getByTestId('studio-start');
+    await expect.poll(() => isOpen(start), 'Start here open again with no head of your own').toBe(true);
+    release = await hold(page, isExample);
+    await page.locator('#studio-example').click();
+    await expect(status).toHaveText('Loading the example…');
+    const head = await upload(page, 'head.png', 'head');
+    const sent = posted.length;
+    const fetched = page.waitForResponse((r) => isExample(new URL(r.url())));
+    release();
+    expect((await fetched).status()).toBe(200);
+    await page.evaluate(() => new Promise((resolve) => setTimeout(resolve, 500)));
+    expect(posted.length, 'the example is not posted').toBe(sent);
+    await expect(status).toHaveText(/^Done: your head is on the board\./);
+    await expectCard(page, 'head', 'Your head', true);
+    await expectAllPaths(page, 'head', head.path_d);
+    expect(JSON.parse(await page.evaluate((k) => localStorage.getItem(k) as string, STORE)).slots.head.example).toBe(false);
   });
 
   test('"Learn more" on each check opens its section of the guide', async ({ page }) => {
@@ -1443,6 +1630,10 @@ test.describe('Head & Tail Studio layout', () => {
       }
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
       await expectTargets(page, width, 'move question');
+      // Undo, after a Remove.
+      await part(page, 'remove', 'head').click();
+      await expect(part(page, 'undo', 'head')).toBeVisible();
+      await expectTargets(page, width, 'undo');
 
       for (const input of await page.locator('#studio :is(input, select, textarea)').all()) {
         const size = await input.evaluate((el) => parseFloat(getComputedStyle(el).fontSize));

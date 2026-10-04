@@ -1386,7 +1386,7 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
 /* `hidden` only hides HTML elements by default; live-loop frames are SVG <g>s. */
 .studio-board .studio-frame[hidden] { display: none; }
 
-/* Page layout. Mobile first: one column (your snake, preview, checks, style, save); at
+/* Page layout. Mobile first: one column (your snake, start here, preview, checks, style, save); at
    980px+ (iPad landscape) the checks sit beside the preview. Every control is at
    least 44x44 at every width, and inputs are 16px so iOS doesn't zoom. */
 .studio { --studio-snake: #ff4f86; }
@@ -1403,7 +1403,7 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
 @media (min-width: 980px) {
   .studio-layout {
     grid-template-columns: minmax(0, 1fr) minmax(280px, 360px);
-    grid-template-areas: "start start" "snake snake" "preview lints" "controls lints" "actions actions";
+    grid-template-areas: "snake snake" "start start" "preview lints" "controls lints" "actions actions";
     align-items: start;
   }
   .studio-start { grid-area: start; }
@@ -1595,8 +1595,8 @@ html[data-app-theme="dark"] .studio-swatch-chip { border-color: rgba(255,255,255
 }
 #studio-color-hint { margin-top: 6px; }
 
-/* Start here: templates by app, the guide, and an example. A <details>, open until the
-   first upload. */
+/* Start here: templates by app, the guide, and an example. A <details> under the cards,
+   open until the first upload. */
 .studio-start-summary {
   display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; min-height: 44px;
   cursor: pointer; list-style: none;

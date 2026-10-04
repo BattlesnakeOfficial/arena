@@ -170,8 +170,9 @@ pub(crate) fn studio_markup() -> Markup {
                 p class="studio-noscript" { "The studio needs JavaScript to process your drawing." }
             }
 
+            // "Your snake" first, so both upload buttons are near the top on a first visit
+            // too (an iPad in landscape included); "Start here" follows, open until then.
             div class="studio-layout" {
-                (start_here())
                 section #studio-snake class="studio-panel studio-snake" data-testid="studio-snake"
                     aria-labelledby="studio-snake-heading" {
                     h2 #studio-snake-heading { "Your snake" }
@@ -196,6 +197,7 @@ pub(crate) fn studio_markup() -> Markup {
                             data-action="fix" hidden {}
                     }
                 }
+                (start_here())
 
                 section class="studio-panel studio-preview" aria-labelledby="studio-result-heading" {
                     h2 #studio-result-heading tabindex="-1" { "Preview" }
@@ -345,7 +347,7 @@ fn title_word(kind: AssetKind) -> &'static str {
 /// upload button (a label the file input covers, so it is the input for keyboard,
 /// touch and VoiceOver; the whole card also takes a dropped file), the catalog styles
 /// to use while the slot isn't the artist's own, and the upload's own actions, which
-/// studio.js shows once there is one.
+/// studio.js shows once there is one (and Undo, after Remove).
 fn slot_card(kind: AssetKind) -> Markup {
     let k = kind_word(kind);
     let to = kind_word(match kind {
@@ -391,6 +393,9 @@ fn slot_card(kind: AssetKind) -> Markup {
                     data-kind=(k) hidden { "Remove" span class="vh" { " your " (k) } }
                 button id=(id("relabel")) class="btn sm studio-relabel" type="button"
                     data-action="relabel" data-kind=(k) hidden { "This is actually a " (to) }
+                // After Remove, until the slot holds a drawing again (in memory only).
+                button id=(id("undo")) class="btn sm" type="button" data-action="undo"
+                    data-kind=(k) hidden { "Undo" span class="vh" { " removing your " (k) } }
             }
             // Moving the upload over the other slot's own drawing needs a second tap here.
             div id=(id("confirm")) class="studio-confirm" role="group"
@@ -432,8 +437,8 @@ fn checks(kind: AssetKind) -> Markup {
 }
 
 /// Before the first upload: where to get a template, how to draw, and a finished
-/// example to run through the studio. Open until the first upload, then studio.js
-/// closes it (it stays one tap away).
+/// example to run through the studio. Under "Your snake"; open until the first upload,
+/// then studio.js closes it (it stays one tap away).
 fn start_here() -> Markup {
     html! {
         details #studio-start class="studio-panel studio-start" data-testid="studio-start" open {
@@ -467,10 +472,10 @@ fn start_here() -> Markup {
                     a class="btn" href=(GUIDE_PATH) { "Read the guide" }
                 }
                 li {
-                    h3 { "Upload here" }
+                    h3 { "Upload it" }
                     p {
-                        "Hide the guides, export a PNG (or an SVG), and upload it below as "
-                        "your head or your tail."
+                        "Hide the guides, export a PNG (or an SVG), and upload it with the "
+                        "head card or the tail card above."
                     }
                 }
             }

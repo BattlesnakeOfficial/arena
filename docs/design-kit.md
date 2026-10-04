@@ -823,15 +823,20 @@ including what `localStorage` restores, and lint text goes in with `textContent`
   input for touch, keyboard and VoiceOver: "Upload head", then "Upload a new version"),
   its style select (`#studio-style-<kind>`: the catalog references, with "Your head"
   first and selected once there is an upload), and, while it wears an upload, "Download
-  SVG", "Remove" (back to the default) and "This is actually a tail/head". Dropping a
-  file on a card fills that slot. An upload only ever fills its own slot: uploading a
-  head never replaces or hides the tail, and every board, the live loop and the saved
-  image wear both slots.
+  SVG", "Remove" (back to the default) and "This is actually a tail/head". After Remove,
+  "Undo" (`#studio-undo-<kind>`, in Remove's place and focused) puts the same upload
+  back, worn, until the slot holds another drawing (in memory only, like moving back).
+  Dropping a file on a card fills that slot. An upload only ever fills its own slot:
+  uploading a head never replaces or hides the tail, and every board, the live loop and
+  the saved image wear both slots. The panel comes first on the page, above Start here,
+  so both upload buttons are near the top on a first visit too.
 - **Moving an upload.** "This is actually a tail" moves the head slot's upload to the
   tail slot without re-posting (both kinds' lints are in the response) and puts back
   the head it replaced, if any. Over a tail slot that already holds a drawing it first
   asks (`#studio-confirm-head`: "Replace your tail" / "Cancel"); it never overwrites
-  silently. Moving it back restores the tail it replaced.
+  silently. Moving it back restores the tail it replaced. While an upload (or the
+  example) is on its way to the other slot, the move waits: the status says so and
+  nothing moves, since that upload would land over the moved drawing.
 - **Checks** are grouped per slot (`#studio-checks-<kind>`, each with its heading, its
   pass line `#studio-pass-<kind>`, warnings, tips and details); Flip and Fit carry
   `data-kind` and fix that slot. Under the cards, `#studio-summary` says both ("Head:
@@ -849,12 +854,14 @@ including what `localStorage` restores, and lint text goes in with `textContent`
   (a route test checks the metrics agree within 1%); the original file's notes are kept.
 - **A failed request changes nothing**: the last result, and its buttons, stay. Each
   slot has its own request in flight; a newer upload or fix for the same slot
-  supersedes it.
+  supersedes it, and Remove, Undo and a move drop what was on its way to the slots they
+  change. A Flip or Fit that lands after the artist picked a catalog style fixes the
+  upload kept in the style list and leaves the pick as it is.
 - **The instant format check** before uploading comes from the server: `#studio-slots`
   carries `data-sniff`, the rejected entries of `design_kit::SIGNATURES` with their
   advice and the size limit. Anything else is posted and the server decides.
-- After a result the page scrolls to the preview (with the checks beside it, at 980px+)
-  or to the status line. Focus moves to the Preview heading (`tabindex=-1`) so screen
+- After a result the page scrolls to the preview (with the checks beside it, at 980px+,
+  or with Start here open between it and the status line) or to the status line. Focus moves to the Preview heading (`tabindex=-1`) so screen
   readers announce the result; it draws no focus ring, since it isn't in the tab order.
   "Processing…" and every error (the instant check, any server answer, a failed image
   save) scroll the status line into view when it's off screen, since "Upload a new
@@ -865,7 +872,7 @@ including what `localStorage` restores, and lint text goes in with `textContent`
   1. the templates, by app: "Procreate (PSD)" and "Illustrator · Inkscape · Affinity
      (SVG)" for the head and the tail, each a `download` link;
   2. the guide;
-  3. upload here.
+  3. upload it, with the cards above.
 
   **Try an example** fetches `design-kit/example-drawing.png` (its `asset_url` is in
   `data-src`) and posts it to the endpoint into the head slot (the tail is untouched),
@@ -873,7 +880,10 @@ including what `localStorage` restores, and lint text goes in with `textContent`
   card, the status and the boards' labels call it "the example head", it can't be moved
   to the tail slot, and it leaves Start here open, so a newcomer who tries it first
   still has the templates in view, after a reload too. It never replaces the artist's
-  own head: with one in the slot, the status asks them to remove it first.
+  own head: with one in the slot (worn, or kept in the style list behind a catalog
+  style) or on its way there, the status says how to remove it first and nothing is
+  fetched; one that lands while the example file is still loading wins, and the example
+  is dropped.
 - Each check links to its section of the guide ("Learn more", from `Lint::guide_anchor`,
   sent as `guide` in the JSON). The page hands the script the guide's sections and what
   each is about (`data-guide-topics`, from `guide::RULE_TOPICS`, the one list), so an

@@ -61,10 +61,12 @@
   };
   // In memory only: the file behind each upload, so Flip/Fit re-post the original
   // ({ body, fixes, info }); what each slot's upload replaced, so moving it to the other
-  // slot puts that back ({ by, prev }); and each slot's request in flight (a newer one
-  // for the same slot supersedes it).
+  // slot puts that back ({ by, prev }); what Remove took out of each slot, for Undo,
+  // until the slot holds a drawing again ({ slot, replaced }); and each slot's request in
+  // flight ({ fixOf, example }; a newer one for the same slot supersedes it).
   const files = new WeakMap();
   const replaced = { head: null, tail: null };
+  const removed = { head: null, tail: null };
   const pending = { head: null, tail: null };
 
   // ---- validation -----------------------------------------------------------------
@@ -169,6 +171,7 @@
     const shapes = {};
     for (const kind of KINDS) {
       if (state.pick[kind] === "user" && !state.slots[kind]) state.pick[kind] = "default";
+      if (state.slots[kind]) removed[kind] = null; // Undo only puts a drawing in an empty slot
       const shape = shapes[kind] = shapeFor(kind);
       all("path.studio-" + kind).forEach((p) => setPath(p, shape));
       setPath(part("closeup-path", kind), shape);
@@ -227,6 +230,7 @@
     part("download", kind).hidden = !mine;
     part("remove", kind).hidden = !mine;
     part("relabel", kind).hidden = !mine || mine.example;
+    part("undo", kind).hidden = !removed[kind];
     part("confirm", kind).hidden = true; // any change closes the question
   }
   function renderControls() {
@@ -358,14 +362,28 @@
     if (hit) return hit.message;
     return file.size > SNIFF.max_bytes ? SNIFF.too_large : null;
   }
+  // Why the example can't go into the head slot, if it can't: the slot holds the
+  // artist's own drawing (worn, or kept in the style list behind a catalog style), or
+  // one is on its way there.
+  function exampleBlocked() {
+    const head = state.slots.head;
+    const lead = "The example is a head, and ";
+    if (head && !head.example) {
+      return lead + (own("head") ? "your head slot holds your own drawing. Remove your head first to try the example."
+        : "your own head is kept in the head card's style list. Pick “Your head” there and tap " +
+          "Remove first to try the example.");
+    }
+    if (pending.head && !pending.head.example) {
+      return lead + "your own head is still processing. Remove it once it's on the board to try the example.";
+    }
+    return null;
+  }
   // "Try an example": a finished head drawing from the design kit, through the real
   // endpoint into the head slot like any upload, but marked as the example: it says so,
   // and it doesn't close "Start here". It never replaces the artist's own head.
   async function tryExample() {
-    if (state.slots.head && !state.slots.head.example) {
-      return setStatus("The example is a head, and your head slot holds your own drawing. " +
-        "Remove your head first to try the example.", true);
-    }
+    const blocked = exampleBlocked();
+    if (blocked) return setStatus(blocked, true);
     const src = $("studio-example").getAttribute("data-src") || "";
     if (!src.startsWith("/static/")) return;
     setStatus("Loading the example…");
@@ -375,6 +393,7 @@
       if (res.ok) body = await res.arrayBuffer();
     } catch (e) { /* network error: body stays null */ }
     if (!body) return setStatus("We couldn't load the example. Check your connection and try again.", true);
+    if (exampleBlocked()) return; // a head of the artist's own came along meanwhile: it wins
     send("head", { body: body, info: null, example: true, fixOf: null }, []);
   }
   async function handleFile(kind, file) {
@@ -397,7 +416,7 @@
   // `kind`. Only a success changes anything: after an error, the last result and its
   // buttons stay.
   async function send(kind, job, fixes) {
-    const ticket = { fixOf: job.fixOf };
+    const ticket = { fixOf: job.fixOf, example: !!job.example };
     pending[kind] = ticket;
     setStatus(job.example ? "Processing the example…" : "Processing your " + kind + "…");
     revealStatus(); // a slow upload must not look like nothing happened
@@ -427,10 +446,19 @@
     // What it replaced. A fix replaces the same drawing, so keep what that one replaced.
     const was = replaced[kind];
     replaced[kind] = { by: slot, prev: !job.fixOf ? state.slots[kind] : was && was.by === job.fixOf ? was.prev : null };
+    // A new upload is worn at once. A fix of one the artist has since swapped for a
+    // catalog style is kept in the style list: their pick stands.
+    const worn = !job.fixOf || state.pick[kind] === "user";
     state.slots[kind] = slot;
-    state.pick[kind] = "user";
+    if (worn) state.pick[kind] = "user";
     render();
     const warns = slot.lints[kind].length;
+    if (!worn) {
+      setStatus("Done: " + (slot.example ? "the example " : "your ") + kind + " is fixed. The " + kind + " card shows " +
+        shapeFor(kind).name + ", so pick “" + (slot.example ? "Example " : "Your ") + kind +
+        "” in its style list to see it.");
+      return revealStatus();
+    }
     setStatus(slot.example ? "This is the example " + kind + "." + summary(warns) + " Upload your own drawing to replace it."
       : "Done: your " + kind + " is on the board." + summary(warns));
     showResult();
@@ -439,7 +467,8 @@
   // else the status line (the top warning and the preview follow it).
   function showResult() {
     $("studio-result-heading").focus({ preventScroll: true });
-    const target = sideBySide.matches ? root.querySelector(".studio-preview") : $("studio-status");
+    // While "Start here" is open (the example), it sits between the status and the preview.
+    const target = sideBySide.matches || (start && start.open) ? root.querySelector(".studio-preview") : $("studio-status");
     target.scrollIntoView({ block: "start", behavior: reduceMotion ? "auto" : "smooth" });
   }
   // Flip and Fit re-post the upload while it's in memory, else (after a reload) the
@@ -460,6 +489,15 @@
     const slot = own(kind);
     const to = other(kind);
     if (!slot || slot.example) return;
+    // An upload still on its way to the other slot would land over the move: not yet.
+    const coming = pending[to] && !pending[to].fixOf ? pending[to] : null;
+    if (coming) {
+      part("confirm", kind).hidden = true;
+      part("relabel", kind).hidden = false;
+      part("relabel", kind).focus();
+      return setStatus((coming.example ? "The example" : "Your " + to) + " is still processing, so nothing moved. " +
+        "Try again once it's on the board.", true);
+    }
     if (state.slots[to] && !confirmed) {
       part("relabel", kind).hidden = true;
       part("confirm", kind).hidden = false;
@@ -489,9 +527,11 @@
     part("relabel", kind).focus();
   }
   // Remove: back to the catalog's default for that slot; the other slot is untouched.
+  // Undo, in its place, puts the upload back until the slot holds another drawing.
   function remove(kind) {
     const slot = own(kind);
     if (!slot) return;
+    removed[kind] = { slot: slot, replaced: replaced[kind] };
     pending[kind] = null;
     replaced[kind] = null;
     state.slots[kind] = null;
@@ -499,7 +539,19 @@
     setBusy();
     render();
     setStatus("Removed " + (slot.example ? "the example " : "your ") + kind + ". The board shows the default " + kind + ".");
-    part("file", kind).focus();
+    part("undo", kind).focus();
+  }
+  function undoRemove(kind) {
+    const was = removed[kind];
+    if (!was || state.slots[kind]) return;
+    pending[kind] = null; // an upload started since doesn't land over the Undo
+    replaced[kind] = was.replaced;
+    state.slots[kind] = was.slot;
+    state.pick[kind] = "user";
+    setBusy();
+    render();
+    setStatus((was.slot.example ? "The example " : "Your ") + kind + " is back.");
+    part("remove", kind).focus();
   }
 
   // ---- downloads ------------------------------------------------------------------
@@ -634,6 +686,7 @@
     ["fix", (kind, btn) => applyFix(kind, btn.getAttribute("data-fix") === "fit" ? "fit" : "flip")],
     ["download", downloadSvg],
     ["remove", remove],
+    ["undo", undoRemove],
     ["relabel", (kind) => relabel(kind, false)],
     ["relabel-confirm", (kind) => relabel(kind, true)],
     ["relabel-cancel", cancelRelabel],
