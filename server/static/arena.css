@@ -1439,10 +1439,13 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
 .studio-status.error { color: var(--down); font-weight: 600; }
 .studio-relabel { margin-top: 8px; }
 .studio-top-warning {
-  display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 10px; padding: 10px 12px;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 10px; padding: 10px 12px 10px 44px;
   background: var(--pink-wash); border: 1px solid var(--pink); border-radius: 12px; font-size: 14.5px;
+  position: relative;
 }
-.studio-top-warning p { flex: 1 1 200px; min-width: 0; }
+/* The icon beside the first line; "Learn more" and the fix on the row below, under the text. */
+.studio-top-warning > .studio-lint-icon { position: absolute; left: 12px; top: 11px; }
+.studio-top-warning p { flex: 1 1 100%; min-width: 0; }
 
 /* Segmented controls: radios cover their label, so the label is the target. */
 .studio-seg { border: 0; margin-top: 14px; min-width: 0; }
@@ -1504,8 +1507,14 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
 
 /* Checks: warnings first, with an icon and text, not colour alone. */
 .studio-lint-list { list-style: none; display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
-.studio-lint { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; font-size: 14.5px; }
-.studio-lint-text { flex: 1 1 180px; min-width: 0; }
+/* The icon beside the message's first line; "Learn more" and Flip/Fit on the row below,
+   lined up with the message. */
+.studio-lint {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; font-size: 14.5px;
+  position: relative; padding-left: 32px;
+}
+.studio-lint > .studio-lint-icon { position: absolute; left: 0; top: 1px; }
+.studio-lint-text { flex: 1 1 100%; min-width: 0; }
 .studio-lint-icon {
   display: inline-flex; align-items: center; justify-content: center; flex: none; width: 22px; height: 22px;
   border-radius: 50%; font-weight: 700; font-size: 13px; background: var(--pill); color: var(--muted);
@@ -1575,9 +1584,10 @@ html[data-app-theme="dark"] .studio-swatch-chip { border-color: rgba(255,255,255
   .studio-start-steps { grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1fr); }
   .studio-start-steps > li:first-child { grid-column: auto; }
 }
-/* "Learn more" beside a check: a link into the guide, as big a target as a button. */
+/* "Learn more" beside a check: a link into the guide, as big a target as a button. Its
+   text lines up with the message above it. */
 .studio-learn {
-  display: inline-flex; align-items: center; min-height: 44px; min-width: 44px; padding: 0 4px;
+  display: inline-flex; align-items: center; min-height: 44px; min-width: 44px; padding: 0 4px; margin-left: -4px;
   color: var(--pink); font-weight: 600; text-decoration: underline; text-underline-offset: 3px;
 }
 
