@@ -241,7 +241,21 @@ and every guide and reference uses a template colour (`palette.rs`):
 
 usvg (and simplecss, its CSS engine) have no limits of their own on depth, expansion or
 work, and a thread that overflows its stack aborts the whole process: `catch_unwind`
-can't catch that. So before usvg runs:
+can't catch that.
+
+**The prescan is defence in depth, not the safety boundary.** The boundary is the
+process: the Head & Tail Studio (PR 3, #221) processes every upload only inside a
+short-lived child process, `arena studio-worker`, with CPU, memory and wall-clock limits
+and one upload at a time. A crash, stack-overflow abort, out-of-memory kill or CPU spin
+in there ends that child only: the endpoint answers 422 or 503, and the server and live
+games carry on. The prescan rejects what it can recognise before usvg spends the work,
+with a clear `too_complex` message. It mirrors usvg's internals, which is open-ended:
+each review round found another construct it missed. A miss is contained by the worker,
+so new bypasses that only hostile files can build are follow-ups, not blockers; what
+must hold is that real exports (Illustrator, Inkscape, Affinity, Figma, Sketch, the
+template) are never rejected.
+
+Before usvg runs:
 
 - **Counts.** Nesting ≤ 64, nodes ≤ 20,000, `<use>` ≤ 500, definitions (clip paths,
   masks, patterns, markers, symbols, gradients, filters) ≤ 64.
@@ -257,6 +271,9 @@ can't catch that. So before usvg runs:
   - ids and references are read the way svgtypes reads them (an id written with a
     trailing `&#9;` keeps the tab), and both `id` and `xml:id` define ids;
   - presentation attributes count in any namespace (usvg reads `xml:fill`);
+  - a `<use>` with both copies its unprefixed `href`, not its `xlink:href`, whatever
+    their order (roxmltree's `attribute("href")` returns whichever comes first, so a
+    decoy `xlink:href` first hid a 1 KB file that reached 1 GB);
   - every `<style>` element counts, whatever its namespace;
   - `inherit` takes the parent's value, also for `clip-path`, `mask` and `filter`;
   - where an element sits never hides it, so each element's role comes from its own
@@ -301,7 +318,10 @@ can't catch that. So before usvg runs:
     reached 2.9 GB inside usvg and aborted. A `<use>` copy inherits `fill`, `stroke`
     and markers from the `<use>` and its ancestors, so those references weigh the shapes
     (and the vertices) of the expanded target, not one: 1 KB of patterns, each filling a
-    group around a `<use>` of six rects, eight deep, aborted too.
+    group around a `<use>` of six rects, eight deep, aborted too. A paint reference
+    never weighs less than one: usvg converts the `<use>`'s own fill and stroke once
+    for the copy's `context-fill`, whatever it copies, so a loop of patterns through
+    `<use>`s of an empty group (or of text) aborted when it weighed nothing.
   - **Path segments** usvg may make are bounded at 500,000 (the official files need at
     most 7,600), counting every copy: a few elements that copy a long path, or hold
     huge arcs, would otherwise allocate before the painter's 5,000-segment budget sees
@@ -315,7 +335,14 @@ can't catch that. So before usvg runs:
     1e30 took 11 s. A radius in `%` counts against the root's viewBox or size (unknown,
     so too big, when nested `<svg>`s or `<symbol>`s set their own), and in `em`/`ex`
     against usvg's 12 px default unless the file sets a font size anywhere (then it is
-    unknown too).
+    unknown too). A polyline or polygon counts a segment per byte of `points`.
+  - **Closes and arcs in a row** are bounded at 1,000 per path. svgtypes' path
+    simplifier calls itself once for each command that adds no segment (a close
+    straight after a close, an arc too small for kurbo to split), and that recursion
+    isn't a loop: 200,000 closes in a row (a 200 KB file) overflowed the 64 MiB stack.
+    Only closes and arcs can add nothing, so every one counts, whether or not it would.
+    The longest run in the catalog corpus is 21 (`pumpkin`), and in 47,000 paths from
+    817 SVGs on the dev VM (icons, logos, app assets) 20.
   - **`<tref>`** copies of text are bounded at 1 MiB, and `<tref>`s times nodes at
     20,000,000 (usvg scans the whole document for each target).
 - **CSS cost**, an upper bound on simplecss's steps, ≤ 20,000,000 before simplecss
@@ -358,7 +385,8 @@ binary.
 
 The prescan mirrors other crates' code: usvg 0.48.1's reference following, simplecss
 0.2.2's selector matching, svgtypes 0.16.1's IRI parsing and roxmltree 0.21.1's
-tokenizer. A reference loop it misses aborts the process. So `usvg` and `simplecss` (and
+tokenizer. A reference loop it misses aborts the process (in production, the worker
+child: see [the prescan](#the-svg-prescan)). So `usvg` and `simplecss` (and
 the test-only `resvg`, which would otherwise pull a second usvg) are pinned with `=` in
 `server/Cargo.toml`, and `svg_parsing_crates_are_the_audited_versions` fails when
 `Cargo.lock` holds any other version (or a second copy) of the four. Bumping one means
@@ -380,11 +408,12 @@ release, median of 9, through `process_on_big_stack`.
 | A DOCTYPE or `<!` declaration roxmltree can't parse | `invalid_xml` | |
 | 64 patterns or masks × 60 groups; 33 pattern/`<use>` pairs × 58 groups | Ok (about 3,600-3,970 levels deep) | 4-5 ms, 12 MB peak RSS |
 | 60 pattern/`<use>` pairs × 58 groups | `too_complex` (nesting) | 1 ms |
-| three-step pattern, mask, clip, `feImage` and `<use>` cycles; loops made with inherited fills, CSS classes, `style` attributes, `xml:id`, `xml:fill`, a stylesheet in another namespace, `clip-path: inherit` or ids ending in a tab; loops through a pattern, mask or clip path nested in a gradient, stop or filter primitive (or inheriting its fill), or through a `<use>` of a group inside a `<foreignObject>` | `too_complex` (loop) | 0.1 ms |
+| three-step pattern, mask, clip, `feImage` and `<use>` cycles; loops made with inherited fills, CSS classes, `style` attributes, `xml:id`, `xml:fill`, a stylesheet in another namespace, `clip-path: inherit` or ids ending in a tab; loops through a pattern, mask or clip path nested in a gradient, stop or filter primitive (or inheriting its fill), or through a `<use>` of a group inside a `<foreignObject>`; loops through a `<use>`'s own fill or stroke, whatever it copies (an empty group, text, a picture), or behind a decoy `xlink:href` | `too_complex` (loop) | 0.1 ms |
 | 2,000-long clip, mask or pattern chain | `too_complex` (definitions) | |
 | `<use>` bombs (2^25 copies; 400 × 100; 501 uses), pattern fan-out, marker per vertex | `too_complex` (expansion) | 0.1 ms |
-| markers on circles and rects, four levels of ten (2.9 GB in usvg); a fill inherited by `<use>` copies of six rects, eight patterns deep (aborted) | `too_complex` (expansion) | 0.2 ms |
-| a path arc with a radius of 1e50 (aborted) or 1e30 (11 s); a circle with r = 3e38 | `too_complex` (huge radius) | 0.1 ms |
+| markers on circles and rects, four levels of ten (2.9 GB in usvg); a fill inherited by `<use>` copies of six rects, eight patterns deep (aborted), also with a decoy `xlink:href` before the copied `href` (1 GB in 13 s); 25 copies of a 5,000-point polyline | `too_complex` (expansion) | 0.2 ms |
+| a path arc with a radius of 1e50 (aborted) or 1e30 (11 s); a circle with r = 3e38; `<use>` copies of a circle sized by a stylesheet font size or a `<symbol>`'s viewport, or kept in `<metadata>` | `too_complex` (huge radius) | 0.1 ms |
+| 200,000 closes in a row (aborted on the 64 MiB stack); 25,000 arcs too small to draw | `too_complex` (closes or arcs in a row) | |
 | 1,000 `<tref>`s of 100 KB of text | `too_complex` (`<tref>`) | 1 ms |
 | a 500 KB `style` attribute inside `<metadata>`, `<title>` or `<foreignObject>` (25 s) | `too_complex` (CSS) | 1 ms |
 | a placed picture as a pattern fill (Figma, Sketch, Penpot), alone or over or under the drawing | the picture is ignored (`image_ignored`); alone it is `empty` | |
@@ -702,7 +731,7 @@ report panics from the decode process.
 | `invalid_image` | truncated, corrupt or zero-size |
 | `invalid_xml` | malformed SVG or DOCTYPE, or declaring entities other than Illustrator-style plain text (its own message: export a plain SVG) |
 | `invalid_svg` | not UTF-8, the root isn't `<svg>`, or usvg can't read it |
-| `too_complex` | over the trace budget, or `d` over 64 KiB (noise, checkerboards, photos, crafted stripes); for SVGs, over 20,000 nodes, or over a prescan or painting budget (nesting, loops, expansion, huge arcs, `<tref>` text, CSS, segments, outline travel, dashes, clips) |
+| `too_complex` | over the trace budget, or `d` over 64 KiB (noise, checkerboards, photos, crafted stripes); for SVGs, over 20,000 nodes, or over a prescan or painting budget (nesting, loops, expansion, huge arcs, closes or arcs in a row, `<tref>` text, CSS, segments, outline travel, dashes, clips) |
 | `empty` | nothing drawable (carries info lints; the message names the reason when one explains it: nothing showing in "Draw here", an embedded image, or guides only; with text, it says text isn't supported and how to outline it if the drawing is text, and otherwise to draw in solid black, since the text may be hidden or only a label) |
 | `internal` | a bug |
 
@@ -743,10 +772,14 @@ report panics from the decode process.
   permit is held until the work ends even when the caller stops waiting, and that a
   thread that can't start is `internal`; in `svg_scan.rs`, that the depth scan reads
   DOCTYPEs as roxmltree does, the loops and expansions above at the prescan alone
-  (markers on every shape, paint inherited by `<use>` copies, huge arcs, copied
-  segments, `<tref>`, `style` in unparsed elements), and that each shape's segment bound
-  holds against what svgtypes and usvg really make (1,000 random paths of absolute and
-  relative arcs, and circles, ellipses and rounded rects from r = 1 to 2·10^12).
+  (markers on every shape, paint inherited by `<use>` copies, the `href` a `<use>`
+  copies, loops through a `<use>`'s own paint, huge arcs (also sized by a stylesheet
+  font size or a `<symbol>`, or kept in unparsed elements), copied segments (also of
+  paths in unparsed elements, and of polylines), runs of closes and arcs, `<tref>`,
+  `style` in unparsed elements), and that each shape's segment bound holds against what
+  svgtypes and usvg really make (1,000 random paths of absolute and relative arcs;
+  polylines and polygons; and circles, ellipses and rounded rects from r = 1 to
+  2·10^12).
 - `server/tests/design_kit_catalog.rs`: the 184-file corpus described above.
 - `server/tests/design_kit_refs.rs`: the reference table against fresh processing.
 - Fixtures live in `server/tests/fixtures/design_kit/`: under `catalog/`, all 184

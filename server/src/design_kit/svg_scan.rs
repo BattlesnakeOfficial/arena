@@ -3,7 +3,12 @@
 //! usvg (and the CSS engine it uses, simplecss) have no limits of their own on depth,
 //! expansion or work, and a thread that overflows its stack aborts the whole process
 //! (`catch_unwind` cannot catch that). Everything here is iterative and runs on the
-//! parsed XML before usvg sees it:
+//! parsed XML before usvg sees it.
+//!
+//! This is defence in depth, not the safety boundary: production processes uploads only
+//! in a resource-limited child process (`arena studio-worker`, PR 3), so whatever this
+//! misses ends that child, not the server. Mirroring usvg exactly is open-ended; what
+//! matters most here is never rejecting a real export. See `docs/design-kit.md`.
 //!
 //! * [`depth_upper_bound`]: a byte scan that bounds element nesting before roxmltree's
 //!   recursive tokenizer runs (about 5000 nested tags overflow a 2 MiB stack).
@@ -32,11 +37,14 @@
 //!     every vertex its own marker (on every shape, rects, circles and ellipses
 //!     included). A `<use>` copy inherits paint and markers from the `<use>` and its
 //!     ancestors, so those references count once per shape (or vertex) of the expanded
-//!     target. Bounded by `Limits::max_svg_expansion`.
+//!     target (and paint at least once: usvg converts the `<use>`'s own fill and stroke
+//!     whatever it copies). Bounded by `Limits::max_svg_expansion`.
 //!   - the **path segments** usvg makes, every copy included, bounded by
 //!     `Limits::max_svg_expanded_segments` before usvg allocates them. Arcs become more
 //!     cubics the bigger their radius ([`arc_cubics`]); one that would become more than
-//!     [`MAX_ARC_CUBICS`] is rejected outright.
+//!     [`MAX_ARC_CUBICS`] is rejected outright. So is a path with more than
+//!     [`MAX_CLOSES_AND_ARCS_IN_A_ROW`] closes and arcs in a row: svgtypes recurses once
+//!     for each that adds no segment.
 //!
 //!   References can come from attributes, `style` attributes and `<style>` sheets, and
 //!   `fill`, `stroke` and markers are inherited from every ancestor, gradients, stops
@@ -286,8 +294,8 @@ struct El<'a, 'input> {
     role: Role,
     /// Only converted through references (`<defs>`, patterns, masks, ...).
     definition: bool,
-    /// The `href` and `xlink:href` of a `<use>`.
-    use_hrefs: [Option<&'a str>; 2],
+    /// The `href` a `<use>` copies ([`use_href`]).
+    use_href: Option<&'a str>,
     /// Own references: kind and target id.
     refs: Vec<(RefKind, &'a str)>,
     /// Nearest proper ancestor with inherited (paint or marker) references.
@@ -542,9 +550,23 @@ fn shape_segments(node: Node, name: &str, units: Units) -> Result<u64, ProcessEr
     })
 }
 
+/// Most closes and arcs in a row in one path. svgtypes 0.16.1's path simplifier
+/// (`SimplifyingPathParser`, which usvg reads every `d` with) calls itself once for each
+/// command that adds no segment (`return self.next()`, not a loop): a close straight
+/// after a close, or an arc that kurbo splits into no cubic. 200,000 closes in a row, a
+/// 200 KB file, overflow even a 64 MiB stack. Every other command adds a segment, so
+/// bounding runs of closes and arcs, whether or not each would add nothing, bounds that
+/// recursion without mirroring kurbo's arithmetic. Drawings have a handful in a row (a
+/// circle drawn as a path is four arcs and a close; the longest run in the catalog is 21).
+const MAX_CLOSES_AND_ARCS_IN_A_ROW: u32 = 1_000;
+
+const CLOSES_AND_ARCS: ProcessError =
+    ProcessError::TooComplex("a path has too many closes or arcs in a row");
+
 /// Upper bound on the segments usvg makes from a path's `d`, read with svgtypes'
 /// parser as usvg reads it (up to the first error): two per command (an implicit move
-/// may come first) and every arc as kurbo splits it.
+/// may come first) and every arc as kurbo splits it. Rejects more than
+/// [`MAX_CLOSES_AND_ARCS_IN_A_ROW`] closes and arcs in a row.
 ///
 /// An arc's split depends on its larger radius after usvg scales both radii up to reach
 /// the end point (by at most half the chord over the smaller radius). The chord comes
@@ -557,11 +579,20 @@ fn path_segments(d: &str) -> Result<u64, ProcessError> {
     let (mut cur, mut cur_slack) = ((0f64, 0f64), 0f64);
     let (mut start, mut start_slack) = ((0f64, 0f64), 0f64);
     let mut total = 2u64;
+    let mut closes_and_arcs = 0u32;
     for seg in svgtypes::PathParser::from(d) {
         let Ok(seg) = seg else {
             break;
         };
         total = total.saturating_add(2);
+        if matches!(seg, S::ClosePath { .. } | S::EllipticalArc { .. }) {
+            closes_and_arcs += 1;
+            if closes_and_arcs > MAX_CLOSES_AND_ARCS_IN_A_ROW {
+                return Err(CLOSES_AND_ARCS);
+            }
+        } else {
+            closes_and_arcs = 0;
+        }
         let (abs, end) = match seg {
             S::MoveTo { abs, x, y }
             | S::LineTo { abs, x, y }
@@ -684,10 +715,10 @@ pub(crate) fn scan(doc: &roxmltree::Document, limits: &Limits) -> Result<Facts, 
             }
         }
 
-        let use_hrefs = if role != Role::Inert && name == "use" {
-            [node.attribute("href"), node.attribute((XLINK_NS, "href"))]
+        let use_href = if role != Role::Inert && name == "use" {
+            use_href(node)
         } else {
-            [None, None]
+            None
         };
         let preceding = node
             .prev_siblings()
@@ -704,7 +735,7 @@ pub(crate) fn scan(doc: &roxmltree::Document, limits: &Limits) -> Result<Facts, 
             end: 0,
             role,
             definition: name == "defs" || DEFS.contains(&name),
-            use_hrefs,
+            use_href,
             refs: Vec::new(),
             inherit_from: None,
             shape: svg_ns && SHAPES.contains(&name),
@@ -802,7 +833,7 @@ pub(crate) fn scan(doc: &roxmltree::Document, limits: &Limits) -> Result<Facts, 
         parsed.begin_node()?;
         if el.role != Role::Inert {
             parsed.children(i, &els, |c| c.role != Role::Inert);
-            for id in el.use_hrefs.into_iter().flatten().flat_map(href_ids) {
+            for id in el.use_href.into_iter().flat_map(href_ids) {
                 parsed.add_targets(&ids, id, 1);
             }
         }
@@ -923,7 +954,10 @@ pub(crate) fn scan(doc: &roxmltree::Document, limits: &Limits) -> Result<Facts, 
     // A `<use>` copy inherits paint and markers from the `<use>` and its ancestors, and
     // usvg converts them once per shape of the copy (an objectBoundingBox pattern's
     // content is cloned for every path, a marker drawn at every vertex), so those edges
-    // weigh the shapes and the vertices of the expanded target.
+    // weigh the shapes and the vertices of the expanded target. Paint weighs at least
+    // one: usvg also converts the `<use>`'s own fill and stroke once for the copy's
+    // `context-fill`/`context-stroke`, whatever the copy holds, so a loop through a
+    // `<use>` of an empty group or of text (no shapes) must not vanish from the graph.
     let shapes_in = parsed.sizes(|e| u64::from(els[e].shape));
     let vertices_in = parsed.sizes(|e| els[e].segments);
     let mut converted = Graph::with_capacity(els.len());
@@ -938,17 +972,15 @@ pub(crate) fn scan(doc: &roxmltree::Document, limits: &Limits) -> Result<Facts, 
         } else {
             // Definitions inside are converted only when referenced.
             converted.children(i, &els, |c| !c.definition && c.role != Role::Inert);
-            let uses = el.use_hrefs.into_iter().flatten().flat_map(href_ids);
-            let copies = if el.use_hrefs.iter().any(Option::is_some) {
-                uses.flat_map(|id| ids.get(id).into_iter().flatten()).fold(
-                    (0u64, 0u64),
-                    |(s, v), &t| {
-                        (
-                            s.saturating_add(shapes_in[t]),
-                            v.saturating_add(vertices_in[t]),
-                        )
-                    },
-                )
+            let copies = if let Some(href) = el.use_href {
+                let targets = href_ids(href).flat_map(|id| ids.get(id).into_iter().flatten());
+                let (shapes, vertices) = targets.fold((0u64, 0u64), |(s, v), &t| {
+                    (
+                        s.saturating_add(shapes_in[t]),
+                        v.saturating_add(vertices_in[t]),
+                    )
+                });
+                (shapes.max(1), vertices)
             } else {
                 (1, el.segments)
             };
@@ -1215,6 +1247,19 @@ fn href_ids(value: &str) -> impl Iterator<Item = &str> {
         .strip_prefix('#')
         .map(|rest| rest.split(' ').next().unwrap_or(rest));
     candidates(exact)
+}
+
+/// The `href` usvg 0.48.1 copies for a `<use>` (`resolve_href` in `svgtree/parse.rs`):
+/// the unprefixed `href` wins over `xlink:href`, whatever their order. roxmltree's
+/// `attribute("href")` matches the local name only, so it returns whichever comes
+/// first, and a decoy `xlink:href` before the real `href` would hide the copy.
+fn use_href<'a>(node: Node<'a, '_>) -> Option<&'a str> {
+    let href = |ns: Option<&str>| {
+        node.attributes()
+            .find(|a| a.name() == "href" && a.namespace() == ns)
+            .map(|a| a.value())
+    };
+    href(None).or_else(|| href(Some(XLINK_NS)))
 }
 
 /// Ids in `url(#id)` references in a property value, as svgtypes reads them
@@ -1705,7 +1750,14 @@ mod tests {
             // when nested `<svg>`s set their own viewport.
             "<g font-size=\"1e30\"><circle r=\"1em\"/></g>",
             "<g style=\"font:1e30px x\"><circle r=\"1ex\"/></g>",
+            "<style>circle{font-size:1e30px}</style><circle r=\"1em\"/>",
             "<svg width=\"1e30\" height=\"1e30\"><circle r=\"50%\"/></svg>",
+            "<symbol id=\"s\"><circle r=\"50%\"/></symbol><use href=\"#s\" width=\"1e30\" \
+             height=\"1e30\"/>",
+            // Shapes usvg never parses where they are, but a `<use>` may copy.
+            "<metadata><circle id=\"c\" r=\"1e30\"/></metadata><use href=\"#c\"/>",
+            "<title><circle id=\"c\" r=\"1e30\"/></title><use href=\"#c\"/>",
+            "<foreignObject><circle id=\"c\" r=\"1e30\"/></foreignObject><use href=\"#c\"/>",
         ] {
             assert_eq!(run(&svg(big)), Err(ARC_TOO_BIG), "{big}");
         }
@@ -1783,6 +1835,27 @@ mod tests {
             percent_base: Some(100.0),
             font_size: Some(12.0),
         };
+        // Polylines and polygons: a segment per point (and a close).
+        let points: String = (0..60).map(|i| format!("{i},{} ", i % 7)).collect();
+        for shape in [
+            format!("<polyline points=\"{points}\"/>"),
+            format!("<polygon points=\"{points}\"/>"),
+            "<polygon points=\"0,0 9,0 9,9\"/>".to_string(),
+            "<line x2=\"9\" y2=\"9\" stroke=\"#000\"/>".to_string(),
+        ] {
+            let svg = format!(
+                "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\">{shape}</svg>"
+            );
+            let doc = parse(&svg);
+            let node = doc.root_element().first_element_child().expect("shape");
+            let bound = shape_segments(node, node.tag_name().name(), units).expect(&shape);
+            let tree = usvg::Tree::from_xmltree(&doc, &usvg::Options::default()).expect(&svg);
+            let made = match tree.root().children() {
+                [usvg::Node::Path(p)] => p.data().len() as u64,
+                other => panic!("{shape}: {other:?}"),
+            };
+            assert!(made <= bound, "{shape}: {made} > {bound}");
+        }
         for r in ["1", "50", "1e4", "1e8", "2e12", "50%", "3em", "2in"] {
             for shape in [
                 format!("<circle r=\"{r}\"/>"),
@@ -1807,6 +1880,129 @@ mod tests {
     }
 
     #[test]
+    fn use_copies_follow_the_href_usvg_follows() {
+        // usvg copies a `<use>`'s unprefixed `href` when it also has an `xlink:href`,
+        // whatever their order, and roxmltree's `attribute("href")` returns the first: a
+        // decoy `xlink:href` before the real `href` hid every copy. Six shapes, eight
+        // levels of patterns filling them: a 1.1 KB file that reached 1 GB in 13 s.
+        let chain = |link: &str, levels: usize| {
+            let mut s = format!(
+                "<svg xmlns=\"http://www.w3.org/2000/svg\" \
+                 xmlns:xlink=\"http://www.w3.org/1999/xlink\"><defs><rect id=\"one\" \
+                 width=\"1\" height=\"1\"/><g id=\"grp\">{}</g>",
+                "<rect width=\"1\" height=\"1\"/>".repeat(6)
+            );
+            for i in 0..levels {
+                let next = if i + 1 < levels {
+                    link.replace("{P}", &format!("P{}", i + 1))
+                } else {
+                    "<use href=\"#grp\"/>".into()
+                };
+                s += &format!("<pattern id=\"P{i}\" width=\"1\" height=\"1\">{next}</pattern>");
+            }
+            s + "</defs><rect width=\"9\" height=\"9\" fill=\"url(#P0)\"/></svg>"
+        };
+        for link in [
+            "<use xlink:href=\"#one\" href=\"#grp\" fill=\"url(#{P})\"/>",
+            "<use xlink:href=\"#nope\" href=\"#grp\" fill=\"url(#{P})\"/>",
+            "<use href=\"#grp\" xlink:href=\"#one\" fill=\"url(#{P})\"/>",
+            "<use xlink:href=\"#grp\" fill=\"url(#{P})\"/>",
+        ] {
+            assert_eq!(run(&chain(link, 8)), Err(EXPANDS), "{link}");
+            assert!(run(&chain(link, 3)).is_ok(), "{link}");
+        }
+        // The other way round: the decoy is the unprefixed one, so the copy is of `one`.
+        let decoy = "<use href=\"#one\" xlink:href=\"#grp\" fill=\"url(#{P})\"/>";
+        assert!(run(&chain(decoy, 8)).is_ok());
+    }
+
+    #[test]
+    fn loops_through_a_uses_own_paint_are_found() {
+        // usvg converts a `<use>`'s fill and stroke (its own or inherited) once for the
+        // copy's `context-fill`, whatever the copy holds. These loops go through `<use>`s
+        // of an empty group, text, a picture, or a group whose only `<use>` names
+        // nothing; 141a415 rejected them, and weighing the paint by the copy's shapes
+        // (none) hid them until they aborted usvg 0.48.1 on a 64 MiB stack.
+        let svg = |target: &str, link: &str| {
+            let pats: String = (0..3)
+                .map(|i| {
+                    let next = format!("P{}", (i + 1) % 3);
+                    format!(
+                        "<pattern id=\"P{i}\" width=\"1\" height=\"1\">{}</pattern>",
+                        link.replace("{P}", &next)
+                    )
+                })
+                .collect();
+            format!(
+                "<svg xmlns=\"http://www.w3.org/2000/svg\" \
+                 xmlns:xlink=\"http://www.w3.org/1999/xlink\"><style>.P0{{stroke:url(#P0)}}\
+                 .P1{{stroke:url(#P1)}}.P2{{stroke:url(#P2)}}</style><defs>{target}{pats}\
+                 </defs><rect width=\"9\" height=\"9\" fill=\"url(#P0)\"/></svg>"
+            )
+        };
+        let targets = [
+            "<g id=\"e\"/>",
+            "<text id=\"e\">hi</text>",
+            "<g id=\"e\"><image width=\"1\" height=\"1\"/></g>",
+            "<g id=\"e\"><use href=\"#nothing\"/></g>",
+        ];
+        let links = [
+            "<use href=\"#e\" fill=\"url(#{P})\"/>",
+            "<use href=\"#e\" stroke=\"url(#{P})\"/>",
+            "<use href=\"#e\" style=\"stroke:url(#{P})\"/>",
+            "<use href=\"#e\" class=\"{P}\"/>",
+            "<g fill=\"url(#{P})\"><use href=\"#e\"/></g>",
+            // A decoy `xlink:href` first, naming nothing.
+            "<use xlink:href=\"#nope\" href=\"#e\" fill=\"url(#{P})\"/>",
+        ];
+        for target in targets {
+            for link in links {
+                let s = svg(target, link);
+                assert!(is_loop(&run(&s)), "{target} {link}: {:?}", run(&s));
+            }
+        }
+        // No loop: the last pattern's `<use>` fill is plain.
+        let ok = svg(targets[0], "<use href=\"#e\" fill=\"url(#{P})\"/>")
+            .replace("url(#P0)\"/></pattern>", "black\"/></pattern>");
+        assert!(run(&ok).is_ok(), "{:?}", run(&ok));
+    }
+
+    #[test]
+    fn runs_of_closes_and_arcs_are_bounded() {
+        // svgtypes' path simplifier calls itself once for each command that adds no
+        // segment (a close after a close, an arc too small for kurbo to split): 200,000
+        // closes in a row overflowed a 64 MiB stack. Only closes and arcs can add
+        // nothing, so a run of them is bounded whether or not they would.
+        assert_eq!(MAX_CLOSES_AND_ARCS_IN_A_ROW, 1000);
+        let too_many = Err(CLOSES_AND_ARCS);
+        type Path = fn(usize) -> String;
+        let paths: [(&str, Path); 4] = [
+            ("closes", |n| format!("M0 0L9 9{}", "Z".repeat(n))),
+            ("tiny arcs", |n| {
+                format!("M0 0{}", " a1 1 0 0 0 1e-20 0".repeat(n))
+            }),
+            ("ordinary arcs", |n| {
+                format!("M0 0{}", " a1 1 0 0 1 0.1 0".repeat(n))
+            }),
+            ("closes and arcs", |n| {
+                format!("M0 0L9 9{}", "Z a1 1 0 0 0 1e-20 0 ".repeat(n / 2))
+            }),
+        ];
+        for (name, d) in paths {
+            assert!(path_segments(&d(1000)).is_ok(), "{name}");
+            assert_eq!(path_segments(&d(1002)).map(|_| ()), too_many, "{name}");
+            let svg = |n| format!("{SVG}<path d=\"{}\"/></svg>", d(n));
+            assert!(run(&svg(1000)).is_ok(), "{name}");
+            assert_eq!(run(&svg(1002)).map(|_| ()), too_many, "{name}");
+        }
+        // Any other command ends the run.
+        let broken = format!("M0 0{}", "Z".repeat(900) + "L1 1" + &"Z".repeat(900));
+        assert!(path_segments(&broken).is_ok());
+        let broken = format!("M0 0{}", " a1 1 0 0 0 1e-20 0".repeat(900) + "m1 1").repeat(2);
+        assert!(path_segments(&broken).is_ok());
+    }
+
+    #[test]
     fn segments_from_copies_are_bounded() {
         // A long path copied by `<use>`s: few elements, but usvg holds every copy's
         // segments (300 copies of 4,000 would be 1.2M). Counted as 2 per command: 8,004
@@ -1822,6 +2018,29 @@ mod tests {
         assert_eq!(Limits::default().max_svg_expanded_segments, 500_000);
         assert_eq!(run(&svg(63)), Err(EXPANDS));
         assert_eq!(run(&svg(62)), Ok(Facts::default()));
+        // The same path kept where usvg never parses it, but a `<use>` copies it.
+        for (open, close) in [
+            ("<metadata>", "</metadata>"),
+            ("<title>", "</title>"),
+            ("<o:x xmlns:o=\"urn:o\">", "</o:x>"),
+        ] {
+            let hidden = svg(63).replace("<defs>", open).replace("</defs>", close);
+            assert_eq!(run(&hidden), Err(EXPANDS), "{open}");
+        }
+        // A polyline counts its points: 5,000 of them are 20,002 segments at most (a
+        // byte of `points` each, and two), so 25 copies are over and 24 are not.
+        let polyline = |copies: usize| {
+            format!(
+                "<svg xmlns=\"http://www.w3.org/2000/svg\"><defs><polyline id=\"p\" \
+                 points=\"{}\"/></defs>{}</svg>",
+                "1,1 ".repeat(5000),
+                "<use href=\"#p\"/>".repeat(copies)
+            )
+        };
+        assert_eq!(run(&polyline(25)), Err(EXPANDS));
+        assert_eq!(run(&polyline(24)), Ok(Facts::default()));
+        let polygon = polyline(25).replace("polyline", "polygon");
+        assert_eq!(run(&polygon), Err(EXPANDS));
     }
 
     #[test]

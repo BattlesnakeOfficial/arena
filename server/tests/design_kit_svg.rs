@@ -1172,6 +1172,13 @@ fn reference_cycles_are_too_complex() {
              width=\"5\" height=\"5\" filter=\"url(#{next})\"/>"
         )
     };
+    // A pattern holding a `<use>` of `#e` that carries `paint`.
+    let use_pat = |id: &str, paint: &str| {
+        format!(
+            "<pattern id=\"{id}\" width=\"10\" height=\"10\" patternUnits=\"userSpaceOnUse\">\
+             <use href=\"#e\" {paint}/></pattern>"
+        )
+    };
     let three = |f: &dyn Fn(&str, &str) -> String, attr: &str| {
         format!(
             "{hdr}{}{}{}</defs><rect width=\"100\" height=\"100\" {attr}=\"url(#A)\"/></svg>",
@@ -1314,6 +1321,44 @@ fn reference_cycles_are_too_complex() {
                 clip("C", "A")
             ),
         ),
+        // usvg converts a `<use>`'s own fill and stroke once, whatever the copy holds:
+        // loops through `<use>`s of an empty group or of text (rejected at 141a415, then
+        // missed when paint was weighed by the copy's shapes).
+        (
+            "<use> of an empty group, filled",
+            format!(
+                "{hdr}<g id=\"e\"/>{}{}{}</defs><rect width=\"100\" height=\"100\" \
+                 fill=\"url(#A)\"/></svg>",
+                use_pat("A", "fill=\"url(#B)\""),
+                use_pat("B", "fill=\"url(#C)\""),
+                use_pat("C", "fill=\"url(#A)\""),
+            ),
+        ),
+        (
+            "<use> of text, stroked from a stylesheet, a style and an attribute",
+            format!(
+                "{hdr}<style>.s{{stroke:url(#B)}}</style><text id=\"e\">hi</text>{}{}{}\
+                 </defs><rect width=\"100\" height=\"100\" fill=\"url(#A)\"/></svg>",
+                use_pat("A", "class=\"s\""),
+                use_pat("B", "style=\"stroke:url(#C)\""),
+                use_pat("C", "stroke=\"url(#A)\""),
+            ),
+        ),
+        (
+            // usvg copies the unprefixed `href` whatever the order; this decoy names
+            // nothing.
+            "<use> with a decoy xlink:href first",
+            format!(
+                "{}{}{}{}</defs><rect width=\"100\" height=\"100\" fill=\"url(#A)\"/></svg>",
+                hdr.replace(
+                    "<svg ",
+                    "<svg xmlns:xlink=\"http://www.w3.org/1999/xlink\" "
+                ) + "<g id=\"e\"><rect width=\"5\" height=\"5\"/></g>",
+                use_pat("A", "fill=\"url(#B)\"").replace("<use ", "<use xlink:href=\"#nope\" "),
+                use_pat("B", "fill=\"url(#C)\"").replace("<use ", "<use xlink:href=\"#nope\" "),
+                use_pat("C", "fill=\"url(#A)\"").replace("<use ", "<use xlink:href=\"#nope\" "),
+            ),
+        ),
         (
             "group inside a foreignObject, copied by <use>",
             format!(
@@ -1452,25 +1497,59 @@ fn expansion_through_shapes_use_copies_and_arcs_is_too_complex_and_fast() {
         assert!(elapsed < Duration::from_millis(500), "{elapsed:?}");
     }
     // A fill inherited by `<use>` copies: every copied shape gets its own copy of an
-    // objectBoundingBox pattern. 6 shapes, 8 levels: a 1 KB file that aborted.
-    let mut svg = format!(
-        "{SVG_OPEN}<defs><g id=\"grp\">{}</g>",
-        "<rect width=\"1\" height=\"1\"/>".repeat(6)
-    );
-    for i in 0..8 {
-        let content = if i < 7 {
-            format!("<g fill=\"url(#P{})\"><use href=\"#grp\"/></g>", i + 1)
-        } else {
-            "<use href=\"#grp\"/>".into()
-        };
-        svg += &format!("<pattern id=\"P{i}\" width=\"1\" height=\"1\">{content}</pattern>");
+    // objectBoundingBox pattern. 6 shapes, 8 levels: a 1 KB file that aborted. The same
+    // with a decoy `xlink:href` before the `href` usvg copies reached 1 GB in 13 s.
+    for link in [
+        "<g fill=\"url(#{P})\"><use href=\"#grp\"/></g>",
+        "<use xlink:href=\"#one\" href=\"#grp\" fill=\"url(#{P})\"/>",
+    ] {
+        let mut svg = format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" \
+             xmlns:xlink=\"http://www.w3.org/1999/xlink\" viewBox=\"0 0 100 100\"><defs>\
+             <rect id=\"one\" width=\"1\" height=\"1\"/><g id=\"grp\">{}</g>",
+            "<rect width=\"1\" height=\"1\"/>".repeat(6)
+        );
+        for i in 0..8 {
+            let content = if i < 7 {
+                link.replace("{P}", &format!("P{}", i + 1))
+            } else {
+                "<use href=\"#grp\"/>".into()
+            };
+            svg += &format!("<pattern id=\"P{i}\" width=\"1\" height=\"1\">{content}</pattern>");
+        }
+        svg += "</defs><rect width=\"90\" height=\"90\" fill=\"url(#P0)\"/></svg>";
+        let (r, elapsed) = run_big(&svg);
+        assert_eq!(r.err(), Some(ProcessError::TooComplex(expands)), "{link}");
+        assert!(elapsed < Duration::from_millis(500), "{elapsed:?}");
     }
-    svg += "</defs><rect width=\"90\" height=\"90\" fill=\"url(#P0)\"/></svg>";
-    let (r, elapsed) = run_big(&svg);
-    assert_eq!(r.err(), Some(ProcessError::TooComplex(expands)));
-    assert!(elapsed < Duration::from_millis(500), "{elapsed:?}");
-    // Arcs with huge radii: usvg would split them into billions of cubics.
+    // Copies of shapes the prescan must still weigh: a circle sized by a stylesheet
+    // font size, or by a `<symbol>`'s own viewport, or kept in `<metadata>`; and a
+    // polyline's points.
     let too_big = "a curve or circle is too big to draw (a huge radius)";
+    let uses = "<use href=\"#c\"/>".repeat(20);
+    for defs in [
+        "<style>circle{font-size:3e37px}</style><defs><circle id=\"c\" r=\"1em\"/></defs>",
+        "<defs><symbol id=\"c\"><circle r=\"50%\"/></symbol></defs>",
+        "<metadata><circle id=\"c\" r=\"3e37\"/></metadata>",
+    ] {
+        let svg = format!("{SVG_OPEN}{defs}{uses}</svg>").replace(
+            "<use href=\"#c\"/>",
+            "<use href=\"#c\" width=\"3e37\" height=\"3e37\"/>",
+        );
+        let (r, elapsed) = run_big(&svg);
+        assert_eq!(r.err(), Some(ProcessError::TooComplex(too_big)), "{defs}");
+        assert!(elapsed < Duration::from_millis(500), "{elapsed:?}");
+    }
+    let polyline = format!(
+        "{SVG_OPEN}<defs><polyline id=\"p\" points=\"{}\"/></defs>{}</svg>",
+        "1,1 ".repeat(5000),
+        "<use href=\"#p\"/>".repeat(25)
+    );
+    assert_eq!(
+        run_big(&polyline).0.err(),
+        Some(ProcessError::TooComplex(expands))
+    );
+    // Arcs with huge radii: usvg would split them into billions of cubics.
     for d in ["M0 0A1e50 1e50 0 1 1 1e50 0Z", "M0 0A1e30 1e30 0 1 1 1 0Z"] {
         let (r, elapsed) = run_big(&format!("{SVG_OPEN}<path d=\"{d}\"/></svg>"));
         assert_eq!(r.err(), Some(ProcessError::TooComplex(too_big)), "{d}");
@@ -1486,6 +1565,35 @@ fn expansion_through_shapes_use_copies_and_arcs_is_too_complex_and_fast() {
         run_big(&tref).0.err(),
         Some(ProcessError::TooComplex("too much text is copied (<tref>)"))
     );
+}
+
+#[test]
+fn long_runs_of_closes_and_arcs_are_too_complex() {
+    // svgtypes' path simplifier calls itself once for every command that adds no segment
+    // (a close after a close, an arc too small for kurbo to split): 200,000 closes in a
+    // row, a 200 KB file, overflowed the 64 MiB stack and aborted.
+    let in_a_row = "a path has too many closes or arcs in a row";
+    let path = |tail: &str| format!("{SVG_OPEN}<path d=\"M10 10L90 10L50 90Z{tail}\"/></svg>");
+    for (name, tail) in [
+        ("200,000 closes", "Z".repeat(200_000)),
+        (
+            "25,000 tiny arcs",
+            format!("M0 0{}", " a1 1 0 0 0 1e-20 0".repeat(25_000)),
+        ),
+    ] {
+        let (r, elapsed) = run_big(&path(&tail));
+        assert_eq!(r.err(), Some(ProcessError::TooComplex(in_a_row)), "{name}");
+        assert!(elapsed < Duration::from_secs(1), "{name}: {elapsed:?}");
+    }
+    // The most the limit lets through, on the production stack: the drawing, then 1,000
+    // closes in a row (999 add nothing), then 1,000 tiny arcs that add nothing.
+    let (r, _) = run_big(&path(&format!(
+        "{}M0 0{}",
+        "Z".repeat(999),
+        " a1 1 0 0 0 1e-20 0".repeat(1000)
+    )));
+    let shape = r.expect("within the limit");
+    assert!(filled_at(&shape, 50.0, 30.0) && !filled_at(&shape, 20.0, 60.0));
 }
 
 #[test]
