@@ -854,9 +854,12 @@ including what `localStorage` restores, and lint text goes in with `textContent`
   (a route test checks the metrics agree within 1%); the original file's notes are kept.
 - **A failed request changes nothing**: the last result, and its buttons, stay. Each
   slot has its own request in flight; a newer upload or fix for the same slot
-  supersedes it, and Remove, Undo and a move drop what was on its way to the slots they
-  change. A Flip or Fit that lands after the artist picked a catalog style fixes the
-  upload kept in the style list and leaves the pick as it is.
+  supersedes it, and Remove and Undo drop what was on its way to their slot. A move
+  drops a Flip or Fit on its way for either drawing, and waits (moves nothing) while an
+  upload is on its way to the other slot. Flip and Fit never supersede an upload: while
+  a new version is on its way, the old drawing's Flip/Fit says so and posts nothing. A
+  Flip or Fit that lands after the artist picked a catalog style fixes the upload kept
+  in the style list and leaves the pick as it is.
 - **The instant format check** before uploading comes from the server: `#studio-slots`
   carries `data-sniff`, the rejected entries of `design_kit::SIGNATURES` with their
   advice and the size limit. Anything else is posted and the server decides.

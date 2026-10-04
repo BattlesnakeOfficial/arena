@@ -1008,6 +1008,46 @@ test.describe('Head & Tail Studio: drop and move', () => {
     expect(JSON.parse(await page.evaluate((k) => localStorage.getItem(k) as string, STORE)).slots.head.d).toBe(head.path_d);
   });
 
+  test('a Flip of the old drawing never drops a new version still on its way to that slot', async ({ page }) => {
+    await openStudio(page);
+    const status = page.locator('#studio-status');
+    const notYet = "Your new head is still processing, so nothing was flipped. Its own checks show once it's on the board.";
+    const mirrored = await upload(page, 'mirrored-head.png', 'head'); // faces left: Flip
+    expect(mirrored.lints.head.map((l) => l.fix)).toContain('flip');
+
+    // A new version starts uploading; the old drawing's warning and its Flip still show.
+    const posted: string[] = [];
+    page.on('request', (r) => { if (isEndpoint(new URL(r.url())) && r.method() === 'POST') posted.push(r.url()); });
+    const release = await hold(page, isEndpoint);
+    const answer = page.waitForResponse(isProcess);
+    await part(page, 'file', 'head').setInputFiles(fixture('head.png'));
+    await expect(status).toHaveText('Processing your head…');
+    const topFix = page.locator('#studio-top-fix');
+    await expect(topFix).toHaveAccessibleName('Flip your head');
+
+    // Tapping either Flip flips nothing, so the new version isn't superseded.
+    await topFix.click();
+    await expect(status).toHaveText(notYet);
+    await expect(status).toHaveClass(/error/);
+    await page.locator('#studio-warnings-head .studio-fix[data-fix="flip"]').click();
+    await expect(status).toHaveText(notYet);
+    expect(posted.filter((u) => u.includes('fix=')), 'no Flip is posted').toEqual([]);
+    await expectAllPaths(page, 'head', mirrored.path_d);
+
+    // The new version lands, and every board wears it.
+    release();
+    const response = await answer;
+    expect([200, ...CAPACITY]).toContain(response.status());
+    await page.unroute(isEndpoint);
+    test.skip(response.status() !== 200, 'the server was busy: no new version to land');
+    const fresh = (await response.json()) as Processed;
+    expect(fresh.path_d).not.toBe(mirrored.path_d);
+    await expect(status).toHaveText('Done: your head is on the board. It passes every check.');
+    await expectAllPaths(page, 'head', fresh.path_d);
+    await expect(page.getByTestId('studio')).not.toHaveAttribute('aria-busy', 'true');
+    expect(JSON.parse(await page.evaluate((k) => localStorage.getItem(k) as string, STORE)).slots.head.d).toBe(fresh.path_d);
+  });
+
   test('a Flip that lands after you pick a catalog style fixes your upload and keeps your pick', async ({ page }) => {
     await openStudio(page);
     const status = page.locator('#studio-status');

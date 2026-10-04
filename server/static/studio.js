@@ -63,7 +63,8 @@
   // ({ body, fixes, info }); what each slot's upload replaced, so moving it to the other
   // slot puts that back ({ by, prev }); what Remove took out of each slot, for Undo,
   // until the slot holds a drawing again ({ slot, replaced }); and each slot's request in
-  // flight ({ fixOf, example }; a newer one for the same slot supersedes it).
+  // flight ({ fixOf, example }; a newer one for the same slot supersedes it, except that
+  // a Flip/Fit never supersedes an upload).
   const files = new WeakMap();
   const replaced = { head: null, tail: null };
   const removed = { head: null, tail: null };
@@ -477,6 +478,14 @@
   function applyFix(kind, fix) {
     const slot = own(kind);
     if (!slot) return;
+    // A new upload still on its way to this slot would be dropped for the fix of the
+    // drawing it replaces (its warning still shows meanwhile): not yet.
+    const coming = pending[kind] && !pending[kind].fixOf ? pending[kind] : null;
+    if (coming) {
+      return setStatus((coming.example ? "The example" : (slot.example ? "Your " : "Your new ") + kind) +
+        " is still processing, so nothing was " + (fix === "flip" ? "flipped" : "fitted") +
+        ". Its own checks show once it's on the board.", true);
+    }
     const file = files.get(slot) || { body: svgFor(slot), fixes: [], info: slot.info };
     if (!file.fixes.includes(fix)) {
       send(kind, { body: file.body, info: file.info, example: slot.example, fixOf: slot }, file.fixes.concat(fix));
