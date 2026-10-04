@@ -1,19 +1,11 @@
 use std::{path::Path, process::Command, time::Duration};
 
-use cja::jobs::worker::{DEFAULT_MAX_RETRIES, JobLeaseConfig, job_worker_configured};
+use cja::jobs::worker::{DEFAULT_MAX_RETRIES, job_worker};
 use sqlx::PgPool;
 use tokio_util::sync::CancellationToken;
 
 use super::{AppState, Jobs};
 use crate::config::{AppConfig, DEFAULT_JOB_SHUTDOWN_DRAIN_SECS};
-
-fn test_lease() -> JobLeaseConfig {
-    let job = AppConfig::test_default().job;
-    JobLeaseConfig {
-        heartbeat_interval: Duration::from_secs(job.heartbeat_interval_secs),
-        reclaim_window: Duration::from_secs(job.lock_timeout_secs),
-    }
-}
 
 #[sqlx::test(migrations = "../migrations")]
 async fn exhausted_job_is_archived_and_worker_continues(pool: PgPool) -> cja::Result<()> {
@@ -39,14 +31,15 @@ async fn exhausted_job_is_archived_and_worker_continues(pool: PgPool) -> cja::Re
     .await?;
 
     let shutdown = CancellationToken::new();
-    let worker = job_worker_configured(
+    let worker = job_worker(
         AppState::test_from_pool(pool.clone()),
         Jobs,
         Duration::from_millis(10),
         DEFAULT_MAX_RETRIES,
         shutdown.clone(),
-        test_lease(),
-        Duration::from_secs(DEFAULT_JOB_SHUTDOWN_DRAIN_SECS),
+        AppConfig::test_default()
+            .job
+            .worker_config(Duration::from_secs(DEFAULT_JOB_SHUTDOWN_DRAIN_SECS)),
     );
     let observe = async {
         // Cancel even on a query failure or timeout, so the worker always exits.
@@ -131,14 +124,15 @@ struct ProbeWorker {
 impl ProbeWorker {
     fn start(pool: PgPool, max_retries: i32) -> Self {
         let shutdown = CancellationToken::new();
-        let handle = tokio::spawn(job_worker_configured(
+        let handle = tokio::spawn(job_worker(
             AppState::test_from_pool(pool),
             lease_probes::Jobs,
             Duration::from_millis(50),
             max_retries,
             shutdown.clone(),
-            test_lease(),
-            Duration::from_secs(DEFAULT_JOB_SHUTDOWN_DRAIN_SECS),
+            AppConfig::test_default()
+                .job
+                .worker_config(Duration::from_secs(DEFAULT_JOB_SHUTDOWN_DRAIN_SECS)),
         ));
         Self { shutdown, handle }
     }

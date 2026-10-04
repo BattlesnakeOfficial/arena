@@ -194,7 +194,7 @@ async fn spawn_application_tasks(
         info!("Jobs Enabled");
         info!("Job poll interval: {}ms", job.poll_interval_ms);
         info!("Job heartbeat interval: {}s", job.heartbeat_interval_secs);
-        info!("Job reclaim window: {}s", job.lock_timeout_secs);
+        info!("Job reclaim window: {}s", job.reclaim_window_secs);
         info!("Job max retries: {}", job.max_retries);
         info!("Job workers: {}", job.workers);
         info!("Job shutdown drain: {}s", job.shutdown_drain_secs);
@@ -203,17 +203,13 @@ async fn spawn_application_tasks(
             let name: &'static str = Box::leak(format!("jobs-{i}").into_boxed_str());
             supervisor.spawn(
                 name,
-                cja::jobs::worker::job_worker_configured(
+                cja::jobs::worker::job_worker(
                     app_state.clone(),
                     jobs::Jobs,
                     Duration::from_millis(job.poll_interval_ms),
                     job.max_retries,
                     shutdown.clone(),
-                    cja::jobs::worker::JobLeaseConfig {
-                        heartbeat_interval: Duration::from_secs(job.heartbeat_interval_secs),
-                        reclaim_window: Duration::from_secs(job.lock_timeout_secs),
-                    },
-                    supervisor.budget().job_drain,
+                    job.worker_config(supervisor.budget().job_drain),
                 ),
             );
         }
