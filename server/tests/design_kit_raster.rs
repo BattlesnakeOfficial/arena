@@ -895,17 +895,53 @@ fn export_stack(stack: &[Px], side: u32) -> Vec<u8> {
     encode_png(side, side, png::ColorType::Rgba, &data)
 }
 
+/// The template for one kind, as layers: the guides overlay (the generator's own
+/// output) and the reference ghost of one catalog shape.
+struct Template {
+    side: u32,
+    guides: Vec<Px>,
+    ghost: Vec<Px>,
+}
+
+impl Template {
+    fn new(kind: AssetKind, reference: &str, guide_png: &str) -> Self {
+        let (side, guides_rgba) = decode_rgba_png(&fixture(guide_png));
+        assert_eq!(side, 1000, "the template is 1000x1000");
+        // The generator bakes the ghost colour into the reference pixels.
+        let ghost_svg = board_svg(&catalog_inner(kind, reference), "#c8c2d4");
+        Template {
+            side,
+            guides: premul_layer(&guides_rgba),
+            ghost: premul_layer(&straight_rgba(&render(&ghost_svg, side))),
+        }
+    }
+
+    /// The `drawing` layer exported with the Background, Guides and Reference layers on
+    /// or off. Bottom to top: Background, Reference, Draw here, Guides (Multiply).
+    fn export(&self, drawing: &[Px], background: bool, guides: bool, reference: bool) -> Vec<u8> {
+        let mut stack = vec![[if background { 1.0f32 } else { 0.0 }; 4]; drawing.len()];
+        if reference {
+            over(&mut stack, &self.ghost);
+        }
+        over(&mut stack, drawing);
+        if guides {
+            multiply(&mut stack, &self.guides);
+        }
+        export_stack(&stack, self.side)
+    }
+
+    /// `svg` rendered at the template's size, as a layer.
+    fn layer(&self, svg: &str) -> Vec<Px> {
+        premul_layer(&straight_rgba(&render(svg, self.side)))
+    }
+}
+
 /// Draw `drawing` (black) in the template for `kind`, over the reference ghost of
 /// `reference`, toggling the Background, Guides and Reference layers.
 fn ink_matrix(kind: AssetKind, drawing: &str, reference: &str, guide_png: &str) {
-    let (side, guides_rgba) = decode_rgba_png(&fixture(guide_png));
-    assert_eq!(side, 1000, "the template is 1000x1000");
-    let draw = premul_layer(&straight_rgba(&render(&catalog_svg(kind, drawing), side)));
-    // The generator bakes the ghost colour into the reference pixels.
-    let ghost_svg = board_svg(&catalog_inner(kind, reference), "#c8c2d4");
-    let ghost = premul_layer(&straight_rgba(&render(&ghost_svg, side)));
-    let guides = premul_layer(&guides_rgba);
-    let white = vec![[1.0f32; 4]; (side * side) as usize];
+    let template = Template::new(kind, reference, guide_png);
+    let side = template.side;
+    let draw = template.layer(&catalog_svg(kind, drawing));
 
     let clean = run(&export_stack(&draw, side), &[]).expect("clean drawing");
     let original = alpha(&catalog_svg(kind, drawing), 400);
@@ -916,25 +952,13 @@ fn ink_matrix(kind: AssetKind, drawing: &str, reference: &str, guide_png: &str) 
     for background in [true, false] {
         for show_guides in [true, false] {
             for show_reference in [true, false] {
-                // Bottom to top: Background, Reference, Draw here, Guides (Multiply).
-                let mut stack = if background {
-                    white.clone()
-                } else {
-                    vec![[0.0; 4]; white.len()]
-                };
-                if show_reference {
-                    over(&mut stack, &ghost);
-                }
-                over(&mut stack, &draw);
-                if show_guides {
-                    multiply(&mut stack, &guides);
-                }
                 let label = format!(
                     "{}/{drawing}: background={background} guides={show_guides} \
                      reference={show_reference}",
                     kind_dir(kind)
                 );
-                let shape = match run(&export_stack(&stack, side), &[]) {
+                let png = template.export(&draw, background, show_guides, show_reference);
+                let shape = match run(&png, &[]) {
                     Ok(s) => s,
                     Err(e) => {
                         failures.push(format!("{label}: {e:?}"));
@@ -965,6 +989,62 @@ fn ink_matrix(kind: AssetKind, drawing: &str, reference: &str, guide_png: &str) 
     assert!(failures.is_empty(), "{failures:#?}");
 }
 
+/// Dark, saturated inks an artist might pick instead of black. The first template
+/// palette drew its labels in dark blues and a crimson (#1f6fb0, #2f8fd6, #d42a63), and
+/// everything within RGB distance 48 of those was "template, not ink": drawings in the
+/// first five came back `empty` (DEV-1550).
+const DARK_INKS: [(&str, &str); 9] = [
+    ("sapphire", "#0f52ba"),
+    ("royal blue", "#4169e1"),
+    ("steel blue", "#4682b4"),
+    ("crimson", "#dc143c"),
+    ("raspberry", "#e91e63"),
+    ("navy", "#144682"),
+    ("indigo", "#1e3a8a"),
+    ("wine", "#961946"),
+    ("teal", "#008080"),
+];
+
+#[test]
+fn dark_saturated_inks_survive_the_template() {
+    let template = Template::new(AssetKind::Head, "default", "template/head-guide.png");
+    let original = alpha(&head("beluga"), 400);
+    let mut failures = Vec::new();
+    for (name, fill) in DARK_INKS {
+        let draw = template.layer(&board_svg(&catalog_inner(AssetKind::Head, "beluga"), fill));
+        // An opaque PNG, Background on: with the guides hidden, and with them left on.
+        for guides in [false, true] {
+            let label = format!(
+                "{name} {fill}, guides {}",
+                if guides { "on" } else { "off" }
+            );
+            let shape = match run(&template.export(&draw, true, guides, false), &[]) {
+                Ok(s) => s,
+                Err(e) => {
+                    failures.push(format!("{label}: {e:?}"));
+                    continue;
+                }
+            };
+            let score = iou(&original, &shape_alpha(&shape, 400));
+            println!("{label}: IoU {score:.4}, info {:?}", shape.info());
+            if score < 0.97 {
+                failures.push(format!("{label}: IoU {score:.4}"));
+            }
+            let mut want = vec![Lint::ColoursFlattened];
+            if guides {
+                want.insert(0, Lint::GuidesVisible);
+            }
+            if shape.info() != want {
+                failures.push(format!("{label}: info {:?}", shape.info()));
+            }
+            if !shape.passes(AssetKind::Head) {
+                failures.push(format!("{label}: {:?}", shape.lints()));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
 #[test]
 fn ink_rule_ignores_head_template_layers() {
     ink_matrix(
@@ -989,14 +1069,12 @@ fn ink_rule_ignores_tail_template_layers() {
 fn guides_alone_are_empty_with_a_hint() {
     let guides = fixture("template/head-guide.png");
     let e = run(&guides, &[]).expect_err("guides alone are not a drawing");
-    // Where the pink attach label meets a blue guide line (around x 35, y 500 of the
-    // overlay), the anti-aliased purple between them is no template colour. Those few
-    // pixels are cleaned up as specks; a drawing covers that spot anyway (it's inside
-    // the neck), so the ink matrix above sees exactly [guides_visible].
+    // Every guide colour is light, so even where two guides overlap (the attach label
+    // crossing the centre line) nothing is dark enough to be ink.
     assert_eq!(
         e,
         ProcessError::Empty {
-            info: vec![Lint::GuidesVisible, Lint::SpecksRemoved { count: 3 }]
+            info: vec![Lint::GuidesVisible]
         }
     );
     assert!(e.user_message().contains("guides"), "{}", e.user_message());
