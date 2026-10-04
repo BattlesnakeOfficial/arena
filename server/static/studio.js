@@ -466,7 +466,11 @@
       part("confirm-yes", kind).focus();
       return;
     }
-    if (pending[kind] && pending[kind].fixOf === slot) pending[kind] = null;
+    // A Flip or Fit still on its way for either drawing would land over the move (the
+    // other slot's would bring back the drawing just replaced): drop it.
+    for (const k of [kind, to]) {
+      if (pending[k] && pending[k].fixOf && pending[k].fixOf === state.slots[k]) pending[k] = null;
+    }
     const back = replaced[kind] && replaced[kind].by === slot ? replaced[kind].prev : null;
     replaced[kind] = null;
     state.slots[kind] = back;
