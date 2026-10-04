@@ -23,6 +23,13 @@ export default defineConfig({
       name: 'chromium',
       use: { ...devices['Desktop Chrome'] },
     },
+    // Safari on an iPad, where most artists draw: the Head & Tail Studio and its
+    // guide only.
+    {
+      name: 'webkit-ipad',
+      use: { ...devices['iPad Pro 11'] },
+      testMatch: /\/(studio|guide)[^/]*\.spec\.ts$/,
+    },
   ],
 
   webServer: [

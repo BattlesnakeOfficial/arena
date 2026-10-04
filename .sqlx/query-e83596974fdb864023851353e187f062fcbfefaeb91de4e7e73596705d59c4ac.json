@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO games (board_size, game_type, enqueued_at)\n             VALUES ('11x11', 'Standard', CASE WHEN $1 THEN NOW() ELSE NULL END)\n             RETURNING game_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "game_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Bool"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "e83596974fdb864023851353e187f062fcbfefaeb91de4e7e73596705d59c4ac"
+}

@@ -89,6 +89,39 @@ rules = { path = "../rules" }
 tokio-util = { version = "0.7.14", features = ["rt"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 
+# design_kit (DEV-1539): PNG/JPEG/SVG upload -> one clean head/tail path. Pure Rust.
+# Rasteriser for lint metrics; no png-format (PNG decoding uses `png` directly).
+tiny-skia = { version = "0.12.0", default-features = false, features = ["std", "simd"] }
+# Tracing engine behind vtracer 0.6.x binary mode.
+visioncortex = "0.8.10"
+png = "0.18.1"
+# Pinned: design_kit::raster_in mirrors 0.5.15 internals (`first_scan_components` walks
+# markers like its header parser; `buffers_coefficients` and `buffered_max_pixels` copy
+# when and how much it buffers). Re-check those, and the JPEG memory caps, before bumping.
+zune-jpeg = "=0.5.15"
+# SVG input: parsing and normalising to paths. No text/fonts, no svgz, no writer. Its
+# image resolvers are replaced with no-ops (the defaults read local files). resvg is
+# deliberately NOT a runtime dependency: it renders filters and mask layers, which are
+# memory and CPU bombs on untrusted input (see docs/design-kit.md).
+#
+# PINNED EXACTLY, with simplecss below: the SVG prescan (src/design_kit/svg_scan.rs)
+# mirrors usvg 0.48.1's reference following, simplecss's selector matching, svgtypes'
+# path parsing, kurbo's arc splitting and roxmltree's tokenizer, and a reference loop it
+# misses aborts the whole process (a stack overflow can't be caught). Bumping any of
+# usvg, simplecss, roxmltree, svgtypes or kurbo means re-checking svg_scan.rs against the
+# new sources;
+# `svg_parsing_crates_are_the_audited_versions` (tests/design_kit_svg.rs) fails until the
+# versions there are updated too.
+usvg = { version = "=0.48.1", default-features = false }
+# The CSS engine usvg uses (the same copy): the SVG prescan matches selectors exactly as
+# usvg will, to find references made from stylesheets and to bound the matching cost.
+simplecss = "=0.2.2"
+# The path, length and viewBox parser usvg uses (the same copy): the prescan reads path
+# data and radii as usvg will, to bound the segments its arcs become (kurbo 0.13.1).
+svgtypes = "=0.16.1"
+# Head & Tail Studio worker (src/studio_worker.rs): setrlimit in the child before exec.
+libc = "0.2"
+
 [lib]
 name = "arena"
 path = "src/lib.rs"
@@ -118,4 +151,9 @@ vergen = { version = "8.3.1", features = [
 tower = { version = "0.4.13", features = ["util"] }
 proptest = "1"
 wiremock = "0.6"
+tokio-tungstenite = "0.28"
 tower-cookies = { version = "0.11", features = ["private"] }
+# design_kit tests: independent SVG renderer (test oracle only, never at runtime)
+# and a JPEG encoder for JPEG round-trip fixtures.
+resvg = { version = "=0.48.1", default-features = false }
+jpeg-encoder = "0.7.1"

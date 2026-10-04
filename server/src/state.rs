@@ -6,7 +6,7 @@ use sqlx::{PgPool, postgres::PgPoolOptions};
 use crate::config::AppConfig;
 use crate::discord::DiscordNotifier;
 use crate::email::Mailer;
-use crate::game_channels::GameChannels;
+use crate::watched_games::WatchedGames;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -17,8 +17,8 @@ pub struct AppState {
     pub cookie_key: cja::server::cookies::CookieKey,
     /// Connection to the legacy Battlesnake Engine database (for game backup)
     pub engine_db: Option<sqlx::Pool<sqlx::Postgres>>,
-    /// Broadcast channels for live game updates
-    pub game_channels: GameChannels,
+    /// Process-local viewers, shared by clones of this state.
+    pub watched_games: WatchedGames,
     /// HTTP client for calling snake APIs
     pub http_client: reqwest::Client,
     pub proxy_east_client: reqwest::Client,
@@ -39,6 +39,9 @@ pub struct AppState {
     pub stats_cache: Arc<crate::cache::TtlCell<crate::models::stats::StatsSnapshot>>,
     pub stats_refresh: Arc<tokio::sync::Mutex<()>>,
     pub activity_recorder: Arc<crate::activity::ActivityRecorder>,
+    /// Head & Tail Studio guards (upload and processing slots, rate limit) and the
+    /// upload processor (an `arena studio-worker` child process per upload).
+    pub studio: crate::routes::studio::StudioState,
 }
 
 impl AppState {
@@ -189,12 +192,15 @@ impl AppState {
             config.stats_cache_secs,
         )));
 
+        let studio = crate::routes::studio::StudioState::subprocess()
+            .wrap_err("Failed to find this executable for the studio worker")?;
+
         Ok(Self {
             config: Arc::new(config),
             db: pool,
             cookie_key,
             engine_db,
-            game_channels: GameChannels::new(),
+            watched_games: WatchedGames::new(),
             http_client,
             proxy_east_client,
             proxy_europe_client,
@@ -208,6 +214,7 @@ impl AppState {
             stats_cache,
             stats_refresh: Arc::new(tokio::sync::Mutex::new(())),
             activity_recorder: Arc::new(crate::activity::ActivityRecorder::default()),
+            studio,
         })
     }
 }
@@ -223,7 +230,7 @@ impl AppState {
             cookie_key: cja::server::cookies::CookieKey::from_env_or_generate()
                 .expect("failed to generate a test cookie key"),
             engine_db: None,
-            game_channels: GameChannels::new(),
+            watched_games: WatchedGames::new(),
             http_client: reqwest::Client::new(),
             proxy_east_client: reqwest::Client::new(),
             proxy_europe_client: reqwest::Client::new(),
@@ -237,6 +244,8 @@ impl AppState {
             stats_cache: Arc::new(crate::cache::TtlCell::new(std::time::Duration::ZERO)),
             stats_refresh: Arc::new(tokio::sync::Mutex::new(())),
             activity_recorder: Arc::new(crate::activity::ActivityRecorder::default()),
+            // The test binary has no `studio-worker` subcommand: process in-process.
+            studio: crate::routes::studio::StudioState::in_process(),
         }
     }
 }

@@ -7,7 +7,7 @@ use cja::{
     setup::{TracingConfig, setup_sentry},
     tasks::{ShutdownBudget, Supervisor},
 };
-use color_eyre::eyre::eyre;
+use color_eyre::eyre::{Context as _, eyre};
 use state::AppState;
 use tracing::info;
 
@@ -24,7 +24,6 @@ mod engine;
 mod engine_models;
 mod errors;
 mod flasher;
-mod game_channels;
 mod game_progress;
 mod game_runner;
 mod github;
@@ -46,6 +45,7 @@ mod stuck_game_sweeper;
 mod telemetry;
 mod tournament_bracket;
 mod tournament_match;
+mod watched_games;
 mod wire;
 
 /// Frontend UI components only - do not place backend logic here
@@ -56,10 +56,19 @@ mod components {
     pub mod live_refresh;
     pub mod page;
     pub mod page_factory;
+    pub mod snake_board;
     pub mod snake_tags;
 }
 
 fn main() -> color_eyre::Result<()> {
+    // Hidden one-shot subcommand: the Head & Tail Studio's upload worker, a child of the
+    // server (see `arena::studio_worker`). It runs before anything else on purpose: no
+    // Sentry, config, telemetry or database, just stdin to stdout.
+    let mut args = std::env::args().skip(1);
+    if args.next().as_deref() == Some(arena::studio_worker::SUBCOMMAND) {
+        std::process::exit(arena::studio_worker::worker_main(args));
+    }
+
     // Initialize Sentry for error tracking
     let _sentry_guard = setup_sentry();
 
@@ -171,6 +180,19 @@ async fn spawn_application_tasks(
     if features.server {
         info!("Server Enabled");
         supervisor.spawn(
+            "watched-games",
+            watched_games::run_watched_games(
+                app_state.db.clone(),
+                app_state
+                    .config
+                    .database_url
+                    .parse()
+                    .wrap_err("Invalid listener database URL")?,
+                app_state.watched_games.clone(),
+                shutdown.clone(),
+            ),
+        );
+        supervisor.spawn(
             "server",
             run_server_until(
                 routes::routes(app_state.clone()),
@@ -184,7 +206,8 @@ async fn spawn_application_tasks(
     if features.jobs {
         info!("Jobs Enabled");
         info!("Job poll interval: {}ms", job.poll_interval_ms);
-        info!("Job lock timeout: {}s", job.lock_timeout_secs);
+        info!("Job heartbeat interval: {}s", job.heartbeat_interval_secs);
+        info!("Job reclaim window: {}s", job.reclaim_window_secs);
         info!("Job max retries: {}", job.max_retries);
         info!("Job workers: {}", job.workers);
         info!("Job shutdown drain: {}s", job.shutdown_drain_secs);
@@ -193,14 +216,13 @@ async fn spawn_application_tasks(
             let name: &'static str = Box::leak(format!("jobs-{i}").into_boxed_str());
             supervisor.spawn(
                 name,
-                cja::jobs::worker::job_worker_with_shutdown_drain(
+                cja::jobs::worker::job_worker(
                     app_state.clone(),
                     jobs::Jobs,
                     Duration::from_millis(job.poll_interval_ms),
                     job.max_retries,
                     shutdown.clone(),
-                    Duration::from_secs(job.lock_timeout_secs),
-                    supervisor.budget().job_drain,
+                    job.worker_config(supervisor.budget().job_drain),
                 ),
             );
         }

@@ -16,6 +16,32 @@ The job migrations include `dead_letter_jobs`, which retains the payload and
 failure details after a job exhausts its retries, and `idx_jobs_fetch_next`, which
 supports polling by priority, scheduled time, and creation time.
 
+## Job leases
+
+Arena heartbeats each running job every 30 seconds (`ARENA_JOB_HEARTBEAT_INTERVAL_SECS`).
+`ARENA_JOB_RECLAIM_WINDOW_SECS` is the reclaim window since the last successful
+heartbeat, default 240 seconds. This allows for roughly 30-second Neon stalls
+while keeping dead-worker recovery under five minutes. A roughly 42-minute game
+remains exclusively leased while heartbeats succeed. A hard-killed worker's lease
+can be reclaimed after four minutes plus the next poll when the database is
+healthy. Polling is separate: `ARENA_JOB_POLL_INTERVAL_MS` is 200 ms in production.
+`ARENA_JOB_SHUTDOWN_DRAIN_SECS` controls graceful shutdown drain (default 5 seconds).
+
+If heartbeat writes keep failing, cja's watchdog stops the job body before the
+lease expires. A later reclaim charges one failed attempt. A panic also charges
+an attempt and releases the lock while the worker keeps running. With N retries,
+the terminal dead-letter row records N+1 failed attempts. Rows locked by the
+pre-heartbeat revision (cja `a6406d7`) have no heartbeat. On the first deploy,
+new workers may reclaim one 240 seconds after its `locked_at` if the old
+revision has not drained or released it. That charges one attempt and replays
+the game from turn zero. This cja bump needs no new migration file.
+
+Watch Cloud Logging for `Job lease watchdog expired`, `Job lease ownership lost`,
+`Job failure finalization lost ownership`, `Job completion lost ownership`, and
+`Job lease lost; body stopped`. Spikes warrant checking database access, pool
+pressure, and the configured reclaim window. A prolonged database outage can
+delay reclaim and cause a game to replay from turn zero.
+
 ## Deployment and rollback
 
 Normal startup applies pending migrations before starting workers. The original
