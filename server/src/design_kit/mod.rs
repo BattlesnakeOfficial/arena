@@ -529,8 +529,8 @@ impl ProcessError {
                     .into()
             }
             ProcessError::Empty { info } if info.contains(&Lint::GuidesVisible) => "We only found \
-                 the template guides. Draw in black on the \"Draw here\" layer, hide the guides, \
-                 then export again."
+                 the template guides. Draw in black on the \"Draw here\" layer, hide the Guides \
+                 and Reference layers, then export again."
                 .into(),
             ProcessError::Empty { .. } => "We couldn't find a drawing. Draw in solid black and \
                  export again. Light colours, and colours close to the template's blue and pink \
