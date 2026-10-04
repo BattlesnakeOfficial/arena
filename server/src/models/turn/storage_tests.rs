@@ -73,9 +73,15 @@ impl Capture {
             .collect()
     }
 
+    /// Lifecycle states in emission order: `started` comes from the phase
+    /// span's creation, terminal states from events.
     fn states(&self, game_id: Uuid) -> Vec<(String, String)> {
-        self.records(game_id, false)
-            .into_iter()
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, fields)| fields)
+            .filter(|fields| fields.get("game_id") == Some(&game_id.to_string()))
             .map(|fields| {
                 (
                     fields["phase"]
@@ -147,7 +153,8 @@ async fn pool_wait_precedes_insert_and_keeps_creation_identity(database: PgPool)
             .all(|fields| fields["turn"] == "7" && !fields.contains_key("frame_data"))
     );
     let events = capture.records(game_id, false);
-    assert!(events[1]["duration_ms"].parse::<u64>().unwrap() >= 20);
+    assert!(events.iter().all(|fields| fields["state"] == "completed"));
+    assert!(events[0]["duration_ms"].parse::<u64>().unwrap() >= 20);
 }
 
 #[sqlx::test(migrations = "../migrations")]
