@@ -801,51 +801,82 @@ async fn the_guide_renders_every_section_the_checks_link_to(db: sqlx::PgPool) {
     assert!(html.contains("keep every detail and every gap at least 40 px"));
 }
 
-/// One of every lint (the values don't matter, only the variant).
+/// One of every lint (the values don't matter, only the variant), as a chain: each
+/// variant's arm names the next one. The match has no wildcard, so a new variant doesn't
+/// compile until it has an arm, and it's only listed once an arm names it as the next.
 fn every_lint() -> Vec<arena::design_kit::Lint> {
     use arena::design_kit::{Edge, Lint};
-    vec![
-        Lint::NearlyEmpty { fill_pct: 1.0 },
-        Lint::SolidSquare { fill_pct: 99.0 },
-        Lint::NeckGap {
-            left_edge_pct: 50.0,
-        },
-        Lint::Margins {
-            bbox: [10.0, 10.0, 90.0, 90.0],
-        },
-        Lint::FacesLeft { centroid_x: 60.0 },
-        Lint::FacesUpDown {
-            right_edge_pct: 90.0,
-        },
-        Lint::TailReversed {
-            attach_edge: Edge::Right,
-        },
-        Lint::OutlineOnly { hole_pct: 80.0 },
-        Lint::SpecksRemoved { count: 2 },
-        Lint::ColoursFlattened,
-        Lint::GuidesVisible,
-        Lint::OutsideDrawHereIgnored,
-        Lint::SemiTransparent,
-        Lint::NonSquare {
-            width: 10,
-            height: 20,
-        },
-        Lint::LowResolution {
-            width: 10,
-            height: 10,
-        },
-        Lint::StrokesConverted { count: 1 },
-        Lint::Gradient,
-        Lint::ImageIgnored { count: 1 },
-        Lint::TextIgnored,
-        Lint::ClipOrMask {
-            clipped: true,
-            masked: false,
-        },
-        Lint::FiltersIgnored,
-        Lint::ActiveContentRemoved,
-        Lint::OutsideCanvas,
-    ]
+    let mut all = Vec::new();
+    let mut next = Some(Lint::NearlyEmpty { fill_pct: 1.0 });
+    while let Some(lint) = next {
+        next = match &lint {
+            Lint::NearlyEmpty { .. } => Some(Lint::SolidSquare { fill_pct: 99.0 }),
+            Lint::SolidSquare { .. } => Some(Lint::NeckGap {
+                left_edge_pct: 50.0,
+            }),
+            Lint::NeckGap { .. } => Some(Lint::Margins {
+                bbox: [10.0, 10.0, 90.0, 90.0],
+            }),
+            Lint::Margins { .. } => Some(Lint::FacesLeft { centroid_x: 60.0 }),
+            Lint::FacesLeft { .. } => Some(Lint::FacesUpDown {
+                right_edge_pct: 90.0,
+            }),
+            Lint::FacesUpDown { .. } => Some(Lint::TailReversed {
+                attach_edge: Edge::Right,
+            }),
+            Lint::TailReversed { .. } => Some(Lint::OutlineOnly { hole_pct: 80.0 }),
+            Lint::OutlineOnly { .. } => Some(Lint::SpecksRemoved { count: 2 }),
+            Lint::SpecksRemoved { .. } => Some(Lint::ColoursFlattened),
+            Lint::ColoursFlattened => Some(Lint::GuidesVisible),
+            Lint::GuidesVisible => Some(Lint::OutsideDrawHereIgnored),
+            Lint::OutsideDrawHereIgnored => Some(Lint::SemiTransparent),
+            Lint::SemiTransparent => Some(Lint::NonSquare {
+                width: 10,
+                height: 20,
+            }),
+            Lint::NonSquare { .. } => Some(Lint::LowResolution {
+                width: 10,
+                height: 10,
+            }),
+            Lint::LowResolution { .. } => Some(Lint::StrokesConverted { count: 1 }),
+            Lint::StrokesConverted { .. } => Some(Lint::Gradient),
+            Lint::Gradient => Some(Lint::ImageIgnored { count: 1 }),
+            Lint::ImageIgnored { .. } => Some(Lint::TextIgnored),
+            Lint::TextIgnored => Some(Lint::ClipOrMask {
+                clipped: true,
+                masked: false,
+            }),
+            Lint::ClipOrMask { .. } => Some(Lint::FiltersIgnored),
+            Lint::FiltersIgnored => Some(Lint::ActiveContentRemoved),
+            Lint::ActiveContentRemoved => Some(Lint::OutsideCanvas),
+            Lint::OutsideCanvas => None,
+        };
+        all.push(lint);
+    }
+    let codes: std::collections::BTreeSet<_> = all.iter().map(|l| l.code()).collect();
+    assert_eq!(codes.len(), all.len(), "each variant once");
+    all
+}
+
+#[sqlx::test(migrations = "../migrations")]
+async fn the_studio_hands_its_script_a_topic_for_every_guide_section(db: sqlx::PgPool) {
+    use super::guide::{RULE_ANCHORS, RULE_TOPICS};
+    // studio.js reads "Learn more about …" from data-guide-topics, so every section a
+    // check links to gets a link.
+    let (status, _, html) = get_html(page_app(db), "/customizations/studio").await;
+    assert_eq!(status, StatusCode::OK);
+    let json = serde_json::to_string(&RULE_TOPICS).expect("json");
+    let attr = format!("data-guide-topics=\"{}\"", json.replace('"', "&quot;"));
+    assert!(html.contains(&attr), "{attr}");
+    for lint in every_lint() {
+        let anchor = lint.guide_anchor().trim_start_matches('#');
+        assert!(RULE_ANCHORS.contains(&anchor), "{}", lint.code());
+    }
+    let script = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("static/studio.js"),
+    )
+    .expect("studio.js");
+    assert!(script.contains("data-guide-topics"));
 }
 
 #[sqlx::test(migrations = "../migrations")]

@@ -25,17 +25,30 @@ pub const STUDIO_PATH: &str = "/customizations/studio";
 /// This page.
 pub const GUIDE_PATH: &str = "/customizations/studio/guide";
 
-/// The anchors the studio's checks link to, in page order.
-pub const RULE_ANCHORS: [&str; 8] = [
-    "colour",
-    "holes",
-    "neck",
-    "direction",
-    "small",
-    "fill",
-    "margins",
-    "guides",
+/// The anchors the studio's checks link to, in page order, each with what its section is
+/// about: the end of a check's "Learn more about …" link. The studio page hands these to
+/// its script (`data-guide-topics`), so this is the only list.
+pub const RULE_TOPICS: [(&str, &str); 8] = [
+    ("colour", "using one colour"),
+    ("holes", "holes"),
+    ("neck", "the neck"),
+    ("direction", "which way to face"),
+    ("small", "small details"),
+    ("fill", "filling your shape"),
+    ("margins", "drawing edge to edge"),
+    ("guides", "hiding the guides"),
 ];
+
+/// The anchors of [`RULE_TOPICS`].
+pub const RULE_ANCHORS: [&str; 8] = {
+    let mut anchors = [""; 8];
+    let mut i = 0;
+    while i < anchors.len() {
+        anchors[i] = RULE_TOPICS[i].0;
+        i += 1;
+    }
+    anchors
+};
 
 /// One downloadable file in `static/design-kit/`.
 #[derive(Debug, Clone, Copy)]
@@ -226,7 +239,8 @@ fn templates_section() -> Markup {
                         p class="guide-muted" {
                             "Other app? "
                             (download_button(guides_png(kind), kind, "guide-minor-download"))
-                            ": put it on a layer above your drawing and hide it before you export."
+                            ": put it on a layer above your drawing, set that layer to "
+                            strong { "Multiply" } ", and hide it before you export."
                         }
                     }
                 }
@@ -258,6 +272,11 @@ fn rules_section() -> Markup {
                     " Black is easiest. If you use several colours, the studio flattens them: "
                     "dark areas become the snake and light areas become holes. Soft or "
                     "see-through strokes only count where they're at least half opaque."
+                }
+                p {
+                    "In an SVG only the filled shapes count. Clipping paths are applied, but "
+                    "masks are ignored (masked shapes show in full), and filters such as blurs "
+                    "and drop shadows, scripts and links are left out, so check the preview."
                 }
             }))
             (rule("holes", "Details are holes", html! {
@@ -302,6 +321,10 @@ fn rules_section() -> Markup {
                     "the size). Zoom way out and squint. If you can't tell what it is, simplify. "
                     "The studio's " strong { "Game size" } " view shows you the real thing."
                 }
+                p {
+                    "Export at the template's full " strong { "1000 × 1000 px" }
+                    ". A smaller image is scaled up and its edges look soft."
+                }
             }))
             (rule("fill", "Fill your shape", html! {
                 p {
@@ -311,6 +334,12 @@ fn rules_section() -> Markup {
                     "converting strokes or merging shapes is optional, because the studio does "
                     "it for you."
                 }
+                p {
+                    "Live text and placed images are left out. Turn text into shapes first ("
+                    strong { "Type → Create Outlines" } " in Illustrator, "
+                    strong { "Path → Object to Path" } " in Inkscape), and draw with shapes "
+                    "rather than placing a picture, or upload the picture as a PNG."
+                }
             }))
             (rule("margins", "Draw edge to edge", html! {
                 p {
@@ -319,6 +348,10 @@ fn rules_section() -> Markup {
                     "neck. If you've already drawn it small, the studio's " strong { "Fit" }
                     " button stretches it for you."
                 }
+                p {
+                    "Keep the canvas square, like the 1000 × 1000 px template: a canvas of any "
+                    "other shape is centred in a square. Anything outside the square is cut off."
+                }
             }))
             (rule("guides", "Hide the guides", html! {
                 p {
@@ -326,6 +359,10 @@ fn rules_section() -> Markup {
                     strong { "Reference" } " layer, and " strong { "leave Background on" }
                     ". If you forget, the studio ignores the template's colours and tells you, "
                     "but hiding them gives the cleanest result."
+                }
+                p {
+                    "In an SVG with a " strong { "draw-here" } " layer, only that layer is used: "
+                    "shapes on your other layers are left out, so move everything you drew into it."
                 }
             }))
         }
@@ -409,8 +446,9 @@ fn anatomy_section() -> Markup {
                 li {
                     strong { "An eye cutout in the upper-left third." }
                     " The eye is usually a round hole about 185 px across (just under two grid "
-                    "squares, about 18% of the height), a third of the way in from the left and "
-                    "a little above the middle (around x 360, y 390)."
+                    "squares, about 18% of the height). Most official heads put it a third of "
+                    "the way in from the left and a little above the middle (around x 360, "
+                    "y 390); the default head above keeps it close to the neck."
                 }
                 li {
                     strong { "A mouth notch in the right edge." }

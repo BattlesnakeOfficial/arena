@@ -51,8 +51,9 @@ pub fn asset_url(path: &str) -> String {
 pub async fn serve_static_file(Path(path): Path<String>) -> impl IntoResponse {
     // Try to find the file in the embedded directory
     if let Some(file) = STATIC_DIR.get_file(&path) {
-        // Get the file contents
-        let contents = file.contents().to_vec();
+        // Borrowed from the binary, not copied: the design kit's PSDs are about 1 MB
+        // each, and a slow download would otherwise hold a copy the whole time.
+        let contents: &'static [u8] = file.contents();
 
         // Guess the MIME type
         let mime_type = from_path(&path).first_or_octet_stream().to_string();
@@ -88,7 +89,7 @@ pub async fn serve_favicon() -> impl IntoResponse {
                     "public, max-age=31536000".to_string(),
                 ),
             ],
-            file.contents().to_vec(),
+            file.contents(),
         )
             .into_response(),
         None => StatusCode::NOT_FOUND.into_response(),

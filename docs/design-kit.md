@@ -530,14 +530,20 @@ are big and bold (DejaVu Sans Bold, 2.1 to 3 units, 21 to 30 px on the template)
 up for the rest.
 
 The guides layer uses Multiply, so guides over a visible reference come out as the
-product of the two colours. A pixel is **never ink** when it is within RGB distance 48 of:
+product of the two colours. A pixel is **never ink** when it is:
 
-- a palette colour, or the segment from it to white (anti-aliased edges over the white
-  background);
-- when the reference is visible, also the product of each guide colour and the ghost,
-  or the segment from it to the ghost. The labels' products, a slate blue and a mauve
-  (luma 0.42–0.43), are dark enough to be ink (the others are 0.53–0.67), so without a
-  visible reference they are ordinary ink.
+- within RGB distance 48 of a palette colour, or of the segment from it to white
+  (anti-aliased edges over the white background);
+- when the reference is visible, within distance **32** of the product of a guide colour
+  and the ghost, or of the segments from it to the ghost (a guide's edge over the
+  reference) and to its guide colour (a guide crossing the reference's edge). The
+  labels' products, a slate blue and a mauve (luma 0.42–0.43), are dark enough to be ink
+  (the others are 0.53–0.67), so without a visible reference they are ordinary ink. The
+  tighter distance is because the products sit among real inks: steel blue is 42 from
+  the blends of the labels' product, medium purple 35 and slate blue 48 from the
+  border's. At 48, any of them drawn over a visible reference vanished. The products are
+  exact colours, so in a PNG they're within a few levels, and 32 still holds them through
+  JPEG noise.
 
 **Greys** (chroma < 12) are only checked against the ghost's fade to white, the light
 greys from 176 up that a reference's soft edge passes through. No template colour is
@@ -554,12 +560,27 @@ of the ghost, and so is part of the anti-aliased edge of a dark-blue drawing on 
 (about 0.1% of the canvas at 1000 px). The chroma floor rules out the greys, and the
 edge is too thin to have an inside.
 
+**JPEG noise** scatters single pixels across those boundaries: a label pixel turns just
+dark enough to be ink (a speck), or a pixel inside a fill lands in a label colour's zone
+(a pinhole). A solid, dark pixel (luma < 128) that is a close call, near a template
+colour or within 24 beyond its zone, goes with its 3 × 3 neighbourhood: near a template
+colour but surrounded by ink (at least 4 neighbours, more ink than template) it's ink;
+ink surrounded by template (at least 4, more than twice the ink) it's not. (The same
+settles a transparent-canvas export's guide and drawing pixels where the reference
+shows.) An
+anti-aliased edge, half one and half the other, keeps the call its colour gets, and black
+ink is never a close call.
+
 So a navy, sapphire, royal blue, steel blue, crimson, raspberry or teal drawing works
-with crisp or soft edges, on white or light grey, and filled inside a black outline,
-with the guides shown or hidden. Ink close to the products (slate blues, mauves) is
-dropped only when the reference is visible (it can't be told apart from guides over the
-reference), or on paper close to the ghost's colour (a cool lavender-grey), which looks
-like a reference covering the whole canvas.
+with crisp or soft edges, on white or light grey, filled inside a black outline, and as
+a PNG or a JPEG, with the guides and the reference shown or hidden. Ink very close to
+the products (within 32: the slate blues and mauves right next to the labels' colours)
+is dropped when the reference is visible, since it can't be told apart from guides over
+the reference, and so is a drawing on paper close to the ghost's colour (a cool
+lavender-grey), which looks like a reference covering the whole canvas. Steel blue's
+luma (0.47) is just under the 50% ink threshold, so JPEG noise alone pushes some of its
+pixels over it: a steel-blue JPEG gets pinholes (filled, with a `specks_removed` note)
+whatever the template does, as does any ink of that lightness.
 
 Then:
 
@@ -575,14 +596,16 @@ Info lints from the same pass:
 - `guides_visible`: at least 0.1% of pixels are guide evidence, or are inside a
   reference as defined above. Guide evidence is within distance 24 of a guide colour (or
   of a product, when the reference is visible), visibly coloured (chroma ≥ 12; the ghost
-  has 18), and in the flat core of a guide: none of its four neighbours is more than 16
-  levels darker (luma, over white). The chroma check keeps grey anti-aliasing of black
-  ink, pencil and paper from counting. The core check keeps coloured ink's soft edges
-  from counting: a light guide colour lies on the fade from darker inks of the same hue
-  to white (a navy edge passes right through the labels' slate blue), but an edge is a
-  ramp, about 40 levels a pixel even 5 px wide, while every line, letter and swatch of a
-  guide has a core as dark as anything around it. "We ignored the template guides. Hide
-  them next time for the cleanest result."
+  has 18), and in the flat core of a guide: no pixel up to 3 away along its row or
+  column is more than 16 levels darker (luma, over white). The chroma check keeps grey
+  anti-aliasing of black ink, pencil and paper from counting. The core check keeps
+  coloured ink's soft edges from counting: a light guide colour lies on the fade from
+  darker inks of the same hue to white (a navy edge passes right through the labels'
+  slate blue, a royal-blue one through the border's periwinkle), but an edge is a ramp,
+  while every line, letter and swatch of a guide has a core as dark as anything around
+  it. One pixel isn't far enough to look: an edge blurred over about 8 px (σ ≈ 3.3)
+  climbs about 18 levels a pixel at its steepest but only 13 along a diagonal; 3 pixels
+  is 39. "We ignored the template guides. Hide them next time for the cleanest result."
 - `colours_flattened`: at least 1% of the canvas is ink in a clear colour (chroma ≥ 64),
   or (alpha rasters) at least 0.1% of the canvas was solid white and became holes.
 - `semi_transparent`: more than 5% of the visible ink, and at least 0.1% of the canvas,
@@ -593,17 +616,21 @@ close to the template's label colours, are dropped, and the `empty` message says
 
 We never recommend a transparent export: both kinds of export work.
 
-Tested by compositing a drawn head and tail with the vendored guide overlays and a
+Tested by compositing a drawn head and tail with the committed guide overlays
+(`static/design-kit/battlesnake-{head,tail}-guide.png`, the generator's output) and a
 rendered reference ghost in all eight Background × Guides × Reference combinations
 (IoU ≥ 0.99 against the clean drawing; the info lints are exactly `[guides_visible]`
 when guides or the reference are visible, and empty otherwise), and by compositing a
 head in nine dark saturated inks (sapphire, royal blue, steel blue, crimson, raspberry,
-navy, indigo, wine, teal) into the head template as an opaque 1000 px PNG with the
-guides hidden and shown (`dark_saturated_inks_survive_the_template`: IoU ≥ 0.97, no
-warnings, notes exactly `[colours_flattened]` plus `guides_visible` when shown; under
-the first palette the first five came back `empty`). The guide overlays are copies of
-the template generator's output (`battlesnake-{head,tail}-guide.png`); the guides alone
-are `empty` with `[guides_visible]`.
+navy, indigo, wine, teal) into the head template with the guides and the reference each
+hidden or shown, as an opaque 1000 px PNG (`dark_saturated_inks_survive_the_template`)
+and as a JPEG at quality 80 (`…_as_jpeg`): IoU ≥ 0.97, no warnings, notes exactly
+`[colours_flattened]` plus `guides_visible` when either shows (steel blue's JPEG may add
+`specks_removed`, see above). Under the first palette the first five came back `empty`,
+and under the first version of this one steel blue did whenever the reference showed.
+Soft edges (`soft_edged_inks_are_not_guides`: royal blue, sapphire, steel blue and teal
+blurred over about 8 px) are not guides. The guides alone are `empty` with
+`[guides_visible]`.
 
 ## Metrics
 
@@ -809,18 +836,24 @@ including what `localStorage` (`arena:studio:v1`) restores, and lint text goes i
   instant check, any server answer, a failed image save) scroll the status line into
   view when it's off screen, since "Upload a new version" and Fix start requests far
   from it.
-- **Start here** (`details#studio-start`) is open until the first upload, then closes
-  (it opens again after Clear, and otherwise stays as the artist leaves it):
+- **Start here** (`details#studio-start`) is open until the artist's first upload of
+  their own, then closes (it opens again after Clear, and otherwise stays as the artist
+  leaves it):
   1. the templates, by app: "Procreate (PSD)" and "Illustrator · Inkscape · Affinity
      (SVG)" for the head and the tail, each a `download` link;
   2. the guide;
   3. upload here.
 
   **Try an example** fetches `design-kit/example-drawing.png` (its `asset_url` is in
-  `data-src`) and posts it to the endpoint as a head, like any upload.
+  `data-src`) and posts it to the endpoint as a head, like any upload, but the result is
+  marked as the example (and saved that way): the status and the boards' labels call it
+  "the example head", and it leaves Start here open, so a newcomer who tries it first
+  still has the templates in view, after a reload too.
 - Each check links to its section of the guide ("Learn more", from `Lint::guide_anchor`,
-  sent as `guide` in the JSON). The page knows the guide's sections, so an unknown
-  anchor gets no link.
+  sent as `guide` in the JSON). The page hands the script the guide's sections and what
+  each is about (`data-guide-topics`, from `guide::RULE_TOPICS`, the one list), so an
+  unknown anchor gets no link. Every section says something about each check that links
+  to it.
 
 ### The guide and the downloads
 
@@ -835,8 +868,14 @@ Procreate (`#procreate`) and vector-app steps, and next steps (the Discord, via
 The downloads live in `server/static/design-kit/`, written by
 `scripts/design-kit/generate.py` (see its README) and committed:
 `battlesnake-{head,tail}-template.{psd,svg}`, `battlesnake-{head,tail}-guide.png` and
-`example-drawing.png`. They're embedded in the binary like every static file and linked
-through `asset_url`, which versions files in subdirectories too.
+`example-drawing.png`. They're embedded in the binary like every static file, linked
+through `asset_url` (which versions files in subdirectories too), and served straight
+from the binary without a copy per request (the PSDs are about 0.9 MB each).
+
+The PSDs are RGBA documents, so every layer's shape is its own transparency channel:
+no layer masks (an RGB document made psd-tools store each layer's alpha as a mask over
+solid pixels, so "Draw here" was solid black under a hide-all mask). "Draw here" is
+fully transparent, and the composite's fourth channel is its transparency.
 
 The studio is linked from the site footer and the customizations page, and `/studio`
 redirects to it (`routes::redirects::LOCAL_REDIRECTS`).
@@ -1013,9 +1052,13 @@ processing slot held until the worker is gone, including when the request is dro
 - `server/tests/design_kit_templates.rs`: the committed design kit against the template
   contract: the SVG templates' guide colours are exactly `design_kit::palette` (and the
   references exactly the ghost), the `draw-here`, `guides` and `reference-*` layers
-  exist, an untouched template is `empty`, the PSDs are turned away with the template
-  advice, the test fixtures are byte-for-byte copies, and `example-drawing.png` is a
-  head with no warnings and no notes.
+  exist, an untouched template is `empty` with `[guides_visible]`, the PSDs are turned
+  away with the template advice, the PSDs' layers (read with a small PSD parser) have
+  no masks, the right order, blend modes and visibility, an empty "Draw here", and
+  shapes in their transparency channels, a PSD exported with its Guides (and a
+  reference) left on, composited from those channels with the example drawn in, is the
+  clean head plus `guides_visible`, and `example-drawing.png` is a head with no warnings
+  and no notes.
 - `server/src/routes/studio/tests.rs` also covers the guide (every section a check links
   to, for every lint; the illustrations; the Procreate steps), every design kit link on
   the studio and the guide (a versioned `asset_url` that serves the committed file, and
@@ -1025,10 +1068,10 @@ processing slot held until the worker is gone, including when the request is dro
   official SVGs, the investigation's `metrics_summary.csv` (the corpus oracle) and
   `metrics_detail.csv` (centroid, holes and bounds for the 12 samples the metric oracle
   checks); the raw reference SVGs under `refs/`; an Illustrator Save As export under
-  `illustrator/`; under `template/`, the guide overlays
-  and the SVG template (`head-template.svg`), all copies of the template generator's
-  output; and a PIL progressive JPEG under `jpeg/`. Reference-ghost overlays are
-  rendered in the tests.
+  `illustrator/`; and a PIL progressive JPEG under `jpeg/`. The template tests read the
+  guide overlays and the SVG template straight from `server/static/design-kit/`, so
+  they always test what artists download. Reference-ghost overlays are rendered in the
+  tests.
 
 ```
 cargo test -p arena --test design_kit_raster --test design_kit_metrics --test design_kit_svg \

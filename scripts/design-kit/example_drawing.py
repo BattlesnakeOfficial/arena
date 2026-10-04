@@ -143,18 +143,19 @@ def shapes() -> list[tuple[int, list[Point]]]:
         ((866, 526), (874, 506), (882, 482)),
     ], n=30)
 
-    # Big round eye, pupil looking forward, with a sparkle.
-    # Ring stays >= 40 px all round so it survives the trip to game size.
-    eye = blob(340, 300, 128, rng, squash=1.03, tilt=0.3, irregular=0.015)
-    pupil = blob(358, 290, 66, rng, squash=1.05, tilt=-0.2, irregular=0.015)
-    sparkle = blob(376, 266, 22, rng, irregular=0.03)
+    # Big round eye, pupil looking forward, with a sparkle. The guide's rule holds
+    # here too: the white ring round the pupil, the black ring round the sparkle, and
+    # every hole are at least 40 px, so they survive the trip to game size.
+    eye = blob(340, 300, 144, rng, squash=1.03, tilt=0.3, irregular=0.015)
+    pupil = blob(356, 292, 78, rng, squash=1.05, tilt=-0.2, irregular=0.015)
+    sparkle = blob(365, 282, 22, rng, irregular=0.03)
 
-    # Freckles on the cheek, behind the smile.
-    freckles = [blob(552, 600, 25, rng, irregular=0.03),
-                blob(612, 632, 23, rng, irregular=0.03),
-                blob(542, 668, 22, rng, irregular=0.03)]
+    # Freckles on the cheek, behind the smile, at least 40 px apart.
+    freckles = [blob(530, 588, 25, rng, irregular=0.03),
+                blob(628, 622, 24, rng, irregular=0.03),
+                blob(548, 690, 24, rng, irregular=0.03)]
     # Nostril near the top of the snout.
-    nostril = blob(862, 318, 24, rng, squash=0.8, tilt=-0.5, irregular=0.05)
+    nostril = blob(862, 318, 28, rng, squash=0.85, tilt=-0.5, irregular=0.05)
 
     out = [(INK, silhouette), (INK, fang),
            (PAPER, eye), (INK, pupil), (PAPER, sparkle), (PAPER, nostril)]
