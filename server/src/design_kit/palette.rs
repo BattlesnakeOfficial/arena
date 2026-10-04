@@ -1,19 +1,26 @@
 //! The template colour contract and the template-aware ink rule.
 //!
 //! The head/tail templates (PSD for Procreate, SVG for vector apps) draw their guides in
-//! five saturated colours and the optional reference shapes in one light "ghost" colour.
-//! These are chosen so that the studio can tell them apart from the artist's ink: an
-//! artist who forgets to hide the guides before exporting still gets a clean result,
+//! five light, saturated colours and the optional reference shapes in one light "ghost"
+//! colour. These are chosen so that the studio can tell them apart from the artist's ink:
+//! an artist who forgets to hide the guides before exporting still gets a clean result,
 //! plus a `guides_visible` info lint.
+//!
+//! Every template colour has a luma above 0.5, so no guide pixel is ink by itself, and
+//! the exclusion zone around each colour (see [`NEAR_DISTANCE`]) stays clear of the dark
+//! inks artists draw with: navy, sapphire, royal blue, steel blue, crimson, raspberry.
+//! (The first palette used dark blues and a crimson for its labels, and their exclusion
+//! zones swallowed about a third of all saturated dark blues and half the crimsons.) The
+//! text colours are the darkest, for about 3.2:1 contrast on white.
 //!
 //! The template generator must use exactly these colours. The guides layer uses the
 //! Multiply blend mode, so guides that sit over the reference ghost come out as the
-//! product of the two colours. Four of those products are blues and crimsons dark enough
-//! to be ink (luma 64-99; the grid's is a light blue-grey), so they are only excluded
-//! when the reference itself is clearly visible in the image (see
-//! [`GHOST_MIN_PERCENT`]); otherwise a navy or crimson drawing would vanish. The
-//! exclusion also covers anti-aliased blends of each colour towards white (or of each
-//! product towards the ghost).
+//! product of the two colours. The labels' products are just dark enough to be ink (luma
+//! 0.42-0.43; the others are 0.53-0.67), so the products are only excluded when the
+//! reference itself is clearly visible in the image (see [`GHOST_MIN_PERCENT`]);
+//! otherwise a slate-blue or mauve drawing would vanish. The exclusion also covers
+//! anti-aliased blends of each colour towards white (or of each product towards the
+//! ghost).
 
 /// An sRGB colour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,14 +55,14 @@ impl Rgb {
 
 /// Grid lines (light blue).
 pub const GRID: Rgb = Rgb::new(0xbf, 0xe3, 0xf7);
-/// Canvas border, centre line, small labels.
-pub const GUIDE: Rgb = Rgb::new(0x2f, 0x8f, 0xd6);
-/// Main labels and the direction arrow.
-pub const LABEL: Rgb = Rgb::new(0x1f, 0x6f, 0xb0);
+/// Canvas border and the horizontal centre (spine) line.
+pub const GUIDE: Rgb = Rgb::new(0x9e, 0xb0, 0xf4);
+/// Every label but the attach edge's, the direction arrow and the detail-size swatches.
+pub const LABEL: Rgb = Rgb::new(0x7e, 0x8f, 0xb8);
 /// The attach edge (neck/body joint) band and ticks.
-pub const ATTACH: Rgb = Rgb::new(0xff, 0x4f, 0x86);
+pub const ATTACH: Rgb = Rgb::new(0xff, 0x94, 0xb8);
 /// The attach edge label.
-pub const ATTACH_LABEL: Rgb = Rgb::new(0xd4, 0x2a, 0x63);
+pub const ATTACH_LABEL: Rgb = Rgb::new(0xb4, 0x80, 0x8c);
 
 /// The five guide colours, in template order.
 pub const GUIDE_COLOURS: [Rgb; 5] = [GRID, GUIDE, LABEL, ATTACH, ATTACH_LABEL];
@@ -73,6 +80,16 @@ pub const NEAR_DISTANCE: u32 = 48;
 /// distance from the ghost makes a pixel ghost-coloured.
 pub const EVIDENCE_DISTANCE: u32 = 24;
 
+/// A guide-coloured pixel only counts as evidence when none of its four neighbours is
+/// darker than it by more than this (luma, 0..=255, composited over white).
+///
+/// Guides are flat colour with crisp edges, so the core of every line, letter and
+/// swatch is as dark as anything around it. The light guide colours also lie on the
+/// anti-aliased edges of darker inks of the same hue (a navy edge fading to white passes
+/// right through the labels' slate blue), but an edge is a ramp: one neighbour is always
+/// a good deal darker (about 40 levels per pixel even for a 5 px soft edge).
+pub const EVIDENCE_MAX_DARKER_NEIGHBOUR: u32 = 16;
+
 /// Minimum `max(r,g,b) - min(r,g,b)` for a pixel to count as guide evidence or as
 /// ghost-coloured. The ghost has chroma 18; greys (anti-aliasing of black ink, pencil,
 /// light-grey paper or backgrounds) have about 0.
@@ -89,7 +106,7 @@ const EVIDENCE_MIN_PER_MILLE: usize = 1;
 pub const GHOST_MIN_PERCENT: usize = 1;
 
 /// Every guide colour multiplied over the ghost: guides drawn over a visible reference.
-/// Not ink either, but only when the ghost is visible (they are dark).
+/// Not ink either, but only when the ghost is visible (the labels' are dark).
 pub(crate) const GHOST_PRODUCTS: [Rgb; 5] = [
     GRID.multiply(REFERENCE_GHOST),
     GUIDE.multiply(REFERENCE_GHOST),
@@ -154,8 +171,18 @@ fn segment_dist_sq(c: Rgb, p: Rgb, q: Rgb) -> f32 {
 }
 
 /// Within [`NEAR_DISTANCE`] of a template colour or of an anti-aliased blend of one.
+///
+/// Greys (chroma below [`EVIDENCE_MIN_CHROMA`]) are only checked against the ghost's
+/// fade to white: the light greys (from luma 0.69) a reference's soft edge passes
+/// through. No guide colour is grey, but grey is what the anti-aliased edge of black ink
+/// is, and what a pencil or a grey brush draws. The labels' slate blue and dusty rose are
+/// within 48 of greys from 133 to 175, so without this a black drawing's soft edge would
+/// lose part of its coverage, and a mid-grey drawing on a transparent canvas would vanish.
 fn near_template(c: Rgb, ghost: bool) -> bool {
     let near = NEAR_DISTANCE.pow(2) as f32;
+    if chroma(c) < EVIDENCE_MIN_CHROMA {
+        return segment_dist_sq(c, REFERENCE_GHOST, WHITE) <= near;
+    }
     let ghost_blends: &[(Rgb, Rgb)] = if ghost { &GHOST_BLENDS } else { &[] };
     BLENDS
         .iter()
@@ -222,7 +249,8 @@ pub(crate) struct Ink {
 struct Class {
     coverage: u8,
     /// Solid and close to a (chromatic) guide colour or, with a visible reference, a
-    /// guide-over-ghost product.
+    /// guide-over-ghost product. [`ink`] also requires it to sit in a flat core (see
+    /// [`EVIDENCE_MAX_DARKER_NEIGHBOUR`]).
     evidence: bool,
     /// Ink in a clear colour rather than black/grey.
     coloured: bool,
@@ -353,6 +381,30 @@ fn ghost_core_pixels(px: &Pixels, alpha_mode: bool) -> usize {
     core
 }
 
+/// Luma of pixel `i` composited over white: how dark it looks.
+fn darkness_luma(px: &Pixels, i: usize) -> u32 {
+    let c = px.channels;
+    let (rgb, a) = Pixels::pixel(&px.data[i * c..i * c + c]);
+    luma(over_white(rgb, a))
+}
+
+/// One of the four neighbours of pixel `i` is darker than it by more than
+/// [`EVIDENCE_MAX_DARKER_NEIGHBOUR`]: it sits on a ramp (an anti-aliased edge), not in
+/// the flat core of a guide.
+fn has_darker_neighbour(px: &Pixels, i: usize) -> bool {
+    let (w, h) = (px.width, px.height);
+    let (x, y) = (i % w, i / w);
+    let own = darkness_luma(px, i);
+    let left = x.checked_sub(1).map(|_| i - 1);
+    let right = (x + 1 < w).then_some(i + 1);
+    let up = y.checked_sub(1).map(|_| i - w);
+    let down = (y + 1 < h).then_some(i + w);
+    [left, right, up, down]
+        .into_iter()
+        .flatten()
+        .any(|n| darkness_luma(px, n) + EVIDENCE_MAX_DARKER_NEIGHBOUR < own)
+}
+
 /// The template-aware ink rule.
 ///
 /// * **Alpha raster** (at least 0.5% transparent and 0.1% opaque pixels): coverage is the
@@ -364,6 +416,10 @@ fn ghost_core_pixels(px: &Pixels, alpha_mode: bool) -> usize {
 ///
 /// The guide-over-ghost products count as template colours only when at least
 /// [`GHOST_MIN_PERCENT`] of the canvas is inside a visible reference.
+///
+/// `guides_visible` counts guide-coloured pixels in the flat core of a guide (no
+/// neighbour much darker, see [`EVIDENCE_MAX_DARKER_NEIGHBOUR`]), plus the inside of a
+/// visible reference.
 pub(crate) fn ink(px: &Pixels) -> Ink {
     let total = px.width * px.height;
     let c = px.channels;
@@ -389,7 +445,7 @@ pub(crate) fn ink(px: &Pixels) -> Ink {
     let (mut soft_px, mut visible_px) = (0usize, 0usize);
     // Drawings are mostly long runs of identical pixels; classify each colour once per run.
     let mut last: Option<((Rgb, u8), Class)> = None;
-    for p in px.data.chunks_exact(c) {
+    for (i, p) in px.data.chunks_exact(c).enumerate() {
         let key = Pixels::pixel(p);
         let class = match last {
             Some((k, class)) if k == key => class,
@@ -400,7 +456,7 @@ pub(crate) fn ink(px: &Pixels) -> Ink {
             }
         };
         coverage.push(class.coverage);
-        evidence_px += usize::from(class.evidence);
+        evidence_px += usize::from(class.evidence && !has_darker_neighbour(px, i));
         coloured_px += usize::from(class.coloured);
         light_dropped_px += usize::from(class.light_dropped);
         visible_px += usize::from(class.visible);
@@ -434,11 +490,25 @@ mod tests {
         assert!(darkest < 128, "{darkest}");
     }
 
+    /// Within 24 of the labels' guide-over-ghost products (slate blue and mauve), but far
+    /// from every template colour.
+    const SLATE: Rgb = Rgb::new(90, 100, 150);
+    const MAUVE: Rgb = Rgb::new(135, 85, 110);
+
     #[test]
-    fn dark_navy_and_crimson_are_ink_unless_the_ghost_shows() {
-        // Each is within 24 of a guide-over-ghost product but far from every template
-        // colour.
-        for c in [Rgb::new(20, 70, 130), Rgb::new(150, 25, 70)] {
+    fn every_template_colour_is_lighter_than_ink() {
+        // Luma above 0.5 with room to spare: a guide pixel is never ink by itself, and
+        // nothing near one is dark ink.
+        for c in GUIDE_COLOURS.iter().chain([&REFERENCE_GHOST]) {
+            assert!(luma(*c) >= 138, "{} has luma {}", c.to_hex(), luma(*c));
+        }
+    }
+
+    #[test]
+    fn colours_near_the_products_are_ink_unless_the_ghost_shows() {
+        assert_eq!(GHOST_PRODUCTS[2], Rgb::new(99, 109, 153));
+        assert_eq!(GHOST_PRODUCTS[4], Rgb::new(141, 97, 116));
+        for c in [SLATE, MAUVE] {
             let alone = classify(c, 255, false, false);
             assert!(alone.coverage > 128 && !alone.evidence, "{}", c.to_hex());
             let with_ghost = classify(c, 255, false, true);
@@ -455,6 +525,13 @@ mod tests {
         for g in 0..=255u8 {
             let c = Rgb::new(g, g, g);
             assert!(chroma(c) < EVIDENCE_MIN_CHROMA, "grey {g}");
+            // Greys darker than the ghost's soft edge are ink like any other, judged by
+            // luma (or alpha), even where a label colour is close.
+            assert_eq!(near_template(c, true), g >= 176, "grey {g}");
+            if g < 176 {
+                assert_eq!(classify(c, 255, false, true).coverage, 255 - g, "grey {g}");
+                assert_eq!(classify(c, 200, true, true).coverage, 200, "grey {g}");
+            }
         }
         assert!(chroma(REFERENCE_GHOST) >= EVIDENCE_MIN_CHROMA);
         for c in GUIDE_COLOURS {
@@ -518,23 +595,22 @@ mod tests {
 
     #[test]
     fn products_are_ink_until_one_percent_of_the_canvas_is_inside_the_reference() {
-        const NAVY: Rgb = Rgb::new(20, 70, 130);
-        // 100x100 navy with a ghost block; the block's inside is (side - 2)².
+        // 100x100 slate blue with a ghost block; the block's inside is (side - 2)².
         let canvas = |side: usize| {
             rgb_pixels(100, 100, move |x, y| {
                 if x < side && y < side {
                     REFERENCE_GHOST
                 } else {
-                    NAVY
+                    SLATE
                 }
             })
         };
-        // 11x11: 81 inside pixels, 0.81%. The navy is ink, and the reference is
+        // 11x11: 81 inside pixels, 0.81%. The slate is ink, and the reference is
         // reported.
         let small = ink(&canvas(11));
-        assert_eq!(small.coverage[99 * 100 + 99], 255 - luma(NAVY) as u8);
+        assert_eq!(small.coverage[99 * 100 + 99], 255 - luma(SLATE) as u8);
         assert!(small.guides_visible);
-        // 12x12: 100 inside pixels, 1%. The navy is now a guide over the ghost.
+        // 12x12: 100 inside pixels, 1%. The slate is now a guide over the ghost.
         let big = ink(&canvas(12));
         assert_eq!(big.coverage[99 * 100 + 99], 0);
         assert!(big.guides_visible);
@@ -553,6 +629,33 @@ mod tests {
         };
         assert!(ink(&labels(10)).guides_visible);
         assert!(!ink(&labels(9)).guides_visible);
+    }
+
+    #[test]
+    fn an_ink_edge_through_a_guide_colour_is_not_guide_evidence() {
+        // Navy fading to white over 8 px: part of the ramp is within 24 of the labels'
+        // slate blue, but every step is about 24 levels darker on the navy side.
+        const NAVY: Rgb = Rgb::new(20, 70, 130);
+        let ramp = |x: usize| {
+            let u = (x.saturating_sub(40) as f32 / 8.0).min(1.0);
+            let ch = |a: u8| (a as f32 + (255.0 - a as f32) * u).round() as u8;
+            Rgb::new(ch(NAVY.r), ch(NAVY.g), ch(NAVY.b))
+        };
+        let edges = rgb_pixels(100, 100, |x, _| ramp(x));
+        let near_label = (40..=48)
+            .filter(|&x| classify(ramp(x), 255, false, false).evidence)
+            .count();
+        assert!(near_label > 0, "the ramp passes the label colour");
+        assert!(!ink(&edges).guides_visible);
+        // A label stroke as thin as one pixel, on white, is.
+        let stroke = rgb_pixels(
+            100,
+            100,
+            |x, y| {
+                if x == 70 && y < 20 { LABEL } else { ramp(x) }
+            },
+        );
+        assert!(ink(&stroke).guides_visible);
     }
 
     #[test]

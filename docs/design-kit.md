@@ -421,17 +421,31 @@ cargo test -p arena --test design_kit_refs -- --ignored --nocapture print_refs_t
 
 ## The ink rule and the template palette
 
-The templates draw guides in five saturated colours and the optional reference shapes in
-one light ghost colour (`design_kit::palette`; the template generator must match):
+The templates draw guides in five light, saturated colours and the optional reference
+shapes in one light ghost colour (`design_kit::palette`; the template generator,
+`scripts/design-kit/generate.py`, must match, and `server/tests/design_kit_templates.rs`
+checks the committed SVGs):
 
-| Role | Colour |
-|---|---|
-| grid | `#bfe3f7` |
-| border, centre line, small labels | `#2f8fd6` |
-| labels, direction arrow | `#1f6fb0` |
-| attach edge band and ticks | `#ff4f86` |
-| attach edge label | `#d42a63` |
-| reference ghost | `#c8c2d4` |
+| Role | Colour | Luma | Contrast on white |
+|---|---|---|---|
+| grid, vertical centre line | `#bfe3f7` | 0.87 | 1.35:1 |
+| canvas border, "middle" spine line | `#9eb0f4` | 0.69 | 2.11:1 |
+| every label but the neck's, the arrow, detail-size swatches | `#7e8fb8` | 0.56 | 3.23:1 |
+| attach edge: band, strip and arrows | `#ff94b8` | 0.68 | 2.06:1 |
+| the "neck attaches here" label | `#b4808c` | 0.55 | 3.28:1 |
+| reference ghost | `#c8c2d4` | 0.77 | 1.73:1 |
+
+Every colour is lighter than 50% luma, so no guide pixel is ink by itself, and the
+exclusion zone around each (below) stays clear of the dark inks people draw with. The
+first palette drew its labels in `#1f6fb0`, `#2f8fd6` and `#d42a63`, dark enough to be
+ink: their zones swallowed about 35% of saturated dark blues (sapphire, royal blue,
+steel blue all came back `empty`), 58% of crimsons and pinks (crimson, raspberry) and
+half the teals. With this palette it's about 1.3%, 1.9% and 0, all medium tones next to
+the label colours (measured on a 4-step sample of the RGB cube: luma < 0.5, chroma ≥
+96). The two text colours are the darkest the rule allows, for about 3.2:1 contrast on
+white (WCAG's bar for large text; under Multiply over the ghost, 2.9:1), and the labels
+are big and bold (DejaVu Sans Bold, 2.1 to 3 units, 21 to 30 px on the template) to make
+up for the rest.
 
 The guides layer uses Multiply, so guides over a visible reference come out as the
 product of the two colours. A pixel is **never ink** when it is within RGB distance 48 of:
@@ -439,9 +453,16 @@ product of the two colours. A pixel is **never ink** when it is within RGB dista
 - a palette colour, or the segment from it to white (anti-aliased edges over the white
   background);
 - when the reference is visible, also the product of each guide colour and the ghost,
-  or the segment from it to the ghost. Four of the five products are blues and
-  crimsons dark enough to be ink (luma 64–99; the grid's, a light blue-grey at 170, is
-  never ink), so without a visible reference they are ordinary ink.
+  or the segment from it to the ghost. The labels' products, a slate blue and a mauve
+  (luma 0.42–0.43), are dark enough to be ink (the others are 0.53–0.67), so without a
+  visible reference they are ordinary ink.
+
+**Greys** (chroma < 12) are only checked against the ghost's fade to white, the light
+greys from 176 up that a reference's soft edge passes through. No template colour is
+grey, but the anti-aliased edge of black ink is, and so is a pencil or grey brush: the
+label colours are within 48 of greys from 133 to 175, which would otherwise strip part
+of every black edge's coverage (visible as stair-stepped curves after a downscale) and
+erase a mid-grey drawing on a transparent canvas.
 
 The reference is **visible** when at least 1% of the canvas is inside it: solid pixels
 within 24 of the ghost, visibly coloured (chroma ≥ 12), whose whole 3 × 3 neighbourhood
@@ -451,11 +472,12 @@ of the ghost, and so is part of the anti-aliased edge of a dark-blue drawing on 
 (about 0.1% of the canvas at 1000 px). The chroma floor rules out the greys, and the
 edge is too thin to have an inside.
 
-So a navy or crimson drawing works with crisp or soft edges, on white or light grey,
-and filled inside a black outline. Ink close to the products is dropped only when the
-reference is visible (it can't be told apart from guides over the reference), or on
-paper close to the ghost's colour (a cool lavender-grey), which looks like a reference
-covering the whole canvas.
+So a navy, sapphire, royal blue, steel blue, crimson, raspberry or teal drawing works
+with crisp or soft edges, on white or light grey, and filled inside a black outline,
+with the guides shown or hidden. Ink close to the products (slate blues, mauves) is
+dropped only when the reference is visible (it can't be told apart from guides over the
+reference), or on paper close to the ghost's colour (a cool lavender-grey), which looks
+like a reference covering the whole canvas.
 
 Then:
 
@@ -468,29 +490,38 @@ Then:
 
 Info lints from the same pass:
 
-- `guides_visible`: at least 0.1% of pixels are within distance 24 of a guide colour
-  (or of a product, when the reference is visible) *and* visibly coloured (chroma ≥ 12;
-  the ghost has 18), or are inside a reference as defined above. The chroma check keeps
-  grey anti-aliasing of black ink, pencil and paper from counting. "We ignored the
-  template guides. Hide them next time for the cleanest result."
+- `guides_visible`: at least 0.1% of pixels are guide evidence, or are inside a
+  reference as defined above. Guide evidence is within distance 24 of a guide colour (or
+  of a product, when the reference is visible), visibly coloured (chroma ≥ 12; the ghost
+  has 18), and in the flat core of a guide: none of its four neighbours is more than 16
+  levels darker (luma, over white). The chroma check keeps grey anti-aliasing of black
+  ink, pencil and paper from counting. The core check keeps coloured ink's soft edges
+  from counting: a light guide colour lies on the fade from darker inks of the same hue
+  to white (a navy edge passes right through the labels' slate blue), but an edge is a
+  ramp, about 40 levels a pixel even 5 px wide, while every line, letter and swatch of a
+  guide has a core as dark as anything around it. "We ignored the template guides. Hide
+  them next time for the cleanest result."
 - `colours_flattened`: at least 1% of the canvas is ink in a clear colour (chroma ≥ 64),
   or (alpha rasters) at least 0.1% of the canvas was solid white and became holes.
 - `semi_transparent`: more than 5% of the visible ink, and at least 0.1% of the canvas,
   is between 10% and 90% opaque (soft brushes, low layer opacity).
 
-Ink is meant to be black. Light colours and dark colours near the template's blues and
-pinks are dropped, and the `empty` message says so.
+Ink is meant to be black. Light colours, and the medium slate blues and dusty pinks
+close to the template's label colours, are dropped, and the `empty` message says so.
 
 We never recommend a transparent export: both kinds of export work.
 
 Tested by compositing a drawn head and tail with the vendored guide overlays and a
 rendered reference ghost in all eight Background × Guides × Reference combinations
 (IoU ≥ 0.99 against the clean drawing; the info lints are exactly `[guides_visible]`
-when guides or the reference are visible, and empty otherwise). The guide overlays are
-copies of the template generator's output (`battlesnake-{head,tail}-guide.png`). Where
-its pink attach label meets a blue guide line, a few anti-aliased purple pixels match no
-template colour; they sit inside the neck, under any drawing, and on a guides-only
-export they are removed as 3 specks.
+when guides or the reference are visible, and empty otherwise), and by compositing a
+head in nine dark saturated inks (sapphire, royal blue, steel blue, crimson, raspberry,
+navy, indigo, wine, teal) into the head template as an opaque 1000 px PNG with the
+guides hidden and shown (`dark_saturated_inks_survive_the_template`: IoU ≥ 0.97, no
+warnings, notes exactly `[colours_flattened]` plus `guides_visible` when shown; under
+the first palette the first five came back `empty`). The guide overlays are copies of
+the template generator's output (`battlesnake-{head,tail}-guide.png`); the guides alone
+are `empty` with `[guides_visible]`.
 
 ## Metrics
 
@@ -852,6 +883,12 @@ processing slot held until the worker is gone, including when the request is dro
   the page (every placeholder carrying the default head or tail, every reference with a
   clean `data-d`, the browser's format check giving the server's answer for every
   rejected format, and studio.js building the design kit's SVG file).
+- `server/tests/design_kit_templates.rs`: the committed design kit against the template
+  contract: the SVG templates' guide colours are exactly `design_kit::palette` (and the
+  references exactly the ghost), the `draw-here`, `guides` and `reference-*` layers
+  exist, an untouched template is `empty`, the PSDs are turned away with the template
+  advice, the test fixtures are byte-for-byte copies, and `example-drawing.png` is a
+  head with no warnings and no notes.
 - Fixtures live in `server/tests/fixtures/design_kit/`: under `catalog/`, all 184
   official SVGs, the investigation's `metrics_summary.csv` (the corpus oracle) and
   `metrics_detail.csv` (centroid, holes and bounds for the 12 samples the metric oracle
@@ -863,7 +900,7 @@ processing slot held until the worker is gone, including when the request is dro
 
 ```
 cargo test -p arena --test design_kit_raster --test design_kit_metrics --test design_kit_svg \
-  --test design_kit_catalog --test design_kit_refs
+  --test design_kit_catalog --test design_kit_refs --test design_kit_templates
 cargo test -p arena --lib design_kit
 cargo test -p arena --bin arena design_kit_refs
 cargo test -p arena --test studio_worker
