@@ -1706,7 +1706,10 @@ mod tests {
         claim_account(&pool, a_id, user).await?;
         let mut b = complete_payload(210);
         b.account.github_uid = Some(90209);
-        assert!(stage_play_account(&pool, &b).await.is_err());
+        assert_eq!(
+            stage_play_account(&pool, &b).await?.status,
+            StageStatus::SkippedIdentityConflict(IdentityConflict::GithubUid(90209))
+        );
         assert_eq!(
             find_unclaimed_by_github_uid(&pool, 90209)
                 .await?

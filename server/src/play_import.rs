@@ -745,7 +745,7 @@ fn finish_import(counts: &ImportCounts) -> cja::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::imported_account::{StageAccount, claim_account, stage_account};
+    use crate::models::imported_account::{StageAccount, claim_account};
     use uuid::Uuid;
 
     async fn test_play_account(
@@ -774,28 +774,33 @@ mod tests {
 
     async fn test_imported_account(pool: &PgPool, number: u32) -> cja::Result<Uuid> {
         test_play_account(pool, number, None).await?;
-        stage_account(
+        Ok(imported_account::stage_play_account(
             pool,
-            &StageAccount {
-                play_user_id: format!("reconcile_user_{number}"),
-                play_account_id: format!("reconcile_account_{number}"),
-                email: format!("reconcile-{number}@example.com"),
-                password_hash: "test-hash".to_string(),
-                is_email_verified: true,
-                username: format!("reconcile_{number}"),
-                display_name: format!("Reconcile {number}"),
-                pronouns: String::new(),
-                country: String::new(),
-                backstory: String::new(),
-                github_uid: None,
-                github_login: None,
-                points: 0,
-                points_high_score: 0,
-                is_staff: false,
-                play_created_at: None,
+            &StagePlayAccount {
+                account: StageAccount {
+                    play_user_id: format!("reconcile_user_{number}"),
+                    play_account_id: format!("reconcile_account_{number}"),
+                    email: format!("reconcile-{number}@example.com"),
+                    password_hash: "test-hash".to_string(),
+                    is_email_verified: true,
+                    username: format!("reconcile_{number}"),
+                    display_name: format!("Reconcile {number}"),
+                    pronouns: String::new(),
+                    country: String::new(),
+                    backstory: String::new(),
+                    github_uid: None,
+                    github_login: None,
+                    points: 0,
+                    points_high_score: 0,
+                    is_staff: false,
+                    play_created_at: None,
+                },
+                snakes: vec![],
+                grants: vec![],
             },
         )
-        .await
+        .await?
+        .imported_account_id)
     }
 
     async fn test_user(pool: &PgPool, number: i64) -> cja::Result<Uuid> {
@@ -972,7 +977,7 @@ mod tests {
             (1, 1, 0)
         );
         let snake_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM imported_snakes WHERE play_account_id = 'reconcile_account_10'",
+            "SELECT COUNT(*) FROM imported_snakes s JOIN imported_accounts a USING (imported_account_id) WHERE a.play_account_id = 'reconcile_account_10'",
         )
         .fetch_one(&pool)
         .await?;
@@ -1156,7 +1161,7 @@ mod tests {
         );
         assert!(
             run_grant_reconcile(
-                "postgres://invalid:invalid@127.0.0.1:1/arena",
+                "postgres://invalid:invalid@127.0.0.1:5432/arena",
                 "play",
                 &pool
             )

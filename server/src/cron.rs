@@ -30,18 +30,18 @@ pub const STUCK_GAME_SWEEP_INTERVAL_SECS: u64 = 30 * 60;
 pub(crate) fn cron_registry(config: &AppConfig) -> CronRegistry<AppState> {
     let mut registry = CronRegistry::new();
 
-    // Hourly play grant and new-account reconciliation; configurable for rollout.
-    registry.register_job(
-        PlayGrantReconcileJob,
-        Some("Reconcile play customization grants"),
-        Duration::from_secs(config.play_grant_reconcile_interval_secs),
-    );
-
     // Game backup discovery: runs every hour, enqueues backup jobs for games from the last 4 hours
     registry.register_job(
         GameBackupJob,
         Some("Enqueue backup jobs for games from the last 4 hours"),
         Duration::from_secs(60 * 60),
+    );
+
+    // Hourly play grant and new-account reconciliation; configurable for rollout.
+    registry.register_job(
+        PlayGrantReconcileJob,
+        Some("Reconcile play customization grants"),
+        Duration::from_secs(config.play_grant_reconcile_interval_secs),
     );
 
     // Leaderboard matchmaker: one round per derived interval, subject to worker delay.
@@ -111,11 +111,7 @@ mod tests {
         assert_eq!(MATCHMAKER_INTERVAL_SECS, 864);
         const { assert!(CRON_POLL_SECS < MATCHMAKER_INTERVAL_SECS) };
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
     use cja::cron::{IntervalSchedule, Schedule};
 
     #[test]
