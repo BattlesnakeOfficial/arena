@@ -1589,7 +1589,7 @@ html[data-app-theme="dark"] .studio-swatch-chip { border-color: rgba(255,255,255
 .guide-toc { margin-top: 18px; }
 .guide-toc ul { list-style: none; display: flex; flex-wrap: wrap; gap: 6px 8px; }
 .guide-toc a:not(.btn) {
-  display: inline-flex; align-items: center; min-height: 36px; padding: 0 12px; border-radius: 999px;
+  display: inline-flex; align-items: center; min-height: 44px; padding: 0 14px; border-radius: 999px;
   background: var(--pill); color: var(--ink); text-decoration: none; font-size: 14px; font-weight: 600;
 }
 .guide-section { margin-top: 40px; scroll-margin-top: 16px; }
