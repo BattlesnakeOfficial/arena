@@ -1826,14 +1826,13 @@ mod live_tests {
         let job_state = reader.clone();
         let job_cancel = job_shutdown.clone();
         let job_worker = tokio::spawn(async move {
-            cja::jobs::worker::job_worker_with_shutdown_drain(
+            cja::jobs::worker::job_worker(
                 job_state,
                 crate::jobs::Jobs,
                 Duration::from_millis(job_config.poll_interval_ms),
                 job_config.max_retries,
                 job_cancel,
-                Duration::from_secs(job_config.lock_timeout_secs),
-                Duration::from_secs(job_config.shutdown_drain_secs),
+                job_config.worker_config(Duration::from_secs(job_config.shutdown_drain_secs)),
             )
             .await
         });
