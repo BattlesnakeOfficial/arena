@@ -248,10 +248,21 @@
   }
 
   // ---- uploads --------------------------------------------------------------------
+  // An error is only ever said in the status line. It sits at the top of the upload
+  // panel, but "Upload a new version" and "Save preview image" are at the bottom of the
+  // page and Fix can be in the checks, so bring it into view (when it isn't already) or
+  // the last result seems to stand for the new file.
+  function revealStatus() {
+    const s = $("studio-status");
+    const box = s.getBoundingClientRect();
+    if (box.top >= 0 && box.bottom <= window.innerHeight) return;
+    s.scrollIntoView({ block: "center", behavior: reduceMotion ? "auto" : "smooth" });
+  }
   function setStatus(text, isError) {
     const s = $("studio-status");
     s.textContent = text;
     s.classList.toggle("error", !!isError);
+    if (isError) revealStatus();
   }
   const summary = (warns) => warns ? " " + warns + (warns === 1 ? " thing" : " things") + " to check below."
     : " It passes every check.";
@@ -298,6 +309,7 @@
     const ticket = {};
     pending = ticket;
     setStatus("Processing your drawing…");
+    revealStatus(); // a slow upload must not look like nothing happened
     root.setAttribute("aria-busy", "true");
     const query = fixes.map((f) => "fix=" + f).join("&");
     let res = null;

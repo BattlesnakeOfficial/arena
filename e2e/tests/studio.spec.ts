@@ -520,6 +520,57 @@ test.describe('Head & Tail Studio: details', () => {
       await expect(page.locator('#studio-closeup')).toBeInViewport({ ratio: name === 'phone' ? 0.2 : 0.5 });
     });
   }
+
+  // "Upload a new version" is at the bottom of the page and the status line at the top:
+  // what happens to the new file must come into view, or the last result (and its green
+  // pass) reads as the new file's.
+  for (const [name, size] of [
+    ['iPad portrait', { width: 820, height: 1180 }],
+    ['phone', { width: 375, height: 812 }],
+  ] as const) {
+    test(`a new version's progress and errors come into view (${name})`, async ({ page }) => {
+      await page.emulateMedia({ reducedMotion: 'reduce' }); // instant scrolls, so positions settle
+      await page.setViewportSize(size);
+      await openStudio(page);
+      await upload(page, 'head.png');
+      const status = page.locator('#studio-status');
+      const newVersion = page.locator('#studio-new-version');
+      const pick = async (file: string | { name: string; mimeType: string; buffer: Buffer }) => {
+        await newVersion.scrollIntoViewIfNeeded();
+        await expect(status, 'the status line is off screen from the button').not.toBeInViewport();
+        const [chooser] = await Promise.all([page.waitForEvent('filechooser'), newVersion.click()]);
+        await chooser.setFiles(file);
+      };
+
+      // Turned down by the browser's own check.
+      await pick(fixture('template.psd'));
+      await expect(status).toContainText("That's a PSD");
+      await expect(status).toHaveClass(/error/);
+      await expect(status).toBeInViewport();
+
+      // A slow upload says it's processing, and the server's answer comes into view
+      // even after scrolling back down.
+      let release = () => {};
+      const held = new Promise<void>((resolve) => { release = resolve; });
+      await page.route((url) => url.pathname === ENDPOINT, async (route) => { await held; await route.continue(); });
+      await pick({ name: 'notes.png', mimeType: 'image/png', buffer: Buffer.from('just some text') });
+      await expect(status).toHaveText('Processing your drawing…');
+      await expect(status).toBeInViewport();
+      await newVersion.scrollIntoViewIfNeeded();
+      await expect(status).not.toBeInViewport();
+      const answer = page.waitForResponse(isProcess);
+      release();
+      const rejected = await answer;
+      expect([422, ...CAPACITY], await rejected.text()).toContain(rejected.status());
+      if (rejected.status() === 422) {
+        await expect(status).toHaveText("We couldn't tell what kind of file this is. Upload a PNG, JPEG or SVG.");
+      }
+      await expect(status).toHaveClass(/error/);
+      await expect(status).toBeInViewport();
+      // The last result stays.
+      await expect(page.getByTestId('studio-pass')).toBeVisible();
+    });
+  }
 });
 
 test.describe('Head & Tail Studio layout', () => {

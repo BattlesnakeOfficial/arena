@@ -772,7 +772,10 @@ including what `localStorage` (`arena:studio:v1`) restores, and lint text goes i
   carries `data-sniff`, the rejected entries of `design_kit::SIGNATURES` with their
   advice and the size limit. Anything else is posted and the server decides.
 - After a result, the drop zone shrinks to one row and the page scrolls to the preview
-  (with the checks beside it, at 980px+) or to the status line.
+  (with the checks beside it, at 980px+) or to the status line. "Processing…" and every
+  error (the instant check, any server answer, a failed image save) scroll the status
+  line into view when it's off screen, since "Upload a new version" and Fix start
+  requests far from it.
 
 ### The endpoint and its guards
 
