@@ -1,0 +1,71 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT imported_account_id, play_snake_id, name, url, head, tail, color, is_public, engine_region FROM imported_snakes WHERE imported_account_id = $1 OR play_snake_id = ANY($2) FOR UPDATE",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "imported_account_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "play_snake_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "head",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "tail",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "color",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "is_public",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 8,
+        "name": "engine_region",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "TextArray"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "0904e7869eee34db87dd1134026838a80215063f44d86f6aa4668ffd1f638c6f"
+}

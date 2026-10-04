@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE imported_accounts SET email=$2, password_hash=$3, is_email_verified=$4,\n            username=$5, display_name=$6, pronouns=$7, country=$8, backstory=$9,\n            github_uid=$10, github_login=$11, points=$12, points_high_score=$13,\n            is_staff=$14, play_created_at=$15\n            WHERE imported_account_id=$1 AND\n              (email, password_hash, is_email_verified, username, display_name, pronouns,\n               country, backstory, github_uid, github_login, points, points_high_score,\n               is_staff, play_created_at) IS DISTINCT FROM\n              ($2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Bool",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Int8",
+        "Text",
+        "Int4",
+        "Int4",
+        "Bool",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "51e68ab294d18a987d51f3407fa483f480036b338be98ad2c2ec7e7566a2a459"
+}
