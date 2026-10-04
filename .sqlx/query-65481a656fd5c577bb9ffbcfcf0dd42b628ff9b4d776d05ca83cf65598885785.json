@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO jobs (job_id, name, payload, context, priority, locked_by, locked_at)\n         VALUES ($1, 'HealthyProbeJob', '{\"probe\":true}', 'lease-probe', 0,\n                 'lease:dead-worker', NOW() - interval '5 minutes')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "65481a656fd5c577bb9ffbcfcf0dd42b628ff9b4d776d05ca83cf65598885785"
+}

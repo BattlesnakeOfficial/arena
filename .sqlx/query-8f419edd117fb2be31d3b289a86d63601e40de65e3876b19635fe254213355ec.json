@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT error_count, locked_by, locked_at, last_error_message\n                     FROM jobs WHERE job_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "error_count",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 1,
+        "name": "locked_by",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "locked_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 3,
+        "name": "last_error_message",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "8f419edd117fb2be31d3b289a86d63601e40de65e3876b19635fe254213355ec"
+}
