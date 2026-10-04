@@ -1565,8 +1565,15 @@ html[data-app-theme="dark"] .studio-swatch-chip { border-color: rgba(255,255,255
 .studio-start-buttons { display: flex; flex-wrap: wrap; gap: 8px; }
 .studio-start .btn { display: inline-flex; align-items: center; justify-content: center; text-align: center; max-width: 100%; }
 .studio-start-example { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--hairline); }
-@media (min-width: 820px) {
+/* Templates across the top, then Draw and Upload side by side; three columns only once
+   Draw's column fits "Read the guide" on one line. */
+@media (min-width: 640px) {
+  .studio-start-steps { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .studio-start-steps > li:first-child { grid-column: 1 / -1; }
+}
+@media (min-width: 980px) {
   .studio-start-steps { grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1fr); }
+  .studio-start-steps > li:first-child { grid-column: auto; }
 }
 /* "Learn more" beside a check: a link into the guide, as big a target as a button. */
 .studio-learn {
