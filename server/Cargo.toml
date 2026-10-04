@@ -105,16 +105,20 @@ zune-jpeg = "=0.5.15"
 # memory and CPU bombs on untrusted input (see docs/design-kit.md).
 #
 # PINNED EXACTLY, with simplecss below: the SVG prescan (src/design_kit/svg_scan.rs)
-# mirrors usvg 0.48.1's reference following, simplecss's selector matching and
-# roxmltree's tokenizer, and a reference loop it misses aborts the whole process (a stack
-# overflow can't be caught). Bumping any of usvg, simplecss, roxmltree or svgtypes means
-# re-checking svg_scan.rs against the new sources;
+# mirrors usvg 0.48.1's reference following, simplecss's selector matching, svgtypes'
+# path parsing, kurbo's arc splitting and roxmltree's tokenizer, and a reference loop it
+# misses aborts the whole process (a stack overflow can't be caught). Bumping any of
+# usvg, simplecss, roxmltree, svgtypes or kurbo means re-checking svg_scan.rs against the
+# new sources;
 # `svg_parsing_crates_are_the_audited_versions` (tests/design_kit_svg.rs) fails until the
 # versions there are updated too.
 usvg = { version = "=0.48.1", default-features = false }
 # The CSS engine usvg uses (the same copy): the SVG prescan matches selectors exactly as
 # usvg will, to find references made from stylesheets and to bound the matching cost.
 simplecss = "=0.2.2"
+# The path, length and viewBox parser usvg uses (the same copy): the prescan reads path
+# data and radii as usvg will, to bound the segments its arcs become (kurbo 0.13.1).
+svgtypes = "=0.16.1"
 
 [lib]
 name = "arena"

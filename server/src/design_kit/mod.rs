@@ -240,6 +240,10 @@ pub struct Limits {
     /// Most elements that references may add on top of `max_svg_nodes`: every `<use>`,
     /// objectBoundingBox pattern fill and marker vertex copies its target's content.
     pub max_svg_expansion: u64,
+    /// Most path segments usvg may make, counted before it runs: every copy (`<use>`,
+    /// patterns, markers) and every arc split into the cubics usvg makes of it. Bounds
+    /// usvg's memory before the painter's own budget (`max_svg_segments`) can see it.
+    pub max_svg_expanded_segments: u64,
     /// Deepest nesting once references are followed (a chain of patterns, masks or
     /// `<use>` nests each target's content inside the referencing element). Bounds
     /// usvg's recursion; see the stack note on [`process_upload`].
@@ -279,6 +283,7 @@ impl Default for Limits {
             max_svg_uses: 500,
             max_svg_defs: 64,
             max_svg_expansion: 20_000,
+            max_svg_expanded_segments: 500_000,
             max_svg_nesting: 4096,
             max_css_work: 20_000_000,
             max_svg_segments: 5_000,
@@ -404,7 +409,7 @@ pub enum ProcessError {
     },
     #[error("could not read the image: {0}")]
     InvalidImage(String),
-    /// Not XML we accept: malformed, over the node limit, or declaring entities.
+    /// Not XML we accept: malformed, or declaring entities.
     #[error("the SVG is not valid XML: {0}")]
     InvalidXml(String),
     /// XML, but not an SVG we can read (not UTF-8, wrong root, bad size, ...).
@@ -496,9 +501,12 @@ impl ProcessError {
                  drawing into \"Draw here\", then export again."
                     .into()
             }
+            // The text may be hidden, or a label beside a drawing that isn't ink: don't
+            // tell the artist to outline it unless the drawing is text.
             ProcessError::Empty { info } if info.contains(&Lint::TextIgnored) => "We couldn't \
-                 find a drawing: text isn't supported. Convert your text to outlines (Type → \
-                 Create Outlines, or Path → Object to Path), then export again."
+                 find a drawing. Text isn't supported: if your drawing is text, convert it to \
+                 outlines (Type → Create Outlines, or Path → Object to Path). Otherwise, draw \
+                 in solid black. Then export again."
                 .into(),
             ProcessError::Empty { info }
                 if info.iter().any(|l| matches!(l, Lint::ImageIgnored { .. })) =>

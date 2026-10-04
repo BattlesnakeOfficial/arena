@@ -405,6 +405,90 @@ fn a_figma_frame_clip_is_applied() {
     assert!(!filled_at(&shape, 50.0, 80.0), "the clipped area is empty");
 }
 
+/// A placed picture as Figma exports it: a shape filled with a pattern that holds only
+/// a `<use>` of the `<image>` (Sketch and Penpot write the same, without the `<use>`).
+fn figma_image_fill(attrs: &str) -> String {
+    format!(
+        "<rect x=\"10\" y=\"10\" width=\"80\" height=\"80\" fill=\"url(#pattern0_1_2)\"{attrs}/>\
+         <defs><pattern id=\"pattern0_1_2\" patternContentUnits=\"objectBoundingBox\" \
+         width=\"1\" height=\"1\"><use xlink:href=\"#image0_1_2\" transform=\"scale(0.25)\"/>\
+         </pattern><image id=\"image0_1_2\" width=\"4\" height=\"4\" \
+         xlink:href=\"data:image/png;base64,iVBORw0KGgo=\"/></defs>"
+    )
+}
+
+const SVG_XLINK: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" \
+     xmlns:xlink=\"http://www.w3.org/1999/xlink\" viewBox=\"0 0 100 100\">";
+
+#[test]
+fn pictures_placed_as_pattern_fills_are_ignored_like_images() {
+    // A pattern whose content paints nothing (the image is never loaded) is no paint:
+    // the picture's box used to be painted as solid black, with a tip saying the image
+    // was ignored.
+    let only = run(&format!("{SVG_XLINK}{}</svg>", figma_image_fill(""))).expect_err("nothing");
+    assert_eq!(
+        only,
+        ProcessError::Empty {
+            info: vec![Lint::ImageIgnored { count: 1 }]
+        }
+    );
+    assert!(
+        only.user_message().contains("pictures"),
+        "{}",
+        only.user_message()
+    );
+    // Penpot and Sketch: the image directly in the pattern, in user space, in a group;
+    // as a stroke too.
+    let penpot = format!(
+        "{SVG_XLINK}<rect width=\"80\" height=\"80\" fill=\"url(#p)\" stroke=\"url(#p)\" \
+         stroke-width=\"9\"/><defs><pattern id=\"p\" patternUnits=\"userSpaceOnUse\" \
+         width=\"80\" height=\"80\"><g><image width=\"80\" height=\"80\" \
+         href=\"data:image/png;base64,iVBORw0KGgo=\"/></g></pattern></defs></svg>"
+    );
+    assert_eq!(
+        run(&penpot).err(),
+        Some(ProcessError::Empty {
+            info: vec![Lint::ImageIgnored { count: 1 }]
+        })
+    );
+
+    // A reference photo left visible above or below the drawing changes nothing.
+    let drawing = "<path d=\"M0 0H70L100 50L70 100H0Z\"/><circle cx=\"60\" cy=\"30\" r=\"7\" \
+                   fill=\"white\"/>";
+    let alone = run(&format!("{SVG_XLINK}{drawing}</svg>")).expect("drawing");
+    assert_eq!(alone.metrics().holes, 1);
+    for (name, svg) in [
+        (
+            "on top at 50%",
+            format!(
+                "{SVG_XLINK}{drawing}{}</svg>",
+                figma_image_fill(" fill-opacity=\"0.5\"")
+            ),
+        ),
+        (
+            "underneath",
+            format!("{SVG_XLINK}{}{drawing}</svg>", figma_image_fill("")),
+        ),
+    ] {
+        let shape = run(&svg).expect(name);
+        assert_eq!(shape.path_d(), alone.path_d(), "{name}");
+        assert_eq!(shape.strategy(), alone.strategy(), "{name}");
+        let mut want = info(&alone);
+        want.push("image_ignored");
+        assert_eq!(info(&shape), want, "{name}");
+    }
+
+    // A pattern with something drawn in it still paints (in one colour).
+    let real = format!(
+        "{SVG_OPEN}<defs><pattern id=\"p\" width=\"10\" height=\"10\" \
+         patternUnits=\"userSpaceOnUse\"><rect width=\"5\" height=\"5\"/></pattern></defs>\
+         <rect width=\"50\" height=\"50\" fill=\"url(#p)\"/></svg>"
+    );
+    let shape = run(&real).expect("texture");
+    assert_eq!(info(&shape), vec!["gradient"]);
+    assert!(filled_at(&shape, 25.0, 25.0));
+}
+
 #[test]
 fn input_facts_are_reported() {
     let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
@@ -472,12 +556,15 @@ fn nothing_drawable_is_empty_with_a_reason() {
             info: vec![Lint::TextIgnored]
         }
     );
-    // The message gives the reason we know, not generic drawing advice.
+    // The message says text isn't supported and how to outline it, but only if the
+    // drawing is text: the text may be hidden, or a label beside a drawing that isn't
+    // ink, and outlining it would make it the drawing.
     let msg = text.user_message();
     assert!(
-        msg.contains("outlines") && !msg.contains("solid black"),
+        msg.contains("if your drawing is text") && msg.contains("outlines"),
         "{msg}"
     );
+    assert!(msg.contains("Otherwise, draw in solid black"), "{msg}");
     let image = run(&format!(
         "{SVG_OPEN}<image href=\"drawing.png\" width=\"100\" height=\"100\"/></svg>"
     ))
@@ -848,6 +935,10 @@ fn entity_declarations_are_invalid_xml() {
         assert_eq!(run(&bad).err(), rejected, "{}", &bad[..80]);
     }
     assert!(run(&doc("<!ENTITY a \"#000\">", "<desc>&a;</desc>")).is_ok());
+    // At most 32 declarations (Illustrator writes 8).
+    let decls = |n: usize| -> String { (0..n).map(|i| format!("<!ENTITY e{i} \"x\">")).collect() };
+    assert!(run(&doc(&decls(32), "")).is_ok());
+    assert_eq!(run(&doc(&decls(33), "")).err(), rejected);
     // A broken document is invalid XML too. (A plain DOCTYPE, as Illustrator writes,
     // is fine: see the Illustrator export test.)
     assert!(matches!(
@@ -874,6 +965,21 @@ fn deep_nesting_is_too_complex_before_parsing() {
         run(&format!("{deep}<!-- unterminated")).err(),
         Some(ProcessError::TooComplex("elements are nested too deeply"))
     );
+    // The byte scan's limit is the element limit exactly: one level deeper is refused
+    // before roxmltree runs; the deepest allowed nesting reaches roxmltree, which then
+    // rejects the unterminated comment.
+    let nested = |levels: usize| {
+        format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\">{}{}</svg><!-- unterminated",
+            "<g>".repeat(levels),
+            "</g>".repeat(levels)
+        )
+    };
+    assert_eq!(
+        run(&nested(64)).err(),
+        Some(ProcessError::TooComplex("elements are nested too deeply"))
+    );
+    assert!(matches!(run(&nested(63)), Err(ProcessError::InvalidXml(_))));
     // Quotes and comments can't hide nesting from the byte scan.
     let tricky = format!(
         "<svg xmlns=\"http://www.w3.org/2000/svg\">{}<rect width=\"9\" height=\"9\"/>{}</svg>",
@@ -1322,6 +1428,67 @@ fn use_bombs_are_too_complex() {
 }
 
 #[test]
+fn expansion_through_shapes_use_copies_and_arcs_is_too_complex_and_fast() {
+    let expands = "references expand to too many shapes (<use>, patterns or markers)";
+    // Markers on circles and rects: usvg draws them on every shape. Four levels of 10
+    // reached 2.9 GB inside usvg and aborted.
+    for shape in [
+        "<circle cx=\"1\" cy=\"1\" r=\"1\"{m}/>",
+        "<rect width=\"2\" height=\"2\"{m}/>",
+    ] {
+        let with = |m: String| shape.replace("{m}", &m);
+        let mut svg = format!("{SVG_OPEN}<defs>");
+        for i in 0..4 {
+            let m = if i < 3 {
+                format!(" style=\"marker:url(#M{})\"", i + 1)
+            } else {
+                String::new()
+            };
+            svg += &format!("<marker id=\"M{i}\">{}</marker>", with(m).repeat(10));
+        }
+        svg += &format!("</defs>{}</svg>", with(" style=\"marker:url(#M0)\"".into()));
+        let (r, elapsed) = run_big(&svg);
+        assert_eq!(r.err(), Some(ProcessError::TooComplex(expands)), "{shape}");
+        assert!(elapsed < Duration::from_millis(500), "{elapsed:?}");
+    }
+    // A fill inherited by `<use>` copies: every copied shape gets its own copy of an
+    // objectBoundingBox pattern. 6 shapes, 8 levels: a 1 KB file that aborted.
+    let mut svg = format!(
+        "{SVG_OPEN}<defs><g id=\"grp\">{}</g>",
+        "<rect width=\"1\" height=\"1\"/>".repeat(6)
+    );
+    for i in 0..8 {
+        let content = if i < 7 {
+            format!("<g fill=\"url(#P{})\"><use href=\"#grp\"/></g>", i + 1)
+        } else {
+            "<use href=\"#grp\"/>".into()
+        };
+        svg += &format!("<pattern id=\"P{i}\" width=\"1\" height=\"1\">{content}</pattern>");
+    }
+    svg += "</defs><rect width=\"90\" height=\"90\" fill=\"url(#P0)\"/></svg>";
+    let (r, elapsed) = run_big(&svg);
+    assert_eq!(r.err(), Some(ProcessError::TooComplex(expands)));
+    assert!(elapsed < Duration::from_millis(500), "{elapsed:?}");
+    // Arcs with huge radii: usvg would split them into billions of cubics.
+    let too_big = "a curve or circle is too big to draw (a huge radius)";
+    for d in ["M0 0A1e50 1e50 0 1 1 1e50 0Z", "M0 0A1e30 1e30 0 1 1 1 0Z"] {
+        let (r, elapsed) = run_big(&format!("{SVG_OPEN}<path d=\"{d}\"/></svg>"));
+        assert_eq!(r.err(), Some(ProcessError::TooComplex(too_big)), "{d}");
+        assert!(elapsed < Duration::from_millis(500), "{elapsed:?}");
+    }
+    // Text copied by `<tref>`s.
+    let tref = format!(
+        "{SVG_OPEN}<g id=\"x\"><text>{}</text></g><text>{}</text></svg>",
+        "A".repeat(100_000),
+        "<tref href=\"#x\"/>".repeat(1_000)
+    );
+    assert_eq!(
+        run_big(&tref).0.err(),
+        Some(ProcessError::TooComplex("too much text is copied (<tref>)"))
+    );
+}
+
+#[test]
 fn css_that_backtracks_is_too_complex_and_fast() {
     // simplecss tries every ancestor for every descendant combinator; usvg matches every
     // rule against every element. Ten combinators over 60 nested groups would be
@@ -1352,6 +1519,25 @@ fn css_that_backtracks_is_too_complex_and_fast() {
         Some(ProcessError::TooComplex("the CSS is too complex"))
     );
     assert!(elapsed < Duration::from_millis(500), "{elapsed:?}");
+    // A long `style` attribute on an element inside one usvg never parses (we still read
+    // its references): 125,000 declarations took 25 s of CPU and were accepted.
+    for (open, close) in [
+        ("<metadata>", "</metadata>"),
+        ("<title>", "</title>"),
+        ("<foreignObject>", "</foreignObject>"),
+    ] {
+        let svg = format!(
+            "{SVG_OPEN}{open}<g style=\"{}\"/>{close}<rect width=\"50\" height=\"50\"/></svg>",
+            "a:b;".repeat(125_000)
+        );
+        let (r, elapsed) = run_big(&svg);
+        assert_eq!(
+            r.err(),
+            Some(ProcessError::TooComplex("the CSS is too complex")),
+            "{open}"
+        );
+        assert!(elapsed < Duration::from_millis(500), "{elapsed:?}");
+    }
 }
 
 #[test]
@@ -1401,12 +1587,21 @@ fn nested_oversized_masks_are_painted_unmasked() {
 
 #[test]
 fn other_bombs_are_too_complex() {
-    // Node limit: 25k elements.
+    // Node limit: 25k elements. Valid XML, so the advice is to simplify, not re-export.
     let many = format!(
         "<svg xmlns=\"http://www.w3.org/2000/svg\">{}</svg>",
         "<path/>".repeat(25_000)
     );
-    assert!(matches!(run_big(&many).0, Err(ProcessError::InvalidXml(_))));
+    let e = run_big(&many).0.expect_err("too many nodes");
+    assert_eq!(
+        e,
+        ProcessError::TooComplex("too many elements (shapes, groups, text and comments)")
+    );
+    assert!(
+        !e.user_message().contains("valid XML"),
+        "{}",
+        e.user_message()
+    );
     // Path segments: the rasteriser's cost grows with them.
     let segments = format!(
         "{SVG_OPEN}<path d=\"M0 0{}Z\"/></svg>",
@@ -1592,9 +1787,10 @@ fn raster_worst_cases_also_run_on_the_big_stack() {
 #[test]
 fn svg_parsing_crates_are_the_audited_versions() {
     // svg_scan.rs mirrors usvg's reference following, simplecss's selector matching,
-    // svgtypes' IRI parsing and roxmltree's tokenizer at exactly these versions; a
-    // reference loop it misses aborts the process. Cargo.toml pins usvg and simplecss
-    // exactly; this also catches a second copy, or a bump of the crates usvg pulls in.
+    // svgtypes' IRI and path parsing, kurbo's arc splitting and roxmltree's tokenizer at
+    // exactly these versions; a reference loop it misses aborts the process. Cargo.toml
+    // pins usvg, simplecss and svgtypes exactly; this also catches a second copy, or a
+    // bump of the crates usvg pulls in.
     // After re-checking svg_scan.rs against a new version's sources, update it here.
     let lock = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../Cargo.lock"),
@@ -1605,6 +1801,7 @@ fn svg_parsing_crates_are_the_audited_versions() {
         ("simplecss", "0.2.2"),
         ("roxmltree", "0.21.1"),
         ("svgtypes", "0.16.1"),
+        ("kurbo", "0.13.1"),
     ] {
         let versions: Vec<&str> = lock
             .split("[[package]]")

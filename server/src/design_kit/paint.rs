@@ -11,7 +11,10 @@
 //! * applies clip paths as coverage masks (at most `Limits::max_svg_clips` of them),
 //!   including those of the groups around `draw-here`;
 //! * ignores filters, paints masked content unmasked, and replaces gradients and
-//!   patterns with one colour (their stops' average; black for patterns);
+//!   patterns with one colour (their stops' average; black for patterns). A pattern
+//!   that paints nothing is no paint at all: that is how Figma, Sketch and Penpot export
+//!   a placed picture (a shape filled with a pattern holding only the `<image>`, which
+//!   is never loaded), so the picture is ignored as a plain `<image>` is;
 //! * bounds its own work: path segments, dashes and clip masks are counted first, and
 //!   the vertical travel of every outline is charged before it is filled ([`travel`]).
 //!
@@ -27,7 +30,8 @@
 //! and some exporters strip ids, but keep colours. Hidden content (`display:none`,
 //! `visibility:hidden`) never reaches us: usvg drops it.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
 
 use tiny_skia::{Mask, Paint, PathSegment, Pixmap, Transform};
 
@@ -86,6 +90,7 @@ enum Mode {
 /// A survey of the drawing: what to paint, and whether painting it is affordable.
 pub(crate) struct Plan {
     mode: Mode,
+    blank: Blank,
     pub facts: Facts,
 }
 
@@ -149,28 +154,83 @@ fn is_light(rgb: [u8; 3]) -> bool {
     palette::luma(Rgb::new(rgb[0], rgb[1], rgb[2])) >= LIGHT_LUMA
 }
 
-/// The fill and stroke paints of a path; none when it is hidden.
-fn visible_paints(p: &usvg::Path) -> impl Iterator<Item = &usvg::Paint> {
+/// The patterns whose content paints nothing (by address; see the module docs).
+struct Blank(HashSet<usize>);
+
+fn pattern_key(p: &Arc<usvg::Pattern>) -> usize {
+    Arc::as_ptr(p) as usize
+}
+
+impl Blank {
+    /// Every pattern in `tree` (usvg lists the nested ones too), each content walked once.
+    fn of(tree: &usvg::Tree) -> Blank {
+        fn blank(p: &Arc<usvg::Pattern>, memo: &mut HashMap<usize, bool>) -> bool {
+            if let Some(&b) = memo.get(&pattern_key(p)) {
+                return b;
+            }
+            let b = !paints(p.root(), memo);
+            memo.insert(pattern_key(p), b);
+            b
+        }
+        fn paints(g: &usvg::Group, memo: &mut HashMap<usize, bool>) -> bool {
+            g.children().iter().any(|c| match c {
+                usvg::Node::Group(cg) => paints(cg, memo),
+                usvg::Node::Path(p) if p.is_visible() => {
+                    let fill = p.fill().map(usvg::Fill::paint);
+                    let stroke = p.stroke().map(usvg::Stroke::paint);
+                    fill.into_iter().chain(stroke).any(|paint| match paint {
+                        usvg::Paint::Pattern(q) => !blank(q, memo),
+                        _ => true,
+                    })
+                }
+                _ => false,
+            })
+        }
+        let mut memo = HashMap::new();
+        for p in tree.patterns() {
+            blank(p, &mut memo);
+        }
+        Blank(
+            memo.into_iter()
+                .filter(|&(_, b)| b)
+                .map(|(k, _)| k)
+                .collect(),
+        )
+    }
+
+    /// A pattern that paints nothing: no paint at all.
+    fn is_blank(&self, paint: &usvg::Paint) -> bool {
+        matches!(paint, usvg::Paint::Pattern(p) if self.0.contains(&pattern_key(p)))
+    }
+}
+
+/// The fill and stroke paints of a path that paint something; none when it is hidden.
+fn visible_paints<'a>(
+    p: &'a usvg::Path,
+    blank: &'a Blank,
+) -> impl Iterator<Item = &'a usvg::Paint> {
     let visible = p.is_visible();
     let fill = p.fill().map(usvg::Fill::paint);
     let stroke = p.stroke().map(usvg::Stroke::paint);
-    fill.into_iter().chain(stroke).filter(move |_| visible)
+    fill.into_iter()
+        .chain(stroke)
+        .filter(move |paint| visible && !blank.is_blank(paint))
 }
 
 /// Anything visible in `g` that would be painted (in any colour).
-fn has_paint(g: &usvg::Group) -> bool {
+fn has_paint(g: &usvg::Group, blank: &Blank) -> bool {
     g.children().iter().any(|c| match c {
-        usvg::Node::Group(cg) => has_paint(cg),
-        usvg::Node::Path(p) => visible_paints(p).next().is_some(),
+        usvg::Node::Group(cg) => has_paint(cg, blank),
+        usvg::Node::Path(p) => visible_paints(p, blank).next().is_some(),
         _ => false,
     })
 }
 
 /// Anything in `g` that is the artist's ink (not template colours or layers).
-fn has_ink(g: &usvg::Group) -> bool {
+fn has_ink(g: &usvg::Group, blank: &Blank) -> bool {
     g.children().iter().any(|c| match c {
-        usvg::Node::Group(cg) => !is_template_layer(cg.id()) && has_ink(cg),
-        usvg::Node::Path(p) => visible_paints(p).any(|paint| !is_template_colour(paint)),
+        usvg::Node::Group(cg) => !is_template_layer(cg.id()) && has_ink(cg, blank),
+        usvg::Node::Path(p) => visible_paints(p, blank).any(|paint| !is_template_colour(paint)),
         _ => false,
     })
 }
@@ -215,12 +275,14 @@ fn children(g: &usvg::Group, mode: Mode, active: bool) -> impl Iterator<Item = C
 
 /// Decide what the drawing is and check that painting it fits the budget.
 pub(crate) fn plan(tree: &usvg::Tree, limits: &Limits) -> Result<Plan, ProcessError> {
+    let blank = Blank::of(tree);
     let mode = match find_draw_here(tree.root()) {
-        Some(g) if has_ink(g) => Mode::DrawHere,
+        Some(g) if has_ink(g, &blank) => Mode::DrawHere,
         _ => Mode::Full,
     };
     let mut survey = Survey {
         mode,
+        blank,
         facts: Facts::default(),
         segments: 0,
         clips: 0,
@@ -239,6 +301,7 @@ pub(crate) fn plan(tree: &usvg::Tree, limits: &Limits) -> Result<Plan, ProcessEr
     }
     Ok(Plan {
         mode,
+        blank: survey.blank,
         facts: survey.facts,
     })
 }
@@ -246,6 +309,7 @@ pub(crate) fn plan(tree: &usvg::Tree, limits: &Limits) -> Result<Plan, ProcessEr
 /// The first pass: facts and costs, nothing rasterised.
 struct Survey {
     mode: Mode,
+    blank: Blank,
     facts: Facts,
     /// Path verbs painted (stroke outlines weighted 5x: they are bigger) and in clips.
     segments: usize,
@@ -278,7 +342,7 @@ impl Survey {
         for child in children(g, self.mode, active) {
             match child {
                 Child::TemplateLayer(cg) => {
-                    if active && has_paint(cg) {
+                    if active && has_paint(cg, &self.blank) {
                         self.facts.guides_dropped = true;
                     }
                 }
@@ -293,7 +357,7 @@ impl Survey {
                 }
                 Child::Path(p) => self.path(p, opacity),
                 Child::Ignored(p) => {
-                    if ignored_ink(p, opacity) {
+                    if ignored_ink(p, opacity, &self.blank) {
                         self.facts.outside_draw_here = true;
                     }
                 }
@@ -332,6 +396,9 @@ impl Survey {
         let fill = p.fill().map(|f| (f.paint(), f.opacity().get(), 1));
         let stroke = p.stroke().map(|s| (s.paint(), s.opacity().get(), 5));
         for (paint, paint_opacity, weight) in fill.into_iter().chain(stroke) {
+            if self.blank.is_blank(paint) {
+                continue;
+            }
             if is_template_colour(paint) {
                 self.facts.guides_dropped = true;
                 continue;
@@ -347,7 +414,10 @@ impl Survey {
             }
             self.facts.colours.insert(rgb);
         }
-        let Some(stroke) = p.stroke().filter(|s| !is_template_colour(s.paint())) else {
+        let Some(stroke) = p
+            .stroke()
+            .filter(|s| !is_template_colour(s.paint()) && !self.blank.is_blank(s.paint()))
+        else {
             return;
         };
         self.facts.strokes += 1;
@@ -372,14 +442,17 @@ fn has_effects(g: &usvg::Group) -> bool {
 /// Would `p`, left out of the drawing, have added ink: a paint that isn't a template
 /// colour or near-white (a white background layer is common and harmless), and is at
 /// least half opaque.
-fn ignored_ink(p: &usvg::Path, opacity: f32) -> bool {
+fn ignored_ink(p: &usvg::Path, opacity: f32, blank: &Blank) -> bool {
     let fill = p.fill().map(|f| (f.paint(), f.opacity().get()));
     let stroke = p.stroke().map(|s| (s.paint(), s.opacity().get()));
     fill.into_iter()
         .chain(stroke)
         .any(|(paint, paint_opacity)| {
             let (rgb, a) = paint_colour(paint);
-            !is_template_colour(paint) && !is_light(rgb) && opacity * paint_opacity * a >= 0.5
+            !is_template_colour(paint)
+                && !blank.is_blank(paint)
+                && !is_light(rgb)
+                && opacity * paint_opacity * a >= 0.5
         })
 }
 
@@ -405,6 +478,7 @@ pub(crate) fn paint(
 ) -> Result<Painted, ProcessError> {
     let mut painter = Painter {
         mode: plan.mode,
+        blank: &plan.blank,
         pm: Pixmap::new(side, side)
             .ok_or(ProcessError::Internal("could not allocate the SVG raster"))?,
         px: Transform::from_scale(side as f32 / 100.0, side as f32 / 100.0),
@@ -494,8 +568,9 @@ struct Clip {
     bounds: Bounds,
 }
 
-struct Painter {
+struct Painter<'p> {
     mode: Mode,
+    blank: &'p Blank,
     pm: Pixmap,
     /// 0..100 space -> pixels.
     px: Transform,
@@ -544,7 +619,7 @@ fn travel(path: &tiny_skia::Path) -> f64 {
     total + step(cur, start)
 }
 
-impl Painter {
+impl Painter<'_> {
     /// Count `path`'s rasterising work against the budget.
     fn charge(&mut self, path: &tiny_skia::Path) -> Result<(), ProcessError> {
         self.travel += travel(path);
@@ -618,6 +693,7 @@ impl Painter {
         }
         if let Some(fill) = p.fill()
             && !is_template_colour(fill.paint())
+            && !self.blank.is_blank(fill.paint())
             && let Some(path) = p.data().clone().transform(ts)
         {
             let (rgb, a) = paint_colour(fill.paint());
@@ -643,7 +719,7 @@ impl Painter {
         let Some(stroke) = p.stroke() else {
             return Ok(());
         };
-        if is_template_colour(stroke.paint()) {
+        if is_template_colour(stroke.paint()) || self.blank.is_blank(stroke.paint()) {
             return Ok(());
         }
         let (rgb, a) = paint_colour(stroke.paint());

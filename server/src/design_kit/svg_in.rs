@@ -79,8 +79,13 @@ pub(crate) fn process(bytes: &[u8], limits: &Limits) -> Result<SvgShape, Process
         nodes_limit: limits.max_svg_nodes,
         ..Default::default()
     };
-    let doc = roxmltree::Document::parse_with_options(text, xml_options)
-        .map_err(|e| ProcessError::InvalidXml(e.to_string()))?;
+    let doc = roxmltree::Document::parse_with_options(text, xml_options).map_err(|e| match e {
+        // Valid XML, just too much of it: re-exporting won't help, simplifying will.
+        roxmltree::Error::NodesLimitReached => {
+            ProcessError::TooComplex("too many elements (shapes, groups, text and comments)")
+        }
+        e => ProcessError::InvalidXml(e.to_string()),
+    })?;
     let scanned = svg_scan::scan(&doc, limits)?;
 
     let options = usvg::Options {
