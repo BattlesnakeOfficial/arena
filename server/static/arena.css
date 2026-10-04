@@ -1460,7 +1460,8 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
 }
 .studio-confirm-buttons { display: flex; flex-wrap: wrap; gap: 8px; }
 .studio-slots-hint { margin-top: 8px; }
-.studio-summary { margin-top: 12px; font-weight: 600; font-size: 15px; }
+/* The bold face's spaces are narrow: "passes · Tail" ran together. */
+.studio-summary { margin-top: 12px; font-weight: 600; font-size: 15px; word-spacing: .14em; }
 .studio-status { margin-top: 12px; font-size: 15px; }
 .studio-summary + .studio-status { margin-top: 4px; }
 /* Where studio.js scrolls a result into view. */
@@ -1515,6 +1516,9 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
   }
   .studio-panes[data-view="closeup"] > [data-pane="live"],
   .studio-panes[data-view="live"] > [data-pane="closeup"] { display: block; }
+  /* The two close-ups stack taller than the live board: it stays beside whichever one
+     is in view. */
+  .studio-panes > [data-pane="live"] { position: sticky; top: 12px; }
 }
 .studio-pane .studio-board, .studio-closeup { display: block; width: 100%; height: auto; border-radius: 10px; }
 /* A close-up per slot: stacked (each as wide as the pane), side by side only where a
