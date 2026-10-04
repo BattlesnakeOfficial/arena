@@ -462,15 +462,34 @@ fn a_stroke_only_drawing_is_outlined() {
 
 #[test]
 fn nothing_drawable_is_empty_with_a_reason() {
+    let text = run(&format!(
+        "{SVG_OPEN}<text x=\"0\" y=\"50\" font-size=\"80\">S</text></svg>"
+    ))
+    .expect_err("text only");
     assert_eq!(
-        run(&format!(
-            "{SVG_OPEN}<text x=\"0\" y=\"50\" font-size=\"80\">S</text></svg>"
-        ))
-        .err(),
-        Some(ProcessError::Empty {
+        text,
+        ProcessError::Empty {
             info: vec![Lint::TextIgnored]
-        })
+        }
     );
+    // The message gives the reason we know, not generic drawing advice.
+    let msg = text.user_message();
+    assert!(
+        msg.contains("outlines") && !msg.contains("solid black"),
+        "{msg}"
+    );
+    let image = run(&format!(
+        "{SVG_OPEN}<image href=\"drawing.png\" width=\"100\" height=\"100\"/></svg>"
+    ))
+    .expect_err("image only");
+    assert_eq!(
+        image,
+        ProcessError::Empty {
+            info: vec![Lint::ImageIgnored { count: 1 }]
+        }
+    );
+    let msg = image.user_message();
+    assert!(msg.contains("PNG") && !msg.contains("solid black"), "{msg}");
     assert_eq!(
         run("<svg xmlns=\"http://www.w3.org/2000/svg\"/>").err(),
         Some(ProcessError::Empty { info: vec![] })
@@ -635,6 +654,40 @@ fn layers_left_out_beside_draw_here_are_reported() {
         let shape = run(&with_layer(harmless)).expect("harmless layer");
         assert!(shape.info().is_empty(), "{harmless}: {:?}", shape.info());
     }
+    // Draw-here holds ink, all of it off the square, and the horn is left out: nothing
+    // is left, and the message says which layer we used.
+    let t = template_with("<rect x=\"200\" width=\"60\" height=\"100\"/>");
+    let close = t.rfind("</svg>").expect("root end");
+    let e = run(&format!(
+        "{}<g id=\"Layer 2\"><rect x=\"60\" y=\"20\" width=\"40\" height=\"60\"/></g>{}",
+        &t[..close],
+        &t[close..]
+    ))
+    .expect_err("nothing in the square");
+    assert_eq!(
+        e,
+        ProcessError::Empty {
+            info: vec![Lint::OutsideDrawHereIgnored]
+        }
+    );
+    assert!(
+        e.user_message().contains("Draw here") && !e.user_message().contains("solid black"),
+        "{}",
+        e.user_message()
+    );
+    // Text in draw-here: the text is the reason, not the visible guides.
+    let e = run(&template_with("<text x=\"10\" y=\"50\">Hi</text>")).expect_err("text");
+    assert_eq!(
+        e,
+        ProcessError::Empty {
+            info: vec![Lint::GuidesVisible, Lint::TextIgnored]
+        }
+    );
+    assert!(
+        e.user_message().contains("outlines"),
+        "{}",
+        e.user_message()
+    );
 }
 
 #[test]
@@ -813,6 +866,12 @@ fn deep_nesting_is_too_complex_before_parsing() {
     );
     assert_eq!(
         run(&deep).err(),
+        Some(ProcessError::TooComplex("elements are nested too deeply"))
+    );
+    // Before roxmltree parses anything: the same nesting in a file roxmltree would reject
+    // (an unterminated comment at the end) is still too complex, not invalid XML.
+    assert_eq!(
+        run(&format!("{deep}<!-- unterminated")).err(),
         Some(ProcessError::TooComplex("elements are nested too deeply"))
     );
     // Quotes and comments can't hide nesting from the byte scan.
@@ -1107,12 +1166,74 @@ fn reference_cycles_are_too_complex() {
                  height=\"9\"/></svg>"
             ),
         ),
+        // usvg parses every child of a gradient, stop or filter primitive and finds ids
+        // anywhere, and its `<use>` copies elements from inside anything, so a
+        // definition's parent hides nothing.
+        (
+            "pattern inside a gradient, inheriting its fill",
+            format!(
+                "{hdr}<linearGradient id=\"G\" fill=\"url(#A)\"><pattern id=\"A\" width=\"10\" \
+                 height=\"10\" patternUnits=\"userSpaceOnUse\"><rect width=\"5\" height=\"5\"/>\
+                 </pattern></linearGradient></defs><rect width=\"100\" height=\"100\" \
+                 fill=\"url(#A)\"/></svg>"
+            ),
+        ),
+        (
+            "pattern inside a stop",
+            format!(
+                "{hdr}<linearGradient id=\"G\"><stop offset=\"0\">{}</stop></linearGradient>\
+                 {}{}</defs><rect width=\"100\" height=\"100\" fill=\"url(#A)\"/></svg>",
+                pat("A", "B"),
+                pat("B", "C"),
+                pat("C", "A")
+            ),
+        ),
+        (
+            "mask inside a filter primitive",
+            format!(
+                "{hdr}<filter id=\"F\"><feFlood>{}</feFlood></filter>{}{}</defs><rect \
+                 width=\"100\" height=\"100\" mask=\"url(#A)\"/></svg>",
+                mask("A", "B"),
+                mask("B", "C"),
+                mask("C", "A")
+            ),
+        ),
+        (
+            "clip path inside a gradient",
+            format!(
+                "{hdr}<radialGradient id=\"G\">{}</radialGradient>{}{}</defs><rect \
+                 width=\"100\" height=\"100\" clip-path=\"url(#A)\"/></svg>",
+                clip("A", "B"),
+                clip("B", "C"),
+                clip("C", "A")
+            ),
+        ),
+        (
+            "group inside a foreignObject, copied by <use>",
+            format!(
+                "{hdr}<pattern id=\"A\" width=\"10\" height=\"10\" \
+                 patternUnits=\"userSpaceOnUse\"><use href=\"#x\"/></pattern>{}{}</defs>\
+                 <foreignObject width=\"1\" height=\"1\"><g id=\"x\"><rect width=\"5\" \
+                 height=\"5\" fill=\"url(#B)\"/></g></foreignObject><rect width=\"100\" \
+                 height=\"100\" fill=\"url(#A)\"/></svg>",
+                pat("B", "C"),
+                pat("C", "A")
+            ),
+        ),
     ];
     for (name, svg) in cases {
         let (r, elapsed) = run_big(&svg);
         assert_eq!(r.err(), Some(ProcessError::TooComplex(loops)), "{name}");
         assert!(elapsed < Duration::from_secs(1), "{name}: {elapsed:?}");
     }
+    // A pattern kept inside a gradient, with no loop, is drawn as usual.
+    let (r, _) = run_big(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\"><linearGradient \
+         id=\"G\"><stop offset=\"0\"/><pattern id=\"P\" width=\"10\" height=\"10\" patternUnits=\"userSpaceOnUse\">\
+         <rect width=\"5\" height=\"5\" fill=\"url(#G)\"/></pattern></linearGradient><rect \
+         x=\"20\" y=\"20\" width=\"60\" height=\"60\" fill=\"url(#P)\"/></svg>",
+    );
+    assert!(r.is_ok(), "{r:?}");
 }
 
 #[test]
@@ -1349,6 +1470,8 @@ fn junk_is_rejected_cleanly() {
     let e = run_bytes(&latin1, &[]).expect_err("latin-1");
     assert!(matches!(e, ProcessError::InvalidSvg(_)), "{e:?}");
     assert_eq!(e.code(), "invalid_svg");
+    // Illustrator's ISO-8859-1 encoding option: the advice says how to save as UTF-8.
+    assert!(e.user_message().contains("UTF-8"), "{}", e.user_message());
     // 600 KiB.
     let mut big = format!("{SVG_OPEN}<rect width=\"9\" height=\"9\"/>");
     big.push_str(&" ".repeat(600 * 1024));

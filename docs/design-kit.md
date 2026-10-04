@@ -252,15 +252,30 @@ can't catch that. So before usvg runs:
     trailing `&#9;` keeps the tab), and both `id` and `xml:id` define ids;
   - presentation attributes count in any namespace (usvg reads `xml:fill`);
   - every `<style>` element counts, whatever its namespace;
-  - `inherit` takes the parent's value, also for `clip-path`, `mask` and `filter`.
+  - `inherit` takes the parent's value, also for `clip-path`, `mask` and `filter`;
+  - where an element sits never hides it, so each element's role comes from its own
+    tag. usvg parses every child of a gradient, stop or filter primitive and resolves an
+    id anywhere in its tree, so a pattern, mask or clip path nested in one is converted
+    when referenced, and its content inherits `fill`, `stroke` and markers from the
+    gradient, stop or primitive (usvg looks for them on every ancestor, whatever its
+    tag). And a `<use>` copies any SVG element in the document, even one inside a
+    `<foreignObject>`, `<style>`, metadata or a foreign-namespace element, none of which
+    usvg parses itself.
 
   A differential fuzz (not checked in) generated 165,000 random reference structures
   over these forms (patterns, masks, clip paths, markers, symbols, `feImage` filters and
   `<use>`; attributes, `style`, classes, `xml:` attributes, `inherit`, tab ids, wrapped
   definitions): the 71,000 the prescan accepted all ran through `process_on_big_stack`
-  without aborting. The loop check is conservative: usvg would have survived all of a
-  sample of 200 rejected loops (it breaks some loops itself, and never converts
-  definitions nothing uses). Real artwork has no loops at all.
+  without aborting. It never put a definition under a non-graphic parent, so a second
+  fuzz does: definitions wrapped in gradients, stops, filter primitives,
+  `<foreignObject>`, metadata, `<title>`, `<desc>`, `<text>`, foreign and unknown
+  elements, each wrapper carrying inherited references, with `<use>`s of what is inside.
+  Against the prescan before roles came from each element's own tag, it aborted the
+  process on 111 of 10,000 files; now, of 150,000 structures, the 53,538 the prescan
+  accepted all ran through `process_on_big_stack` without aborting. The loop
+  check is conservative: usvg would have survived all of a sample of 200 rejected loops
+  (it breaks some loops itself, and never converts definitions nothing uses). Real
+  artwork has no loops at all.
 
   From the graphs:
   - **Cycles** are rejected. usvg only breaks one- and two-step cycles; a three-pattern
@@ -332,7 +347,7 @@ release, median of 9, through `process_on_big_stack`.
 | A DOCTYPE or `<!` declaration roxmltree can't parse | `invalid_xml` | |
 | 64 patterns or masks × 60 groups; 33 pattern/`<use>` pairs × 58 groups | Ok (about 3,600-3,970 levels deep) | 4-5 ms, 12 MB peak RSS |
 | 60 pattern/`<use>` pairs × 58 groups | `too_complex` (nesting) | 1 ms |
-| three-step pattern, mask, clip, `feImage` and `<use>` cycles; loops made with inherited fills, CSS classes, `style` attributes, `xml:id`, `xml:fill`, a stylesheet in another namespace, `clip-path: inherit` or ids ending in a tab | `too_complex` (loop) | 0.1 ms |
+| three-step pattern, mask, clip, `feImage` and `<use>` cycles; loops made with inherited fills, CSS classes, `style` attributes, `xml:id`, `xml:fill`, a stylesheet in another namespace, `clip-path: inherit` or ids ending in a tab; loops through a pattern, mask or clip path nested in a gradient, stop or filter primitive (or inheriting its fill), or through a `<use>` of a group inside a `<foreignObject>` | `too_complex` (loop) | 0.1 ms |
 | 2,000-long clip, mask or pattern chain | `too_complex` (definitions) | |
 | `<use>` bombs (2^25 copies; 400 × 100; 501 uses), pattern fan-out, marker per vertex | `too_complex` (expansion) | 0.1 ms |
 | `<filter>` with 4,000 morphology and blur primitives | Ok, `filters_ignored` | 2.8 ms |
@@ -342,7 +357,7 @@ release, median of 9, through `process_on_big_stack`.
 | 1,200 segments crossing the drawing (the most the budget allows) | Ok | 64 ms |
 | 0.001-unit dashes; 20 nested clipped groups; 6,000 segments | `too_complex` | |
 | 25,000 elements | `invalid_xml` (node limit) | |
-| Latin-1 bytes | `invalid_svg` | |
+| Latin-1 bytes (Illustrator's ISO-8859-1 encoding) | `invalid_svg`, with advice to save as UTF-8 | |
 | gzip (`.svgz`), UTF-16 (with or without a BOM) | `unsupported_format` (`svgz`, `utf16`), with advice to save a plain UTF-8 SVG | |
 | 600 KiB | `too_large` | 0.1 ms |
 | HTML that mentions `<svg>` | `invalid_svg` (root) | |
@@ -650,7 +665,7 @@ report panics from the decode process.
 | `invalid_xml` | malformed SVG or DOCTYPE, over 20,000 nodes, or declaring entities other than Illustrator-style plain text (its own message: export a plain SVG) |
 | `invalid_svg` | not UTF-8, the root isn't `<svg>`, or usvg can't read it |
 | `too_complex` | over the trace budget, or `d` over 64 KiB (noise, checkerboards, photos, crafted stripes); for SVGs, over a prescan or painting budget (nesting, loops, expansion, CSS, segments, outline travel, dashes, clips) |
-| `empty` | nothing drawable (carries info lints, e.g. guides only) |
+| `empty` | nothing drawable (carries info lints; the message names the reason when one explains it: nothing showing in "Draw here", text, an embedded image, or guides only) |
 | `internal` | a bug |
 
 ## Tests

@@ -22,7 +22,10 @@
 //!
 //! **Stack**: processing a hostile SVG within the limits can recurse about 4,000 levels
 //! deep inside usvg, which overflows a default 2 MiB thread stack and aborts the process.
-//! Run uploads with [`process_on_big_stack`] (a dedicated thread with a 64 MiB stack).
+//! Run uploads with [`process_on_big_stack`] (a dedicated thread with a 64 MiB stack),
+//! and in production inside a short-lived child process with memory and CPU limits (the
+//! studio, PR 3): a failed allocation, or an abort nothing here foresaw, then ends only
+//! that process.
 
 mod emit;
 mod fix;
@@ -472,6 +475,12 @@ impl ProcessError {
             ProcessError::InvalidXml(_) => "That SVG isn't valid XML, so we couldn't read it. \
                  Export it again from your drawing app, or export a PNG."
                 .into(),
+            ProcessError::InvalidSvg(detail) if detail.starts_with(svg_in::NOT_UTF8) => {
+                "That SVG isn't saved as UTF-8 text, which we need. Save it again with the \
+                 encoding set to UTF-8 (in Illustrator's SVG Options, set Encoding to UTF-8), \
+                 then upload it."
+                    .into()
+            }
             ProcessError::InvalidSvg(_) => "We couldn't read that SVG. Export it again as a \
                  plain SVG, or export a PNG."
                 .into(),
@@ -480,6 +489,24 @@ impl ProcessError {
                  background. In a vector app, flatten effects, symbols and patterns before \
                  exporting."
                 .into(),
+            // When we know why nothing was left, say so. Template guides are in every
+            // export from the template, so they explain it only when nothing else does.
+            ProcessError::Empty { info } if info.contains(&Lint::OutsideDrawHereIgnored) => {
+                "We only use your \"Draw here\" layer, and nothing in it showed up. Move your \
+                 drawing into \"Draw here\", then export again."
+                    .into()
+            }
+            ProcessError::Empty { info } if info.contains(&Lint::TextIgnored) => "We couldn't \
+                 find a drawing: text isn't supported. Convert your text to outlines (Type → \
+                 Create Outlines, or Path → Object to Path), then export again."
+                .into(),
+            ProcessError::Empty { info }
+                if info.iter().any(|l| matches!(l, Lint::ImageIgnored { .. })) =>
+            {
+                "We couldn't find a drawing: we don't read pictures embedded in an SVG. Upload \
+                 your drawing as a PNG instead, or draw it with vector shapes."
+                    .into()
+            }
             ProcessError::Empty { info } if info.contains(&Lint::GuidesVisible) => "We only found \
                  the template guides. Draw in black on the \"Draw here\" layer, hide the guides, \
                  then export again."
@@ -567,15 +594,16 @@ fn looks_like_svg(bytes: &[u8]) -> bool {
 /// Untrusted upload bytes -> clean shape, with `fixes` applied (a set; see [`Fix`]).
 ///
 /// CPU-bound and synchronous (tens of milliseconds in release for a 2048 px PNG or an
-/// official SVG); run it off the async runtime, behind a semaphore.
+/// official SVG). In production, run untrusted uploads in an isolated child process with
+/// memory and CPU limits (see [`ProcessError`]), behind a semaphore.
 ///
 /// **Needs a 64 MiB stack for untrusted input.** An SVG within every limit can still make
 /// usvg recurse about [`Limits::max_svg_nesting`] levels deep (a chain of patterns or
 /// masks, each wrapping nested groups): the worst accepted inputs abort on 2 and 4 MiB
 /// stacks and pass on 8 MiB in release (measured), and need more in a debug build. On a default 2 MiB thread (Tokio workers and `spawn_blocking` threads
 /// included) that overflows the stack, which aborts the whole process. Production code
-/// should call [`process_on_big_stack`]; calling this directly is fine for trusted input
-/// such as tests of the official assets.
+/// should call [`process_on_big_stack`] (inside that child process); calling this
+/// directly is fine for trusted input such as tests of the official assets.
 pub fn process_upload(
     bytes: &[u8],
     limits: &Limits,

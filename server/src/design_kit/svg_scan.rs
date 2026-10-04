@@ -14,7 +14,9 @@
 //!     (patterns), `clip-path`, `mask`, `filter` (and `feImage` hrefs), markers
 //!     (instantiated at every vertex) and `<use>`, each converting the target's content
 //!     nested inside the referencing element. Definitions (`<defs>`, patterns, masks,
-//!     ...) are converted only through references.
+//!     ...) are converted only through references, and so is anything inside a
+//!     gradient, stop or filter primitive, or (through a `<use>`) inside an element
+//!     usvg doesn't parse. Where an element sits never hides it: see `Role`.
 //!
 //!   From those:
 //!   - a **cycle** of three or more references (pattern A fills with B, B with C, C
@@ -30,7 +32,8 @@
 //!     every vertex its own marker. Bounded by `Limits::max_svg_expansion`.
 //!
 //!   References can come from attributes, `style` attributes and `<style>` sheets, and
-//!   `fill`, `stroke` and markers are inherited. Stylesheet rules are matched with the
+//!   `fill`, `stroke` and markers are inherited from every ancestor, gradients, stops
+//!   and filter primitives included. Stylesheet rules are matched with the
 //!   same CSS engine and element view as usvg's, and every candidate value counts (not
 //!   just the cascade winner), so the graph is a superset of what usvg follows.
 //! * The **CSS cost**, bounded by `Limits::max_css_work` before simplecss runs:
@@ -234,15 +237,25 @@ impl RefKind {
     }
 }
 
-/// How usvg treats an element.
+/// How usvg treats an element, decided by its own tag only. Being inside a gradient, a
+/// stop, a filter primitive or an element usvg never parses hides nothing: usvg parses
+/// every child of a gradient, stop or primitive and resolves a reference to an id
+/// anywhere in its tree, and a `<use>` copies any SVG element in the document, even one
+/// inside a `<foreignObject>` or a foreign-namespace element. So a pattern nested in a
+/// gradient is converted when something references it, and its content inherits paint
+/// from the gradient (usvg looks for `fill`, `stroke` and markers on every ancestor,
+/// whatever its tag).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Role {
     /// Converted as graphics: children, references and inherited references count.
     Graphic,
-    /// Gradients, stops and filter primitives: only an `href` is followed (they aren't
-    /// drawn, so inherited paint doesn't recurse through them).
+    /// Gradients, stops and filter primitives: only their non-inherited references (an
+    /// `href`) are followed, and their children are converted only through references.
+    /// They aren't drawn, so their own paint and markers aren't followed, but their
+    /// descendants inherit them.
     HrefOnly,
     /// Never parsed: non-SVG namespaces, `foreignObject`, `style`, `script`, metadata.
+    /// Their children are reached only through a `<use>`.
     Inert,
 }
 
@@ -369,8 +382,8 @@ pub(crate) fn scan(doc: &roxmltree::Document, limits: &Limits) -> Result<Facts, 
         }
         let name = node.tag_name().name();
         let svg_ns = matches!(node.tag_name().namespace(), None | Some(SVG_NS));
-        let role = if parent_el.is_some_and(|p| p.role == Role::Inert)
-            || !svg_ns
+        // By the element's own tag, never its parent's: see `Role`.
+        let role = if !svg_ns
             || matches!(
                 name,
                 "foreignObject" | "style" | "script" | "title" | "desc" | "metadata"
@@ -378,7 +391,6 @@ pub(crate) fn scan(doc: &roxmltree::Document, limits: &Limits) -> Result<Facts, 
             Role::Inert
         } else if matches!(name, "linearGradient" | "radialGradient" | "stop")
             || name.starts_with("fe")
-            || parent_el.is_some_and(|p| p.role == Role::HrefOnly)
         {
             Role::HrefOnly
         } else {
@@ -527,9 +539,11 @@ pub(crate) fn scan(doc: &roxmltree::Document, limits: &Limits) -> Result<Facts, 
             ref_rules.push(rule);
         }
     }
-    // usvg tries every rule on every copy; we only try the rules that can add a
-    // reference on the originals.
-    if per_element.saturating_mul(copies.size) > limits.max_css_work {
+    // usvg tries every rule on every copy (`copies`). We try the rules that can add a
+    // reference on every original that isn't inert, including the ones inside inert
+    // elements, which `copies` leaves out unless a `<use>` reaches them.
+    let originals = els.iter().filter(|e| e.role != Role::Inert).count() as u64;
+    if per_element.saturating_mul(copies.size.max(originals)) > limits.max_css_work {
         return Err(CSS_TOO_COMPLEX);
     }
 
@@ -564,22 +578,20 @@ pub(crate) fn scan(doc: &roxmltree::Document, limits: &Limits) -> Result<Facts, 
                 inherits |= is_inherit(value);
             }
         }
-        if el.role == Role::Graphic {
-            for rule in &ref_rules {
-                if rule.selector.matches(&XmlNode(el.node)) {
-                    for decl in &rule.declarations {
-                        let kind = RefKind::of_property(decl.name);
-                        refs.extend(url_ids(decl.value).map(|id| (kind, id)));
-                        inherits |= is_inherit(decl.value);
-                    }
+        // usvg applies the stylesheet to every element it parses. All kinds are kept,
+        // also on gradients, stops and primitives: their descendants inherit paint and
+        // markers from them (the converter graph follows only what each role follows).
+        for rule in &ref_rules {
+            if rule.selector.matches(&XmlNode(el.node)) {
+                for decl in &rule.declarations {
+                    let kind = RefKind::of_property(decl.name);
+                    refs.extend(url_ids(decl.value).map(|id| (kind, id)));
+                    inherits |= is_inherit(decl.value);
                 }
             }
-            if inherits && let Some(p) = el.parent {
-                refs.extend(els[p].refs.iter().copied());
-            }
-        } else {
-            // Gradients, stops and primitives: only an `href` is followed.
-            refs.retain(|(k, _)| *k == RefKind::Other);
+        }
+        if inherits && let Some(p) = el.parent {
+            refs.extend(els[p].refs.iter().copied());
         }
         refs.sort_unstable();
         refs.dedup();
@@ -610,15 +622,17 @@ pub(crate) fn scan(doc: &roxmltree::Document, limits: &Limits) -> Result<Facts, 
         if el.role == Role::Inert {
             continue;
         }
-        if el.role == Role::Graphic {
+        if el.role == Role::HrefOnly {
+            // Not drawn: neither children nor paint. Descendants are reached by id.
+            converted.refs(&ids, &el.refs, el.vertices, |k| !k.inherited());
+        } else {
             // Definitions inside are converted only when referenced.
             converted.children(i, &els, |c| !c.definition && c.role != Role::Inert);
-        }
-        converted.refs(&ids, &el.refs, el.vertices, false);
-        if el.role == Role::Graphic {
+            converted.refs(&ids, &el.refs, el.vertices, |_| true);
+            // From every ancestor, whatever its role (usvg's `find_attribute`).
             let mut a = el.inherit_from;
             while let Some(anc) = a {
-                converted.refs(&ids, &els[anc].refs, el.vertices, true);
+                converted.refs(&ids, &els[anc].refs, el.vertices, RefKind::inherited);
                 if converted.edges.len() > MAX_EDGES {
                     return Err(TOO_MANY_REFS);
                 }
@@ -693,16 +707,16 @@ impl Graph {
         }
     }
 
-    /// Edges for references (all of them, or only the inherited kinds).
+    /// Edges for the references whose kind `follow` accepts.
     fn refs(
         &mut self,
         ids: &HashMap<&str, Vec<usize>>,
         refs: &[(RefKind, &str)],
         vertices: u64,
-        inherited_only: bool,
+        follow: impl Fn(RefKind) -> bool,
     ) {
         for &(kind, id) in refs {
-            if inherited_only && !kind.inherited() {
+            if !follow(kind) {
                 continue;
             }
             let copies = match kind {
@@ -1022,6 +1036,166 @@ mod tests {
              <g class=\"g\"><linearGradient id=\"G\"><stop offset=\"0\"/></linearGradient>\
              <rect width=\"9\" height=\"9\"/></g></svg>";
         assert_eq!(run(grad), Ok(Facts::default()));
+    }
+
+    fn is_loop(r: &Result<Facts, ProcessError>) -> bool {
+        matches!(r, Err(ProcessError::TooComplex(m)) if m.contains("loop"))
+    }
+
+    const SVG: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:o=\"urn:other\">";
+
+    fn pat(id: &str, rect_attrs: &str) -> String {
+        format!(
+            "<pattern id=\"{id}\" width=\"9\" height=\"9\" patternUnits=\"userSpaceOnUse\">\
+             <rect width=\"5\" height=\"5\"{rect_attrs}/></pattern>"
+        )
+    }
+
+    #[test]
+    fn definitions_inside_gradients_stops_and_primitives_are_followed() {
+        // usvg parses every child of a gradient, stop or filter primitive and resolves an
+        // id anywhere in its tree, so a definition nested in one is converted when
+        // something references it, and its content inherits paint and markers from them.
+        // Each of these aborted usvg 0.48.1 on a 64 MiB stack.
+        let mask = |id: &str, next: &str| {
+            format!(
+                "<mask id=\"{id}\"><rect width=\"9\" height=\"9\" fill=\"white\" \
+                 mask=\"url(#{next})\"/></mask>"
+            )
+        };
+        let clip = |id: &str, next: &str| {
+            format!(
+                "<clipPath id=\"{id}\"><rect width=\"9\" height=\"9\" \
+                 clip-path=\"url(#{next})\"/></clipPath>"
+            )
+        };
+        let wrappers = [
+            ("<linearGradient id=\"W\"{a}>", "</linearGradient>"),
+            ("<radialGradient id=\"W\"{a}>", "</radialGradient>"),
+            (
+                "<linearGradient id=\"W\"><stop offset=\"0\"{a}>",
+                "</stop></linearGradient>",
+            ),
+            ("<filter id=\"W\"><feFlood{a}>", "</feFlood></filter>"),
+            (
+                "<filter id=\"W\"><feMerge><feMergeNode{a}>",
+                "</feMergeNode></feMerge></filter>",
+            ),
+        ];
+        for (open, close) in wrappers {
+            let wrap =
+                |attrs: &str, inner: &str| format!("{}{inner}{close}", open.replace("{a}", attrs));
+            let cases = [
+                // The pattern's content inherits the wrapper's fill or stroke.
+                (
+                    "inherited fill",
+                    format!(
+                        "{SVG}{}<rect width=\"9\" height=\"9\" fill=\"url(#P)\"/></svg>",
+                        wrap(" fill=\"url(#P)\"", &pat("P", ""))
+                    ),
+                ),
+                (
+                    "inherited stroke",
+                    format!(
+                        "{SVG}{}<rect width=\"9\" height=\"9\" stroke=\"url(#P)\"/></svg>",
+                        wrap(" style=\"stroke:url(#P)\"", &pat("P", ""))
+                    ),
+                ),
+                // A mask whose content inherits a fill from the wrapper, naming a pattern
+                // that masks with it.
+                (
+                    "inherited fill into a mask",
+                    format!(
+                        "{SVG}{}{}<rect width=\"9\" height=\"9\" fill=\"url(#P)\"/></svg>",
+                        wrap(
+                            " fill=\"url(#P)\"",
+                            "<mask id=\"M\"><rect width=\"9\" height=\"9\"/></mask>"
+                        ),
+                        pat("P", " mask=\"url(#M)\"")
+                    ),
+                ),
+                // Three-step loops with one link inside the wrapper.
+                (
+                    "pattern loop",
+                    format!(
+                        "{SVG}{}{}{}<rect width=\"9\" height=\"9\" fill=\"url(#A)\"/></svg>",
+                        wrap("", &pat("A", " fill=\"url(#B)\"")),
+                        pat("B", " fill=\"url(#C)\""),
+                        pat("C", " fill=\"url(#A)\"")
+                    ),
+                ),
+                (
+                    "mask loop",
+                    format!(
+                        "{SVG}{}{}{}<rect width=\"9\" height=\"9\" mask=\"url(#A)\"/></svg>",
+                        wrap("", &mask("A", "B")),
+                        mask("B", "C"),
+                        mask("C", "A")
+                    ),
+                ),
+                (
+                    "clip loop",
+                    format!(
+                        "{SVG}{}{}{}<rect width=\"9\" height=\"9\" clip-path=\"url(#A)\"/></svg>",
+                        wrap("", &clip("A", "B")),
+                        clip("B", "C"),
+                        clip("C", "A")
+                    ),
+                ),
+                // The same through a stylesheet rule that matches the wrapper.
+                (
+                    "inherited fill from a stylesheet",
+                    format!(
+                        "{SVG}<style>.w{{fill:url(#P)}}</style>{}<rect width=\"9\" height=\"9\" \
+                         fill=\"url(#P)\"/></svg>",
+                        wrap(" class=\"w\"", &pat("P", ""))
+                    ),
+                ),
+            ];
+            for (name, svg) in cases {
+                assert!(is_loop(&run(&svg)), "{name} in {open}: {:?}", run(&svg));
+            }
+            // A pattern kept in a gradient and used normally is fine.
+            let ok = format!(
+                "{SVG}{}<rect width=\"9\" height=\"9\" fill=\"url(#P)\"/></svg>",
+                wrap("", &pat("P", " fill=\"url(#W)\""))
+            );
+            assert!(run(&ok).is_ok(), "{open}: {:?}", run(&ok));
+        }
+    }
+
+    #[test]
+    fn elements_inside_unparsed_elements_count_when_a_use_copies_them() {
+        // usvg never parses a `<foreignObject>`, `<style>`, metadata or a foreign element,
+        // but a `<use>` copies any SVG element in the document, wherever it is. Each of
+        // these aborted usvg 0.48.1 on a 64 MiB stack.
+        for (open, close) in [
+            (
+                "<foreignObject width=\"1\" height=\"1\">",
+                "</foreignObject>",
+            ),
+            ("<o:thing>", "</o:thing>"),
+            ("<metadata>", "</metadata>"),
+            ("<title>", "</title>"),
+            ("<style>", "</style>"),
+        ] {
+            let svg = format!(
+                "{SVG}{open}<g id=\"x\"><rect width=\"5\" height=\"5\" fill=\"url(#B)\"/></g>\
+                 {close}<pattern id=\"A\" width=\"9\" height=\"9\" patternUnits=\"userSpaceOnUse\">\
+                 <use href=\"#x\"/></pattern>{}{}<rect width=\"9\" height=\"9\" \
+                 fill=\"url(#A)\"/></svg>",
+                pat("B", " fill=\"url(#C)\""),
+                pat("C", " fill=\"url(#A)\"")
+            );
+            assert!(is_loop(&run(&svg)), "{open}: {:?}", run(&svg));
+            // Copies made there count towards the expansion too.
+            let bomb = format!(
+                "{SVG}{open}<g id=\"x\">{}</g>{close}{}</svg>",
+                "<rect width=\"1\" height=\"1\"/>".repeat(200),
+                "<use href=\"#x\"/>".repeat(400)
+            );
+            assert_eq!(run(&bomb), Err(EXPANDS), "{open}");
+        }
     }
 
     #[test]

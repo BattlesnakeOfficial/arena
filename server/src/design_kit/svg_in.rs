@@ -47,6 +47,10 @@ const MAX_ENTITY_EXPANSION_BYTES: usize = 256 * 1024;
 pub(crate) const ENTITIES_REJECTED: &str =
     "entity declarations other than short plain text are not allowed";
 
+/// The start of the `InvalidSvg` detail for bytes that aren't UTF-8 (its message says how
+/// to save as UTF-8).
+pub(crate) const NOT_UTF8: &str = "the file is not UTF-8 text";
+
 /// A converted SVG, before fixes, metrics and lints.
 pub(crate) struct SvgShape {
     pub path: tiny_skia::Path,
@@ -57,7 +61,7 @@ pub(crate) struct SvgShape {
 
 pub(crate) fn process(bytes: &[u8], limits: &Limits) -> Result<SvgShape, ProcessError> {
     let text = std::str::from_utf8(bytes)
-        .map_err(|e| ProcessError::InvalidSvg(format!("the file is not UTF-8 text ({e})")))?;
+        .map_err(|e| ProcessError::InvalidSvg(format!("{NOT_UTF8} ({e})")))?;
     // roxmltree's tokenizer recurses once per nesting level: ~5000 nested tags overflow
     // a 2 MiB stack (~200 in a debug build) and abort the process. Bound the depth from
     // the bytes first.
