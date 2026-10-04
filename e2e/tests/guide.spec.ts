@@ -146,22 +146,7 @@ test.describe('Ways in to the studio', () => {
     await expect(page.getByRole('heading', { level: 1, name: 'Head & Tail Studio' })).toBeVisible();
   });
 
-  test('/customizations links to the studio', async ({ page }) => {
-    const response = await page.goto('/customizations');
-    expect(response?.status()).toBe(200);
-    const note = page.locator('.cz-note').filter({ hasText: 'Design your own head or tail in the' });
-    await expect(note).toBeVisible();
-    const link = note.getByRole('link', { name: 'Head & Tail Studio' });
-    await expect(link).toHaveAttribute('href', STUDIO);
-    await link.click();
-    await expect(page).toHaveURL(new RegExp(`${STUDIO}$`));
-    await expect(page.getByRole('heading', { level: 1, name: 'Head & Tail Studio' })).toBeVisible();
-  });
-
-  test('the footer links to the studio', async ({ page }) => {
-    await page.goto('/customizations');
-    const link = page.locator('footer').getByRole('link', { name: 'Head & Tail Studio' });
-    await expect(link).toHaveAttribute('href', STUDIO);
-    await expect(page.locator('footer').getByRole('link', { name: 'Code of Conduct' })).toBeVisible();
-  });
+  // No public links (the /customizations note and the footer) until launch (DEV-1539);
+  // the Rust test the_studio_is_not_linked_from_customizations_or_the_footer_yet checks
+  // they stay out.
 });

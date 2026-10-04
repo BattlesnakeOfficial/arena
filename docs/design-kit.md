@@ -14,7 +14,7 @@ Status (DEV-1539):
 | 1 | core, PNG/JPEG input, the ink rule, lints, fixes |
 | 2 | SVG input and hardening, the full catalog corpus test, reference shapes |
 | 3 (this) | board component, studio page, endpoint, its guards and the worker process |
-| 4 | templates, guide page, discoverability |
+| 4 | templates, guide page, the start-here panel, the `/studio` short link |
 
 ## Asset contract
 
@@ -877,8 +877,10 @@ no layer masks (an RGB document made psd-tools store each layer's alpha as a mas
 solid pixels, so "Draw here" was solid black under a hide-all mask). "Draw here" is
 fully transparent, and the composite's fourth channel is its transparency.
 
-The studio is linked from the site footer and the customizations page, and `/studio`
-redirects to it (`routes::redirects::LOCAL_REDIRECTS`).
+The studio and the guide are reachable by URL, and `/studio` redirects to the studio
+(`routes::redirects::LOCAL_REDIRECTS`), but nothing else on the site links to them yet:
+the footer and `/customizations` links wait for launch (a test in
+`server/src/routes/studio/tests.rs` checks they're absent).
 
 ### The endpoint and its guards
 

@@ -703,8 +703,6 @@ async fn the_page_renders_every_board_with_placeholders(db: sqlx::PgPool) {
         example[0].starts_with("/static/design-kit/example-drawing.png?v="),
         "{example:?}"
     );
-    // The footer links here too.
-    assert!(html.contains("href=\"/customizations/studio\""));
 }
 
 // ---- GET /customizations/studio/guide, downloads, links in -------------------------
@@ -962,21 +960,35 @@ async fn studio_redirects_to_the_studio() {
     }
 }
 
+/// The studio isn't advertised yet (DEV-1539): it's reachable by URL (and `/studio`), but
+/// neither `/customizations` nor the site footer links to it. Linking it publicly is a
+/// launch decision, so adding those links back has to change this test on purpose.
 #[sqlx::test(migrations = "../migrations")]
-async fn the_customizations_page_links_to_the_studio(db: sqlx::PgPool) {
-    let (status, _, html) = get_html(page_app(db), "/customizations").await;
+async fn the_studio_is_not_linked_from_customizations_or_the_footer_yet(db: sqlx::PgPool) {
+    use maud::Render as _;
+
+    let (status, _, customizations) = get_html(page_app(db), "/customizations").await;
     assert_eq!(status, StatusCode::OK);
-    let note = html
-        .find("Design your own head or tail in the ")
-        .expect("the studio note");
-    assert!(
-        html[note..].starts_with(
-            "Design your own head or tail in the <a href=\"/customizations/studio\">Head &amp; \
-             Tail Studio</a>."
-        ),
-        "{}",
-        &html[note..note + 120]
-    );
+    let footer = crate::components::page::Page::new(
+        "Test".to_string(),
+        Box::new(maud::html! { p { "content" } }),
+        None,
+    )
+    .render()
+    .into_string();
+
+    for (what, html) in [
+        ("/customizations", &customizations),
+        ("the footer", &footer),
+    ] {
+        // A whole page, footer included, so the checks below can fail.
+        assert!(html.contains("class=\"site-footer\""), "{what}: no footer");
+        assert!(html.contains("href=\"/terms\""), "{what}: no footer links");
+        for href in ["href=\"/customizations/studio", "href=\"/studio"] {
+            assert!(!html.contains(href), "{what} links to the studio ({href})");
+        }
+    }
+    assert!(customizations.contains("Reach out on Discord"));
 }
 
 /// The page's in-browser check, run the way studio.js runs it: the first rejected
