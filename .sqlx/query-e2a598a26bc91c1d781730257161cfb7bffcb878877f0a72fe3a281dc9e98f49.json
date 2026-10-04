@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT github_uid, claimed_by_user_id FROM imported_accounts WHERE imported_account_id=$1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "github_uid",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "claimed_by_user_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true,
+      true
+    ]
+  },
+  "hash": "e2a598a26bc91c1d781730257161cfb7bffcb878877f0a72fe3a281dc9e98f49"
+}

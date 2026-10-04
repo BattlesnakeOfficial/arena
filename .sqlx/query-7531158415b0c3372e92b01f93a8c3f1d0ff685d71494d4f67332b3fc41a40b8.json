@@ -1,0 +1,47 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT t.turn_id, t.game_id, t.turn_number, t.frame_data, t.created_at\n           FROM unnest($1::uuid[], $2::int[]) AS w(game_id, last_turn)\n           JOIN turns t ON t.game_id = w.game_id\n           WHERE t.turn_number > w.last_turn AND t.frame_data IS NOT NULL\n           ORDER BY t.game_id, t.turn_number",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "turn_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "game_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "turn_number",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 3,
+        "name": "frame_data",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 4,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray",
+        "Int4Array"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "7531158415b0c3372e92b01f93a8c3f1d0ff685d71494d4f67332b3fc41a40b8"
+}

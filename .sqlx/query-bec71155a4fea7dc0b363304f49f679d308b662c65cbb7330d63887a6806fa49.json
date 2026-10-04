@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT imported_account_id, play_account_id, claimed_by_user_id FROM imported_accounts WHERE play_user_id = $1 FOR UPDATE",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "imported_account_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "play_account_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "claimed_by_user_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "bec71155a4fea7dc0b363304f49f679d308b662c65cbb7330d63887a6806fa49"
+}
