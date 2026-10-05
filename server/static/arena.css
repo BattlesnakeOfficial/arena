@@ -197,8 +197,8 @@ html[data-app-theme="dark"] .ic-moon { display: none; }
 .mobile-menu { display: none; position: relative; }
 .mobile-menu summary {
   list-style: none;
-  width: 38px;
-  height: 38px;
+  width: 44px;
+  height: 44px;
   border-radius: 50%;
   border: 1.5px solid var(--hairline-dark);
   color: var(--ink);
@@ -1095,6 +1095,8 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
 @media (max-width: 1220px) {
   .site-nav .links { display: none; }
   .mobile-menu { display: block; }
+  /* Match the 44px hamburger tap target while the menu is collapsed */
+  .theme-btn { width: 44px; height: 44px; }
 }
 @media (max-width: 980px) {
   .grid { grid-template-columns: 1fr; }
@@ -1123,7 +1125,6 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
     border: 0;
   }
   .theme-btn { width: 44px; height: 44px; }
-  .mobile-menu summary { width: 44px; height: 44px; }
   .appearance { right: 16px; left: 16px; width: auto; top: 80px; }
   .page { padding: 28px 20px 96px; }
   .flash-message { width: calc(100% - 40px); }
