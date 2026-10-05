@@ -12,10 +12,11 @@ pub async fn phase<T>(
     turn: Option<i32>,
     work: impl Future<Output = cja::Result<T>>,
 ) -> cja::Result<T> {
-    let span = tracing::info_span!("arena.game.phase", %game_id, phase, turn);
+    // The span's creation record is the `started` receipt. A separate started
+    // event would add a row per phase, per turn, without adding evidence.
+    let span = tracing::info_span!("arena.game.phase", event_type = "game_phase", %game_id, phase, turn, state = "started");
     async move {
         let mut progress = Progress { game_id, phase, turn, started: Instant::now(), finished: false };
-        tracing::info!(event_type = "game_phase", %game_id, phase, turn, state = "started", "Game phase started");
         let result = work.await;
         progress.finished = true;
         let duration_ms = progress.started.elapsed().as_millis() as u64;
@@ -57,8 +58,30 @@ mod tests {
     use tracing::{field::Visit, instrument::WithSubscriber};
     use tracing_subscriber::{Layer, prelude::*};
 
+    /// A game-phase record, tagged with whether it came from a span's
+    /// creation (`true`) or an event (`false`).
+    type Record = (bool, BTreeMap<String, String>);
+
+    /// Game-phase records in emission order.
     #[derive(Clone, Default)]
-    struct Capture(Arc<Mutex<Vec<BTreeMap<String, String>>>>);
+    struct Capture(Arc<Mutex<Vec<Record>>>);
+
+    impl Capture {
+        fn push_if_phase(&self, span: bool, fields: Fields) {
+            if fields.0.get("event_type").map(String::as_str) == Some("game_phase") {
+                self.0.lock().unwrap().push((span, fields.0));
+            }
+        }
+
+        fn states(&self) -> Vec<(bool, String)> {
+            self.0
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(span, fields)| (*span, fields["state"].clone()))
+                .collect()
+        }
+    }
 
     #[derive(Default)]
     struct Fields(BTreeMap<String, String>);
@@ -73,6 +96,17 @@ mod tests {
     }
 
     impl<S: tracing::Subscriber> Layer<S> for Capture {
+        fn on_new_span(
+            &self,
+            attrs: &tracing::span::Attributes<'_>,
+            _: &tracing::Id,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let mut fields = Fields::default();
+            attrs.record(&mut fields);
+            self.push_if_phase(true, fields);
+        }
+
         fn on_event(
             &self,
             event: &tracing::Event<'_>,
@@ -80,9 +114,7 @@ mod tests {
         ) {
             let mut fields = Fields::default();
             event.record(&mut fields);
-            if fields.0.get("event_type").map(String::as_str) == Some("game_phase") {
-                self.0.lock().unwrap().push(fields.0);
-            }
+            self.push_if_phase(false, fields);
         }
     }
 
@@ -109,21 +141,23 @@ mod tests {
         }
         .with_subscriber(subscriber)
         .await;
-        let records = capture.0.lock().unwrap();
         assert_eq!(
-            records
-                .iter()
-                .map(|r| r["state"].as_str())
-                .collect::<Vec<_>>(),
-            ["started", "completed", "started", "failed"]
+            capture.states(),
+            [
+                (true, "started".into()),
+                (false, "completed".into()),
+                (true, "started".into()),
+                (false, "failed".into()),
+            ]
         );
+        let records = capture.0.lock().unwrap();
         assert!(
             records
                 .iter()
-                .all(|r| r["game_id"] == game_id.to_string() && r["turn"] == "9")
+                .all(|(_, r)| r["game_id"] == game_id.to_string() && r["turn"] == "9")
         );
         assert_eq!(
-            records[3]["error"],
+            records[3].1["error"],
             "finish transaction: database unavailable"
         );
     }
@@ -148,18 +182,17 @@ mod tests {
         }
         .with_subscriber(subscriber)
         .await;
-        let records = capture.0.lock().unwrap();
         assert_eq!(
-            records
-                .iter()
-                .map(|r| r["state"].as_str())
-                .collect::<Vec<_>>(),
-            ["started", "cancelled"]
+            capture.states(),
+            [(true, "started".into()), (false, "cancelled".into())]
         );
         assert!(
-            records
+            capture
+                .0
+                .lock()
+                .unwrap()
                 .iter()
-                .all(|r| r["game_id"] == game_id.to_string() && r["phase"] == "request_moves")
+                .all(|(_, r)| r["game_id"] == game_id.to_string() && r["phase"] == "request_moves")
         );
     }
 }

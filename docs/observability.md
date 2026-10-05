@@ -67,9 +67,11 @@ creation, nested under its cja job attempt. Its phases are `load_game`,
 `reset_game` (retries), `prepare_snakes`, `start_snakes`, `request_moves`,
 `persist_turn`, `end_snakes`, `finish_game`, and `post_completion`.
 
-An `arena.game.phase` span carries game ID, phase, and the applicable turn.
-Events with `event_type=game_phase` record `state=started`, followed by exactly
-one of `completed`, `failed`, or `cancelled` if execution unwinds normally.
+An `arena.game.phase` span carries game ID, phase, the applicable turn,
+`event_type=game_phase`, and `state=started`; its creation is the start receipt.
+Exactly one event with `event_type=game_phase` follows, with `state` set to
+`completed`, `failed`, or `cancelled` if execution unwinds normally. A phase
+with only its span has started but never finished.
 Terminal events include elapsed milliseconds; failures preserve the error cause
 chain. `finish_game` completes only after the database commit, and follow-up
 jobs are a separate phase. An interrupted future never emits `completed`.
