@@ -6,7 +6,7 @@ use uuid::Uuid;
 use crate::customizations;
 use crate::engine::MAX_TURNS;
 use crate::engine::frame::{DeathInfo, SnakeCustomizations, game_to_frame};
-use crate::game_progress::phase;
+use crate::game_progress::{Phase, phase};
 use crate::models::game::{GameStatus, get_game_by_id, get_game_source, update_game_status};
 use crate::snake_client::{
     ProxyClients, SnakeEndpoint, request_end_routed_parallel, request_info_routed_parallel,
@@ -32,7 +32,7 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
     tracing::info!(game_id = %game_id, "Starting run_game");
 
     // Get the game details
-    let (game, game_source) = phase(game_id, "load_game", None, async {
+    let (game, game_source) = phase(game_id, Phase::LoadGame, None, async {
         let game = get_game_by_id(pool, game_id)
             .await?
             .ok_or_else(|| cja::color_eyre::eyre::eyre!("Game not found"))?;
@@ -56,7 +56,7 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
             );
             phase(
                 game_id,
-                "post_completion",
+                Phase::PostCompletion,
                 None,
                 enqueue_post_completion_jobs(app_state, game_id),
             )
@@ -74,7 +74,7 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
             );
             phase(
                 game_id,
-                "reset_game",
+                Phase::ResetGame,
                 None,
                 crate::models::game::reset_game_state_for_retry(pool, game_id),
             )
@@ -106,7 +106,7 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
     }
 
     let (battlesnakes, snake_urls, customizations) =
-        phase(game_id, "prepare_snakes", None, async {
+        phase(game_id, Phase::PrepareSnakes, None, async {
             // Update status to running
             update_game_status(pool, game_id, GameStatus::Running).await?;
 
@@ -239,7 +239,7 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
     tracing::info!(game_id = %game_id, "Calling /start for all snakes");
     phase(
         game_id,
-        "start_snakes",
+        Phase::StartSnakes,
         Some(engine_game.board.turn),
         async {
             let _: () = request_start_routed_parallel(
@@ -262,7 +262,7 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
         serde_json::to_value(&frame_0).wrap_err("Failed to serialize initial frame")?;
 
     tracing::info!(game_id = %game_id, "Storing turn 0");
-    phase(game_id, "persist_turn", Some(0), async {
+    phase(game_id, Phase::PersistTurn, Some(0), async {
         crate::models::turn::create_turn(pool, game_id, 0, Some(frame_0_json)).await?;
         Ok(())
     })
@@ -279,7 +279,7 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
         let move_wait_start = std::time::Instant::now();
         let move_results = phase(
             game_id,
-            "request_moves",
+            Phase::RequestMoves,
             Some(engine_game.board.turn),
             async {
                 Ok(request_moves_routed_parallel(
@@ -356,7 +356,7 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
 
         phase(
             game_id,
-            "persist_turn",
+            Phase::PersistTurn,
             Some(engine_game.board.turn),
             async {
                 let turn = crate::models::turn::create_turn(
@@ -426,18 +426,23 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
 
     // Call /end for all snakes in parallel (fire and forget)
     tracing::info!(game_id = %game_id, "Calling /end for all snakes");
-    phase(game_id, "end_snakes", Some(engine_game.board.turn), async {
-        let _: () = request_end_routed_parallel(
-            &proxy_clients,
-            &engine_game,
-            &snake_urls,
-            timeout,
-            &snake_contexts,
-            &customizations,
-        )
-        .await;
-        Ok(())
-    })
+    phase(
+        game_id,
+        Phase::EndSnakes,
+        Some(engine_game.board.turn),
+        async {
+            let _: () = request_end_routed_parallel(
+                &proxy_clients,
+                &engine_game,
+                &snake_urls,
+                timeout,
+                &snake_contexts,
+                &customizations,
+            )
+            .await;
+            Ok(())
+        },
+    )
     .await?;
 
     tracing::info!(
@@ -472,7 +477,7 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
 
     phase(
         game_id,
-        "finish_game",
+        Phase::FinishGame,
         Some(engine_game.board.turn),
         async {
             // Resolve the tournament match result (if any) before the finish
@@ -562,7 +567,7 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
 
     phase(
         game_id,
-        "post_completion",
+        Phase::PostCompletion,
         None,
         enqueue_post_completion_jobs(app_state, game_id),
     )
