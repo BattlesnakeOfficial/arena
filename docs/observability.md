@@ -111,3 +111,16 @@ flush up to 500 events at a time or after one second, preserving buffered events
 through failed requests. A fresh heartbeat proves process liveness, not event
 delivery freshness. Verify a completed game's final phase and completion receipt
 in Eyes after rollout, alongside the source Cloud Logging records.
+
+## Retention
+
+The boot manifest declares DEBUG retention of 7 days
+(`observability::DEBUG_RETENTION_DAYS`). Every other level keeps Eyes' server
+default of 30 days. Eyes routes each row into a per-level retention class and
+drops expired DEBUG data a day at a time, instead of deleting rows.
+
+Routing starts only when `eyes --app <arena app id> retention` reports
+`routing_active: true`. That requires the classes to be ready and today's
+partition to be class-partitioned. DEBUG rows stored before then keep the
+30-day default. Move telemetry to DEBUG only after routing is active
+(DEV-1568).
