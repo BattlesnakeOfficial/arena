@@ -646,13 +646,71 @@ async fn the_page_renders_every_board_with_placeholders(db: sqlx::PgPool) {
         );
     }
     assert_eq!(html.matches("class=\"studio-frame\"").count(), 16);
-    assert!(html.contains(&format!(
-        "<path id=\"studio-closeup-path\" class=\"studio-closeup-path\" d=\"{}\"",
-        default_head.d
-    )));
     assert!(html.contains("Try it with your own drawing."));
 
-    // Every reference is offered for pairing, with a clean path.
+    // "Your snake": a card per slot, each with its own close-up, thumbnail and checks,
+    // every one showing that slot's default before any upload. No "Upload as" toggle:
+    // each card's file input fills its own slot.
+    for (kind, shape) in [("head", default_head), ("tail", default_tail)] {
+        for part in ["closeup", "thumb"] {
+            let path = format!(
+                "<path id=\"studio-{part}-path-{kind}\" class=\"studio-{part}-path\" d=\"{}\" fill-rule=\"{}\">",
+                shape.d,
+                shape.fill_rule.as_svg()
+            );
+            assert!(html.contains(&path), "{path}");
+        }
+        assert!(html.contains(&format!("aria-label=\"Close-up of the default {kind}\"")));
+        let file = format!(
+            "<input id=\"studio-file-{kind}\" class=\"studio-file\" type=\"file\" name=\"studio-file-{kind}\" data-kind=\"{kind}\""
+        );
+        assert!(html.contains(&file), "{file}");
+        assert!(html.contains(&format!(">Upload {kind}</span>")), "{kind}");
+        assert!(html.contains(&format!(">Default {kind}</p>")), "{kind}");
+        for part in [
+            "slot",
+            "thumb",
+            "name",
+            "upload",
+            "upload-text",
+            "style",
+            "download",
+            "remove",
+            "relabel",
+            "undo",
+            "confirm",
+            "confirm-yes",
+            "confirm-no",
+            "closeup",
+            "gaps",
+            "checks",
+            "pass",
+            "warnings",
+            "tips",
+            "details",
+            "details-summary",
+            "info",
+        ] {
+            // The leading space keeps `data-testid="…"` from counting.
+            let id = format!(" id=\"studio-{part}-{kind}\"");
+            assert_eq!(html.matches(&id).count(), 1, "{id}");
+        }
+        assert!(html.contains(&format!("data-testid=\"studio-checks-{kind}\"")));
+        assert!(html.contains(&format!("Passes every check the official {kind}s pass.")));
+    }
+    assert!(html.contains(">This is actually a tail</button>"));
+    assert!(html.contains(">This is actually a head</button>"));
+    assert!(html.contains(">Replace your tail</button>"));
+    for gone in [
+        "name=\"studio-kind\"",
+        "Upload as",
+        "Pair your",
+        "studio-pair",
+    ] {
+        assert!(!html.contains(gone), "{gone}");
+    }
+
+    // Every reference is offered as a style for its slot, with a clean path.
     let ds = attr_values(&html, "data-d");
     assert_eq!(ds.len(), REFS.len());
     for d in ds {
@@ -661,20 +719,30 @@ async fn the_page_renders_every_board_with_placeholders(db: sqlx::PgPool) {
     for rule in attr_values(&html, "data-fill-rule") {
         assert!(rule == "nonzero" || rule == "evenodd", "{rule}");
     }
+    for (kind, select) in [
+        (AssetKind::Head, "studio-style-head"),
+        (AssetKind::Tail, "studio-style-tail"),
+    ] {
+        let start = html.find(&format!("id=\"{select}\"")).expect(select);
+        let end = start + html[start..].find("</select>").expect("</select>");
+        let options = &html[start..end];
+        let count = REFS.iter().filter(|r| r.kind == kind).count();
+        assert_eq!(options.matches("<option ").count(), count, "{select}");
+        assert!(options.contains("value=\"default\""), "{select}");
+    }
 
     // The page's controls and script.
     for id in [
-        "studio-file",
+        "studio-snake",
+        "studio-slots",
+        "studio-summary",
         "studio-status",
         "studio-top-warning",
+        "studio-top-fix",
         "studio-panes",
-        "studio-pair-head",
-        "studio-pair-tail",
-        "studio-warnings",
-        "studio-details",
+        "studio-closeup",
+        "studio-lints-empty",
         "studio-save-image",
-        "studio-download-head",
-        "studio-clear",
         "studio-result-heading",
     ] {
         assert!(html.contains(&format!("id=\"{id}\"")), "{id}");
@@ -689,6 +757,11 @@ async fn the_page_renders_every_board_with_placeholders(db: sqlx::PgPool) {
     // by app), the guide, and the example studio.js posts as a head.
     assert!(html.contains("<details id=\"studio-start\""));
     assert!(html.contains(" open>"));
+    // Under "Your snake", so both upload buttons come first on a first visit too.
+    let snake_at = html.find("id=\"studio-snake\"").expect("Your snake");
+    let start_at = html.find("id=\"studio-start\"").expect("Start here");
+    let preview_at = html.find("id=\"studio-result-heading\"").expect("Preview");
+    assert!(snake_at < start_at && start_at < preview_at);
     assert_eq!(html.matches(">Procreate (PSD)</a>").count(), 2);
     assert_eq!(
         html.matches(">Illustrator · Inkscape · Affinity (SVG)</a>")

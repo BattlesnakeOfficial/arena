@@ -9,10 +9,14 @@ use eyes_subscriber::{
     AggregateFunction as Agg, DashboardItem as Item, DashboardSection as Section,
     MetricThresholdBuilder, NamedDashboard, NamedMetric, NamedMetricBuilder as Metric,
     ProcessHeartbeat, ProcessHeartbeatConfig, ProcessHeartbeatHandle, ProcessIdentity,
-    ThresholdComparison::Above,
+    RetentionPolicy, ThresholdComparison::Above,
 };
 
 pub const ROLE: &str = "arena";
+
+/// Days Eyes keeps arena's DEBUG telemetry. Every other level keeps Eyes'
+/// server default (30 days).
+pub const DEBUG_RETENTION_DAYS: u32 = 7;
 
 pub fn manifest(
     registry: &cja::cron::CronRegistry<AppState>,
@@ -25,6 +29,7 @@ pub fn manifest(
         features.cron.then_some(registry),
     )
     .base_url(crate::config::ARENA_PUBLIC_BASE_URL)
+    .retention(RetentionPolicy::new().level(tracing::Level::DEBUG, DEBUG_RETENTION_DAYS))
     .process(identity)
     .expected_process_roles(vec![ExpectedProcessRole::new(ROLE).min_instances(1)])
     .monitors(if features.server {
@@ -456,6 +461,12 @@ mod tests {
         assert_eq!(
             body["metrics"].as_array().unwrap().len(),
             manifest.metrics.as_ref().unwrap().len()
+        );
+        // Only DEBUG is shortened; no app-wide days, so other levels keep
+        // Eyes' server default.
+        assert_eq!(
+            body["retention"],
+            serde_json::json!({ "levels": { "DEBUG": DEBUG_RETENTION_DAYS } })
         );
         // Optional artifact for a local server acceptance check, using the
         // actual subscriber wire format rather than a second serializer.

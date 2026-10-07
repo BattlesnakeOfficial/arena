@@ -117,7 +117,7 @@ pub const fn guides_png(kind: AssetKind) -> Download {
 /// The finished drawing behind the studio's "Try an example".
 pub const EXAMPLE_DRAWING: &str = "design-kit/example-drawing.png";
 
-fn kind_word(kind: AssetKind) -> &'static str {
+pub(crate) fn kind_word(kind: AssetKind) -> &'static str {
     match kind {
         AssetKind::Head => "head",
         AssetKind::Tail => "tail",
@@ -194,7 +194,7 @@ pub(crate) fn guide_markup() -> Markup {
                     li { "in any snake colour, facing all four directions" }
                     li { "at real game size and close up" }
                     li { "on light and dark boards" }
-                    li { "paired with your own tail (or head) or an official one" }
+                    li { "with your own head and tail together, or either one with an official one" }
                 }
                 p {
                     "The studio flags common problems, like a gap at the neck, a head facing "
@@ -515,7 +515,7 @@ fn first_head_section() -> Markup {
                 li {
                     strong { "Export and upload (2 min)." }
                     " Tap " strong { "Actions (wrench) → Share → PNG → Save to Files" }
-                    ". In the studio, choose " strong { "Head" } " and upload the file."
+                    ". In the studio, tap " strong { "Upload head" } " and choose the file."
                 }
             }
             p {

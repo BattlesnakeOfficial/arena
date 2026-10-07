@@ -79,7 +79,6 @@ Turn persistence has nested phases with the same lifecycle contract:
 | --- | --- |
 | `persist_turn.acquire_frame_connection` | SQLx connection acquisition before the frame write |
 | `persist_turn.insert_frame` | Frame INSERT on the acquired connection |
-| `persist_turn.notify` | Channel-map read lock and local broadcast send |
 | `persist_turn.acquire_snake_connection` | SQLx connection acquisition before each snake move write |
 | `persist_turn.insert_snake` | One snake move INSERT on the acquired connection |
 
@@ -87,8 +86,9 @@ Every stage carries game ID and turn at span creation and inherits the job/game
 trace. `eyes investigate --game <UUID> --since 1h` includes these invocations.
 Acquisition can include pool checkout checks or opening a connection; insert
 timing includes the database round trip and row decoding, not just server CPU.
-Notification does not await WebSocket delivery. The frame connection is returned
-before notification; writes retain their existing order and autocommit behavior.
+Live viewers are notified by a database trigger on the committed turn insert,
+so notification is not a phase. Writes retain their existing order and
+autocommit behavior.
 The enclosing `persist_turn` duration includes these stages, so summing parent
 and child durations double-counts time. Routine stage fields contain no frame
 payloads, SQL parameters, or credentials.
@@ -97,6 +97,22 @@ Abrupt process death can prevent both the terminal event and buffered startup
 information from arriving. An unmatched start means the phase has no observed
 terminal event, not proof that its worker crashed. Correlate the containing job
 attempt, process instance heartbeat, deployment, and Cloud Run logs.
+
+### Phase levels
+
+Phases are a closed set (`game_progress::Phase`). Per-turn phases
+(`request_moves`, `persist_turn`, and the `persist_turn.*` stages) emit their
+start span and `completed` event at DEBUG, which Eyes keeps for 7 days.
+Once-per-game phases (`load_game`, `reset_game`, `prepare_snakes`,
+`start_snakes`, `end_snakes`, `finish_game`, `post_completion`) stay at INFO
+for 30 days. `failed` is ERROR and `cancelled` is WARN for every phase, so a
+failure never ages out early. The per-turn `db_write_latency` and
+`scheduler_jitter` metric events stay at INFO because named metrics and
+thresholds read them over 24-hour and 7-day windows.
+
+Per-turn telemetry reaches Eyes only while the tracing filter admits DEBUG for
+arena. Production's `RUST_LOG` is `info,arena=debug`; dropping `arena=debug`
+silently removes every per-turn phase from Eyes.
 
 Cja's enqueue receipt (`event_type=job_enqueued`) identifies the persisted job
 UUID, which matches `job.id` on the later worker attempt. Enqueue spans alone
@@ -111,3 +127,16 @@ flush up to 500 events at a time or after one second, preserving buffered events
 through failed requests. A fresh heartbeat proves process liveness, not event
 delivery freshness. Verify a completed game's final phase and completion receipt
 in Eyes after rollout, alongside the source Cloud Logging records.
+
+## Retention
+
+The boot manifest declares DEBUG retention of 7 days
+(`observability::DEBUG_RETENTION_DAYS`). Every other level keeps Eyes' server
+default of 30 days. Eyes routes each row into a per-level retention class and
+drops expired DEBUG data a day at a time, instead of deleting rows.
+
+Routing starts only when `eyes --app <arena app id> retention` reports
+`routing_active: true`. That requires the classes to be ready and today's
+partition to be class-partitioned. DEBUG rows stored before then keep the
+30-day default. Move telemetry to DEBUG only after routing is active
+(DEV-1568).
