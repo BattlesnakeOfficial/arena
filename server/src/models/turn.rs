@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
-use crate::game_progress::phase;
+use crate::game_progress::{Phase, phase};
 
 #[cfg(test)]
 mod storage_tests;
@@ -142,7 +142,7 @@ pub async fn create_turn(
     let turn = {
         let mut connection = phase(
             game_id,
-            "persist_turn.acquire_frame_connection",
+            Phase::PersistTurnAcquireFrameConnection,
             Some(turn_number),
             async {
                 pool.acquire()
@@ -153,7 +153,7 @@ pub async fn create_turn(
         .await?;
         phase(
             game_id,
-            "persist_turn.insert_frame",
+            Phase::PersistTurnInsertFrame,
             Some(turn_number),
             async {
                 sqlx::query_as!(
@@ -248,7 +248,7 @@ pub async fn create_snake_turn(
     let latency_i32 = latency_ms.map(|ms| ms as i32);
     let mut connection = phase(
         turn.game_id,
-        "persist_turn.acquire_snake_connection",
+        Phase::PersistTurnAcquireSnakeConnection,
         Some(turn.turn_number),
         async {
             pool.acquire()
@@ -257,7 +257,7 @@ pub async fn create_snake_turn(
         },
     )
     .await?;
-    let row = phase(turn.game_id, "persist_turn.insert_snake", Some(turn.turn_number), async {
+    let row = phase(turn.game_id, Phase::PersistTurnInsertSnake, Some(turn.turn_number), async {
         sqlx::query!(
         r#"
         INSERT INTO snake_turns (turn_id, game_battlesnake_id, direction, latency_ms, timed_out, errored)
