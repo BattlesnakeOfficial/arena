@@ -16,7 +16,7 @@ test.describe('Leaderboard Pages', () => {
       leaderboardId = leaderboard.leaderboard_id;
       const [game] = await query<{ game_id: string }>(
         `INSERT INTO games (board_size, game_type, status)
-         VALUES ('11x11', 'Standard', 'waiting') RETURNING game_id`
+         VALUES ('11x11', 'Standard', 'running') RETURNING game_id`
       );
       gameId = game.game_id;
       await query(
