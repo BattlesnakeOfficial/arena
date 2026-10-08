@@ -1,6 +1,7 @@
 use color_eyre::eyre::Context as _;
 use serde::{Deserialize, Serialize};
 use sqlx::{Executor, PgPool, Postgres};
+use std::collections::HashSet;
 use std::str::FromStr;
 use uuid::Uuid;
 
@@ -201,6 +202,342 @@ pub fn validate_battlesnake_count(game_type: &GameType, count: usize) -> cja::Re
 }
 
 // Database functions for game management
+
+/// Result of atomically moving a waiting game into the running state.
+#[derive(Debug, PartialEq, Eq)]
+pub enum StartClaim {
+    Started {
+        leaderboard_id: Option<Uuid>,
+        wait_ms: i64,
+        via: Option<&'static str>,
+    },
+    Busy,
+    AlreadyRunning,
+    Terminal,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ScheduleGame {
+    pub game_id: Uuid,
+    pub status: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub leaderboard_id: Option<Uuid>,
+    pub disabled_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub participants: Vec<Uuid>,
+}
+
+#[derive(Debug)]
+pub(crate) struct ScheduleSnapshot {
+    pub at: chrono::DateTime<chrono::Utc>,
+    pub games: Vec<ScheduleGame>,
+}
+
+/// One view of all running games and waiting ladder games. Caller-held participant
+/// locks make this authoritative for a claim; dispatch uses it only as a hint.
+pub(crate) async fn load_schedule_snapshot(
+    conn: &mut sqlx::PgConnection,
+) -> cja::Result<ScheduleSnapshot> {
+    let rows = sqlx::query!(
+        r#"SELECT g.game_id, g.status, g.created_at, lg.leaderboard_id,
+                  lb.disabled_at,
+                  ARRAY(SELECT DISTINCT COALESCE(gb.battlesnake_id, le.battlesnake_id)
+                        FROM game_battlesnakes gb
+                        LEFT JOIN leaderboard_entries le ON le.leaderboard_entry_id = gb.leaderboard_entry_id
+                        WHERE gb.game_id = g.game_id AND COALESCE(gb.battlesnake_id, le.battlesnake_id) IS NOT NULL
+                        ORDER BY COALESCE(gb.battlesnake_id, le.battlesnake_id)) AS "participants!: Vec<Uuid>"
+           FROM games g
+           LEFT JOIN leaderboard_games lg ON lg.game_id = g.game_id
+           LEFT JOIN leaderboards lb ON lb.leaderboard_id = lg.leaderboard_id
+           WHERE g.status = 'running' OR (g.status = 'waiting' AND lg.game_id IS NOT NULL)"#
+    )
+    .fetch_all(&mut *conn)
+    .await
+    .wrap_err("Failed to load game schedule")?;
+    let at = sqlx::query_scalar!(r#"SELECT clock_timestamp() AS "at!""#)
+        .fetch_one(&mut *conn)
+        .await
+        .wrap_err("Failed to read schedule clock")?;
+    Ok(ScheduleSnapshot {
+        at,
+        games: rows
+            .into_iter()
+            .map(|r| ScheduleGame {
+                game_id: r.game_id,
+                status: r.status,
+                created_at: r.created_at,
+                leaderboard_id: r.leaderboard_id,
+                disabled_at: r.disabled_at,
+                participants: r.participants,
+            })
+            .collect(),
+    })
+}
+
+fn shares_snake(a: &ScheduleGame, b: &ScheduleGame) -> bool {
+    let ids: HashSet<_> = a.participants.iter().collect();
+    b.participants.iter().any(|id| ids.contains(id))
+}
+
+/// Eligibility before FIFO, including the non-overridable same-ladder rule.
+fn base_eligibility(
+    snapshot: &ScheduleSnapshot,
+    game: &ScheduleGame,
+    deadline_secs: i64,
+) -> Option<&'static str> {
+    if game.status != "waiting"
+        || game.leaderboard_id.is_none()
+        || game.disabled_at.is_some()
+        || game.participants.is_empty()
+    {
+        return None;
+    }
+    let conflicts: Vec<_> = snapshot
+        .games
+        .iter()
+        .filter(|other| other.status == "running" && shares_snake(game, other))
+        .collect();
+    if conflicts
+        .iter()
+        .any(|other| other.leaderboard_id == game.leaderboard_id)
+    {
+        return None;
+    }
+    if conflicts.is_empty() {
+        return Some("free");
+    }
+    if snapshot
+        .at
+        .signed_duration_since(game.created_at)
+        .num_seconds()
+        >= deadline_secs
+    {
+        Some("deadline")
+    } else {
+        None
+    }
+}
+
+/// Oldest base-eligible game sharing a participant wins this dispatch cycle.
+pub(crate) fn ladder_eligibility(
+    snapshot: &ScheduleSnapshot,
+    game: &ScheduleGame,
+    deadline_secs: i64,
+) -> Option<&'static str> {
+    let via = base_eligibility(snapshot, game, deadline_secs)?;
+    let older = snapshot.games.iter().filter(|other| {
+        other.game_id != game.game_id
+            && (other.created_at, other.game_id) < (game.created_at, game.game_id)
+            && shares_snake(game, other)
+    });
+    if older
+        .into_iter()
+        .any(|other| base_eligibility(snapshot, other, deadline_secs).is_some())
+    {
+        None
+    } else {
+        Some(via)
+    }
+}
+
+/// Claim exactly one waiting game before any snake HTTP request.
+pub async fn claim_game_start(
+    pool: &PgPool,
+    game_id: Uuid,
+    deadline_secs: i64,
+) -> cja::Result<StartClaim> {
+    use color_eyre::eyre::eyre;
+    let mut tx = pool
+        .begin()
+        .await
+        .wrap_err("Failed to begin game start claim")?;
+    let target = sqlx::query!(
+        "SELECT status, created_at FROM games WHERE game_id = $1 FOR UPDATE",
+        game_id
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .wrap_err("Failed to lock game for start")?;
+    match target.status.as_str() {
+        "running" => return Ok(StartClaim::AlreadyRunning),
+        "finished" | "failed" => return Ok(StartClaim::Terminal),
+        "waiting" => {}
+        other => return Err(eyre!("Unknown game status {other}")),
+    }
+    let roster = sqlx::query_scalar!(
+        r#"SELECT DISTINCT COALESCE(gb.battlesnake_id, le.battlesnake_id) AS "snake_id!"
+           FROM game_battlesnakes gb
+           LEFT JOIN leaderboard_entries le ON le.leaderboard_entry_id = gb.leaderboard_entry_id
+           WHERE gb.game_id = $1
+           ORDER BY "snake_id!""#,
+        game_id
+    )
+    .fetch_all(&mut *tx)
+    .await
+    .wrap_err("Failed to resolve game roster")?;
+    if roster.is_empty() {
+        return Err(eyre!("Game {game_id} has empty roster"));
+    }
+    for snake_id in &roster {
+        let found = sqlx::query_scalar!(
+            "SELECT battlesnake_id FROM battlesnakes WHERE battlesnake_id = $1 FOR NO KEY UPDATE",
+            snake_id
+        )
+        .fetch_optional(&mut *tx)
+        .await
+        .wrap_err("Failed to lock game participant")?;
+        if found.is_none() {
+            return Err(eyre!(
+                "Game {game_id} has unresolved participant {snake_id}"
+            ));
+        }
+    }
+    let snapshot = load_schedule_snapshot(&mut tx)
+        .await
+        .wrap_err("Failed to recheck schedule under participant locks")?;
+    let target_game = snapshot.games.iter().find(|g| g.game_id == game_id);
+    let (leaderboard_id, via) = if let Some(game) = target_game {
+        (
+            game.leaderboard_id,
+            ladder_eligibility(&snapshot, game, deadline_secs),
+        )
+    } else {
+        (None, None)
+    };
+    if leaderboard_id.is_some() && via.is_none() {
+        return Ok(StartClaim::Busy);
+    }
+    let updated = sqlx::query_scalar!("UPDATE games SET status = 'running' WHERE game_id = $1 AND status = 'waiting' RETURNING game_id", game_id)
+        .fetch_optional(&mut *tx).await.wrap_err("Failed to start claimed game")?;
+    if updated.is_none() {
+        return Ok(StartClaim::AlreadyRunning);
+    }
+    let wait_ms = snapshot
+        .at
+        .signed_duration_since(target.created_at)
+        .num_milliseconds()
+        .max(0);
+    tx.commit()
+        .await
+        .wrap_err("Failed to commit game start claim")?;
+    Ok(StartClaim::Started {
+        leaderboard_id,
+        wait_ms,
+        via,
+    })
+}
+
+#[cfg(test)]
+mod ladder_dispatch_tests {
+    use super::*;
+    use chrono::{Duration, Utc};
+
+    fn game(
+        id: u128,
+        status: &str,
+        age: i64,
+        ladder: Option<Uuid>,
+        snakes: &[Uuid],
+    ) -> ScheduleGame {
+        ScheduleGame {
+            game_id: Uuid::from_u128(id),
+            status: status.into(),
+            created_at: Utc::now() - Duration::seconds(age),
+            leaderboard_id: ladder,
+            disabled_at: None,
+            participants: snakes.to_vec(),
+        }
+    }
+
+    #[test]
+    fn busy_deadline_and_same_ladder_hold() {
+        let snake = Uuid::from_u128(1);
+        let ladder = Uuid::from_u128(2);
+        let running = game(10, "running", 20, None, &[snake]);
+        let waiting = game(11, "waiting", 479, Some(ladder), &[snake]);
+        let mut snapshot = ScheduleSnapshot {
+            at: Utc::now(),
+            games: vec![running, waiting],
+        };
+        assert_eq!(ladder_eligibility(&snapshot, &snapshot.games[1], 480), None);
+        snapshot.games[1].created_at = snapshot.at - Duration::seconds(480);
+        assert_eq!(
+            ladder_eligibility(&snapshot, &snapshot.games[1], 480),
+            Some("deadline")
+        );
+        snapshot.games[0].leaderboard_id = Some(ladder);
+        assert_eq!(ladder_eligibility(&snapshot, &snapshot.games[1], 480), None);
+    }
+
+    #[test]
+    fn oldest_base_eligible_wins_without_reserving_blocked_snakes() {
+        let snake = Uuid::from_u128(1);
+        let ladder = Uuid::from_u128(2);
+        let mut snapshot = ScheduleSnapshot {
+            at: Utc::now(),
+            games: vec![
+                game(1, "waiting", 20, Some(ladder), &[snake]),
+                game(2, "waiting", 10, Some(ladder), &[snake]),
+            ],
+        };
+        assert_eq!(
+            ladder_eligibility(&snapshot, &snapshot.games[0], 480),
+            Some("free")
+        );
+        assert_eq!(ladder_eligibility(&snapshot, &snapshot.games[1], 480), None);
+        snapshot
+            .games
+            .push(game(3, "running", 30, Some(ladder), &[snake]));
+        assert_eq!(ladder_eligibility(&snapshot, &snapshot.games[1], 480), None);
+        snapshot.games[0].disabled_at = Some(snapshot.at);
+        snapshot.games[2].leaderboard_id = None;
+        assert_eq!(ladder_eligibility(&snapshot, &snapshot.games[1], 480), None);
+        snapshot.games[2].participants.clear();
+        assert_eq!(
+            ladder_eligibility(&snapshot, &snapshot.games[1], 480),
+            Some("free")
+        );
+    }
+
+    #[test]
+    fn equal_creation_time_uses_game_id_for_fifo() {
+        let snake = Uuid::from_u128(1);
+        let ladder = Uuid::from_u128(2);
+        let at = Utc::now();
+        let mut younger_id = game(20, "waiting", 0, Some(ladder), &[snake]);
+        let mut older_id = game(10, "waiting", 0, Some(ladder), &[snake]);
+        younger_id.created_at = at;
+        older_id.created_at = at;
+        let snapshot = ScheduleSnapshot {
+            at,
+            games: vec![younger_id, older_id],
+        };
+        assert_eq!(ladder_eligibility(&snapshot, &snapshot.games[0], 480), None);
+        assert_eq!(
+            ladder_eligibility(&snapshot, &snapshot.games[1], 480),
+            Some("free")
+        );
+    }
+
+    #[test]
+    fn blocked_older_game_does_not_reserve_free_participant() {
+        let shared = Uuid::from_u128(1);
+        let blocked = Uuid::from_u128(2);
+        let ladder = Uuid::from_u128(3);
+        let snapshot = ScheduleSnapshot {
+            at: Utc::now(),
+            games: vec![
+                game(10, "waiting", 30, Some(ladder), &[shared, blocked]),
+                game(11, "waiting", 20, Some(ladder), &[shared]),
+                game(12, "running", 40, Some(ladder), &[blocked]),
+            ],
+        };
+        assert_eq!(ladder_eligibility(&snapshot, &snapshot.games[0], 480), None);
+        assert_eq!(
+            ladder_eligibility(&snapshot, &snapshot.games[1], 480),
+            Some("free")
+        );
+    }
+}
 
 /// Where a game came from, sent to snakes as `game.source`. Matchmaker and
 /// tournament games link their `leaderboard_games` / `match_games` row in the
@@ -1007,6 +1344,130 @@ mod tests {
             get_game_rematch_metadata(&pool, Uuid::new_v4())
                 .await?
                 .is_none()
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn custom_busy_holds_ladder_until_deadline_but_custom_starts_immediately(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        let owner = rematch_user(&pool, 161300).await?;
+        let snake = rematch_snake(&pool, owner, "Dispatch", "public").await?;
+        let new_game = || CreateGameWithSnakes {
+            board_size: GameBoardSize::Medium,
+            game_type: GameType::Standard,
+            battlesnake_ids: vec![snake],
+        };
+        let custom = create_game_with_snakes(&pool, new_game()).await?;
+        assert!(matches!(
+            claim_game_start(&pool, custom.game_id, 480).await?,
+            StartClaim::Started {
+                leaderboard_id: None,
+                ..
+            }
+        ));
+        let ladder = create_game_with_snakes(&pool, new_game()).await?;
+        let leaderboard_id = sqlx::query_scalar!(
+            "SELECT leaderboard_id FROM leaderboards WHERE name = 'Standard 11x11'"
+        )
+        .fetch_one(&pool)
+        .await?;
+        sqlx::query!(
+            "INSERT INTO leaderboard_games (leaderboard_id, game_id) VALUES ($1, $2)",
+            leaderboard_id,
+            ladder.game_id
+        )
+        .execute(&pool)
+        .await?;
+        assert_eq!(
+            claim_game_start(&pool, ladder.game_id, 480).await?,
+            StartClaim::Busy
+        );
+        let other_custom = create_game_with_snakes(&pool, new_game()).await?;
+        assert!(matches!(
+            claim_game_start(&pool, other_custom.game_id, 480).await?,
+            StartClaim::Started {
+                leaderboard_id: None,
+                ..
+            }
+        ));
+        sqlx::query!("UPDATE games SET created_at = clock_timestamp() - interval '480 seconds' WHERE game_id = $1", ladder.game_id)
+            .execute(&pool).await?;
+        assert!(matches!(
+            claim_game_start(&pool, ladder.game_id, 480).await?,
+            StartClaim::Started {
+                via: Some("deadline"),
+                ..
+            }
+        ));
+        Ok(())
+    }
+    #[sqlx::test(migrations = "../migrations")]
+    async fn selected_entry_survives_pause_and_leaderboard_disable_holds_claim(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        let owner = rematch_user(&pool, 161301).await?;
+        let snake = rematch_snake(&pool, owner, "Selected", "public").await?;
+        let leaderboard_id = sqlx::query_scalar!(
+            "SELECT leaderboard_id FROM leaderboards WHERE name = 'Standard 11x11'"
+        )
+        .fetch_one(&pool)
+        .await?;
+        let entry = sqlx::query_scalar!(
+            "INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id)
+            VALUES ($1, $2) RETURNING leaderboard_entry_id",
+            leaderboard_id,
+            snake
+        )
+        .fetch_one(&pool)
+        .await?;
+        let game_id = sqlx::query_scalar!("INSERT INTO games (board_size, game_type) VALUES ('11x11', 'Standard') RETURNING game_id")
+            .fetch_one(&pool).await?;
+        add_leaderboard_entry_to_game(&pool, game_id, entry).await?;
+        sqlx::query!(
+            "INSERT INTO leaderboard_games (leaderboard_id, game_id) VALUES ($1, $2)",
+            leaderboard_id,
+            game_id
+        )
+        .execute(&pool)
+        .await?;
+        sqlx::query!("UPDATE leaderboard_entries SET disabled_at = clock_timestamp() WHERE leaderboard_entry_id = $1", entry)
+            .execute(&pool).await?;
+        sqlx::query!(
+            "UPDATE leaderboards SET disabled_at = clock_timestamp() WHERE leaderboard_id = $1",
+            leaderboard_id
+        )
+        .execute(&pool)
+        .await?;
+        assert_eq!(
+            claim_game_start(&pool, game_id, 480).await?,
+            StartClaim::Busy
+        );
+        sqlx::query!(
+            "UPDATE leaderboards SET disabled_at = NULL WHERE leaderboard_id = $1",
+            leaderboard_id
+        )
+        .execute(&pool)
+        .await?;
+        assert!(matches!(
+            claim_game_start(&pool, game_id, 480).await?,
+            StartClaim::Started {
+                via: Some("free"),
+                ..
+            }
+        ));
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn empty_roster_cannot_start(pool: PgPool) -> cja::Result<()> {
+        let game_id = sqlx::query_scalar!("INSERT INTO games (board_size, game_type) VALUES ('11x11', 'Standard') RETURNING game_id")
+            .fetch_one(&pool).await?;
+        assert!(claim_game_start(&pool, game_id, 480).await.is_err());
+        assert_eq!(
+            get_game_by_id(&pool, game_id).await?.unwrap().status,
+            GameStatus::Waiting
         );
         Ok(())
     }

@@ -43,9 +43,21 @@ async fn fail_stuck_games(pool: &sqlx::PgPool, max_age_hours: i32) -> cja::Resul
     let ids = sqlx::query_scalar!(
         r#"UPDATE games
            SET status = 'failed', updated_at = NOW()
-           WHERE status IN ('waiting', 'running')
-             AND created_at < NOW() - make_interval(hours => $1)
-             AND game_id NOT IN (SELECT game_id FROM match_games)
+           WHERE games.status IN ('waiting', 'running')
+             AND games.created_at < NOW() - make_interval(hours => $1)
+             AND games.game_id NOT IN (SELECT game_id FROM match_games)
+             AND NOT (games.status = 'waiting' AND EXISTS (
+               SELECT 1 FROM leaderboard_games waiting_lg
+               JOIN leaderboard_games running_lg ON running_lg.leaderboard_id = waiting_lg.leaderboard_id
+               JOIN games running_game ON running_game.game_id = running_lg.game_id AND running_game.status = 'running'
+               JOIN game_battlesnakes waiting_gb ON waiting_gb.game_id = games.game_id
+               LEFT JOIN leaderboard_entries waiting_le ON waiting_le.leaderboard_entry_id = waiting_gb.leaderboard_entry_id
+               JOIN game_battlesnakes running_gb ON running_gb.game_id = running_game.game_id
+               LEFT JOIN leaderboard_entries running_le ON running_le.leaderboard_entry_id = running_gb.leaderboard_entry_id
+               WHERE waiting_lg.game_id = games.game_id
+                 AND COALESCE(waiting_gb.battlesnake_id, waiting_le.battlesnake_id)
+                     = COALESCE(running_gb.battlesnake_id, running_le.battlesnake_id)
+             ))
            RETURNING game_id"#,
         max_age_hours,
     )
@@ -124,6 +136,51 @@ mod tests {
         assert_eq!(failed, vec![game_id]);
         assert_eq!(game_status(&pool, game_id).await?, "failed");
 
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn same_ladder_held_waiter_survives_until_running_game_fails(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        let user = sqlx::query_scalar!(
+            "INSERT INTO users (external_github_id, github_login, github_access_token)
+             VALUES (1613, 'sweeper-owner', 'test') RETURNING user_id"
+        )
+        .fetch_one(&pool)
+        .await?;
+        let snake = sqlx::query_scalar!(
+            "INSERT INTO battlesnakes (user_id, name, url) VALUES ($1, 'sweeper-snake', 'http://example.com') RETURNING battlesnake_id", user
+        ).fetch_one(&pool).await?;
+        let ladder = sqlx::query_scalar!(
+            "SELECT leaderboard_id FROM leaderboards WHERE name = 'Standard 11x11'"
+        )
+        .fetch_one(&pool)
+        .await?;
+        let old = Utc::now() - Duration::hours(3);
+        let running = insert_game(&pool, "running", old).await?;
+        let waiting = insert_game(&pool, "waiting", old).await?;
+        for game_id in [running, waiting] {
+            sqlx::query!(
+                "INSERT INTO leaderboard_games (leaderboard_id, game_id) VALUES ($1, $2)",
+                ladder,
+                game_id
+            )
+            .execute(&pool)
+            .await?;
+            sqlx::query!(
+                "INSERT INTO game_battlesnakes (game_id, battlesnake_id) VALUES ($1, $2)",
+                game_id,
+                snake
+            )
+            .execute(&pool)
+            .await?;
+        }
+        let first = fail_stuck_games(&pool, 2).await?;
+        assert!(first.contains(&running));
+        assert!(!first.contains(&waiting));
+        assert_eq!(game_status(&pool, waiting).await?, "waiting");
+        assert_eq!(fail_stuck_games(&pool, 2).await?, vec![waiting]);
         Ok(())
     }
 

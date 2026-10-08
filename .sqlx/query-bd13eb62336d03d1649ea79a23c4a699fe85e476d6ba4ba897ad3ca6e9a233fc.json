@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE leaderboard_games SET last_dispatch_at = clock_timestamp() WHERE game_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "bd13eb62336d03d1649ea79a23c4a699fe85e476d6ba4ba897ad3ca6e9a233fc"
+}

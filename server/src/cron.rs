@@ -16,6 +16,7 @@ pub const MATCHMAKER_INTERVAL_SECS: u64 = 86_400 / GAMES_PER_SNAKE_PER_DAY;
 /// CJA requires elapsed > interval, so a short poll observes the 864s cadence
 /// without rounding each round up to the default 60s poll boundary.
 const CRON_POLL_SECS: u64 = 2;
+const LADDER_DISPATCH_INTERVAL_SECS: u64 = 5;
 
 /// Snake health sweep interval. With the default failure threshold of 3,
 /// a broken entry is pulled from matchmaking ~90 minutes after its first
@@ -41,6 +42,21 @@ pub(crate) fn cron_registry() -> CronRegistry<AppState> {
         LeaderboardMatchmakerJob,
         Some("Create leaderboard match games"),
         Duration::from_secs(MATCHMAKER_INTERVAL_SECS),
+    );
+    registry.register(
+        "LeaderboardGameDispatch",
+        Some("Dispatch eligible ladder games"),
+        Duration::from_secs(LADDER_DISPATCH_INTERVAL_SECS),
+        |app_state, _| {
+            Box::pin(async move {
+                if let Err(error) =
+                    crate::leaderboard_matchmaker::dispatch_pending_ladder_games(&app_state).await
+                {
+                    tracing::error!(error = %format!("{error:#}"), "Ladder dispatch failed");
+                }
+                Ok::<(), std::convert::Infallible>(())
+            })
+        },
     );
 
     // Stuck-match sweeper: runs every 2 minutes, re-enqueues evaluation for
@@ -101,6 +117,7 @@ mod tests {
     #[test]
     fn matchmaker_cadence() {
         assert_eq!(MATCHMAKER_INTERVAL_SECS, 864);
+        assert_eq!(LADDER_DISPATCH_INTERVAL_SECS, 5);
         const { assert!(CRON_POLL_SECS < MATCHMAKER_INTERVAL_SECS) };
     }
 }

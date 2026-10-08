@@ -2,7 +2,6 @@ use color_eyre::eyre::Context as _;
 use std::str::FromStr;
 
 use crate::{
-    cron::MATCHMAKER_INTERVAL_SECS,
     jobs::GameRunnerJob,
     models::{
         game::{self, CreateGame, GameBoardSize, GameType},
@@ -36,49 +35,28 @@ pub async fn run_matchmaker(app_state: &AppState) -> cja::Result<()> {
 async fn run_matchmaker_for_leaderboard(app_state: &AppState, lb: &Leaderboard) -> cja::Result<()> {
     let pool = &app_state.db;
     let leaderboard_id = lb.leaderboard_id;
-    let now = chrono::Utc::now();
-    let backlog_cutoff = now - chrono::Duration::seconds((2 * MATCHMAKER_INTERVAL_SECS) as i64);
-
     let backlog = sqlx::query!(
-        r#"SELECT COUNT(*) FILTER (WHERE g.enqueued_at >= $2) AS "backlog_count!",
-                  MIN(g.enqueued_at) FILTER (WHERE g.enqueued_at >= $2) AS oldest_backlog_enqueued_at,
-                  COUNT(*) FILTER (WHERE g.enqueued_at < $2) AS "old_waiting_count!",
-                  MIN(g.enqueued_at) FILTER (WHERE g.enqueued_at < $2) AS oldest_old_waiting_enqueued_at
-           FROM games g
-           JOIN leaderboard_games lg ON lg.game_id = g.game_id
-           WHERE g.status = 'waiting' AND g.enqueued_at IS NOT NULL
-             AND lg.leaderboard_id = $1"#,
+        r#"SELECT COUNT(*) AS "backlog_count!", MIN(oldest_job_at) AS oldest_job_at
+           FROM (SELECT MIN(j.created_at) AS oldest_job_at
+                 FROM games g
+                 JOIN leaderboard_games lg ON lg.game_id = g.game_id
+                 JOIN jobs j ON j.name = 'GameRunnerJob'
+                   AND j.payload->>'game_id' = g.game_id::text
+                 WHERE lg.leaderboard_id = $1 AND g.status = 'waiting'
+                   AND j.locked_at IS NULL AND j.locked_by IS NULL
+                   AND j.run_at <= clock_timestamp()
+                   AND j.created_at < clock_timestamp() - interval '30 seconds'
+                 GROUP BY g.game_id) pending"#,
         leaderboard_id,
-        backlog_cutoff,
     )
     .fetch_one(pool)
     .await
-    .wrap_err("Failed to check matchmaker backlog")?;
-    if backlog.old_waiting_count > 0 {
-        let oldest_waiting_age_secs = backlog
-            .oldest_old_waiting_enqueued_at
-            .map(|at| (now - at).num_seconds().max(0))
-            .unwrap_or(0);
-        tracing::warn!(
-            leaderboard_id = %leaderboard_id,
-            leaderboard_name = %lb.name,
-            old_waiting_count = backlog.old_waiting_count,
-            oldest_waiting_age_secs,
-            "Ignoring old waiting games when checking matchmaker backlog"
-        );
-    }
+    .wrap_err("Failed to check unclaimed runner backlog")?;
     if backlog.backlog_count > 0 {
-        let oldest_waiting_age_secs = backlog
-            .oldest_backlog_enqueued_at
-            .map(|at| (now - at).num_seconds().max(0))
-            .unwrap_or(0);
-        tracing::warn!(
-            leaderboard_id = %leaderboard_id,
-            leaderboard_name = %lb.name,
+        tracing::warn!(leaderboard_id = %leaderboard_id, leaderboard_name = %lb.name,
             backlog_count = backlog.backlog_count,
-            oldest_waiting_age_secs,
-            "Skipping matchmaker round: waiting games remain"
-        );
+            oldest_unclaimed_job_age_secs = backlog.oldest_job_at.map(|at| (chrono::Utc::now() - at).num_seconds().max(0)).unwrap_or(0),
+            "Skipping matchmaker round: old unclaimed runner jobs remain");
         return Ok(());
     }
 
@@ -162,20 +140,6 @@ async fn run_matchmaker_for_leaderboard(app_state: &AppState, lb: &Leaderboard) 
             .await
             .wrap_err("Failed to commit matchmaker transaction")?;
 
-        // Enqueue outside the transaction — if this fails, the game + leaderboard record
-        // still exist (consistent state). The game can be retried or discovered by a poller.
-        let job = GameRunnerJob {
-            game_id: game.game_id,
-        };
-        cja::jobs::Job::enqueue(
-            job,
-            app_state.clone(),
-            format!("Leaderboard game {}", game.game_id),
-            None,
-        )
-        .await
-        .wrap_err("Failed to enqueue game runner job")?;
-
         tracing::info!(
             leaderboard_id = %leaderboard_id,
             game_id = %game.game_id,
@@ -184,6 +148,98 @@ async fn run_matchmaker_for_leaderboard(app_state: &AppState, lb: &Leaderboard) 
     }
 
     Ok(())
+}
+
+/// Discover and enqueue eligible waiting ladder games. The runner repeats the
+/// eligibility check under participant locks before the game can start.
+pub async fn dispatch_pending_ladder_games(app_state: &AppState) -> cja::Result<()> {
+    let mut conn = app_state
+        .db
+        .acquire()
+        .await
+        .wrap_err("Failed to acquire schedule connection")?;
+    let snapshot = game::load_schedule_snapshot(&mut conn)
+        .await
+        .wrap_err("Failed to discover pending ladder games")?;
+    drop(conn);
+    for waiting in snapshot
+        .games
+        .iter()
+        .filter(|g| g.status == "waiting" && g.leaderboard_id.is_some() && g.disabled_at.is_none())
+    {
+        let held_age = snapshot
+            .at
+            .signed_duration_since(waiting.created_at)
+            .num_seconds();
+        if held_age < app_state.config.ladder_start_deadline_secs {
+            continue;
+        }
+        let blocking: Vec<_> = snapshot
+            .games
+            .iter()
+            .filter(|running| {
+                running.status == "running"
+                    && running.leaderboard_id == waiting.leaderboard_id
+                    && running
+                        .participants
+                        .iter()
+                        .any(|id| waiting.participants.contains(id))
+            })
+            .map(|g| g.game_id)
+            .collect();
+        if !blocking.is_empty() {
+            tracing::warn!(game_id = %waiting.game_id, leaderboard_id = ?waiting.leaderboard_id,
+                blocking_game_ids = ?blocking, held_age_secs = held_age,
+                "Past-deadline ladder game held by same-ladder running game");
+        }
+    }
+    let mut candidates: Vec<_> = snapshot
+        .games
+        .iter()
+        .filter(|g| {
+            game::ladder_eligibility(&snapshot, g, app_state.config.ladder_start_deadline_secs)
+                .is_some()
+        })
+        .collect();
+    candidates.sort_by_key(|g| (g.created_at, g.game_id));
+    let mut first_error = None;
+    for candidate in candidates {
+        let result: cja::Result<()> = async {
+            let mut tx = app_state.db.begin().await.wrap_err("Failed to begin ladder dispatch")?;
+            let row = sqlx::query!(
+                r#"SELECT g.status, lb.disabled_at, lg.last_dispatch_at,
+                          EXISTS(SELECT 1 FROM jobs j WHERE j.name = 'GameRunnerJob'
+                            AND j.payload->>'game_id' = g.game_id::text) AS "has_job!"
+                   FROM leaderboard_games lg
+                   JOIN games g ON g.game_id = lg.game_id
+                   JOIN leaderboards lb ON lb.leaderboard_id = lg.leaderboard_id
+                   WHERE lg.game_id = $1 FOR UPDATE OF lg"#, candidate.game_id
+            ).fetch_optional(&mut *tx).await.wrap_err("Failed to lock ladder dispatch row")?;
+            let Some(row) = row else { return Ok(()); };
+            if row.status != "waiting" || row.disabled_at.is_some() || row.has_job
+                || row.last_dispatch_at.is_some_and(|at| chrono::Utc::now().signed_duration_since(at).num_seconds() < 5) {
+                return Ok(());
+            }
+            cja::jobs::Job::enqueue(GameRunnerJob { game_id: candidate.game_id }, app_state.clone(),
+                format!("Leaderboard game {}", candidate.game_id), None)
+                .await.wrap_err("Failed to enqueue ladder game runner")?;
+            tracing::info!(event_type = "ladder_game_eligible", game_id = %candidate.game_id,
+                leaderboard_id = ?candidate.leaderboard_id,
+                eligible_observed_at = %snapshot.at,
+                dispatched_at = %chrono::Utc::now(), "ladder game eligible for dispatch");
+            sqlx::query!("UPDATE leaderboard_games SET last_dispatch_at = clock_timestamp() WHERE game_id = $1", candidate.game_id)
+                .execute(&mut *tx).await.wrap_err("Failed to record ladder dispatch")?;
+            tx.commit().await.wrap_err("Failed to commit ladder dispatch")?;
+            Ok(())
+        }.await;
+        if let Err(error) = result {
+            tracing::error!(game_id = %candidate.game_id, error = %format!("{error:#}"), "Ladder dispatch failed");
+            if first_error.is_none() {
+                first_error = Some(error);
+            }
+        }
+    }
+    first_error.map_or(Ok(()), Err)
 }
 
 // Bounded rank jitter keeps groups local while varying opponents between ticks.
@@ -274,6 +330,7 @@ fn select_round(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cron::MATCHMAKER_INTERVAL_SECS;
     use rand::SeedableRng;
     use uuid::Uuid;
 
@@ -607,12 +664,22 @@ mod tests {
         Ok(game_id)
     }
 
+    async fn insert_old_unclaimed_job(pool: &sqlx::PgPool, game_id: Uuid) -> cja::Result<()> {
+        sqlx::query!(
+            "INSERT INTO jobs (job_id, name, payload, priority, context, created_at)
+             VALUES (gen_random_uuid(), 'GameRunnerJob', jsonb_build_object('game_id', $1::text), 0, 'test', clock_timestamp() - interval '31 seconds')",
+            game_id.to_string(),
+        ).execute(pool).await?;
+        Ok(())
+    }
+
     #[sqlx::test(migrations = "../migrations")]
     async fn waiting_backlog_skips_then_running_allows_round(
         pool: sqlx::PgPool,
     ) -> cja::Result<()> {
         let (lb, ids) = seeded_mode(&pool, "Standard 11x11", 4).await?;
         let game_id = insert_backlog_game(&pool, lb.leaderboard_id, true).await?;
+        insert_old_unclaimed_job(&pool, game_id).await?;
         let app_state = crate::state::AppState::test_from_pool(pool.clone());
         run_matchmaker_for_leaderboard(&app_state, &lb).await?;
         assert_eq!(game_sizes(&pool, lb.leaderboard_id).await?.len(), 0);
@@ -653,9 +720,27 @@ mod tests {
         )
         .fetch_one(&pool)
         .await?;
-        insert_backlog_game(&pool, other, true).await?;
+        let other_game = insert_backlog_game(&pool, other, true).await?;
+        insert_old_unclaimed_job(&pool, other_game).await?;
         let app_state = crate::state::AppState::test_from_pool(pool.clone());
         run_matchmaker_for_leaderboard(&app_state, &lb).await?;
+        assert_created_round(&pool, &lb, &ids, 1, 4).await
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn claimed_old_job_does_not_block_new_round(pool: sqlx::PgPool) -> cja::Result<()> {
+        let (lb, ids) = seeded_mode(&pool, "Standard 11x11", 4).await?;
+        let game_id = insert_backlog_game(&pool, lb.leaderboard_id, true).await?;
+        insert_old_unclaimed_job(&pool, game_id).await?;
+        sqlx::query!(
+            "UPDATE jobs SET locked_at = clock_timestamp(), locked_by = 'test-worker'
+            WHERE name = 'GameRunnerJob' AND payload->>'game_id' = $1",
+            game_id.to_string()
+        )
+        .execute(&pool)
+        .await?;
+        let app = crate::state::AppState::test_from_pool(pool.clone());
+        run_matchmaker_for_leaderboard(&app, &lb).await?;
         assert_created_round(&pool, &lb, &ids, 1, 4).await
     }
 
@@ -666,5 +751,369 @@ mod tests {
         let app_state = crate::state::AppState::test_from_pool(pool.clone());
         run_matchmaker_for_leaderboard(&app_state, &lb).await?;
         assert_created_round(&pool, &lb, &ids, 1, 4).await
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn held_rounds_dispatch_once_and_same_ladder_never_overlap(
+        pool: sqlx::PgPool,
+    ) -> cja::Result<()> {
+        let (lb, _) = seeded_mode(&pool, "Standard 11x11", 4).await?;
+        let app = crate::state::AppState::test_from_pool(pool.clone());
+        run_matchmaker_for_leaderboard(&app, &lb).await?;
+        run_matchmaker_for_leaderboard(&app, &lb).await?;
+        let games = sqlx::query_scalar!(
+            "SELECT g.game_id FROM games g JOIN leaderboard_games lg ON lg.game_id = g.game_id
+             WHERE lg.leaderboard_id = $1 ORDER BY g.created_at, g.game_id",
+            lb.leaderboard_id
+        )
+        .fetch_all(&pool)
+        .await?;
+        assert_eq!(games.len(), 2, "a held round must not skip the next round");
+        let (left, right) = tokio::join!(
+            dispatch_pending_ladder_games(&app),
+            dispatch_pending_ladder_games(&app)
+        );
+        left?;
+        right?;
+        let queued = sqlx::query_scalar!("SELECT COUNT(*) FROM jobs WHERE name = 'GameRunnerJob'")
+            .fetch_one(&pool)
+            .await?
+            .unwrap_or(0);
+        assert_eq!(queued, 1, "overlapping dispatches must create one job");
+        let (left, right) = tokio::join!(
+            game::claim_game_start(&pool, games[0], 480),
+            game::claim_game_start(&pool, games[0], 480),
+        );
+        let claims = [left?, right?];
+        assert_eq!(
+            claims
+                .iter()
+                .filter(|c| matches!(c, game::StartClaim::Started { .. }))
+                .count(),
+            1
+        );
+        sqlx::query!("UPDATE games SET created_at = clock_timestamp() - interval '600 seconds' WHERE game_id = $1", games[1])
+            .execute(&pool).await?;
+        assert_eq!(
+            game::claim_game_start(&pool, games[1], 480).await?,
+            game::StartClaim::Busy
+        );
+        sqlx::query!(
+            "UPDATE games SET status = 'finished' WHERE game_id = $1",
+            games[0]
+        )
+        .execute(&pool)
+        .await?;
+        assert!(matches!(
+            game::claim_game_start(&pool, games[1], 480).await?,
+            game::StartClaim::Started { .. }
+        ));
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn deleted_busy_job_is_redispatched_after_throttle(
+        pool: sqlx::PgPool,
+    ) -> cja::Result<()> {
+        let (lb, _) = seeded_mode(&pool, "Standard 11x11", 4).await?;
+        let app = crate::state::AppState::test_from_pool(pool.clone());
+        run_matchmaker_for_leaderboard(&app, &lb).await?;
+        dispatch_pending_ladder_games(&app).await?;
+        let game_id = sqlx::query_scalar!(
+            "SELECT game_id FROM leaderboard_games WHERE leaderboard_id = $1",
+            lb.leaderboard_id
+        )
+        .fetch_one(&pool)
+        .await?;
+        sqlx::query!(
+            "DELETE FROM jobs WHERE name = 'GameRunnerJob' AND payload->>'game_id' = $1",
+            game_id.to_string()
+        )
+        .execute(&pool)
+        .await?;
+        dispatch_pending_ladder_games(&app).await?;
+        assert_eq!(
+            sqlx::query_scalar!("SELECT COUNT(*) FROM jobs WHERE name = 'GameRunnerJob'")
+                .fetch_one(&pool)
+                .await?
+                .unwrap_or(0),
+            0
+        );
+        sqlx::query!("UPDATE leaderboard_games SET last_dispatch_at = clock_timestamp() - interval '6 seconds' WHERE game_id = $1", game_id)
+            .execute(&pool).await?;
+        dispatch_pending_ladder_games(&app).await?;
+        assert_eq!(
+            sqlx::query_scalar!("SELECT COUNT(*) FROM jobs WHERE name = 'GameRunnerJob'")
+                .fetch_one(&pool)
+                .await?
+                .unwrap_or(0),
+            1
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn disabled_leaderboard_waits_then_dispatches_after_enable(
+        pool: sqlx::PgPool,
+    ) -> cja::Result<()> {
+        let (lb, _) = seeded_mode(&pool, "Standard 11x11", 4).await?;
+        let app = crate::state::AppState::test_from_pool(pool.clone());
+        run_matchmaker_for_leaderboard(&app, &lb).await?;
+        sqlx::query!(
+            "UPDATE leaderboards SET disabled_at = clock_timestamp() WHERE leaderboard_id = $1",
+            lb.leaderboard_id
+        )
+        .execute(&pool)
+        .await?;
+        dispatch_pending_ladder_games(&app).await?;
+        assert_eq!(
+            sqlx::query_scalar!("SELECT COUNT(*) FROM jobs WHERE name = 'GameRunnerJob'")
+                .fetch_one(&pool)
+                .await?
+                .unwrap_or(0),
+            0
+        );
+        sqlx::query!(
+            "UPDATE leaderboards SET disabled_at = NULL WHERE leaderboard_id = $1",
+            lb.leaderboard_id
+        )
+        .execute(&pool)
+        .await?;
+        dispatch_pending_ladder_games(&app).await?;
+        assert_eq!(
+            sqlx::query_scalar!("SELECT COUNT(*) FROM jobs WHERE name = 'GameRunnerJob'")
+                .fetch_one(&pool)
+                .await?
+                .unwrap_or(0),
+            1
+        );
+        Ok(())
+    }
+    #[test]
+    fn ladder_dispatch_sim() {
+        use crate::models::game::{ScheduleGame, ScheduleSnapshot, ladder_eligibility};
+        use rand::Rng;
+        use std::collections::{HashMap, HashSet};
+        // Seed 1613. Ratings: 1000 - 10 * rotated rank + 0.01 * ladder index.
+        // Assumptions: instant worker pickup on each 5s tick; no non-ladder games.
+        let mut rng = rand::rngs::StdRng::seed_from_u64(1613);
+        let snakes: Vec<Uuid> = (1..=24).map(Uuid::from_u128).collect();
+        let membership: [Vec<usize>; 4] = [
+            (0..22).collect(),
+            (0..16).chain(std::iter::once(22)).collect(),
+            (0..11).chain(std::iter::once(16)).collect(),
+            (0..8).chain(std::iter::once(23)).collect(),
+        ];
+        let sizes = [4, 2, 4, 4];
+        let lengths: [(f64, f64, i64); 4] = [
+            (162.0, 343.0, 619),
+            (91.0, 315.0, 467),
+            (122.0, 182.0, 226),
+            (27.0, 37.0, 52),
+        ];
+        let ladders: Vec<Uuid> = (100..104).map(Uuid::from_u128).collect();
+        let entries: Vec<Vec<LeaderboardEntry>> = membership
+            .iter()
+            .enumerate()
+            .map(|(mode, members)| {
+                members
+                    .iter()
+                    .enumerate()
+                    .map(|(rank, &snake)| {
+                        let mut entry = make_entry(
+                            1000.0 - ((rank + mode * 3) % members.len()) as f64 * 10.0
+                                + mode as f64 * 0.01,
+                        );
+                        entry.battlesnake_id = snakes[snake];
+                        entry.leaderboard_id = ladders[mode];
+                        entry.leaderboard_entry_id =
+                            Uuid::from_u128(1000 + mode as u128 * 100 + snake as u128);
+                        entry
+                    })
+                    .collect()
+            })
+            .collect();
+        #[derive(Clone)]
+        struct Sim {
+            schedule: ScheduleGame,
+            mode: usize,
+            start: Option<i64>,
+            end: Option<i64>,
+        }
+        let origin = chrono::Utc::now();
+        let mut games: Vec<Sim> = Vec::new();
+        let mut next_id = 10_000_u128;
+        let mut next_round = 0_i64;
+        let mut deadline_starts = 0;
+        let mut waits = Vec::new();
+        for tick in (0..86_400).step_by(5) {
+            for game in &mut games {
+                if game.schedule.status == "running" && game.end.is_some_and(|end| end <= tick) {
+                    game.schedule.status = "finished".into();
+                }
+            }
+            if tick >= next_round {
+                next_round += 864;
+                for mode in 0..4 {
+                    let round = select_round(&mut rng, &entries[mode], sizes[mode]);
+                    assert_eq!(round.len(), entries[mode].len().div_ceil(sizes[mode]));
+                    let covered: HashSet<_> = round
+                        .iter()
+                        .flatten()
+                        .map(|e| e.leaderboard_entry_id)
+                        .collect();
+                    assert_eq!(covered.len(), entries[mode].len(), "round skipped an entry");
+                    for group in round {
+                        games.push(Sim {
+                            schedule: ScheduleGame {
+                                game_id: Uuid::from_u128(next_id),
+                                status: "waiting".into(),
+                                created_at: origin + chrono::Duration::seconds(tick),
+                                leaderboard_id: Some(ladders[mode]),
+                                disabled_at: None,
+                                participants: group.iter().map(|e| e.battlesnake_id).collect(),
+                            },
+                            mode,
+                            start: None,
+                            end: None,
+                        });
+                        next_id += 1;
+                    }
+                }
+            }
+            loop {
+                let snapshot = ScheduleSnapshot {
+                    at: origin + chrono::Duration::seconds(tick),
+                    games: games
+                        .iter()
+                        .filter(|g| g.schedule.status != "finished")
+                        .map(|g| g.schedule.clone())
+                        .collect(),
+                };
+                let winner = games
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, g)| g.schedule.status == "waiting")
+                    .filter(|(_, g)| ladder_eligibility(&snapshot, &g.schedule, 480).is_some())
+                    .min_by_key(|(_, g)| (g.schedule.created_at, g.schedule.game_id))
+                    .map(|(i, _)| i);
+                let Some(index) = winner else { break };
+                let via = ladder_eligibility(&snapshot, &games[index].schedule, 480).unwrap();
+                if via == "deadline" {
+                    deadline_starts += 1;
+                }
+                let (p50, p90, max) = lengths[games[index].mode];
+                let u1 = rng.gen_range(f64::EPSILON..1.0);
+                let u2 = rng.gen_range(0.0..1.0);
+                let z = (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos();
+                let duration = (p50.ln() + (p90 / p50).ln() / 1.2816 * z).exp().round() as i64;
+                let duration = duration.clamp(1, max);
+                let created = games[index]
+                    .schedule
+                    .created_at
+                    .signed_duration_since(origin)
+                    .num_seconds();
+                waits.push((tick - created) * 1000);
+                games[index].schedule.status = "running".into();
+                games[index].start = Some(tick);
+                games[index].end = Some(tick + duration);
+            }
+        }
+        let completed: Vec<_> = games
+            .iter()
+            .filter(|g| g.end.is_some_and(|end| end <= 86_400))
+            .collect();
+        let mut counts: HashMap<(Uuid, Uuid), usize> = HashMap::new();
+        let mut buckets = [(0usize, 0usize); 4];
+        let mut same_ladder_overlap = 0;
+        let mut max_four_live = 0;
+        for game in &completed {
+            let (Some(start), Some(end)) = (game.start, game.end) else {
+                continue;
+            };
+            for &snake in &game.schedule.participants {
+                *counts
+                    .entry((game.schedule.leaderboard_id.unwrap(), snake))
+                    .or_default() += 1;
+                let ladder_count = membership
+                    .iter()
+                    .filter(|members| members.iter().any(|&n| snakes[n] == snake))
+                    .count();
+                let overlapping: Vec<_> = completed
+                    .iter()
+                    .filter(|other| {
+                        other.schedule.game_id != game.schedule.game_id
+                            && other.schedule.participants.contains(&snake)
+                            && other.start.is_some_and(|other_start| other_start < end)
+                            && other.end.is_some_and(|other_end| start < other_end)
+                    })
+                    .collect();
+                same_ladder_overlap += overlapping
+                    .iter()
+                    .filter(|other| other.schedule.leaderboard_id == game.schedule.leaderboard_id)
+                    .count();
+                buckets[ladder_count - 1].0 += usize::from(overlapping.is_empty());
+                buckets[ladder_count - 1].1 += 1;
+                if ladder_count == 4 {
+                    max_four_live = max_four_live.max(overlapping.len() + 1);
+                }
+            }
+        }
+        let share = |good: usize, total: usize| {
+            if total == 0 {
+                0.0
+            } else {
+                100.0 * good as f64 / total as f64
+            }
+        };
+        let one = share(buckets[0].0, buckets[0].1);
+        let two_three = share(buckets[1].0 + buckets[2].0, buckets[1].1 + buckets[2].1);
+        let all = share(
+            buckets.iter().map(|x| x.0).sum(),
+            buckets.iter().map(|x| x.1).sum(),
+        );
+        let four = share(buckets[3].0, buckets[3].1);
+        let min_entry = entries
+            .iter()
+            .flatten()
+            .map(|e| {
+                counts
+                    .get(&(e.leaderboard_id, e.battlesnake_id))
+                    .copied()
+                    .unwrap_or(0)
+            })
+            .min()
+            .unwrap();
+        waits.sort_unstable();
+        let percentile = |p: f64| waits[((waits.len() - 1) as f64 * p).round() as usize];
+        let mut starts: Vec<_> = games.iter().filter_map(|g| g.start).collect();
+        starts.sort_unstable();
+        let max_burst = starts
+            .iter()
+            .map(|&s| {
+                starts
+                    .iter()
+                    .filter(|&&other| other >= s && other < s + 10)
+                    .count()
+            })
+            .max()
+            .unwrap_or(0);
+        println!(
+            "metric | result | gate\n---|---:|---\nsame-ladder overlap | {same_ladder_overlap} | zero\none-ladder no-overlap | {one:.1}% | {}\ntwo/three-ladder no-overlap | {two_three:.1}% | {}\noverall no-overlap | {all:.1}% | {}\nfour-ladder no-overlap | {four:.1}% | report\nfour-ladder max live | {max_four_live} | report\ncompleted/day | {} | {}\nminimum completed/entry | {min_entry} | {}\ndeadline starts/day | {deadline_starts} | report\nmax starts/rolling 10s | {max_burst} | report\nwait p50/p95/max ms | {}/{}/{} | report",
+            if one >= 95.0 { "PASS" } else { "MISS" },
+            if two_three >= 75.0 { "PASS" } else { "MISS" },
+            if all >= 50.0 { "PASS" } else { "MISS" },
+            completed.len(),
+            if completed.len() >= 2000 {
+                "PASS"
+            } else {
+                "MISS"
+            },
+            if min_entry >= 95 { "PASS" } else { "MISS" },
+            percentile(0.5),
+            percentile(0.95),
+            waits[waits.len() - 1]
+        );
+        assert_eq!(same_ladder_overlap, 0);
     }
 }

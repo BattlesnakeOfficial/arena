@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE jobs SET locked_at = clock_timestamp(), locked_by = 'test-worker'\n            WHERE name = 'GameRunnerJob' AND payload->>'game_id' = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2198de49832b811cdeeb5d14d3a8254c60cbbf9e416b77b378c410c5a722f87d"
+}

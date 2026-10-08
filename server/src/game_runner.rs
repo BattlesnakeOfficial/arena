@@ -7,7 +7,9 @@ use crate::customizations;
 use crate::engine::MAX_TURNS;
 use crate::engine::frame::{DeathInfo, SnakeCustomizations, game_to_frame};
 use crate::game_progress::{Phase, phase};
-use crate::models::game::{GameStatus, get_game_by_id, get_game_source, update_game_status};
+use crate::models::game::{
+    GameStatus, StartClaim, claim_game_start, get_game_by_id, get_game_source,
+};
 use crate::snake_client::{
     ProxyClients, SnakeEndpoint, request_end_routed_parallel, request_info_routed_parallel,
     request_moves_routed_parallel, request_start_routed_parallel,
@@ -80,7 +82,32 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
             )
             .await?;
         }
-        GameStatus::Waiting => {}
+        GameStatus::Waiting => {
+            match claim_game_start(pool, game_id, app_state.config.ladder_start_deadline_secs)
+                .await
+                .wrap_err("Failed to claim waiting game start")?
+            {
+                StartClaim::Busy | StartClaim::AlreadyRunning | StartClaim::Terminal => {
+                    return Ok(());
+                }
+                StartClaim::Started {
+                    leaderboard_id,
+                    wait_ms,
+                    via,
+                } => {
+                    if let Some(leaderboard_id) = leaderboard_id {
+                        tracing::info!(event_type = "ladder_game_started", game_id = %game_id,
+                            leaderboard_id = %leaderboard_id, wait_ms, via = via.unwrap_or("free"),
+                            "ladder game started");
+                    }
+                    if let Some(enqueued_at) = game.enqueued_at {
+                        tracing::info!(metric_type = "queue_wait", game_id = %game_id,
+                            duration_ms = chrono::Utc::now().signed_duration_since(enqueued_at).num_milliseconds(),
+                            "game queue wait time");
+                    }
+                }
+            }
+        }
         GameStatus::Failed => {
             // Terminal: an operator (or the stuck-game sweeper) declared
             // this game dead. A straggling retry must not resurrect it —
@@ -94,22 +121,8 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
         }
     }
 
-    // Emit queue_wait metric if enqueued_at is available
-    if let Some(enqueued_at) = game.enqueued_at {
-        let queue_wait = chrono::Utc::now().signed_duration_since(enqueued_at);
-        tracing::info!(
-            metric_type = "queue_wait",
-            game_id = %game_id,
-            duration_ms = queue_wait.num_milliseconds(),
-            "game queue wait time"
-        );
-    }
-
     let (battlesnakes, snake_urls, customizations) =
         phase(game_id, Phase::PrepareSnakes, None, async {
-            // Update status to running
-            update_game_status(pool, game_id, GameStatus::Running).await?;
-
             // Get all the battlesnakes in the game with their URLs
             let battlesnakes =
                 crate::models::game_battlesnake::get_battlesnakes_by_game_id(pool, game_id)
@@ -725,6 +738,62 @@ mod tests {
         assert_eq!(count_jobs(&pool, "LeaderboardRatingUpdateJob").await?, 0);
         assert_eq!(count_jobs(&pool, "RunMatchJob").await?, 0);
 
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn busy_ladder_runner_makes_no_turns(pool: PgPool) -> cja::Result<()> {
+        let owner = sqlx::query_scalar!(
+            "INSERT INTO users (external_github_id, github_login, github_access_token)
+             VALUES (161302, 'runner-owner', 'test') RETURNING user_id"
+        )
+        .fetch_one(&pool)
+        .await?;
+        let snake = sqlx::query_scalar!(
+            "INSERT INTO battlesnakes (user_id, name, url)
+             VALUES ($1, 'runner-snake', 'http://127.0.0.1:9') RETURNING battlesnake_id",
+            owner
+        )
+        .fetch_one(&pool)
+        .await?;
+        let running = fixture_game(&pool, "running").await?;
+        let waiting = fixture_game(&pool, "waiting").await?;
+        for game_id in [running, waiting] {
+            sqlx::query!(
+                "INSERT INTO game_battlesnakes (game_id, battlesnake_id) VALUES ($1, $2)",
+                game_id,
+                snake
+            )
+            .execute(&pool)
+            .await?;
+        }
+        let leaderboard = sqlx::query_scalar!(
+            "SELECT leaderboard_id FROM leaderboards WHERE name = 'Standard 11x11'"
+        )
+        .fetch_one(&pool)
+        .await?;
+        sqlx::query!(
+            "INSERT INTO leaderboard_games (leaderboard_id, game_id) VALUES ($1, $2)",
+            leaderboard,
+            waiting
+        )
+        .execute(&pool)
+        .await?;
+        let app = AppState::test_from_pool(pool.clone());
+        run_game(&app, waiting).await?;
+        assert_eq!(
+            sqlx::query_scalar!("SELECT status FROM games WHERE game_id = $1", waiting)
+                .fetch_one(&pool)
+                .await?,
+            "waiting"
+        );
+        assert_eq!(
+            sqlx::query_scalar!("SELECT COUNT(*) FROM turns WHERE game_id = $1", waiting)
+                .fetch_one(&pool)
+                .await?
+                .unwrap_or(0),
+            0
+        );
         Ok(())
     }
 

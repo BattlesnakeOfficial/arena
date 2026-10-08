@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT COUNT(*) AS \"backlog_count!\", MIN(oldest_job_at) AS oldest_job_at\n           FROM (SELECT MIN(j.created_at) AS oldest_job_at\n                 FROM games g\n                 JOIN leaderboard_games lg ON lg.game_id = g.game_id\n                 JOIN jobs j ON j.name = 'GameRunnerJob'\n                   AND j.payload->>'game_id' = g.game_id::text\n                 WHERE lg.leaderboard_id = $1 AND g.status = 'waiting'\n                   AND j.locked_at IS NULL AND j.locked_by IS NULL\n                   AND j.run_at <= clock_timestamp()\n                   AND j.created_at < clock_timestamp() - interval '30 seconds'\n                 GROUP BY g.game_id) pending",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "backlog_count!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "oldest_job_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "86be7ff176543831f3beb191f08f03fe4fca7e3f5c32d1282f14cbd48e33b53d"
+}
