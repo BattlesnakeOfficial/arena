@@ -889,6 +889,84 @@ mod tests {
         );
         Ok(())
     }
+
+    /// Plan DEV-1613.4 step 6: "A crash after enqueue but before commit leaves
+    /// the durable job; a concurrent pass waits on the row and sees it." A pass
+    /// blocked on the `leaderboard_games` lock must not enqueue a second runner
+    /// once the holder's job is committed and the holder rolls back.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn blocked_dispatch_sees_job_enqueued_by_rolled_back_holder(
+        pool: sqlx::PgPool,
+    ) -> cja::Result<()> {
+        let (lb, _) = seeded_mode(&pool, "Standard 11x11", 4).await?;
+        let app = crate::state::AppState::test_from_pool(pool.clone());
+        run_matchmaker_for_leaderboard(&app, &lb).await?;
+        let game_id: Uuid =
+            sqlx::query_scalar("SELECT game_id FROM leaderboard_games WHERE leaderboard_id = $1")
+                .bind(lb.leaderboard_id)
+                .fetch_one(&pool)
+                .await?;
+
+        // First dispatcher: holds the row lock, enqueues (committed on another
+        // connection), then dies before recording last_dispatch_at.
+        let mut holder = pool.begin().await?;
+        sqlx::query("SELECT game_id FROM leaderboard_games WHERE game_id = $1 FOR UPDATE")
+            .bind(game_id)
+            .fetch_one(&mut *holder)
+            .await?;
+
+        let concurrent_app = app.clone();
+        let concurrent =
+            tokio::spawn(async move { dispatch_pending_ladder_games(&concurrent_app).await });
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let blocked: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM pg_stat_activity
+                 WHERE datname = current_database() AND wait_event_type = 'Lock'
+                   AND query LIKE '%FOR UPDATE OF lg%'",
+            )
+            .fetch_one(&pool)
+            .await?;
+            if blocked > 0 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "concurrent dispatch never blocked on the leaderboard_games lock"
+            );
+            tokio::task::yield_now().await;
+        }
+
+        cja::jobs::Job::enqueue(
+            GameRunnerJob { game_id },
+            app.clone(),
+            "first dispatcher".to_string(),
+            None,
+        )
+        .await?;
+        holder.rollback().await?;
+
+        tokio::time::timeout(std::time::Duration::from_secs(10), concurrent)
+            .await
+            .expect("concurrent dispatch timed out")
+            .expect("concurrent dispatch panicked")?;
+
+        let jobs: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM jobs
+             WHERE name = 'GameRunnerJob' AND payload->>'game_id' = $1",
+        )
+        .bind(game_id.to_string())
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(
+            jobs, 1,
+            "a blocked dispatch pass enqueued a duplicate GameRunnerJob; the duplicate \
+             reaches run_game's Running branch and resets a live game"
+        );
+        Ok(())
+    }
+
     #[test]
     fn ladder_dispatch_sim() {
         use crate::models::game::{ScheduleGame, ScheduleSnapshot, ladder_eligibility};
