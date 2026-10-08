@@ -829,6 +829,28 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "../migrations")]
+    async fn running_retry_does_not_emit_start_metrics(pool: PgPool) -> cja::Result<()> {
+        let app = AppState::test_from_pool(pool.clone());
+        // An empty roster makes the retry fail after its Running branch, so
+        // the test never reaches snake HTTP calls or a full game simulation.
+        let game_id = fixture_game(&pool, "running").await?;
+        let capture = StartEventCapture::default();
+        let result = run_game(&app, game_id)
+            .with_subscriber(tracing_subscriber::registry().with(capture.clone()))
+            .await;
+        assert!(
+            result.is_err(),
+            "invalid retry fixture unexpectedly completed"
+        );
+        assert!(capture.0.lock().unwrap().iter().all(|event| {
+            event.get("game_id") != Some(&game_id.to_string())
+                || (event.get("event_type") != Some(&"ladder_game_started".to_owned())
+                    && event.get("metric_type") != Some(&"queue_wait".to_owned()))
+        }));
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
     async fn busy_ladder_runner_makes_no_turns(pool: PgPool) -> cja::Result<()> {
         let owner = sqlx::query_scalar!(
             "INSERT INTO users (external_github_id, github_login, github_access_token)
