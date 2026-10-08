@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT g.status, lb.disabled_at,\n                          COALESCE(lg.last_dispatch_at > clock_timestamp() - interval '5 seconds', false) AS \"throttled!\"\n                   FROM leaderboard_games lg\n                   JOIN games g ON g.game_id = lg.game_id\n                   JOIN leaderboards lb ON lb.leaderboard_id = lg.leaderboard_id\n                   WHERE lg.game_id = $1 FOR UPDATE OF lg",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "status",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "disabled_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 2,
+        "name": "throttled!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      null
+    ]
+  },
+  "hash": "f33e352b4f24da2a469e595a0e69de5b55c0d4b68839715c7b345bba3f9e1db6"
+}

@@ -1,5 +1,4 @@
 use color_eyre::eyre::Context as _;
-use sqlx::Row as _;
 use std::str::FromStr;
 
 use crate::{
@@ -207,34 +206,29 @@ pub async fn dispatch_pending_ladder_games(app_state: &AppState) -> cja::Result<
     for candidate in candidates {
         let result: cja::Result<()> = async {
             let mut tx = app_state.db.begin().await.wrap_err("Failed to begin ladder dispatch")?;
-            let row = sqlx::query(
+            let row = sqlx::query!(
                 r#"SELECT g.status, lb.disabled_at,
-                          COALESCE(lg.last_dispatch_at > clock_timestamp() - interval '5 seconds', false) AS throttled
+                          COALESCE(lg.last_dispatch_at > clock_timestamp() - interval '5 seconds', false) AS "throttled!"
                    FROM leaderboard_games lg
                    JOIN games g ON g.game_id = lg.game_id
                    JOIN leaderboards lb ON lb.leaderboard_id = lg.leaderboard_id
                    WHERE lg.game_id = $1 FOR UPDATE OF lg"#,
+                candidate.game_id,
             )
-            .bind(candidate.game_id)
             .fetch_optional(&mut *tx)
             .await
             .wrap_err("Failed to lock ladder dispatch row")?;
             let Some(row) = row else { return Ok(()); };
-            let status: &str = row.try_get("status").wrap_err("Missing dispatch game status")?;
-            let disabled_at: Option<chrono::DateTime<chrono::Utc>> = row
-                .try_get("disabled_at")
-                .wrap_err("Missing leaderboard disablement")?;
-            let throttled: bool = row.try_get("throttled").wrap_err("Missing dispatch throttle")?;
-            if status != "waiting" || disabled_at.is_some() || throttled {
+            if row.status != "waiting" || row.disabled_at.is_some() || row.throttled {
                 return Ok(());
             }
             // This must be a separate READ COMMITTED statement after the row lock.
             // A pass that waited for the lock needs a fresh snapshot of jobs
             // committed by the previous holder, even if that holder rolled back.
-            let has_job: bool = sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM jobs WHERE name = 'GameRunnerJob' AND payload->>'game_id' = $1)",
+            let has_job = sqlx::query_scalar!(
+                r#"SELECT EXISTS(SELECT 1 FROM jobs WHERE name = 'GameRunnerJob' AND payload->>'game_id' = $1) AS "has_job!""#,
+                candidate.game_id.to_string(),
             )
-            .bind(candidate.game_id.to_string())
             .fetch_one(&mut *tx)
             .await
             .wrap_err("Failed to check outstanding ladder runner after dispatch lock")?;
