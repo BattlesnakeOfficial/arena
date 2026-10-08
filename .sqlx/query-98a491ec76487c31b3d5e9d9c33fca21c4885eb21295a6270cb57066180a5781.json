@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT g.game_id FROM games g JOIN leaderboard_games lg ON lg.game_id = g.game_id\n             WHERE lg.leaderboard_id = $1 ORDER BY g.created_at, g.game_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "game_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "98a491ec76487c31b3d5e9d9c33fca21c4885eb21295a6270cb57066180a5781"
+}

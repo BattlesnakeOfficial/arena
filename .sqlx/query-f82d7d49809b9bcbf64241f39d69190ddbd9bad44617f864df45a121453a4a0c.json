@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE games SET created_at = clock_timestamp() - interval '300 seconds' WHERE game_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f82d7d49809b9bcbf64241f39d69190ddbd9bad44617f864df45a121453a4a0c"
+}

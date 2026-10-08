@@ -16,6 +16,7 @@ pub const MATCHMAKER_INTERVAL_SECS: u64 = 86_400 / GAMES_PER_SNAKE_PER_DAY;
 /// CJA requires elapsed > interval, so a short poll observes the 864s cadence
 /// without rounding each round up to the default 60s poll boundary.
 const CRON_POLL_SECS: u64 = 2;
+const LADDER_DISPATCH_INTERVAL_SECS: u64 = 5;
 
 /// Snake health sweep interval. With the default failure threshold of 3,
 /// a broken entry is pulled from matchmaking ~90 minutes after its first
@@ -41,6 +42,12 @@ pub(crate) fn cron_registry() -> CronRegistry<AppState> {
         LeaderboardMatchmakerJob,
         Some("Create leaderboard match games"),
         Duration::from_secs(MATCHMAKER_INTERVAL_SECS),
+    );
+    registry.register(
+        "LeaderboardGameDispatch",
+        Some("Dispatch eligible ladder games"),
+        Duration::from_secs(LADDER_DISPATCH_INTERVAL_SECS),
+        |app_state, _| Box::pin(dispatch_ladder_callback(app_state)),
     );
 
     // Stuck-match sweeper: runs every 2 minutes, re-enqueues evaluation for
@@ -79,6 +86,17 @@ pub(crate) fn cron_registry() -> CronRegistry<AppState> {
     registry
 }
 
+async fn dispatch_ladder_callback(
+    app_state: crate::state::AppState,
+) -> Result<(), std::convert::Infallible> {
+    if let Err(error) =
+        crate::leaderboard_matchmaker::dispatch_pending_ladder_games(&app_state).await
+    {
+        tracing::error!(error = %format!("{error:#}"), "Ladder dispatch failed");
+    }
+    Ok(())
+}
+
 pub(crate) async fn run_cron(
     app_state: AppState,
     registry: CronRegistry<AppState>,
@@ -98,22 +116,85 @@ pub(crate) async fn run_cron(
 mod tests {
     use super::*;
     use cja::jobs::registry::JobRegistry;
+    use std::sync::{Arc, Mutex};
+    use tracing::{field::Visit, instrument::WithSubscriber};
+    use tracing_subscriber::{Layer, prelude::*};
+
+    #[derive(Clone, Default)]
+    struct Errors(Arc<Mutex<Vec<String>>>);
+
+    struct ErrorField(Option<String>);
+
+    impl Visit for ErrorField {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "error" {
+                self.0 = Some(format!("{value:?}"));
+            }
+        }
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            if field.name() == "error" {
+                self.0 = Some(value.to_owned());
+            }
+        }
+    }
+
+    impl<S: tracing::Subscriber> Layer<S> for Errors {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let mut field = ErrorField(None);
+            event.record(&mut field);
+            if let Some(error) = field.0 {
+                self.0.lock().unwrap().push(error);
+            }
+        }
+    }
 
     #[test]
     fn matchmaker_cadence() {
         assert_eq!(MATCHMAKER_INTERVAL_SECS, 864);
+        assert_eq!(LADDER_DISPATCH_INTERVAL_SECS, 5);
         const { assert!(CRON_POLL_SECS < MATCHMAKER_INTERVAL_SECS) };
     }
 
+    /// Callback crons take the same interval claim as job crons, so they run
+    /// at most once per interval across schedulers. Every other cron must be a
+    /// registered job so its enqueue commits exactly once.
+    const CALLBACK_CRONS: &[&str] = &["LeaderboardGameDispatch"];
+
     #[test]
-    fn all_crons_are_registered_jobs() {
+    fn all_crons_are_registered_jobs_or_known_callbacks() {
         let registry = cron_registry();
         assert!(!registry.jobs().is_empty());
         for name in registry.jobs().keys() {
             assert!(
-                crate::jobs::Jobs::job_names().contains(name),
-                "cron {name} is missing from the job registry"
+                crate::jobs::Jobs::job_names().contains(name) || CALLBACK_CRONS.contains(name),
+                "cron {name} is neither a registered job nor a known callback cron"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn dispatch_callback_logs_cause_and_returns_success() -> cja::Result<()> {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(Duration::from_millis(100))
+            .connect_lazy("postgres://127.0.0.1:1/arena")?;
+        let app = crate::state::AppState::test_from_pool(pool);
+        let errors = Errors::default();
+        dispatch_ladder_callback(app)
+            .with_subscriber(tracing_subscriber::registry().with(errors.clone()))
+            .await
+            .expect("cron callback should absorb a dispatch failure");
+        let logged = errors.0.lock().unwrap();
+        assert!(
+            logged.iter().any(
+                |error| error.contains("Failed to acquire schedule connection")
+                    && (error.contains("refused") || error.contains("timed out"))
+            ),
+            "missing error cause chain: {logged:?}"
+        );
+        Ok(())
     }
 }

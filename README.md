@@ -91,6 +91,8 @@ Run exactly one cron-role process. Cron-only can enqueue scheduled jobs with
 `JOBS_DISABLED=true`; a jobs-enabled process must run to execute them. Concurrent
 upgraded cron schedulers sharing a database safely commit one enqueue per due
 interval, but a legacy scheduler overlapping an upgraded one can double enqueue.
+The ladder dispatch callback cron runs at most once per interval instead; its
+per-game row lock also keeps overlapping passes from double dispatching.
 This change does not split the current deployment.
 
 #### Optional: Eyes telemetry

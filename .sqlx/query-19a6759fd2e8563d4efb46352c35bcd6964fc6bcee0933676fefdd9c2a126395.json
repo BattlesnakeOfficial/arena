@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT leaderboard_id FROM leaderboards WHERE name = 'Standard 11x11'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "leaderboard_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "19a6759fd2e8563d4efb46352c35bcd6964fc6bcee0933676fefdd9c2a126395"
+}

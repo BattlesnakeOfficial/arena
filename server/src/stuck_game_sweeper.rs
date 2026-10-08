@@ -37,15 +37,30 @@ pub async fn run_sweep(app_state: &AppState) -> cja::Result<()> {
 }
 
 /// Atomically mark all eligible stuck games `failed`, returning their IDs.
-/// Eligibility = live status AND older than `max_age_hours` (by `created_at`)
-/// AND not a tournament match game.
+/// Eligibility = live status AND older than `max_age_hours` AND not a
+/// tournament match game. Age counts from `enqueued_at`, falling back to
+/// `created_at`: a ladder game held before dispatch (DEV-1613) has a NULL
+/// `enqueued_at` and ages from creation, but once dispatched its runtime is
+/// measured from the enqueue, so a long hold can't get a live game failed.
 async fn fail_stuck_games(pool: &sqlx::PgPool, max_age_hours: i32) -> cja::Result<Vec<Uuid>> {
     let ids = sqlx::query_scalar!(
         r#"UPDATE games
            SET status = 'failed', updated_at = NOW()
-           WHERE status IN ('waiting', 'running')
-             AND created_at < NOW() - make_interval(hours => $1)
-             AND game_id NOT IN (SELECT game_id FROM match_games)
+           WHERE games.status IN ('waiting', 'running')
+             AND COALESCE(games.enqueued_at, games.created_at) < NOW() - make_interval(hours => $1)
+             AND games.game_id NOT IN (SELECT game_id FROM match_games)
+             AND NOT (games.status = 'waiting' AND EXISTS (
+               SELECT 1 FROM leaderboard_games waiting_lg
+               JOIN leaderboard_games running_lg ON running_lg.leaderboard_id = waiting_lg.leaderboard_id
+               JOIN games running_game ON running_game.game_id = running_lg.game_id AND running_game.status = 'running'
+               JOIN game_battlesnakes waiting_gb ON waiting_gb.game_id = games.game_id
+               LEFT JOIN leaderboard_entries waiting_le ON waiting_le.leaderboard_entry_id = waiting_gb.leaderboard_entry_id
+               JOIN game_battlesnakes running_gb ON running_gb.game_id = running_game.game_id
+               LEFT JOIN leaderboard_entries running_le ON running_le.leaderboard_entry_id = running_gb.leaderboard_entry_id
+               WHERE waiting_lg.game_id = games.game_id
+                 AND COALESCE(waiting_gb.battlesnake_id, waiting_le.battlesnake_id)
+                     = COALESCE(running_gb.battlesnake_id, running_le.battlesnake_id)
+             ))
            RETURNING game_id"#,
         max_age_hours,
     )
@@ -124,6 +139,82 @@ mod tests {
         assert_eq!(failed, vec![game_id]);
         assert_eq!(game_status(&pool, game_id).await?, "failed");
 
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn same_ladder_held_waiter_survives_until_running_game_fails(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        let user = sqlx::query_scalar!(
+            "INSERT INTO users (external_github_id, github_login, github_access_token)
+             VALUES (1613, 'sweeper-owner', 'test') RETURNING user_id"
+        )
+        .fetch_one(&pool)
+        .await?;
+        let snake = sqlx::query_scalar!(
+            "INSERT INTO battlesnakes (user_id, name, url) VALUES ($1, 'sweeper-snake', 'http://example.com') RETURNING battlesnake_id", user
+        ).fetch_one(&pool).await?;
+        let ladder = sqlx::query_scalar!(
+            "SELECT leaderboard_id FROM leaderboards WHERE name = 'Standard 11x11'"
+        )
+        .fetch_one(&pool)
+        .await?;
+        let old = Utc::now() - Duration::hours(3);
+        let running = insert_game(&pool, "running", old).await?;
+        let waiting = insert_game(&pool, "waiting", old).await?;
+        for game_id in [running, waiting] {
+            sqlx::query!(
+                "INSERT INTO leaderboard_games (leaderboard_id, game_id) VALUES ($1, $2)",
+                ladder,
+                game_id
+            )
+            .execute(&pool)
+            .await?;
+            sqlx::query!(
+                "INSERT INTO game_battlesnakes (game_id, battlesnake_id) VALUES ($1, $2)",
+                game_id,
+                snake
+            )
+            .execute(&pool)
+            .await?;
+        }
+        let first = fail_stuck_games(&pool, 2).await?;
+        assert!(first.contains(&running));
+        assert!(!first.contains(&waiting));
+        assert_eq!(game_status(&pool, waiting).await?, "waiting");
+        assert_eq!(fail_stuck_games(&pool, 2).await?, vec![waiting]);
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn ladder_waiter_age_and_disabled_leaderboard_do_not_exempt_sweep(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        let ladder: Uuid = sqlx::query_scalar(
+            "SELECT leaderboard_id FROM leaderboards WHERE name = 'Standard 11x11'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        let now = Utc::now();
+        let recent = insert_game(&pool, "waiting", now - Duration::minutes(30)).await?;
+        let old = insert_game(&pool, "waiting", now - Duration::hours(3)).await?;
+        for game_id in [recent, old] {
+            sqlx::query("INSERT INTO leaderboard_games (leaderboard_id, game_id) VALUES ($1, $2)")
+                .bind(ladder)
+                .bind(game_id)
+                .execute(&pool)
+                .await?;
+        }
+        sqlx::query(
+            "UPDATE leaderboards SET disabled_at = clock_timestamp() WHERE leaderboard_id = $1",
+        )
+        .bind(ladder)
+        .execute(&pool)
+        .await?;
+        assert_eq!(fail_stuck_games(&pool, 2).await?, vec![old]);
+        assert_eq!(game_status(&pool, recent).await?, "waiting");
+        assert_eq!(game_status(&pool, old).await?, "failed");
         Ok(())
     }
 
@@ -206,6 +297,30 @@ mod tests {
         assert_eq!(game_status(&pool, game_id).await?, "failed");
         assert_eq!(game_updated_at(&pool, game_id).await?, after_first);
 
+        Ok(())
+    }
+
+    /// Age counts from the enqueue once a game has one: a ladder game held for a
+    /// long time before dispatch must not be failed mid-run, while a game with no
+    /// enqueue (held, never dispatched) still ages from creation.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn age_counts_from_enqueue_when_present(pool: PgPool) -> cja::Result<()> {
+        let base_time = Utc::now();
+        let recently_started =
+            insert_game(&pool, "running", base_time - Duration::hours(3)).await?;
+        sqlx::query!(
+            "UPDATE games SET enqueued_at = $2 WHERE game_id = $1",
+            recently_started,
+            base_time - Duration::minutes(10),
+        )
+        .execute(&pool)
+        .await?;
+        let never_enqueued = insert_game(&pool, "waiting", base_time - Duration::hours(3)).await?;
+
+        let failed = fail_stuck_games(&pool, 2).await?;
+
+        assert_eq!(failed, vec![never_enqueued]);
+        assert_eq!(game_status(&pool, recently_started).await?, "running");
         Ok(())
     }
 

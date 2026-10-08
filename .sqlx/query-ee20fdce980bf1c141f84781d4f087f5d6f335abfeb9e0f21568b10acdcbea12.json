@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE leaderboards SET disabled_at = clock_timestamp() WHERE leaderboard_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ee20fdce980bf1c141f84781d4f087f5d6f335abfeb9e0f21568b10acdcbea12"
+}
