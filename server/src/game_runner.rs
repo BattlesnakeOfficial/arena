@@ -83,10 +83,13 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
             .await?;
         }
         GameStatus::Waiting => {
-            match claim_game_start(pool, game_id, app_state.config.ladder_start_deadline_secs)
-                .await
-                .wrap_err("Failed to claim waiting game start")?
-            {
+            let claim = phase(game_id, Phase::ClaimStart, None, async {
+                claim_game_start(pool, game_id, app_state.config.ladder_start_deadline_secs)
+                    .await
+                    .wrap_err("Failed to claim waiting game start")
+            })
+            .await?;
+            match claim {
                 StartClaim::Busy | StartClaim::AlreadyRunning | StartClaim::Terminal => {
                     return Ok(());
                 }
@@ -94,8 +97,9 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
                     leaderboard_id,
                     wait_ms,
                     via,
+                    enqueued_at,
                 } => {
-                    emit_start_events(game_id, leaderboard_id, wait_ms, via, game.enqueued_at);
+                    emit_start_events(game_id, leaderboard_id, wait_ms, via, enqueued_at);
                 }
             }
         }

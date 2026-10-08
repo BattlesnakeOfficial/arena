@@ -210,6 +210,9 @@ pub enum StartClaim {
         leaderboard_id: Option<Uuid>,
         wait_ms: i64,
         via: Option<&'static str>,
+        /// Read under the claim's row lock, so a dispatcher that stamped it in a
+        /// still-open transaction is waited for rather than read stale.
+        enqueued_at: Option<chrono::DateTime<chrono::Utc>>,
     },
     Busy,
     AlreadyRunning,
@@ -317,7 +320,28 @@ fn base_eligibility(
     }
 }
 
-/// Oldest base-eligible game sharing a participant wins this dispatch cycle.
+/// A waiting ladder game past the deadline can only be blocked by same-ladder
+/// running games. It reserves its snakes against younger games of its own
+/// ladder; otherwise each new round could keep taking its free snakes and
+/// starve it (the stuck-game sweeper exempts it while it's held).
+fn reserves_same_ladder(
+    snapshot: &ScheduleSnapshot,
+    game: &ScheduleGame,
+    deadline_secs: i64,
+) -> bool {
+    game.status == "waiting"
+        && game.leaderboard_id.is_some()
+        && game.disabled_at.is_none()
+        && !game.participants.is_empty()
+        && snapshot
+            .at
+            .signed_duration_since(game.created_at)
+            .num_seconds()
+            >= deadline_secs
+}
+
+/// Oldest base-eligible game sharing a participant wins this dispatch cycle,
+/// and a past-deadline game holds its snakes against younger same-ladder games.
 pub(crate) fn ladder_eligibility(
     snapshot: &ScheduleSnapshot,
     game: &ScheduleGame,
@@ -329,10 +353,11 @@ pub(crate) fn ladder_eligibility(
             && (other.created_at, other.game_id) < (game.created_at, game.game_id)
             && shares_snake(game, other)
     });
-    if older
-        .into_iter()
-        .any(|other| base_eligibility(snapshot, other, deadline_secs).is_some())
-    {
+    if older.into_iter().any(|other| {
+        base_eligibility(snapshot, other, deadline_secs).is_some()
+            || (other.leaderboard_id == game.leaderboard_id
+                && reserves_same_ladder(snapshot, other, deadline_secs))
+    }) {
         None
     } else {
         Some(via)
@@ -351,7 +376,7 @@ pub async fn claim_game_start(
         .await
         .wrap_err("Failed to begin game start claim")?;
     let target = sqlx::query!(
-        "SELECT status, created_at FROM games WHERE game_id = $1 FOR UPDATE",
+        "SELECT status, created_at, enqueued_at FROM games WHERE game_id = $1 FOR UPDATE",
         game_id
     )
     .fetch_one(&mut *tx)
@@ -423,6 +448,7 @@ pub async fn claim_game_start(
         leaderboard_id,
         wait_ms,
         via,
+        enqueued_at: target.enqueued_at,
     })
 }
 
@@ -535,6 +561,46 @@ mod ladder_dispatch_tests {
         assert_eq!(
             ladder_eligibility(&snapshot, &snapshot.games[1], 480),
             Some("free")
+        );
+    }
+
+    #[test]
+    fn past_deadline_blocked_game_reserves_snakes_against_its_own_ladder() {
+        let shared = Uuid::from_u128(1);
+        let blocked = Uuid::from_u128(2);
+        let ladder = Uuid::from_u128(3);
+        let other_ladder = Uuid::from_u128(4);
+        let held = game(10, "waiting", 500, Some(ladder), &[shared, blocked]);
+        let blocker = game(12, "running", 600, Some(ladder), &[blocked]);
+        let same_ladder = ScheduleSnapshot {
+            at: Utc::now(),
+            games: vec![
+                held.clone(),
+                game(11, "waiting", 20, Some(ladder), &[shared]),
+                blocker.clone(),
+            ],
+        };
+        assert_eq!(
+            ladder_eligibility(&same_ladder, &same_ladder.games[0], 480),
+            None
+        );
+        assert_eq!(
+            ladder_eligibility(&same_ladder, &same_ladder.games[1], 480),
+            None,
+            "a younger same-ladder game must not take a past-deadline game's snake"
+        );
+        let other = ScheduleSnapshot {
+            at: Utc::now(),
+            games: vec![
+                held,
+                blocker,
+                game(13, "waiting", 20, Some(other_ladder), &[shared]),
+            ],
+        };
+        assert_eq!(
+            ladder_eligibility(&other, &other.games[2], 480),
+            Some("free"),
+            "the reservation is same-ladder only; other ladders may still use the snake"
         );
     }
 }
@@ -1634,6 +1700,95 @@ mod tests {
             }
         }
         assert_eq!((started, busy), (1, 1));
+        Ok(())
+    }
+
+    /// Older O {a,t} is held by a running same-ladder R {t}; younger Y {a}
+    /// queues on a's row lock; R finishes; O queues on a. Exactly one of O/Y may
+    /// start. Pins that the claim re-reads the schedule only after taking its
+    /// participant locks: with the snapshot read first, both start and overlap
+    /// on a in the same ladder.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn claim_rechecks_schedule_after_participant_locks(pool: PgPool) -> cja::Result<()> {
+        let owner = rematch_user(&pool, 999_001).await?;
+        let a = rematch_snake(&pool, owner, "ClaimRaceA", "public").await?;
+        let t = rematch_snake(&pool, owner, "ClaimRaceT", "public").await?;
+        let ladder: Uuid = sqlx::query_scalar(
+            "SELECT leaderboard_id FROM leaderboards WHERE name = 'Standard 11x11'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        let mk = |ids: Vec<Uuid>| CreateGameWithSnakes {
+            board_size: GameBoardSize::Medium,
+            game_type: GameType::Standard,
+            battlesnake_ids: ids,
+        };
+        let mut ids = Vec::new();
+        for (snakes, age) in [(vec![t], 200), (vec![a, t], 100), (vec![a], 50)] {
+            let g = create_game_with_snakes(&pool, mk(snakes)).await?;
+            sqlx::query("INSERT INTO leaderboard_games (leaderboard_id, game_id) VALUES ($1, $2)")
+                .bind(ladder)
+                .bind(g.game_id)
+                .execute(&pool)
+                .await?;
+            sqlx::query("UPDATE games SET created_at = clock_timestamp() - make_interval(secs => $2) WHERE game_id = $1")
+                .bind(g.game_id)
+                .bind(age as f64)
+                .execute(&pool)
+                .await?;
+            ids.push(g.game_id);
+        }
+        let (r, o, y) = (ids[0], ids[1], ids[2]);
+        sqlx::query("UPDATE games SET status = 'running' WHERE game_id = $1")
+            .bind(r)
+            .execute(&pool)
+            .await?;
+        let mut blocker = pool.begin().await?;
+        sqlx::query("SELECT 1 FROM battlesnakes WHERE battlesnake_id = $1 FOR NO KEY UPDATE")
+            .bind(a)
+            .fetch_one(&mut *blocker)
+            .await?;
+        async fn wait_blocked(pool: &PgPool, n: i64) -> cja::Result<()> {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                let blocked: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'")
+                    .fetch_one(pool)
+                    .await?;
+                if blocked >= n {
+                    return Ok(());
+                }
+                assert!(std::time::Instant::now() < deadline, "claims never blocked");
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        }
+        let p = pool.clone();
+        let claim_y = tokio::spawn(async move { claim_game_start(&p, y, 480).await });
+        wait_blocked(&pool, 1).await?;
+        sqlx::query("UPDATE games SET status = 'finished' WHERE game_id = $1")
+            .bind(r)
+            .execute(&pool)
+            .await?;
+        let p = pool.clone();
+        let claim_o = tokio::spawn(async move { claim_game_start(&p, o, 480).await });
+        wait_blocked(&pool, 2).await?;
+        blocker.rollback().await?;
+        let ry = claim_y.await.expect("join")?;
+        let ro = claim_o.await.expect("join")?;
+        let started = [&ry, &ro]
+            .iter()
+            .filter(|c| matches!(c, StartClaim::Started { .. }))
+            .count();
+        let running: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM games WHERE game_id = ANY($1) AND status = 'running'",
+        )
+        .bind(vec![o, y])
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(
+            (started, running),
+            (1, 1),
+            "same-ladder overlap on snake a: y={ry:?} o={ro:?}"
+        );
         Ok(())
     }
 }

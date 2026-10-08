@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT status, created_at FROM games WHERE game_id = $1 FOR UPDATE",
+  "query": "SELECT status, created_at, enqueued_at FROM games WHERE game_id = $1 FOR UPDATE",
   "describe": {
     "columns": [
       {
@@ -12,6 +12,11 @@
         "ordinal": 1,
         "name": "created_at",
         "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 2,
+        "name": "enqueued_at",
+        "type_info": "Timestamptz"
       }
     ],
     "parameters": {
@@ -21,8 +26,9 @@
     },
     "nullable": [
       false,
-      false
+      false,
+      true
     ]
   },
-  "hash": "89d28e6872356f4c2f7a44c2a9c1b581ac06813e468c95161e63730ae4fd050e"
+  "hash": "7422e1426a10dfaeb3b50aeda011620196c70ac3007ce96e9afd89505deee012"
 }

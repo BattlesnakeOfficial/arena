@@ -98,8 +98,10 @@ async fn run_matchmaker_for_leaderboard(app_state: &AppState, lb: &Leaderboard) 
     );
 
     for selected in round {
-        // Use a transaction to atomically create the game, link it to the leaderboard,
-        // and set enqueued_at. This prevents "zombie" games without a leaderboard record.
+        // Use a transaction to atomically create the game and link it to the
+        // leaderboard. This prevents "zombie" games without a leaderboard record.
+        // enqueued_at stays NULL until the dispatcher enqueues the runner, so
+        // queue_wait measures enqueue-to-claim rather than the deliberate hold.
         let mut tx = pool
             .begin()
             .await
@@ -127,10 +129,6 @@ async fn run_matchmaker_for_leaderboard(app_state: &AppState, lb: &Leaderboard) 
                     )
                 })?;
         }
-
-        game::set_game_enqueued_at_tx(&mut tx, game.game_id, chrono::Utc::now())
-            .await
-            .wrap_err("Failed to set enqueued_at")?;
 
         leaderboard::create_leaderboard_game(&mut *tx, leaderboard_id, game.game_id)
             .await
@@ -187,7 +185,7 @@ pub async fn dispatch_pending_ladder_games(app_state: &AppState) -> cja::Result<
             })
             .map(|g| g.game_id)
             .collect();
-        if !blocking.is_empty() {
+        if !blocking.is_empty() && should_warn_held(waiting.game_id, std::time::Instant::now()) {
             tracing::warn!(game_id = %waiting.game_id, leaderboard_id = ?waiting.leaderboard_id,
                 blocking_game_ids = ?blocking, held_age_secs = held_age,
                 "Past-deadline ladder game held by same-ladder running game");
@@ -202,10 +200,17 @@ pub async fn dispatch_pending_ladder_games(app_state: &AppState) -> cja::Result<
         })
         .collect();
     candidates.sort_by_key(|g| (g.created_at, g.game_id));
-    let mut first_error = None;
+    let attempted = candidates.len();
+    let mut failed = 0_usize;
     for candidate in candidates {
         let result: cja::Result<()> = async {
             let mut tx = app_state.db.begin().await.wrap_err("Failed to begin ladder dispatch")?;
+            // This runs inline in the cron loop that also drives the matchmaker,
+            // so a row held by another dispatch pass must not stall it.
+            sqlx::query_scalar!("SELECT set_config('lock_timeout', $1, true)", DISPATCH_LOCK_TIMEOUT)
+                .fetch_one(&mut *tx)
+                .await
+                .wrap_err("Failed to set ladder dispatch lock timeout")?;
             let row = sqlx::query!(
                 r#"SELECT g.status, lb.disabled_at,
                           COALESCE(lg.last_dispatch_at > clock_timestamp() - interval '5 seconds', false) AS "throttled!"
@@ -235,26 +240,73 @@ pub async fn dispatch_pending_ladder_games(app_state: &AppState) -> cja::Result<
             if has_job {
                 return Ok(());
             }
+            // Stamp enqueued_at before the job exists. The claim reads it under
+            // its own FOR UPDATE on this games row, so it waits for this commit,
+            // and queue_wait measures enqueue-to-claim rather than the hold.
+            sqlx::query!(
+                "UPDATE games SET enqueued_at = clock_timestamp() WHERE game_id = $1",
+                candidate.game_id,
+            )
+            .execute(&mut *tx)
+            .await
+            .wrap_err("Failed to stamp ladder game enqueue time")?;
             cja::jobs::Job::enqueue(GameRunnerJob { game_id: candidate.game_id }, app_state.clone(),
                 format!("Leaderboard game {}", candidate.game_id), None)
                 .await.wrap_err("Failed to enqueue ladder game runner")?;
-            sqlx::query!("UPDATE leaderboard_games SET last_dispatch_at = clock_timestamp() WHERE game_id = $1", candidate.game_id)
-                .execute(&mut *tx).await.wrap_err("Failed to record ladder dispatch")?;
+            let dispatched_at = sqlx::query_scalar!(
+                r#"UPDATE leaderboard_games SET last_dispatch_at = clock_timestamp()
+                   WHERE game_id = $1
+                   RETURNING last_dispatch_at AS "dispatched_at!""#,
+                candidate.game_id,
+            )
+            .fetch_one(&mut *tx)
+            .await
+            .wrap_err("Failed to record ladder dispatch")?;
             tx.commit().await.wrap_err("Failed to commit ladder dispatch")?;
             tracing::info!(event_type = "ladder_game_eligible", game_id = %candidate.game_id,
                 leaderboard_id = ?candidate.leaderboard_id,
                 eligible_observed_at = %snapshot.at,
-                dispatched_at = %chrono::Utc::now(), "ladder game eligible for dispatch");
+                dispatched_at = %dispatched_at, "ladder game eligible for dispatch");
             Ok(())
         }.await;
         if let Err(error) = result {
             tracing::error!(game_id = %candidate.game_id, error = %format!("{error:#}"), "Ladder dispatch failed");
-            if first_error.is_none() {
-                first_error = Some(error);
-            }
+            failed += 1;
         }
     }
-    first_error.map_or(Ok(()), Err)
+    // Each failure was logged above with its game and cause; the caller only
+    // needs the summary, so the cron log doesn't repeat the first error.
+    if failed > 0 {
+        return Err(cja::color_eyre::eyre::eyre!(
+            "{failed} of {attempted} ladder dispatches failed; see the per-game errors"
+        ));
+    }
+    Ok(())
+}
+
+/// Lock wait bound for one dispatch transaction.
+const DISPATCH_LOCK_TIMEOUT: &str = "2s";
+
+/// A game held past the deadline is seen by every dispatch pass (~6s), so its
+/// WARN repeats at most this often.
+const HELD_WARN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// True at most once per [`HELD_WARN_INTERVAL`] per game. Process-local: a
+/// restart warns again, which is fine for log de-duplication.
+fn should_warn_held(game_id: uuid::Uuid, now: std::time::Instant) -> bool {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock, PoisonError};
+    static LAST: OnceLock<Mutex<HashMap<uuid::Uuid, std::time::Instant>>> = OnceLock::new();
+    let mut last = LAST
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    last.retain(|_, at| now.saturating_duration_since(*at) < HELD_WARN_INTERVAL);
+    if last.contains_key(&game_id) {
+        return false;
+    }
+    last.insert(game_id, now);
+    true
 }
 
 // Bounded rank jitter keeps groups local while varying opponents between ticks.
@@ -589,7 +641,10 @@ mod tests {
         for row in rows {
             assert_eq!(row.game_type, lb.game_type);
             assert_eq!(row.board_size, lb.board_size);
-            assert!(row.enqueued_at.is_some());
+            assert!(
+                row.enqueued_at.is_none(),
+                "a held round game isn't enqueued until the dispatcher enqueues its runner"
+            );
             let id = row.leaderboard_entry_id.expect("ranked game participant");
             games.entry(row.game_id).or_default().push(id);
             covered.insert(id);
@@ -995,13 +1050,77 @@ mod tests {
         Ok(())
     }
 
+    /// queue_wait must measure enqueue-to-claim, not the deliberate hold, or the
+    /// Eyes "Game queue delay" monitor (p95 > 30s critical) fires on every hold.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn dispatch_stamps_enqueued_at_and_claim_reads_it(pool: sqlx::PgPool) -> cja::Result<()> {
+        let (lb, _) = seeded_mode(&pool, "Standard 11x11", 4).await?;
+        let app = crate::state::AppState::test_from_pool(pool.clone());
+        run_matchmaker_for_leaderboard(&app, &lb).await?;
+        let game_id = sqlx::query_scalar!(
+            "SELECT game_id FROM leaderboard_games WHERE leaderboard_id = $1",
+            lb.leaderboard_id
+        )
+        .fetch_one(&pool)
+        .await?;
+        sqlx::query!(
+            "UPDATE games SET created_at = clock_timestamp() - interval '300 seconds' WHERE game_id = $1",
+            game_id
+        )
+        .execute(&pool)
+        .await?;
+        dispatch_pending_ladder_games(&app).await?;
+        let row = sqlx::query!(
+            r#"SELECT created_at, enqueued_at AS "enqueued_at!" FROM games WHERE game_id = $1"#,
+            game_id
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert!(
+            row.enqueued_at - row.created_at >= chrono::Duration::seconds(299),
+            "enqueued_at must be the dispatch time, not round creation"
+        );
+        match game::claim_game_start(&pool, game_id, 480).await? {
+            game::StartClaim::Started {
+                enqueued_at,
+                wait_ms,
+                ..
+            } => {
+                assert_eq!(enqueued_at, Some(row.enqueued_at));
+                assert!(wait_ms >= 300_000, "wait_ms still carries the whole hold");
+            }
+            other => panic!("expected a start, got {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn held_warn_is_rate_limited_per_game() {
+        let game = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        let t0 = std::time::Instant::now();
+        assert!(should_warn_held(game, t0));
+        assert!(!should_warn_held(
+            game,
+            t0 + std::time::Duration::from_secs(6)
+        ));
+        assert!(should_warn_held(
+            other,
+            t0 + std::time::Duration::from_secs(6)
+        ));
+        assert!(should_warn_held(game, t0 + HELD_WARN_INTERVAL));
+    }
+
     #[test]
     fn ladder_dispatch_sim() {
         use crate::models::game::{ScheduleGame, ScheduleSnapshot, ladder_eligibility};
         use rand::Rng;
         use std::collections::{HashMap, HashSet};
         // Seed 1613. Ratings: 1000 - 10 * seeded rotated rank + 0.01 * ladder index.
-        // Assumptions: instant worker pickup on each 5s tick; no non-ladder games.
+        // Assumptions: one dispatch pass per 6s tick (5s cron interval polled
+        // every 2s, and cja needs elapsed > interval); every candidate from that
+        // pass's single snapshot starts with instant worker pickup; no
+        // non-ladder games.
         let mut rng = rand::rngs::StdRng::seed_from_u64(1613);
         let snakes: Vec<Uuid> = (1..=24).map(Uuid::from_u128).collect();
         let membership: [Vec<usize>; 4] = [
@@ -1057,7 +1176,7 @@ mod tests {
         let mut next_round = 0_i64;
         let mut deadline_starts = 0;
         let mut waits = Vec::new();
-        for tick in (0..86_400).step_by(5) {
+        for tick in (0..86_400).step_by(6) {
             for game in &mut games {
                 if game.schedule.status == "running" && game.end.is_some_and(|end| end <= tick) {
                     game.schedule.status = "finished".into();
@@ -1092,24 +1211,29 @@ mod tests {
                     }
                 }
             }
-            loop {
-                let snapshot = ScheduleSnapshot {
-                    at: origin + chrono::Duration::seconds(tick),
-                    games: games
-                        .iter()
-                        .filter(|g| g.schedule.status != "finished")
-                        .map(|g| g.schedule.clone())
-                        .collect(),
-                };
-                let winner = games
+            // Like the real dispatcher: one snapshot per pass, every candidate
+            // from it starts. Candidates never share a snake (a younger game
+            // sharing one with an older base-eligible game isn't a candidate),
+            // so the claims all succeed.
+            let snapshot = ScheduleSnapshot {
+                at: origin + chrono::Duration::seconds(tick),
+                games: games
                     .iter()
-                    .enumerate()
-                    .filter(|(_, g)| g.schedule.status == "waiting")
-                    .filter(|(_, g)| ladder_eligibility(&snapshot, &g.schedule, 480).is_some())
-                    .min_by_key(|(_, g)| (g.schedule.created_at, g.schedule.game_id))
-                    .map(|(i, _)| i);
-                let Some(index) = winner else { break };
-                let via = ladder_eligibility(&snapshot, &games[index].schedule, 480).unwrap();
+                    .filter(|g| g.schedule.status != "finished")
+                    .map(|g| g.schedule.clone())
+                    .collect(),
+            };
+            let mut candidates: Vec<(usize, &'static str)> = games
+                .iter()
+                .enumerate()
+                .filter(|(_, g)| g.schedule.status == "waiting")
+                .filter_map(|(i, g)| {
+                    ladder_eligibility(&snapshot, &g.schedule, 480).map(|via| (i, via))
+                })
+                .collect();
+            candidates
+                .sort_by_key(|&(i, _)| (games[i].schedule.created_at, games[i].schedule.game_id));
+            for (index, via) in candidates {
                 if via == "deadline" {
                     deadline_starts += 1;
                 }
@@ -1229,5 +1353,19 @@ mod tests {
             waits[waits.len() - 1]
         );
         assert_eq!(same_ladder_overlap, 0);
+        // DEV-1613's gated bars. Deterministic (seed 1613), so a MISS is a
+        // real regression, not noise.
+        assert!(one >= 95.0, "one-ladder no-overlap {one:.1}% < 95%");
+        assert!(
+            two_three >= 75.0,
+            "two/three-ladder no-overlap {two_three:.1}% < 75%"
+        );
+        assert!(all >= 50.0, "overall no-overlap {all:.1}% < 50%");
+        assert!(
+            completed.len() >= 2000,
+            "completed/day {} < 2000",
+            completed.len()
+        );
+        assert!(min_entry >= 95, "minimum completed/entry {min_entry} < 95");
     }
 }

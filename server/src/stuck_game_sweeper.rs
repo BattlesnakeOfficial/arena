@@ -37,14 +37,17 @@ pub async fn run_sweep(app_state: &AppState) -> cja::Result<()> {
 }
 
 /// Atomically mark all eligible stuck games `failed`, returning their IDs.
-/// Eligibility = live status AND older than `max_age_hours` (by `created_at`)
-/// AND not a tournament match game.
+/// Eligibility = live status AND older than `max_age_hours` AND not a
+/// tournament match game. Age counts from `enqueued_at`, falling back to
+/// `created_at`: a ladder game held before dispatch (DEV-1613) has a NULL
+/// `enqueued_at` and ages from creation, but once dispatched its runtime is
+/// measured from the enqueue, so a long hold can't get a live game failed.
 async fn fail_stuck_games(pool: &sqlx::PgPool, max_age_hours: i32) -> cja::Result<Vec<Uuid>> {
     let ids = sqlx::query_scalar!(
         r#"UPDATE games
            SET status = 'failed', updated_at = NOW()
            WHERE games.status IN ('waiting', 'running')
-             AND games.created_at < NOW() - make_interval(hours => $1)
+             AND COALESCE(games.enqueued_at, games.created_at) < NOW() - make_interval(hours => $1)
              AND games.game_id NOT IN (SELECT game_id FROM match_games)
              AND NOT (games.status = 'waiting' AND EXISTS (
                SELECT 1 FROM leaderboard_games waiting_lg
@@ -294,6 +297,30 @@ mod tests {
         assert_eq!(game_status(&pool, game_id).await?, "failed");
         assert_eq!(game_updated_at(&pool, game_id).await?, after_first);
 
+        Ok(())
+    }
+
+    /// Age counts from the enqueue once a game has one: a ladder game held for a
+    /// long time before dispatch must not be failed mid-run, while a game with no
+    /// enqueue (held, never dispatched) still ages from creation.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn age_counts_from_enqueue_when_present(pool: PgPool) -> cja::Result<()> {
+        let base_time = Utc::now();
+        let recently_started =
+            insert_game(&pool, "running", base_time - Duration::hours(3)).await?;
+        sqlx::query!(
+            "UPDATE games SET enqueued_at = $2 WHERE game_id = $1",
+            recently_started,
+            base_time - Duration::minutes(10),
+        )
+        .execute(&pool)
+        .await?;
+        let never_enqueued = insert_game(&pool, "waiting", base_time - Duration::hours(3)).await?;
+
+        let failed = fail_stuck_games(&pool, 2).await?;
+
+        assert_eq!(failed, vec![never_enqueued]);
+        assert_eq!(game_status(&pool, recently_started).await?, "running");
         Ok(())
     }
 

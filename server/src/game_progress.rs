@@ -17,6 +17,7 @@ use uuid::Uuid;
 pub enum Phase {
     LoadGame,
     ResetGame,
+    ClaimStart,
     PrepareSnakes,
     StartSnakes,
     RequestMoves,
@@ -31,9 +32,10 @@ pub enum Phase {
 }
 
 impl Phase {
-    pub const ALL: [Phase; 13] = [
+    pub const ALL: [Phase; 14] = [
         Phase::LoadGame,
         Phase::ResetGame,
+        Phase::ClaimStart,
         Phase::PrepareSnakes,
         Phase::StartSnakes,
         Phase::RequestMoves,
@@ -51,6 +53,7 @@ impl Phase {
         match self {
             Phase::LoadGame => "load_game",
             Phase::ResetGame => "reset_game",
+            Phase::ClaimStart => "claim_start",
             Phase::PrepareSnakes => "prepare_snakes",
             Phase::StartSnakes => "start_snakes",
             Phase::RequestMoves => "request_moves",
@@ -78,6 +81,7 @@ impl Phase {
             | Phase::PersistTurnInsertSnake => true,
             Phase::LoadGame
             | Phase::ResetGame
+            | Phase::ClaimStart
             | Phase::PrepareSnakes
             | Phase::StartSnakes
             | Phase::EndSnakes
