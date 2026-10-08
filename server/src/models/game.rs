@@ -1403,6 +1403,50 @@ mod tests {
         ));
         Ok(())
     }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn running_tournament_game_holds_ladder_claim(pool: PgPool) -> cja::Result<()> {
+        let owner = rematch_user(&pool, 161305).await?;
+        let snake = rematch_snake(&pool, owner, "Tournament", "public").await?;
+        let tournament: Uuid = sqlx::query_scalar("INSERT INTO tournaments (name, user_id) VALUES ('claim test', $1) RETURNING tournament_id")
+            .bind(owner).fetch_one(&pool).await?;
+        let match_id: Uuid = sqlx::query_scalar("INSERT INTO tournament_matches (tournament_id, round, position, visual_column, visual_row) VALUES ($1, 1, 0, 0, 0) RETURNING match_id")
+            .bind(tournament).fetch_one(&pool).await?;
+        let new_game = || CreateGameWithSnakes {
+            board_size: GameBoardSize::Medium,
+            game_type: GameType::Standard,
+            battlesnake_ids: vec![snake],
+        };
+        let tournament_game = create_game_with_snakes(&pool, new_game()).await?;
+        sqlx::query("INSERT INTO match_games (match_id, game_id, game_number) VALUES ($1, $2, 1)")
+            .bind(match_id)
+            .bind(tournament_game.game_id)
+            .execute(&pool)
+            .await?;
+        assert!(matches!(
+            claim_game_start(&pool, tournament_game.game_id, 480).await?,
+            StartClaim::Started {
+                leaderboard_id: None,
+                ..
+            }
+        ));
+        let ladder_game = create_game_with_snakes(&pool, new_game()).await?;
+        let ladder: Uuid = sqlx::query_scalar(
+            "SELECT leaderboard_id FROM leaderboards WHERE name = 'Standard 11x11'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        sqlx::query("INSERT INTO leaderboard_games (leaderboard_id, game_id) VALUES ($1, $2)")
+            .bind(ladder)
+            .bind(ladder_game.game_id)
+            .execute(&pool)
+            .await?;
+        assert_eq!(
+            claim_game_start(&pool, ladder_game.game_id, 480).await?,
+            StartClaim::Busy
+        );
+        Ok(())
+    }
     #[sqlx::test(migrations = "../migrations")]
     async fn selected_entry_survives_pause_and_leaderboard_disable_holds_claim(
         pool: PgPool,
@@ -1469,6 +1513,127 @@ mod tests {
             get_game_by_id(&pool, game_id).await?.unwrap().status,
             GameStatus::Waiting
         );
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn duplicate_custom_snake_rows_claim_once(pool: PgPool) -> cja::Result<()> {
+        let owner = rematch_user(&pool, 161303).await?;
+        let snake = rematch_snake(&pool, owner, "Duplicate", "public").await?;
+        let game = create_game_with_snakes(
+            &pool,
+            CreateGameWithSnakes {
+                board_size: GameBoardSize::Medium,
+                game_type: GameType::Standard,
+                battlesnake_ids: vec![snake, snake],
+            },
+        )
+        .await?;
+        assert!(matches!(
+            claim_game_start(&pool, game.game_id, 480).await?,
+            StartClaim::Started {
+                leaderboard_id: None,
+                ..
+            }
+        ));
+        assert_eq!(
+            claim_game_start(&pool, game.game_id, 480).await?,
+            StartClaim::AlreadyRunning
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn concurrent_same_ladder_claims_serialize_on_participant(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        let owner = rematch_user(&pool, 161304).await?;
+        let snake = rematch_snake(&pool, owner, "Contested", "public").await?;
+        let second = rematch_snake(&pool, owner, "Second", "public").await?;
+        let first_lock = snake.min(second);
+        let ladder: Uuid = sqlx::query_scalar(
+            "SELECT leaderboard_id FROM leaderboards WHERE name = 'Standard 11x11'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        let mut games = Vec::new();
+        for index in 0..2 {
+            let game = create_game_with_snakes(
+                &pool,
+                CreateGameWithSnakes {
+                    board_size: GameBoardSize::Medium,
+                    game_type: GameType::Standard,
+                    battlesnake_ids: if index == 0 {
+                        vec![snake, second]
+                    } else {
+                        vec![second, snake]
+                    },
+                },
+            )
+            .await?;
+            sqlx::query("INSERT INTO leaderboard_games (leaderboard_id, game_id) VALUES ($1, $2)")
+                .bind(ladder)
+                .bind(game.game_id)
+                .execute(&pool)
+                .await?;
+            games.push(game.game_id);
+        }
+        // Hold the first participant lock so both claims queue before either
+        // can inspect the running roster.
+        let mut blocker = pool.begin().await?;
+        sqlx::query(
+            "SELECT battlesnake_id FROM battlesnakes WHERE battlesnake_id = $1 FOR NO KEY UPDATE",
+        )
+        .bind(first_lock)
+        .fetch_one(&mut *blocker)
+        .await?;
+        let mut claims = Vec::new();
+        for game_id in games {
+            let pool = pool.clone();
+            claims.push(tokio::spawn(async move {
+                claim_game_start(&pool, game_id, 480).await
+            }));
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let blocked: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%FOR NO KEY UPDATE%'")
+                .fetch_one(&pool).await?;
+            if blocked >= 2 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "claims did not both reach participant lock"
+            );
+            tokio::task::yield_now().await;
+        }
+        // FK KEY SHARE must remain compatible with the held participant lock.
+        let extra: Uuid = sqlx::query_scalar("INSERT INTO games (board_size, game_type) VALUES ('11x11', 'Standard') RETURNING game_id")
+            .fetch_one(&pool).await?;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            sqlx::query("INSERT INTO game_battlesnakes (game_id, battlesnake_id) VALUES ($1, $2)")
+                .bind(extra)
+                .bind(first_lock)
+                .execute(&pool),
+        )
+        .await
+        .expect("FK insert blocked by participant lock")?;
+        blocker.rollback().await?;
+        let mut started = 0;
+        let mut busy = 0;
+        for claim in claims {
+            match tokio::time::timeout(std::time::Duration::from_secs(10), claim)
+                .await
+                .expect("claim deadlocked")
+                .expect("claim panicked")?
+            {
+                StartClaim::Started { .. } => started += 1,
+                StartClaim::Busy => busy += 1,
+                other => panic!("unexpected claim result: {other:?}"),
+            }
+        }
+        assert_eq!((started, busy), (1, 1));
         Ok(())
     }
 }

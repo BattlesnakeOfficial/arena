@@ -1,4 +1,5 @@
 use color_eyre::eyre::Context as _;
+use sqlx::Row as _;
 use std::str::FromStr;
 
 use crate::{
@@ -206,30 +207,50 @@ pub async fn dispatch_pending_ladder_games(app_state: &AppState) -> cja::Result<
     for candidate in candidates {
         let result: cja::Result<()> = async {
             let mut tx = app_state.db.begin().await.wrap_err("Failed to begin ladder dispatch")?;
-            let row = sqlx::query!(
-                r#"SELECT g.status, lb.disabled_at, lg.last_dispatch_at,
-                          EXISTS(SELECT 1 FROM jobs j WHERE j.name = 'GameRunnerJob'
-                            AND j.payload->>'game_id' = g.game_id::text) AS "has_job!"
+            let row = sqlx::query(
+                r#"SELECT g.status, lb.disabled_at,
+                          COALESCE(lg.last_dispatch_at > clock_timestamp() - interval '5 seconds', false) AS throttled
                    FROM leaderboard_games lg
                    JOIN games g ON g.game_id = lg.game_id
                    JOIN leaderboards lb ON lb.leaderboard_id = lg.leaderboard_id
-                   WHERE lg.game_id = $1 FOR UPDATE OF lg"#, candidate.game_id
-            ).fetch_optional(&mut *tx).await.wrap_err("Failed to lock ladder dispatch row")?;
+                   WHERE lg.game_id = $1 FOR UPDATE OF lg"#,
+            )
+            .bind(candidate.game_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .wrap_err("Failed to lock ladder dispatch row")?;
             let Some(row) = row else { return Ok(()); };
-            if row.status != "waiting" || row.disabled_at.is_some() || row.has_job
-                || row.last_dispatch_at.is_some_and(|at| chrono::Utc::now().signed_duration_since(at).num_seconds() < 5) {
+            let status: &str = row.try_get("status").wrap_err("Missing dispatch game status")?;
+            let disabled_at: Option<chrono::DateTime<chrono::Utc>> = row
+                .try_get("disabled_at")
+                .wrap_err("Missing leaderboard disablement")?;
+            let throttled: bool = row.try_get("throttled").wrap_err("Missing dispatch throttle")?;
+            if status != "waiting" || disabled_at.is_some() || throttled {
+                return Ok(());
+            }
+            // This must be a separate READ COMMITTED statement after the row lock.
+            // A pass that waited for the lock needs a fresh snapshot of jobs
+            // committed by the previous holder, even if that holder rolled back.
+            let has_job: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM jobs WHERE name = 'GameRunnerJob' AND payload->>'game_id' = $1)",
+            )
+            .bind(candidate.game_id.to_string())
+            .fetch_one(&mut *tx)
+            .await
+            .wrap_err("Failed to check outstanding ladder runner after dispatch lock")?;
+            if has_job {
                 return Ok(());
             }
             cja::jobs::Job::enqueue(GameRunnerJob { game_id: candidate.game_id }, app_state.clone(),
                 format!("Leaderboard game {}", candidate.game_id), None)
                 .await.wrap_err("Failed to enqueue ladder game runner")?;
+            sqlx::query!("UPDATE leaderboard_games SET last_dispatch_at = clock_timestamp() WHERE game_id = $1", candidate.game_id)
+                .execute(&mut *tx).await.wrap_err("Failed to record ladder dispatch")?;
+            tx.commit().await.wrap_err("Failed to commit ladder dispatch")?;
             tracing::info!(event_type = "ladder_game_eligible", game_id = %candidate.game_id,
                 leaderboard_id = ?candidate.leaderboard_id,
                 eligible_observed_at = %snapshot.at,
                 dispatched_at = %chrono::Utc::now(), "ladder game eligible for dispatch");
-            sqlx::query!("UPDATE leaderboard_games SET last_dispatch_at = clock_timestamp() WHERE game_id = $1", candidate.game_id)
-                .execute(&mut *tx).await.wrap_err("Failed to record ladder dispatch")?;
-            tx.commit().await.wrap_err("Failed to commit ladder dispatch")?;
             Ok(())
         }.await;
         if let Err(error) = result {
@@ -758,7 +779,11 @@ mod tests {
         pool: sqlx::PgPool,
     ) -> cja::Result<()> {
         let (lb, _) = seeded_mode(&pool, "Standard 11x11", 4).await?;
-        let app = crate::state::AppState::test_from_pool(pool.clone());
+        let limited_pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(5)
+            .connect_with((*pool.connect_options()).clone())
+            .await?;
+        let app = crate::state::AppState::test_from_pool(limited_pool);
         run_matchmaker_for_leaderboard(&app, &lb).await?;
         run_matchmaker_for_leaderboard(&app, &lb).await?;
         let games = sqlx::query_scalar!(
@@ -780,6 +805,15 @@ mod tests {
             .await?
             .unwrap_or(0);
         assert_eq!(queued, 1, "overlapping dispatches must create one job");
+        let queued_game: String =
+            sqlx::query_scalar("SELECT payload->>'game_id' FROM jobs WHERE name = 'GameRunnerJob'")
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(
+            queued_game,
+            games[0].to_string(),
+            "oldest shared-snake game must dispatch first"
+        );
         let (left, right) = tokio::join!(
             game::claim_game_start(&pool, games[0], 480),
             game::claim_game_start(&pool, games[0], 480),
@@ -972,7 +1006,7 @@ mod tests {
         use crate::models::game::{ScheduleGame, ScheduleSnapshot, ladder_eligibility};
         use rand::Rng;
         use std::collections::{HashMap, HashSet};
-        // Seed 1613. Ratings: 1000 - 10 * rotated rank + 0.01 * ladder index.
+        // Seed 1613. Ratings: 1000 - 10 * seeded rotated rank + 0.01 * ladder index.
         // Assumptions: instant worker pickup on each 5s tick; no non-ladder games.
         let mut rng = rand::rngs::StdRng::seed_from_u64(1613);
         let snakes: Vec<Uuid> = (1..=24).map(Uuid::from_u128).collect();
@@ -990,6 +1024,10 @@ mod tests {
             (27.0, 37.0, 52),
         ];
         let ladders: Vec<Uuid> = (100..104).map(Uuid::from_u128).collect();
+        let rating_rotations: Vec<usize> = membership
+            .iter()
+            .map(|members| rng.gen_range(0..members.len()))
+            .collect();
         let entries: Vec<Vec<LeaderboardEntry>> = membership
             .iter()
             .enumerate()
@@ -999,7 +1037,8 @@ mod tests {
                     .enumerate()
                     .map(|(rank, &snake)| {
                         let mut entry = make_entry(
-                            1000.0 - ((rank + mode * 3) % members.len()) as f64 * 10.0
+                            1000.0
+                                - ((rank + rating_rotations[mode]) % members.len()) as f64 * 10.0
                                 + mode as f64 * 0.01,
                         );
                         entry.battlesnake_id = snakes[snake];
@@ -1117,7 +1156,10 @@ mod tests {
                     .iter()
                     .filter(|members| members.iter().any(|&n| snakes[n] == snake))
                     .count();
-                let overlapping: Vec<_> = completed
+                // Include games still running at the day boundary as overlap
+                // partners for completed games, even though they do not count
+                // toward completed volume.
+                let overlapping: Vec<_> = games
                     .iter()
                     .filter(|other| {
                         other.schedule.game_id != game.schedule.game_id

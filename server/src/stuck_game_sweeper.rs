@@ -184,6 +184,37 @@ mod tests {
         Ok(())
     }
 
+    #[sqlx::test(migrations = "../migrations")]
+    async fn ladder_waiter_age_and_disabled_leaderboard_do_not_exempt_sweep(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        let ladder: Uuid = sqlx::query_scalar(
+            "SELECT leaderboard_id FROM leaderboards WHERE name = 'Standard 11x11'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        let now = Utc::now();
+        let recent = insert_game(&pool, "waiting", now - Duration::minutes(30)).await?;
+        let old = insert_game(&pool, "waiting", now - Duration::hours(3)).await?;
+        for game_id in [recent, old] {
+            sqlx::query("INSERT INTO leaderboard_games (leaderboard_id, game_id) VALUES ($1, $2)")
+                .bind(ladder)
+                .bind(game_id)
+                .execute(&pool)
+                .await?;
+        }
+        sqlx::query(
+            "UPDATE leaderboards SET disabled_at = clock_timestamp() WHERE leaderboard_id = $1",
+        )
+        .bind(ladder)
+        .execute(&pool)
+        .await?;
+        assert_eq!(fail_stuck_games(&pool, 2).await?, vec![old]);
+        assert_eq!(game_status(&pool, recent).await?, "waiting");
+        assert_eq!(game_status(&pool, old).await?, "failed");
+        Ok(())
+    }
+
     /// Games inside the window are live work, and terminal states are
     /// already done — the positive `IN ('waiting','running')` predicate must
     /// leave all three alone.
