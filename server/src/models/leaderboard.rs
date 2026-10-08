@@ -909,12 +909,13 @@ pub async fn get_leaderboard_status(
     .await
     .wrap_err("Failed to fetch last game created_at")?;
 
-    // Positive list, not "!= 'finished'": failed games are terminal and
-    // must never count as live.
+    // Only `running` is live. Failed games are terminal, and a `waiting`
+    // ladder game may be held for minutes until its snakes are free (DEV-1613),
+    // so counting it would overstate what's on the board.
     let games_in_progress = sqlx::query_scalar!(
         r#"SELECT COUNT(*) as "count!" FROM leaderboard_games lg
          JOIN games g ON lg.game_id = g.game_id
-         WHERE lg.leaderboard_id = $1 AND g.status IN ('waiting', 'running')"#,
+         WHERE lg.leaderboard_id = $1 AND g.status = 'running'"#,
         leaderboard_id
     )
     .fetch_one(pool)
@@ -1168,8 +1169,9 @@ mod tests {
         Ok(())
     }
 
-    /// "In progress" means waiting or running — terminal states (finished,
-    /// failed) must never show as live on the leaderboard page.
+    /// "In progress" means running. Terminal states (finished, failed) must
+    /// never show as live, and a waiting ladder game may be held for minutes
+    /// before its snakes are free (DEV-1613), so it isn't live yet either.
     #[sqlx::test(migrations = "../migrations")]
     async fn games_in_progress_counts_only_live_states(pool: PgPool) -> cja::Result<()> {
         let leaderboard_id: Uuid = sqlx::query_scalar(
@@ -1183,7 +1185,7 @@ mod tests {
         }
 
         let status = get_leaderboard_status(&pool, leaderboard_id).await?;
-        assert_eq!(status.games_in_progress, 2);
+        assert_eq!(status.games_in_progress, 1);
         assert_eq!(status.total_games, 4);
 
         Ok(())

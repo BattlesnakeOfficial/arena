@@ -7,7 +7,9 @@ use crate::customizations;
 use crate::engine::MAX_TURNS;
 use crate::engine::frame::{DeathInfo, SnakeCustomizations, game_to_frame};
 use crate::game_progress::{Phase, phase};
-use crate::models::game::{GameStatus, get_game_by_id, get_game_source, update_game_status};
+use crate::models::game::{
+    GameStatus, StartClaim, claim_game_start, get_game_by_id, get_game_source,
+};
 use crate::snake_client::{
     ProxyClients, SnakeEndpoint, request_end_routed_parallel, request_info_routed_parallel,
     request_moves_routed_parallel, request_start_routed_parallel,
@@ -80,7 +82,27 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
             )
             .await?;
         }
-        GameStatus::Waiting => {}
+        GameStatus::Waiting => {
+            let claim = phase(game_id, Phase::ClaimStart, None, async {
+                claim_game_start(pool, game_id, app_state.config.ladder_start_deadline_secs)
+                    .await
+                    .wrap_err("Failed to claim waiting game start")
+            })
+            .await?;
+            match claim {
+                StartClaim::Busy | StartClaim::AlreadyRunning | StartClaim::Terminal => {
+                    return Ok(());
+                }
+                StartClaim::Started {
+                    leaderboard_id,
+                    wait_ms,
+                    via,
+                    enqueued_at,
+                } => {
+                    emit_start_events(game_id, leaderboard_id, wait_ms, via, enqueued_at);
+                }
+            }
+        }
         GameStatus::Failed => {
             // Terminal: an operator (or the stuck-game sweeper) declared
             // this game dead. A straggling retry must not resurrect it —
@@ -94,22 +116,8 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
         }
     }
 
-    // Emit queue_wait metric if enqueued_at is available
-    if let Some(enqueued_at) = game.enqueued_at {
-        let queue_wait = chrono::Utc::now().signed_duration_since(enqueued_at);
-        tracing::info!(
-            metric_type = "queue_wait",
-            game_id = %game_id,
-            duration_ms = queue_wait.num_milliseconds(),
-            "game queue wait time"
-        );
-    }
-
     let (battlesnakes, snake_urls, customizations) =
         phase(game_id, Phase::PrepareSnakes, None, async {
-            // Update status to running
-            update_game_status(pool, game_id, GameStatus::Running).await?;
-
             // Get all the battlesnakes in the game with their URLs
             let battlesnakes =
                 crate::models::game_battlesnake::get_battlesnakes_by_game_id(pool, game_id)
@@ -576,6 +584,25 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
     Ok(())
 }
 
+fn emit_start_events(
+    game_id: Uuid,
+    leaderboard_id: Option<Uuid>,
+    wait_ms: i64,
+    via: Option<&'static str>,
+    enqueued_at: Option<chrono::DateTime<chrono::Utc>>,
+) {
+    if let Some(leaderboard_id) = leaderboard_id {
+        tracing::info!(event_type = "ladder_game_started", game_id = %game_id,
+            leaderboard_id = %leaderboard_id, wait_ms, via = via.unwrap_or("free"),
+            "ladder game started");
+    }
+    if let Some(enqueued_at) = enqueued_at {
+        tracing::info!(metric_type = "queue_wait", game_id = %game_id,
+            duration_ms = chrono::Utc::now().signed_duration_since(enqueued_at).num_milliseconds(),
+            "game queue wait time");
+    }
+}
+
 /// Enqueue the follow-up jobs for a finished game: the leaderboard rating
 /// update and the tournament match evaluation, as applicable.
 ///
@@ -664,6 +691,83 @@ fn elimination_cause_label(cause: &EliminationCause) -> String {
 mod tests {
     use super::*;
     use sqlx::PgPool;
+    use std::sync::{Arc, Mutex};
+    use tracing::{field::Visit, instrument::WithSubscriber};
+    use tracing_subscriber::{Layer, prelude::*};
+
+    #[derive(Clone, Default)]
+    struct StartEventCapture(Arc<Mutex<Vec<std::collections::HashMap<String, String>>>>);
+
+    #[derive(Default)]
+    struct EventFields(std::collections::HashMap<String, String>);
+
+    impl Visit for EventFields {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.0.insert(field.name().to_owned(), format!("{value:?}"));
+        }
+
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.0.insert(field.name().to_owned(), value.to_owned());
+        }
+    }
+
+    impl<S: tracing::Subscriber> Layer<S> for StartEventCapture {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let mut fields = EventFields::default();
+            event.record(&mut fields);
+            if fields.0.contains_key("event_type") || fields.0.contains_key("metric_type") {
+                self.0.lock().unwrap().push(fields.0);
+            }
+        }
+    }
+
+    #[test]
+    fn successful_claim_emits_one_start_and_queue_wait_event() {
+        let capture = StartEventCapture::default();
+        let subscriber = tracing_subscriber::registry().with(capture.clone());
+        let game_id = Uuid::new_v4();
+        let leaderboard_id = Uuid::new_v4();
+        tracing::subscriber::with_default(subscriber, || {
+            emit_start_events(
+                game_id,
+                Some(leaderboard_id),
+                1234,
+                Some("deadline"),
+                Some(chrono::Utc::now()),
+            );
+        });
+        let events = capture.0.lock().unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| e
+                    .get("event_type")
+                    .is_some_and(|v| v == "ladder_game_started"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| e.get("metric_type").is_some_and(|v| v == "queue_wait"))
+                .count(),
+            1
+        );
+        assert!(
+            events
+                .iter()
+                .all(|e| e.get("game_id").is_some_and(|v| v == &game_id.to_string()))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| e.get("via").is_some_and(|v| v == "deadline"))
+        );
+    }
 
     async fn count_jobs(pool: &PgPool, name: &str) -> cja::Result<i64> {
         Ok(
@@ -725,6 +829,92 @@ mod tests {
         assert_eq!(count_jobs(&pool, "LeaderboardRatingUpdateJob").await?, 0);
         assert_eq!(count_jobs(&pool, "RunMatchJob").await?, 0);
 
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn running_retry_does_not_emit_start_metrics(pool: PgPool) -> cja::Result<()> {
+        let app = AppState::test_from_pool(pool.clone());
+        // An empty roster makes the retry fail after its Running branch, so
+        // the test never reaches snake HTTP calls or a full game simulation.
+        let game_id = fixture_game(&pool, "running").await?;
+        let capture = StartEventCapture::default();
+        let result = run_game(&app, game_id)
+            .with_subscriber(tracing_subscriber::registry().with(capture.clone()))
+            .await;
+        assert!(
+            result.is_err(),
+            "invalid retry fixture unexpectedly completed"
+        );
+        assert!(capture.0.lock().unwrap().iter().all(|event| {
+            event.get("game_id") != Some(&game_id.to_string())
+                || (event.get("event_type") != Some(&"ladder_game_started".to_owned())
+                    && event.get("metric_type") != Some(&"queue_wait".to_owned()))
+        }));
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn busy_ladder_runner_makes_no_turns(pool: PgPool) -> cja::Result<()> {
+        let owner = sqlx::query_scalar!(
+            "INSERT INTO users (external_github_id, github_login, github_access_token)
+             VALUES (161302, 'runner-owner', 'test') RETURNING user_id"
+        )
+        .fetch_one(&pool)
+        .await?;
+        let snake = sqlx::query_scalar!(
+            "INSERT INTO battlesnakes (user_id, name, url)
+             VALUES ($1, 'runner-snake', 'http://127.0.0.1:9') RETURNING battlesnake_id",
+            owner
+        )
+        .fetch_one(&pool)
+        .await?;
+        let running = fixture_game(&pool, "running").await?;
+        let waiting = fixture_game(&pool, "waiting").await?;
+        for game_id in [running, waiting] {
+            sqlx::query!(
+                "INSERT INTO game_battlesnakes (game_id, battlesnake_id) VALUES ($1, $2)",
+                game_id,
+                snake
+            )
+            .execute(&pool)
+            .await?;
+        }
+        let leaderboard = sqlx::query_scalar!(
+            "SELECT leaderboard_id FROM leaderboards WHERE name = 'Standard 11x11'"
+        )
+        .fetch_one(&pool)
+        .await?;
+        sqlx::query!(
+            "INSERT INTO leaderboard_games (leaderboard_id, game_id) VALUES ($1, $2)",
+            leaderboard,
+            waiting
+        )
+        .execute(&pool)
+        .await?;
+        let app = AppState::test_from_pool(pool.clone());
+        let capture = StartEventCapture::default();
+        run_game(&app, waiting)
+            .with_subscriber(tracing_subscriber::registry().with(capture.clone()))
+            .await?;
+        assert!(capture.0.lock().unwrap().iter().all(|event| {
+            event.get("game_id") != Some(&waiting.to_string())
+                || (event.get("event_type") != Some(&"ladder_game_started".to_owned())
+                    && event.get("metric_type") != Some(&"queue_wait".to_owned()))
+        }));
+        assert_eq!(
+            sqlx::query_scalar!("SELECT status FROM games WHERE game_id = $1", waiting)
+                .fetch_one(&pool)
+                .await?,
+            "waiting"
+        );
+        assert_eq!(
+            sqlx::query_scalar!("SELECT COUNT(*) FROM turns WHERE game_id = $1", waiting)
+                .fetch_one(&pool)
+                .await?
+                .unwrap_or(0),
+            0
+        );
         Ok(())
     }
 

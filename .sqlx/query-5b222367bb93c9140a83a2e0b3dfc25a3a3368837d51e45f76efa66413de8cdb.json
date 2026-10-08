@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO jobs (job_id, name, payload, priority, context, created_at)\n             VALUES (gen_random_uuid(), 'GameRunnerJob', jsonb_build_object('game_id', $1::text), 0, 'test', clock_timestamp() - interval '31 seconds')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5b222367bb93c9140a83a2e0b3dfc25a3a3368837d51e45f76efa66413de8cdb"
+}

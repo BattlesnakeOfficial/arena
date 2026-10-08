@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE games\n           SET status = 'failed', updated_at = NOW()\n           WHERE games.status IN ('waiting', 'running')\n             AND COALESCE(games.enqueued_at, games.created_at) < NOW() - make_interval(hours => $1)\n             AND games.game_id NOT IN (SELECT game_id FROM match_games)\n             AND NOT (games.status = 'waiting' AND EXISTS (\n               SELECT 1 FROM leaderboard_games waiting_lg\n               JOIN leaderboard_games running_lg ON running_lg.leaderboard_id = waiting_lg.leaderboard_id\n               JOIN games running_game ON running_game.game_id = running_lg.game_id AND running_game.status = 'running'\n               JOIN game_battlesnakes waiting_gb ON waiting_gb.game_id = games.game_id\n               LEFT JOIN leaderboard_entries waiting_le ON waiting_le.leaderboard_entry_id = waiting_gb.leaderboard_entry_id\n               JOIN game_battlesnakes running_gb ON running_gb.game_id = running_game.game_id\n               LEFT JOIN leaderboard_entries running_le ON running_le.leaderboard_entry_id = running_gb.leaderboard_entry_id\n               WHERE waiting_lg.game_id = games.game_id\n                 AND COALESCE(waiting_gb.battlesnake_id, waiting_le.battlesnake_id)\n                     = COALESCE(running_gb.battlesnake_id, running_le.battlesnake_id)\n             ))\n           RETURNING game_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "game_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int4"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "5281b26bd99844e6c918dbcaadad70a04a5ee59b4c4db91de9184b6e111826f8"
+}

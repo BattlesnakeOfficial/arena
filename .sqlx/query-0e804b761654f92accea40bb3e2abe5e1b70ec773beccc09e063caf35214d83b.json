@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT DISTINCT COALESCE(gb.battlesnake_id, le.battlesnake_id) AS \"snake_id!\"\n           FROM game_battlesnakes gb\n           LEFT JOIN leaderboard_entries le ON le.leaderboard_entry_id = gb.leaderboard_entry_id\n           WHERE gb.game_id = $1\n           ORDER BY \"snake_id!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "snake_id!",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "0e804b761654f92accea40bb3e2abe5e1b70ec773beccc09e063caf35214d83b"
+}
