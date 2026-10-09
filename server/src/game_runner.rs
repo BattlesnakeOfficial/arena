@@ -453,12 +453,6 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
     )
     .await?;
 
-    tracing::info!(
-        game_id = %game_id,
-        final_turn = engine_game.board.turn,
-        "Game completed with persistence"
-    );
-
     // Build placements: last eliminated = winner (placement 1)
     // Snakes still alive at the end go first
     //
@@ -696,7 +690,7 @@ mod tests {
     use tracing_subscriber::{Layer, prelude::*};
 
     #[derive(Clone, Default)]
-    struct StartEventCapture(Arc<Mutex<Vec<std::collections::HashMap<String, String>>>>);
+    struct EventCapture(Arc<Mutex<Vec<std::collections::HashMap<String, String>>>>);
 
     #[derive(Default)]
     struct EventFields(std::collections::HashMap<String, String>);
@@ -711,7 +705,7 @@ mod tests {
         }
     }
 
-    impl<S: tracing::Subscriber> Layer<S> for StartEventCapture {
+    impl<S: tracing::Subscriber> Layer<S> for EventCapture {
         fn on_event(
             &self,
             event: &tracing::Event<'_>,
@@ -719,15 +713,13 @@ mod tests {
         ) {
             let mut fields = EventFields::default();
             event.record(&mut fields);
-            if fields.0.contains_key("event_type") || fields.0.contains_key("metric_type") {
-                self.0.lock().unwrap().push(fields.0);
-            }
+            self.0.lock().unwrap().push(fields.0);
         }
     }
 
     #[test]
     fn successful_claim_emits_one_start_and_queue_wait_event() {
-        let capture = StartEventCapture::default();
+        let capture = EventCapture::default();
         let subscriber = tracing_subscriber::registry().with(capture.clone());
         let game_id = Uuid::new_v4();
         let leaderboard_id = Uuid::new_v4();
@@ -790,6 +782,72 @@ mod tests {
         Ok(game_id)
     }
 
+    #[sqlx::test(migrations = "../migrations")]
+    async fn completed_game_emits_final_turn_once(pool: PgPool) -> cja::Result<()> {
+        let app_state = AppState::test_from_pool(pool.clone());
+        let game_id = fixture_game(&pool, "waiting").await?;
+        let snake_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::any())
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "apiversion": "1" })),
+            )
+            .mount(&snake_server)
+            .await;
+
+        let user_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO users (external_github_id, github_login, github_access_token)
+             VALUES (1626, 'completion-test', 'test-token') RETURNING user_id",
+        )
+        .fetch_one(&pool)
+        .await?;
+        let battlesnake_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO battlesnakes (user_id, name, url)
+             VALUES ($1, 'completion-snake', $2) RETURNING battlesnake_id",
+        )
+        .bind(user_id)
+        .bind(snake_server.uri())
+        .fetch_one(&pool)
+        .await?;
+        sqlx::query("INSERT INTO game_battlesnakes (game_id, battlesnake_id) VALUES ($1, $2)")
+            .bind(game_id)
+            .bind(battlesnake_id)
+            .execute(&pool)
+            .await?;
+
+        let capture = EventCapture::default();
+        async { run_game(&app_state, game_id).await }
+            .with_subscriber(tracing_subscriber::registry().with(capture.clone()))
+            .await?;
+
+        let status: String = sqlx::query_scalar("SELECT status FROM games WHERE game_id = $1")
+            .bind(game_id)
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(status, "finished");
+
+        let events = capture.0.lock().unwrap();
+        let final_turn_events: Vec<_> = events
+            .iter()
+            .filter(|event| event.contains_key("final_turn"))
+            .collect();
+        assert_eq!(final_turn_events.len(), 1, "{final_turn_events:?}");
+        let event = final_turn_events[0];
+        assert_eq!(
+            event.get("event_type").map(String::as_str),
+            Some("game_completed")
+        );
+        assert_eq!(
+            event.get("message").map(String::as_str),
+            Some("game completed")
+        );
+        assert_eq!(event.get("game_id"), Some(&game_id.to_string()));
+        assert_eq!(event.get("final_turn").map(String::as_str), Some("0"));
+        assert!(event.contains_key("total_ms"));
+        assert!(event.contains_key("winner_battlesnake_id"));
+        Ok(())
+    }
+
     /// A retry on an already-finished game must short-circuit to the
     /// (idempotent) post-completion hooks instead of re-running the game.
     /// The fixture game has no battlesnakes, so reaching the normal run path
@@ -838,7 +896,7 @@ mod tests {
         // An empty roster makes the retry fail after its Running branch, so
         // the test never reaches snake HTTP calls or a full game simulation.
         let game_id = fixture_game(&pool, "running").await?;
-        let capture = StartEventCapture::default();
+        let capture = EventCapture::default();
         let result = run_game(&app, game_id)
             .with_subscriber(tracing_subscriber::registry().with(capture.clone()))
             .await;
@@ -893,7 +951,7 @@ mod tests {
         .execute(&pool)
         .await?;
         let app = AppState::test_from_pool(pool.clone());
-        let capture = StartEventCapture::default();
+        let capture = EventCapture::default();
         run_game(&app, waiting)
             .with_subscriber(tracing_subscriber::registry().with(capture.clone()))
             .await?;
