@@ -24,6 +24,35 @@ const HISTORICAL_BATCH_SIZE: i32 = 500;
 /// ~300ms, long enough to time out snakes mid-turn.
 static BACKUP_SLOT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
 
+/// Job priority for [`BackupSingleGameJob`], below the default 0 that game
+/// runners use. cja claims `ORDER BY priority DESC, run_at, created_at`, and a
+/// claimed backup holds its worker while it waits for [`BACKUP_SLOT`], so an
+/// hourly burst of ~1,100 backups pins most workers and frees them one backup at
+/// a time. At equal priority each freed worker took the next backup, and a game
+/// queued behind the burst waited 15-111s to start. Lower, the next freed worker
+/// takes the game.
+pub(crate) const BACKUP_JOB_PRIORITY: i32 = -10;
+
+/// Enqueue one game's backup at [`BACKUP_JOB_PRIORITY`].
+async fn enqueue_backup_job(
+    app_state: &AppState,
+    engine_game_id: &str,
+    batch_id: Option<i32>,
+) -> cja::Result<()> {
+    BackupSingleGameJob {
+        engine_game_id: engine_game_id.to_owned(),
+        batch_id,
+    }
+    .enqueue(
+        app_state.clone(),
+        format!("backup game {engine_game_id}"),
+        Some(BACKUP_JOB_PRIORITY),
+    )
+    .await
+    .wrap_err_with(|| format!("Failed to enqueue backup job for game {engine_game_id}"))?;
+    Ok(())
+}
+
 /// Shared GCS client. Building one per job re-ran TLS setup and a metadata
 /// token fetch for every archived game; the client refreshes its own token.
 static GCS_CLIENT: tokio::sync::OnceCell<GcsClient> = tokio::sync::OnceCell::const_new();
@@ -304,17 +333,7 @@ pub async fn run_backup_discovery(app_state: &AppState) -> Result<(), BackupErro
         }
 
         // Enqueue a job to backup this game (no batch_id for regular discovery)
-        BackupSingleGameJob {
-            engine_game_id: game_row.id.clone(),
-            batch_id: None,
-        }
-        .enqueue(
-            app_state.clone(),
-            format!("backup game {}", game_row.id),
-            None,
-        )
-        .await
-        .wrap_err_with(|| format!("Failed to enqueue backup job for game {}", game_row.id))?;
+        enqueue_backup_job(app_state, &game_row.id, None).await?;
 
         enqueued_count += 1;
     }
@@ -694,13 +713,7 @@ pub async fn run_historical_backup_discovery(
 
     // Enqueue backup jobs
     for game in &unarchived {
-        BackupSingleGameJob {
-            engine_game_id: game.id.clone(),
-            batch_id: Some(batch_id),
-        }
-        .enqueue(app_state.clone(), format!("backup game {}", game.id), None)
-        .await
-        .wrap_err_with(|| format!("Failed to enqueue backup job for game {}", game.id))?;
+        enqueue_backup_job(app_state, &game.id, Some(batch_id)).await?;
     }
 
     tracing::info!(batch_id = batch_id, "Enqueued all backup jobs for batch");
@@ -758,6 +771,41 @@ mod tests {
         let result = build_compressed_export(game, vec![serde_json::json!({ "Turn": "nope" })]);
 
         assert!(result.is_err());
+    }
+
+    /// A claimed backup waits on BACKUP_SLOT while holding its worker, so a
+    /// burst must sort below game runners or new games queue behind it.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn backups_queue_below_default_priority_jobs(pool: sqlx::PgPool) -> cja::Result<()> {
+        let app_state = AppState::test_from_pool(pool.clone());
+        enqueue_backup_job(&app_state, "engine-game-1", None).await?;
+        enqueue_backup_job(&app_state, "engine-game-2", Some(7)).await?;
+        crate::jobs::GameRunnerJob {
+            game_id: uuid::Uuid::new_v4(),
+        }
+        .enqueue(app_state.clone(), "game".to_string(), None)
+        .await?;
+        let rows = sqlx::query!("SELECT name, priority FROM jobs ORDER BY created_at")
+            .fetch_all(&pool)
+            .await?;
+        let priority_of = |name: &str| -> Vec<i32> {
+            rows.iter()
+                .filter(|r| r.name == name)
+                .map(|r| r.priority)
+                .collect()
+        };
+        assert_eq!(
+            priority_of("BackupSingleGameJob"),
+            vec![BACKUP_JOB_PRIORITY, BACKUP_JOB_PRIORITY],
+            "both discovery and batch backfill backups use the backup priority"
+        );
+        assert!(
+            priority_of("GameRunnerJob")
+                .iter()
+                .all(|&p| p > BACKUP_JOB_PRIORITY),
+            "a game runner must out-rank queued backups"
+        );
+        Ok(())
     }
 
     /// Backups are serialized process-wide so an hourly burst can't
