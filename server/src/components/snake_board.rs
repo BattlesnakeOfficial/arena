@@ -26,7 +26,8 @@ use crate::customizations::normalize_color;
 /// A board cell `(x, y)`. As in the game API, `(0, 0)` is the bottom-left cell.
 pub type Cell = (i32, i32);
 
-const CELL: i32 = 20;
+/// Side of one cell, in board pixels.
+pub const CELL: i32 = 20;
 const HALF: f64 = 10.0;
 const SPACING: i32 = 4;
 const BORDER: i32 = 10;
@@ -160,9 +161,9 @@ pub struct Placement {
 pub struct SnakeGeometry {
     /// `None` when the tail sits on the head (a fresh snake).
     pub tail: Option<Placement>,
-    /// `points` for each body polyline: none for a fresh snake, several only on
-    /// wrapped boards.
-    pub polylines: Vec<String>,
+    /// Points (board pixels) of each body polyline: none for a fresh snake, several
+    /// only on wrapped boards.
+    pub polylines: Vec<Vec<(f64, f64)>>,
     pub head: Placement,
 }
 
@@ -237,7 +238,7 @@ fn render_snake(board: &Board, snake: &SnakeSpec) -> Markup {
                 }
             }
             @for points in &geometry.polylines {
-                polyline fill="transparent" points=(points) stroke-width=(CELL)
+                polyline fill="transparent" points=(points_attr(points)) stroke-width=(CELL)
                     stroke-linecap="butt" stroke-linejoin="round" {}
             }
             svg class={ "head " (head.dir.as_str()) } viewBox="0 0 100 100" x=(head.x) y=(head.y)
@@ -369,14 +370,15 @@ fn tail_direction(body: &[Cell]) -> Direction {
 }
 
 /// Board pixel geometry: the real board's constants and coordinate maths.
+/// Social cards (`crate::og`) paint from the same numbers.
 #[derive(Debug, Clone, Copy)]
-struct Board {
-    px_width: i32,
-    px_height: i32,
+pub struct Board {
+    pub px_width: i32,
+    pub px_height: i32,
 }
 
 impl Board {
-    fn new(width: i32, height: i32) -> Self {
+    pub fn new(width: i32, height: i32) -> Self {
         let span = |n: i32| 2 * BORDER + n * CELL + (n - 1).max(0) * SPACING;
         Self {
             px_width: span(width),
@@ -385,14 +387,14 @@ impl Board {
     }
 
     /// Top-left corner of a cell. Board `y` grows upward; SVG `y` grows down.
-    fn top_left(&self, (x, y): Cell) -> (i32, i32) {
+    pub fn top_left(&self, (x, y): Cell) -> (i32, i32) {
         (
             BORDER + x * (CELL + SPACING),
             self.px_height - (BORDER + y * (CELL + SPACING) + CELL),
         )
     }
 
-    fn center(&self, cell: Cell) -> (f64, f64) {
+    pub fn center(&self, cell: Cell) -> (f64, f64) {
         let (x, y) = self.top_left(cell);
         (f64::from(x) + HALF, f64::from(y) + HALF)
     }
@@ -407,15 +409,12 @@ impl Board {
         Placement { x, y, dir }
     }
 
-    fn snake(&self, body: &[Cell]) -> Option<SnakeGeometry> {
+    /// The board-dependent geometry of one snake, or `None` for an empty body.
+    pub fn snake(&self, body: &[Cell]) -> Option<SnakeGeometry> {
         let (&head, &tail) = (body.first()?, body.last()?);
         Some(SnakeGeometry {
             tail: (head != tail).then(|| self.placement(tail, tail_direction(body))),
-            polylines: self
-                .polylines(body)
-                .iter()
-                .map(|line| points_attr(line))
-                .collect(),
+            polylines: self.polylines(body),
             head: self.placement(head, head_direction(body)),
         })
     }
@@ -751,7 +750,9 @@ mod tests {
                 let got = snake_geometry(g.width, g.height, &snake.body).unwrap();
                 let ctx = format!("{name}, body {:?}", snake.body);
 
-                assert_eq!(got.polylines, want.polylines, "polylines: {ctx}");
+                let got_polylines: Vec<String> =
+                    got.polylines.iter().map(|line| points_attr(line)).collect();
+                assert_eq!(got_polylines, want.polylines, "polylines: {ctx}");
 
                 let head = &want.head;
                 assert_eq!(got.head.x.to_string(), head.x, "head x: {ctx}");

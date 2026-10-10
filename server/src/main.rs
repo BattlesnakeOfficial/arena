@@ -33,6 +33,7 @@ mod leaderboard_ratings;
 mod models;
 mod moderation;
 mod observability;
+mod og;
 mod play_import;
 mod routes;
 mod scoring;

@@ -2,7 +2,7 @@ use maud::{DOCTYPE, Markup, PreEscaped, Render, html};
 
 use crate::{
     components::avatar::user_avatar, config::LOCAL_BASE_URL, models::user::User,
-    static_assets::asset_url,
+    routes::og::DEFAULT_CARD_PATH, static_assets::asset_url,
 };
 
 /// Resolves the two theme axes before first paint so there is no flash of
@@ -11,8 +11,9 @@ use crate::{
 const THEME_BOOTSTRAP_JS: &str = r#"(function(){var d=document.documentElement;function p(a,f){return d.getAttribute("data-bs-"+a)||localStorage.getItem("bs-"+a)||f}var site=p("site","system");var th=p("theater","dark");var sys=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";var s=site==="system"?sys:site;d.setAttribute("data-app-theme",d.hasAttribute("data-theater-page")?(th==="match"?s:th):s);})();"#;
 
 /// Site-wide fallback for social embeds (OpenGraph/Twitter) when a page
-/// doesn't set its own description.
-const DEFAULT_DESCRIPTION: &str = "A competitive arena where your code battles other Battlesnakes.";
+/// doesn't set its own description. Also the default social card's tagline.
+pub const DEFAULT_DESCRIPTION: &str =
+    "A competitive arena where your code battles other Battlesnakes.";
 
 const GOOGLE_FONTS_HREF: &str = "https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,300;12..96,500;12..96,600;12..96,700;12..96,800&family=Instrument+Sans:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap";
 
@@ -44,7 +45,21 @@ pub struct Page {
     /// Page-specific description for social embeds (OpenGraph/Twitter).
     /// Falls back to a site-wide default when unset.
     pub description: Option<String>,
+    /// Page-specific social card. Falls back to the site-wide default card.
+    pub social_image: Option<SocialImage>,
 }
+
+/// A page's social card (`og:image`), served by `routes::og`.
+#[derive(Debug, Clone)]
+pub struct SocialImage {
+    /// Site-relative path, e.g. `/og/games/{id}.png`.
+    pub path: String,
+    /// What the card shows, for screen readers.
+    pub alt: String,
+}
+
+/// Alt text for the default card.
+const DEFAULT_IMAGE_ALT: &str = "Battlesnake Arena";
 
 impl Page {
     pub fn new(title: String, content: Box<dyn Render>, flash: Option<String>) -> Self {
@@ -58,6 +73,7 @@ impl Page {
             base_url: LOCAL_BASE_URL.to_string(),
             theater: false,
             description: None,
+            social_image: None,
         }
     }
 
@@ -65,6 +81,15 @@ impl Page {
     /// chains off `PageFactory::create_page` / `create_theater_page`).
     pub fn with_description(mut self, description: impl Into<String>) -> Self {
         self.description = Some(description.into());
+        self
+    }
+
+    /// Set a page-specific social card (builder style, like `with_description`).
+    pub fn with_social_image(mut self, path: impl Into<String>, alt: impl Into<String>) -> Self {
+        self.social_image = Some(SocialImage {
+            path: path.into(),
+            alt: alt.into(),
+        });
         self
     }
 
@@ -81,11 +106,17 @@ impl Page {
     }
 
     fn social_image_url(&self) -> String {
-        format!(
-            "{}{}",
-            self.base_url.trim_end_matches('/'),
-            asset_url("og-card.png")
-        )
+        let path = self
+            .social_image
+            .as_ref()
+            .map_or(DEFAULT_CARD_PATH, |image| image.path.as_str());
+        format!("{}{}", self.base_url.trim_end_matches('/'), path)
+    }
+
+    fn social_image_alt(&self) -> &str {
+        self.social_image
+            .as_ref()
+            .map_or(DEFAULT_IMAGE_ALT, |image| image.alt.as_str())
     }
 
     /// Server-rendered initial theme, when it can be known without JS.
@@ -261,10 +292,10 @@ impl Render for Page {
                     meta property="og:image:type" content="image/png";
                     meta property="og:image:width" content="1200";
                     meta property="og:image:height" content="630";
-                    meta property="og:image:alt" content="Battlesnake Arena";
+                    meta property="og:image:alt" content=(self.social_image_alt());
                     meta name="twitter:card" content="summary_large_image";
                     meta name="twitter:image" content=(self.social_image_url());
-                    meta name="twitter:image:alt" content="Battlesnake Arena";
+                    meta name="twitter:image:alt" content=(self.social_image_alt());
                     link rel="preconnect" href="https://fonts.googleapis.com";
                     link rel="preconnect" href="https://fonts.gstatic.com" crossorigin;
                     link href=(GOOGLE_FONTS_HREF) rel="stylesheet";
@@ -328,19 +359,19 @@ mod tests {
         assert!(html.contains(&format!(
             r#"<meta property="og:description" content="{DEFAULT_DESCRIPTION}">"#
         )));
-        let image_url = format!("https://arena.battlesnake.com{}", asset_url("og-card.png"));
+        let image_url = "https://arena.battlesnake.com/og/default.png";
         let expected = [
             (
                 r#"property="og:url""#,
                 "https://arena.battlesnake.com/games/example",
             ),
-            (r#"property="og:image""#, image_url.as_str()),
+            (r#"property="og:image""#, image_url),
             (r#"property="og:image:type""#, "image/png"),
             (r#"property="og:image:width""#, "1200"),
             (r#"property="og:image:height""#, "630"),
             (r#"property="og:image:alt""#, "Battlesnake Arena"),
             (r#"name="twitter:card""#, "summary_large_image"),
-            (r#"name="twitter:image""#, image_url.as_str()),
+            (r#"name="twitter:image""#, image_url),
             (r#"name="twitter:image:alt""#, "Battlesnake Arena"),
         ];
         for (selector, value) in expected {
@@ -415,16 +446,20 @@ mod tests {
     }
 
     #[test]
-    fn og_card_generator_literals_match_page_constants() {
-        let generator = include_str!("../../../e2e/scripts/generate-og-card.mjs");
-        for (name, value) in [
-            ("GOOGLE_FONTS_HREF", GOOGLE_FONTS_HREF),
-            ("DEFAULT_DESCRIPTION", DEFAULT_DESCRIPTION),
-        ] {
-            assert!(
-                generator.contains(value),
-                "{name} changed; update the card generator when the Rust constants change"
-            );
-        }
+    fn page_specific_social_image_and_alt() {
+        let mut page = test_page()
+            .with_social_image("/og/games/abc.png?showSpoilers=true", r#"Snek "A" vs <B>"#);
+        page.base_url = "https://arena.battlesnake.com".to_string();
+        let html = page.render().into_string();
+        let url = "https://arena.battlesnake.com/og/games/abc.png?showSpoilers=true";
+        assert!(html.contains(&format!(r#"<meta property="og:image" content="{url}">"#)));
+        assert!(html.contains(&format!(r#"<meta name="twitter:image" content="{url}">"#)));
+        let alt = "Snek &quot;A&quot; vs &lt;B&gt;";
+        assert!(html.contains(&format!(
+            r#"<meta property="og:image:alt" content="{alt}">"#
+        )));
+        assert!(html.contains(&format!(
+            r#"<meta name="twitter:image:alt" content="{alt}">"#
+        )));
     }
 }
