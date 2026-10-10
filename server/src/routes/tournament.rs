@@ -1285,45 +1285,47 @@ pub async fn show_tournament(
                         @if registrations.is_empty() {
                             p class="empty" { "No snakes registered yet." }
                         } @else {
-                            table class="data" {
-                                thead {
-                                    tr {
-                                        th { "Seed" }
-                                        th { "Battlesnake" }
-                                        @if can_edit_registrations && viewer.is_some() {
-                                            th class="r" { "Actions" }
+                            div class="table-scroll" {
+                                table class="data" {
+                                    thead {
+                                        tr {
+                                            th { "Seed" }
+                                            th { "Battlesnake" }
+                                            @if can_edit_registrations && viewer.is_some() {
+                                                th class="r" { "Actions" }
+                                            }
                                         }
                                     }
-                                }
-                                tbody {
-                                    @for reg in &registrations {
-                                        tr {
-                                            td class="rank" { (format!("{:02}", reg.seed)) }
-                                            td {
-                                                div class="snake-cell" {
-                                                    span class="chip" style={"background:"(chip_color(&reg.snake_color))} {}
-                                                    span {
-                                                        a class="name" href={"/battlesnakes/"(reg.battlesnake_id)"/profile"} { (reg.snake_name) }
-                                                        span class="owner" { "by " (reg.owner_name) }
+                                    tbody {
+                                        @for reg in &registrations {
+                                            tr {
+                                                td class="rank" { (format!("{:02}", reg.seed)) }
+                                                td {
+                                                    div class="snake-cell" {
+                                                        span class="chip" style={"background:"(chip_color(&reg.snake_color))} {}
+                                                        span {
+                                                            a class="name" href={"/battlesnakes/"(reg.battlesnake_id)"/profile"} { (reg.snake_name) }
+                                                            span class="owner" { "by " (reg.owner_name) }
+                                                        }
                                                     }
                                                 }
-                                            }
-                                            @if can_edit_registrations && viewer.is_some() {
-                                                td {
-                                                    div class="reg-actions" {
-                                                        @if is_owner {
-                                                            form class="seed-form" action={"/tournaments/"(t.tournament_id)"/seed"} method="post" {
-                                                                input type="hidden" name="registration_id" value=(reg.registration_id);
-                                                                input type="number" name="new_seed" aria-label="New seed"
-                                                                    min="1" max=(max_seed) value=(reg.seed) {}
-                                                                button type="submit" class="btn sm" { "Move" }
+                                                @if can_edit_registrations && viewer.is_some() {
+                                                    td {
+                                                        div class="reg-actions" {
+                                                            @if is_owner {
+                                                                form class="seed-form" action={"/tournaments/"(t.tournament_id)"/seed"} method="post" {
+                                                                    input type="hidden" name="registration_id" value=(reg.registration_id);
+                                                                    input type="number" name="new_seed" aria-label="New seed"
+                                                                        min="1" max=(max_seed) value=(reg.seed) {}
+                                                                    button type="submit" class="btn sm" { "Move" }
+                                                                }
                                                             }
-                                                        }
-                                                        @if is_owner || viewer_id == Some(reg.user_id) {
-                                                            form action={"/tournaments/"(t.tournament_id)"/unregister"} method="post" {
-                                                                input type="hidden" name="registration_id" value=(reg.registration_id);
-                                                                button type="submit" class="btn sm danger"
-                                                                    onclick="return confirm('Remove this snake from the tournament?');" { "Unregister" }
+                                                            @if is_owner || viewer_id == Some(reg.user_id) {
+                                                                form action={"/tournaments/"(t.tournament_id)"/unregister"} method="post" {
+                                                                    input type="hidden" name="registration_id" value=(reg.registration_id);
+                                                                    button type="submit" class="btn sm danger"
+                                                                        onclick="return confirm('Remove this snake from the tournament?');" { "Unregister" }
+                                                                }
                                                             }
                                                         }
                                                     }

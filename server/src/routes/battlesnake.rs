@@ -440,44 +440,41 @@ pub async fn list_battlesnakes(
                 p class="empty" { "You don't have any battlesnakes yet." }
             } @else {
                 div class="section" {
-                    div class="table-scroll" {
-                        table class="data" {
-                            thead {
-                                tr {
-                                    th { "Snake" }
-                                    th { "URL" }
-                                    th { "Visibility" }
-                                    th class="r" { "Actions" }
-                                }
+                    table class="data my-snakes" {
+                        thead {
+                            tr {
+                                th { "Snake" }
+                                th { "Visibility" }
+                                th class="r" { "Actions" }
                             }
-                            tbody {
-                                @for snake in &battlesnakes {
-                                    tr {
-                                        td {
-                                            div class="snake-cell" {
-                                                span class="chip" style={"background:" (chip_color(&snake.color))} {}
+                        }
+                        tbody {
+                            @for snake in &battlesnakes {
+                                tr {
+                                    td {
+                                        div class="snake-cell" {
+                                            span class="chip" style={"background:" (chip_color(&snake.color))} {}
+                                            span class="snake-details" {
                                                 a class="name" href={"/battlesnakes/"(snake.battlesnake_id)"/profile"} { (snake.name) }
+                                                a class="snake-url" href=(snake.url) target="_blank" rel="noopener" { (snake.url) }
                                             }
                                         }
-                                        td class="url-cell" {
-                                            a href=(snake.url) target="_blank" rel="noopener" { (snake.url) }
+                                    }
+                                    td {
+                                        @if snake.visibility == Visibility::Public {
+                                            span class="badge ok" { "Public" }
+                                        } @else {
+                                            span class="badge" { "Private" }
                                         }
-                                        td {
-                                            @if snake.visibility == Visibility::Public {
-                                                span class="badge ok" { "Public" }
-                                            } @else {
-                                                span class="badge" { "Private" }
+                                    }
+                                    td class="r" {
+                                        div class="row-actions" {
+                                            form action={"/battlesnakes/"(snake.battlesnake_id)"/test"} method="post" {
+                                                button type="submit" class="btn sm" { "Test" }
                                             }
-                                        }
-                                        td class="r" {
-                                            div class="row-actions" {
-                                                form action={"/battlesnakes/"(snake.battlesnake_id)"/test"} method="post" {
-                                                    button type="submit" class="btn sm" { "Test" }
-                                                }
-                                                a href={"/battlesnakes/"(snake.battlesnake_id)"/edit"} class="btn sm" { "Edit" }
-                                                form action={"/battlesnakes/"(snake.battlesnake_id)"/delete"} method="post" {
-                                                    button type="submit" class="btn sm danger" onclick="return confirm('Are you sure you want to delete this battlesnake?');" { "Delete" }
-                                                }
+                                            a href={"/battlesnakes/"(snake.battlesnake_id)"/edit"} class="btn sm" { "Edit" }
+                                            form action={"/battlesnakes/"(snake.battlesnake_id)"/delete"} method="post" {
+                                                button type="submit" class="btn sm danger" onclick="return confirm('Are you sure you want to delete this battlesnake?');" { "Delete" }
                                             }
                                         }
                                     }
@@ -1721,19 +1718,20 @@ fn render_test_results(
 
 fn test_results_table(calls: &[snake_health::HealthCheckCall], game_timeout_ms: i64) -> Markup {
     html! {
-        table class="table" {
+        table class="data test-results" {
             thead {
                 tr {
                     th { "Call" }
                     th { "Result" }
-                    th { "HTTP Status" }
-                    th { "Latency" }
-                    th { "Details" }
+                    th class="r" { "HTTP Status" }
+                    th class="r" { "Latency" }
                 }
             }
             tbody {
                 @for call in calls {
-                    tr {
+                    // Details get their own full-width row so long errors and
+                    // body excerpts stay readable on a phone.
+                    tr class="call" {
                         td { code { (call.name) } }
                         td {
                             @match call.status {
@@ -1743,30 +1741,30 @@ fn test_results_table(calls: &[snake_health::HealthCheckCall], game_timeout_ms: 
                                 snake_health::HealthCallStatus::SnakeFailure => span class="badge warn" { "Failed" },
                             }
                         }
-                        td {
+                        td class="r num" {
                             @if let Some(status) = call.http_status {
                                 (status)
                             } @else {
                                 "—"
                             }
                         }
-                        td {
+                        td class="r num" {
                             @if let Some(latency) = call.latency_ms {
                                 (latency) " ms"
                                 @if i64::try_from(latency).is_ok_and(|l| l > game_timeout_ms) {
                                     " "
-                                    span class="badge bg-warning text-dark" { "over game budget" }
+                                    span class="badge warn" { "over game budget" }
                                 }
                             } @else {
                                 "—"
                             }
                         }
-                        td {
+                    }
+                    tr class="call-details" {
+                        td colspan="4" {
                             (call.summary)
                             @if let Some(excerpt) = &call.body_excerpt {
-                                pre style="white-space: pre-wrap; word-break: break-all; margin-top: 8px; font-size: 0.85em;" {
-                                    (excerpt)
-                                }
+                                pre { (excerpt) }
                             }
                         }
                     }

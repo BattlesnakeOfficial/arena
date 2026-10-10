@@ -242,6 +242,8 @@ main { flex: 1; width: 100%; }
 .crumb a:hover { color: var(--pink); }
 .page-head { display: flex; align-items: flex-end; gap: 24px; margin-top: 10px; flex-wrap: wrap; }
 .page-head .sub { color: var(--muted); font-size: 15.5px; padding-bottom: 9px; max-width: 52ch; }
+/* Long names and 39-character logins wrap instead of widening the page. */
+.page-head h1, .page-head .sub { overflow-wrap: anywhere; }
 
 /* mode tabs */
 .modes { display: flex; gap: 6px; margin: 34px 0 0; border-bottom: 1px solid var(--hairline); }
@@ -371,6 +373,9 @@ table.data td.rating { font-family: var(--mono); font-weight: 600; font-size: 15
 .snake-cell .name { font-weight: 600; letter-spacing: -.01em; }
 .snake-cell .name:hover { color: var(--pink); }
 .snake-cell .owner { font-size: 12.5px; color: var(--muted); display: block; margin-top: -2px; }
+/* A long unbroken name or 39-character GitHub login wraps rather than widening
+   a table that has to fit a phone. No effect inside .table-scroll's nowrap. */
+table.data .snake-cell .name, table.data .snake-cell .owner { overflow-wrap: anywhere; }
 .snake-details { min-width: 0; }
 .snake-tags { display: flex; flex-wrap: wrap; gap: 4px 6px; margin-top: 4px; }
 /* No text-transform/letter-spacing here on purpose: tag names are mixed case ("Fly.io", "C#"). */
@@ -837,6 +842,17 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
 .url-cell a:hover { color: var(--pink); }
 .row-actions { display: flex; gap: 8px; justify-content: flex-end; align-items: center; flex-wrap: wrap; }
 .row-actions form { display: inline; margin: 0; }
+/* The URL rides under the name and never sets the column's width, so the
+   actions stay on screen on a phone. */
+.my-snakes .snake-details { flex: 1; }
+.my-snakes .snake-url { display: block; width: 0; min-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 12.5px; color: var(--muted); }
+.my-snakes .snake-url:hover { color: var(--pink); }
+
+/* snake test results: each call's details sit in a full-width row beneath it */
+table.data.test-results tr:hover td { background: none; }
+table.data.test-results tr.call td { border-bottom: 0; padding-bottom: 4px; }
+table.data.test-results tr.call-details td { padding-top: 0; font-size: 14px; color: var(--muted); overflow-wrap: anywhere; }
+table.data.test-results pre { margin-top: 8px; font-family: var(--mono); font-size: 12.5px; white-space: pre-wrap; overflow-wrap: anywhere; }
 
 @media (max-width: 640px) {
   .profile-head { gap: 16px; }
@@ -1094,8 +1110,8 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
 
 @media (max-width: 640px) {
   .bracket-scroll { margin-left: -20px; margin-right: -20px; padding-left: 20px; padding-right: 20px; }
-  .reg-actions .btn.sm, .owner-actions .btn.sm { padding: 10px 16px; }
-  .seed-form input { padding: 10px 8px; }
+  .reg-actions .btn.sm, .owner-actions .btn.sm { padding: 11px 16px; }
+  .seed-form input { padding: 10px 8px; font-size: 16px; min-height: 44px; }
 }
 
 /* --- responsive ---------------------------------------------------------- */
