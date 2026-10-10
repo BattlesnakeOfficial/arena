@@ -106,10 +106,12 @@ async fn render_customizations_page(
                 @if let Some(message) = redeem_error {
                     p role="alert" { (message) }
                 }
-                form method="post" action="/customizations/redeem" {
-                    label for="redeem-code" { "Redeem a code" }
-                    input id="redeem-code" type="text" name="code" required;
-                    button type="submit" { "Redeem" }
+                form class="form-stack cz-redeem" method="post" action="/customizations/redeem" {
+                    div class="field" {
+                        label for="redeem-code" { "Redeem a code" }
+                        input id="redeem-code" type="text" name="code" required autocomplete="off" autocapitalize="characters" spellcheck="false";
+                    }
+                    button type="submit" class="btn solid" { "Redeem" }
                 }
                 div class="cz-token-panel" aria-label="Token unlocks" {
                     h2 { "Token unlocks" }
@@ -178,16 +180,16 @@ pub async fn redeem_code(
     Form(form): Form<RedeemCodeForm>,
 ) -> ServerResult<axum::response::Response, StatusCode> {
     let outcome = codes::redeem(&state.db, user.user_id, &form.code).await?;
-    if let RedeemOutcome::Granted { name, kind, slug } = outcome {
-        if let Err(error) = flasher
-            .success(format!("Unlocked {name} ({kind}: {slug})"))
-            .await
-        {
-            tracing::error!(error = %format!("{error:#}"), "Failed to flash code redemption");
-        }
-        return Ok(Redirect::to("/customizations").into_response());
-    }
     let (status, message) = match outcome {
+        RedeemOutcome::Granted { name, kind, slug } => {
+            if let Err(error) = flasher
+                .success(format!("Unlocked {name} ({kind}: {slug})"))
+                .await
+            {
+                tracing::error!(error = %format!("{error:#}"), "Failed to flash code redemption");
+            }
+            return Ok(Redirect::to("/customizations").into_response());
+        }
         RedeemOutcome::Unknown => (StatusCode::NOT_FOUND, "Unknown code"),
         RedeemOutcome::Expired => (StatusCode::GONE, "This code has expired"),
         RedeemOutcome::Disabled => (StatusCode::FORBIDDEN, "This code is disabled"),
@@ -201,7 +203,6 @@ pub async fn redeem_code(
             StatusCode::TOO_MANY_REQUESTS,
             "Too many failed redemptions. Try again later",
         ),
-        RedeemOutcome::Granted { .. } => unreachable!(),
     };
     Ok((
         status,
@@ -334,6 +335,15 @@ mod tests {
         let signed =
             html(request_at(&app, Method::GET, "/customizations", Some(&cookie), "").await).await;
         assert!(signed.contains("action=\"/customizations/redeem\""));
+        let redeem_form = signed
+            .split("<form class=\"form-stack cz-redeem\"")
+            .nth(1)
+            .expect("redeem form")
+            .split("</form>")
+            .next()
+            .expect("redeem form end");
+        assert!(redeem_form.contains("class=\"btn solid\""));
+        assert!(redeem_form.contains("id=\"redeem-code\""));
         assert!(!signed.contains("head: hydra"));
         let input = CreateCode {
             customization_type: "head".into(),
@@ -359,7 +369,16 @@ mod tests {
         assert!(page.contains("Unlocked Community Hydra (head: hydra)"));
         assert!(page.contains("head: hydra"));
         assert!(!page.contains("tail: hydra"));
-        assert!(page.contains("Unlocked"));
+        let slug_position = page.rfind("head: hydra").expect("hydra head slug");
+        let card_start = page[..slug_position]
+            .rfind("<div class=\"cz-item")
+            .expect("hydra head card");
+        let card_tail = &page[card_start..];
+        let card_end = card_tail.find("</section>").expect("end of hydra group");
+        let hydra_card = &card_tail[..card_end];
+        assert!(hydra_card.contains("badge ok"));
+        assert!(hydra_card.contains("Unlocked"));
+        assert!(!hydra_card.contains("cz-unlock-form"));
         assert_eq!(
             customizations::token_balance(&db, player).await.unwrap(),
             before

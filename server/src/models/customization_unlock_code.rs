@@ -181,13 +181,15 @@ pub async fn redeem(pool: &PgPool, user_id: Uuid, submitted: &str) -> cja::Resul
     };
     let Some(code) = code else {
         record_failure(&mut tx, user_id).await?;
-        tx.commit().await?;
+        tx.commit()
+            .await
+            .wrap_err("Failed to commit failed code attempt")?;
         return Ok(RedeemOutcome::Unknown);
     };
     let redeemed = sqlx::query!("SELECT 1 AS marker FROM customization_code_redemptions WHERE code_id = $1 AND user_id = $2", code.code_id, user_id)
-        .fetch_optional(&mut *tx).await?;
+        .fetch_optional(&mut *tx).await.wrap_err("Failed to check prior code redemption")?;
     let owned = sqlx::query!("SELECT 1 AS marker FROM customization_grants WHERE user_id = $1 AND customization_type = $2 AND slug = $3", user_id, code.customization_type, code.slug)
-        .fetch_optional(&mut *tx).await?;
+        .fetch_optional(&mut *tx).await.wrap_err("Failed to check existing grant")?;
     let outcome = if redeemed.is_some() {
         Some(RedeemOutcome::AlreadyRedeemed)
     } else if code.disabled_at.is_some() {
@@ -202,15 +204,20 @@ pub async fn redeem(pool: &PgPool, user_id: Uuid, submitted: &str) -> cja::Resul
         None
     };
     if let Some(outcome) = outcome {
+        // Every non-granted outcome except RateLimited records a failed attempt, including AlreadyRedeemed and AlreadyOwned.
         record_failure(&mut tx, user_id).await?;
-        tx.commit().await?;
+        tx.commit()
+            .await
+            .wrap_err("Failed to commit failed code attempt")?;
         return Ok(outcome);
     }
     let inserted = sqlx::query!("INSERT INTO customization_grants (user_id, customization_type, slug, source) VALUES ($1, $2, $3, 'code') ON CONFLICT (user_id, customization_type, slug) DO NOTHING", user_id, code.customization_type, code.slug)
         .execute(&mut *tx).await.wrap_err("Failed to grant code customization")?;
     if inserted.rows_affected() == 0 {
         record_failure(&mut tx, user_id).await?;
-        tx.commit().await?;
+        tx.commit()
+            .await
+            .wrap_err("Failed to commit failed code attempt")?;
         return Ok(RedeemOutcome::AlreadyOwned);
     }
     sqlx::query!(

@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::components::page_factory::PageFactory;
 use crate::customizations::{Head, Tail};
-use crate::errors::ServerResult;
+use crate::errors::{ServerResult, WithStatus};
 use crate::models::customization_unlock_code::{self as codes, CreateCode, ValidationError};
 use crate::models::moderation_flag::{self, ModerationFlagListing};
 use crate::routes::auth::{AdminApiUser, AdminUser};
@@ -517,9 +517,10 @@ pub async fn list_codes(
     let listings = codes::list(&state.db).await?;
     Ok(page_factory.create_page("Unlock codes".to_string(), Box::new(html! {
         h1 { "Unlock codes" }
-        form method="post" action="/admin/codes" {
-            label for="code-item" { "Item" }
-            select id="code-item" name="item" required {
+        form class="form-stack admin-code-form" method="post" action="/admin/codes" {
+            div class="field" {
+                label for="code-item" { "Item" }
+                select id="code-item" name="item" required {
                 @for head in Head::ALL.iter().filter(|h| !h.def().is_free()) {
                     option value=(format!("head:{}", head.slug())) {
                         (head.def().display_name) " (head, " (head.def().group.title()) ")"
@@ -530,16 +531,23 @@ pub async fn list_codes(
                         (tail.def().display_name) " (tail, " (tail.def().group.title()) ")"
                     }
                 }
+                }
             }
-            label for="code-max" { "Maximum redemptions" }
-            input id="code-max" type="number" min="1" name="max_redemptions" required;
-            label for="code-expiry" { "Expiry (RFC3339 with timezone, optional)" }
-            input id="code-expiry" type="text" name="expires_at" placeholder="2026-10-31T23:59:00-04:00";
-            label for="code-note" { "Internal note (optional)" }
-            input id="code-note" type="text" name="note";
-            button type="submit" { "Create code" }
+            div class="field" {
+                label for="code-max" { "Maximum redemptions" }
+                input id="code-max" type="number" min="1" name="max_redemptions" required;
+            }
+            div class="field" {
+                label for="code-expiry" { "Expiry (RFC3339 with timezone, optional)" }
+                input id="code-expiry" type="text" name="expires_at" placeholder="2026-10-31T23:59:00-04:00";
+            }
+            div class="field" {
+                label for="code-note" { "Internal note (optional)" }
+                input id="code-note" type="text" name="note";
+            }
+            button type="submit" class="btn solid" { "Create code" }
         }
-        table {
+        div style="overflow-x:auto" { table {
             thead { tr { th { "Item" } th { "Note" } th { "Used / max" } th { "Expiry" } th { "Created" } th { "Status" } } }
             tbody {
                 @for code in &listings {
@@ -560,7 +568,7 @@ pub async fn list_codes(
                     }
                 }
             }
-        }
+        } }
     })))
 }
 
@@ -632,7 +640,9 @@ pub async fn disable_code(
     AdminUser(_user): AdminUser,
     Path(code_id): Path<Uuid>,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
-    codes::disable(&state.db, code_id).await?;
+    if !codes::disable(&state.db, code_id).await? {
+        return Err("Unlock code not found".to_string()).with_status(StatusCode::NOT_FOUND);
+    }
     Ok(Redirect::to("/admin/codes"))
 }
 
@@ -738,6 +748,20 @@ mod tests {
                 StatusCode::UNPROCESSABLE_ENTITY
             );
         }
+        let past_expiry = code_request(
+            &app,
+            Method::POST,
+            "/admin/codes",
+            Some(&admin_cookie),
+            "item=head%3Ahydra&max_redemptions=1&expires_at=2000-01-01T00%3A00%3A00Z",
+        )
+        .await;
+        assert_eq!(past_expiry.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            body(past_expiry)
+                .await
+                .contains("Expiry must be in the future")
+        );
         let created = code_request(
             &app,
             Method::POST,
@@ -782,6 +806,18 @@ mod tests {
         )
         .await;
         assert_eq!(disable.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            code_request(
+                &app,
+                Method::POST,
+                &format!("/admin/codes/{code_id}/disable"),
+                Some(&admin_cookie),
+                "x=1",
+            )
+            .await
+            .status(),
+            StatusCode::NOT_FOUND
+        );
         let third = create_user_session(&db, 164573, false).await;
         assert_eq!(
             codes::redeem(&db, session_user_id(&db, third).await, code)
