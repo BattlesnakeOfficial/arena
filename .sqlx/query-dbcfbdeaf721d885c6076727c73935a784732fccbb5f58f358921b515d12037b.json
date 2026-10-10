@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT game_battlesnake_id, food_eaten AS \"food_eaten!\"\n         FROM game_battlesnakes\n         WHERE game_id = $1 AND food_eaten IS NOT NULL",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "game_battlesnake_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "food_eaten!",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "dbcfbdeaf721d885c6076727c73935a784732fccbb5f58f358921b515d12037b"
+}
