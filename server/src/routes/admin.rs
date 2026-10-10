@@ -228,24 +228,24 @@ pub async fn dashboard(
                 h2 { "Job Queue" }
                 table style="border-collapse: collapse; width: 100%; max-width: 600px; margin-bottom: 20px;" {
                     tr {
-                        th style="text-align: left; padding: 8px; border-bottom: 1px solid #ddd; background-color: #f5f5f5;" { "Status" }
-                        th style="text-align: right; padding: 8px; border-bottom: 1px solid #ddd; background-color: #f5f5f5;" { "Count" }
+                        th style="text-align: left; padding: 8px; border-bottom: 1px solid var(--hairline); background-color: var(--pill);" { "Status" }
+                        th style="text-align: right; padding: 8px; border-bottom: 1px solid var(--hairline); background-color: var(--pill);" { "Count" }
                     }
                     tr {
-                        td style="padding: 8px; border-bottom: 1px solid #ddd;" { "Ready" }
-                        td style="text-align: right; padding: 8px; border-bottom: 1px solid #ddd;" { (metrics.job_queue.ready) }
+                        td style="padding: 8px; border-bottom: 1px solid var(--hairline);" { "Ready" }
+                        td style="text-align: right; padding: 8px; border-bottom: 1px solid var(--hairline);" { (metrics.job_queue.ready) }
                     }
                     tr {
-                        td style="padding: 8px; border-bottom: 1px solid #ddd;" { "Running" }
-                        td style="text-align: right; padding: 8px; border-bottom: 1px solid #ddd;" { (metrics.job_queue.running) }
+                        td style="padding: 8px; border-bottom: 1px solid var(--hairline);" { "Running" }
+                        td style="text-align: right; padding: 8px; border-bottom: 1px solid var(--hairline);" { (metrics.job_queue.running) }
                     }
                     tr {
-                        td style="padding: 8px; border-bottom: 1px solid #ddd;" { "Scheduled" }
-                        td style="text-align: right; padding: 8px; border-bottom: 1px solid #ddd;" { (metrics.job_queue.scheduled) }
+                        td style="padding: 8px; border-bottom: 1px solid var(--hairline);" { "Scheduled" }
+                        td style="text-align: right; padding: 8px; border-bottom: 1px solid var(--hairline);" { (metrics.job_queue.scheduled) }
                     }
                     tr {
-                        td style="padding: 8px; border-bottom: 1px solid #ddd; font-weight: bold;" { "Total" }
-                        td style="text-align: right; padding: 8px; border-bottom: 1px solid #ddd; font-weight: bold;" { (metrics.job_queue.total) }
+                        td style="padding: 8px; border-bottom: 1px solid var(--hairline); font-weight: bold;" { "Total" }
+                        td style="text-align: right; padding: 8px; border-bottom: 1px solid var(--hairline); font-weight: bold;" { (metrics.job_queue.total) }
                     }
                 }
 
@@ -253,13 +253,13 @@ pub async fn dashboard(
                     h3 { "Jobs by Type" }
                     table style="border-collapse: collapse; width: 100%; max-width: 600px; margin-bottom: 20px;" {
                         tr {
-                            th style="text-align: left; padding: 8px; border-bottom: 1px solid #ddd; background-color: #f5f5f5;" { "Job Name" }
-                            th style="text-align: right; padding: 8px; border-bottom: 1px solid #ddd; background-color: #f5f5f5;" { "Count" }
+                            th style="text-align: left; padding: 8px; border-bottom: 1px solid var(--hairline); background-color: var(--pill);" { "Job Name" }
+                            th style="text-align: right; padding: 8px; border-bottom: 1px solid var(--hairline); background-color: var(--pill);" { "Count" }
                         }
                         @for job in &metrics.jobs_by_name {
                             tr {
-                                td style="padding: 8px; border-bottom: 1px solid #ddd;" { (job.name) }
-                                td style="text-align: right; padding: 8px; border-bottom: 1px solid #ddd;" { (job.count) }
+                                td style="padding: 8px; border-bottom: 1px solid var(--hairline);" { (job.name) }
+                                td style="text-align: right; padding: 8px; border-bottom: 1px solid var(--hairline);" { (job.count) }
                             }
                         }
                     }
@@ -270,64 +270,64 @@ pub async fn dashboard(
                 h3 { "By Status" }
                 table style="border-collapse: collapse; width: 100%; max-width: 600px; margin-bottom: 20px;" {
                     tr {
-                        th style="text-align: left; padding: 8px; border-bottom: 1px solid #ddd; background-color: #f5f5f5;" { "Status" }
-                        th style="text-align: right; padding: 8px; border-bottom: 1px solid #ddd; background-color: #f5f5f5;" { "Count" }
+                        th style="text-align: left; padding: 8px; border-bottom: 1px solid var(--hairline); background-color: var(--pill);" { "Status" }
+                        th style="text-align: right; padding: 8px; border-bottom: 1px solid var(--hairline); background-color: var(--pill);" { "Count" }
                     }
                     tr {
-                        td style="padding: 8px; border-bottom: 1px solid #ddd;" { "Waiting" }
-                        td style="text-align: right; padding: 8px; border-bottom: 1px solid #ddd;" { (metrics.game_counts.waiting) }
+                        td style="padding: 8px; border-bottom: 1px solid var(--hairline);" { "Waiting" }
+                        td style="text-align: right; padding: 8px; border-bottom: 1px solid var(--hairline);" { (metrics.game_counts.waiting) }
                     }
                     tr {
-                        td style="padding: 8px; border-bottom: 1px solid #ddd;" { "Running" }
-                        td style="text-align: right; padding: 8px; border-bottom: 1px solid #ddd;" { (metrics.game_counts.running) }
+                        td style="padding: 8px; border-bottom: 1px solid var(--hairline);" { "Running" }
+                        td style="text-align: right; padding: 8px; border-bottom: 1px solid var(--hairline);" { (metrics.game_counts.running) }
                     }
                     tr {
-                        td style="padding: 8px; border-bottom: 1px solid #ddd;" { "Finished" }
-                        td style="text-align: right; padding: 8px; border-bottom: 1px solid #ddd;" { (metrics.game_counts.finished) }
+                        td style="padding: 8px; border-bottom: 1px solid var(--hairline);" { "Finished" }
+                        td style="text-align: right; padding: 8px; border-bottom: 1px solid var(--hairline);" { (metrics.game_counts.finished) }
                     }
                     tr {
-                        td style="padding: 8px; border-bottom: 1px solid #ddd; font-weight: bold;" { "Total" }
-                        td style="text-align: right; padding: 8px; border-bottom: 1px solid #ddd; font-weight: bold;" { (metrics.game_counts.total) }
+                        td style="padding: 8px; border-bottom: 1px solid var(--hairline); font-weight: bold;" { "Total" }
+                        td style="text-align: right; padding: 8px; border-bottom: 1px solid var(--hairline); font-weight: bold;" { (metrics.game_counts.total) }
                     }
                 }
 
                 h3 { "Games Created" }
                 table style="border-collapse: collapse; width: 100%; max-width: 600px; margin-bottom: 20px;" {
                     tr {
-                        th style="text-align: left; padding: 8px; border-bottom: 1px solid #ddd; background-color: #f5f5f5;" { "Window" }
-                        th style="text-align: right; padding: 8px; border-bottom: 1px solid #ddd; background-color: #f5f5f5;" { "Count" }
+                        th style="text-align: left; padding: 8px; border-bottom: 1px solid var(--hairline); background-color: var(--pill);" { "Window" }
+                        th style="text-align: right; padding: 8px; border-bottom: 1px solid var(--hairline); background-color: var(--pill);" { "Count" }
                     }
                     tr {
-                        td style="padding: 8px; border-bottom: 1px solid #ddd;" { "Last Hour" }
-                        td style="text-align: right; padding: 8px; border-bottom: 1px solid #ddd;" { (metrics.games_created.last_hour) }
+                        td style="padding: 8px; border-bottom: 1px solid var(--hairline);" { "Last Hour" }
+                        td style="text-align: right; padding: 8px; border-bottom: 1px solid var(--hairline);" { (metrics.games_created.last_hour) }
                     }
                     tr {
-                        td style="padding: 8px; border-bottom: 1px solid #ddd;" { "Last 24 Hours" }
-                        td style="text-align: right; padding: 8px; border-bottom: 1px solid #ddd;" { (metrics.games_created.last_24h) }
+                        td style="padding: 8px; border-bottom: 1px solid var(--hairline);" { "Last 24 Hours" }
+                        td style="text-align: right; padding: 8px; border-bottom: 1px solid var(--hairline);" { (metrics.games_created.last_24h) }
                     }
                     tr {
-                        td style="padding: 8px; border-bottom: 1px solid #ddd;" { "Last 7 Days" }
-                        td style="text-align: right; padding: 8px; border-bottom: 1px solid #ddd;" { (metrics.games_created.last_7d) }
+                        td style="padding: 8px; border-bottom: 1px solid var(--hairline);" { "Last 7 Days" }
+                        td style="text-align: right; padding: 8px; border-bottom: 1px solid var(--hairline);" { (metrics.games_created.last_7d) }
                     }
                 }
 
                 h3 { "Games Finished" }
                 table style="border-collapse: collapse; width: 100%; max-width: 600px; margin-bottom: 20px;" {
                     tr {
-                        th style="text-align: left; padding: 8px; border-bottom: 1px solid #ddd; background-color: #f5f5f5;" { "Window" }
-                        th style="text-align: right; padding: 8px; border-bottom: 1px solid #ddd; background-color: #f5f5f5;" { "Count" }
+                        th style="text-align: left; padding: 8px; border-bottom: 1px solid var(--hairline); background-color: var(--pill);" { "Window" }
+                        th style="text-align: right; padding: 8px; border-bottom: 1px solid var(--hairline); background-color: var(--pill);" { "Count" }
                     }
                     tr {
-                        td style="padding: 8px; border-bottom: 1px solid #ddd;" { "Last Hour" }
-                        td style="text-align: right; padding: 8px; border-bottom: 1px solid #ddd;" { (metrics.games_finished.last_hour) }
+                        td style="padding: 8px; border-bottom: 1px solid var(--hairline);" { "Last Hour" }
+                        td style="text-align: right; padding: 8px; border-bottom: 1px solid var(--hairline);" { (metrics.games_finished.last_hour) }
                     }
                     tr {
-                        td style="padding: 8px; border-bottom: 1px solid #ddd;" { "Last 24 Hours" }
-                        td style="text-align: right; padding: 8px; border-bottom: 1px solid #ddd;" { (metrics.games_finished.last_24h) }
+                        td style="padding: 8px; border-bottom: 1px solid var(--hairline);" { "Last 24 Hours" }
+                        td style="text-align: right; padding: 8px; border-bottom: 1px solid var(--hairline);" { (metrics.games_finished.last_24h) }
                     }
                     tr {
-                        td style="padding: 8px; border-bottom: 1px solid #ddd;" { "Last 7 Days" }
-                        td style="text-align: right; padding: 8px; border-bottom: 1px solid #ddd;" { (metrics.games_finished.last_7d) }
+                        td style="padding: 8px; border-bottom: 1px solid var(--hairline);" { "Last 7 Days" }
+                        td style="text-align: right; padding: 8px; border-bottom: 1px solid var(--hairline);" { (metrics.games_finished.last_7d) }
                     }
                 }
 
@@ -342,29 +342,31 @@ pub async fn dashboard(
 
                 @if !metrics.recent_errors.is_empty() {
                     h2 { "Recent Job Errors" }
-                    table style="border-collapse: collapse; width: 100%; margin-bottom: 20px;" {
-                        tr {
-                            th style="text-align: left; padding: 8px; border-bottom: 1px solid #ddd; background-color: #f5f5f5;" { "Job Name" }
-                            th style="text-align: right; padding: 8px; border-bottom: 1px solid #ddd; background-color: #f5f5f5;" { "Error Count" }
-                            th style="text-align: left; padding: 8px; border-bottom: 1px solid #ddd; background-color: #f5f5f5;" { "Last Error" }
-                            th style="text-align: left; padding: 8px; border-bottom: 1px solid #ddd; background-color: #f5f5f5;" { "Last Failed" }
-                        }
-                        @for err in &metrics.recent_errors {
+                    div class="table-scroll" {
+                        table style="border-collapse: collapse; width: 100%; margin-bottom: 20px;" {
                             tr {
-                                td style="padding: 8px; border-bottom: 1px solid #ddd;" { (err.name) }
-                                td style="text-align: right; padding: 8px; border-bottom: 1px solid #ddd;" { (err.error_count) }
-                                td style="padding: 8px; border-bottom: 1px solid #ddd; max-width: 400px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" {
-                                    @if let Some(msg) = &err.last_error_message {
-                                        (msg)
-                                    } @else {
-                                        "-"
+                                th style="text-align: left; padding: 8px; border-bottom: 1px solid var(--hairline); background-color: var(--pill);" { "Job Name" }
+                                th style="text-align: right; padding: 8px; border-bottom: 1px solid var(--hairline); background-color: var(--pill);" { "Error Count" }
+                                th style="text-align: left; padding: 8px; border-bottom: 1px solid var(--hairline); background-color: var(--pill);" { "Last Error" }
+                                th style="text-align: left; padding: 8px; border-bottom: 1px solid var(--hairline); background-color: var(--pill);" { "Last Failed" }
+                            }
+                            @for err in &metrics.recent_errors {
+                                tr {
+                                    td style="padding: 8px; border-bottom: 1px solid var(--hairline);" { (err.name) }
+                                    td style="text-align: right; padding: 8px; border-bottom: 1px solid var(--hairline);" { (err.error_count) }
+                                    td style="padding: 8px; border-bottom: 1px solid var(--hairline); max-width: 400px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" {
+                                        @if let Some(msg) = &err.last_error_message {
+                                            (msg)
+                                        } @else {
+                                            "-"
+                                        }
                                     }
-                                }
-                                td style="padding: 8px; border-bottom: 1px solid #ddd;" {
-                                    @if let Some(ts) = err.last_failed_at {
-                                        (ts.format("%Y-%m-%d %H:%M:%S"))
-                                    } @else {
-                                        "-"
+                                    td style="padding: 8px; border-bottom: 1px solid var(--hairline);" {
+                                        @if let Some(ts) = err.last_failed_at {
+                                            (ts.format("%Y-%m-%d %H:%M:%S"))
+                                        } @else {
+                                            "-"
+                                        }
                                     }
                                 }
                             }
@@ -396,7 +398,7 @@ pub async fn moderation_queue(
     };
     let cell = |value: String| {
         maud::html! {
-            td style="padding: 8px; border-bottom: 1px solid #ddd;" { (value) }
+            td style="padding: 8px; border-bottom: 1px solid var(--hairline);" { (value) }
         }
     };
     let prob_cell = |v: Option<f64>| cell(fmt(v));
@@ -404,13 +406,13 @@ pub async fn moderation_queue(
     let rows = flags.iter().map(|flag: &ModerationFlagListing| {
         maud::html! {
             tr {
-                td style="padding: 8px; border-bottom: 1px solid #ddd; white-space: nowrap;" { (flag.created_at.format("%Y-%m-%d %H:%M")) }
-                td style="padding: 8px; border-bottom: 1px solid #ddd;" { (flag.field_kind) }
+                td style="padding: 8px; border-bottom: 1px solid var(--hairline); white-space: nowrap;" { (flag.created_at.format("%Y-%m-%d %H:%M")) }
+                td style="padding: 8px; border-bottom: 1px solid var(--hairline);" { (flag.field_kind) }
                 // maud escapes the text — the submitted string renders
                 // inert even though it's attacker-controlled.
-                td style="padding: 8px; border-bottom: 1px solid #ddd; max-width: 320px;" { (flag.text) }
-                td style="padding: 8px; border-bottom: 1px solid #ddd;" { (flag.user_login) }
-                td style="padding: 8px; border-bottom: 1px solid #ddd;" { (flag.decision) }
+                td style="padding: 8px; border-bottom: 1px solid var(--hairline); max-width: 320px;" { (flag.text) }
+                td style="padding: 8px; border-bottom: 1px solid var(--hairline);" { (flag.user_login) }
+                td style="padding: 8px; border-bottom: 1px solid var(--hairline);" { (flag.decision) }
                 (prob_cell(flag.action_confidence))
                 (prob_cell(flag.action_block_mass))
                 (prob_cell(flag.hate_or_slur))
@@ -418,9 +420,9 @@ pub async fn moderation_queue(
                 (prob_cell(flag.harassment_or_threat))
                 (prob_cell(flag.impersonates_staff_or_platform))
                 (prob_cell(flag.disguised_evasion))
-                td style="padding: 8px; border-bottom: 1px solid #ddd;" { (flag.action_choice.as_deref().unwrap_or("—")) }
-                td style="padding: 8px; border-bottom: 1px solid #ddd;" { (flag.model.as_deref().unwrap_or("—")) }
-                td style="padding: 8px; border-bottom: 1px solid #ddd;" { (flag.subject_id.map(|id| id.to_string()).unwrap_or_else(|| "—".to_string())) }
+                td style="padding: 8px; border-bottom: 1px solid var(--hairline);" { (flag.action_choice.as_deref().unwrap_or("—")) }
+                td style="padding: 8px; border-bottom: 1px solid var(--hairline);" { (flag.model.as_deref().unwrap_or("—")) }
+                td style="padding: 8px; border-bottom: 1px solid var(--hairline);" { (flag.subject_id.map(|id| id.to_string()).unwrap_or_else(|| "—".to_string())) }
             }
         }
     });
@@ -437,26 +439,28 @@ pub async fn moderation_queue(
                     @if flags.is_empty() {
                         p { "No unreviewed moderation flags." }
                     } @else {
-                        table style="border-collapse: collapse; width: 100%; font-size: 13px;" {
-                            tr {
-                                th style="text-align: left; padding: 8px; border-bottom: 1px solid #ddd; background-color: #f5f5f5;" { "Created" }
-                                th style="text-align: left; padding: 8px; border-bottom: 1px solid #ddd; background-color: #f5f5f5;" { "Field" }
-                                th style="text-align: left; padding: 8px; border-bottom: 1px solid #ddd; background-color: #f5f5f5;" { "Text" }
-                                th style="text-align: left; padding: 8px; border-bottom: 1px solid #ddd; background-color: #f5f5f5;" { "Owner" }
-                                th style="text-align: left; padding: 8px; border-bottom: 1px solid #ddd; background-color: #f5f5f5;" { "Decision" }
-                                th style="text-align: right; padding: 8px; border-bottom: 1px solid #ddd; background-color: #f5f5f5;" { "Conf" }
-                                th style="text-align: right; padding: 8px; border-bottom: 1px solid #ddd; background-color: #f5f5f5;" { "Block mass" }
-                                th style="text-align: right; padding: 8px; border-bottom: 1px solid #ddd; background-color: #f5f5f5;" { "Hate" }
-                                th style="text-align: right; padding: 8px; border-bottom: 1px solid #ddd; background-color: #f5f5f5;" { "Sexual" }
-                                th style="text-align: right; padding: 8px; border-bottom: 1px solid #ddd; background-color: #f5f5f5;" { "Harass" }
-                                th style="text-align: right; padding: 8px; border-bottom: 1px solid #ddd; background-color: #f5f5f5;" { "Impersonate" }
-                                th style="text-align: right; padding: 8px; border-bottom: 1px solid #ddd; background-color: #f5f5f5;" { "Evasion" }
-                                th style="text-align: left; padding: 8px; border-bottom: 1px solid #ddd; background-color: #f5f5f5;" { "Action" }
-                                th style="text-align: left; padding: 8px; border-bottom: 1px solid #ddd; background-color: #f5f5f5;" { "Model" }
-                                th style="text-align: left; padding: 8px; border-bottom: 1px solid #ddd; background-color: #f5f5f5;" { "Subject" }
-                            }
-                            @for row in rows {
-                                (row)
+                        div class="table-scroll" {
+                            table style="border-collapse: collapse; width: 100%; font-size: 13px;" {
+                                tr {
+                                    th style="text-align: left; padding: 8px; border-bottom: 1px solid var(--hairline); background-color: var(--pill);" { "Created" }
+                                    th style="text-align: left; padding: 8px; border-bottom: 1px solid var(--hairline); background-color: var(--pill);" { "Field" }
+                                    th style="text-align: left; padding: 8px; border-bottom: 1px solid var(--hairline); background-color: var(--pill);" { "Text" }
+                                    th style="text-align: left; padding: 8px; border-bottom: 1px solid var(--hairline); background-color: var(--pill);" { "Owner" }
+                                    th style="text-align: left; padding: 8px; border-bottom: 1px solid var(--hairline); background-color: var(--pill);" { "Decision" }
+                                    th style="text-align: right; padding: 8px; border-bottom: 1px solid var(--hairline); background-color: var(--pill);" { "Conf" }
+                                    th style="text-align: right; padding: 8px; border-bottom: 1px solid var(--hairline); background-color: var(--pill);" { "Block mass" }
+                                    th style="text-align: right; padding: 8px; border-bottom: 1px solid var(--hairline); background-color: var(--pill);" { "Hate" }
+                                    th style="text-align: right; padding: 8px; border-bottom: 1px solid var(--hairline); background-color: var(--pill);" { "Sexual" }
+                                    th style="text-align: right; padding: 8px; border-bottom: 1px solid var(--hairline); background-color: var(--pill);" { "Harass" }
+                                    th style="text-align: right; padding: 8px; border-bottom: 1px solid var(--hairline); background-color: var(--pill);" { "Impersonate" }
+                                    th style="text-align: right; padding: 8px; border-bottom: 1px solid var(--hairline); background-color: var(--pill);" { "Evasion" }
+                                    th style="text-align: left; padding: 8px; border-bottom: 1px solid var(--hairline); background-color: var(--pill);" { "Action" }
+                                    th style="text-align: left; padding: 8px; border-bottom: 1px solid var(--hairline); background-color: var(--pill);" { "Model" }
+                                    th style="text-align: left; padding: 8px; border-bottom: 1px solid var(--hairline); background-color: var(--pill);" { "Subject" }
+                                }
+                                @for row in rows {
+                                    (row)
+                                }
                             }
                         }
                     }
