@@ -282,6 +282,17 @@ main { flex: 1; width: 100%; }
 .stat .value .live { color: var(--pink); }
 
 /* hairline data tables */
+/* Tables too wide for a phone scroll sideways rather than dropping columns.
+   The `local` paper gradients ride along with the content and cover the fixed
+   edge shadows, so a shadow only shows on a side with more to scroll to. */
+.table-scroll {
+  overflow-x: auto;
+  background:
+    linear-gradient(to right, var(--paper) 40%, transparent) left / 32px 100% no-repeat local,
+    linear-gradient(to left, var(--paper) 40%, transparent) right / 32px 100% no-repeat local,
+    radial-gradient(farthest-side at 0 50%, color-mix(in srgb, var(--ink) 16%, transparent), transparent) left / 12px 100% no-repeat scroll,
+    radial-gradient(farthest-side at 100% 50%, color-mix(in srgb, var(--ink) 16%, transparent), transparent) right / 12px 100% no-repeat scroll;
+}
 table.data { width: 100%; border-collapse: collapse; }
 table.data th {
   font-family: var(--mono);
@@ -393,7 +404,7 @@ table.data td.rating { font-family: var(--mono); font-weight: 600; font-size: 15
 .meta-list dd { font-family: var(--mono); font-size: 13px; }
 
 /* table + rail layout */
-.grid { display: grid; grid-template-columns: 1fr 320px; gap: 56px; margin-top: 44px; align-items: start; }
+.grid { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 56px; margin-top: 44px; align-items: start; }
 
 /* small variants & badges */
 .stat .value.sm { font-family: var(--mono); font-weight: 500; font-size: 17px; padding-top: 9px; }
@@ -1088,8 +1099,7 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
 
 /* --- responsive ---------------------------------------------------------- */
 @media (max-width: 980px) {
-  .grid { grid-template-columns: 1fr; }
-  .hide-md { display: none; }
+  .grid { grid-template-columns: minmax(0, 1fr); }
   .site-nav .links { display: none; }
   .mobile-menu { display: block; }
   .stats { grid-template-columns: repeat(2, 1fr); }
@@ -1121,6 +1131,7 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
   .modes::-webkit-scrollbar { display: none; }
   .mode { white-space: nowrap; }
   table.data th, table.data td { padding-left: 8px; padding-right: 8px; }
+  .table-scroll th, .table-scroll td { white-space: nowrap; }
   .site-footer .inner { padding: 24px 20px; }
 }
 /* Narrow phones: logged-in nav is glyph + 2 theme buttons + menu + avatar.
