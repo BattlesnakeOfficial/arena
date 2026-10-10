@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT customization_grant_id FROM customization_grants WHERE user_id = $1 AND customization_type = $2 AND slug = $3",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "customization_grant_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "2e347cc1a834f449c1fb15d1aa5285d353e0c368625b28722abcfd8ea37e66f3"
+}

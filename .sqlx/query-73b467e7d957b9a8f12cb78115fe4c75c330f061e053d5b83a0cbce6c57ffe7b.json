@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO customization_active_weeks (user_id, week_start) VALUES ($1, '2026-10-05')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "73b467e7d957b9a8f12cb78115fe4c75c330f061e053d5b83a0cbce6c57ffe7b"
+}

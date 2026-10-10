@@ -102,6 +102,29 @@ pub async fn get_latest_frame(
     Ok(frame)
 }
 
+/// The persisted frame for one turn of a game, or `None` if that turn has no
+/// frame (not played yet, or rolled back by a retry).
+pub async fn get_turn_frame(
+    pool: &PgPool,
+    game_id: Uuid,
+    turn_number: i32,
+) -> cja::Result<Option<serde_json::Value>> {
+    let frame = sqlx::query_scalar!(
+        r#"
+        SELECT frame_data AS "frame_data!"
+        FROM turns
+        WHERE game_id = $1 AND turn_number = $2 AND frame_data IS NOT NULL
+        "#,
+        game_id,
+        turn_number
+    )
+    .fetch_optional(pool)
+    .await
+    .wrap_err("Failed to fetch turn frame")?;
+
+    Ok(frame)
+}
+
 /// Get turns for a game starting from a specific turn number
 /// Used for reconnection catch-up
 pub async fn get_turns_from(

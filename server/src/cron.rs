@@ -4,8 +4,8 @@ use cja::cron::{CronRegistry, Worker};
 use tokio_util::sync::CancellationToken;
 
 use crate::jobs::{
-    GameBackupJob, LeaderboardMatchmakerJob, RateLimitPruneJob, SnakeHealthSweeperJob,
-    StuckGameSweeperJob, StuckMatchSweeperJob,
+    CustomizationActiveWeekBackfillJob, GameBackupJob, LeaderboardMatchmakerJob, RateLimitPruneJob,
+    SnakeHealthSweeperJob, StuckGameSweeperJob, StuckMatchSweeperJob,
 };
 use crate::state::AppState;
 
@@ -26,6 +26,7 @@ pub const SNAKE_HEALTH_SWEEP_INTERVAL_SECS: u64 = 30 * 60;
 /// Stuck-game sweep interval. Fails non-tournament games left in
 /// waiting/running past the configured max age.
 pub const STUCK_GAME_SWEEP_INTERVAL_SECS: u64 = 30 * 60;
+pub const CUSTOMIZATION_ACTIVE_WEEK_BACKFILL_INTERVAL_SECS: u64 = 60 * 60;
 
 pub(crate) fn cron_registry() -> CronRegistry<AppState> {
     let mut registry = CronRegistry::new();
@@ -35,6 +36,11 @@ pub(crate) fn cron_registry() -> CronRegistry<AppState> {
         GameBackupJob,
         Some("Enqueue backup jobs for games from the last 4 hours"),
         Duration::from_secs(60 * 60),
+    );
+    registry.register_job(
+        CustomizationActiveWeekBackfillJob,
+        Some("Credit historical finished-game weeks"),
+        Duration::from_secs(CUSTOMIZATION_ACTIVE_WEEK_BACKFILL_INTERVAL_SECS),
     );
 
     // Leaderboard matchmaker: one round per derived interval, subject to worker delay.
@@ -115,7 +121,6 @@ pub(crate) async fn run_cron(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cja::jobs::registry::JobRegistry;
     use std::sync::{Arc, Mutex};
     use tracing::{field::Visit, instrument::WithSubscriber};
     use tracing_subscriber::{Layer, prelude::*};
@@ -159,21 +164,53 @@ mod tests {
         const { assert!(CRON_POLL_SECS < MATCHMAKER_INTERVAL_SECS) };
     }
 
-    /// Callback crons take the same interval claim as job crons, so they run
-    /// at most once per interval across schedulers. Every other cron must be a
-    /// registered job so its enqueue commits exactly once.
-    const CALLBACK_CRONS: &[&str] = &["LeaderboardGameDispatch"];
+    #[test]
+    fn every_cron_job_is_dispatchable_by_the_worker() {
+        let dispatchable =
+            <crate::jobs::Jobs as cja::jobs::registry::JobRegistry<AppState>>::job_names();
+        let mut undispatchable: Vec<_> = cron_registry()
+            .jobs()
+            .keys()
+            .copied()
+            .filter(|name| !dispatchable.contains(name))
+            .collect();
+        undispatchable.sort_unstable();
+        // Closure crons run in the cron worker; every Job cron is enqueued for
+        // the job worker, which fails names missing from impl_job_registry!.
+        // Job crons enqueue exactly once per interval across schedulers;
+        // callback crons take the same claim, so they run at most once.
+        assert_eq!(undispatchable, ["LeaderboardGameDispatch"]);
+    }
 
     #[test]
-    fn all_crons_are_registered_jobs_or_known_callbacks() {
+    fn active_week_backfill_runs_on_boot_then_hourly() {
         let registry = cron_registry();
-        assert!(!registry.jobs().is_empty());
-        for name in registry.jobs().keys() {
-            assert!(
-                crate::jobs::Jobs::job_names().contains(name) || CALLBACK_CRONS.contains(name),
-                "cron {name} is neither a registered job nor a known callback cron"
-            );
-        }
+        let job = registry
+            .get("CustomizationActiveWeekBackfillJob")
+            .expect("active-week backfill registered");
+        assert_eq!(
+            job.description,
+            Some("Credit historical finished-game weeks")
+        );
+        let cja::cron::Schedule::Interval(interval) = &job.schedule else {
+            panic!("active-week backfill must use an interval");
+        };
+        assert_eq!(
+            interval.0,
+            Duration::from_secs(CUSTOMIZATION_ACTIVE_WEEK_BACKFILL_INTERVAL_SECS)
+        );
+        let now = chrono::Utc::now();
+        assert!(job.schedule.should_run(None, now, now, cja::chrono_tz::UTC));
+        assert!(
+            !job.schedule
+                .should_run(Some(&now), now, now, cja::chrono_tz::UTC)
+        );
+        assert!(job.schedule.should_run(
+            Some(&(now - chrono::Duration::hours(2))),
+            now,
+            now,
+            cja::chrono_tz::UTC
+        ));
     }
 
     #[tokio::test]

@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT le.leaderboard_entry_id, le.first_place_finishes, wr.wins\n             FROM leaderboard_entries le\n             JOIN win_rate_stats wr USING (leaderboard_entry_id)\n             WHERE le.leaderboard_entry_id = ANY($1)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "leaderboard_entry_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "first_place_finishes",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 2,
+        "name": "wins",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "1645c64ab8faa41b471992579c9d34b1397bfe265b835dc4522a8e77d7831009"
+}

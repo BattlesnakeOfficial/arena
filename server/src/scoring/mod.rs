@@ -2,14 +2,24 @@ use async_trait::async_trait;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::models::game::GameType;
+
 /// Event representing the results of a completed leaderboard game.
 /// Passed to each scoring algorithm to update its internal state.
 pub struct GameResultEvent {
     pub leaderboard_game_id: Uuid,
     pub leaderboard_id: Uuid,
     pub game_id: Uuid,
-    /// (leaderboard_entry_id, battlesnake_id, placement). Placement is 1-indexed (1 = winner).
+    /// (leaderboard_entry_id, battlesnake_id, placement). Placement is 1-indexed;
+    /// snakes eliminated on the same turn share one.
     pub results: Vec<GameResultEntry>,
+}
+
+impl GameResultEvent {
+    /// The entry that won the game. `None` when first place was shared (a draw).
+    pub fn outright_winner(&self) -> Option<&GameResultEntry> {
+        crate::placement::outright_winner(&self.results, |result| Some(result.placement))
+    }
 }
 
 pub struct GameResultEntry {
@@ -46,6 +56,12 @@ pub trait ScoringAlgorithm: Send + Sync {
 
     /// Column header for the score in rankings tables (e.g. "Rating", "Win %").
     fn score_column_name(&self) -> &'static str;
+
+    /// Whether this score means anything in the given game mode. Scores that
+    /// don't apply are left off that mode's leaderboard pages.
+    fn applies_to(&self, _game_type: &GameType) -> bool {
+        true
+    }
 
     /// Initialize state for a new leaderboard entry.
     /// Must use INSERT ... ON CONFLICT DO NOTHING for idempotency.

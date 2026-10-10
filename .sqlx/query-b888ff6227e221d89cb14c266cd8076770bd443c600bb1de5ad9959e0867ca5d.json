@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO turns (game_id, turn_number, created_at) VALUES ($1, 1, $2)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b888ff6227e221d89cb14c266cd8076770bd443c600bb1de5ad9959e0867ca5d"
+}

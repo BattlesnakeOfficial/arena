@@ -62,6 +62,7 @@ impl PageFactory {
             base_url: self.base_url,
             theater,
             description: None,
+            social_image: None,
         }
     }
 }

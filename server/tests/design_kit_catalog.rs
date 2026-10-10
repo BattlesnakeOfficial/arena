@@ -16,6 +16,9 @@
 //!   catalog's range; this is the check that they stay there through the SVG pipeline),
 //!   except the one documented in [`EXCEPTIONS`], which must fire exactly as listed.
 //!
+//! It also checks `design_kit::catalog_shapes`, the generated table social cards draw
+//! from, against each file's fresh output (and [`write_catalog_shapes`] regenerates it).
+//!
 //! Failures are listed by slug. The files are processed in chunks across threads, each
 //! with the stack production uses (`PROCESS_STACK_BYTES`), so a deep file fails the test
 //! instead of aborting the binary.
@@ -26,7 +29,9 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use arena::design_kit::{
-    AssetKind, CleanShape, Limits, PROCESS_STACK_BYTES, Severity, Strategy, process_upload,
+    AssetKind, CleanShape, Limits, PROCESS_STACK_BYTES, Severity, Strategy,
+    catalog_shapes::{self, CATALOG_SHAPES},
+    process_upload,
 };
 use common::design_kit::*;
 
@@ -343,6 +348,14 @@ fn check(asset: &Asset, rows: &[Row]) -> Result<Checked, String> {
         problems.push(format!("warnings {warns:?}, expected {allowed:?}"));
     }
 
+    match catalog_shapes::find(asset.kind, &asset.slug) {
+        None => problems.push(regenerate("missing from")),
+        Some(entry) if entry.d != shape.path_d() || entry.fill_rule != shape.fill_rule() => {
+            problems.push(regenerate("stale in"));
+        }
+        Some(_) => {}
+    }
+
     if problems.is_empty() {
         Ok(Checked {
             name,
@@ -362,10 +375,24 @@ fn check(asset: &Asset, rows: &[Row]) -> Result<Checked, String> {
     }
 }
 
+fn regenerate(what: &str) -> String {
+    format!(
+        "{what} design_kit/catalog_shapes.rs (regenerate: cargo test -p arena \
+         --test design_kit_catalog -- --ignored write_catalog_shapes)"
+    )
+}
+
 #[test]
 fn every_catalog_asset_is_processed_cleanly() {
     let assets = catalog();
     assert_eq!(assets.len(), 184, "all 101 heads and 83 tails are vendored");
+    // Each file is checked against its table entry below; this catches extras.
+    assert_eq!(
+        CATALOG_SHAPES.len(),
+        assets.len(),
+        "{}",
+        regenerate("stale")
+    );
     for (kind, slug, _, reason) in EXCEPTIONS {
         assert!(
             assets.iter().any(|a| a.kind == kind && a.slug == slug),
@@ -426,4 +453,55 @@ fn every_catalog_asset_is_processed_cleanly() {
             .collect::<Vec<_>>()
             .join("\n")
     );
+}
+
+/// Rewrite the table in `src/design_kit/catalog_shapes.rs` (between its `@generated`
+/// markers) from fresh processing of every vendored catalog file.
+#[test]
+#[ignore = "rewrites src/design_kit/catalog_shapes.rs; run by hand"]
+fn write_catalog_shapes() {
+    use std::fmt::Write as _;
+
+    let assets = catalog();
+    // One thread with production's stack, like the corpus test's workers.
+    let shapes: Vec<(Asset, CleanShape)> = std::thread::Builder::new()
+        .stack_size(PROCESS_STACK_BYTES)
+        .spawn(move || {
+            assets
+                .into_iter()
+                .map(|asset| {
+                    let bytes = std::fs::read(&asset.path).expect("catalog file");
+                    let shape = process_upload(&bytes, &Limits::default(), &[])
+                        .unwrap_or_else(|e| panic!("{}: {e:?}", asset.slug));
+                    (asset, shape)
+                })
+                .collect()
+        })
+        .expect("generator thread")
+        .join()
+        .expect("generator thread");
+
+    let mut table = String::new();
+    for (asset, shape) in &shapes {
+        write!(
+            table,
+            "    CatalogShape {{\n        kind: AssetKind::{:?},\n        file: {:?},\n        \
+             d: {:?},\n        fill_rule: FillRule::{:?},\n    }},\n",
+            asset.kind,
+            asset.slug,
+            shape.path_d(),
+            shape.fill_rule()
+        )
+        .expect("write to string");
+    }
+
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/design_kit/catalog_shapes.rs");
+    let source = std::fs::read_to_string(&path).expect("catalog_shapes.rs");
+    let (begin, end) = ("    // @generated begin\n", "    // @generated end\n");
+    let start = source.find(begin).expect("begin marker") + begin.len();
+    let stop = source.find(end).expect("end marker");
+    let updated = format!("{}{table}{}", &source[..start], &source[stop..]);
+    std::fs::write(&path, updated).expect("write catalog_shapes.rs");
+    println!("wrote {} shapes to {}", shapes.len(), path.display());
 }

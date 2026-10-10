@@ -158,6 +158,15 @@ impl MatchStyle {
     }
 
     /// Wins required to take the match.
+    /// Human label, e.g. "Best of 3".
+    pub fn label(&self) -> &'static str {
+        match self {
+            MatchStyle::SingleGame => "Single game",
+            MatchStyle::BestOf3 => "Best of 3",
+            MatchStyle::FirstTo3 => "First to 3",
+        }
+    }
+
     pub fn wins_needed(&self) -> i32 {
         match self {
             MatchStyle::SingleGame => 1,

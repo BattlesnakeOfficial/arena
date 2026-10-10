@@ -89,6 +89,8 @@ impl From<&GameBattlesnakeWithDetails> for SnakeInfo {
 pub struct GameListItem {
     pub id: Uuid,
     pub status: String,
+    /// The snake that won outright. `None` until the game finishes, and for a
+    /// draw (first place shared by snakes eliminated on the same turn).
     pub winner: Option<Uuid>,
     pub snakes: Vec<SnakeInfo>,
     pub board: String,
@@ -103,6 +105,8 @@ pub struct GameListItem {
 pub struct GameResponse {
     pub id: Uuid,
     pub status: String,
+    /// The snake that won outright. `None` until the game finishes, and for a
+    /// draw (first place shared by snakes eliminated on the same turn).
     pub winner: Option<Uuid>,
     pub snakes: Vec<SnakeInfo>,
     pub frames: Vec<serde_json::Value>,
@@ -125,10 +129,8 @@ fn default_limit() -> u32 {
 
 /// Build a GameListItem from game and battlesnakes
 fn build_game_list_item(game: &Game, battlesnakes: &[GameBattlesnakeWithDetails]) -> GameListItem {
-    let winner = battlesnakes
-        .iter()
-        .find(|b| b.placement == Some(1))
-        .map(|b| b.battlesnake_id);
+    let winner =
+        crate::placement::outright_winner(battlesnakes, |b| b.placement).map(|b| b.battlesnake_id);
 
     let snakes: Vec<SnakeInfo> = battlesnakes.iter().map(SnakeInfo::from).collect();
 
@@ -467,11 +469,8 @@ pub async fn show_game(
         crate::moderation::shouts::strip_suppressed_shouts(frame, &suppressed);
     }
 
-    // Find winner
-    let winner = battlesnakes
-        .iter()
-        .find(|b| b.placement == Some(1))
-        .map(|b| b.battlesnake_id);
+    let winner =
+        crate::placement::outright_winner(&battlesnakes, |b| b.placement).map(|b| b.battlesnake_id);
 
     let snakes: Vec<SnakeInfo> = battlesnakes.iter().map(SnakeInfo::from).collect();
 

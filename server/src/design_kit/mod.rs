@@ -27,6 +27,7 @@
 //! studio, PR 3): a failed allocation, or an abort nothing here foresaw, then ends only
 //! that process.
 
+pub mod catalog_shapes;
 mod emit;
 mod fix;
 mod lints;

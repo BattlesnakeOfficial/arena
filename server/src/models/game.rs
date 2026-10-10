@@ -91,6 +91,12 @@ impl GameType {
             GameType::Other(s) => s,
         }
     }
+
+    /// Whether this mode puts food on the board. Constrictor never spawns
+    /// any, so food stats there are always zero.
+    pub fn has_food(&self) -> bool {
+        !matches!(self, GameType::Constrictor)
+    }
 }
 
 impl FromStr for GameType {
@@ -1050,12 +1056,12 @@ pub async fn reset_game_state_for_retry(pool: &PgPool, game_id: Uuid) -> cja::Re
         .wrap_err_with(|| format!("Failed to delete turns for game {game_id} reset"))?;
 
     sqlx::query!(
-        "UPDATE game_battlesnakes SET placement = NULL WHERE game_id = $1",
+        "UPDATE game_battlesnakes SET placement = NULL, food_eaten = NULL WHERE game_id = $1",
         game_id
     )
     .execute(&mut *tx)
     .await
-    .wrap_err_with(|| format!("Failed to clear placements for game {game_id} reset"))?;
+    .wrap_err_with(|| format!("Failed to clear results for game {game_id} reset"))?;
 
     tx.commit()
         .await

@@ -40,6 +40,7 @@ pub mod game;
 pub mod github_auth;
 pub mod health;
 pub mod leaderboard;
+pub mod og;
 pub mod pagination;
 pub mod policy;
 #[cfg(test)]
@@ -67,6 +68,8 @@ pub fn routes(app_state: AppState) -> axum::Router {
         .route("/games/{id}/events", get(game::game_events_websocket))
         // Engine-compatible frame history (public, used by the GIF exporter)
         .route("/games/{id}/frames", get(game::get_game_frames))
+        // One turn's `/move` request body, as a chosen snake (public)
+        .route("/games/{id}/move-request", get(game::get_move_request))
         .route("/tokens", post(api::tokens::create_token))
         .route("/tokens", get(api::tokens::list_tokens))
         .route("/tokens/{id}", delete(api::tokens::revoke_token))
@@ -105,6 +108,14 @@ pub fn routes(app_state: AppState) -> axum::Router {
         .route("/robots.txt", get(robots_txt))
         .route("/health", get(health::health))
         .route("/favicon.ico", get(crate::static_assets::serve_favicon))
+        // Social cards (og:image)
+        .route(og::DEFAULT_CARD_PATH, get(og::default_card))
+        .route("/og/games/{file}", get(og::game_card))
+        .route("/og/battlesnakes/{file}", get(og::snake_card))
+        .route("/og/users/{file}", get(og::player_card))
+        .route("/og/leaderboards/{id}", get(og::leaderboard_card))
+        .route("/og/leaderboards/{id}/entries/{file}", get(og::entry_card))
+        .route("/og/tournaments/{file}", get(og::tournament_card))
         // Policy pages
         .route("/conduct", get(policy::conduct_page))
         .route("/privacy", get(policy::privacy_page))
@@ -134,6 +145,10 @@ pub fn routes(app_state: AppState) -> axum::Router {
         .route("/auth/cli-token", get(github_auth::cli_token_page))
         // Battlesnake routes
         .route("/customizations", get(customizations::list_customizations))
+        .route(
+            "/customizations/unlock",
+            post(customizations::unlock_customization),
+        )
         // Head & Tail Studio, and its guide (`/studio` redirects to the studio)
         .route("/customizations/studio", get(studio::studio_page))
         .route("/customizations/studio/guide", get(studio::guide_page))

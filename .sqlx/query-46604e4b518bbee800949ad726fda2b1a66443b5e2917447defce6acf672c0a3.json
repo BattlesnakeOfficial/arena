@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT source FROM customization_grants WHERE user_id = $1 AND customization_type = 'head' AND slug = 'alligator'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "source",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "46604e4b518bbee800949ad726fda2b1a66443b5e2917447defce6acf672c0a3"
+}

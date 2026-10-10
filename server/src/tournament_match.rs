@@ -80,34 +80,6 @@ pub fn match_winner(style: MatchStyle, game_winners: &[Option<Uuid>]) -> Option<
     None
 }
 
-/// Determine the winner of a finished game from the final snake states.
-///
-/// Returns the engine snake id (a `game_battlesnake_id` string). A snake
-/// still alive at the end wins outright. If everyone was eliminated, the
-/// snake that survived strictly longest wins; a shared final turn is a tie
-/// (`None`).
-pub fn game_winner_from_snakes(snakes: &[rules::Snake]) -> Option<String> {
-    let alive: Vec<&rules::Snake> = snakes
-        .iter()
-        .filter(|s| !s.eliminated_cause.is_eliminated())
-        .collect();
-    match alive.as_slice() {
-        [only] => return Some(only.id.clone()),
-        [] => {}
-        // Multiple survivors (e.g. a turn-capped game) is a tie.
-        _ => return None,
-    }
-
-    let max_turn = snakes.iter().map(|s| s.eliminated_on_turn).max()?;
-    let mut last_standing = snakes.iter().filter(|s| s.eliminated_on_turn == max_turn);
-    let candidate = last_standing.next()?;
-    if last_standing.next().is_some() {
-        None // simultaneous elimination on the final turn: tie
-    } else {
-        Some(candidate.id.clone())
-    }
-}
-
 /// Evaluate a match and take the next step: complete it, wait on an
 /// in-flight game, or create the next game. Safe to run repeatedly.
 pub async fn run_match(app_state: &AppState, match_id: Uuid) -> cja::Result<()> {
@@ -655,22 +627,6 @@ pub async fn resolve_finished_match_game(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rules::{EliminationCause, Point, Snake};
-
-    fn snake(id: &str, eliminated_cause: EliminationCause, eliminated_on_turn: i32) -> Snake {
-        Snake {
-            id: id.to_string(),
-            body: vec![Point { x: 0, y: 0 }],
-            health: if eliminated_cause == EliminationCause::NotEliminated {
-                100
-            } else {
-                0
-            },
-            eliminated_cause,
-            eliminated_by: String::new(),
-            eliminated_on_turn,
-        }
-    }
 
     fn ids(n: usize) -> Vec<Uuid> {
         (0..n).map(|_| Uuid::new_v4()).collect()
@@ -727,42 +683,6 @@ mod tests {
             ),
             Some(a)
         );
-    }
-
-    #[test]
-    fn surviving_snake_wins_the_game() {
-        let snakes = vec![
-            snake("winner", EliminationCause::NotEliminated, 0),
-            snake("loser", EliminationCause::OutOfHealth, 40),
-        ];
-        assert_eq!(game_winner_from_snakes(&snakes), Some("winner".to_string()));
-    }
-
-    #[test]
-    fn longest_survivor_wins_when_all_eliminated() {
-        let snakes = vec![
-            snake("early", EliminationCause::OutOfBounds, 10),
-            snake("late", EliminationCause::OutOfHealth, 42),
-        ];
-        assert_eq!(game_winner_from_snakes(&snakes), Some("late".to_string()));
-    }
-
-    #[test]
-    fn simultaneous_elimination_is_a_tie() {
-        let snakes = vec![
-            snake("a", EliminationCause::HeadToHeadCollision, 30),
-            snake("b", EliminationCause::HeadToHeadCollision, 30),
-        ];
-        assert_eq!(game_winner_from_snakes(&snakes), None);
-    }
-
-    #[test]
-    fn multiple_survivors_is_a_tie() {
-        let snakes = vec![
-            snake("a", EliminationCause::NotEliminated, 0),
-            snake("b", EliminationCause::NotEliminated, 0),
-        ];
-        assert_eq!(game_winner_from_snakes(&snakes), None);
     }
 
     // --- forced tie resolution (pure) ---
