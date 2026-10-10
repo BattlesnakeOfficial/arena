@@ -11,7 +11,27 @@ interface Duel {
   bravo: string;
 }
 
-/** A finished two-snake game with frames for turns 0-2. */
+/** Users seeded by this file, removed (with their snakes and games) after each test. */
+const seededUsers: string[] = [];
+
+test.afterEach(async () => {
+  const users = seededUsers.splice(0);
+  if (users.length === 0) return;
+  const games = `SELECT game_id FROM game_battlesnakes WHERE battlesnake_id IN
+    (SELECT battlesnake_id FROM battlesnakes WHERE user_id = ANY($1::uuid[]))`;
+  await query(`DELETE FROM turns WHERE game_id IN (${games})`, [users]);
+  const deleted = await query<{ game_id: string }>(
+    `DELETE FROM game_battlesnakes WHERE game_id IN (${games}) RETURNING game_id::text AS game_id`,
+    [users],
+  );
+  await query('DELETE FROM games WHERE game_id = ANY($1::uuid[])', [deleted.map((g) => g.game_id)]);
+  await query('DELETE FROM battlesnakes WHERE user_id = ANY($1::uuid[])', [users]);
+  await query('DELETE FROM users WHERE user_id = ANY($1::uuid[])', [users]);
+});
+
+/** A finished two-snake game with frames for turns 0-2. The snakes are
+ * private so they never show up in other specs' public snake lists (the game
+ * builder's opponents, the directory). */
 async function seedDuel(): Promise<Duel> {
   const unique = Date.now() * 1000 + Math.floor(Math.random() * 1000);
   const [user] = await query<{ user_id: string }>(
@@ -19,6 +39,7 @@ async function seedDuel(): Promise<Duel> {
      VALUES ($1, $2, '') RETURNING user_id::text AS user_id`,
     [unique, `turnjson_${unique}`],
   );
+  seededUsers.push(user.user_id);
   const [game] = await query<{ game_id: string }>(
     `INSERT INTO games (board_size, game_type, status)
      VALUES ('11x11', 'Standard', 'finished') RETURNING game_id::text AS game_id`,
@@ -26,7 +47,7 @@ async function seedDuel(): Promise<Duel> {
   const join = async (name: string, placement: number): Promise<string> => {
     const [snake] = await query<{ battlesnake_id: string }>(
       `INSERT INTO battlesnakes (user_id, name, url, visibility)
-       VALUES ($1, $2, 'https://example.com', 'public') RETURNING battlesnake_id::text AS battlesnake_id`,
+       VALUES ($1, $2, 'https://example.com', 'private') RETURNING battlesnake_id::text AS battlesnake_id`,
       [user.user_id, name],
     );
     const [entry] = await query<{ id: string }>(
