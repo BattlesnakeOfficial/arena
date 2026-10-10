@@ -1513,6 +1513,17 @@ pub async fn view_battlesnake_profile(
         || ("Unknown User".to_string(), "Unknown User".to_string()),
         |o| (o.github_login.clone(), o.public_name().to_string()),
     );
+    let social_alt = format!("{}, a Battlesnake by {owner_name}", snake.name);
+    let description = format!(
+        "{}, a Battlesnake by {owner_name}: {} {} played on Battlesnake Arena.",
+        snake.name,
+        crate::routes::game::view::comma_separate(stats.total_games),
+        if stats.total_games == 1 {
+            "game"
+        } else {
+            "games"
+        },
+    );
     let owner_pronouns = owner
         .as_ref()
         .map(|o| o.pronouns.clone())
@@ -1543,6 +1554,11 @@ pub async fn view_battlesnake_profile(
             format!("Battlesnake: {}", snake.name),
             Box::new(content),
             flash,
+        )
+        .with_description(description)
+        .with_social_image(
+            crate::routes::og::snake_card_path(battlesnake_id),
+            social_alt,
         )
         .into_response())
 }

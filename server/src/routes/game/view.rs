@@ -661,9 +661,10 @@ fn death_cause_copy(slug: &str) -> &str {
     }
 }
 
-/// Thousands-separate a non-negative number (e.g. `5000` -> `"5,000"`),
-/// for displaying the turn cap in the Solo Outcome row.
-fn comma_separate(n: i32) -> String {
+/// Thousands-separate a non-negative number (e.g. `5000` -> `"5,000"`), for
+/// the turn cap in the Solo Outcome row and the numbers on social cards.
+pub(crate) fn comma_separate(n: impl Into<i64>) -> String {
+    let n = n.into();
     debug_assert!(n >= 0);
     let digits = n.unsigned_abs().to_string();
     let bytes = digits.as_bytes();

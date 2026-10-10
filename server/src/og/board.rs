@@ -167,38 +167,42 @@ pub struct BoardArt {
 const ELIMINATED_ALPHA: f32 = 0.22;
 
 impl Canvas {
-    /// Paint `art` in a framed panel filling the square at (`x`, `y`) of side
-    /// `side`: the home page's dark board, the grid, hazards, snakes, food.
-    pub fn board(&mut self, art: &BoardArt, x: f32, y: f32, side: f32) {
+    /// The framed dark panel boards sit in (the home page's board frame), at
+    /// (`x`, `y`) with side `side`; returns its outline for clipping.
+    pub fn panel(&mut self, x: f32, y: f32, side: f32) -> Option<Path> {
         self.glow(
             x + side / 2.0,
             y + side / 2.0,
             side * 0.62,
             with_alpha(palette::pink(), 0.16),
         );
-        let panel = round_rect(x, y, side, side, 28.0);
-        if let Some(panel) = &panel {
-            if let Some(shader) =
-                vertical_gradient(y, y + side, palette::board_top(), palette::board_bottom())
-            {
-                self.fill_path(
-                    panel,
-                    &shaded(shader),
-                    SkiaFillRule::Winding,
-                    Transform::identity(),
-                );
-            }
-            let stroke = Stroke {
-                width: 1.5,
-                ..Stroke::default()
-            };
-            self.stroke_path(
-                panel,
-                &solid(palette::board_border()),
-                &stroke,
+        let panel = round_rect(x, y, side, side, 28.0)?;
+        if let Some(shader) =
+            vertical_gradient(y, y + side, palette::board_top(), palette::board_bottom())
+        {
+            self.fill_path(
+                &panel,
+                &shaded(shader),
+                SkiaFillRule::Winding,
                 Transform::identity(),
             );
         }
+        let stroke = Stroke {
+            width: 1.5,
+            ..Stroke::default()
+        };
+        self.stroke_path(
+            &panel,
+            &solid(palette::board_border()),
+            &stroke,
+            Transform::identity(),
+        );
+        Some(panel)
+    }
+
+    /// Paint `art` in a [`Canvas::panel`]: the grid, hazards, snakes, food.
+    pub fn board(&mut self, art: &BoardArt, x: f32, y: f32, side: f32) {
+        let panel = self.panel(x, y, side);
 
         let (width, height) = (art.width.max(1), art.height.max(1));
         let board = Board::new(width, height);

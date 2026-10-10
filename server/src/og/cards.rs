@@ -384,26 +384,7 @@ fn roster_row(
     let dim = spoilers && !solo && !winner;
     c.head_tile(snake.head, snake.color, PAD, top, spec.tile);
     if winner {
-        // A pink ring marks the winner's tile.
-        let ring = round_rect(
-            PAD - 5.0,
-            top - 5.0,
-            spec.tile + 10.0,
-            spec.tile + 10.0,
-            spec.tile * 0.3,
-        );
-        if let Some(ring) = ring {
-            let stroke = Stroke {
-                width: 3.0,
-                ..Stroke::default()
-            };
-            c.stroke_path(
-                &ring,
-                &solid(palette::pink()),
-                &stroke,
-                Transform::identity(),
-            );
-        }
+        ring(c, PAD, top, spec.tile);
     }
 
     let mut right = COLUMN_RIGHT;
@@ -512,6 +493,410 @@ pub fn game_card(card: &GameCard) -> cja::Result<Vec<u8>> {
     c.into_png()
 }
 
+// --- Profiles: snakes, leaderboard entries, players --------------------------
+
+/// A labelled number in a profile's stat row.
+#[derive(Debug, Clone)]
+pub struct Stat {
+    pub label: String,
+    pub value: String,
+}
+
+impl Stat {
+    pub fn new(label: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            value: value.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ProfileCard {
+    pub kicker: String,
+    pub title: String,
+    pub subtitle: String,
+    /// A head tile beside the title (snakes); players have none.
+    pub avatar: Option<(Option<&'static RefShape>, Color)>,
+    /// At most three are shown.
+    pub stats: Vec<Stat>,
+    /// A pink line above the stats, e.g. "#3 on Standard 11x11".
+    pub highlight: Option<String>,
+    pub board: BoardArt,
+}
+
+const STATS_LABEL_BASELINE: f32 = 432.0;
+
+/// A snake's portrait: it winds across a small board toward a snack.
+pub fn portrait_board(color: Color, head: &str, tail: &str) -> BoardArt {
+    BoardArt {
+        width: 7,
+        height: 7,
+        snakes: vec![BoardSnake {
+            body: vec![
+                (4, 5),
+                (3, 5),
+                (2, 5),
+                (1, 5),
+                (1, 4),
+                (1, 3),
+                (2, 3),
+                (3, 3),
+                (4, 3),
+                (5, 3),
+                (5, 2),
+                (5, 1),
+                (4, 1),
+                (3, 1),
+            ],
+            color,
+            head: shape(AssetKind::Head, head),
+            tail: shape(AssetKind::Tail, tail),
+            eliminated: false,
+        }],
+        food: vec![(5, 5)],
+        hazards: vec![],
+    }
+}
+
+/// A player's snakes (up to four), lined up across the board like a starting
+/// grid, centred top to bottom, with a snack in front of the first.
+pub fn lineup_board(snakes: &[(Color, &str, &str)]) -> BoardArt {
+    const LENGTHS: [i32; 4] = [7, 5, 6, 4];
+    let shown = snakes.len().min(LENGTHS.len()) as i32;
+    // Rows two apart, centred on the middle row (4).
+    let rows = (0..shown).map(|i| 4 + (shown - 1) - 2 * i);
+    let lineup: Vec<BoardSnake> = snakes
+        .iter()
+        .zip(LENGTHS)
+        .zip(rows)
+        .map(|((&(color, head, tail), len), y)| BoardSnake {
+            body: (1..=len).rev().map(|x| (x, y)).collect(),
+            color,
+            head: shape(AssetKind::Head, head),
+            tail: shape(AssetKind::Tail, tail),
+            eliminated: false,
+        })
+        .collect();
+    let mut food = vec![(3, 0), (6, 8)];
+    if let Some(first) = lineup.first().and_then(|s| s.body.first()) {
+        food.push((first.0 + 1, first.1));
+    }
+    BoardArt {
+        width: 9,
+        height: 9,
+        snakes: lineup,
+        food,
+        hazards: vec![],
+    }
+}
+
+fn stats_row(c: &mut Canvas, stats: &[Stat]) {
+    let shown = &stats[..stats.len().min(3)];
+    if shown.is_empty() {
+        return;
+    }
+    let column = COLUMN_WIDTH / shown.len() as f32;
+    let label = TextStyle::new(Font::Mono, 15.0, palette::muted()).tracking(0.08);
+    let value = TextStyle::new(Font::Display, 46.0, palette::ink()).tracking(-0.02);
+    let value_baseline = STATS_LABEL_BASELINE + 12.0 + c.cap_height(Font::Display, 46.0);
+    for (i, stat) in shown.iter().enumerate() {
+        let x = PAD + i as f32 * column;
+        let room = column - 18.0;
+        let line = c.ellipsize(&stat.label.to_uppercase(), label, room);
+        c.draw(&line, x, STATS_LABEL_BASELINE);
+        let line = c.fit_line(&stat.value, value, room, 28.0);
+        c.draw(&line, x - 2.0, value_baseline);
+    }
+}
+
+pub fn profile_card(card: &ProfileCard) -> cja::Result<Vec<u8>> {
+    let mut c = Canvas::new()?;
+    backdrop(&mut c);
+    c.board(&card.board, BOARD_X, PAD, BOARD_SIDE);
+    kicker(&mut c, None, &card.kicker);
+
+    let tile = 84.0;
+    let x = if card.avatar.is_some() {
+        PAD + tile + 24.0
+    } else {
+        PAD
+    };
+    let title = TextStyle::new(Font::Display, 66.0, palette::ink()).tracking(-0.03);
+    let lines = c.fit_lines(&card.title, title, COLUMN_RIGHT - x, 2, 38.0);
+    let size = lines.first().map_or(66.0, |l| l.style.size);
+    let leading = size * 1.04;
+    let subtitle = TextStyle::new(Font::Body, 24.0, palette::muted());
+    let sub_cap = c.cap_height(Font::Body, 24.0);
+    let title_cap = c.cap_height(Font::Display, size);
+    let block = title_cap + leading * lines.len().saturating_sub(1) as f32 + 18.0 + sub_cap;
+
+    // Centre the title block between the kicker and the highlight/stats.
+    let bottom = if card.highlight.is_some() {
+        330.0
+    } else {
+        380.0
+    };
+    let top = BODY_TOP + ((bottom - BODY_TOP - block) / 2.0).max(0.0);
+    if let Some((head, color)) = card.avatar {
+        c.head_tile(head, color, PAD, top + block / 2.0 - tile / 2.0, tile);
+    }
+    let last_baseline = draw_lines(&mut c, &lines, x - 2.0, top, leading);
+    let sub = c.ellipsize(&card.subtitle, subtitle, COLUMN_RIGHT - x);
+    c.draw(&sub, x, last_baseline + 18.0 + sub_cap);
+
+    if let Some(highlight) = &card.highlight {
+        let style = TextStyle::new(Font::Mono, 19.0, palette::pink()).tracking(0.04);
+        let line = c.ellipsize(highlight, style, COLUMN_WIDTH);
+        c.draw(&line, PAD, 372.0);
+    }
+    stats_row(&mut c, &card.stats);
+
+    footer(&mut c);
+    c.into_png()
+}
+
+// --- Leaderboards ------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct LadderRow {
+    pub rank: i64,
+    pub snake: RosterSnake,
+    pub rating: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct LeaderboardCard {
+    pub kicker: String,
+    pub title: String,
+    /// At most three are shown, under the title.
+    pub stats: Vec<Stat>,
+    /// The top of the ladder; at most five are shown.
+    pub rows: Vec<LadderRow>,
+}
+
+/// Inner padding of a list panel.
+const PANEL_PAD: f32 = 34.0;
+
+/// A big title and a muted subtitle, from `top`; returns the last baseline.
+fn title_block(c: &mut Canvas, title: &str, subtitle: &str, top: f32) -> f32 {
+    let style = TextStyle::new(Font::Display, 66.0, palette::ink()).tracking(-0.03);
+    let lines = c.fit_lines(title, style, COLUMN_WIDTH, 3, 40.0);
+    let size = lines.first().map_or(66.0, |l| l.style.size);
+    let last = draw_lines(c, &lines, PAD - 2.0, top, size * 1.04);
+    let body = TextStyle::new(Font::Body, 24.0, palette::muted());
+    let sub = c.fit_lines(subtitle, body, COLUMN_WIDTH, 2, 20.0);
+    draw_lines(c, &sub, PAD, last + 26.0, 32.0)
+}
+
+/// Muted text centred in the right-hand panel, for an empty list.
+fn panel_note(c: &mut Canvas, text: &str) {
+    let style = TextStyle::new(Font::Strong, 24.0, palette::muted());
+    let line = c.shape(text, style);
+    let cap = c.cap_height(Font::Strong, 24.0);
+    c.draw(
+        &line,
+        BOARD_X + (BOARD_SIDE - line.width) / 2.0,
+        PAD + BOARD_SIDE / 2.0 + cap / 2.0,
+    );
+}
+
+pub fn leaderboard_card(card: &LeaderboardCard) -> cja::Result<Vec<u8>> {
+    let mut c = Canvas::new()?;
+    backdrop(&mut c);
+    kicker(&mut c, None, &card.kicker);
+    let style = TextStyle::new(Font::Display, 72.0, palette::ink()).tracking(-0.03);
+    let lines = c.fit_lines(&card.title, style, COLUMN_WIDTH, 3, 40.0);
+    let size = lines.first().map_or(72.0, |l| l.style.size);
+    let leading = size * 1.04;
+    let block = c.cap_height(Font::Display, size) + leading * lines.len().saturating_sub(1) as f32;
+    let top = BODY_TOP + ((370.0 - BODY_TOP - block) / 2.0).max(0.0);
+    draw_lines(&mut c, &lines, PAD - 2.0, top, leading);
+    stats_row(&mut c, &card.stats);
+
+    c.panel(BOARD_X, PAD, BOARD_SIDE);
+    let inner_x = BOARD_X + PANEL_PAD;
+    let inner_right = BOARD_X + BOARD_SIDE - PANEL_PAD;
+    let header = TextStyle::new(Font::Mono, 16.0, palette::muted()).tracking(0.1);
+    let header_baseline = PAD + PANEL_PAD + c.cap_height(Font::Mono, 16.0);
+    c.text("TOP OF THE LADDER", header, inner_x, header_baseline);
+
+    let rows = &card.rows[..card.rows.len().min(5)];
+    if rows.is_empty() {
+        panel_note(&mut c, "No ranked snakes yet");
+    }
+    let row_height = 80.0;
+    let tile = 50.0;
+    let name_style = TextStyle::new(Font::Strong, 24.0, palette::ink());
+    let owner_style = TextStyle::new(Font::Body, 17.0, palette::muted());
+    let name_cap = c.cap_height(Font::Strong, 24.0);
+    let owner_cap = c.cap_height(Font::Body, 17.0);
+    let mut top = header_baseline + 26.0;
+    for row in rows {
+        let center = top + row_height / 2.0;
+        let rank_color = if row.rank == 1 {
+            palette::pink()
+        } else {
+            palette::muted()
+        };
+        let rank = TextStyle::new(Font::Mono, 22.0, rank_color);
+        let cap = c.cap_height(Font::Mono, 22.0);
+        c.text(&row.rank.to_string(), rank, inner_x, center + cap / 2.0);
+
+        let tile_x = inner_x + 48.0;
+        c.head_tile(
+            row.snake.head,
+            row.snake.color,
+            tile_x,
+            center - tile / 2.0,
+            tile,
+        );
+
+        let rating = TextStyle::new(Font::Mono, 20.0, palette::ink());
+        let rating_cap = c.cap_height(Font::Mono, 20.0);
+        let rating_width =
+            c.text_right(&row.rating, rating, inner_right, center + rating_cap / 2.0);
+
+        let x = tile_x + tile + 18.0;
+        let room = inner_right - rating_width - 16.0 - x;
+        let name = c.ellipsize(&row.snake.name, name_style, room);
+        let owner = c.ellipsize(&format!("by {}", row.snake.owner), owner_style, room);
+        let block = name_cap + 10.0 + owner_cap;
+        let baseline = center - block / 2.0 + name_cap;
+        c.draw(&name, x, baseline);
+        c.draw(&owner, x, baseline + 10.0 + owner_cap);
+        top += row_height;
+    }
+
+    footer(&mut c);
+    c.into_png()
+}
+
+// --- Tournaments -------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct Entrant {
+    pub color: Color,
+    pub head: Option<&'static RefShape>,
+    pub champion: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct TournamentCard {
+    /// The status pill: its label, and whether it's the filled (live) style.
+    pub status: (String, bool),
+    pub kicker: String,
+    pub title: String,
+    pub subtitle: String,
+    pub champion: Option<RosterSnake>,
+    pub entrants: Vec<Entrant>,
+}
+
+/// Most head tiles the entrant grid shows (6×6); past that, the last tile
+/// becomes "+N".
+const MAX_ENTRANTS: usize = 36;
+
+fn entrant_grid(c: &mut Canvas, entrants: &[Entrant]) {
+    if entrants.is_empty() {
+        panel_note(c, "No snakes registered yet");
+        return;
+    }
+    let inner = BOARD_SIDE - 2.0 * PANEL_PAD;
+    let count = entrants.len().min(MAX_ENTRANTS);
+    let cols = (count as f32).sqrt().ceil();
+    let rows = (count as f32 / cols).ceil();
+    let gap = 16.0;
+    let tile = ((inner - (cols - 1.0) * gap) / cols).min(120.0);
+    let grid_w = cols * tile + (cols - 1.0) * gap;
+    let grid_h = rows * tile + (rows - 1.0) * gap;
+    let x0 = BOARD_X + (BOARD_SIDE - grid_w) / 2.0;
+    let y0 = PAD + (BOARD_SIDE - grid_h) / 2.0;
+    // Entrants past the grid, counting the tile the "+N" replaces.
+    let overflow = entrants.len() + 1 - count;
+    for (i, entrant) in entrants.iter().take(count).enumerate() {
+        let x = x0 + (i as f32 % cols) * (tile + gap);
+        let y = y0 + (i as f32 / cols).floor() * (tile + gap);
+        if entrants.len() > MAX_ENTRANTS && i == count - 1 {
+            c.round_rect(x, y, tile, tile, tile * 0.24, palette::card());
+            let style = TextStyle::new(Font::Mono, (tile * 0.3).min(26.0), palette::muted());
+            let line = c.shape(&format!("+{overflow}"), style);
+            let cap = c.cap_height(Font::Mono, style.size);
+            c.draw(
+                &line,
+                x + (tile - line.width) / 2.0,
+                y + tile / 2.0 + cap / 2.0,
+            );
+            continue;
+        }
+        c.head_tile(entrant.head, entrant.color, x, y, tile);
+        if entrant.champion {
+            ring(c, x, y, tile);
+        }
+    }
+}
+
+/// The pink ring that marks a winner's tile.
+fn ring(c: &mut Canvas, x: f32, y: f32, tile: f32) {
+    if let Some(ring) = round_rect(x - 5.0, y - 5.0, tile + 10.0, tile + 10.0, tile * 0.3) {
+        let stroke = Stroke {
+            width: 3.0,
+            ..Stroke::default()
+        };
+        c.stroke_path(
+            &ring,
+            &solid(palette::pink()),
+            &stroke,
+            Transform::identity(),
+        );
+    }
+}
+
+pub fn tournament_card(card: &TournamentCard) -> cja::Result<Vec<u8>> {
+    let mut c = Canvas::new()?;
+    backdrop(&mut c);
+    kicker(
+        &mut c,
+        Some((card.status.0.as_str(), card.status.1)),
+        &card.kicker,
+    );
+    let top = if card.champion.is_some() {
+        140.0
+    } else {
+        168.0
+    };
+    title_block(&mut c, &card.title, &card.subtitle, top);
+
+    if let Some(champion) = &card.champion {
+        let label = TextStyle::new(Font::Mono, 16.0, palette::pink()).tracking(0.1);
+        c.text("CHAMPION", label, PAD, 404.0);
+        let tile = 64.0;
+        let tile_y = 424.0;
+        c.head_tile(champion.head, champion.color, PAD, tile_y, tile);
+        ring(&mut c, PAD, tile_y, tile);
+        let x = PAD + tile + 20.0;
+        let name_style = TextStyle::new(Font::Display, 34.0, palette::ink()).tracking(-0.02);
+        let name = c.fit_line(&champion.name, name_style, COLUMN_RIGHT - x, 24.0);
+        let owner_style = TextStyle::new(Font::Body, 19.0, palette::muted());
+        let owner = c.ellipsize(
+            &format!("by {}", champion.owner),
+            owner_style,
+            COLUMN_RIGHT - x,
+        );
+        let name_cap = c.cap_height(Font::Display, name.style.size);
+        let owner_cap = c.cap_height(Font::Body, 19.0);
+        let block = name_cap + 12.0 + owner_cap;
+        let baseline = tile_y + tile / 2.0 - block / 2.0 + name_cap;
+        c.draw(&name, x, baseline);
+        c.draw(&owner, x, baseline + 12.0 + owner_cap);
+    }
+
+    c.panel(BOARD_X, PAD, BOARD_SIDE);
+    entrant_grid(&mut c, &card.entrants);
+
+    footer(&mut c);
+    c.into_png()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -596,6 +981,127 @@ mod tests {
         }
     }
 
+    pub(crate) fn sample_profile(long: bool, avatar: bool) -> ProfileCard {
+        let pink = rgb(0xFF, 0x3D, 0x8A);
+        ProfileCard {
+            kicker: "Battlesnake".to_string(),
+            title: if long {
+                "The Very Hungry Caterpillar Who Never Stops Eating Ever".to_string()
+            } else {
+                "Hovering Hobbs".to_string()
+            },
+            subtitle: "by coreyja".to_string(),
+            avatar: avatar.then(|| (shape(AssetKind::Head, "bendr"), pink)),
+            stats: vec![
+                Stat::new("Games", "1,204"),
+                Stat::new("Wins", "377"),
+                Stat::new("Win rate", "31.3%"),
+            ],
+            highlight: Some("#3 on Standard 11x11".to_string()),
+            board: portrait_board(pink, "bendr", "bolt"),
+        }
+    }
+
+    pub(crate) fn sample_leaderboard(rows: usize) -> LeaderboardCard {
+        LeaderboardCard {
+            kicker: "Leaderboard · Standard · 11x11".to_string(),
+            title: "Standard 11x11".to_string(),
+            stats: vec![
+                Stat::new("Ranked snakes", "142"),
+                Stat::new("Games", "98,311"),
+                Stat::new("Live now", "3"),
+            ],
+            rows: sample_game(8, true)
+                .roster
+                .into_iter()
+                .take(rows)
+                .enumerate()
+                .map(|(i, snake)| LadderRow {
+                    rank: i as i64 + 1,
+                    snake,
+                    rating: format!("{:.1}", 41.2 - i as f64 * 2.7),
+                })
+                .collect(),
+        }
+    }
+
+    pub(crate) fn sample_tournament(entrants: usize, champion: bool) -> TournamentCard {
+        let roster = sample_game(8, true).roster;
+        TournamentCard {
+            status: if champion {
+                ("COMPLETE".to_string(), false)
+            } else {
+                ("ROUND 2 OF 4".to_string(), true)
+            },
+            kicker: "Tournament · Standard · 11×11".to_string(),
+            title: "Battlesnake Fall League 2026".to_string(),
+            subtitle: format!("{entrants} snakes · Best of 3"),
+            champion: champion.then(|| roster[0].clone()),
+            entrants: (0..entrants)
+                .map(|i| Entrant {
+                    color: roster[i % roster.len()].color,
+                    head: shape(
+                        AssetKind::Head,
+                        ["default", "bendr", "smile", "pixel"][i % 4],
+                    ),
+                    champion: champion && i == 0,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn profile_leaderboard_and_tournament_cards_render() {
+        for (long, avatar) in [(false, true), (true, true), (true, false)] {
+            let png = profile_card(&sample_profile(long, avatar)).unwrap();
+            assert_eq!(decode(&png), (WIDTH, HEIGHT));
+        }
+        let mut bare = sample_profile(false, false);
+        bare.stats.clear();
+        bare.highlight = None;
+        bare.board = lineup_board(&[]);
+        assert_eq!(decode(&profile_card(&bare).unwrap()), (WIDTH, HEIGHT));
+        for rows in [0, 3, 8] {
+            let png = leaderboard_card(&sample_leaderboard(rows)).unwrap();
+            assert_eq!(decode(&png), (WIDTH, HEIGHT), "{rows} rows");
+        }
+        for entrants in [0, 1, 2, 7, 16, 36, 37, 100] {
+            for champion in [false, true] {
+                let png = tournament_card(&sample_tournament(
+                    entrants.max(usize::from(champion)),
+                    champion,
+                ))
+                .unwrap();
+                assert_eq!(decode(&png), (WIDTH, HEIGHT), "{entrants} entrants");
+            }
+        }
+    }
+
+    #[test]
+    fn lineup_shows_at_most_four_snakes_heads_right() {
+        let snakes: Vec<(Color, &str, &str)> = (0..6)
+            .map(|_| (rgb(1, 2, 3), "default", "default"))
+            .collect();
+        let board = lineup_board(&snakes);
+        assert_eq!(board.snakes.len(), 4);
+        for snake in &board.snakes {
+            // Head first, at the right-hand end.
+            let (head, neck) = (snake.body[0], snake.body[1]);
+            assert_eq!((head.0 - neck.0, head.1), (1, neck.1));
+        }
+        assert!(lineup_board(&[]).snakes.is_empty());
+        let rows = |n: usize| -> Vec<i32> {
+            lineup_board(&snakes[..n])
+                .snakes
+                .iter()
+                .map(|s| s.body[0].1)
+                .collect()
+        };
+        assert_eq!(rows(1), [4]);
+        assert_eq!(rows(2), [5, 3]);
+        assert_eq!(rows(4), [7, 5, 3, 1]);
+    }
+
     #[test]
     fn ordinals() {
         let got: Vec<String> = [1, 2, 3, 4, 11, 12, 13, 21, 22, 23, 101, 111]
@@ -642,6 +1148,44 @@ mod tests {
             "default.png",
             default_card("A competitive arena where your code battles other Battlesnakes.")
                 .unwrap(),
+        );
+        write(
+            "snake.png",
+            profile_card(&sample_profile(false, true)).unwrap(),
+        );
+        write(
+            "snake-long.png",
+            profile_card(&sample_profile(true, true)).unwrap(),
+        );
+        let player = ProfileCard {
+            kicker: "Player".to_string(),
+            title: "Corey Alexander".to_string(),
+            subtitle: "@coreyja".to_string(),
+            avatar: None,
+            stats: vec![
+                Stat::new("Snakes", "3"),
+                Stat::new("Rating", "71.4"),
+                Stat::new("Ladders", "2"),
+            ],
+            highlight: None,
+            board: lineup_board(&[
+                (rgb(0xFF, 0x3D, 0x8A), "smile", "curled"),
+                (rgb(0x3D, 0xDB, 0xA0), "bendr", "bolt"),
+                (rgb(0xF5, 0xB7, 0x00), "pixel", "pixel"),
+            ]),
+        };
+        write("player.png", profile_card(&player).unwrap());
+        write(
+            "leaderboard.png",
+            leaderboard_card(&sample_leaderboard(5)).unwrap(),
+        );
+        write(
+            "tournament-live.png",
+            tournament_card(&sample_tournament(16, false)).unwrap(),
+        );
+        write(
+            "tournament-done.png",
+            tournament_card(&sample_tournament(8, true)).unwrap(),
         );
         for count in [1, 2, 4, 8] {
             for spoilers in [false, true] {

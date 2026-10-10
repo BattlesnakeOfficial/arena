@@ -105,7 +105,7 @@ fn can_register(tournament: &Tournament, is_owner: bool) -> bool {
 
 /// Who can view a tournament page. `participants_only` tournaments are only
 /// visible to the owner and users with a registered snake.
-fn can_view(
+pub(crate) fn can_view(
     tournament: &Tournament,
     viewer_user_id: Option<Uuid>,
     participant_user_ids: &[Uuid],
@@ -1067,6 +1067,15 @@ pub async fn show_tournament(
         return Ok(crate::routes::render_not_found(page_factory));
     }
 
+    // Only cards an anonymous scraper can fetch: a participants-only
+    // tournament keeps the default card.
+    let social_card = can_view(&t, None, &participant_user_ids).then(|| {
+        (
+            crate::routes::og::tournament_card_path(tournament_id),
+            format!("{} tournament", t.name),
+        )
+    });
+
     let owner = user::get_user_by_id(&state.db, t.user_id)
         .await
         .wrap_err("Failed to fetch tournament owner")?;
@@ -1166,11 +1175,7 @@ pub async fn show_tournament(
         })
         .unwrap_or((0, 0, 0));
 
-    let style_label = match t.match_style {
-        MatchStyle::SingleGame => "Single game",
-        MatchStyle::BestOf3 => "Best of 3",
-        MatchStyle::FirstTo3 => "First to 3",
-    };
+    let style_label = t.match_style.label();
 
     let matches = bracket_data
         .as_ref()
@@ -1193,7 +1198,7 @@ pub async fn show_tournament(
         )
     });
 
-    Ok(page_factory.create_page(
+    let page = page_factory.create_page(
         format!("Tournament: {}", t.name),
         Box::new(html! {
             div class="crumb" {
@@ -1421,7 +1426,12 @@ pub async fn show_tournament(
                 }
             }
         }),
-    ).into_response())
+    );
+    Ok(match social_card {
+        Some((path, alt)) => page.with_social_image(path, alt),
+        None => page,
+    }
+    .into_response())
 }
 
 /// GET /tournaments/{id}/edit — settings form (owner only).

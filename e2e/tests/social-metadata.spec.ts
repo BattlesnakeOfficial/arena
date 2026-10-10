@@ -65,10 +65,20 @@ test('emits complete social metadata for home, leaderboard, and game pages', asy
   const gameId = games[0].game_id;
 
   try {
-    for (const pathname of ['/', `/leaderboards/${leaderboards[0].leaderboard_id}`]) {
-      await page.goto(pathname);
-      await assertMetadata(page, baseURL!, pathname, '/og/default.png', 'Battlesnake Arena');
-    }
+    await page.goto('/');
+    await assertMetadata(page, baseURL!, '/', '/og/default.png', 'Battlesnake Arena');
+
+    const leaderboardId = leaderboards[0].leaderboard_id;
+    const leaderboardPath = `/leaderboards/${leaderboardId}`;
+    await page.goto(leaderboardPath);
+    await assertMetadata(
+      page,
+      baseURL!,
+      leaderboardPath,
+      `/og/leaderboards/${leaderboardId}.png`,
+      'Standard 11x11: the top of the leaderboard',
+    );
+    await assertCard(page, `/og/leaderboards/${leaderboardId}.png`);
     const gamePath = `/games/${gameId}`;
     await page.goto(`${gamePath}?turn=1`);
     await assertMetadata(

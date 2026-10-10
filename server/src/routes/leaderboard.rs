@@ -229,6 +229,7 @@ pub async fn show_leaderboard(
         "{} leaderboard on Battlesnake Arena — {} ranked snakes, {} games played.",
         lb.name, total_ranked, status.total_games
     );
+    let social_alt = format!("{}: the top of the leaderboard", lb.name);
 
     Ok(page_factory.create_page(
         lb.name.clone(),
@@ -563,7 +564,9 @@ pub async fn show_leaderboard(
             }
         }),
     )
-    .with_description(description).into_response())
+    .with_description(description)
+    .with_social_image(crate::routes::og::leaderboard_card_path(leaderboard_id), social_alt)
+    .into_response())
 }
 
 /// GET /leaderboards/:id/entries/:entry_id — snake detail on leaderboard
@@ -748,6 +751,10 @@ pub async fn show_leaderboard_entry(
     let description = format!(
         "{} by {} on the {} leaderboard — rating {:.1}, {} games played.",
         snake.name, owner_name, lb.name, entry.display_score, entry.games_played
+    );
+    let social_alt = format!(
+        "{} by {} on the {} leaderboard",
+        snake.name, owner_name, lb.name
     );
 
     Ok(page_factory.create_page(
@@ -957,7 +964,12 @@ pub async fn show_leaderboard_entry(
             }
         }),
     )
-    .with_description(description).into_response())
+    .with_description(description)
+    .with_social_image(
+        crate::routes::og::entry_card_path(leaderboard_id, entry_id),
+        social_alt,
+    )
+    .into_response())
 }
 
 #[derive(serde::Deserialize)]

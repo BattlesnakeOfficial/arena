@@ -109,6 +109,11 @@ pub fn routes(app_state: AppState) -> axum::Router {
         // Social cards (og:image)
         .route(og::DEFAULT_CARD_PATH, get(og::default_card))
         .route("/og/games/{file}", get(og::game_card))
+        .route("/og/battlesnakes/{file}", get(og::snake_card))
+        .route("/og/users/{file}", get(og::player_card))
+        .route("/og/leaderboards/{id}", get(og::leaderboard_card))
+        .route("/og/leaderboards/{id}/entries/{file}", get(og::entry_card))
+        .route("/og/tournaments/{file}", get(og::tournament_card))
         // Policy pages
         .route("/conduct", get(policy::conduct_page))
         .route("/privacy", get(policy::privacy_page))

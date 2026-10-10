@@ -198,6 +198,47 @@ pub struct UpdateBattlesnake {
 
 // Database functions for battlesnake management
 
+/// How a snake looks: its colour, head and tail.
+#[derive(Debug, Clone)]
+pub struct Cosmetics {
+    pub color: String,
+    pub head: String,
+    pub tail: String,
+}
+
+/// The cosmetics of each live snake in `ids`, for lists whose rows carry only
+/// a name and colour (leaderboard entries, tournament registrations). Deleted
+/// and unknown snakes are absent from the map.
+pub async fn get_cosmetics_by_ids(
+    pool: &PgPool,
+    ids: &[Uuid],
+) -> cja::Result<std::collections::HashMap<Uuid, Cosmetics>> {
+    let rows = sqlx::query!(
+        r#"
+        SELECT battlesnake_id, color, head, tail
+        FROM battlesnakes
+        WHERE battlesnake_id = ANY($1)
+          AND deleted_at IS NULL
+        "#,
+        ids
+    )
+    .fetch_all(pool)
+    .await
+    .wrap_err("Failed to fetch battlesnake cosmetics")?;
+
+    Ok(rows
+        .into_iter()
+        .map(|r| {
+            let cosmetics = Cosmetics {
+                color: r.color,
+                head: r.head,
+                tail: r.tail,
+            };
+            (r.battlesnake_id, cosmetics)
+        })
+        .collect())
+}
+
 // Get all battlesnakes for a user
 pub async fn get_battlesnakes_by_user_id(
     pool: &PgPool,
