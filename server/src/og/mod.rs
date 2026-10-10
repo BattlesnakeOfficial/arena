@@ -2,8 +2,9 @@
 //!
 //! Drawn in-process with tiny-skia, the rasteriser the design kit already
 //! uses, from layouts in [`cards`]. Every input is server data (names, colours,
-//! board frames) and the head and tail art is the design kit's fixed reference
-//! table, so nothing user-uploaded is ever parsed here.
+//! board frames) and the head and tail art comes from a static table of the
+//! official catalog (`design_kit::catalog_shapes`), so nothing user-uploaded
+//! is ever parsed here.
 
 pub mod board;
 pub mod canvas;
