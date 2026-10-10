@@ -1,0 +1,44 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT g.game_id, g.game_type, bs.user_id, gb.placement,\n            (SELECT COUNT(*) FROM game_battlesnakes peer WHERE peer.game_id = g.game_id) AS \"participants!\"\n        FROM games g\n        JOIN game_battlesnakes gb ON gb.game_id = g.game_id\n        LEFT JOIN leaderboard_entries le ON le.leaderboard_entry_id = gb.leaderboard_entry_id\n        JOIN battlesnakes bs ON bs.battlesnake_id = COALESCE(gb.battlesnake_id, le.battlesnake_id)\n        WHERE g.status = 'finished' AND g.finished_at IS NOT NULL\n          AND g.finished_at > NOW() - INTERVAL '2 hours'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "game_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "game_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "placement",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 4,
+        "name": "participants!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      null
+    ]
+  },
+  "hash": "a5ab45a163204892cb21ac325e9bb775ace0ad16a2a72551feb15c56770180db"
+}

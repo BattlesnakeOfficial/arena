@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT COUNT(*)::bigint AS \"count!\" FROM (\n            SELECT DISTINCT owned.game_id FROM (\n                SELECT gb.game_id FROM battlesnakes bs\n                JOIN game_battlesnakes gb ON gb.battlesnake_id = bs.battlesnake_id\n                WHERE bs.user_id = $1\n                  AND (NOT $3::bool OR (gb.placement = 1 AND gb.leaderboard_entry_id IS NOT NULL))\n                UNION ALL\n                SELECT gb.game_id FROM battlesnakes bs\n                JOIN leaderboard_entries le ON le.battlesnake_id = bs.battlesnake_id\n                JOIN game_battlesnakes gb ON gb.leaderboard_entry_id = le.leaderboard_entry_id\n                WHERE bs.user_id = $1 AND gb.battlesnake_id IS NULL\n                  AND (NOT $3::bool OR gb.placement = 1)\n            ) owned\n            JOIN games g ON g.game_id = owned.game_id\n            WHERE g.status = 'finished'\n            LIMIT $2\n        ) qualifying\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int8",
+        "Bool"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "203ec8174643c4c6f02eee3f8e000a91097bfd31d9699be479b044c96cabc150"
+}

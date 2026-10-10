@@ -603,6 +603,15 @@ fn emit_start_events(
 async fn enqueue_post_completion_jobs(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
     let pool = &app_state.db;
 
+    cja::jobs::Job::enqueue(
+        crate::jobs::AwardAchievementsForGameJob { game_id },
+        app_state.clone(),
+        format!("Award achievements for game {game_id}"),
+        None,
+    )
+    .await
+    .wrap_err("Failed to enqueue achievement award job")?;
+
     // Check if this is a leaderboard game and enqueue rating update
     if let Some(lb_game) =
         crate::models::leaderboard::find_leaderboard_game_by_game_id(pool, game_id).await?
@@ -821,6 +830,17 @@ mod tests {
             .fetch_one(&pool)
             .await?;
         assert_eq!(status, "finished");
+        assert_eq!(count_jobs(&pool, "AwardAchievementsForGameJob").await?, 1);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM customization_grants WHERE user_id = $1"
+            )
+            .bind(user_id)
+            .fetch_one(&pool)
+            .await?,
+            0,
+            "finish commits before the award job runs"
+        );
         let credited = sqlx::query!(
             "SELECT g.finished_at, aw.week_start FROM games g JOIN customization_active_weeks aw ON aw.user_id = $2 WHERE g.game_id = $1",
             game_id,
@@ -840,6 +860,7 @@ mod tests {
             1
         );
         run_game(&app_state, game_id).await?;
+        assert_eq!(count_jobs(&pool, "AwardAchievementsForGameJob").await?, 2);
         assert_eq!(
             crate::customizations::token_balance(&pool, user_id).await?,
             1
@@ -880,7 +901,8 @@ mod tests {
 
         run_game(&app_state, game_id).await?;
 
-        // Not a leaderboard or tournament game: nothing to enqueue.
+        assert_eq!(count_jobs(&pool, "AwardAchievementsForGameJob").await?, 1);
+        // Not a leaderboard or tournament game: no other follow-up jobs.
         assert_eq!(count_jobs(&pool, "LeaderboardRatingUpdateJob").await?, 0);
         assert_eq!(count_jobs(&pool, "RunMatchJob").await?, 0);
 

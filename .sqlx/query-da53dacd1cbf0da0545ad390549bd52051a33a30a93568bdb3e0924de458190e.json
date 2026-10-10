@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "ALTER TABLE turns_hidden RENAME TO turns",
+  "query": "SET LOCAL statement_timeout = '20s'",
   "describe": {
     "columns": [],
     "parameters": {
@@ -8,5 +8,5 @@
     },
     "nullable": []
   },
-  "hash": "fa52f570aefdd1ef414677302b46a75a825c9a8c356f5254cc7ef467ff796927"
+  "hash": "da53dacd1cbf0da0545ad390549bd52051a33a30a93568bdb3e0924de458190e"
 }

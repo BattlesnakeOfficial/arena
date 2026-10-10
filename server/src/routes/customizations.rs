@@ -11,7 +11,9 @@ use std::collections::HashSet;
 
 use crate::{
     components::page_factory::PageFactory,
-    customizations::{self, Availability, CustomizationDef, Group, Head, Tail, UnlockOutcome},
+    customizations::{
+        self, Availability, CustomizationDef, Group, Head, Tail, UnlockOutcome, achievements,
+    },
     errors::{ServerResult, WithStatus},
     flasher::Flasher,
     routes::auth::{CurrentUser, OptionalUser},
@@ -28,6 +30,7 @@ fn catalog_item(
     balance: i64,
 ) -> Markup {
     let unlocked = def.is_free() || granted.contains(&(kind.to_string(), slug.to_string()));
+    let achievement = achievements::for_item(kind, slug);
 
     html! {
         div .cz-item .locked[!unlocked] {
@@ -36,7 +39,9 @@ fn catalog_item(
             }
             div class="cz-name" title=(def.display_name) { (def.display_name) }
             code class="cz-slug" { (kind) ": " (slug) }
-            @if !def.description.is_empty() {
+            @if let Some(achievement) = achievement {
+                p class="cz-description" { (achievement.name) ": " (achievement.description) }
+            } @else if !def.description.is_empty() {
                 p class="cz-description" { (def.description) }
             }
             @if unlocked {
@@ -85,9 +90,10 @@ pub async fn list_customizations(
             }
 
             @if user.is_some() {
-                p class="cz-note" { (balance) " unlock token(s) available" }
-                p class="cz-note" { "1 token for every week your snakes play a game; each unlock uses 1 token." }
-                @if balance == 0 {
+                div class="cz-token-panel" aria-label="Token unlocks" {
+                    h2 { "Token unlocks" }
+                    p class="cz-note" { (balance) " unlock token(s) available" }
+                    p class="cz-note" { "1 token for every week your snakes play a game; each unlock uses 1 token." }
                     p class="cz-note" { "To earn a token, one of your snakes needs to play a game this week." }
                 }
             }
@@ -220,6 +226,44 @@ mod tests {
         .unwrap()
     }
 
+    #[test]
+    fn achievement_cards_explain_rewards_without_token_actions() {
+        let mut owned = HashSet::new();
+        for (kind, slug, url, def) in Head::ALL
+            .iter()
+            .filter(|item| item.def().group == Group::Collection2024)
+            .map(|item| (Head::KIND, item.slug(), item.image_url(), item.def()))
+            .chain(
+                Tail::ALL
+                    .iter()
+                    .filter(|item| item.def().group == Group::Collection2024)
+                    .map(|item| (Tail::KIND, item.slug(), item.image_url(), item.def())),
+            )
+        {
+            let achievement = achievements::for_item(kind, slug).unwrap();
+            let guest = catalog_item(kind, slug, &url, &def, &owned, false, 0).into_string();
+            let locked = catalog_item(kind, slug, &url, &def, &owned, true, 4).into_string();
+            for card in [&guest, &locked] {
+                assert!(card.contains(achievement.name));
+                assert!(card.contains(achievement.description));
+                assert!(card.contains("Locked"));
+                assert!(!card.contains("cz-unlock-form"));
+                for word in card
+                    .to_ascii_lowercase()
+                    .split(|c: char| !c.is_ascii_alphabetic())
+                {
+                    assert!(
+                        !["buy", "price", "paid", "owned", "free", "cost", "costs"].contains(&word)
+                    );
+                }
+            }
+            owned.insert((kind.to_string(), slug.to_string()));
+            let unlocked = catalog_item(kind, slug, &url, &def, &owned, true, 4).into_string();
+            assert!(unlocked.contains("Unlocked"));
+            assert!(!unlocked.contains("cz-unlock-form"));
+        }
+    }
+
     #[sqlx::test(migrations = "../migrations")]
     async fn guest_zero_balance_and_unlock_form(db: sqlx::PgPool) {
         let state = AppState::test_from_pool(db.clone());
@@ -229,6 +273,10 @@ mod tests {
         assert!(guest.contains("sign in"));
         assert!(!guest.contains("action=\"/customizations/unlock\""));
         assert!(guest.contains("head: default"));
+        assert!(guest.contains("2024 Achievement Collection"));
+        for achievement in achievements::Achievement::ALL {
+            assert!(guest.contains(achievement.def().description));
+        }
         assert_eq!(
             request(&app, Method::POST, None, "kind=head&slug=alligator")
                 .await
@@ -277,6 +325,14 @@ mod tests {
             ("kind=head&slug=default", StatusCode::UNPROCESSABLE_ENTITY),
             ("kind=head&slug=fish", StatusCode::UNPROCESSABLE_ENTITY),
             ("kind=head&slug=turtle", StatusCode::UNPROCESSABLE_ENTITY),
+            ("kind=tail&slug=turtle", StatusCode::UNPROCESSABLE_ENTITY),
+            ("kind=head&slug=frog", StatusCode::UNPROCESSABLE_ENTITY),
+            ("kind=head&slug=judge", StatusCode::UNPROCESSABLE_ENTITY),
+            ("kind=tail&slug=judge", StatusCode::UNPROCESSABLE_ENTITY),
+            ("kind=head&slug=monkey", StatusCode::UNPROCESSABLE_ENTITY),
+            ("kind=tail&slug=monkey", StatusCode::UNPROCESSABLE_ENTITY),
+            ("kind=head&slug=subway", StatusCode::UNPROCESSABLE_ENTITY),
+            ("kind=tail&slug=subway", StatusCode::UNPROCESSABLE_ENTITY),
         ] {
             assert_eq!(
                 request(&app, Method::POST, Some(&cookie), body)
