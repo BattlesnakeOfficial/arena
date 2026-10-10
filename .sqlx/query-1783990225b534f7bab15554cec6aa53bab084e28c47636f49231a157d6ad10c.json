@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO customization_grants (user_id, customization_type, slug, source)\n        VALUES ($1, $2, $3, 'admin')\n        ON CONFLICT (user_id, customization_type, slug) DO NOTHING\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "1783990225b534f7bab15554cec6aa53bab084e28c47636f49231a157d6ad10c"
+}

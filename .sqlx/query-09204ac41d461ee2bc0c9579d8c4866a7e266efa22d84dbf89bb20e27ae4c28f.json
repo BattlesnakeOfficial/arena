@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO battlesnakes (user_id, name, url) VALUES ($1, 'Other Snake', 'https://example.com') RETURNING battlesnake_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "battlesnake_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "09204ac41d461ee2bc0c9579d8c4866a7e266efa22d84dbf89bb20e27ae4c28f"
+}

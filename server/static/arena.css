@@ -871,7 +871,7 @@ table.data.test-results pre { margin-top: 8px; font-family: var(--mono); font-si
 
 /* --- page: customizations (slice 6) --------------------------------------- */
 
-.cz-note { font-size: 14px; color: var(--muted); margin-top: 18px; }
+.cz-note { font-size: 16px; color: var(--muted); margin-top: 18px; }
 .cz-note a { color: var(--pink); }
 .cz-group { margin-top: 48px; }
 .cz-group-head { display: flex; align-items: baseline; gap: 12px; border-bottom: 1px solid var(--hairline); padding-bottom: 10px; }
@@ -889,6 +889,9 @@ table.data.test-results pre { margin-top: 8px; font-family: var(--mono); font-si
 .cz-name { max-width: 100%; font-weight: 600; font-size: 13.5px; letter-spacing: -.01em; margin: 10px 0 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cz-description { font-size: 12px; line-height: 1.5; color: var(--muted); margin: 0 0 10px; overflow-wrap: anywhere; }
 .cz-item .badge { margin-top: auto; }
+.cz-slug { display: block; max-width: 100%; overflow-wrap: anywhere; font-size: 13px; margin-bottom: 8px; }
+.cz-unlock-form { width: 100%; margin-top: 12px; }
+.cz-unlock { width: 100%; min-height: 44px; }
 
 @media (max-width: 640px) {
   .cz-grid { grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); gap: 10px; }

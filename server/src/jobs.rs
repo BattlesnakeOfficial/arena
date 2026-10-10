@@ -1,6 +1,7 @@
 use crate::state::AppState;
 
 use cja::jobs::Job;
+use color_eyre::eyre::Context as _;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -36,6 +37,27 @@ impl Job<AppState> for GameRunnerJob {
 /// Runs as a cron job every hour, checking games from the last 4 hours.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct GameBackupJob;
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CustomizationActiveWeekBackfillJob;
+
+#[async_trait::async_trait]
+impl Job<AppState> for CustomizationActiveWeekBackfillJob {
+    const NAME: &'static str = "CustomizationActiveWeekBackfillJob";
+
+    async fn run(&self, app_state: AppState) -> cja::Result<()> {
+        let inserted = crate::customizations::backfill_active_weeks(&app_state.db).await?;
+        let cursor = sqlx::query!(
+            "SELECT scanned_through FROM customization_active_week_backfill_cursor WHERE singleton = TRUE"
+        )
+        .fetch_one(&app_state.db)
+        .await
+        .wrap_err("Failed to read active-week backfill cursor")?
+        .scanned_through;
+        tracing::info!(inserted, %cursor, "Customization active-week backfill completed");
+        Ok(())
+    }
+}
 
 #[async_trait::async_trait]
 impl Job<AppState> for GameBackupJob {

@@ -509,6 +509,15 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
 
             crate::models::game::update_game_status_tx(&mut tx, game_id, GameStatus::Finished)
                 .await?;
+            let finished_at = chrono::Utc::now();
+            sqlx::query!(
+                "UPDATE games SET finished_at = $2 WHERE game_id = $1",
+                game_id,
+                finished_at,
+            )
+            .execute(&mut *tx)
+            .await
+            .wrap_err("Failed to persist game finish instant")?;
 
             if let Some(resolved) = &resolved_match_game {
                 crate::models::tournament::set_match_game_winner(
@@ -526,6 +535,10 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
                     "Recording tournament match game result"
                 );
             }
+
+            crate::customizations::record_active_week_for_game(&mut tx, game_id, finished_at)
+                .await
+                .wrap_err("Failed to credit game participants; retrying finish transaction")?;
 
             tx.commit()
                 .await
@@ -803,6 +816,29 @@ mod tests {
             .fetch_one(&pool)
             .await?;
         assert_eq!(status, "finished");
+        let credited = sqlx::query!(
+            "SELECT g.finished_at, aw.week_start FROM games g JOIN customization_active_weeks aw ON aw.user_id = $2 WHERE g.game_id = $1",
+            game_id,
+            user_id,
+        )
+        .fetch_one(&pool)
+        .await?;
+        let finished_at = credited
+            .finished_at
+            .expect("finished game has exact finish instant");
+        use chrono::Datelike as _;
+        let monday = finished_at.date_naive()
+            - chrono::Duration::days(i64::from(finished_at.weekday().num_days_from_monday()));
+        assert_eq!(credited.week_start, monday);
+        assert_eq!(
+            crate::customizations::token_balance(&pool, user_id).await?,
+            1
+        );
+        run_game(&app_state, game_id).await?;
+        assert_eq!(
+            crate::customizations::token_balance(&pool, user_id).await?,
+            1
+        );
 
         let events = capture.0.lock().unwrap();
         let final_turn_events: Vec<_> = events

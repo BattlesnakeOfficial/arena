@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE customization_active_week_backfill_cursor SET scanned_through = $1 WHERE singleton = TRUE",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ff42f99a3fc4ea3962251f567e08d3480693e1afa67007445b433f44da3878cd"
+}

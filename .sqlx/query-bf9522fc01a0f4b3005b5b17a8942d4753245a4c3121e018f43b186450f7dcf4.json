@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id) VALUES ($1, $2) RETURNING leaderboard_entry_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "leaderboard_entry_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "bf9522fc01a0f4b3005b5b17a8942d4753245a4c3121e018f43b186450f7dcf4"
+}

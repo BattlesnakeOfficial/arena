@@ -1061,7 +1061,7 @@ async fn the_studio_is_not_linked_from_customizations_or_the_footer_yet(db: sqlx
             assert!(!html.contains(href), "{what} links to the studio ({href})");
         }
     }
-    assert!(customizations.contains("Reach out on Discord"));
+    assert!(!customizations.contains("Reach out on Discord"));
 }
 
 /// The page's in-browser check, run the way studio.js runs it: the first rejected

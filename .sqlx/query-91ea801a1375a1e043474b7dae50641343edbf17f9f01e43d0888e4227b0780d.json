@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            (SELECT COUNT(*)::bigint FROM customization_active_weeks WHERE user_id = $1)\n          - (SELECT COUNT(*)::bigint FROM customization_grants WHERE user_id = $1 AND source = 'token')\n          AS \"balance!\"\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "balance!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "91ea801a1375a1e043474b7dae50641343edbf17f9f01e43d0888e4227b0780d"
+}

@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO games (board_size, game_type, status) VALUES ('11x11', 'Standard', 'finished') RETURNING game_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "game_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "3330c0f7a43d738db6e3c727382d0cabdd482d5c53618d2b1094d47ea32e3711"
+}
