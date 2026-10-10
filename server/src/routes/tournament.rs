@@ -848,31 +848,33 @@ pub async fn list_tournaments(
                 }
             } @else {
                 div class="section" {
-                    table class="data" {
-                        thead {
-                            tr {
-                                th { "Tournament" }
-                                th { "Status" }
-                                th class="r" { "Snakes" }
-                                th class="r hide-sm" { "Game" }
-                                th class="r hide-sm" { "Created" }
-                            }
-                        }
-                        tbody {
-                            @for t in &tournaments {
+                    div class="table-scroll" {
+                        table class="data" {
+                            thead {
                                 tr {
-                                    td {
-                                        div class="snake-cell" {
-                                            span {
-                                                a class="name" href={"/tournaments/"(t.tournament_id)} { (t.name) }
-                                                span class="owner" { "by " (t.owner_name) }
+                                    th { "Tournament" }
+                                    th { "Status" }
+                                    th class="r" { "Snakes" }
+                                    th class="r" { "Game" }
+                                    th class="r" { "Created" }
+                                }
+                            }
+                            tbody {
+                                @for t in &tournaments {
+                                    tr {
+                                        td {
+                                            div class="snake-cell" {
+                                                span {
+                                                    a class="name" href={"/tournaments/"(t.tournament_id)} { (t.name) }
+                                                    span class="owner" { "by " (t.owner_name) }
+                                                }
                                             }
                                         }
+                                        td { (status_badge(t.status)) }
+                                        td class="r num" { (t.registration_count) }
+                                        td class="r num" { (t.game_type.as_str()) }
+                                        td class="r num" { (t.created_at.format("%b %-d, %Y")) }
                                     }
-                                    td { (status_badge(t.status)) }
-                                    td class="r num" { (t.registration_count) }
-                                    td class="r num hide-sm" { (t.game_type.as_str()) }
-                                    td class="r num hide-sm" { (t.created_at.format("%b %-d, %Y")) }
                                 }
                             }
                         }

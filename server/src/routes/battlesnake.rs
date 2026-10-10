@@ -440,42 +440,44 @@ pub async fn list_battlesnakes(
                 p class="empty" { "You don't have any battlesnakes yet." }
             } @else {
                 div class="section" {
-                    table class="data" {
-                        thead {
-                            tr {
-                                th { "Snake" }
-                                th class="hide-sm" { "URL" }
-                                th { "Visibility" }
-                                th class="r" { "Actions" }
-                            }
-                        }
-                        tbody {
-                            @for snake in &battlesnakes {
+                    div class="table-scroll" {
+                        table class="data" {
+                            thead {
                                 tr {
-                                    td {
-                                        div class="snake-cell" {
-                                            span class="chip" style={"background:" (chip_color(&snake.color))} {}
-                                            a class="name" href={"/battlesnakes/"(snake.battlesnake_id)"/profile"} { (snake.name) }
-                                        }
-                                    }
-                                    td class="url-cell hide-sm" {
-                                        a href=(snake.url) target="_blank" rel="noopener" { (snake.url) }
-                                    }
-                                    td {
-                                        @if snake.visibility == Visibility::Public {
-                                            span class="badge ok" { "Public" }
-                                        } @else {
-                                            span class="badge" { "Private" }
-                                        }
-                                    }
-                                    td class="r" {
-                                        div class="row-actions" {
-                                            form action={"/battlesnakes/"(snake.battlesnake_id)"/test"} method="post" {
-                                                button type="submit" class="btn sm" { "Test" }
+                                    th { "Snake" }
+                                    th { "URL" }
+                                    th { "Visibility" }
+                                    th class="r" { "Actions" }
+                                }
+                            }
+                            tbody {
+                                @for snake in &battlesnakes {
+                                    tr {
+                                        td {
+                                            div class="snake-cell" {
+                                                span class="chip" style={"background:" (chip_color(&snake.color))} {}
+                                                a class="name" href={"/battlesnakes/"(snake.battlesnake_id)"/profile"} { (snake.name) }
                                             }
-                                            a href={"/battlesnakes/"(snake.battlesnake_id)"/edit"} class="btn sm" { "Edit" }
-                                            form action={"/battlesnakes/"(snake.battlesnake_id)"/delete"} method="post" {
-                                                button type="submit" class="btn sm danger" onclick="return confirm('Are you sure you want to delete this battlesnake?');" { "Delete" }
+                                        }
+                                        td class="url-cell" {
+                                            a href=(snake.url) target="_blank" rel="noopener" { (snake.url) }
+                                        }
+                                        td {
+                                            @if snake.visibility == Visibility::Public {
+                                                span class="badge ok" { "Public" }
+                                            } @else {
+                                                span class="badge" { "Private" }
+                                            }
+                                        }
+                                        td class="r" {
+                                            div class="row-actions" {
+                                                form action={"/battlesnakes/"(snake.battlesnake_id)"/test"} method="post" {
+                                                    button type="submit" class="btn sm" { "Test" }
+                                                }
+                                                a href={"/battlesnakes/"(snake.battlesnake_id)"/edit"} class="btn sm" { "Edit" }
+                                                form action={"/battlesnakes/"(snake.battlesnake_id)"/delete"} method="post" {
+                                                    button type="submit" class="btn sm danger" onclick="return confirm('Are you sure you want to delete this battlesnake?');" { "Delete" }
+                                                }
                                             }
                                         }
                                     }
@@ -1314,42 +1316,44 @@ fn render_battlesnake_profile(view: &ProfileView<'_>) -> Markup {
             @if !view.leaderboard_entries.is_empty() {
                 section class="section" {
                     h2 { "Leaderboards" }
-                    table class="data" {
-                        thead {
-                            tr {
-                                th { "Leaderboard" }
-                                th class="r" { "Rating" }
-                                th class="r hide-sm" { "Games" }
-                                th class="r hide-sm" { "1st Place" }
-                                th class="r" { "Status" }
-                            }
-                        }
-                        tbody {
-                            @for entry in view.leaderboard_entries {
+                    div class="table-scroll" {
+                        table class="data" {
+                            thead {
                                 tr {
-                                    td {
-                                        a href={"/leaderboards/"(entry.leaderboard_id)"/entries/"(entry.leaderboard_entry_id)} {
-                                            (entry.leaderboard_name)
+                                    th { "Leaderboard" }
+                                    th class="r" { "Rating" }
+                                    th class="r" { "Games" }
+                                    th class="r" { "1st Place" }
+                                    th class="r" { "Status" }
+                                }
+                            }
+                            tbody {
+                                @for entry in view.leaderboard_entries {
+                                    tr {
+                                        td {
+                                            a href={"/leaderboards/"(entry.leaderboard_id)"/entries/"(entry.leaderboard_entry_id)} {
+                                                (entry.leaderboard_name)
+                                            }
                                         }
-                                    }
-                                    td class="r num" { (format!("{:.1}", entry.display_score)) }
-                                    td class="r num hide-sm" { (entry.games_played) }
-                                    td class="r num hide-sm" {
-                                        @if entry.games_played > 0 {
-                                            (format!("{:.0}%", f64::from(entry.first_place_finishes) / f64::from(entry.games_played) * 100.0))
-                                        } @else {
-                                            "—"
+                                        td class="r num" { (format!("{:.1}", entry.display_score)) }
+                                        td class="r num" { (entry.games_played) }
+                                        td class="r num" {
+                                            @if entry.games_played > 0 {
+                                                (format!("{:.0}%", f64::from(entry.first_place_finishes) / f64::from(entry.games_played) * 100.0))
+                                            } @else {
+                                                "—"
+                                            }
                                         }
-                                    }
-                                    td class="r" {
-                                        @if entry.disabled_at.is_some()
-                                            && entry.disabled_reason.as_deref() == Some(leaderboard_entry_health::DISABLED_REASON_HEALTH)
-                                        {
-                                            span class="badge warn" title="Automatically paused: this snake is failing health checks on this leaderboard." { "Auto-paused" }
-                                        } @else if entry.disabled_at.is_some() {
-                                            span class="badge" { "Paused" }
-                                        } @else {
-                                            span class="badge ok" { "Active" }
+                                        td class="r" {
+                                            @if entry.disabled_at.is_some()
+                                                && entry.disabled_reason.as_deref() == Some(leaderboard_entry_health::DISABLED_REASON_HEALTH)
+                                            {
+                                                span class="badge warn" title="Automatically paused: this snake is failing health checks on this leaderboard." { "Auto-paused" }
+                                            } @else if entry.disabled_at.is_some() {
+                                                span class="badge" { "Paused" }
+                                            } @else {
+                                                span class="badge ok" { "Active" }
+                                            }
                                         }
                                     }
                                 }
@@ -1364,51 +1368,53 @@ fn render_battlesnake_profile(view: &ProfileView<'_>) -> Markup {
                 @if stats.total_games == 0 {
                     p class="empty" { "No games played yet." }
                 } @else {
-                    table class="data" {
-                        thead {
-                            tr {
-                                th { "Date" }
-                                th { "Game" }
-                                th class="r hide-sm" { "Snakes" }
-                                th { "Placement" }
-                                th class="hide-sm" { "Winner" }
-                                th class="r" { "Replay" }
-                            }
-                        }
-                        tbody {
-                            @for entry in view.history {
-                                @let finished = entry.status == crate::models::game::GameStatus::Finished;
+                    div class="table-scroll" {
+                        table class="data" {
+                            thead {
                                 tr {
-                                    td class="when" {
-                                        (entry.created_at.format("%b %-d"))
-                                        span class="sub" { (entry.created_at.format("%H:%M")) }
-                                    }
-                                    td {
-                                        (entry.game_type.as_str())
-                                        span class="sub" { (entry.board_size.as_str()) }
-                                    }
-                                    td class="r num hide-sm" { (entry.snake_count) }
-                                    td {
-                                        @if let Some(placement) = entry.placement {
-                                            (placement_badge(placement))
-                                        } @else if finished {
-                                            span class="badge" { "—" }
-                                        } @else {
-                                            span class="badge warn" { "Live" }
+                                    th { "Date" }
+                                    th { "Game" }
+                                    th class="r" { "Snakes" }
+                                    th { "Placement" }
+                                    th { "Winner" }
+                                    th class="r" { "Replay" }
+                                }
+                            }
+                            tbody {
+                                @for entry in view.history {
+                                    @let finished = entry.status == crate::models::game::GameStatus::Finished;
+                                    tr {
+                                        td class="when" {
+                                            (entry.created_at.format("%b %-d"))
+                                            span class="sub" { (entry.created_at.format("%H:%M")) }
                                         }
-                                    }
-                                    td class="hide-sm" {
-                                        @if let Some(winner) = &entry.winner_name {
-                                            (winner)
-                                        } @else if finished {
-                                            span class="sub" { "No winner" }
-                                        } @else {
-                                            span class="sub" { "In progress" }
+                                        td {
+                                            (entry.game_type.as_str())
+                                            span class="sub" { (entry.board_size.as_str()) }
                                         }
-                                    }
-                                    td class="r" {
-                                        a href={"/games/"(entry.game_id)} class="btn sm" {
-                                            @if finished { "Watch" } @else { "Live" }
+                                        td class="r num" { (entry.snake_count) }
+                                        td {
+                                            @if let Some(placement) = entry.placement {
+                                                (placement_badge(placement))
+                                            } @else if finished {
+                                                span class="badge" { "—" }
+                                            } @else {
+                                                span class="badge warn" { "Live" }
+                                            }
+                                        }
+                                        td {
+                                            @if let Some(winner) = &entry.winner_name {
+                                                (winner)
+                                            } @else if finished {
+                                                span class="sub" { "No winner" }
+                                            } @else {
+                                                span class="sub" { "In progress" }
+                                            }
+                                        }
+                                        td class="r" {
+                                            a href={"/games/"(entry.game_id)} class="btn sm" {
+                                                @if finished { "Watch" } @else { "Live" }
+                                            }
                                         }
                                     }
                                 }
@@ -2393,7 +2399,7 @@ mod profile_page_tests {
                 "href=\"/battlesnakes/{}/profile?page={pager_link}\"",
                 fx.snake_id
             )));
-            assert!(html.contains("<td class=\"r num hide-sm\">7</td>"));
+            assert!(html.contains("<td class=\"r num\">7</td>"));
             if pager_link == 1 {
                 assert!(html.contains("Next ›"));
                 assert!(!html.contains("‹ Prev"));
