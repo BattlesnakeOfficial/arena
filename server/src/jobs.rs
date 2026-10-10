@@ -37,6 +37,26 @@ impl Job<AppState> for GameRunnerJob {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct GameBackupJob;
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CustomizationActiveWeekBackfillJob;
+
+#[async_trait::async_trait]
+impl Job<AppState> for CustomizationActiveWeekBackfillJob {
+    const NAME: &'static str = "CustomizationActiveWeekBackfillJob";
+
+    async fn run(&self, app_state: AppState) -> cja::Result<()> {
+        let inserted = crate::customizations::backfill_active_weeks(&app_state.db).await?;
+        let cursor = sqlx::query!(
+            "SELECT scanned_through FROM customization_active_week_backfill_cursor WHERE singleton = TRUE"
+        )
+        .fetch_one(&app_state.db)
+        .await?
+        .scanned_through;
+        tracing::info!(inserted, %cursor, "Customization active-week backfill completed");
+        Ok(())
+    }
+}
+
 #[async_trait::async_trait]
 impl Job<AppState> for GameBackupJob {
     const NAME: &'static str = "GameBackupJob";

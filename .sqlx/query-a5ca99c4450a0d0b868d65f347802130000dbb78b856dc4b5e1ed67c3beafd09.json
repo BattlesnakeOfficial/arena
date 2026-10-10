@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO customization_active_weeks (user_id, week_start)\n        SELECT DISTINCT bs.user_id,\n            date_trunc('week', $2::timestamptz AT TIME ZONE 'UTC')::date\n        FROM game_battlesnakes gb\n        LEFT JOIN leaderboard_entries le ON le.leaderboard_entry_id = gb.leaderboard_entry_id\n        JOIN battlesnakes bs ON bs.battlesnake_id = COALESCE(gb.battlesnake_id, le.battlesnake_id)\n        WHERE gb.game_id = $1\n        ON CONFLICT (user_id, week_start) DO NOTHING\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a5ca99c4450a0d0b868d65f347802130000dbb78b856dc4b5e1ed67c3beafd09"
+}

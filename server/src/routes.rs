@@ -145,6 +145,10 @@ pub fn routes(app_state: AppState) -> axum::Router {
         .route("/auth/cli-token", get(github_auth::cli_token_page))
         // Battlesnake routes
         .route("/customizations", get(customizations::list_customizations))
+        .route(
+            "/customizations/unlock",
+            post(customizations::unlock_customization),
+        )
         // Head & Tail Studio, and its guide (`/studio` redirects to the studio)
         .route("/customizations/studio", get(studio::studio_page))
         .route("/customizations/studio/guide", get(studio::guide_page))

@@ -4,8 +4,8 @@ use cja::cron::{CronRegistry, Worker};
 use tokio_util::sync::CancellationToken;
 
 use crate::jobs::{
-    GameBackupJob, LeaderboardMatchmakerJob, RateLimitPruneJob, SnakeHealthSweeperJob,
-    StuckGameSweeperJob, StuckMatchSweeperJob,
+    CustomizationActiveWeekBackfillJob, GameBackupJob, LeaderboardMatchmakerJob, RateLimitPruneJob,
+    SnakeHealthSweeperJob, StuckGameSweeperJob, StuckMatchSweeperJob,
 };
 use crate::state::AppState;
 
@@ -26,6 +26,7 @@ pub const SNAKE_HEALTH_SWEEP_INTERVAL_SECS: u64 = 30 * 60;
 /// Stuck-game sweep interval. Fails non-tournament games left in
 /// waiting/running past the configured max age.
 pub const STUCK_GAME_SWEEP_INTERVAL_SECS: u64 = 30 * 60;
+pub const CUSTOMIZATION_ACTIVE_WEEK_BACKFILL_INTERVAL_SECS: u64 = 60 * 60;
 
 pub(crate) fn cron_registry() -> CronRegistry<AppState> {
     let mut registry = CronRegistry::new();
@@ -35,6 +36,11 @@ pub(crate) fn cron_registry() -> CronRegistry<AppState> {
         GameBackupJob,
         Some("Enqueue backup jobs for games from the last 4 hours"),
         Duration::from_secs(60 * 60),
+    );
+    registry.register_job(
+        CustomizationActiveWeekBackfillJob,
+        Some("Credit historical finished-game weeks"),
+        Duration::from_secs(CUSTOMIZATION_ACTIVE_WEEK_BACKFILL_INTERVAL_SECS),
     );
 
     // Leaderboard matchmaker: one round per derived interval, subject to worker delay.
@@ -156,6 +162,37 @@ mod tests {
         assert_eq!(MATCHMAKER_INTERVAL_SECS, 864);
         assert_eq!(LADDER_DISPATCH_INTERVAL_SECS, 5);
         const { assert!(CRON_POLL_SECS < MATCHMAKER_INTERVAL_SECS) };
+    }
+
+    #[test]
+    fn active_week_backfill_runs_on_boot_then_hourly() {
+        let registry = cron_registry();
+        let job = registry
+            .get("CustomizationActiveWeekBackfillJob")
+            .expect("active-week backfill registered");
+        assert_eq!(
+            job.description,
+            Some("Credit historical finished-game weeks")
+        );
+        let cja::cron::Schedule::Interval(interval) = &job.schedule else {
+            panic!("active-week backfill must use an interval");
+        };
+        assert_eq!(
+            interval.0,
+            Duration::from_secs(CUSTOMIZATION_ACTIVE_WEEK_BACKFILL_INTERVAL_SECS)
+        );
+        let now = chrono::Utc::now();
+        assert!(job.schedule.should_run(None, now, now, cja::chrono_tz::UTC));
+        assert!(
+            !job.schedule
+                .should_run(Some(&now), now, now, cja::chrono_tz::UTC)
+        );
+        assert!(job.schedule.should_run(
+            Some(&(now - chrono::Duration::hours(2))),
+            now,
+            now,
+            cja::chrono_tz::UTC
+        ));
     }
 
     #[tokio::test]

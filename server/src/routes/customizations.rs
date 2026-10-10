@@ -1,13 +1,20 @@
-use axum::{extract::State, http::StatusCode, response::IntoResponse};
+use axum::{
+    Form,
+    extract::State,
+    http::StatusCode,
+    response::{IntoResponse, Redirect},
+};
 use color_eyre::eyre::Context as _;
 use maud::{Markup, html};
+use serde::Deserialize;
 use std::collections::HashSet;
 
 use crate::{
     components::page_factory::PageFactory,
-    customizations::{self, Availability, CustomizationDef, Group, Head, Tail},
-    errors::ServerResult,
-    routes::auth::OptionalUser,
+    customizations::{self, Availability, CustomizationDef, Group, Head, Tail, UnlockOutcome},
+    errors::{ServerResult, WithStatus},
+    flasher::Flasher,
+    routes::auth::{CurrentUser, OptionalUser},
     state::AppState,
 };
 
@@ -17,6 +24,8 @@ fn catalog_item(
     image_url: &str,
     def: &CustomizationDef,
     granted: &HashSet<(String, String)>,
+    signed_in: bool,
+    balance: i64,
 ) -> Markup {
     let unlocked = def.is_free() || granted.contains(&(kind.to_string(), slug.to_string()));
 
@@ -26,6 +35,7 @@ fn catalog_item(
                 img src=(image_url) alt="" loading="lazy";
             }
             div class="cz-name" title=(def.display_name) { (def.display_name) }
+            code class="cz-slug" { (kind) ": " (slug) }
             @if !def.description.is_empty() {
                 p class="cz-description" { (def.description) }
             }
@@ -33,6 +43,13 @@ fn catalog_item(
                 span class="badge ok" { "Unlocked" }
             } @else {
                 span class="badge" { "Locked" }
+            }
+            @if signed_in && !unlocked && def.is_token_unlockable() && balance > 0 {
+                form class="cz-unlock-form" method="post" action="/customizations/unlock" {
+                    input type="hidden" name="kind" value=(kind);
+                    input type="hidden" name="slug" value=(slug);
+                    button type="submit" class="btn solid cz-unlock" { "Unlock" }
+                }
             }
         }
     }
@@ -50,6 +67,10 @@ pub async fn list_customizations(
             .wrap_err("Failed to fetch customization grants")?,
         None => HashSet::new(),
     };
+    let balance = match &user {
+        Some(user) => customizations::token_balance(&state.db, user.user_id).await?,
+        None => 0,
+    };
 
     Ok(page_factory.create_page(
         "Customizations".to_string(),
@@ -63,10 +84,12 @@ pub async fn list_customizations(
                 }
             }
 
-            p class="cz-note" {
-                "See a head or tail you want? "
-                a href="/discord" { "Reach out on Discord" }
-                " and tell us which one!"
+            @if user.is_some() {
+                p class="cz-note" { (balance) " unlock token(s) available" }
+                p class="cz-note" { "1 token for every week your snakes play a game; each unlock uses 1 token." }
+                @if balance == 0 {
+                    p class="cz-note" { "To earn a token, one of your snakes needs to play a game this week." }
+                }
             }
 
             @if user.is_none() {
@@ -93,7 +116,7 @@ pub async fn list_customizations(
                                 h3 class="cz-kind" { "Heads" }
                                 div class="cz-grid" {
                                     @for head in &heads {
-                                        (catalog_item(Head::KIND, head.slug(), &head.image_url(), &head.def(), &granted))
+                                        (catalog_item(Head::KIND, head.slug(), &head.image_url(), &head.def(), &granted, user.is_some(), balance))
                                     }
                                 }
                             }
@@ -101,7 +124,7 @@ pub async fn list_customizations(
                                 h3 class="cz-kind" { "Tails" }
                                 div class="cz-grid" {
                                     @for tail in &tails {
-                                        (catalog_item(Tail::KIND, tail.slug(), &tail.image_url(), &tail.def(), &granted))
+                                        (catalog_item(Tail::KIND, tail.slug(), &tail.image_url(), &tail.def(), &granted, user.is_some(), balance))
                                     }
                                 }
                             }
@@ -111,4 +134,198 @@ pub async fn list_customizations(
             }
         }),
     ))
+}
+
+#[derive(Deserialize)]
+pub struct UnlockForm {
+    kind: String,
+    slug: String,
+}
+
+pub async fn unlock_customization(
+    State(state): State<AppState>,
+    CurrentUser(user): CurrentUser,
+    flasher: Flasher,
+    Form(form): Form<UnlockForm>,
+) -> ServerResult<impl IntoResponse, StatusCode> {
+    match customizations::unlock_with_token(&state.db, user.user_id, &form.kind, &form.slug).await?
+    {
+        UnlockOutcome::Unlocked => {
+            let name = match form.kind.as_str() {
+                Head::KIND => Head::from_slug(&form.slug).map(|head| head.def().display_name),
+                Tail::KIND => Tail::from_slug(&form.slug).map(|tail| tail.def().display_name),
+                _ => None,
+            }
+            .expect("unlocked catalog item was validated");
+            if let Err(error) = flasher.add_flash(format!("Unlocked {name}")).await {
+                tracing::error!(error = %format!("{error:#}"), "Failed to flash customization unlock");
+            }
+            Ok(Redirect::to("/customizations"))
+        }
+        UnlockOutcome::UnknownItem => {
+            Err("Unknown customization".to_string()).with_status(StatusCode::NOT_FOUND)
+        }
+        UnlockOutcome::NotTokenUnlockable => {
+            Err("Customization cannot be unlocked with a token".to_string())
+                .with_status(StatusCode::UNPROCESSABLE_ENTITY)
+        }
+        UnlockOutcome::AlreadyOwned => {
+            Err("Customization already unlocked".to_string()).with_status(StatusCode::CONFLICT)
+        }
+        UnlockOutcome::InsufficientTokens => {
+            Err("No unlock tokens available".to_string()).with_status(StatusCode::CONFLICT)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::routes::test_support::{
+        create_user_session, session_user_id, signed_session_cookie,
+    };
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Method, Request, header},
+    };
+    use tower::ServiceExt as _;
+
+    async fn request(
+        app: &axum::Router,
+        method: Method,
+        cookie: Option<&str>,
+        body: &str,
+    ) -> axum::response::Response {
+        let mut builder = Request::builder().method(method).uri(if body.is_empty() {
+            "/customizations"
+        } else {
+            "/customizations/unlock"
+        });
+        if let Some(cookie) = cookie {
+            builder = builder.header(
+                header::COOKIE,
+                format!("{}={cookie}", crate::models::session::SESSION_COOKIE_NAME),
+            );
+        }
+        if !body.is_empty() {
+            builder = builder.header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
+        }
+        app.clone()
+            .oneshot(builder.body(Body::from(body.to_owned())).unwrap())
+            .await
+            .unwrap()
+    }
+
+    async fn html(response: axum::response::Response) -> String {
+        String::from_utf8(
+            to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap()
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn guest_zero_balance_and_unlock_form(db: sqlx::PgPool) {
+        let state = AppState::test_from_pool(db.clone());
+        let app =
+            crate::routes::routes(state.clone()).layer(tower_cookies::CookieManagerLayer::new());
+        let guest = html(request(&app, Method::GET, None, "").await).await;
+        assert!(guest.contains("sign in"));
+        assert!(!guest.contains("action=\"/customizations/unlock\""));
+        assert!(guest.contains("head: default"));
+        assert_eq!(
+            request(&app, Method::POST, None, "kind=head&slug=alligator")
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        let session = create_user_session(&db, 164701, false).await;
+        let user = session_user_id(&db, session).await;
+        let cookie = signed_session_cookie(&state, session);
+        let empty = html(request(&app, Method::GET, Some(&cookie), "").await).await;
+        assert!(
+            empty.contains(
+                "1 token for every week your snakes play a game; each unlock uses 1 token."
+            )
+        );
+        assert!(empty.contains("one of your snakes needs to play a game this week"));
+        assert!(!empty.contains("action=\"/customizations/unlock\""));
+
+        sqlx::query!("INSERT INTO customization_active_weeks (user_id, week_start) VALUES ($1, '2026-10-05')", user).execute(&db).await.unwrap();
+        let funded = html(request(&app, Method::GET, Some(&cookie), "").await).await;
+        assert!(funded.contains("1 unlock token(s) available"));
+        assert!(funded.contains("head: alligator"));
+        assert!(funded.contains("tail: alligator"));
+        assert!(funded.contains("action=\"/customizations/unlock\""));
+        let intro = funded
+            .split("<h1>Customizations</h1>")
+            .nth(1)
+            .expect("customization heading")
+            .split("<section class=\"cz-group\">")
+            .next()
+            .expect("intro before catalog");
+        for word in intro
+            .to_ascii_lowercase()
+            .split(|c: char| !c.is_ascii_alphabetic())
+        {
+            assert!(
+                !["buy", "price", "paid", "owned", "free", "cost", "costs"].contains(&word),
+                "purchase vocabulary in customization page intro: {word}"
+            );
+        }
+
+        for (body, expected) in [
+            ("kind=head&slug=not-real", StatusCode::NOT_FOUND),
+            ("kind=unknown&slug=alligator", StatusCode::NOT_FOUND),
+            ("kind=head&slug=default", StatusCode::UNPROCESSABLE_ENTITY),
+            ("kind=head&slug=fish", StatusCode::UNPROCESSABLE_ENTITY),
+            ("kind=head&slug=turtle", StatusCode::UNPROCESSABLE_ENTITY),
+        ] {
+            assert_eq!(
+                request(&app, Method::POST, Some(&cookie), body)
+                    .await
+                    .status(),
+                expected
+            );
+            assert_eq!(customizations::token_balance(&db, user).await.unwrap(), 1);
+        }
+        let unlocked = request(
+            &app,
+            Method::POST,
+            Some(&cookie),
+            "kind=head&slug=alligator",
+        )
+        .await;
+        assert_eq!(unlocked.status(), StatusCode::SEE_OTHER);
+        assert_eq!(unlocked.headers()[header::LOCATION], "/customizations");
+        assert_eq!(customizations::token_balance(&db, user).await.unwrap(), 0);
+        assert_eq!(
+            request(
+                &app,
+                Method::POST,
+                Some(&cookie),
+                "kind=tail&slug=alligator"
+            )
+            .await
+            .status(),
+            StatusCode::CONFLICT
+        );
+        let page = html(request(&app, Method::GET, Some(&cookie), "").await).await;
+        assert!(page.contains("Unlocked alligator") || page.contains("Unlocked Alligator"));
+        assert!(!page.contains("action=\"/customizations/unlock\""));
+        assert_eq!(
+            request(
+                &app,
+                Method::POST,
+                Some(&cookie),
+                "kind=head&slug=alligator"
+            )
+            .await
+            .status(),
+            StatusCode::CONFLICT
+        );
+    }
 }

@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT customization_type, slug, source FROM customization_grants WHERE user_id = $1 ORDER BY customization_type, slug",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "customization_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "slug",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "source",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "f0f5d61bf2dcca6bc1a6aed736270f136e41a1328d6c0201d71f76be0827c527"
+}
