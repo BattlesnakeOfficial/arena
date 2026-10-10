@@ -117,6 +117,8 @@ async fn render_user_profile(
         .wrap_err("Failed to fetch saved games")?;
 
     let name = user.public_name().to_string();
+    let social_image = crate::routes::og::player_card_path(user.user_id);
+    let social_alt = format!("{name} on Battlesnake Arena");
 
     Ok(page_factory.create_page(
         name.clone(),
@@ -225,7 +227,8 @@ async fn render_user_profile(
                 }
             }
         }),
-    ))
+    )
+    .with_social_image(social_image, social_alt))
 }
 
 fn render_profile_rating(score: Option<&GlobalPlayerScore>) -> Markup {
