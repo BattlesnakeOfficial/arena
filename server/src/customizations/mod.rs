@@ -37,7 +37,7 @@ impl CustomizationDef {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnlockOutcome {
-    Unlocked,
+    Unlocked(&'static str),
     UnknownItem,
     NotTokenUnlockable,
     AlreadyOwned,
@@ -60,6 +60,7 @@ pub async fn record_active_week_for_game(
         LEFT JOIN leaderboard_entries le ON le.leaderboard_entry_id = gb.leaderboard_entry_id
         JOIN battlesnakes bs ON bs.battlesnake_id = COALESCE(gb.battlesnake_id, le.battlesnake_id)
         WHERE gb.game_id = $1
+        ORDER BY 1, 2
         ON CONFLICT (user_id, week_start) DO NOTHING
         "#,
         game_id,
@@ -163,7 +164,7 @@ pub async fn unlock_with_token(
     tx.commit()
         .await
         .wrap_err("Failed to commit customization unlock")?;
-    Ok(UnlockOutcome::Unlocked)
+    Ok(UnlockOutcome::Unlocked(def.display_name))
 }
 
 /// Scan historical links in bounded timestamp windows. Credits and cursor
@@ -177,14 +178,17 @@ pub async fn backfill_active_weeks(pool: &PgPool) -> cja::Result<u64> {
             .wrap_err("Failed to begin active-week backfill")?;
         sqlx::query!("SET LOCAL lock_timeout = '5s'")
             .execute(&mut *tx)
-            .await?;
+            .await
+            .wrap_err("Failed to set active-week backfill lock timeout")?;
         sqlx::query!("SET LOCAL statement_timeout = '60s'")
             .execute(&mut *tx)
-            .await?;
+            .await
+            .wrap_err("Failed to set active-week backfill statement timeout")?;
         let cursor = sqlx::query!(
             "SELECT scanned_through FROM customization_active_week_backfill_cursor WHERE singleton = TRUE FOR UPDATE"
         )
-        .fetch_one(&mut *tx).await?
+        .fetch_one(&mut *tx).await
+        .wrap_err("Failed to lock active-week backfill cursor")?
         .scanned_through;
         let run_now = chrono::Utc::now();
         let advancing = cursor < run_now;
@@ -218,6 +222,7 @@ pub async fn backfill_active_weeks(pool: &PgPool) -> cja::Result<u64> {
             FROM window_links wl
             JOIN legacy_finishes lf ON lf.game_id = wl.game_id
             JOIN battlesnakes bs ON bs.battlesnake_id = wl.battlesnake_id
+            ORDER BY 1, 2
             ON CONFLICT (user_id, week_start) DO NOTHING
             "#,
             window_start,
@@ -230,7 +235,8 @@ pub async fn backfill_active_weeks(pool: &PgPool) -> cja::Result<u64> {
             sqlx::query!(
                 "UPDATE customization_active_week_backfill_cursor SET scanned_through = $1 WHERE singleton = TRUE",
                 batch_end,
-            ).execute(&mut *tx).await?;
+            ).execute(&mut *tx).await
+            .wrap_err("Failed to advance active-week backfill cursor")?;
         }
         tx.commit()
             .await
@@ -557,7 +563,7 @@ mod tests {
         assert_eq!(token_balance(&pool, other).await?, 2);
         assert_eq!(
             unlock_with_token(&pool, owner, "head", "alligator").await?,
-            UnlockOutcome::Unlocked
+            UnlockOutcome::Unlocked(Head::Alligator.def().display_name)
         );
         assert_eq!(
             unlock_with_token(&pool, owner, "head", "alligator").await?,
@@ -671,6 +677,181 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "../migrations")]
+    async fn backfill_catches_late_finish_in_lookback(pool: PgPool) -> cja::Result<()> {
+        let user = create_test_user(&pool).await?;
+        let snake = sqlx::query_scalar!(
+            "INSERT INTO battlesnakes (user_id, name, url) VALUES ($1, 'Late Snake', 'https://example.com') RETURNING battlesnake_id", user
+        ).fetch_one(&pool).await?;
+        let game = sqlx::query_scalar!(
+            "INSERT INTO games (board_size, game_type, status) VALUES ('11x11', 'Standard', 'running') RETURNING game_id"
+        ).fetch_one(&pool).await?;
+        let linked_at = chrono::Utc::now() - chrono::Duration::hours(2);
+        sqlx::query!(
+            "INSERT INTO game_battlesnakes (game_id, battlesnake_id, created_at) VALUES ($1, $2, $3)",
+            game, snake, linked_at
+        ).execute(&pool).await?;
+        sqlx::query!(
+            "UPDATE customization_active_week_backfill_cursor SET scanned_through = $1 WHERE singleton = TRUE",
+            linked_at - chrono::Duration::hours(1)
+        ).execute(&pool).await?;
+        assert_eq!(backfill_active_weeks(&pool).await?, 0);
+        sqlx::query!(
+            "UPDATE games SET status = 'finished' WHERE game_id = $1",
+            game
+        )
+        .execute(&pool)
+        .await?;
+        let finished_at = chrono::Utc::now();
+        sqlx::query!(
+            "INSERT INTO turns (game_id, turn_number, created_at) VALUES ($1, 1, $2)",
+            game,
+            finished_at
+        )
+        .execute(&pool)
+        .await?;
+        assert_eq!(backfill_active_weeks(&pool).await?, 1);
+        let week = sqlx::query_scalar!(
+            "SELECT week_start FROM customization_active_weeks WHERE user_id = $1",
+            user
+        )
+        .fetch_one(&pool)
+        .await?;
+        use chrono::Datelike as _;
+        assert_eq!(
+            week,
+            finished_at.date_naive()
+                - chrono::Duration::days(i64::from(finished_at.weekday().num_days_from_monday()))
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn failed_backfill_batch_rolls_back_credit_and_cursor(pool: PgPool) -> cja::Result<()> {
+        let a = create_test_user(&pool).await?;
+        let b = sqlx::query_scalar!(
+            "INSERT INTO users (external_github_id, github_login, github_access_token) VALUES (42424243, 'poison-tester', 'token') RETURNING user_id"
+        ).fetch_one(&pool).await?;
+        let (normal, poisoned) = if a < b { (a, b) } else { (b, a) };
+        let start = chrono::Utc::now() - chrono::Duration::hours(4);
+        sqlx::query!(
+            "UPDATE customization_active_week_backfill_cursor SET scanned_through = $1 WHERE singleton = TRUE", start
+        ).execute(&pool).await?;
+        let start = sqlx::query_scalar!(
+            "SELECT scanned_through FROM customization_active_week_backfill_cursor WHERE singleton = TRUE"
+        ).fetch_one(&pool).await?;
+        for (index, user) in [normal, poisoned].into_iter().enumerate() {
+            let snake = sqlx::query_scalar!(
+                "INSERT INTO battlesnakes (user_id, name, url) VALUES ($1, $2, 'https://example.com') RETURNING battlesnake_id",
+                user, format!("Batch Snake {index}")
+            ).fetch_one(&pool).await?;
+            let game = sqlx::query_scalar!(
+                "INSERT INTO games (board_size, game_type, status) VALUES ('11x11', 'Standard', 'finished') RETURNING game_id"
+            ).fetch_one(&pool).await?;
+            sqlx::query!(
+                "INSERT INTO game_battlesnakes (game_id, battlesnake_id, created_at) VALUES ($1, $2, $3)",
+                game, snake, start + chrono::Duration::hours(1)
+            ).execute(&pool).await?;
+        }
+        sqlx::query(&format!(
+            "CREATE FUNCTION reject_poisoned_week() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.user_id = '{poisoned}'::uuid THEN RAISE EXCEPTION 'poisoned week'; END IF; RETURN NEW; END $$"
+        )).execute(&pool).await?;
+        sqlx::query("CREATE TRIGGER reject_poisoned_week BEFORE INSERT ON customization_active_weeks FOR EACH ROW EXECUTE FUNCTION reject_poisoned_week()")
+            .execute(&pool).await?;
+        assert!(backfill_active_weeks(&pool).await.is_err());
+        let cursor = sqlx::query_scalar!(
+            "SELECT scanned_through FROM customization_active_week_backfill_cursor WHERE singleton = TRUE"
+        ).fetch_one(&pool).await?;
+        assert_eq!(cursor, start);
+        let count = sqlx::query_scalar!(
+            "SELECT COUNT(*)::bigint AS \"count!\" FROM customization_active_weeks"
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(count, 0);
+        sqlx::query("DROP TRIGGER reject_poisoned_week ON customization_active_weeks")
+            .execute(&pool)
+            .await?;
+        sqlx::query("DROP FUNCTION reject_poisoned_week()")
+            .execute(&pool)
+            .await?;
+        assert_eq!(backfill_active_weeks(&pool).await?, 2);
+        let cursor = sqlx::query_scalar!(
+            "SELECT scanned_through FROM customization_active_week_backfill_cursor WHERE singleton = TRUE"
+        ).fetch_one(&pool).await?;
+        assert!(cursor > start);
+        assert_eq!(token_balance(&pool, normal).await?, 1);
+        assert_eq!(token_balance(&pool, poisoned).await?, 1);
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn overlapping_backfills_wait_for_cursor_lock(pool: PgPool) -> cja::Result<()> {
+        let user = create_test_user(&pool).await?;
+        let snake = sqlx::query_scalar!(
+            "INSERT INTO battlesnakes (user_id, name, url) VALUES ($1, 'Cursor Snake', 'https://example.com') RETURNING battlesnake_id", user
+        ).fetch_one(&pool).await?;
+        let game = sqlx::query_scalar!(
+            "INSERT INTO games (board_size, game_type, status) VALUES ('11x11', 'Standard', 'finished') RETURNING game_id"
+        ).fetch_one(&pool).await?;
+        let start = chrono::Utc::now() - chrono::Duration::hours(4);
+        sqlx::query!("UPDATE customization_active_week_backfill_cursor SET scanned_through = $1 WHERE singleton = TRUE", start).execute(&pool).await?;
+        sqlx::query!("INSERT INTO game_battlesnakes (game_id, battlesnake_id, created_at) VALUES ($1, $2, $3)", game, snake, start + chrono::Duration::hours(1)).execute(&pool).await?;
+        let mut blocker = pool.begin().await?;
+        sqlx::query!("SELECT scanned_through FROM customization_active_week_backfill_cursor WHERE singleton = TRUE FOR UPDATE")
+            .fetch_one(&mut *blocker).await?;
+        let task = {
+            let pool = pool.clone();
+            tokio::spawn(async move { backfill_active_weeks(&pool).await })
+        };
+        let wait = async {
+            loop {
+                let waiting = sqlx::query_scalar!(
+                    "SELECT COUNT(*)::bigint AS \"count!\" FROM pg_stat_activity WHERE query LIKE 'SELECT scanned_through FROM customization_active_week_backfill_cursor WHERE singleton = TRUE FOR UPDATE%' AND wait_event_type = 'Lock' AND datname = current_database()"
+                ).fetch_one(&pool).await?;
+                if waiting == 1 {
+                    break Ok::<(), cja::color_eyre::Report>(());
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        };
+        let barrier = tokio::time::timeout(std::time::Duration::from_secs(4), wait).await;
+        blocker.commit().await?;
+        barrier??;
+        assert_eq!(task.await??, 1);
+        assert_eq!(token_balance(&pool, user).await?, 1);
+        let cursor = sqlx::query_scalar!("SELECT scanned_through FROM customization_active_week_backfill_cursor WHERE singleton = TRUE")
+            .fetch_one(&pool).await?;
+        assert!(cursor >= start);
+        assert!((chrono::Utc::now() - cursor).num_seconds() < 5);
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn seven_day_boundary_is_in_next_batch_and_catches_up(pool: PgPool) -> cja::Result<()> {
+        let user = create_test_user(&pool).await?;
+        let snake = sqlx::query_scalar!("INSERT INTO battlesnakes (user_id, name, url) VALUES ($1, 'Boundary Snake', 'https://example.com') RETURNING battlesnake_id", user)
+            .fetch_one(&pool).await?;
+        let game = sqlx::query_scalar!("INSERT INTO games (board_size, game_type, status) VALUES ('11x11', 'Standard', 'finished') RETURNING game_id")
+            .fetch_one(&pool).await?;
+        let start = chrono::Utc::now() - chrono::Duration::days(15);
+        let edge = start + chrono::Duration::days(7);
+        sqlx::query!("UPDATE customization_active_week_backfill_cursor SET scanned_through = $1 WHERE singleton = TRUE", start)
+            .execute(&pool).await?;
+        sqlx::query!("INSERT INTO game_battlesnakes (game_id, battlesnake_id, created_at) VALUES ($1, $2, $3)", game, snake, edge)
+            .execute(&pool).await?;
+        assert_eq!(backfill_active_weeks(&pool).await?, 1);
+        assert_eq!(token_balance(&pool, user).await?, 1);
+        let caught_up = sqlx::query_scalar!("SELECT scanned_through FROM customization_active_week_backfill_cursor WHERE singleton = TRUE")
+            .fetch_one(&pool).await?;
+        assert!((chrono::Utc::now() - caught_up).num_seconds() < 5);
+        assert_eq!(backfill_active_weeks(&pool).await?, 0);
+        let again = sqlx::query_scalar!("SELECT scanned_through FROM customization_active_week_backfill_cursor WHERE singleton = TRUE")
+            .fetch_one(&pool).await?;
+        assert!(again >= caught_up);
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
     async fn concurrent_spends_serialize_on_user_lock(pool: PgPool) -> cja::Result<()> {
         let user = create_test_user(&pool).await?;
         sqlx::query!("INSERT INTO customization_active_weeks (user_id, week_start) VALUES ($1, '2026-10-05')", user).execute(&pool).await?;
@@ -705,8 +886,13 @@ mod tests {
         let (a, b) = (a.await??, b.await??);
         assert!(matches!(
             (a, b),
-            (UnlockOutcome::Unlocked, UnlockOutcome::InsufficientTokens)
-                | (UnlockOutcome::InsufficientTokens, UnlockOutcome::Unlocked)
+            (
+                UnlockOutcome::Unlocked(_),
+                UnlockOutcome::InsufficientTokens
+            ) | (
+                UnlockOutcome::InsufficientTokens,
+                UnlockOutcome::Unlocked(_)
+            )
         ));
         assert_eq!(token_balance(&pool, user).await?, 0);
         let grant_count = sqlx::query_scalar!("SELECT COUNT(*)::bigint AS \"count!\" FROM customization_grants WHERE user_id = $1 AND source = 'token'", user).fetch_one(&pool).await?;
@@ -749,8 +935,8 @@ mod tests {
         let (a, b) = (a.await??, b.await??);
         assert!(matches!(
             (a, b),
-            (UnlockOutcome::Unlocked, UnlockOutcome::AlreadyOwned)
-                | (UnlockOutcome::AlreadyOwned, UnlockOutcome::Unlocked)
+            (UnlockOutcome::Unlocked(_), UnlockOutcome::AlreadyOwned)
+                | (UnlockOutcome::AlreadyOwned, UnlockOutcome::Unlocked(_))
         ));
         assert_eq!(token_balance(&pool, user).await?, 0);
         let count = sqlx::query_scalar!(
@@ -862,6 +1048,7 @@ mod tests {
                 chrono::NaiveDate::from_ymd_opt(2026, 10, 12).unwrap(),
             ),
         ];
+        // Eligibility is deliberately declared independently of the catalog predicate.
         let candidates = [
             ("head", "alligator", true),
             ("tail", "alligator", true),
@@ -878,106 +1065,175 @@ mod tests {
                 .new_tree(&mut runner)
                 .map_err(|error| color_eyre::eyre::eyre!("case {case} generation: {error}"))?
                 .current();
-            let user = sqlx::query_scalar!(
-                "INSERT INTO users (external_github_id, github_login, github_access_token) VALUES ($1, $2, 'token') RETURNING user_id",
-                4_000_000_i64 + i64::from(case),
-                format!("property-{case}"),
+            let mut users = Vec::new();
+            for owner in 0..2 {
+                users.push(sqlx::query_scalar!(
+                    "INSERT INTO users (external_github_id, github_login, github_access_token) VALUES ($1, $2, 'token') RETURNING user_id",
+                    4_000_000_i64 + i64::from(case) * 2 + owner as i64,
+                    format!("property-{case}-{owner}"),
+                ).fetch_one(&pool).await?);
+            }
+            let mut snakes = Vec::new();
+            for (index, owner) in [0, 0, 1].into_iter().enumerate() {
+                snakes.push(sqlx::query_scalar!(
+                    "INSERT INTO battlesnakes (user_id, name, url) VALUES ($1, $2, 'https://example.com') RETURNING battlesnake_id",
+                    users[owner], format!("Property Snake {case}-{index}"),
+                ).fetch_one(&pool).await?);
+            }
+            let leaderboard =
+                sqlx::query_scalar!("SELECT leaderboard_id FROM leaderboards LIMIT 1")
+                    .fetch_one(&pool)
+                    .await?;
+            let ladder_entry = sqlx::query_scalar!(
+                "INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id) VALUES ($1, $2) RETURNING leaderboard_entry_id",
+                leaderboard, snakes[2],
             ).fetch_one(&pool).await?;
-            let snake = sqlx::query_scalar!(
-                "INSERT INTO battlesnakes (user_id, name, url) VALUES ($1, 'Property Snake', 'https://example.com') RETURNING battlesnake_id",
-                user,
+            create_grant(&pool, users[0], "head", "pirate").await?;
+            let mut earned = [HashSet::new(), HashSet::new()];
+            let mut owned = [
+                HashSet::from([("head".to_string(), "pirate".to_string())]),
+                HashSet::new(),
+            ];
+            let mut token_owned = [HashSet::new(), HashSet::new()];
+            // Fixed game identities and participant masks make replay a true replay.
+            let mut games: Vec<(Uuid, usize, u8)> = Vec::new();
+            // Every case starts with both owners, two snakes for the first owner,
+            // and a ladder link, independent of the random event sequence.
+            let seeded_game = sqlx::query_scalar!(
+                "INSERT INTO games (board_size, game_type, status) VALUES ('11x11', 'Standard', 'finished') RETURNING game_id"
             ).fetch_one(&pool).await?;
-            create_grant(&pool, user, "head", "pirate").await?;
-            let mut earned = HashSet::new();
-            let mut owned = HashSet::from([("head".to_string(), "pirate".to_string())]);
-            let mut token_owned = HashSet::new();
-            let mut games: Vec<(Uuid, usize, bool)> = Vec::new();
+            for snake in &snakes[..2] {
+                sqlx::query!(
+                    "INSERT INTO game_battlesnakes (game_id, battlesnake_id) VALUES ($1, $2)",
+                    seeded_game,
+                    snake
+                )
+                .execute(&pool)
+                .await?;
+            }
+            sqlx::query!(
+                "INSERT INTO game_battlesnakes (game_id, leaderboard_entry_id) VALUES ($1, $2)",
+                seeded_game,
+                ladder_entry
+            )
+            .execute(&pool)
+            .await?;
+            let mut seeded_tx = pool.begin().await?;
+            record_active_week_for_game(&mut seeded_tx, seeded_game, anchors[0].0).await?;
+            seeded_tx.commit().await?;
+            earned[0].insert(anchors[0].1);
+            earned[1].insert(anchors[0].1);
+            games.push((seeded_game, 0, 0b111));
             for (step, (a, b)) in events.iter().copied().enumerate() {
                 if a < 100 || (a < 130 && games.is_empty()) {
                     let bucket = usize::from(b % 3);
-                    let linked = b % 5 != 0;
+                    let mask = (b / 3) % 8;
                     let game = sqlx::query_scalar!(
                         "INSERT INTO games (board_size, game_type, status) VALUES ('11x11', 'Standard', 'finished') RETURNING game_id"
                     ).fetch_one(&pool).await?;
-                    if linked {
-                        sqlx::query!("INSERT INTO game_battlesnakes (game_id, battlesnake_id) VALUES ($1, $2)", game, snake).execute(&pool).await?;
-                        earned.insert(anchors[bucket].1);
+                    for (index, snake) in snakes.iter().enumerate() {
+                        if mask & (1 << index) == 0 {
+                            continue;
+                        }
+                        if index == 2 {
+                            sqlx::query!("INSERT INTO game_battlesnakes (game_id, leaderboard_entry_id) VALUES ($1, $2)", game, ladder_entry)
+                                .execute(&pool).await?;
+                        } else {
+                            sqlx::query!("INSERT INTO game_battlesnakes (game_id, battlesnake_id) VALUES ($1, $2)", game, snake)
+                                .execute(&pool).await?;
+                        }
+                    }
+                    if mask & 0b011 != 0 {
+                        earned[0].insert(anchors[bucket].1);
+                    }
+                    if mask & 0b100 != 0 {
+                        earned[1].insert(anchors[bucket].1);
                     }
                     let mut tx = pool.begin().await?;
                     record_active_week_for_game(&mut tx, game, anchors[bucket].0).await?;
                     tx.commit().await?;
-                    games.push((game, bucket, linked));
+                    games.push((game, bucket, mask));
                 } else if a < 130 {
-                    let (game, bucket, linked) = games[usize::from(b) % games.len()];
+                    let (game, bucket, _mask) = games[usize::from(b) % games.len()];
                     let mut tx = pool.begin().await?;
                     record_active_week_for_game(&mut tx, game, anchors[bucket].0).await?;
                     tx.commit().await?;
-                    if linked {
-                        earned.insert(anchors[bucket].1);
-                    }
                 } else {
+                    let owner = usize::from(a % 2);
                     let (kind, slug, eligible) = candidates[usize::from(b) % candidates.len()];
                     let key = (kind.to_string(), slug.to_string());
                     let expected = if kind == "invalid" || slug == "no-such-slug" {
                         UnlockOutcome::UnknownItem
                     } else if !eligible {
                         UnlockOutcome::NotTokenUnlockable
-                    } else if owned.contains(&key) {
+                    } else if owned[owner].contains(&key) {
                         UnlockOutcome::AlreadyOwned
-                    } else if earned.len() <= token_owned.len() {
+                    } else if earned[owner].len() <= token_owned[owner].len() {
                         UnlockOutcome::InsufficientTokens
                     } else {
-                        UnlockOutcome::Unlocked
+                        let name = match (kind, slug) {
+                            ("head", "alligator") => Head::Alligator.def().display_name,
+                            ("tail", "alligator") => Tail::Alligator.def().display_name,
+                            ("head", "crystal-power") => Head::CrystalPower.def().display_name,
+                            ("head", "pirate") => Head::Pirate.def().display_name,
+                            _ => unreachable!(),
+                        };
+                        UnlockOutcome::Unlocked(name)
                     };
-                    let actual = unlock_with_token(&pool, user, kind, slug).await?;
+                    let actual = unlock_with_token(&pool, users[owner], kind, slug).await?;
                     assert_eq!(
                         actual, expected,
                         "case {case}, step {step}, events={events:?}"
                     );
-                    if expected == UnlockOutcome::Unlocked {
-                        owned.insert(key.clone());
-                        token_owned.insert(key);
+                    if matches!(expected, UnlockOutcome::Unlocked(_)) {
+                        owned[owner].insert(key.clone());
+                        token_owned[owner].insert(key);
                     }
                 }
-                let db_weeks: HashSet<_> = sqlx::query_scalar!(
-                    "SELECT week_start FROM customization_active_weeks WHERE user_id = $1",
-                    user
-                )
-                .fetch_all(&pool)
-                .await?
-                .into_iter()
-                .collect();
-                let db_grants: Vec<_> = sqlx::query!(
-                    "SELECT customization_type, slug, source FROM customization_grants WHERE user_id = $1", user
-                ).fetch_all(&pool).await?;
-                let db_owned: HashSet<_> = db_grants
-                    .iter()
-                    .map(|row| (row.customization_type.clone(), row.slug.clone()))
+                for owner in 0..2 {
+                    let db_weeks: HashSet<_> = sqlx::query_scalar!(
+                        "SELECT week_start FROM customization_active_weeks WHERE user_id = $1",
+                        users[owner]
+                    )
+                    .fetch_all(&pool)
+                    .await?
+                    .into_iter()
                     .collect();
-                let db_token_owned: HashSet<_> = db_grants
-                    .iter()
-                    .filter(|row| row.source == "token")
-                    .map(|row| (row.customization_type.clone(), row.slug.clone()))
-                    .collect();
-                let balance = token_balance(&pool, user).await?;
-                assert_eq!(
-                    db_weeks, earned,
-                    "case {case}, step {step}, events={events:?}"
-                );
-                assert_eq!(
-                    db_owned, owned,
-                    "case {case}, step {step}, events={events:?}"
-                );
-                assert_eq!(
-                    db_token_owned, token_owned,
-                    "case {case}, step {step}, events={events:?}"
-                );
-                assert_eq!(
-                    balance,
-                    (earned.len() - token_owned.len()) as i64,
-                    "case {case}, step {step}, events={events:?}"
-                );
-                assert!(balance >= 0, "case {case}, step {step}, events={events:?}");
+                    let db_grants = sqlx::query!(
+                        "SELECT customization_type, slug, source FROM customization_grants WHERE user_id = $1", users[owner]
+                    ).fetch_all(&pool).await?;
+                    let db_owned: HashSet<_> = db_grants
+                        .iter()
+                        .map(|row| (row.customization_type.clone(), row.slug.clone()))
+                        .collect();
+                    let db_token_owned: HashSet<_> = db_grants
+                        .iter()
+                        .filter(|row| row.source == "token")
+                        .map(|row| (row.customization_type.clone(), row.slug.clone()))
+                        .collect();
+                    let balance = token_balance(&pool, users[owner]).await?;
+                    assert_eq!(
+                        db_weeks, earned[owner],
+                        "case {case}, step {step}, owner {owner}, events={events:?}"
+                    );
+                    assert_eq!(
+                        db_owned, owned[owner],
+                        "case {case}, step {step}, owner {owner}, events={events:?}"
+                    );
+                    assert_eq!(
+                        db_token_owned, token_owned[owner],
+                        "case {case}, step {step}, owner {owner}, events={events:?}"
+                    );
+                    assert_eq!(
+                        balance,
+                        (earned[owner].len() - token_owned[owner].len()) as i64,
+                        "case {case}, step {step}, owner {owner}, events={events:?}"
+                    );
+                    assert!(
+                        balance >= 0,
+                        "case {case}, step {step}, owner {owner}, events={events:?}"
+                    );
+                }
             }
         }
         Ok(())

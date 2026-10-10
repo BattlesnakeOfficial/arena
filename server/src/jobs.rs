@@ -1,6 +1,7 @@
 use crate::state::AppState;
 
 use cja::jobs::Job;
+use color_eyre::eyre::Context as _;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -50,7 +51,8 @@ impl Job<AppState> for CustomizationActiveWeekBackfillJob {
             "SELECT scanned_through FROM customization_active_week_backfill_cursor WHERE singleton = TRUE"
         )
         .fetch_one(&app_state.db)
-        .await?
+        .await
+        .wrap_err("Failed to read active-week backfill cursor")?
         .scanned_through;
         tracing::info!(inserted, %cursor, "Customization active-week backfill completed");
         Ok(())

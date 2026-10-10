@@ -847,7 +847,9 @@ mod tests {
         .execute(&pool).await?;
         assert_eq!(
             crate::customizations::unlock_with_token(&pool, user_id, "head", "alligator").await?,
-            crate::customizations::UnlockOutcome::Unlocked,
+            crate::customizations::UnlockOutcome::Unlocked(
+                crate::customizations::Head::Alligator.def().display_name
+            ),
         );
         assert_eq!(
             crate::customizations::token_balance(&pool, user_id).await?,
@@ -925,7 +927,7 @@ mod tests {
         let outcome = unlock.await??;
         assert!(matches!(
             outcome,
-            crate::customizations::UnlockOutcome::Unlocked
+            crate::customizations::UnlockOutcome::Unlocked(_)
                 | crate::customizations::UnlockOutcome::AlreadyOwned
         ));
         assert_eq!(

@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT COUNT(*)::bigint AS \"count!\" FROM pg_stat_activity WHERE query LIKE 'SELECT scanned_through FROM customization_active_week_backfill_cursor WHERE singleton = TRUE FOR UPDATE%' AND wait_event_type = 'Lock' AND datname = current_database()",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "1f8a1f714462c005ed8d42dee6bdacdb6f5404530136d592d911cd77e85a37a2"
+}

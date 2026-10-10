@@ -150,13 +150,7 @@ pub async fn unlock_customization(
 ) -> ServerResult<impl IntoResponse, StatusCode> {
     match customizations::unlock_with_token(&state.db, user.user_id, &form.kind, &form.slug).await?
     {
-        UnlockOutcome::Unlocked => {
-            let name = match form.kind.as_str() {
-                Head::KIND => Head::from_slug(&form.slug).map(|head| head.def().display_name),
-                Tail::KIND => Tail::from_slug(&form.slug).map(|tail| tail.def().display_name),
-                _ => None,
-            }
-            .expect("unlocked catalog item was validated");
+        UnlockOutcome::Unlocked(name) => {
             if let Err(error) = flasher.add_flash(format!("Unlocked {name}")).await {
                 tracing::error!(error = %format!("{error:#}"), "Failed to flash customization unlock");
             }
@@ -314,7 +308,7 @@ mod tests {
             StatusCode::CONFLICT
         );
         let page = html(request(&app, Method::GET, Some(&cookie), "").await).await;
-        assert!(page.contains("Unlocked alligator") || page.contains("Unlocked Alligator"));
+        assert!(page.contains(&format!("Unlocked {}", Head::Alligator.def().display_name)));
         assert!(!page.contains("action=\"/customizations/unlock\""));
         assert_eq!(
             request(
