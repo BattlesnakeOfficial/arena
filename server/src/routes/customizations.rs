@@ -94,7 +94,9 @@ pub async fn list_customizations(
                     h2 { "Token unlocks" }
                     p class="cz-note" { (balance) " unlock token(s) available" }
                     p class="cz-note" { "1 token for every week your snakes play a game; each unlock uses 1 token." }
-                    p class="cz-note" { "To earn a token, one of your snakes needs to play a game this week." }
+                    @if balance == 0 {
+                        p class="cz-note" { "To earn a token, one of your snakes needs to play a game this week." }
+                    }
                 }
             }
 

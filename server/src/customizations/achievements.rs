@@ -1,5 +1,5 @@
 //! Code-defined achievements and permanent cosmetic awards.
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 
 use color_eyre::eyre::Context as _;
 use sqlx::{PgConnection, PgPool};
@@ -138,11 +138,14 @@ async fn distinct_finished_count(
     cap: i64,
     ladder_wins: bool,
 ) -> cja::Result<i64> {
+    // Deduplicate via the per-snake/per-entry indexes before probing games; the
+    // indexed participant rows are cheap, while each games lookup is costly.
     // For Ladder Regular the owner's winning participant row must have the entry.
     let count = sqlx::query_scalar!(
         r#"
         SELECT COUNT(*)::bigint AS "count!" FROM (
-            SELECT DISTINCT owned.game_id FROM (
+            SELECT 1 FROM (
+                SELECT DISTINCT owned.game_id FROM (
                 SELECT gb.game_id FROM battlesnakes bs
                 JOIN game_battlesnakes gb ON gb.battlesnake_id = bs.battlesnake_id
                 WHERE bs.user_id = $1
@@ -153,8 +156,9 @@ async fn distinct_finished_count(
                 JOIN game_battlesnakes gb ON gb.leaderboard_entry_id = le.leaderboard_entry_id
                 WHERE bs.user_id = $1 AND gb.battlesnake_id IS NULL
                   AND (NOT $3::bool OR gb.placement = 1)
-            ) owned
-            JOIN games g ON g.game_id = owned.game_id
+                ) owned
+            ) distinct_games
+            JOIN games g ON g.game_id = distinct_games.game_id
             WHERE g.status = 'finished'
             LIMIT $2
         ) qualifying
@@ -260,7 +264,7 @@ pub async fn award_for_game(pool: &PgPool, game_id: Uuid) -> cja::Result<u64> {
     .await
     .wrap_err("Failed to read achievement participants")?;
     let participants = rows.len() as i64;
-    let mut owners = HashMap::<Uuid, WinFlags>::new();
+    let mut owners = BTreeMap::<Uuid, WinFlags>::new();
     for row in rows {
         owners.entry(row.user_id).or_default().include(
             row.placement,
@@ -292,16 +296,18 @@ pub async fn backfill_achievement_page(pool: &PgPool) -> cja::Result<BackfillPag
         .wrap_err("Failed to begin achievement backfill")?;
     sqlx::query!("SET LOCAL lock_timeout = '5s'")
         .execute(&mut *tx)
-        .await?;
-    sqlx::query!("SET LOCAL statement_timeout = '20s'")
+        .await
+        .wrap_err("Failed to set achievement backfill lock timeout")?;
+    sqlx::query!("SET LOCAL statement_timeout = '60s'")
         .execute(&mut *tx)
-        .await?;
+        .await
+        .wrap_err("Failed to set achievement backfill statement timeout")?;
     let cursor = sqlx::query!(
         "SELECT after_user_id, completed_at FROM achievement_backfill_cursor WHERE singleton = TRUE FOR UPDATE SKIP LOCKED"
     ).fetch_optional(&mut *tx).await.wrap_err("Failed to lock achievement cursor")?;
     let Some(cursor) = cursor else {
         let exists = sqlx::query_scalar!("SELECT EXISTS(SELECT 1 FROM achievement_backfill_cursor WHERE singleton = TRUE) AS \"exists!\"")
-            .fetch_one(&mut *tx).await?;
+            .fetch_one(&mut *tx).await.wrap_err("Failed to check achievement cursor existence")?;
         if !exists {
             color_eyre::eyre::bail!("Achievement backfill cursor is missing");
         }
@@ -312,7 +318,9 @@ pub async fn backfill_achievement_page(pool: &PgPool) -> cja::Result<BackfillPag
         });
     };
     if cursor.completed_at.is_some() {
-        tx.commit().await?;
+        tx.commit()
+            .await
+            .wrap_err("Failed to commit completed achievement backfill")?;
         return Ok(BackfillPage {
             inserted: 0,
             processed: 0,
@@ -363,7 +371,7 @@ pub async fn reconcile_recent_achievements(pool: &PgPool) -> cja::Result<u64> {
           AND g.finished_at > NOW() - INTERVAL '2 hours'"#,
     ).fetch_all(&mut *tx).await.wrap_err("Failed to read recent achievement games")?;
     let candidate_games: HashSet<_> = rows.iter().map(|row| row.game_id).collect();
-    let mut owners = HashMap::<Uuid, WinFlags>::new();
+    let mut owners = BTreeMap::<Uuid, WinFlags>::new();
     for row in rows {
         owners.entry(row.user_id).or_default().include(
             row.placement,
@@ -687,6 +695,103 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "../migrations")]
+    async fn backfill_matches_live_at_win_and_distinct_game_boundaries(pool: PgPool) {
+        let owner = user(&pool, 1644300).await;
+        let opponent = user(&pool, 1644301).await;
+        let winner = snake(&pool, owner, "winner").await;
+        let own_peer = snake(&pool, owner, "own peer").await;
+        let rival = snake(&pool, opponent, "rival").await;
+        let fourth = snake(&pool, opponent, "fourth").await;
+        let rival_entry = entry(&pool, rival).await;
+
+        let solo = game(&pool, "Standard", "finished", None).await;
+        participant(&pool, solo, winner, 1, None).await;
+        assert_eq!(award_for_game(&pool, solo).await.unwrap(), 0);
+        assert!(backfill_achievement_page(&pool).await.unwrap().complete);
+        assert!(grants(&pool, owner).await.is_empty());
+
+        let three = game(&pool, "Standard", "finished", None).await;
+        participant(&pool, three, winner, 1, None).await;
+        participant(&pool, three, own_peer, 2, None).await;
+        participant(&pool, three, rival, 3, None).await;
+        assert_eq!(award_for_game(&pool, three).await.unwrap(), 1);
+        assert!(!has(&grants(&pool, owner).await, Head::KIND, "monkey"));
+
+        let lower = game(&pool, "constrictor", "finished", None).await;
+        participant(&pool, lower, winner, 1, None).await;
+        participant(&pool, lower, rival, 2, None).await;
+        assert_eq!(award_for_game(&pool, lower).await.unwrap(), 0);
+        assert!(!has(&grants(&pool, owner).await, Head::KIND, "subway"));
+
+        let waiting = game(&pool, GameType::Constrictor.as_str(), "waiting", None).await;
+        participant(&pool, waiting, winner, 1, None).await;
+        participant(&pool, waiting, own_peer, 2, None).await;
+        participant(&pool, waiting, rival, 3, None).await;
+        participant(&pool, waiting, fourth, 4, None).await;
+        assert_eq!(award_for_game(&pool, waiting).await.unwrap(), 0);
+
+        let opponent_ladder = game(&pool, "Standard", "finished", None).await;
+        participant(&pool, opponent_ladder, winner, 1, None).await;
+        participant(&pool, opponent_ladder, rival, 2, Some(rival_entry)).await;
+        assert_eq!(award_for_game(&pool, opponent_ladder).await.unwrap(), 0);
+        assert!(!has(&grants(&pool, owner).await, Head::KIND, "judge"));
+        let live_before_four = grants(&pool, owner).await;
+        sqlx::query("DELETE FROM customization_grants WHERE user_id = $1")
+            .bind(owner)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE achievement_backfill_cursor SET after_user_id = NULL, completed_at = NULL WHERE singleton = TRUE")
+            .execute(&pool).await.unwrap();
+        assert!(backfill_achievement_page(&pool).await.unwrap().complete);
+        assert_eq!(grants(&pool, owner).await, live_before_four);
+
+        let four = game(&pool, GameType::Constrictor.as_str(), "finished", None).await;
+        participant(&pool, four, winner, 1, None).await;
+        participant(&pool, four, own_peer, 2, None).await;
+        participant(&pool, four, rival, 3, None).await;
+        participant(&pool, four, fourth, 4, None).await;
+        assert_eq!(award_for_game(&pool, four).await.unwrap(), 4);
+
+        // Five finished games above plus 94 distinct games reaches 99.
+        for _ in 0..94 {
+            let id = game(&pool, "Standard", "finished", None).await;
+            participant(&pool, id, winner, 2, None).await;
+            participant(&pool, id, own_peer, 2, None).await;
+            assert_eq!(award_for_game(&pool, id).await.unwrap(), 0);
+        }
+        let live_99 = grants(&pool, owner).await;
+        assert!(!has(&live_99, Head::KIND, "turtle"));
+        assert!(!has(&live_99, Head::KIND, "judge"));
+        sqlx::query("DELETE FROM customization_grants WHERE user_id = $1")
+            .bind(owner)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE achievement_backfill_cursor SET after_user_id = NULL, completed_at = NULL WHERE singleton = TRUE")
+            .execute(&pool).await.unwrap();
+        assert!(backfill_achievement_page(&pool).await.unwrap().complete);
+        assert_eq!(grants(&pool, owner).await, live_99);
+
+        let hundredth = game(&pool, "Standard", "finished", None).await;
+        participant(&pool, hundredth, winner, 2, None).await;
+        participant(&pool, hundredth, own_peer, 2, None).await;
+        assert_eq!(award_for_game(&pool, hundredth).await.unwrap(), 2);
+        let live_100 = grants(&pool, owner).await;
+        assert!(has(&live_100, Head::KIND, "turtle"));
+        assert!(has(&live_100, Tail::KIND, "turtle"));
+        sqlx::query("DELETE FROM customization_grants WHERE user_id = $1")
+            .bind(owner)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE achievement_backfill_cursor SET after_user_id = NULL, completed_at = NULL WHERE singleton = TRUE")
+            .execute(&pool).await.unwrap();
+        assert!(backfill_achievement_page(&pool).await.unwrap().complete);
+        assert_eq!(grants(&pool, owner).await, live_100);
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
     async fn concurrent_awards_and_backfill_rollback(pool: PgPool) {
         let owner = user(&pool, 1644200).await;
         let a = snake(&pool, owner, "a").await;
@@ -694,8 +799,32 @@ mod tests {
         let id = game(&pool, "Standard", "finished", Some(0)).await;
         participant(&pool, id, a, 1, None).await;
         participant(&pool, id, b, 2, None).await;
-        let (one, two) = tokio::join!(award_for_game(&pool, id), award_for_game(&pool, id));
-        assert_eq!(one.unwrap() + two.unwrap(), 1);
+        // Hold an uncommitted conflicting grant so the award must reach the
+        // unique-index conflict path rather than seeing an already owned item.
+        let mut holder = pool.begin().await.unwrap();
+        sqlx::query("INSERT INTO customization_grants (user_id, customization_type, slug, source) VALUES ($1, 'head', 'frog', 'admin')")
+            .bind(owner).execute(&mut *holder).await.unwrap();
+        let release_holder = async {
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    let blocked: bool = sqlx::query_scalar(
+                        "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE 'INSERT INTO customization_grants%')",
+                    )
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+                    if blocked {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("award never blocked on the uncommitted grant");
+            holder.commit().await.unwrap();
+        };
+        let (award, ()) = tokio::join!(award_for_game(&pool, id), release_holder);
+        assert_eq!(award.unwrap(), 0);
         assert_eq!(grants(&pool, owner).await.len(), 1);
 
         sqlx::query("DELETE FROM customization_grants WHERE user_id = $1")
