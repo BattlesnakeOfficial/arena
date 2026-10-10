@@ -153,7 +153,7 @@ test.describe('Mobile layout (375px)', () => {
       await assertNoHorizontalOverflow(authenticatedPage, `/leaderboards/${leaderboard.leaderboard_id}`);
       const scroller = authenticatedPage.locator('.table-scroll').first();
       const headers = scroller.locator('thead th');
-      await expect(headers.last()).toHaveText('1st place %');
+      await expect(headers.last()).toHaveText('Games');
       for (const th of await headers.all()) {
         await expect(th, 'no column is dropped on a phone').toBeVisible();
       }
@@ -165,7 +165,9 @@ test.describe('Mobile layout (375px)', () => {
       expect(await scroller.evaluate((el) => el.scrollWidth > el.clientWidth), 'table overflows its scroller').toBe(true);
       expect(await lastHeaderOverhang()).toBeGreaterThan(0);
       await scroller.evaluate((el) => { el.scrollLeft = el.scrollWidth; });
-      expect(await lastHeaderOverhang()).toBeLessThanOrEqual(0);
+      // Scroll offsets are whole pixels but layout isn't, so a fully scrolled
+      // table can still overhang by a fraction of a pixel.
+      expect(await lastHeaderOverhang()).toBeLessThan(1);
     } finally {
       await query('DELETE FROM leaderboards WHERE leaderboard_id = $1', [leaderboard.leaderboard_id]);
       await query("DELETE FROM battlesnakes WHERE name = 'Mobile table snake' AND url = 'https://example.com/mobile-table'");

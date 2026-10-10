@@ -1320,7 +1320,7 @@ fn render_battlesnake_profile(view: &ProfileView<'_>) -> Markup {
                                     th { "Leaderboard" }
                                     th class="r" { "Rating" }
                                     th class="r" { "Games" }
-                                    th class="r" { "1st Place" }
+                                    th class="r" { "Win %" }
                                     th class="r" { "Status" }
                                 }
                             }

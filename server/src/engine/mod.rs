@@ -353,10 +353,17 @@ pub fn is_game_over(game: &EngineGame) -> bool {
 
 /// Apply a single turn: move snakes, reduce health, feed, eliminate
 ///
+/// Returns the IDs of the snakes that ate food this turn. This is the only
+/// reliable food signal: body growth isn't, because Constrictor grows every
+/// snake every turn without any food on the board.
+///
 /// Note: Unlike the rules crate's `execute_turn`, this does NOT increment
 /// `board.turn` internally -- the caller must do that (for compatibility with
 /// game_runner.rs which increments after recording frames).
-pub fn apply_turn(game: &mut EngineGame, moves: &[(String, Direction)]) -> cja::Result<()> {
+pub fn apply_turn(
+    game: &mut EngineGame,
+    moves: &[(String, Direction)],
+) -> cja::Result<Vec<String>> {
     let royale = (game.meta.ruleset_name == "royale")
         .then(|| royale_settings(game))
         .transpose()?;
@@ -372,7 +379,7 @@ pub fn apply_turn(game: &mut EngineGame, moves: &[(String, Direction)]) -> cja::
     let _ = rules::standard::move_snakes(&mut game.board, &snake_moves);
     rules::standard::reduce_snake_health(&mut game.board);
     rules::standard::damage_hazards(&mut game.board, &game.meta.settings);
-    rules::standard::feed_snakes(&mut game.board);
+    let fed = rules::standard::feed_snakes(&mut game.board);
     let _ = rules::standard::eliminate_snakes(&mut game.board);
 
     // Mode-specific post-elimination stages. Dispatch on the ruleset name so
@@ -405,7 +412,7 @@ pub fn apply_turn(game: &mut EngineGame, moves: &[(String, Direction)]) -> cja::
         _ => {}
     }
 
-    Ok(())
+    Ok(fed)
 }
 
 /// Spawn food for the next turn in modes that spawn food.
@@ -1148,8 +1155,9 @@ mod tests {
         game.board.snakes[0].health = 100;
 
         let moves = vec![("snake-0".to_string(), Direction::Up)];
-        apply_turn(&mut game, &moves).expect("apply_turn on a valid fixture");
+        let fed = apply_turn(&mut game, &moves).expect("apply_turn on a valid fixture");
 
+        assert!(fed.is_empty(), "the snake never reached the food");
         // Health should decrease by 1
         assert_eq!(game.board.snakes[0].health, 99);
     }
@@ -1162,8 +1170,9 @@ mod tests {
         game.board.food = vec![Point::new(5, 5)];
 
         let moves = vec![("snake-0".to_string(), Direction::Up)];
-        apply_turn(&mut game, &moves).expect("apply_turn on a valid fixture");
+        let fed = apply_turn(&mut game, &moves).expect("apply_turn on a valid fixture");
 
+        assert_eq!(fed, vec!["snake-0".to_string()]);
         // Health should be restored to max
         assert_eq!(game.board.snakes[0].health, SNAKE_MAX_HEALTH);
         // Snake should have grown
@@ -1868,8 +1877,13 @@ mod tests {
                 (id_a.clone(), Direction::Up),
                 (id_b.clone(), Direction::Down),
             ];
-            apply_turn(&mut game, &moves).expect("apply_turn on a valid fixture");
+            let fed = apply_turn(&mut game, &moves).expect("apply_turn on a valid fixture");
             game.board.turn += 1;
+            assert!(
+                fed.is_empty(),
+                "constrictor growth is not eating (turn {}): {fed:?}",
+                i + 1
+            );
 
             let frame = frame::game_to_frame(&game, &[], &[], &std::collections::HashMap::new());
             assert!(

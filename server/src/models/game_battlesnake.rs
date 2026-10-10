@@ -278,6 +278,7 @@ pub async fn set_game_result_by_id(
     conn: &mut sqlx::PgConnection,
     game_battlesnake_id: Uuid,
     placement: i32,
+    food_eaten: i32,
 ) -> cja::Result<GameBattlesnake> {
     // Validate placement is between 1 and 4
     if !(1..=4).contains(&placement) {
@@ -290,7 +291,7 @@ pub async fn set_game_result_by_id(
         GameBattlesnake,
         r#"
         UPDATE game_battlesnakes
-        SET placement = $2
+        SET placement = $2, food_eaten = $3
         WHERE game_battlesnake_id = $1
         RETURNING
             game_battlesnake_id,
@@ -301,7 +302,8 @@ pub async fn set_game_result_by_id(
             updated_at
         "#,
         game_battlesnake_id,
-        placement
+        placement,
+        food_eaten
     )
     .fetch_one(&mut *conn)
     .await

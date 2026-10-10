@@ -108,9 +108,12 @@ pub fn damage_hazards(board: &mut BoardState, settings: &StandardSettings) {
 ///
 /// Remove eaten food from `board.food`.
 /// Multiple snakes CAN eat the same food tile (both grow/heal).
-pub fn feed_snakes(board: &mut BoardState) {
+///
+/// Returns the IDs of the snakes that ate this turn, in board order.
+pub fn feed_snakes(board: &mut BoardState) -> Vec<String> {
     let food_set: std::collections::HashSet<Point> = board.food.iter().copied().collect();
     let mut eaten: std::collections::HashSet<Point> = std::collections::HashSet::new();
+    let mut fed = Vec::new();
 
     for snake in &mut board.snakes {
         if snake.eliminated_cause.is_eliminated() {
@@ -124,10 +127,13 @@ pub fn feed_snakes(board: &mut BoardState) {
             snake.body.push(tail);
             snake.health = SNAKE_MAX_HEALTH;
             eaten.insert(head);
+            fed.push(snake.id.clone());
         }
     }
 
     board.food.retain(|f| !eaten.contains(f));
+
+    fed
 }
 
 /// Eliminate snakes based on health, boundaries, and collisions.
@@ -734,7 +740,7 @@ mod tests {
             vec![make_snake("one", &[(5, 5), (5, 4), (5, 3)], 50)],
         );
         board.food.push(Point::new(5, 5));
-        feed_snakes(&mut board);
+        assert_eq!(feed_snakes(&mut board), vec!["one".to_string()]);
         assert_eq!(board.snakes[0].health, 100);
         assert_eq!(board.snakes[0].body.len(), 4);
         assert!(board.food.is_empty());
@@ -746,7 +752,7 @@ mod tests {
             vec![make_snake("one", &[(5, 5), (5, 4), (5, 3)], 50)],
         );
         board.food.push(Point::new(0, 0));
-        feed_snakes(&mut board);
+        assert!(feed_snakes(&mut board).is_empty());
         assert_eq!(board.snakes[0].health, 50);
         assert_eq!(board.snakes[0].body.len(), 3);
         assert_eq!(board.food.len(), 1);
@@ -761,12 +767,30 @@ mod tests {
             ],
         );
         board.food.push(Point::new(5, 5));
-        feed_snakes(&mut board);
+        assert_eq!(
+            feed_snakes(&mut board),
+            vec!["one".to_string(), "two".to_string()]
+        );
         assert_eq!(board.snakes[0].health, 100);
         assert_eq!(board.snakes[0].body.len(), 4);
         assert_eq!(board.snakes[1].health, 100);
         assert_eq!(board.snakes[1].body.len(), 4);
         assert!(board.food.is_empty());
+    }
+
+    #[test]
+    fn feed_snakes_skips_eliminated_snakes() {
+        let mut board = make_board(
+            11,
+            11,
+            vec![make_snake("dead", &[(5, 5), (5, 4), (5, 3)], 0)],
+        );
+        board.snakes[0].eliminated_cause = EliminationCause::Hazard;
+        board.food.push(Point::new(5, 5));
+
+        assert!(feed_snakes(&mut board).is_empty());
+        assert_eq!(board.snakes[0].body.len(), 3);
+        assert_eq!(board.food.len(), 1);
     }
 
     #[test]

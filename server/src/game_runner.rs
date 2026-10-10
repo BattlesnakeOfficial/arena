@@ -239,6 +239,7 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
     let timeout = std::time::Duration::from_millis(engine_game.meta.timeout as u64);
 
     let mut death_info: Vec<DeathInfo> = Vec::new();
+    let mut food_eaten: HashMap<String, i32> = HashMap::new();
     let mut last_moves: HashMap<String, Direction> = HashMap::new();
     let mut snake_contexts: HashMap<String, wire::SnakeContext> = HashMap::new();
 
@@ -334,7 +335,10 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
         }
 
         // Apply the moves using the engine
-        crate::engine::apply_turn(&mut engine_game, &moves)?;
+        let fed = crate::engine::apply_turn(&mut engine_game, &moves)?;
+        for snake_id in fed {
+            *food_eaten.entry(snake_id).or_default() += 1;
+        }
         engine_game.board.turn += 1;
         // Spawn food for the next turn before the frame is recorded, so the
         // viewer and the snakes' next /move requests both see it.
@@ -497,6 +501,7 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
                     &mut tx,
                     game_battlesnake_id,
                     *placement,
+                    food_eaten.get(snake_id).copied().unwrap_or(0),
                 )
                 .await
                 .wrap_err_with(|| {
@@ -1049,10 +1054,12 @@ mod tests {
     /// Scripted wiremock Battlesnake. Moves cautiously (any in-bounds cell
     /// not on a body or next to another head) until `suicide_from_turn`,
     /// then always "left" into the wall. `timeout_on_turn` delays that
-    /// turn's /move past the 500ms budget.
+    /// turn's /move past the 500ms budget. With `seek_food` it takes the
+    /// cautious move closest to the nearest food.
     struct ScriptedSnake {
         suicide_from_turn: i64,
         timeout_on_turn: Option<i64>,
+        seek_food: bool,
     }
 
     impl ScriptedSnake {
@@ -1081,19 +1088,34 @@ mod tests {
                 }
             }
             let (x, y) = point(&request["you"]["head"]);
-            [
+            let mut safe = [
                 ("up", (x, y + 1)),
                 ("right", (x + 1, y)),
                 ("down", (x, y - 1)),
                 ("left", (x - 1, y)),
             ]
             .into_iter()
-            .find(|(_, (nx, ny))| {
+            .filter(|(_, (nx, ny))| {
                 (0..width).contains(nx)
                     && (0..height).contains(ny)
                     && !blocked.contains(&(*nx, *ny))
-            })
-            .map_or("up", |(direction, _)| direction)
+            });
+            let food: Vec<(i64, i64)> = request["board"]["food"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(point)
+                .collect();
+            let choice = if self.seek_food && !food.is_empty() {
+                safe.min_by_key(|(_, (nx, ny))| {
+                    food.iter()
+                        .map(|(fx, fy)| (fx - nx).abs() + (fy - ny).abs())
+                        .min()
+                })
+            } else {
+                safe.next()
+            };
+            choice.map_or("up", |(direction, _)| direction)
         }
     }
 
@@ -1172,6 +1194,7 @@ mod tests {
                 ScriptedSnake {
                     suicide_from_turn: 1,
                     timeout_on_turn: Some(0),
+                    seek_food: false,
                 },
             ),
             (
@@ -1180,6 +1203,7 @@ mod tests {
                 ScriptedSnake {
                     suicide_from_turn: 15,
                     timeout_on_turn: None,
+                    seek_food: false,
                 },
             ),
             (
@@ -1188,6 +1212,7 @@ mod tests {
                 ScriptedSnake {
                     suicide_from_turn: i64::MAX,
                     timeout_on_turn: None,
+                    seek_food: false,
                 },
             ),
         ] {
@@ -1315,8 +1340,8 @@ mod tests {
         .fetch_one(&pool)
         .await?;
         let game_battlesnake_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO game_battlesnakes (game_id, battlesnake_id, placement)
-             VALUES ($1, $2, 1) RETURNING game_battlesnake_id",
+            "INSERT INTO game_battlesnakes (game_id, battlesnake_id, placement, food_eaten)
+             VALUES ($1, $2, 1, 4) RETURNING game_battlesnake_id",
         )
         .bind(game_id)
         .bind(battlesnake_id)
@@ -1350,13 +1375,115 @@ mod tests {
                 .fetch_one(&pool)
                 .await?;
         assert_eq!(snake_turns, 0);
-        let placement: Option<i32> = sqlx::query_scalar(
-            "SELECT placement FROM game_battlesnakes WHERE game_battlesnake_id = $1",
+        let (placement, food_eaten): (Option<i32>, Option<i32>) = sqlx::query_as(
+            "SELECT placement, food_eaten FROM game_battlesnakes WHERE game_battlesnake_id = $1",
         )
         .bind(game_battlesnake_id)
         .fetch_one(&pool)
         .await?;
         assert_eq!(placement, None);
+        assert_eq!(food_eaten, None);
+
+        Ok(())
+    }
+
+    /// Food eaten is counted from the engine's feed stage and stored with the
+    /// placement, never inferred from body growth (#233). In Standard each
+    /// food is exactly +1 length, so the count must equal every snake's
+    /// growth. Constrictor grows every snake every turn with no food on the
+    /// board, so the count must stay 0 while the snakes still grow.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn finished_game_records_food_eaten(pool: PgPool) -> cja::Result<()> {
+        let app_state = crate::state::AppState::test_from_pool(pool.clone());
+        let user_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO users (external_github_id, github_login, github_access_token)
+             VALUES (233, 'food-test', 'test-token') RETURNING user_id",
+        )
+        .fetch_one(&pool)
+        .await?;
+
+        for game_type in ["Standard", "Constrictor"] {
+            let game_id: Uuid = sqlx::query_scalar(
+                "INSERT INTO games (board_size, game_type, status)
+                 VALUES ('11x11', $1, 'waiting') RETURNING game_id",
+            )
+            .bind(game_type)
+            .fetch_one(&pool)
+            .await?;
+
+            // One snake suicides from turn 25, which ends the game; both chase
+            // food until then.
+            let mut servers = vec![];
+            for suicide_from_turn in [25, i64::MAX] {
+                let server = wiremock::MockServer::start().await;
+                wiremock::Mock::given(wiremock::matchers::any())
+                    .respond_with(ScriptedSnake {
+                        suicide_from_turn,
+                        timeout_on_turn: None,
+                        seek_food: true,
+                    })
+                    .mount(&server)
+                    .await;
+                let battlesnake_id: Uuid = sqlx::query_scalar(
+                    "INSERT INTO battlesnakes (user_id, name, url) VALUES ($1, $2, $3)
+                     RETURNING battlesnake_id",
+                )
+                .bind(user_id)
+                .bind(format!("{game_type}-{suicide_from_turn}"))
+                .bind(server.uri())
+                .fetch_one(&pool)
+                .await?;
+                sqlx::query(
+                    "INSERT INTO game_battlesnakes (game_id, battlesnake_id) VALUES ($1, $2)",
+                )
+                .bind(game_id)
+                .bind(battlesnake_id)
+                .execute(&pool)
+                .await?;
+                servers.push(server);
+            }
+
+            run_game(&app_state, game_id).await?;
+
+            // Each snake's final length, from the last frame it appears in.
+            let frames: Vec<serde_json::Value> = sqlx::query_scalar(
+                "SELECT frame_data FROM turns WHERE game_id = $1 ORDER BY turn_number",
+            )
+            .bind(game_id)
+            .fetch_all(&pool)
+            .await?;
+            let mut final_length: HashMap<String, i32> = HashMap::new();
+            for frame in &frames {
+                for snake in frame["Snakes"].as_array().into_iter().flatten() {
+                    let id = snake["ID"].as_str().expect("frame snake has an ID");
+                    let length = snake["Body"].as_array().map_or(0, Vec::len);
+                    final_length.insert(id.to_string(), i32::try_from(length)?);
+                }
+            }
+
+            let recorded: Vec<(Uuid, Option<i32>)> = sqlx::query_as(
+                "SELECT game_battlesnake_id, food_eaten FROM game_battlesnakes WHERE game_id = $1",
+            )
+            .bind(game_id)
+            .fetch_all(&pool)
+            .await?;
+            assert_eq!(recorded.len(), 2);
+            let mut total_food = 0;
+            for (game_battlesnake_id, food_eaten) in recorded {
+                let food_eaten = food_eaten.expect("finished game records food eaten");
+                let grown = final_length[&game_battlesnake_id.to_string()] - 3;
+                if game_type == "Constrictor" {
+                    assert!(grown > 0, "constrictor snakes grow every turn");
+                    assert_eq!(food_eaten, 0, "constrictor growth is not eating");
+                } else {
+                    assert_eq!(food_eaten, grown, "standard food eaten == growth");
+                }
+                total_food += food_eaten;
+            }
+            if game_type == "Standard" {
+                assert!(total_food > 0, "food seekers should eat in Standard");
+            }
+        }
 
         Ok(())
     }

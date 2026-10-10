@@ -174,7 +174,7 @@ mod tests {
     use super::*;
     use crate::models::game::{self, CreateGame, GameBoardSize, GameType};
     use crate::scoring::{
-        ScoringRegistry, food_eaten::FoodEatenScoring, weng_lin::WengLinScoring,
+        ScoringAlgorithm, ScoringRegistry, food_eaten::FoodEatenScoring, weng_lin::WengLinScoring,
         win_rate::WinRateScoring,
     };
     use sqlx::PgPool;
@@ -397,6 +397,57 @@ mod tests {
         .collect::<std::collections::HashMap<_, _>>();
         assert_eq!(wins[&a], (1, 1));
         assert_eq!(wins[&b], (0, 0));
+        Ok(())
+    }
+
+    /// Food scoring credits exactly the count the game runner recorded on
+    /// `game_battlesnakes`, and nothing for a snake with no recorded count.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn food_score_comes_from_recorded_food_eaten(pool: PgPool) -> cja::Result<()> {
+        let user_id = create_user(&pool, 233).await?;
+        let eater = create_snake(&pool, user_id, "eater").await?;
+        let unrecorded = create_snake(&pool, user_id, "unrecorded").await?;
+        let leaderboard_id = sqlx::query_scalar!(
+            "INSERT INTO leaderboards (name) VALUES ($1) RETURNING leaderboard_id",
+            "Food Board",
+        )
+        .fetch_one(&pool)
+        .await?;
+        let a = leaderboard::get_or_create_entry(&pool, leaderboard_id, eater)
+            .await?
+            .leaderboard_entry_id;
+        let b = leaderboard::get_or_create_entry(&pool, leaderboard_id, unrecorded)
+            .await?
+            .leaderboard_entry_id;
+
+        let lb_game = finished_game(&pool, leaderboard_id, &[(a, 1), (b, 2)]).await?;
+        sqlx::query!(
+            "UPDATE game_battlesnakes SET food_eaten = 7 WHERE leaderboard_entry_id = $1",
+            a,
+        )
+        .execute(&pool)
+        .await?;
+
+        let mut state = AppState::test_from_pool(pool.clone());
+        let mut scoring = ScoringRegistry::new();
+        scoring.register(Box::new(WengLinScoring));
+        scoring.register(Box::new(FoodEatenScoring));
+        state.scoring = std::sync::Arc::new(scoring);
+        update_ratings(&state, lb_game).await?;
+
+        let eater_score = FoodEatenScoring.get_entry_score(&pool, a).await?;
+        assert_eq!(eater_score.map(|s| s.score), Some(7.0));
+        let unrecorded_score = FoodEatenScoring.get_entry_score(&pool, b).await?;
+        assert_eq!(unrecorded_score.map_or(0.0, |s| s.score), 0.0);
+
+        let per_game: Vec<(Uuid, i32)> = sqlx::query_as(
+            "SELECT leaderboard_entry_id, food_eaten FROM leaderboard_game_results
+             WHERE leaderboard_game_id = $1 ORDER BY food_eaten DESC",
+        )
+        .bind(lb_game)
+        .fetch_all(&pool)
+        .await?;
+        assert_eq!(per_game, vec![(a, 7), (b, 0)]);
         Ok(())
     }
 }
