@@ -239,7 +239,6 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
     let timeout = std::time::Duration::from_millis(engine_game.meta.timeout as u64);
 
     let mut death_info: Vec<DeathInfo> = Vec::new();
-    let mut elimination_order: Vec<String> = Vec::new();
     let mut last_moves: HashMap<String, Direction> = HashMap::new();
     let mut snake_contexts: HashMap<String, wire::SnakeContext> = HashMap::new();
 
@@ -343,8 +342,9 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
 
         // Track newly eliminated snakes
         for snake in &engine_game.board.snakes {
-            if snake.eliminated_cause.is_eliminated() && !elimination_order.contains(&snake.id) {
-                elimination_order.push(snake.id.clone());
+            if snake.eliminated_cause.is_eliminated()
+                && !death_info.iter().any(|death| death.snake_id == snake.id)
+            {
                 death_info.push(DeathInfo {
                     snake_id: snake.id.clone(),
                     turn: engine_game.board.turn,
@@ -453,29 +453,12 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
     )
     .await?;
 
-    // Build placements: last eliminated = winner (placement 1)
-    // Snakes still alive at the end go first
-    //
-    // Note: placements cannot express ties. Snakes eliminated on the same
-    // turn (e.g. a head-to-head where both die) still get distinct
-    // placements in elimination order, so the game page can show a "winner"
-    // for a game the tournament layer records as a tie. We keep it that way
-    // because the rating pipeline can't express ties either: win_rate counts
-    // exactly `placement == 1` as a win, so sharing placement 1 would credit
-    // both snakes of a drawn game with a win. Tournament tie handling
-    // instead derives the real result from the final snake states
-    // (`game_winner_from_snakes`).
-    let mut placements: Vec<String> = engine_game
-        .board
-        .snakes
-        .iter()
-        .filter(|s| !s.eliminated_cause.is_eliminated())
-        .map(|s| s.id.clone())
-        .collect();
-
-    // Then add eliminated snakes in reverse order (last eliminated = better placement)
-    elimination_order.reverse();
-    placements.extend(elimination_order);
+    // Snakes eliminated on the same turn share a placement, so a final
+    // head-to-head where both die is a draw with no winner.
+    let placements = crate::placement::from_final_snakes(&engine_game.board.snakes);
+    let winner_snake_id =
+        crate::placement::outright_winner(&placements, |(_, placement)| Some(*placement))
+            .map(|(snake_id, _)| snake_id.as_str());
 
     phase(
         game_id,
@@ -483,14 +466,11 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
         Some(engine_game.board.turn),
         async {
             // Resolve the tournament match result (if any) before the finish
-            // transaction. Placements can't express ties, so the winner is derived
-            // from the final snake states.
-            let match_winner_snake_id =
-                crate::tournament_match::game_winner_from_snakes(&engine_game.board.snakes);
+            // transaction.
             let resolved_match_game = crate::tournament_match::resolve_finished_match_game(
                 pool,
                 game_id,
-                match_winner_snake_id.as_deref(),
+                winner_snake_id,
             )
             .await
             .wrap_err("Failed to resolve tournament match game result")?;
@@ -508,9 +488,7 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
                 .await
                 .wrap_err("Failed to start game finish transaction")?;
 
-            for (i, snake_id) in placements.iter().enumerate() {
-                let placement = (i + 1) as i32;
-
+            for (snake_id, placement) in &placements {
                 let game_battlesnake_id: Uuid = snake_id
                     .parse()
                     .wrap_err_with(|| format!("Invalid game_battlesnake ID: {}", snake_id))?;
@@ -518,7 +496,7 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
                 crate::models::game_battlesnake::set_game_result_by_id(
                     &mut tx,
                     game_battlesnake_id,
-                    placement,
+                    *placement,
                 )
                 .await
                 .wrap_err_with(|| {
@@ -563,7 +541,7 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
         game_id = %game_id,
         final_turn = engine_game.board.turn,
         total_ms = total_time_ms,
-        winner_battlesnake_id = ?placements.first(),
+        winner_battlesnake_id = ?winner_snake_id,
         "game completed"
     );
 

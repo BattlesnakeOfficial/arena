@@ -318,4 +318,85 @@ mod tests {
         );
         Ok(())
     }
+
+    /// Two snakes that die on the same final turn share first place. That is a
+    /// draw: neither gets a win, and equally rated snakes keep their mu.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn shared_first_place_rates_as_a_draw(pool: PgPool) -> cja::Result<()> {
+        let user_id = create_user(&pool, 16400).await?;
+        let snake_a = create_snake(&pool, user_id, "snake-a").await?;
+        let snake_b = create_snake(&pool, user_id, "snake-b").await?;
+        let leaderboard_id = sqlx::query_scalar!(
+            "INSERT INTO leaderboards (name) VALUES ($1) RETURNING leaderboard_id",
+            "Draw Board",
+        )
+        .fetch_one(&pool)
+        .await?;
+        let mut state = AppState::test_from_pool(pool.clone());
+        let mut scoring = ScoringRegistry::new();
+        scoring.register(Box::new(WengLinScoring));
+        scoring.register(Box::new(WinRateScoring));
+        state.scoring = std::sync::Arc::new(scoring);
+        let mut entries = Vec::new();
+        for snake_id in [snake_a, snake_b] {
+            let entry = leaderboard::get_or_create_entry(&pool, leaderboard_id, snake_id).await?;
+            for algo in state.scoring.algorithms() {
+                algo.initialize_entry(&pool, entry.leaderboard_entry_id)
+                    .await?;
+            }
+            entries.push(entry);
+        }
+        let (a, b) = (
+            entries[0].leaderboard_entry_id,
+            entries[1].leaderboard_entry_id,
+        );
+
+        let draw = finished_game(&pool, leaderboard_id, &[(a, 1), (b, 1)]).await?;
+        update_ratings(&state, draw).await?;
+
+        for entry in &entries {
+            let id = entry.leaderboard_entry_id;
+            let row = sqlx::query!(
+                "SELECT le.mu, le.games_played, le.first_place_finishes, wr.wins, wr.games_played AS wr_games
+                 FROM leaderboard_entries le
+                 JOIN win_rate_stats wr USING (leaderboard_entry_id)
+                 WHERE le.leaderboard_entry_id = $1",
+                id,
+            )
+            .fetch_one(&pool)
+            .await?;
+            assert_eq!(row.games_played, 1);
+            assert_eq!(row.first_place_finishes, 0, "a draw is not a win");
+            assert_eq!((row.wins, row.wr_games), (0, 1), "a draw is not a win");
+            assert!(
+                (row.mu - entry.mu).abs() < 1e-9,
+                "equals who draw keep their mu: {} -> {}",
+                entry.mu,
+                row.mu
+            );
+        }
+
+        let a_won = finished_game(&pool, leaderboard_id, &[(a, 1), (b, 2)]).await?;
+        update_ratings(&state, a_won).await?;
+        let wins = sqlx::query!(
+            "SELECT le.leaderboard_entry_id, le.first_place_finishes, wr.wins
+             FROM leaderboard_entries le
+             JOIN win_rate_stats wr USING (leaderboard_entry_id)
+             WHERE le.leaderboard_entry_id = ANY($1)",
+            &[a, b][..],
+        )
+        .fetch_all(&pool)
+        .await?
+        .into_iter()
+        .map(|row| {
+            (
+                row.leaderboard_entry_id,
+                (row.first_place_finishes, row.wins),
+            )
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(wins[&a], (1, 1));
+        assert_eq!(wins[&b], (0, 0));
+        Ok(())
+    }
 }

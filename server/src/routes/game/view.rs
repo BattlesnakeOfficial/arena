@@ -297,7 +297,7 @@ pub async fn view_game(
     // Social-embed description. No winner by default — half the fun of a
     // shared replay is finding out who won by watching it — but sharers can
     // opt into the reveal with ?showSpoilers.
-    let winner = battlesnakes.iter().find(|b| b.placement == Some(1));
+    let winner = crate::placement::outright_winner(&battlesnakes, |b| b.placement);
     let spoilers = finished && params.show_spoilers();
     // The title is a link preview's headline, so it lists snakes in join
     // order even though the results rail below is in placement order.
