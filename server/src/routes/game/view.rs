@@ -21,6 +21,7 @@ use crate::{
     routes::auth::OptionalUser,
     routes::og::game_card_path,
     state::AppState,
+    static_assets::asset_url,
 };
 
 /// "Copy Link" button behavior for the share panel. Rendered via
@@ -305,6 +306,15 @@ pub async fn view_game(
         battlesnakes.iter().collect();
     joined.sort_by_key(|snake| game_battlesnake::join_order_key(snake));
     let title = game_page_title(joined.iter().map(|b| b.name.as_str()));
+    // The turn-JSON form starts on the linked turn and defaults to the
+    // viewer's own snake; the board's TURN messages keep the turn current.
+    let initial_turn = board_params.turn.unwrap_or(0);
+    let viewer_snake = user.as_ref().and_then(|current| {
+        joined
+            .iter()
+            .find(|snake| snake.user_id == current.user_id)
+            .map(|snake| snake.game_battlesnake_id)
+    });
     let image_alt = match winner {
         Some(winner) if spoilers => format!(
             "{title}: final board of a {} game on a {} board, won by {}",
@@ -510,6 +520,34 @@ pub async fn view_game(
                     }
 
                     script { (PreEscaped(SHARE_COPY_JS)) }
+
+                    @if game.status != GameStatus::Waiting {
+                        div class="gmeta" {
+                            h3 { "Turn JSON" }
+                            p class="gmeta-note" {
+                                "The " code { "/move" } " request a snake was sent on a turn, "
+                                "to replay against your snake locally."
+                            }
+                            form #move-request-form class="rail-form turn-json-form" action={"/api/games/"(game_id)"/move-request"} method="get" {
+                                select name="you" aria-label="Snake to get the request for" {
+                                    @for snake in &joined {
+                                        option value=(snake.game_battlesnake_id) selected[Some(snake.game_battlesnake_id) == viewer_snake] {
+                                            (snake.name)
+                                        }
+                                    }
+                                }
+                                label class="lbl" for="move-request-turn" { "Turn" }
+                                input #move-request-turn type="number" name="turn" min="0" required value=(initial_turn);
+                                div class="turn-json-actions" {
+                                    // Revealed by turn-json.js; needs JS and a secure context.
+                                    button #move-request-copy type="button" class="btn sm" hidden { "Copy" }
+                                    button type="submit" class="btn sm" { "Download" }
+                                }
+                            }
+                            p #move-request-error class="turn-json-error" role="alert" hidden {}
+                            script src=(asset_url("turn-json.js")) defer {}
+                        }
+                    }
 
                     @if user.is_some() {
                         div class="gmeta" {
