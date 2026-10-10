@@ -21,6 +21,7 @@ use crate::{
     routes::auth::OptionalUser,
     routes::og::game_card_path,
     state::AppState,
+    static_assets::asset_url,
 };
 
 /// "Copy Link" button behavior for the share panel. Rendered via
@@ -414,11 +415,6 @@ pub async fn view_game(
                                 "document.getElementById('board-viewer-container').style"
                                     ".setProperty('aspect-ratio', evt.data.width + ' / ' + evt.data.height);"
                             "}"
-                            // Keep the turn-JSON form on the turn being viewed.
-                            "if (evt.event === 'TURN') {"
-                                "var turnInput = document.getElementById('move-request-turn');"
-                                "if (turnInput) turnInput.value = evt.data.turn;"
-                            "}"
                         "});"
                     }
 
@@ -527,13 +523,13 @@ pub async fn view_game(
 
                     @if game.status != GameStatus::Waiting {
                         div class="gmeta" {
-                            h3 { "Download Turn JSON" }
+                            h3 { "Turn JSON" }
                             p class="gmeta-note" {
                                 "The " code { "/move" } " request a snake was sent on a turn, "
                                 "to replay against your snake locally."
                             }
                             form #move-request-form class="rail-form turn-json-form" action={"/api/games/"(game_id)"/move-request"} method="get" {
-                                select name="you" aria-label="Snake to download the request for" {
+                                select name="you" aria-label="Snake to get the request for" {
                                     @for snake in &joined {
                                         option value=(snake.game_battlesnake_id) selected[Some(snake.game_battlesnake_id) == viewer_snake] {
                                             (snake.name)
@@ -542,8 +538,14 @@ pub async fn view_game(
                                 }
                                 label class="lbl" for="move-request-turn" { "Turn" }
                                 input #move-request-turn type="number" name="turn" min="0" required value=(initial_turn);
-                                button type="submit" class="btn sm" { "Download" }
+                                div class="turn-json-actions" {
+                                    // Revealed by turn-json.js; needs JS and a secure context.
+                                    button #move-request-copy type="button" class="btn sm" hidden { "Copy" }
+                                    button type="submit" class="btn sm" { "Download" }
+                                }
                             }
+                            p #move-request-error class="turn-json-error" role="alert" hidden {}
+                            script src=(asset_url("turn-json.js")) defer {}
                         }
                     }
 

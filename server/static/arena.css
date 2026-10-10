@@ -797,7 +797,10 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
 .share-row input:focus-visible { outline: none; border-color: var(--pink); box-shadow: 0 0 0 3px var(--pink-wash); }
 .gmeta-note { color: var(--muted); font-size: 13px; margin-top: 6px; }
 .rail-form.turn-json-form select { flex-basis: 100%; }
-.turn-json-form .btn { margin-left: auto; }
+.turn-json-actions { margin-left: auto; display: flex; gap: 8px; }
+/* .btn sets display, which would otherwise override [hidden] */
+.turn-json-actions [hidden] { display: none; }
+.turn-json-error { color: var(--down); font-size: 13px; margin-top: 10px; }
 
 @media (max-width: 980px) {
   .theater { grid-template-columns: 1fr; }

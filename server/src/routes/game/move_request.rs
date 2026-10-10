@@ -763,8 +763,17 @@ mod tests {
             body.contains(&format!(r#"<option value="{other}">Their Snake</option>"#)),
             "{body}"
         );
-        // The board's TURN messages keep the form on the turn being viewed.
-        assert!(body.contains("evt.event === 'TURN'"), "{body}");
+        // Copy needs JS, so it ships hidden and the plain form is unchanged
+        // without it; turn-json.js reveals it, reports errors inline, and
+        // follows the board's TURN messages.
+        assert!(
+            body.contains(
+                r#"<button id="move-request-copy" type="button" class="btn sm" hidden>Copy</button>"#
+            ),
+            "{body}"
+        );
+        assert!(body.contains(r#"<p id="move-request-error""#), "{body}");
+        assert!(body.contains(r#"src="/static/turn-json.js?v="#), "{body}");
 
         // Nothing to download before the game starts.
         sqlx::query("UPDATE games SET status = 'waiting' WHERE game_id = $1")
