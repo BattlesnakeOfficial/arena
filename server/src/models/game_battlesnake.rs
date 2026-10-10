@@ -53,6 +53,14 @@ pub struct GameBattlesnakeWithDetails {
     pub owner_name: String,
 }
 
+/// Sort key for the order snakes joined a game. Anything shown before the
+/// viewer opts into spoilers (link-preview titles, social cards) lists snakes
+/// this way: the placement order `get_battlesnakes_by_game_id` returns would
+/// give the result away.
+pub fn join_order_key(snake: &GameBattlesnakeWithDetails) -> (chrono::DateTime<chrono::Utc>, Uuid) {
+    (snake.created_at, snake.game_battlesnake_id)
+}
+
 // Database functions for game battlesnake management
 
 // Get all battlesnakes in a game

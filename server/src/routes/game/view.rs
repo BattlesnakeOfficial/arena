@@ -19,6 +19,7 @@ use crate::{
     models::turn::{SoloGameStats, get_solo_game_stats},
     routes::UuidPath,
     routes::auth::OptionalUser,
+    routes::og::game_card_path,
     state::AppState,
 };
 
@@ -211,7 +212,7 @@ pub struct ViewGameParams {
 }
 
 impl ViewGameParams {
-    fn show_spoilers(&self) -> bool {
+    pub(crate) fn show_spoilers(&self) -> bool {
         match self.show_spoilers.as_deref() {
             None => false,
             Some(v) => !matches!(
@@ -297,8 +298,28 @@ pub async fn view_game(
     // shared replay is finding out who won by watching it — but sharers can
     // opt into the reveal with ?showSpoilers.
     let winner = battlesnakes.iter().find(|b| b.placement == Some(1));
+    let spoilers = finished && params.show_spoilers();
+    // The title is a link preview's headline, so it lists snakes in join
+    // order even though the results rail below is in placement order.
+    let mut joined: Vec<&game_battlesnake::GameBattlesnakeWithDetails> =
+        battlesnakes.iter().collect();
+    joined.sort_by_key(|snake| game_battlesnake::join_order_key(snake));
+    let title = game_page_title(joined.iter().map(|b| b.name.as_str()));
+    let image_alt = match winner {
+        Some(winner) if spoilers => format!(
+            "{title}: final board of a {} game on a {} board, won by {}",
+            game.game_type.as_str(),
+            game.board_size.as_str(),
+            winner.name,
+        ),
+        _ => format!(
+            "{title}: {} game on a {} board",
+            game.game_type.as_str(),
+            game.board_size.as_str(),
+        ),
+    };
     let description = match winner {
-        Some(winner) if finished && params.show_spoilers() => format!(
+        Some(winner) if spoilers => format!(
             "{} game on a {} board — {} won. Watch the replay on Battlesnake Arena.",
             game.game_type.as_str(),
             game.board_size.as_str(),
@@ -322,7 +343,7 @@ pub async fn view_game(
     };
 
     Ok(page_factory.create_theater_page(
-        game_page_title(battlesnakes.iter().map(|b| b.name.as_str())),
+        title,
         Box::new(html! {
             h1 class="vh" { "Game Details" }
             div id="game-live-state" data-game-id=(game_id) data-status=(game.status.as_str()) {}
@@ -516,7 +537,9 @@ pub async fn view_game(
             script { (PreEscaped(GAME_STATUS_JS)) }
         }),
     )
-    .with_description(description).into_response())
+    .with_description(description)
+    .with_social_image(game_card_path(game_id, spoilers), image_alt)
+    .into_response())
 }
 
 /// Query-string suffix (each param prefixed with `&`) for the optional board

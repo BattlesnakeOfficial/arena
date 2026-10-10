@@ -92,6 +92,9 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # design_kit (DEV-1539): PNG/JPEG/SVG upload -> one clean head/tail path. Pure Rust.
 # Rasteriser for lint metrics; no png-format (PNG decoding uses `png` directly).
 tiny-skia = { version = "0.12.0", default-features = false, features = ["std", "simd"] }
+# Social cards (src/og): text shaping (kerning) for the embedded fonts; glyph outlines
+# come from its re-exported ttf-parser and are filled with tiny-skia like any path.
+rustybuzz = "0.20.1"
 # Tracing engine behind vtracer 0.6.x binary mode.
 visioncortex = "0.8.10"
 png = "0.18.1"

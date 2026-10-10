@@ -40,6 +40,7 @@ pub mod game;
 pub mod github_auth;
 pub mod health;
 pub mod leaderboard;
+pub mod og;
 pub mod pagination;
 pub mod policy;
 #[cfg(test)]
@@ -105,6 +106,9 @@ pub fn routes(app_state: AppState) -> axum::Router {
         .route("/robots.txt", get(robots_txt))
         .route("/health", get(health::health))
         .route("/favicon.ico", get(crate::static_assets::serve_favicon))
+        // Social cards (og:image)
+        .route(og::DEFAULT_CARD_PATH, get(og::default_card))
+        .route("/og/games/{file}", get(og::game_card))
         // Policy pages
         .route("/conduct", get(policy::conduct_page))
         .route("/privacy", get(policy::privacy_page))
