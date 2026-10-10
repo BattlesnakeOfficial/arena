@@ -34,6 +34,7 @@ mod models;
 mod moderation;
 mod observability;
 mod og;
+mod placement;
 mod play_import;
 mod routes;
 mod scoring;

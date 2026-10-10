@@ -8,8 +8,16 @@ pub struct GameResultEvent {
     pub leaderboard_game_id: Uuid,
     pub leaderboard_id: Uuid,
     pub game_id: Uuid,
-    /// (leaderboard_entry_id, battlesnake_id, placement). Placement is 1-indexed (1 = winner).
+    /// (leaderboard_entry_id, battlesnake_id, placement). Placement is 1-indexed;
+    /// snakes eliminated on the same turn share one.
     pub results: Vec<GameResultEntry>,
+}
+
+impl GameResultEvent {
+    /// The entry that won the game. `None` when first place was shared (a draw).
+    pub fn outright_winner(&self) -> Option<&GameResultEntry> {
+        crate::placement::outright_winner(&self.results, |result| Some(result.placement))
+    }
 }
 
 pub struct GameResultEntry {

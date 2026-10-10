@@ -368,7 +368,8 @@ pub async fn get_game_history_for_battlesnake(
         FROM page p
         JOIN games g ON g.game_id = p.game_id
         LEFT JOIN LATERAL (
-            SELECT b.name
+            -- A shared first place is a draw: no winner.
+            SELECT MIN(b.name) AS name
             FROM game_battlesnakes gb_winner
             LEFT JOIN leaderboard_entries le_winner
               ON le_winner.leaderboard_entry_id = gb_winner.leaderboard_entry_id
@@ -376,7 +377,7 @@ pub async fn get_game_history_for_battlesnake(
               ON b.battlesnake_id = COALESCE(gb_winner.battlesnake_id,
                                             le_winner.battlesnake_id)
             WHERE gb_winner.game_id = p.game_id AND gb_winner.placement = 1
-            ORDER BY gb_winner.game_battlesnake_id LIMIT 1
+            HAVING COUNT(*) = 1
         ) winner ON TRUE
         ORDER BY p.linked_at DESC, p.game_battlesnake_id DESC
         "#,
@@ -444,18 +445,18 @@ pub async fn get_game_stats_for_battlesnake(
     let row = sqlx::query!(
         r#"
         WITH classified AS (
-            SELECT gb.placement,
+            SELECT gb.game_battlesnake_id, gb.game_id, gb.placement,
                    (g.status = 'finished' AND lower(g.game_type) <> 'solo') AS competitive
             FROM game_battlesnakes gb
             JOIN games g ON g.game_id = gb.game_id
             WHERE gb.battlesnake_id = $1
             UNION ALL
-            SELECT lb.placement,
+            SELECT lb.game_battlesnake_id, lb.game_id, lb.placement,
                    (lb.placement IS NOT NULL AND lower(l.game_type) <> 'solo') AS competitive
             FROM leaderboard_entries le
             JOIN leaderboards l ON l.leaderboard_id = le.leaderboard_id
             CROSS JOIN LATERAL (
-                SELECT gb.placement
+                SELECT gb.game_battlesnake_id, gb.game_id, gb.placement
                 FROM game_battlesnakes gb
                 WHERE gb.leaderboard_entry_id = le.leaderboard_entry_id
                   AND gb.battlesnake_id IS NULL
@@ -464,7 +465,12 @@ pub async fn get_game_stats_for_battlesnake(
         )
         SELECT COUNT(*) AS "total_games!",
                COUNT(*) FILTER (WHERE competitive) AS "finished_games!",
-               COUNT(*) FILTER (WHERE competitive AND placement = 1) AS "wins!",
+               -- A shared first place is a draw, not a win.
+               COUNT(*) FILTER (WHERE competitive AND placement = 1 AND NOT EXISTS (
+                   SELECT 1 FROM game_battlesnakes tied
+                   WHERE tied.game_id = classified.game_id AND tied.placement = 1
+                     AND tied.game_battlesnake_id <> classified.game_battlesnake_id
+               )) AS "wins!",
                COUNT(*) FILTER (WHERE competitive AND placement = 2) AS "second_places!",
                COUNT(*) FILTER (WHERE competitive AND placement = 3) AS "third_places!",
                COUNT(*) FILTER (WHERE competitive AND placement = 4) AS "fourth_places!",
@@ -746,6 +752,44 @@ mod tests {
                 .await?
                 .is_empty()
         );
+        Ok(())
+    }
+
+    /// Two snakes that die on the same final turn share first place: the game
+    /// is a draw, so the profile shows no winner and counts no win.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn shared_first_place_is_a_draw_on_the_profile(pool: PgPool) -> cja::Result<()> {
+        let user_id = sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO users (external_github_id, github_login, github_access_token)
+             VALUES (1640001, 'profile-draw', 'test') RETURNING user_id",
+        )
+        .fetch_one(&pool)
+        .await?;
+        let drawer = test_snake(&pool, user_id, "Drawer").await?;
+        let rival = test_snake(&pool, user_id, "Rival").await?;
+        let rival_entry = test_entry(&pool, rival, 0).await?;
+        let drawer_entry = test_entry(&pool, drawer, 0).await?;
+
+        let draw = test_game(&pool, "Standard", "finished", 2).await?;
+        test_link(&pool, draw, None, Some(drawer_entry), Some(1)).await?;
+        test_link(&pool, draw, None, Some(rival_entry), Some(1)).await?;
+        let win = test_game(&pool, "Standard", "finished", 1).await?;
+        test_link(&pool, win, Some(drawer), None, Some(1)).await?;
+        test_link(&pool, win, Some(rival), None, Some(2)).await?;
+
+        let rows = get_game_history_for_battlesnake(&pool, drawer, 50, 0).await?;
+        let winner = |game_id| {
+            rows.iter()
+                .find(|r| r.game_id == game_id)
+                .and_then(|r| r.winner_name.as_deref())
+        };
+        assert_eq!(winner(draw), None);
+        assert_eq!(winner(win), Some("Drawer"));
+
+        let stats = get_game_stats_for_battlesnake(&pool, drawer).await?;
+        assert_eq!((stats.finished_games, stats.wins), (2, 1));
+        assert!((stats.win_rate - 50.0).abs() < 1e-9);
+        assert!((stats.average_placement - 1.0).abs() < 1e-9);
         Ok(())
     }
 
