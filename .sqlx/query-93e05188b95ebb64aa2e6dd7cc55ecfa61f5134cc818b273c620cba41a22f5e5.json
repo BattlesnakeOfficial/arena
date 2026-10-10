@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT COUNT(*) AS \"count!\" FROM customization_code_failed_attempts WHERE user_id = $1 AND attempted_at > NOW() - INTERVAL '1 hour'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "93e05188b95ebb64aa2e6dd7cc55ecfa61f5134cc818b273c620cba41a22f5e5"
+}

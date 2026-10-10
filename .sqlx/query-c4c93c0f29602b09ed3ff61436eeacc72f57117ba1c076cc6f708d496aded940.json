@@ -1,0 +1,68 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT code_id, customization_type, slug, max_redemptions, redemptions_used, expires_at, note, created_at, disabled_at FROM customization_unlock_codes ORDER BY created_at DESC, code_id DESC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "code_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "customization_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "slug",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "max_redemptions",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 4,
+        "name": "redemptions_used",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 5,
+        "name": "expires_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 6,
+        "name": "note",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 8,
+        "name": "disabled_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "c4c93c0f29602b09ed3ff61436eeacc72f57117ba1c076cc6f708d496aded940"
+}
