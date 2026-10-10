@@ -297,6 +297,7 @@ cja::impl_job_registry!(
     NoopJob,
     GameRunnerJob,
     GameBackupJob,
+    CustomizationActiveWeekBackfillJob,
     BackupSingleGameJob,
     HistoricalBackupDiscoveryJob,
     LeaderboardMatchmakerJob,

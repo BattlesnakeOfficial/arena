@@ -165,6 +165,22 @@ mod tests {
     }
 
     #[test]
+    fn every_cron_job_is_dispatchable_by_the_worker() {
+        let dispatchable =
+            <crate::jobs::Jobs as cja::jobs::registry::JobRegistry<AppState>>::job_names();
+        let mut undispatchable: Vec<_> = cron_registry()
+            .jobs()
+            .keys()
+            .copied()
+            .filter(|name| !dispatchable.contains(name))
+            .collect();
+        undispatchable.sort_unstable();
+        // Closure crons run in the cron worker; every Job cron is enqueued for
+        // the job worker, which fails names missing from impl_job_registry!.
+        assert_eq!(undispatchable, ["LeaderboardGameDispatch"]);
+    }
+
+    #[test]
     fn active_week_backfill_runs_on_boot_then_hourly() {
         let registry = cron_registry();
         let job = registry
