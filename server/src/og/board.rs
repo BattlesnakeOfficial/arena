@@ -1,12 +1,12 @@
 //! Battlesnake boards and head tiles for social cards, painted from the same
 //! geometry as the Studio's SVG board (`components::snake_board`).
 //!
-//! Heads and tails come from the design kit's reference table, which holds the
-//! Standard set; any other catalog cosmetic is drawn as the default shape.
+//! Heads and tails come from the design kit's table of every catalog cosmetic
+//! (`design_kit::catalog_shapes`); an unknown slug is drawn as the default.
 
 use arena::design_kit::{
     AssetKind, FillRule,
-    refs::{REFS, RefShape},
+    catalog_shapes::{self, CatalogShape},
 };
 use svgtypes::{SimplePathSegment, SimplifyingPathParser};
 use tiny_skia::{
@@ -15,17 +15,29 @@ use tiny_skia::{
 
 use super::canvas::{Canvas, palette, round_rect, shaded, solid, vertical_gradient, with_alpha};
 use crate::components::snake_board::{Board, CELL, Cell, Direction, Placement};
+use crate::customizations::{DEFAULT_SLUG, Head, Tail};
 
-/// A head or tail cosmetic by slug, falling back to the default shape.
-pub fn shape(kind: AssetKind, slug: &str) -> Option<&'static RefShape> {
-    let of_kind = || REFS.iter().filter(move |r| r.kind == kind);
-    of_kind()
-        .find(|r| r.slug == slug)
-        .or_else(|| of_kind().find(|r| r.slug == crate::customizations::DEFAULT_SLUG))
+/// A head or tail cosmetic by catalog slug, falling back to the default shape.
+pub fn shape(kind: AssetKind, slug: &str) -> Option<&'static CatalogShape> {
+    // The art a slug draws is the file its image URL names: usually the slug,
+    // but a few entries reuse another's art.
+    let url = match kind {
+        AssetKind::Head => Head::from_slug(slug).map(Head::image_url),
+        AssetKind::Tail => Tail::from_slug(slug).map(Tail::image_url),
+    };
+    url.as_deref()
+        .and_then(media_file)
+        .and_then(|file| catalog_shapes::find(kind, file))
+        .or_else(|| catalog_shapes::find(kind, DEFAULT_SLUG))
 }
 
-/// A reference shape's path, in its 100×100 box.
-fn shape_path(shape: &RefShape) -> Option<Path> {
+/// `heads/viper.svg` -> `viper`.
+fn media_file(url: &str) -> Option<&str> {
+    url.rsplit('/').next()?.strip_suffix(".svg")
+}
+
+/// A catalog shape's path, in its 100×100 box.
+fn shape_path(shape: &CatalogShape) -> Option<Path> {
     let mut pb = PathBuilder::new();
     for segment in SimplifyingPathParser::from(shape.d) {
         match segment.ok()? {
@@ -147,8 +159,8 @@ pub struct BoardSnake {
     /// Head first, as in the game API.
     pub body: Vec<Cell>,
     pub color: Color,
-    pub head: Option<&'static RefShape>,
-    pub tail: Option<&'static RefShape>,
+    pub head: Option<&'static CatalogShape>,
+    pub tail: Option<&'static CatalogShape>,
     /// Drawn first and faded, as the board draws eliminated snakes.
     pub eliminated: bool,
 }
@@ -264,7 +276,7 @@ impl Canvas {
         } else {
             1.0
         };
-        let placed = |shape: Option<&'static RefShape>, at: Placement, dir: Transform| {
+        let placed = |shape: Option<&'static CatalogShape>, at: Placement, dir: Transform| {
             let shape = shape?;
             let scale = CELL as f32 / 100.0;
             let transform = to_card
@@ -317,7 +329,14 @@ impl Canvas {
 
     /// A snake's head, facing right, on a rounded tile at (`x`, `y`) of side
     /// `side`: the roster's avatar.
-    pub fn head_tile(&mut self, head: Option<&RefShape>, color: Color, x: f32, y: f32, side: f32) {
+    pub fn head_tile(
+        &mut self,
+        head: Option<&CatalogShape>,
+        color: Color,
+        x: f32,
+        y: f32,
+        side: f32,
+    ) {
         let tile = if is_dark(color) {
             palette::ink()
         } else {
@@ -450,30 +469,45 @@ mod tests {
     }
 
     #[test]
-    fn every_reference_shape_parses() {
-        for r in REFS {
-            let path = shape_path(r).unwrap_or_else(|| panic!("{} failed to parse", r.slug));
+    fn every_catalog_shape_parses_inside_its_box() {
+        for c in catalog_shapes::CATALOG_SHAPES {
+            let path = shape_path(c).unwrap_or_else(|| panic!("{} failed to parse", c.file));
             // Tight bounds: `bounds()` counts Bézier control points.
             let b = path.compute_tight_bounds().unwrap();
-            assert!(b.left() >= -1.0 && b.right() <= 101.0, "{}: {b:?}", r.slug);
-            assert!(b.top() >= -1.0 && b.bottom() <= 101.0, "{}: {b:?}", r.slug);
+            assert!(b.left() >= -1.0 && b.right() <= 101.0, "{}: {b:?}", c.file);
+            assert!(b.top() >= -1.0 && b.bottom() <= 101.0, "{}: {b:?}", c.file);
         }
     }
 
     #[test]
+    fn every_catalog_cosmetic_draws_its_own_art() {
+        let heads = Head::ALL
+            .iter()
+            .map(|h| (AssetKind::Head, h.slug(), h.image_url()));
+        let tails = Tail::ALL
+            .iter()
+            .map(|t| (AssetKind::Tail, t.slug(), t.image_url()));
+        for (kind, slug, url) in heads.chain(tails) {
+            let file = media_file(&url).unwrap_or_else(|| panic!("{slug}: odd URL {url}"));
+            let got = shape(kind, slug).unwrap_or_else(|| panic!("{kind:?} {slug}: no shape"));
+            assert_eq!((got.kind, got.file), (kind, file), "{kind:?} {slug}");
+        }
+        // Entries that reuse another's art.
+        assert_eq!(
+            shape(AssetKind::Head, "viper").map(|s| s.file),
+            Some("rattler")
+        );
+        assert_eq!(
+            shape(AssetKind::Tail, "pruzze-special").map(|s| s.file),
+            Some("pirate-special")
+        );
+    }
+
+    #[test]
     fn unknown_cosmetics_fall_back_to_the_default_shape() {
-        assert_eq!(shape(AssetKind::Head, "bendr").unwrap().slug, "bendr");
-        assert_eq!(
-            shape(AssetKind::Head, "bendr").unwrap().kind,
-            AssetKind::Head
-        );
-        assert_eq!(
-            shape(AssetKind::Tail, "pixel").unwrap().kind,
-            AssetKind::Tail
-        );
-        let fallback = shape(AssetKind::Head, "not-a-real-head").unwrap();
-        assert_eq!((fallback.slug, fallback.kind), ("default", AssetKind::Head));
-        let fallback = shape(AssetKind::Tail, "").unwrap();
-        assert_eq!((fallback.slug, fallback.kind), ("default", AssetKind::Tail));
+        for (kind, slug) in [(AssetKind::Head, "not-a-real-head"), (AssetKind::Tail, "")] {
+            let fallback = shape(kind, slug).unwrap();
+            assert_eq!((fallback.kind, fallback.file), (kind, "default"));
+        }
     }
 }

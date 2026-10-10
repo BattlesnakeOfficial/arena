@@ -929,7 +929,7 @@ mod tests {
             [("Games", "0"), ("Wins", "0"), ("Win rate", "—")]
         );
         assert_eq!(
-            snake.avatar.and_then(|(h, _)| h).map(|h| h.slug),
+            snake.avatar.and_then(|(h, _)| h).map(|h| h.file),
             Some("bendr")
         );
 
@@ -950,7 +950,7 @@ mod tests {
         );
         assert_eq!(player.stats[0].value, "1");
         assert_eq!(player.board.snakes.len(), 1);
-        assert_eq!(player.board.snakes[0].head.map(|h| h.slug), Some("bendr"));
+        assert_eq!(player.board.snakes[0].head.map(|h| h.file), Some("bendr"));
     }
 
     #[sqlx::test(migrations = "../migrations")]
@@ -968,7 +968,7 @@ mod tests {
         assert_eq!((row.rank, row.rating.as_str()), (1, "33.3"));
         assert_eq!(row.snake.name, "Card Shark");
         assert_eq!(row.snake.owner, "OG Player");
-        assert_eq!(row.snake.head.map(|h| h.slug), Some("bendr"));
+        assert_eq!(row.snake.head.map(|h| h.file), Some("bendr"));
 
         let cup = load_tournament_card(&state, w.tournament_id)
             .await
@@ -1135,7 +1135,7 @@ mod tests {
         // The turn-2 board, with everyone alive, in what they wore that game.
         assert_eq!(card.board.snakes[0].body, vec![(1, 3), (1, 2)]);
         assert!(card.board.snakes.iter().all(|s| !s.eliminated));
-        assert_eq!(card.roster[0].head.map(|h| h.slug), Some("smile"));
+        assert_eq!(card.roster[0].head.map(|h| h.file), Some("smile"));
         assert_eq!(
             card.roster[0].color,
             crate::og::canvas::rgb(0x3d, 0xdb, 0xa0)
@@ -1248,9 +1248,9 @@ mod tests {
         assert!(shown.snakes[0].eliminated && !shown.snakes[1].eliminated);
 
         assert_eq!(shown.snakes[0].body, vec![(1, 3), (1, 2)]);
-        assert_eq!(shown.snakes[0].head.map(|h| h.slug), Some("bendr"));
-        assert_eq!(shown.snakes[0].tail.map(|t| t.slug), Some("bolt"));
-        assert_eq!(shown.snakes[1].head.map(|h| h.slug), Some("default"));
+        assert_eq!(shown.snakes[0].head.map(|h| h.file), Some("bendr"));
+        assert_eq!(shown.snakes[0].tail.map(|t| t.file), Some("bolt"));
+        assert_eq!(shown.snakes[1].head.map(|h| h.file), Some("default"));
         assert_eq!(shown.food, vec![(0, 0)]);
         assert_eq!(shown.hazards, vec![(4, 4)]);
 

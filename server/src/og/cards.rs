@@ -5,7 +5,7 @@
 //! a board panel on the right, a text column on the left, and the wordmark in
 //! the bottom-left corner.
 
-use arena::design_kit::{AssetKind, refs::RefShape};
+use arena::design_kit::{AssetKind, catalog_shapes::CatalogShape};
 use tiny_skia::{Color, Stroke, Transform};
 
 use super::{
@@ -199,7 +199,7 @@ pub struct RosterSnake {
     pub name: String,
     pub owner: String,
     pub color: Color,
-    pub head: Option<&'static RefShape>,
+    pub head: Option<&'static CatalogShape>,
     /// Shown only on spoiler cards.
     pub placement: Option<i32>,
 }
@@ -517,7 +517,7 @@ pub struct ProfileCard {
     pub title: String,
     pub subtitle: String,
     /// A head tile beside the title (snakes); players have none.
-    pub avatar: Option<(Option<&'static RefShape>, Color)>,
+    pub avatar: Option<(Option<&'static CatalogShape>, Color)>,
     /// At most three are shown.
     pub stats: Vec<Stat>,
     /// A pink line above the stats, e.g. "#3 on Standard 11x11".
@@ -777,7 +777,7 @@ pub fn leaderboard_card(card: &LeaderboardCard) -> cja::Result<Vec<u8>> {
 #[derive(Debug, Clone)]
 pub struct Entrant {
     pub color: Color,
-    pub head: Option<&'static RefShape>,
+    pub head: Option<&'static CatalogShape>,
     pub champion: bool,
 }
 
