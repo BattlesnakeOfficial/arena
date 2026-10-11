@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT week_start FROM customization_active_weeks WHERE user_id = $1 ORDER BY week_start",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "week_start",
+        "type_info": "Date"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "1ed7fe8b3d79626629d11d37bd1d803596b9122b3286d2e2cd1e7414077de63f"
+}

@@ -41,8 +41,11 @@ impl ScoringAlgorithm for WinRateScoring {
         conn: &mut sqlx::PgConnection,
         event: &GameResultEvent,
     ) -> cja::Result<()> {
+        let winner = event
+            .outright_winner()
+            .map(|winner| winner.leaderboard_entry_id);
         for result in &event.results {
-            let is_win = result.placement == 1;
+            let is_win = winner == Some(result.leaderboard_entry_id);
 
             // Try UPDATE first
             let rows_affected = sqlx::query!(
@@ -241,21 +244,6 @@ mod tests {
             "0 games played should return 0.0, not NaN or infinity, got {}",
             rate
         );
-    }
-
-    #[test]
-    fn test_placement_1_is_win() {
-        let placement = 1;
-        let is_win = placement == 1;
-        assert!(is_win, "Placement 1 should count as a win");
-    }
-
-    #[test]
-    fn test_placement_not_1_is_loss() {
-        for placement in [2, 3, 4] {
-            let is_win = placement == 1;
-            assert!(!is_win, "Placement {} should not count as a win", placement);
-        }
     }
 
     #[test]

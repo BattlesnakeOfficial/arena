@@ -105,7 +105,7 @@ fn can_register(tournament: &Tournament, is_owner: bool) -> bool {
 
 /// Who can view a tournament page. `participants_only` tournaments are only
 /// visible to the owner and users with a registered snake.
-fn can_view(
+pub(crate) fn can_view(
     tournament: &Tournament,
     viewer_user_id: Option<Uuid>,
     participant_user_ids: &[Uuid],
@@ -848,31 +848,33 @@ pub async fn list_tournaments(
                 }
             } @else {
                 div class="section" {
-                    table class="data" {
-                        thead {
-                            tr {
-                                th { "Tournament" }
-                                th { "Status" }
-                                th class="r" { "Snakes" }
-                                th class="r hide-sm" { "Game" }
-                                th class="r hide-sm" { "Created" }
-                            }
-                        }
-                        tbody {
-                            @for t in &tournaments {
+                    div class="table-scroll" {
+                        table class="data" {
+                            thead {
                                 tr {
-                                    td {
-                                        div class="snake-cell" {
-                                            span {
-                                                a class="name" href={"/tournaments/"(t.tournament_id)} { (t.name) }
-                                                span class="owner" { "by " (t.owner_name) }
+                                    th { "Tournament" }
+                                    th { "Status" }
+                                    th class="r" { "Snakes" }
+                                    th class="r" { "Game" }
+                                    th class="r" { "Created" }
+                                }
+                            }
+                            tbody {
+                                @for t in &tournaments {
+                                    tr {
+                                        td {
+                                            div class="snake-cell" {
+                                                span {
+                                                    a class="name" href={"/tournaments/"(t.tournament_id)} { (t.name) }
+                                                    span class="owner" { "by " (t.owner_name) }
+                                                }
                                             }
                                         }
+                                        td { (status_badge(t.status)) }
+                                        td class="r num" { (t.registration_count) }
+                                        td class="r num" { (t.game_type.as_str()) }
+                                        td class="r num" { (t.created_at.format("%b %-d, %Y")) }
                                     }
-                                    td { (status_badge(t.status)) }
-                                    td class="r num" { (t.registration_count) }
-                                    td class="r num hide-sm" { (t.game_type.as_str()) }
-                                    td class="r num hide-sm" { (t.created_at.format("%b %-d, %Y")) }
                                 }
                             }
                         }
@@ -1065,6 +1067,15 @@ pub async fn show_tournament(
         return Ok(crate::routes::render_not_found(page_factory));
     }
 
+    // Only cards an anonymous scraper can fetch: a participants-only
+    // tournament keeps the default card.
+    let social_card = can_view(&t, None, &participant_user_ids).then(|| {
+        (
+            crate::routes::og::tournament_card_path(tournament_id),
+            format!("{} tournament", t.name),
+        )
+    });
+
     let owner = user::get_user_by_id(&state.db, t.user_id)
         .await
         .wrap_err("Failed to fetch tournament owner")?;
@@ -1164,11 +1175,7 @@ pub async fn show_tournament(
         })
         .unwrap_or((0, 0, 0));
 
-    let style_label = match t.match_style {
-        MatchStyle::SingleGame => "Single game",
-        MatchStyle::BestOf3 => "Best of 3",
-        MatchStyle::FirstTo3 => "First to 3",
-    };
+    let style_label = t.match_style.label();
 
     let matches = bracket_data
         .as_ref()
@@ -1191,7 +1198,7 @@ pub async fn show_tournament(
         )
     });
 
-    Ok(page_factory.create_page(
+    let page = page_factory.create_page(
         format!("Tournament: {}", t.name),
         Box::new(html! {
             div class="crumb" {
@@ -1278,45 +1285,47 @@ pub async fn show_tournament(
                         @if registrations.is_empty() {
                             p class="empty" { "No snakes registered yet." }
                         } @else {
-                            table class="data" {
-                                thead {
-                                    tr {
-                                        th { "Seed" }
-                                        th { "Battlesnake" }
-                                        @if can_edit_registrations && viewer.is_some() {
-                                            th class="r" { "Actions" }
+                            div class="table-scroll" {
+                                table class="data" {
+                                    thead {
+                                        tr {
+                                            th { "Seed" }
+                                            th { "Battlesnake" }
+                                            @if can_edit_registrations && viewer.is_some() {
+                                                th class="r" { "Actions" }
+                                            }
                                         }
                                     }
-                                }
-                                tbody {
-                                    @for reg in &registrations {
-                                        tr {
-                                            td class="rank" { (format!("{:02}", reg.seed)) }
-                                            td {
-                                                div class="snake-cell" {
-                                                    span class="chip" style={"background:"(chip_color(&reg.snake_color))} {}
-                                                    span {
-                                                        a class="name" href={"/battlesnakes/"(reg.battlesnake_id)"/profile"} { (reg.snake_name) }
-                                                        span class="owner" { "by " (reg.owner_name) }
+                                    tbody {
+                                        @for reg in &registrations {
+                                            tr {
+                                                td class="rank" { (format!("{:02}", reg.seed)) }
+                                                td {
+                                                    div class="snake-cell" {
+                                                        span class="chip" style={"background:"(chip_color(&reg.snake_color))} {}
+                                                        span {
+                                                            a class="name" href={"/battlesnakes/"(reg.battlesnake_id)"/profile"} { (reg.snake_name) }
+                                                            span class="owner" { "by " (reg.owner_name) }
+                                                        }
                                                     }
                                                 }
-                                            }
-                                            @if can_edit_registrations && viewer.is_some() {
-                                                td {
-                                                    div class="reg-actions" {
-                                                        @if is_owner {
-                                                            form class="seed-form" action={"/tournaments/"(t.tournament_id)"/seed"} method="post" {
-                                                                input type="hidden" name="registration_id" value=(reg.registration_id);
-                                                                input type="number" name="new_seed" aria-label="New seed"
-                                                                    min="1" max=(max_seed) value=(reg.seed) {}
-                                                                button type="submit" class="btn sm" { "Move" }
+                                                @if can_edit_registrations && viewer.is_some() {
+                                                    td {
+                                                        div class="reg-actions" {
+                                                            @if is_owner {
+                                                                form class="seed-form" action={"/tournaments/"(t.tournament_id)"/seed"} method="post" {
+                                                                    input type="hidden" name="registration_id" value=(reg.registration_id);
+                                                                    input type="number" name="new_seed" aria-label="New seed"
+                                                                        min="1" max=(max_seed) value=(reg.seed) {}
+                                                                    button type="submit" class="btn sm" { "Move" }
+                                                                }
                                                             }
-                                                        }
-                                                        @if is_owner || viewer_id == Some(reg.user_id) {
-                                                            form action={"/tournaments/"(t.tournament_id)"/unregister"} method="post" {
-                                                                input type="hidden" name="registration_id" value=(reg.registration_id);
-                                                                button type="submit" class="btn sm danger"
-                                                                    onclick="return confirm('Remove this snake from the tournament?');" { "Unregister" }
+                                                            @if is_owner || viewer_id == Some(reg.user_id) {
+                                                                form action={"/tournaments/"(t.tournament_id)"/unregister"} method="post" {
+                                                                    input type="hidden" name="registration_id" value=(reg.registration_id);
+                                                                    button type="submit" class="btn sm danger"
+                                                                        onclick="return confirm('Remove this snake from the tournament?');" { "Unregister" }
+                                                                }
                                                             }
                                                         }
                                                     }
@@ -1419,7 +1428,12 @@ pub async fn show_tournament(
                 }
             }
         }),
-    ).into_response())
+    );
+    Ok(match social_card {
+        Some((path, alt)) => page.with_social_image(path, alt),
+        None => page,
+    }
+    .into_response())
 }
 
 /// GET /tournaments/{id}/edit — settings form (owner only).

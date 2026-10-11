@@ -460,6 +460,13 @@ async fn claim_account_inner(
     expected_github_uid: Option<i64>,
 ) -> cja::Result<Option<ClaimSummary>> {
     let mut tx = pool.begin().await.wrap_err("Failed to begin claim tx")?;
+    sqlx::query!(
+        "SELECT user_id FROM users WHERE user_id = $1 FOR NO KEY UPDATE",
+        user_id
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .wrap_err("Failed to lock user for play claim")?;
 
     let claimed = sqlx::query!(
         r#"
@@ -605,11 +612,22 @@ async fn claim_account_inner(
             continue;
         }
 
-        let inserted = sqlx::query!(
+        let prior = sqlx::query!(
+            "SELECT source FROM customization_grants WHERE user_id = $1 AND customization_type = $2 AND slug = $3",
+            user_id,
+            grant.customization_type,
+            grant.slug,
+        )
+        .fetch_optional(&mut *tx)
+        .await
+        .wrap_err("Failed to check existing play grant")?;
+        let changed = sqlx::query!(
             r#"
-            INSERT INTO customization_grants (user_id, customization_type, slug)
-            VALUES ($1, $2, $3)
-            ON CONFLICT (user_id, customization_type, slug) DO NOTHING
+            INSERT INTO customization_grants (user_id, customization_type, slug, source)
+            VALUES ($1, $2, $3, 'play_import')
+            ON CONFLICT (user_id, customization_type, slug)
+            DO UPDATE SET source = 'play_import'
+            WHERE customization_grants.source = 'token'
             "#,
             user_id,
             grant.customization_type,
@@ -619,7 +637,9 @@ async fn claim_account_inner(
         .await
         .wrap_err("Failed to materialize grant")?
         .rows_affected();
-        grants_created += inserted;
+        if prior.is_none() {
+            grants_created += changed;
+        }
     }
 
     tx.commit().await.wrap_err("Failed to commit claim tx")?;
@@ -828,6 +848,125 @@ mod tests {
         )
         .await?
         .imported_account_id)
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn play_claim_refunds_overlapping_token_grant(pool: PgPool) -> cja::Result<()> {
+        let user_id = create_user(&pool, 1647).await?;
+        let account_id = stage_full_account(&pool, 1647).await?;
+        sqlx::query!(
+            "INSERT INTO imported_grants (imported_account_id, customization_type, slug) VALUES ($1, 'tail', 'alligator'), ($1, 'head', 'default')",
+            account_id,
+        ).execute(&pool).await?;
+        crate::customizations::create_grant(&pool, user_id, "tail", "alligator").await?;
+        sqlx::query!(
+            "INSERT INTO customization_grants (user_id, customization_type, slug, source) VALUES ($1, 'head', 'default', 'pre_token')",
+            user_id,
+        ).execute(&pool).await?;
+        sqlx::query!(
+            "INSERT INTO customization_active_weeks (user_id, week_start) VALUES ($1, '2026-10-05')",
+            user_id,
+        )
+        .execute(&pool).await?;
+        assert_eq!(
+            crate::customizations::unlock_with_token(&pool, user_id, "head", "alligator").await?,
+            crate::customizations::UnlockOutcome::Unlocked(
+                crate::customizations::Head::Alligator.def().display_name
+            ),
+        );
+        assert_eq!(
+            crate::customizations::token_balance(&pool, user_id).await?,
+            0
+        );
+        let summary = claim_account(&pool, account_id, user_id).await?.unwrap();
+        assert_eq!(summary.grants_created, 0);
+        let source = sqlx::query_scalar!(
+            "SELECT source FROM customization_grants WHERE user_id = $1 AND customization_type = 'head' AND slug = 'alligator'",
+            user_id,
+        ).fetch_one(&pool).await?;
+        assert_eq!(source, "play_import");
+        let origins = sqlx::query!(
+            "SELECT customization_type, slug, source FROM customization_grants WHERE user_id = $1 ORDER BY customization_type, slug",
+            user_id,
+        ).fetch_all(&pool).await?;
+        assert_eq!(origins.len(), 3);
+        assert!(origins.iter().any(|row| row.customization_type == "tail"
+            && row.slug == "alligator"
+            && row.source == "admin"));
+        assert!(origins.iter().any(|row| row.customization_type == "head"
+            && row.slug == "default"
+            && row.source == "pre_token"));
+        assert_eq!(
+            crate::customizations::token_balance(&pool, user_id).await?,
+            1
+        );
+        assert!(claim_account(&pool, account_id, user_id).await?.is_none());
+        assert_eq!(
+            crate::customizations::token_balance(&pool, user_id).await?,
+            1
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn play_claim_and_unlock_serialize_on_user(pool: PgPool) -> cja::Result<()> {
+        let user_id = create_user(&pool, 1648).await?;
+        let account_id = stage_full_account(&pool, 1648).await?;
+        sqlx::query!(
+            "INSERT INTO customization_active_weeks (user_id, week_start) VALUES ($1, '2026-10-05')",
+            user_id,
+        ).execute(&pool).await?;
+        let mut blocker = pool.begin().await?;
+        sqlx::query!(
+            "SELECT user_id FROM users WHERE user_id = $1 FOR NO KEY UPDATE",
+            user_id
+        )
+        .fetch_one(&mut *blocker)
+        .await?;
+        let claim = {
+            let pool = pool.clone();
+            tokio::spawn(async move { claim_account(&pool, account_id, user_id).await })
+        };
+        let unlock = {
+            let pool = pool.clone();
+            tokio::spawn(async move {
+                crate::customizations::unlock_with_token(&pool, user_id, "head", "alligator").await
+            })
+        };
+        let wait = async {
+            loop {
+                let waiting = sqlx::query_scalar!(
+                    "SELECT COUNT(*)::bigint AS \"count!\" FROM pg_stat_activity WHERE query LIKE 'SELECT user_id FROM users WHERE user_id = $1 FOR NO KEY UPDATE%' AND wait_event_type = 'Lock' AND datname = current_database()"
+                ).fetch_one(&pool).await?;
+                if waiting == 2 {
+                    break Ok::<(), cja::color_eyre::Report>(());
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(15), wait).await??;
+        blocker.commit().await?;
+        let summary = claim.await??.expect("claim succeeds");
+        let outcome = unlock.await??;
+        assert!(matches!(
+            outcome,
+            crate::customizations::UnlockOutcome::Unlocked(_)
+                | crate::customizations::UnlockOutcome::AlreadyOwned
+        ));
+        assert_eq!(
+            summary.grants_created,
+            u64::from(outcome == crate::customizations::UnlockOutcome::AlreadyOwned)
+        );
+        let grant = sqlx::query!(
+            "SELECT source FROM customization_grants WHERE user_id = $1 AND customization_type = 'head' AND slug = 'alligator'",
+            user_id,
+        ).fetch_one(&pool).await?;
+        assert_eq!(grant.source, "play_import");
+        assert_eq!(
+            crate::customizations::token_balance(&pool, user_id).await?,
+            1
+        );
+        Ok(())
     }
 
     #[sqlx::test(migrations = "../migrations")]
@@ -1607,6 +1746,17 @@ mod tests {
             .await?
             .imported_account_id;
         let user_id = create_user(&pool, 9205).await?;
+        // The claim now takes the user lock before its imported-account CAS.
+        // Hold a staged snake separately so the claim can take the CAS, then
+        // pause before materialization while staging queues behind it.
+        let mut snake_lock = pool.begin().await?;
+        let snake_blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *snake_lock)
+            .await?;
+        sqlx::query!(
+            "SELECT imported_snake_id FROM imported_snakes WHERE imported_account_id = $1 FOR UPDATE",
+            id,
+        ).fetch_one(&mut *snake_lock).await?;
         let mut lock = pool.begin().await?;
         let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(&mut *lock)
@@ -1620,6 +1770,8 @@ mod tests {
         let (claim_pool, claim_pid) = staging_test_pool(&pool, "claim-first-1389").await?;
         let claim = tokio::spawn(async move { claim_account(&claim_pool, id, user_id).await });
         wait_for_blocker(&pool, claim_pid, blocker_pid).await?;
+        lock.commit().await?;
+        wait_for_blocker(&pool, claim_pid, snake_blocker_pid).await?;
         let (stage_pool, stage_pid) = staging_test_pool(&pool, "stage-after-claim-1389").await?;
         let mut refresh = payload.clone();
         refresh.account.display_name = "Changed".to_string();
@@ -1633,7 +1785,7 @@ mod tests {
         });
         let stage = tokio::spawn(async move { stage_play_account(&stage_pool, &refresh).await });
         wait_for_blocker(&pool, stage_pid, claim_pid).await?;
-        lock.commit().await?;
+        snake_lock.commit().await?;
         let summary = claim.await??.expect("claim wins");
         assert_eq!((summary.snakes_created, summary.grants_created), (1, 1));
         assert_eq!(stage.await??.status, StageStatus::SkippedClaimed);

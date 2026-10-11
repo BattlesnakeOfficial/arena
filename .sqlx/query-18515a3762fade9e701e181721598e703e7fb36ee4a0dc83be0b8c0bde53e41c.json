@@ -1,0 +1,46 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT le.mu, le.games_played, le.first_place_finishes, wr.wins, wr.games_played AS wr_games\n                 FROM leaderboard_entries le\n                 JOIN win_rate_stats wr USING (leaderboard_entry_id)\n                 WHERE le.leaderboard_entry_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "mu",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 1,
+        "name": "games_played",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 2,
+        "name": "first_place_finishes",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 3,
+        "name": "wins",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 4,
+        "name": "wr_games",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "18515a3762fade9e701e181721598e703e7fb36ee4a0dc83be0b8c0bde53e41c"
+}

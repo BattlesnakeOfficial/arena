@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO customization_grants (user_id, customization_type, slug, source)\n            VALUES ($1, $2, $3, 'play_import')\n            ON CONFLICT (user_id, customization_type, slug)\n            DO UPDATE SET source = 'play_import'\n            WHERE customization_grants.source = 'token'\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "33073f78eafac3595d5e896ea06c5c95e9044c4ef8f06e7915d0d356877fa7ca"
+}

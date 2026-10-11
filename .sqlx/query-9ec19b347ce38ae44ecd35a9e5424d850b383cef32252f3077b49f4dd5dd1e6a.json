@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT EXISTS(SELECT 1 FROM jobs WHERE name = 'GameRunnerJob' AND payload->>'game_id' = $1) AS \"has_job!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "has_job!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "9ec19b347ce38ae44ecd35a9e5424d850b383cef32252f3077b49f4dd5dd1e6a"
+}

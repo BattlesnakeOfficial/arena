@@ -1,6 +1,7 @@
 use crate::state::AppState;
 
 use cja::jobs::Job;
+use color_eyre::eyre::Context as _;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -76,6 +77,82 @@ impl Job<AppState> for GameRunnerJob {
 /// Runs as a cron job every hour, checking games from the last 4 hours.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct GameBackupJob;
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CustomizationActiveWeekBackfillJob;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AwardAchievementsForGameJob {
+    pub game_id: Uuid,
+}
+
+#[async_trait::async_trait]
+impl Job<AppState> for AwardAchievementsForGameJob {
+    const NAME: &'static str = "AwardAchievementsForGameJob";
+
+    async fn run(&self, app_state: AppState) -> cja::Result<()> {
+        crate::customizations::achievements::award_for_game(&app_state.db, self.game_id).await?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BackfillAchievementsJob;
+
+#[async_trait::async_trait]
+impl Job<AppState> for BackfillAchievementsJob {
+    const NAME: &'static str = "BackfillAchievementsJob";
+
+    async fn run(&self, app_state: AppState) -> cja::Result<()> {
+        let started = std::time::Instant::now();
+        while started.elapsed() < std::time::Duration::from_secs(30) {
+            let page =
+                crate::customizations::achievements::backfill_achievement_page(&app_state.db)
+                    .await?;
+            tracing::info!(
+                inserted = page.inserted,
+                processed = page.processed,
+                complete = page.complete,
+                "Achievement backfill page"
+            );
+            if page.complete || page.processed == 0 {
+                break;
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ReconcileRecentAchievementsJob;
+
+#[async_trait::async_trait]
+impl Job<AppState> for ReconcileRecentAchievementsJob {
+    const NAME: &'static str = "ReconcileRecentAchievementsJob";
+
+    async fn run(&self, app_state: AppState) -> cja::Result<()> {
+        crate::customizations::achievements::reconcile_recent_achievements(&app_state.db).await?;
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl Job<AppState> for CustomizationActiveWeekBackfillJob {
+    const NAME: &'static str = "CustomizationActiveWeekBackfillJob";
+
+    async fn run(&self, app_state: AppState) -> cja::Result<()> {
+        let inserted = crate::customizations::backfill_active_weeks(&app_state.db).await?;
+        let cursor = sqlx::query!(
+            "SELECT scanned_through FROM customization_active_week_backfill_cursor WHERE singleton = TRUE"
+        )
+        .fetch_one(&app_state.db)
+        .await
+        .wrap_err("Failed to read active-week backfill cursor")?
+        .scanned_through;
+        tracing::info!(inserted, %cursor, "Customization active-week backfill completed");
+        Ok(())
+    }
+}
 
 #[async_trait::async_trait]
 impl Job<AppState> for GameBackupJob {
@@ -316,6 +393,10 @@ cja::impl_job_registry!(
     PlayGrantReconcileJob,
     GameRunnerJob,
     GameBackupJob,
+    CustomizationActiveWeekBackfillJob,
+    AwardAchievementsForGameJob,
+    BackfillAchievementsJob,
+    ReconcileRecentAchievementsJob,
     BackupSingleGameJob,
     HistoricalBackupDiscoveryJob,
     LeaderboardMatchmakerJob,

@@ -48,7 +48,12 @@ pub fn calculate_rating_updates(
         .map(|(team, (_, placement))| (team.as_slice(), MultiTeamOutcome::new(*placement as usize)))
         .collect();
 
+    // Equal placements are scored as a draw between those snakes.
     let new_ratings = weng_lin_multi_team(&teams_and_ranks, &config);
+    let winner = crate::placement::outright_winner(entries_with_placements, |(_, placement)| {
+        Some(*placement)
+    })
+    .map(|(entry, _)| entry.leaderboard_entry_id);
 
     entries_with_placements
         .iter()
@@ -70,7 +75,7 @@ pub fn calculate_rating_updates(
                 new_sigma,
                 new_display_score,
                 display_score_change: new_display_score - old_display_score,
-                is_first_place: *placement == 1,
+                is_first_place: winner == Some(entry.leaderboard_entry_id),
             }
         })
         .collect()
@@ -488,5 +493,65 @@ mod tests {
         );
         assert_eq!(updates[0].placement, 1);
         assert_eq!(updates[1].placement, 3);
+    }
+
+    /// A shared first place is a draw: neither snake won, and two equally
+    /// rated snakes come out of it exactly as rated as they went in.
+    #[test]
+    fn test_shared_first_place_is_a_draw() {
+        let entries = vec![(make_entry(25.0, 8.333), 1), (make_entry(25.0, 8.333), 1)];
+
+        let updates = calculate_rating_updates(&entries);
+
+        for update in &updates {
+            assert!(!update.is_first_place, "a draw is nobody's win");
+            assert!(
+                (update.new_mu - update.old_mu).abs() < 1e-9,
+                "a draw between equals should not move mu: {} -> {}",
+                update.old_mu,
+                update.new_mu
+            );
+        }
+        assert!((updates[0].new_sigma - updates[1].new_sigma).abs() < 1e-9);
+    }
+
+    /// In a draw the lower-rated snake gains and the higher-rated one loses,
+    /// no matter which of them is listed first.
+    #[test]
+    fn test_draw_moves_ratings_toward_each_other() {
+        let strong = make_entry(30.0, 4.0);
+        let weak = make_entry(20.0, 4.0);
+
+        for entries in [
+            vec![(strong.clone(), 1), (weak.clone(), 1)],
+            vec![(weak.clone(), 1), (strong.clone(), 1)],
+        ] {
+            let updates = calculate_rating_updates(&entries);
+            let mu_change = |id: Uuid| {
+                let update = updates
+                    .iter()
+                    .find(|u| u.leaderboard_entry_id == id)
+                    .expect("every entry gets an update");
+                update.new_mu - update.old_mu
+            };
+            assert!(mu_change(weak.leaderboard_entry_id) > 0.0);
+            assert!(mu_change(strong.leaderboard_entry_id) < 0.0);
+        }
+    }
+
+    #[test]
+    fn test_shared_second_place_still_has_an_outright_winner() {
+        let entries = vec![
+            (make_entry(25.0, 8.333), 1),
+            (make_entry(25.0, 8.333), 2),
+            (make_entry(25.0, 8.333), 2),
+            (make_entry(25.0, 8.333), 4),
+        ];
+
+        let updates = calculate_rating_updates(&entries);
+
+        assert!(updates[0].is_first_place);
+        assert!(updates[1..].iter().all(|u| !u.is_first_place));
+        assert!((updates[1].new_mu - updates[2].new_mu).abs() < 1e-9);
     }
 }

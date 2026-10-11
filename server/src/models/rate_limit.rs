@@ -104,7 +104,16 @@ pub async fn prune_old_attempts(pool: &PgPool) -> cja::Result<()> {
     .await
     .wrap_err("Failed to prune claim attempts")?;
 
+    let codes = sqlx::query!(
+        "DELETE FROM customization_code_failed_attempts WHERE attempted_at < NOW() - make_interval(hours => $1)",
+        PRUNE_RETENTION_HOURS,
+    )
+    .execute(pool)
+    .await
+    .wrap_err("Failed to prune code attempts")?;
+
     tracing::info!(
+        customization_code_failed_attempts = codes.rows_affected(),
         game_creation_attempts = games.rows_affected(),
         claim_attempts = claims.rows_affected(),
         "Pruned rate-limit bookkeeping"
@@ -214,8 +223,18 @@ mod tests {
         .execute(&pool)
         .await?;
 
+        sqlx::query!(
+            "INSERT INTO customization_code_failed_attempts (user_id, attempted_at) VALUES ($1, NOW() - INTERVAL '25 hours'), ($1, NOW())",
+            user,
+        ).execute(&pool).await?;
+
         prune_old_attempts(&pool).await?;
 
+        let codes: i64 = sqlx::query_scalar!(
+            r#"SELECT COUNT(*) AS "c!" FROM customization_code_failed_attempts"#
+        )
+        .fetch_one(&pool)
+        .await?;
         let games: i64 =
             sqlx::query_scalar!(r#"SELECT COUNT(*) as "c!" FROM game_creation_attempts"#)
                 .fetch_one(&pool)
@@ -223,7 +242,7 @@ mod tests {
         let claims: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) as "c!" FROM claim_attempts"#)
             .fetch_one(&pool)
             .await?;
-        assert_eq!((games, claims), (1, 1));
+        assert_eq!((games, claims, codes), (1, 1, 1));
 
         Ok(())
     }

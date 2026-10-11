@@ -24,6 +24,7 @@ use crate::{
     models::leaderboard_entry_health,
     models::{
         battlesnake,
+        game::GameType,
         leaderboard::{self, MIN_GAMES_FOR_RANKING},
         tag, user,
     },
@@ -119,6 +120,19 @@ pub async fn show_leaderboard(
         .await
         .wrap_err("Failed to fetch leaderboards")?;
 
+    let game_type: GameType = lb
+        .game_type
+        .parse()
+        .wrap_err("Failed to parse leaderboard game type")?;
+    let has_food = game_type.has_food();
+    // Food-less modes have no food sort; an old ?sort=food_eaten link falls
+    // back to rating instead of ranking a column of zeros.
+    let sort = if has_food {
+        pagination.sort
+    } else {
+        leaderboard::LeaderboardSort::Rating
+    };
+
     let per_page: i64 = 50;
 
     let total_ranked = leaderboard::count_ranked_entries(&state.db, leaderboard_id)
@@ -132,15 +146,10 @@ pub async fn show_leaderboard(
     };
     let page = pagination.page.unwrap_or(0).clamp(0, total_pages - 1);
 
-    let ranked = leaderboard::get_ranked_entries_paginated(
-        &state.db,
-        leaderboard_id,
-        page,
-        per_page,
-        pagination.sort,
-    )
-    .await
-    .wrap_err("Failed to fetch ranked entries")?;
+    let ranked =
+        leaderboard::get_ranked_entries_paginated(&state.db, leaderboard_id, page, per_page, sort)
+            .await
+            .wrap_err("Failed to fetch ranked entries")?;
 
     let placement = leaderboard::get_placement_entries(&state.db, leaderboard_id)
         .await
@@ -154,9 +163,13 @@ pub async fn show_leaderboard(
         .await
         .wrap_err("Failed to fetch activity feed")?;
 
-    let top_eaters = leaderboard::get_top_eaters(&state.db, leaderboard_id, 3)
-        .await
-        .wrap_err("Failed to fetch top eaters")?;
+    let top_eaters = if has_food {
+        leaderboard::get_top_eaters(&state.db, leaderboard_id, 3)
+            .await
+            .wrap_err("Failed to fetch top eaters")?
+    } else {
+        vec![]
+    };
 
     // Get user's snakes for the join form
     let user_snakes = if let Some(ref u) = user {
@@ -192,13 +205,7 @@ pub async fn show_leaderboard(
     };
 
     let rank_start = page * per_page;
-    let sort_param = pagination.sort.as_str();
-    // The active sort's score column stays visible on narrow screens.
-    let active_algo_key = match pagination.sort {
-        leaderboard::LeaderboardSort::Rating => "weng_lin",
-        leaderboard::LeaderboardSort::FoodEaten => "food_eaten",
-    };
-
+    let sort_param = sort.as_str();
     // Collect entry IDs from the current page for scoring lookups
     let entry_ids: Vec<Uuid> = ranked
         .iter()
@@ -218,8 +225,13 @@ pub async fn show_leaderboard(
         .wrap_err("Failed to fetch battlesnake tags")?;
 
     // Fetch per-algorithm scores for only the visible entries
-    let mut algo_scores: Vec<(&str, &str, HashMap<Uuid, EntryScore>)> = vec![];
-    for algo in state.scoring.algorithms() {
+    let mut algo_scores: Vec<(&str, HashMap<Uuid, EntryScore>)> = vec![];
+    for algo in state
+        .scoring
+        .algorithms()
+        .iter()
+        .filter(|algo| algo.applies_to(&game_type))
+    {
         let scores = algo
             .get_scores(&state.db, &entry_ids)
             .await
@@ -228,13 +240,14 @@ pub async fn show_leaderboard(
             .into_iter()
             .map(|s| (s.leaderboard_entry_id, s))
             .collect();
-        algo_scores.push((algo.key(), algo.score_column_name(), map));
+        algo_scores.push((algo.score_column_name(), map));
     }
 
     let description = format!(
         "{} leaderboard on Battlesnake Arena — {} ranked snakes, {} games played.",
         lb.name, total_ranked, status.total_games
     );
+    let social_alt = format!("{}: the top of the leaderboard", lb.name);
 
     Ok(page_factory.create_page(
         lb.name.clone(),
@@ -317,17 +330,19 @@ pub async fn show_leaderboard(
 
             div class="grid" {
                 div {
-                    div class="sortbar" {
-                        span { "sort" }
-                        @if pagination.sort == leaderboard::LeaderboardSort::Rating {
-                            span class="on" aria-current="true" { "Rating" }
-                        } @else {
-                            a href={"/leaderboards/"(leaderboard_id)"?sort=rating"} { "Rating" }
-                        }
-                        @if pagination.sort == leaderboard::LeaderboardSort::FoodEaten {
-                            span class="on" aria-current="true" { "Food eaten" }
-                        } @else {
-                            a href={"/leaderboards/"(leaderboard_id)"?sort=food_eaten"} { "Food eaten" }
+                    @if has_food {
+                        div class="sortbar" {
+                            span { "sort" }
+                            @if sort == leaderboard::LeaderboardSort::Rating {
+                                span class="on" aria-current="true" { "Rating" }
+                            } @else {
+                                a href={"/leaderboards/"(leaderboard_id)"?sort=rating"} { "Rating" }
+                            }
+                            @if sort == leaderboard::LeaderboardSort::FoodEaten {
+                                span class="on" aria-current="true" { "Food eaten" }
+                            } @else {
+                                a href={"/leaderboards/"(leaderboard_id)"?sort=food_eaten"} { "Food eaten" }
+                            }
                         }
                     }
 
@@ -337,56 +352,50 @@ pub async fn show_leaderboard(
                             "(Minimum: " (MIN_GAMES_FOR_RANKING) " games)"
                         }
                     } @else {
-                        table class="data" {
-                            thead {
-                                tr {
-                                    th { "#" }
-                                    th { "Battlesnake" }
-                                    @for (key, col_name, _map) in &algo_scores {
-                                        th .r .hide-sm[*key != active_algo_key] { (col_name) }
+                        div class="table-scroll" {
+                            table class="data" {
+                                thead {
+                                    tr {
+                                        th { "#" }
+                                        th { "Battlesnake" }
+                                        @for (col_name, _map) in &algo_scores {
+                                            th .r { (col_name) }
+                                        }
+                                        th class="r" { "Games" }
                                     }
-                                    th class="r hide-md" { "Games" }
-                                    th class="r hide-sm" { "1st place %" }
                                 }
-                            }
-                            tbody {
-                                @for (i, entry) in ranked.iter().enumerate() {
-                                    @let rank = rank_start + i as i64 + 1;
-                                    @let is_you = user.as_ref().is_some_and(|u| u.user_id == entry.user_id);
-                                    tr .top[rank <= 3] .you[is_you] {
-                                        td class="rank" { (format!("{rank:02}")) }
-                                        td {
-                                            div class="snake-cell" {
-                                                span class="chip" style={"background:"(chip_color(&entry.snake_color))} {}
-                                                div class="snake-details" {
-                                                    a class="name" href={"/leaderboards/"(leaderboard_id)"/entries/"(entry.leaderboard_entry_id)} {
-                                                        (entry.snake_name)
+                                tbody {
+                                    @for (i, entry) in ranked.iter().enumerate() {
+                                        @let rank = rank_start + i as i64 + 1;
+                                        @let is_you = user.as_ref().is_some_and(|u| u.user_id == entry.user_id);
+                                        tr .top[rank <= 3] .you[is_you] {
+                                            td class="rank" { (format!("{rank:02}")) }
+                                            td {
+                                                div class="snake-cell" {
+                                                    span class="chip" style={"background:"(chip_color(&entry.snake_color))} {}
+                                                    div class="snake-details" {
+                                                        a class="name" href={"/leaderboards/"(leaderboard_id)"/entries/"(entry.leaderboard_entry_id)} {
+                                                            (entry.snake_name)
+                                                        }
+                                                        span class="owner" {
+                                                            "by "
+                                                            a href={"/users/"(entry.owner_login)} { (entry.owner_name) }
+                                                            @if is_you { " — you" }
+                                                        }
+                                                        (snake_tag_chips(snake_tags.get(&entry.battlesnake_id).map(Vec::as_slice).unwrap_or(&[])))
                                                     }
-                                                    span class="owner" {
-                                                        "by "
-                                                        a href={"/users/"(entry.owner_login)} { (entry.owner_name) }
-                                                        @if is_you { " — you" }
-                                                    }
-                                                    (snake_tag_chips(snake_tags.get(&entry.battlesnake_id).map(Vec::as_slice).unwrap_or(&[])))
                                                 }
                                             }
-                                        }
-                                        @for (key, _col_name, map) in &algo_scores {
-                                            td .r .rating .hide-sm[*key != active_algo_key] {
-                                                @if let Some(score) = map.get(&entry.leaderboard_entry_id) {
-                                                    (format!("{:.1}", score.score))
-                                                } @else {
-                                                    "—"
+                                            @for (_col_name, map) in &algo_scores {
+                                                td .r .rating {
+                                                    @if let Some(score) = map.get(&entry.leaderboard_entry_id) {
+                                                        (format!("{:.1}", score.score))
+                                                    } @else {
+                                                        "—"
+                                                    }
                                                 }
                                             }
-                                        }
-                                        td class="r num hide-md" { (entry.games_played) }
-                                        td class="r num hide-sm" {
-                                            @if entry.games_played > 0 {
-                                                (format!("{:.0}%", (entry.first_place_finishes as f64 / entry.games_played as f64) * 100.0))
-                                            } @else {
-                                                "N/A"
-                                            }
+                                            td class="r num" { (entry.games_played) }
                                         }
                                     }
                                 }
@@ -567,7 +576,9 @@ pub async fn show_leaderboard(
             }
         }),
     )
-    .with_description(description).into_response())
+    .with_description(description)
+    .with_social_image(crate::routes::og::leaderboard_card_path(leaderboard_id), social_alt)
+    .into_response())
 }
 
 /// GET /leaderboards/:id/entries/:entry_id — snake detail on leaderboard
@@ -739,9 +750,20 @@ pub async fn show_leaderboard_entry(
         .wrap_err("Failed to fetch recent form")?;
     let recent_form: Vec<i32> = recent_games.iter().map(|h| h.placement).collect();
 
+    let game_type: GameType = lb
+        .game_type
+        .parse()
+        .wrap_err("Failed to parse leaderboard game type")?;
+    let has_food = game_type.has_food();
+
     // Fetch per-algorithm scores for this entry
     let mut algo_entry_scores: Vec<(&str, &str, Option<EntryScore>)> = vec![];
-    for algo in state.scoring.algorithms() {
+    for algo in state
+        .scoring
+        .algorithms()
+        .iter()
+        .filter(|algo| algo.applies_to(&game_type))
+    {
         let score = algo
             .get_entry_score(&state.db, entry_id)
             .await
@@ -752,6 +774,10 @@ pub async fn show_leaderboard_entry(
     let description = format!(
         "{} by {} on the {} leaderboard — rating {:.1}, {} games played.",
         snake.name, owner_name, lb.name, entry.display_score, entry.games_played
+    );
+    let social_alt = format!(
+        "{} by {} on the {} leaderboard",
+        snake.name, owner_name, lb.name
     );
 
     Ok(page_factory.create_page(
@@ -850,31 +876,33 @@ pub async fn show_leaderboard_entry(
 
             div class="section" {
                 h2 { "Scores by Algorithm" }
-                table class="data" {
-                    thead {
-                        tr {
-                            th { "Algorithm" }
-                            th class="r" { "Score" }
-                            th class="hide-sm" { "Details" }
-                        }
-                    }
-                    tbody {
-                        @for (_key, display_name, score) in &algo_entry_scores {
+                div class="table-scroll" {
+                    table class="data" {
+                        thead {
                             tr {
-                                td { (display_name) }
-                                @if let Some(s) = score {
-                                    td class="r num" { (format!("{:.1}", s.score)) }
-                                    td class="hide-sm" {
-                                        span class="sub" {
-                                            @for (j, (detail_name, detail_value)) in s.details.iter().enumerate() {
-                                                @if j > 0 { " · " }
-                                                (detail_name) " " (detail_value)
+                                th { "Algorithm" }
+                                th class="r" { "Score" }
+                                th { "Details" }
+                            }
+                        }
+                        tbody {
+                            @for (_key, display_name, score) in &algo_entry_scores {
+                                tr {
+                                    td { (display_name) }
+                                    @if let Some(s) = score {
+                                        td class="r num" { (format!("{:.1}", s.score)) }
+                                        td {
+                                            span class="sub" {
+                                                @for (j, (detail_name, detail_value)) in s.details.iter().enumerate() {
+                                                    @if j > 0 { " · " }
+                                                    (detail_name) " " (detail_value)
+                                                }
                                             }
                                         }
+                                    } @else {
+                                        td class="r num" { "—" }
+                                        td { span class="sub" { "No data" } }
                                     }
-                                } @else {
-                                    td class="r num" { "—" }
-                                    td class="hide-sm" { span class="sub" { "No data" } }
                                 }
                             }
                         }
@@ -887,50 +915,56 @@ pub async fn show_leaderboard_entry(
                 @if history.is_empty() {
                     p class="empty" { "No games played yet." }
                 } @else {
-                    table class="data" {
-                        thead {
-                            tr {
-                                th { "Date" }
-                                th { "Opponents" }
-                                th class="r" { "Placement" }
-                                th class="r" { "Rating" }
-                                th class="r hide-sm" { "Food" }
-                                th class="r" { "Replay" }
-                            }
-                        }
-                        tbody {
-                            @for game in &history {
+                    div class="table-scroll" {
+                        table class="data" {
+                            thead {
                                 tr {
-                                    td { (game.game_created_at.format("%Y-%m-%d %H:%M")) }
-                                    td {
-                                        @if let Some(opps) = opponents_map.get(&game.game_id) {
-                                            @for (j, opp) in opps.iter().enumerate() {
-                                                @if j > 0 { ", " }
-                                                @if let Some(opp_entry_id) = opp.leaderboard_entry_id {
-                                                    a href={"/leaderboards/"(leaderboard_id)"/entries/"(opp_entry_id)} { (opp.snake_name) }
-                                                } @else {
-                                                    (opp.snake_name)
+                                    th { "Date" }
+                                    th { "Opponents" }
+                                    th class="r" { "Placement" }
+                                    th class="r" { "Rating" }
+                                    @if has_food {
+                                        th class="r" { "Food" }
+                                    }
+                                    th class="r" { "Replay" }
+                                }
+                            }
+                            tbody {
+                                @for game in &history {
+                                    tr {
+                                        td { (game.game_created_at.format("%Y-%m-%d %H:%M")) }
+                                        td {
+                                            @if let Some(opps) = opponents_map.get(&game.game_id) {
+                                                @for (j, opp) in opps.iter().enumerate() {
+                                                    @if j > 0 { ", " }
+                                                    @if let Some(opp_entry_id) = opp.leaderboard_entry_id {
+                                                        a href={"/leaderboards/"(leaderboard_id)"/entries/"(opp_entry_id)} { (opp.snake_name) }
+                                                    } @else {
+                                                        (opp.snake_name)
+                                                    }
                                                 }
+                                            } @else {
+                                                span class="sub" { "—" }
                                             }
-                                        } @else {
-                                            span class="sub" { "—" }
                                         }
-                                    }
-                                    td class="r" {
-                                        @match game.placement {
-                                            1 => span class="badge ok" { "🥇 1st" },
-                                            2 => span class="badge" { "🥈 2nd" },
-                                            3 => span class="badge" { "🥉 3rd" },
-                                            // 4+ (max 4 snakes/game) — "th" is always right
-                                            p => span class="badge" { (p) "th" },
+                                        td class="r" {
+                                            @match game.placement {
+                                                1 => span class="badge ok" { "🥇 1st" },
+                                                2 => span class="badge" { "🥈 2nd" },
+                                                3 => span class="badge" { "🥉 3rd" },
+                                                // 4+ (max 4 snakes/game) — "th" is always right
+                                                p => span class="badge" { (p) "th" },
+                                            }
                                         }
-                                    }
-                                    td class="r num" {
-                                        (render_score_delta(game.display_score_change, "rating-positive", "rating-negative"))
-                                    }
-                                    td class="r num hide-sm" { (game.food_eaten) }
-                                    td class="r" {
-                                        a href={"/games/"(game.game_id)} class="btn sm" { "Watch" }
+                                        td class="r num" {
+                                            (render_score_delta(game.display_score_change, "rating-positive", "rating-negative"))
+                                        }
+                                        @if has_food {
+                                            td class="r num" { (game.food_eaten) }
+                                        }
+                                        td class="r" {
+                                            a href={"/games/"(game.game_id)} class="btn sm" { "Watch" }
+                                        }
                                     }
                                 }
                             }
@@ -957,7 +991,12 @@ pub async fn show_leaderboard_entry(
             }
         }),
     )
-    .with_description(description).into_response())
+    .with_description(description)
+    .with_social_image(
+        crate::routes::og::entry_card_path(leaderboard_id, entry_id),
+        social_alt,
+    )
+    .into_response())
 }
 
 #[derive(serde::Deserialize)]
@@ -1388,5 +1427,122 @@ mod owner_name_route_tests {
             owners("placement"),
             vec![pair("gh-display", "Display Person")]
         );
+    }
+}
+
+#[cfg(test)]
+mod column_route_tests {
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode},
+    };
+    use sqlx::PgPool;
+    use tower::ServiceExt as _;
+    use uuid::Uuid;
+
+    use crate::models::leaderboard::{self, MIN_GAMES_FOR_RANKING};
+    use crate::scoring::{
+        ScoringRegistry, food_eaten::FoodEatenScoring, weng_lin::WengLinScoring,
+        win_rate::WinRateScoring,
+    };
+    use crate::state::AppState;
+
+    /// GET `path` with the production scoring algorithms registered.
+    async fn get(pool: &PgPool, path: &str) -> String {
+        let mut state = AppState::test_from_pool(pool.clone());
+        let mut scoring = ScoringRegistry::new();
+        scoring.register(Box::new(WengLinScoring));
+        scoring.register(Box::new(WinRateScoring));
+        scoring.register(Box::new(FoodEatenScoring));
+        state.scoring = std::sync::Arc::new(scoring);
+        let app = crate::routes::routes(state).layer(tower_cookies::CookieManagerLayer::new());
+        let response = app
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        String::from_utf8_lossy(&body).into_owned()
+    }
+
+    /// A ranked entry with a nonzero food score on the named seeded ladder.
+    async fn ranked_entry(pool: &PgPool, github_id: i64, leaderboard_name: &str) -> (Uuid, Uuid) {
+        let leaderboard_id = sqlx::query_scalar!(
+            "SELECT leaderboard_id FROM leaderboards WHERE name = $1",
+            leaderboard_name
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        let user_id = sqlx::query_scalar!(
+            "INSERT INTO users (external_github_id, github_login, github_access_token)
+             VALUES ($1, $2, 'token') RETURNING user_id",
+            github_id,
+            format!("gh-{github_id}")
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        let battlesnake_id = sqlx::query_scalar!(
+            "INSERT INTO battlesnakes (user_id, name, url)
+             VALUES ($1, 'ranked', 'http://snake') RETURNING battlesnake_id",
+            user_id
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        let entry_id = leaderboard::get_or_create_entry(pool, leaderboard_id, battlesnake_id)
+            .await
+            .unwrap()
+            .leaderboard_entry_id;
+        sqlx::query!(
+            "UPDATE leaderboard_entries SET games_played = $2 WHERE leaderboard_entry_id = $1",
+            entry_id,
+            MIN_GAMES_FOR_RANKING
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query!(
+            "INSERT INTO food_eaten_stats (leaderboard_entry_id, food_score) VALUES ($1, 5)",
+            entry_id
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        (leaderboard_id, entry_id)
+    }
+
+    /// Win % is the only win-rate column (#232: "1st place %" was the same
+    /// number twice). Constrictor never has food, so its pages drop every
+    /// food stat, even if stale scores exist and even when the URL asks to
+    /// sort by food (#233).
+    #[sqlx::test(migrations = "../migrations")]
+    async fn leaderboard_columns_by_mode(pool: PgPool) {
+        for (github_id, name, has_food) in [
+            (2331, "Standard 11x11", true),
+            (2332, "Constrictor 11x11", false),
+        ] {
+            let (leaderboard_id, entry_id) = ranked_entry(&pool, github_id, name).await;
+            for path in [
+                format!("/leaderboards/{leaderboard_id}"),
+                format!("/leaderboards/{leaderboard_id}?sort=food_eaten"),
+            ] {
+                let body = get(&pool, &path).await;
+                assert!(body.contains(">Win %<"), "{path}");
+                assert!(!body.contains("1st place"), "{path}");
+                assert_eq!(body.contains(">Food<"), has_food, "{path} food column");
+                assert_eq!(body.contains("Food eaten"), has_food, "{path} food sort");
+                assert_eq!(body.contains("Top eaters"), has_food, "{path} top eaters");
+            }
+
+            let body = get(
+                &pool,
+                &format!("/leaderboards/{leaderboard_id}/entries/{entry_id}"),
+            )
+            .await;
+            assert_eq!(body.contains("Food Eaten"), has_food, "{name} entry scores");
+            assert!(body.contains("Win Rate"), "{name} entry scores");
+        }
     }
 }

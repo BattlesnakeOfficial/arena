@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT COUNT(*) as \"count!\" FROM leaderboard_games lg\n         JOIN games g ON lg.game_id = g.game_id\n         WHERE lg.leaderboard_id = $1 AND g.status = 'running'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "2b8b35796f31347d3af5b9151d3a6c37b029bcb0722014621f31f70b8c211814"
+}

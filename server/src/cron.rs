@@ -1,12 +1,17 @@
 use std::time::Duration;
 
-use cja::cron::{CronRegistry, Worker};
+use cja::{
+    cron::{CronRegistry, Worker},
+    jobs::Job as _,
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::config::AppConfig;
 use crate::jobs::{
-    GameBackupJob, LeaderboardMatchmakerJob, PlayGrantReconcileJob, RateLimitPruneJob,
-    SnakeHealthSweeperJob, StuckGameSweeperJob, StuckMatchSweeperJob,
+    BackfillAchievementsJob, CustomizationActiveWeekBackfillJob, GameBackupJob,
+    LeaderboardMatchmakerJob, PlayGrantReconcileJob, RateLimitPruneJob,
+    ReconcileRecentAchievementsJob, SnakeHealthSweeperJob, StuckGameSweeperJob,
+    StuckMatchSweeperJob,
 };
 use crate::state::AppState;
 
@@ -17,6 +22,7 @@ pub const MATCHMAKER_INTERVAL_SECS: u64 = 86_400 / GAMES_PER_SNAKE_PER_DAY;
 /// CJA requires elapsed > interval, so a short poll observes the 864s cadence
 /// without rounding each round up to the default 60s poll boundary.
 const CRON_POLL_SECS: u64 = 2;
+const LADDER_DISPATCH_INTERVAL_SECS: u64 = 5;
 
 /// Snake health sweep interval. With the default failure threshold of 3,
 /// a broken entry is pulled from matchmaking ~90 minutes after its first
@@ -26,6 +32,9 @@ pub const SNAKE_HEALTH_SWEEP_INTERVAL_SECS: u64 = 30 * 60;
 /// Stuck-game sweep interval. Fails non-tournament games left in
 /// waiting/running past the configured max age.
 pub const STUCK_GAME_SWEEP_INTERVAL_SECS: u64 = 30 * 60;
+pub const CUSTOMIZATION_ACTIVE_WEEK_BACKFILL_INTERVAL_SECS: u64 = 60 * 60;
+pub const ACHIEVEMENT_BACKFILL_INTERVAL_SECS: u64 = 5 * 60;
+pub const ACHIEVEMENT_RECONCILE_INTERVAL_SECS: u64 = 60 * 60;
 
 pub(crate) fn cron_registry(config: &AppConfig) -> CronRegistry<AppState> {
     let mut registry = CronRegistry::new();
@@ -35,6 +44,23 @@ pub(crate) fn cron_registry(config: &AppConfig) -> CronRegistry<AppState> {
         GameBackupJob,
         Some("Enqueue backup jobs for games from the last 4 hours"),
         Duration::from_secs(60 * 60),
+    );
+    registry.register_job(
+        CustomizationActiveWeekBackfillJob,
+        Some("Credit historical finished-game weeks"),
+        Duration::from_secs(CUSTOMIZATION_ACTIVE_WEEK_BACKFILL_INTERVAL_SECS),
+    );
+    registry.register(
+        "AchievementBackfillSchedule",
+        Some("Resume historical achievement awards"),
+        Duration::from_secs(ACHIEVEMENT_BACKFILL_INTERVAL_SECS),
+        |app_state, _| Box::pin(backfill_achievements_callback(app_state)),
+    );
+    registry.register(
+        "AchievementReconcileSchedule",
+        Some("Repair recent achievement awards"),
+        Duration::from_secs(ACHIEVEMENT_RECONCILE_INTERVAL_SECS),
+        |app_state, _| Box::pin(reconcile_achievements_callback(app_state)),
     );
 
     // Hourly play grant and new-account reconciliation; configurable for rollout.
@@ -49,6 +75,12 @@ pub(crate) fn cron_registry(config: &AppConfig) -> CronRegistry<AppState> {
         LeaderboardMatchmakerJob,
         Some("Create leaderboard match games"),
         Duration::from_secs(MATCHMAKER_INTERVAL_SECS),
+    );
+    registry.register(
+        "LeaderboardGameDispatch",
+        Some("Dispatch eligible ladder games"),
+        Duration::from_secs(LADDER_DISPATCH_INTERVAL_SECS),
+        |app_state, _| Box::pin(dispatch_ladder_callback(app_state)),
     );
 
     // Stuck-match sweeper: runs every 2 minutes, re-enqueues evaluation for
@@ -87,6 +119,37 @@ pub(crate) fn cron_registry(config: &AppConfig) -> CronRegistry<AppState> {
     registry
 }
 
+async fn dispatch_ladder_callback(
+    app_state: crate::state::AppState,
+) -> Result<(), std::convert::Infallible> {
+    if let Err(error) =
+        crate::leaderboard_matchmaker::dispatch_pending_ladder_games(&app_state).await
+    {
+        tracing::error!(error = %format!("{error:#}"), "Ladder dispatch failed");
+    }
+    Ok(())
+}
+
+async fn backfill_achievements_callback(app_state: AppState) -> std::io::Result<()> {
+    BackfillAchievementsJob
+        .enqueue(app_state, "Backfill achievements".to_string(), Some(-10))
+        .await
+        .map_err(|error| std::io::Error::other(format!("{error:#}")))?;
+    Ok(())
+}
+
+async fn reconcile_achievements_callback(app_state: AppState) -> std::io::Result<()> {
+    ReconcileRecentAchievementsJob
+        .enqueue(
+            app_state,
+            "Reconcile recent achievements".to_string(),
+            Some(-10),
+        )
+        .await
+        .map_err(|error| std::io::Error::other(format!("{error:#}")))?;
+    Ok(())
+}
+
 pub(crate) async fn run_cron(
     app_state: AppState,
     registry: CronRegistry<AppState>,
@@ -105,10 +168,46 @@ pub(crate) async fn run_cron(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+    use tracing::{field::Visit, instrument::WithSubscriber};
+    use tracing_subscriber::{Layer, prelude::*};
+
+    #[derive(Clone, Default)]
+    struct Errors(Arc<Mutex<Vec<String>>>);
+
+    struct ErrorField(Option<String>);
+
+    impl Visit for ErrorField {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "error" {
+                self.0 = Some(format!("{value:?}"));
+            }
+        }
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            if field.name() == "error" {
+                self.0 = Some(value.to_owned());
+            }
+        }
+    }
+
+    impl<S: tracing::Subscriber> Layer<S> for Errors {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let mut field = ErrorField(None);
+            event.record(&mut field);
+            if let Some(error) = field.0 {
+                self.0.lock().unwrap().push(error);
+            }
+        }
+    }
 
     #[test]
     fn matchmaker_cadence() {
         assert_eq!(MATCHMAKER_INTERVAL_SECS, 864);
+        assert_eq!(LADDER_DISPATCH_INTERVAL_SECS, 5);
         const { assert!(CRON_POLL_SECS < MATCHMAKER_INTERVAL_SECS) };
     }
 
@@ -131,5 +230,146 @@ mod tests {
                 matches!(&job.schedule, Schedule::Interval(IntervalSchedule(duration)) if *duration == Duration::from_secs(interval))
             );
         }
+    }
+    #[test]
+    fn every_cron_job_is_dispatchable_by_the_worker() {
+        let dispatchable =
+            <crate::jobs::Jobs as cja::jobs::registry::JobRegistry<AppState>>::job_names();
+        let mut undispatchable: Vec<_> = cron_registry(&AppConfig::test_default())
+            .jobs()
+            .keys()
+            .copied()
+            .filter(|name| !dispatchable.contains(name))
+            .collect();
+        undispatchable.sort_unstable();
+        // Closure crons run in the cron worker; every Job cron is enqueued for
+        // the job worker, which fails names missing from impl_job_registry!.
+        assert_eq!(
+            undispatchable,
+            [
+                "AchievementBackfillSchedule",
+                "AchievementReconcileSchedule",
+                "LeaderboardGameDispatch"
+            ]
+        );
+    }
+
+    #[test]
+    fn active_week_backfill_runs_on_boot_then_hourly() {
+        let registry = cron_registry(&AppConfig::test_default());
+        let job = registry
+            .get("CustomizationActiveWeekBackfillJob")
+            .expect("active-week backfill registered");
+        assert_eq!(
+            job.description,
+            Some("Credit historical finished-game weeks")
+        );
+        let cja::cron::Schedule::Interval(interval) = &job.schedule else {
+            panic!("active-week backfill must use an interval");
+        };
+        assert_eq!(
+            interval.0,
+            Duration::from_secs(CUSTOMIZATION_ACTIVE_WEEK_BACKFILL_INTERVAL_SECS)
+        );
+        let now = chrono::Utc::now();
+        assert!(job.schedule.should_run(None, now, now, cja::chrono_tz::UTC));
+        assert!(
+            !job.schedule
+                .should_run(Some(&now), now, now, cja::chrono_tz::UTC)
+        );
+        assert!(job.schedule.should_run(
+            Some(&(now - chrono::Duration::hours(2))),
+            now,
+            now,
+            cja::chrono_tz::UTC
+        ));
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn achievement_schedules_enqueue_background_priority(pool: sqlx::PgPool) {
+        let app = AppState::test_from_pool(pool.clone());
+        let registry = cron_registry(&AppConfig::test_default());
+        for (name, interval) in [
+            (
+                "AchievementBackfillSchedule",
+                ACHIEVEMENT_BACKFILL_INTERVAL_SECS,
+            ),
+            (
+                "AchievementReconcileSchedule",
+                ACHIEVEMENT_RECONCILE_INTERVAL_SECS,
+            ),
+        ] {
+            let schedule = registry.get(name).expect("achievement schedule registered");
+            let cja::cron::Schedule::Interval(actual) = &schedule.schedule else {
+                panic!("expected interval")
+            };
+            assert_eq!(actual.0, Duration::from_secs(interval));
+        }
+        backfill_achievements_callback(app.clone()).await.unwrap();
+        reconcile_achievements_callback(app.clone()).await.unwrap();
+        crate::jobs::GameRunnerJob {
+            game_id: uuid::Uuid::new_v4(),
+        }
+        .enqueue(app.clone(), "Runner priority".to_string(), None)
+        .await
+        .unwrap();
+        crate::jobs::AwardAchievementsForGameJob {
+            game_id: uuid::Uuid::new_v4(),
+        }
+        .enqueue(app, "Award priority".to_string(), None)
+        .await
+        .unwrap();
+        let rows: Vec<(String, i32)> = sqlx::query_as("SELECT name, priority FROM jobs")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert!(rows.contains(&("BackfillAchievementsJob".to_string(), -10)));
+        assert!(rows.contains(&("ReconcileRecentAchievementsJob".to_string(), -10)));
+        assert!(rows.contains(&("GameRunnerJob".to_string(), 0)));
+        assert!(rows.contains(&("AwardAchievementsForGameJob".to_string(), 0)));
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn next_backfill_schedule_resumes_an_unfinished_page(pool: sqlx::PgPool) {
+        let app = AppState::test_from_pool(pool.clone());
+        for number in 0..27_i64 {
+            sqlx::query("INSERT INTO users (external_github_id, github_login, github_access_token) VALUES ($1, $2, '')")
+                .bind(1644300 + number)
+                .bind(format!("backfill-resume-{number}"))
+                .execute(&pool).await.unwrap();
+        }
+        let page = crate::customizations::achievements::backfill_achievement_page(&pool)
+            .await
+            .unwrap();
+        assert_eq!(page.processed, 25);
+        assert!(!page.complete);
+        backfill_achievements_callback(app.clone()).await.unwrap();
+        BackfillAchievementsJob.run(app).await.unwrap();
+        let completed: bool = sqlx::query_scalar(
+            "SELECT completed_at IS NOT NULL FROM achievement_backfill_cursor WHERE singleton = TRUE"
+        ).fetch_one(&pool).await.unwrap();
+        assert!(completed);
+    }
+
+    #[tokio::test]
+    async fn dispatch_callback_logs_cause_and_returns_success() -> cja::Result<()> {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(Duration::from_millis(100))
+            .connect_lazy("postgres://127.0.0.1:1/arena")?;
+        let app = crate::state::AppState::test_from_pool(pool);
+        let errors = Errors::default();
+        dispatch_ladder_callback(app)
+            .with_subscriber(tracing_subscriber::registry().with(errors.clone()))
+            .await
+            .expect("cron callback should absorb a dispatch failure");
+        let logged = errors.0.lock().unwrap();
+        assert!(
+            logged.iter().any(
+                |error| error.contains("Failed to acquire schedule connection")
+                    && (error.contains("refused") || error.contains("timed out"))
+            ),
+            "missing error cause chain: {logged:?}"
+        );
+        Ok(())
     }
 }

@@ -218,6 +218,8 @@ pub struct AppConfig {
     /// `waiting`/`running` before the stuck-game sweeper marks it `failed`.
     /// Env `STUCK_GAME_MAX_AGE_HOURS`, default 2h, clamped to >= 1.
     pub stuck_game_max_age_hours: i32,
+    /// Maximum wait before a ladder game may overlap other game sources.
+    pub ladder_start_deadline_secs: i64,
 
     /// Max transactional emails one recipient address may receive per hour,
     /// across all purposes (BS-7e38). Play's safety net against logic bugs
@@ -247,6 +249,13 @@ fn parse_env<T: std::str::FromStr>(name: &str, default: T) -> T {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(default)
+}
+
+fn ladder_start_deadline(value: Option<&str>) -> i64 {
+    value
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(480)
+        .max(1)
 }
 
 /// A feature is enabled unless `<FEATURE>_DISABLED` is exactly `"true"`.
@@ -336,6 +345,9 @@ impl AppConfig {
             snake_health_failure_threshold: parse_env("SNAKE_HEALTH_FAILURE_THRESHOLD", 3).max(1),
             snake_health_recovery_threshold: parse_env("SNAKE_HEALTH_RECOVERY_THRESHOLD", 2).max(1),
             stuck_game_max_age_hours: parse_env("STUCK_GAME_MAX_AGE_HOURS", 2).max(1),
+            ladder_start_deadline_secs: ladder_start_deadline(
+                std::env::var("LADDER_START_DEADLINE_SECS").ok().as_deref(),
+            ),
             email_per_recipient_hourly_limit: parse_env("EMAIL_PER_RECIPIENT_HOURLY_LIMIT", 5)
                 .max(1),
 
@@ -378,6 +390,7 @@ impl AppConfig {
             snake_health_failure_threshold: 3,
             snake_health_recovery_threshold: 2,
             stuck_game_max_age_hours: 2,
+            ladder_start_deadline_secs: 480,
             email_per_recipient_hourly_limit: 5,
             home_feed_cache_secs: 0,
             stats_cache_secs: 0,
@@ -603,7 +616,18 @@ mod tests {
         assert!(c.gcp_project_id.is_none());
         assert_eq!(c.job.workers, 1);
         assert_eq!(c.stuck_game_max_age_hours, 2);
+        assert_eq!(c.ladder_start_deadline_secs, 480);
+        assert_eq!(c.job.poll_interval_ms, 60_000);
+        assert_eq!(c.pg_max_connections, 5);
         assert!(c.features.server && c.features.jobs && c.features.cron);
+    }
+
+    #[test]
+    fn ladder_deadline_default_override_and_minimum() {
+        assert_eq!(ladder_start_deadline(None), 480);
+        assert_eq!(ladder_start_deadline(Some("600")), 600);
+        assert_eq!(ladder_start_deadline(Some("0")), 1);
+        assert_eq!(ladder_start_deadline(Some("-5")), 1);
     }
 
     #[test]

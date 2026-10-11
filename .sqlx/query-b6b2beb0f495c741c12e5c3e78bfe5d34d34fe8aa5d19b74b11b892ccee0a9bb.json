@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT battlesnake_id, color, head, tail\n        FROM battlesnakes\n        WHERE battlesnake_id = ANY($1)\n          AND deleted_at IS NULL\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "battlesnake_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "color",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "head",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "tail",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "b6b2beb0f495c741c12e5c3e78bfe5d34d34fe8aa5d19b74b11b892ccee0a9bb"
+}

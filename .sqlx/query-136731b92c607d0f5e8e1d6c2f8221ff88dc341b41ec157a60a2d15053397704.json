@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM jobs WHERE name = 'GameRunnerJob' AND payload->>'game_id' = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "136731b92c607d0f5e8e1d6c2f8221ff88dc341b41ec157a60a2d15053397704"
+}

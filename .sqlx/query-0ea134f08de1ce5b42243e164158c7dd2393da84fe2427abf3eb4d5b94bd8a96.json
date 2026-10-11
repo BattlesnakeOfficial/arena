@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO customization_code_failed_attempts (user_id, attempted_at) VALUES ($1, NOW() - INTERVAL '25 hours'), ($1, NOW())",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "0ea134f08de1ce5b42243e164158c7dd2393da84fe2427abf3eb4d5b94bd8a96"
+}
