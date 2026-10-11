@@ -40,6 +40,9 @@ pub mod game;
 pub mod github_auth;
 pub mod health;
 pub mod leaderboard;
+#[cfg(test)]
+mod notification_tests;
+pub mod notifications;
 pub mod og;
 pub mod pagination;
 pub mod policy;
@@ -154,6 +157,12 @@ pub fn routes(app_state: AppState) -> axum::Router {
             get(settings::confirm_notification_email_page)
                 .post(settings::confirm_notification_email),
         )
+        .route("/notifications", get(notifications::page))
+        .route("/notifications/drawer", get(notifications::drawer))
+        .route("/notifications/more", get(notifications::more))
+        .route("/notifications/count", get(notifications::count))
+        .route("/notifications/{id}/open", post(notifications::open))
+        .route("/notifications/read-all", post(notifications::read_all))
         .route(
             "/notifications/unsubscribe/{token}",
             get(settings::unsubscribe_get).post(settings::unsubscribe_post),
