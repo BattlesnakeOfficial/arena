@@ -6,6 +6,9 @@ use crate::{
 };
 
 /// Render a compiled IIFE at its required synchronous position.
+///
+/// Panics like `asset_url` if the compile-time manifest is missing the entry or
+/// contains invalid UTF-8; either case is a build/registration error.
 pub(crate) fn inline_bundle(logical_name: &str) -> Markup {
     let Some(asset) = crate::arena_assets::MANIFEST
         .entries

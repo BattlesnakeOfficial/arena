@@ -749,6 +749,30 @@ mod tests {
         };
 
         let body = page(format!("/games/{game_id}?turn=7")).await;
+        // The compiled board-theme-sync IIFE must run synchronously immediately
+        // after the iframe, before another script or board action can run.
+        let iframe = body.find(r#"id="board-viewer""#).expect("board iframe");
+        let after_iframe = body[iframe..]
+            .split_once("</iframe>")
+            .expect("closed board iframe")
+            .1;
+        let inline_script = after_iframe
+            .strip_prefix("<script>")
+            .expect("board sync is inline immediately after iframe");
+        let (inline_body, after_sync) = inline_script
+            .split_once("</script>")
+            .expect("closed board sync script");
+        assert_eq!(
+            inline_body,
+            crate::components::page::inline_bundle("board-theme-sync.js").into_string()
+        );
+        assert!(!inline_body.contains("&amp;"));
+        assert!(!inline_body.contains("&lt;"));
+        assert!(!inline_body.contains("sourceMappingURL="));
+        assert!(
+            after_sync.contains(&crate::arena_assets::asset_url("board-resize.js")),
+            "board resize must load after inline sync"
+        );
         assert!(
             body.contains(&format!(r#"action="/api/games/{game_id}/move-request""#)),
             "{body}"
