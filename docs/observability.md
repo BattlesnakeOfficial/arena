@@ -114,6 +114,13 @@ Per-turn telemetry reaches Eyes only while the tracing filter admits DEBUG for
 arena. Production's `RUST_LOG` is `info,arena=debug`; dropping `arena=debug`
 silently removes every per-turn phase from Eyes.
 
+To cut stdout volume without touching Eyes, set `ARENA_STDOUT_LOG` (same
+directive syntax as `RUST_LOG`). It narrows only the JSON stdout layer:
+`warn` keeps warnings and errors, and `off` silences stdout entirely. Panics
+and `main`'s exit report go to stderr outside tracing, so they survive either
+setting. On Cloud Run, stdout feeds Cloud Logging's logs-based metrics, so
+leave it unset there.
+
 Cja's enqueue receipt (`event_type=job_enqueued`) identifies the persisted job
 UUID, which matches `job.id` on the later worker attempt. Enqueue spans alone
 include failed attempts and are not proof that work entered the queue.
