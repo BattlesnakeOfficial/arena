@@ -899,6 +899,7 @@ table.data.test-results pre { margin-top: 8px; font-family: var(--mono); font-si
 .cz-group-head { flex-wrap: wrap; }
 .cz-ladder-link, .cz-catalog-link { display: inline-flex; align-items: center; min-height: 44px; color: var(--pink); font-weight: 600; }
 .cz-ladder-link { margin-left: auto; }
+.cz-catalog-link { display: flex; width: fit-content; }
 .cz-ladder-section { max-width: 860px; margin-top: 36px; }
 .cz-ladder-section h2 { font-size: 24px; margin-bottom: 22px; }
 .cz-ladder { list-style: none; margin: 0; padding: 0; }
@@ -921,6 +922,7 @@ table.data.test-results pre { margin-top: 8px; font-family: var(--mono); font-si
 .cz-step-reward-name { font-weight: 600; }
 .cz-step-reward code { font-size: 16px; white-space: normal; overflow-wrap: anywhere; }
 .cz-ladder-foot { color: var(--muted); margin: 4px 0 36px 58px; }
+.cz-ladder-foot p { margin: 0; }
 @media (max-width: 640px) {
   .cz-step { gap: 10px; }
   .cz-step-card { padding: 14px; }

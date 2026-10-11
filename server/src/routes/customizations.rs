@@ -192,9 +192,9 @@ pub async fn achievements_page(
                         (ladder_step(achievement, index, &granted, next_up == Some(index)))
                     }
                 }
-                p class="cz-ladder-foot" {
-                    "To wear these head and tail rewards, your " (root_endpoint_note()) ". "
-                    a class="cz-catalog-link" href="/customizations" { "Catalog" }
+                div class="cz-ladder-foot" {
+                    p { "To wear these rewards, have your snake declare them from its root endpoint." }
+                    a class="cz-catalog-link" href="/customizations" { "Browse the full catalog" }
                 }
             }
         }),
@@ -455,6 +455,15 @@ mod tests {
             .collect()
     }
 
+    fn main_content(page: &str) -> &str {
+        page.split_once("<main>")
+            .expect("main start")
+            .1
+            .split_once("</main>")
+            .expect("main end")
+            .0
+    }
+
     fn assert_tabs(page: &str, active: &str) {
         let nav = page
             .split("<nav class=\"modes cz-modes\" aria-label=\"Customizations\">")
@@ -474,6 +483,7 @@ mod tests {
     #[sqlx::test(migrations = "../migrations")]
     async fn guest_achievement_ladder_and_catalog_tabs(db: sqlx::PgPool) {
         let app = crate::routes::routes(AppState::test_from_pool(db))
+            .expect("asset router")
             .layer(tower_cookies::CookieManagerLayer::new());
         let response =
             request_at(&app, Method::GET, "/customizations/achievements", None, "").await;
@@ -481,7 +491,13 @@ mod tests {
         let page = html(response).await;
         assert!(page.contains("Getting Started"));
         assert!(page.contains("href=\"/auth/github\""));
-        assert!(!page.contains("2024"));
+        assert!(page.contains(
+            "To wear these rewards, have your snake declare them from its root endpoint."
+        ));
+        assert!(page.contains(
+            "class=\"cz-catalog-link\" href=\"/customizations\">Browse the full catalog</a>"
+        ));
+        assert!(!main_content(&page).contains("2024"));
         assert_tabs(
             &page,
             "class=\"mode on\" href=\"/customizations/achievements\" aria-current=\"page\"",
@@ -521,7 +537,7 @@ mod tests {
             &catalog,
             "class=\"mode on\" href=\"/customizations\" aria-current=\"page\"",
         );
-        assert!(!catalog.contains("2024"));
+        assert!(!main_content(&catalog).contains("2024"));
         assert!(catalog.contains("See the achievement ladder"));
         let group = catalog
             .split("<section class=\"cz-group\">")
@@ -536,8 +552,9 @@ mod tests {
     #[sqlx::test(migrations = "../migrations")]
     async fn achievement_ladder_uses_all_rewards_and_marks_next_step(db: sqlx::PgPool) {
         let state = AppState::test_from_pool(db.clone());
-        let app =
-            crate::routes::routes(state.clone()).layer(tower_cookies::CookieManagerLayer::new());
+        let app = crate::routes::routes(state.clone())
+            .expect("asset router")
+            .layer(tower_cookies::CookieManagerLayer::new());
         let frog_session = create_user_session(&db, 169201, false).await;
         let frog_user = session_user_id(&db, frog_session).await;
         let frog_cookie = signed_session_cookie(&state, frog_session);

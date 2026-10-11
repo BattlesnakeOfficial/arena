@@ -37,6 +37,11 @@ test('guest ladder fits a phone and tabs navigate', async ({ page }) => {
       expect(dimensions.scrollWidth).toBeLessThanOrEqual(dimensions.clientWidth);
     }
   }
+  const footer = page.locator('.cz-ladder-foot');
+  await expect(footer.getByRole('link', { name: 'Browse the full catalog' })).toBeVisible();
+  const footerText = await footer.locator('p').boundingBox();
+  const catalogLink = await footer.getByRole('link').boundingBox();
+  expect(catalogLink!.y).toBeGreaterThanOrEqual(footerText!.y + footerText!.height);
   await tabs.getByRole('link', { name: 'Catalog' }).click();
   await expect(page).toHaveURL(/\/customizations$/);
   await expect(page.getByRole('navigation', { name: 'Customizations' }).getByRole('link', { name: 'Catalog' })).toHaveAttribute('aria-current', 'page');
