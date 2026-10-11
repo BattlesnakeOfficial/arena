@@ -411,6 +411,7 @@ pub async fn submit_email_claim(
                 text: None,
                 recipient: crate::notifications::EmailRecipient::Override(account.email.clone()),
                 claim_imported_account_id: Some(account.imported_account_id),
+                notification_email_request_id: None,
             }),
         };
         if let Err(error) = crate::notifications::record(&state.db, event).await {

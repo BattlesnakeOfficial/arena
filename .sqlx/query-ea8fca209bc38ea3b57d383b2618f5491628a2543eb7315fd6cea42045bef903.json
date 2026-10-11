@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO imported_accounts (play_user_id, play_account_id, email, username, claimed_by_user_id, is_email_verified) VALUES ('p1','a1',' ','one',$1,true), ('p2','a2','play@example.com','two',$1,false)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ea8fca209bc38ea3b57d383b2618f5491628a2543eb7315fd6cea42045bef903"
+}

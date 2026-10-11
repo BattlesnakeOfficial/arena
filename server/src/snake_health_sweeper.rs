@@ -484,6 +484,7 @@ async fn notify_owner(
                         text: Some(text),
                         recipient: EmailRecipient::Snake(snake.battlesnake_id),
                         claim_imported_account_id: None,
+                        notification_email_request_id: None,
                     }),
                 },
             )
@@ -514,6 +515,7 @@ async fn notify_owner(
                         text: Some(text),
                         recipient: EmailRecipient::Snake(snake.battlesnake_id),
                         claim_imported_account_id: None,
+                        notification_email_request_id: None,
                     }),
                 },
             )

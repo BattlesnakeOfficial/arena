@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO users (external_github_id, github_login, github_access_token, github_email) VALUES (1673001, 'notification-job-test', '', 'owner@example.com') RETURNING user_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "e9c427da7d422cc58776aa5fbc663534144497a0ed94d2fffcbda9396ec11265"
+}

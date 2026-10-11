@@ -42,7 +42,6 @@ impl Mailer {
             // Keep the disabled path a true no-op (matching `send`): no log
             // rows for messages that never had a transport.
             tracing::info!(
-                to = %message.to,
                 subject = %message.subject,
                 "Email disabled (no Mailgun config); not sending"
             );
@@ -54,7 +53,6 @@ impl Mailer {
         if recent > hourly_limit {
             tracing::warn!(
                 event_type = "email_rate_limited",
-                to = %message.to,
                 purpose = purpose,
                 recent = recent,
                 hourly_limit,
@@ -157,7 +155,7 @@ impl Mailer {
             ));
         }
 
-        tracing::info!(to = %message.to, subject = %message.subject, "Email sent");
+        tracing::info!(subject = %message.subject, "Email sent");
         Ok(())
     }
 }

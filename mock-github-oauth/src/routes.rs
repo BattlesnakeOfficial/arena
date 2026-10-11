@@ -126,7 +126,7 @@ pub async fn access_token(
             let response = TokenResponse {
                 access_token: token,
                 token_type: "bearer".to_string(),
-                scope: "user:email".to_string(),
+                scope: String::new(),
             };
 
             // Check Accept header to determine response format

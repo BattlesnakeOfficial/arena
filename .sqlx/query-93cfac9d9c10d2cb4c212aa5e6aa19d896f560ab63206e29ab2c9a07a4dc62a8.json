@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO users (external_github_id, github_login, github_access_token) VALUES (1673004, 'terminal-job-test', '') RETURNING user_id",
+  "query": "INSERT INTO users (external_github_id, github_login, github_access_token) VALUES (1674092, 'confirmation-cap-test', '') RETURNING user_id",
   "describe": {
     "columns": [
       {
@@ -16,5 +16,5 @@
       false
     ]
   },
-  "hash": "662d6e5fb1b6b4621cfcc45e97f651c62c4033e345c93843b1740acbf488ce65"
+  "hash": "93cfac9d9c10d2cb4c212aa5e6aa19d896f560ab63206e29ab2c9a07a4dc62a8"
 }

@@ -29,6 +29,17 @@ impl EmailMessage {
     }
 }
 
+pub fn notification_email_confirmation(to: &str, url: &str) -> EmailMessage {
+    EmailMessage {
+        to: to.to_string(),
+        subject: "Confirm your Battlesnake notification email".to_string(),
+        text: format!(
+            "Confirm this address for optional Battlesnake Arena emails within 24 hours:\n\n{url}\n\nSign in to the same Arena account that requested this change. If your email app opens a signed-out browser, sign in and reopen this link. If you did not request this, you can ignore this email.\n"
+        ),
+        list_unsubscribe: None,
+    }
+}
+
 /// Sent to a play account's email when that account is claimed on arena
 /// (via GitHub auto-link or password claim). Doubles as a security notice:
 /// the real owner hears about a claim even if someone else initiated it.
