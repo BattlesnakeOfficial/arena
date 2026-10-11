@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO customization_grants (user_id, customization_type, slug, source)\n           SELECT ia.claimed_by_user_id, ig.customization_type, ig.slug, 'play_import'\n           FROM imported_grants ig\n           JOIN imported_accounts ia ON ia.imported_account_id = ig.imported_account_id\n           JOIN UNNEST($1::text[], $2::text[])\n                AS catalog(customization_type, slug)\n             ON (catalog.customization_type, catalog.slug) = (ig.customization_type, ig.slug)\n           WHERE ia.claimed_by_user_id IS NOT NULL\n           ORDER BY ia.claimed_by_user_id, ig.customization_type, ig.slug\n           ON CONFLICT (user_id, customization_type, slug)\n           DO UPDATE SET source = 'play_import'\n           WHERE customization_grants.source = 'token'\n           RETURNING (xmax = 0) AS \"inserted!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "inserted!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "TextArray",
+        "TextArray"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "33bd1be1b71e00bb902ce841c9b7d5895b60f220ba04d2e84f19faf21207de33"
+}

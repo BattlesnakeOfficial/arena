@@ -6,14 +6,24 @@
 //! refreshes play-side data without touching claim state, so it can run
 //! repeatedly during the transition window.
 //!
+//! The hourly grant reconcile derives a play connection from arena credentials,
+//! which can write to play. All source reads use a verified READ ONLY transaction.
+//!
 //! Play reads use runtime queries (not sqlx macros) — the play schema
 //! isn't part of arena's compile-time database.
 
 use color_eyre::eyre::Context as _;
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    str::FromStr,
+};
 
-use sqlx::{PgPool, Postgres, Row as _, Transaction};
+use sqlx::{
+    PgPool, Postgres, Row as _, Transaction,
+    postgres::{PgConnectOptions, PgPoolOptions},
+};
 
+use crate::customizations::catalog::{Head, Tail};
 use crate::models::battlesnake::EngineRegion;
 
 use crate::models::imported_account::{
@@ -38,6 +48,9 @@ pub struct ImportCounts {
     pub stage_p99_us: u64,
 }
 
+/// Arena credentials can write to play. This SQL transaction guard is the only
+/// protection; verify it on the same connection before any source query.
+/// Pooler startup options cannot provide this guard.
 async fn begin_read_only_play_transaction(play: &PgPool) -> cja::Result<Transaction<'_, Postgres>> {
     let mut tx = play
         .begin()
@@ -59,6 +72,25 @@ async fn begin_read_only_play_transaction(play: &PgPool) -> cja::Result<Transact
         ));
     }
     Ok(tx)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct PlayGrant {
+    play_account_id: String,
+    customization_type: String,
+    slug: String,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct GrantReconcileCounts {
+    pub play_grants_read: u64,
+    pub newly_staged: u64,
+    pub newly_materialized: u64,
+    pub refunded_token_grants: u64,
+    pub skipped_off_catalog: u64,
+    pub newly_staged_accounts: u64,
+    pub skipped_identity_conflict: u64,
+    pub failed_account_staging: u64,
 }
 
 /// The Play region tuple is retained even when unknown so import can warn
@@ -112,9 +144,7 @@ async fn read_play_snakes<'e, E: sqlx::PgExecutor<'e>>(
     Ok((snakes, unmapped))
 }
 
-async fn read_play_grants<'e, E: sqlx::PgExecutor<'e>>(
-    executor: E,
-) -> cja::Result<Vec<(String, StageGrant)>> {
+async fn read_play_grants<'e, E: sqlx::PgExecutor<'e>>(executor: E) -> cja::Result<Vec<PlayGrant>> {
     let rows = sqlx::query(
         r#"SELECT g.account_id, c.customization_type, c.slug
            FROM core_snakecustomizationgrant g
@@ -127,44 +157,18 @@ async fn read_play_grants<'e, E: sqlx::PgExecutor<'e>>(
     .wrap_err("Failed to read Play grants")?;
     rows.into_iter()
         .map(|row| {
-            Ok((
-                row.try_get("account_id")?,
-                StageGrant {
-                    customization_type: row.try_get("customization_type")?,
-                    slug: row.try_get("slug")?,
-                },
-            ))
+            Ok(PlayGrant {
+                play_account_id: row.try_get("account_id")?,
+                customization_type: row.try_get("customization_type")?,
+                slug: row.try_get("slug")?,
+            })
         })
         .collect()
 }
 
-pub async fn import_from_play(play: &PgPool, arena: &PgPool) -> cja::Result<ImportCounts> {
-    let mut counts = ImportCounts::default();
-    let mut stage_times_us = Vec::new();
-    let mut play_tx = begin_read_only_play_transaction(play).await?;
-
-    // Play users without a core_account (e.g. createsuperuser, which makes
-    // only the User) have nothing to migrate and are dropped by the inner
-    // JOIN below. Surface the count so the drop isn't silent.
-    let accountless: i64 = sqlx::query_scalar(
-        r#"
-        SELECT COUNT(*)
-        FROM authentication_user u
-        LEFT JOIN core_account a ON a.user_id = u.id
-        WHERE a.id IS NULL
-        "#,
-    )
-    .fetch_one(&mut *play_tx)
-    .await
-    .wrap_err("Failed to count accountless play users")?;
-    counts.accountless_users = accountless;
-    if accountless > 0 {
-        tracing::warn!(
-            accountless_users = accountless,
-            "Play users without a core_account are excluded from the import"
-        );
-    }
-
+async fn read_play_accounts<'e, E: sqlx::PgExecutor<'e>>(
+    executor: E,
+) -> cja::Result<Vec<StageAccount>> {
     // One row per play user: identity + profile + optional GitHub link.
     // uid/extra_data are cast to text so this works against both older
     // (text) and newer (jsonb) social-auth schemas.
@@ -202,17 +206,9 @@ pub async fn import_from_play(play: &PgPool, arena: &PgPool) -> cja::Result<Impo
         ORDER BY u.id, s.id DESC NULLS LAST
         "#,
     )
-    .fetch_all(&mut *play_tx)
+    .fetch_all(executor)
     .await
     .wrap_err("Failed to read play accounts")?;
-
-    let (snakes, unmapped) = read_play_snakes(&mut *play_tx).await?;
-    counts.snakes_region_unmapped = unmapped;
-    let grants = read_play_grants(&mut *play_tx).await?;
-    play_tx
-        .commit()
-        .await
-        .wrap_err("Failed to finish Play read-only snapshot")?;
 
     let accounts: Vec<StageAccount> = account_rows
         .into_iter()
@@ -264,6 +260,45 @@ pub async fn import_from_play(play: &PgPool, arena: &PgPool) -> cja::Result<Impo
         .collect::<cja::Result<_>>()
         .wrap_err("Failed to decode Play account snapshot")?;
 
+    Ok(accounts)
+}
+
+pub async fn import_from_play(play: &PgPool, arena: &PgPool) -> cja::Result<ImportCounts> {
+    let mut counts = ImportCounts::default();
+    let mut stage_times_us = Vec::new();
+    let mut play_tx = begin_read_only_play_transaction(play).await?;
+
+    // Play users without a core_account (e.g. createsuperuser, which makes
+    // only the User) have nothing to migrate and are dropped by the inner
+    // JOIN below. Surface the count so the drop isn't silent.
+    let accountless: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*)
+        FROM authentication_user u
+        LEFT JOIN core_account a ON a.user_id = u.id
+        WHERE a.id IS NULL
+        "#,
+    )
+    .fetch_one(&mut *play_tx)
+    .await
+    .wrap_err("Failed to count accountless play users")?;
+    counts.accountless_users = accountless;
+    if accountless > 0 {
+        tracing::warn!(
+            accountless_users = accountless,
+            "Play users without a core_account are excluded from the import"
+        );
+    }
+
+    let accounts = read_play_accounts(&mut *play_tx).await?;
+    let (snakes, unmapped) = read_play_snakes(&mut *play_tx).await?;
+    counts.snakes_region_unmapped = unmapped;
+    let grants = read_play_grants(&mut *play_tx).await?;
+    play_tx
+        .commit()
+        .await
+        .wrap_err("Failed to finish Play read-only snapshot")?;
+
     let mut snakes_by_account: HashMap<String, Vec<StageSnake>> = HashMap::new();
     for snake in snakes {
         snakes_by_account
@@ -272,8 +307,14 @@ pub async fn import_from_play(play: &PgPool, arena: &PgPool) -> cja::Result<Impo
             .push(snake);
     }
     let mut grants_by_account: HashMap<String, Vec<StageGrant>> = HashMap::new();
-    for (owner, grant) in grants {
-        grants_by_account.entry(owner).or_default().push(grant);
+    for grant in grants {
+        grants_by_account
+            .entry(grant.play_account_id)
+            .or_default()
+            .push(StageGrant {
+                customization_type: grant.customization_type,
+                slug: grant.slug,
+            });
     }
     let account_ids: HashSet<String> = accounts
         .iter()
@@ -310,9 +351,16 @@ pub async fn import_from_play(play: &PgPool, arena: &PgPool) -> cja::Result<Impo
                 counts.accounts += 1;
                 counts.snakes += result.snakes_processed;
                 counts.grants += result.grants_processed;
-                if result.status == StageStatus::SkippedClaimed {
-                    counts.skipped_claimed += 1;
-                    counts.snakes_skipped_claimed += payload.snakes.len() as u64;
+                match result.status {
+                    StageStatus::SkippedClaimed => {
+                        counts.skipped_claimed += 1;
+                        counts.snakes_skipped_claimed += payload.snakes.len() as u64;
+                    }
+                    StageStatus::SkippedIdentityConflict(ref conflict) => {
+                        counts.skipped_claimed += 1;
+                        tracing::warn!(play_account_id = %payload.account.play_account_id, ?conflict, "Play account skipped due to claimed identity conflict");
+                    }
+                    _ => {}
                 }
             }
             Err(error) => {
@@ -330,6 +378,230 @@ pub async fn import_from_play(play: &PgPool, arena: &PgPool) -> cja::Result<Impo
     }
 
     Ok(counts)
+}
+
+async fn stage_reconcile_grants(
+    tx: &mut Transaction<'_, Postgres>,
+    grants: &[PlayGrant],
+) -> cja::Result<u64> {
+    let account_ids: Vec<String> = grants.iter().map(|g| g.play_account_id.clone()).collect();
+    let types: Vec<String> = grants
+        .iter()
+        .map(|g| g.customization_type.clone())
+        .collect();
+    let slugs: Vec<String> = grants.iter().map(|g| g.slug.clone()).collect();
+    let result = sqlx::query!(
+        r#"INSERT INTO imported_grants (imported_account_id, customization_type, slug)
+           SELECT ia.imported_account_id, g.customization_type, g.slug
+           FROM UNNEST($1::text[], $2::text[], $3::text[])
+                AS g(play_account_id, customization_type, slug)
+           JOIN imported_accounts ia ON ia.play_account_id = g.play_account_id
+           ORDER BY ia.imported_account_id, g.customization_type, g.slug
+           ON CONFLICT (imported_account_id, customization_type, slug) DO NOTHING"#,
+        &account_ids,
+        &types,
+        &slugs,
+    )
+    .execute(&mut **tx)
+    .await
+    .wrap_err("Failed to stage reconciled play grants")?;
+    Ok(result.rows_affected())
+}
+
+async fn materialize_reconcile_grants(
+    tx: &mut Transaction<'_, Postgres>,
+) -> cja::Result<(u64, u64)> {
+    let catalog: Vec<(&str, &str)> = Head::ALL
+        .iter()
+        .map(|head| (Head::KIND, head.slug()))
+        .chain(Tail::ALL.iter().map(|tail| (Tail::KIND, tail.slug())))
+        .collect();
+    let types: Vec<String> = catalog
+        .iter()
+        .map(|(kind, _)| (*kind).to_string())
+        .collect();
+    let slugs: Vec<String> = catalog
+        .iter()
+        .map(|(_, slug)| (*slug).to_string())
+        .collect();
+    let results = sqlx::query!(
+        r#"INSERT INTO customization_grants (user_id, customization_type, slug, source)
+           SELECT ia.claimed_by_user_id, ig.customization_type, ig.slug, 'play_import'
+           FROM imported_grants ig
+           JOIN imported_accounts ia ON ia.imported_account_id = ig.imported_account_id
+           JOIN UNNEST($1::text[], $2::text[])
+                AS catalog(customization_type, slug)
+             ON (catalog.customization_type, catalog.slug) = (ig.customization_type, ig.slug)
+           WHERE ia.claimed_by_user_id IS NOT NULL
+           ORDER BY ia.claimed_by_user_id, ig.customization_type, ig.slug
+           ON CONFLICT (user_id, customization_type, slug)
+           DO UPDATE SET source = 'play_import'
+           WHERE customization_grants.source = 'token'
+           RETURNING (xmax = 0) AS "inserted!""#,
+        &types,
+        &slugs,
+    )
+    .fetch_all(&mut **tx)
+    .await
+    .wrap_err("Failed to materialize reconciled play grants")?;
+    let newly_materialized = results.iter().filter(|row| row.inserted).count() as u64;
+    let refunded_token_grants = results.len() as u64 - newly_materialized;
+    Ok((newly_materialized, refunded_token_grants))
+}
+
+pub async fn reconcile_grants(play: &PgPool, arena: &PgPool) -> cja::Result<GrantReconcileCounts> {
+    let mut play_tx = begin_read_only_play_transaction(play).await?;
+    let accounts = read_play_accounts(&mut *play_tx).await?;
+    let (snakes, _) = read_play_snakes(&mut *play_tx).await?;
+    let mut grants = read_play_grants(&mut *play_tx).await?;
+    play_tx
+        .commit()
+        .await
+        .wrap_err("Failed to commit play read-only transaction")?;
+
+    let mut counts = GrantReconcileCounts {
+        play_grants_read: grants.len() as u64,
+        ..Default::default()
+    };
+    grants.sort_unstable();
+    grants.dedup();
+    let mut valid = Vec::with_capacity(grants.len());
+    for grant in grants {
+        let in_catalog = match grant.customization_type.as_str() {
+            "head" => Head::from_slug(&grant.slug).is_some(),
+            "tail" => Tail::from_slug(&grant.slug).is_some(),
+            _ => false,
+        };
+        if in_catalog {
+            valid.push(grant);
+        } else {
+            counts.skipped_off_catalog += 1;
+        }
+    }
+
+    // Existing accounts are grant-only. The lookup is one statement independent
+    // of the number of accounts and grants in the source snapshot.
+    let staged: HashSet<String> = sqlx::query_scalar!("SELECT play_user_id FROM imported_accounts")
+        .fetch_all(arena)
+        .await
+        .wrap_err("Failed to find staged play users")?
+        .into_iter()
+        .collect();
+    let mut snakes_by_account: HashMap<String, Vec<StageSnake>> = HashMap::new();
+    for snake in snakes {
+        snakes_by_account
+            .entry(snake.play_account_id.clone())
+            .or_default()
+            .push(snake);
+    }
+    let mut grants_by_account: HashMap<String, Vec<StageGrant>> = HashMap::new();
+    for grant in &valid {
+        grants_by_account
+            .entry(grant.play_account_id.clone())
+            .or_default()
+            .push(StageGrant {
+                customization_type: grant.customization_type.clone(),
+                slug: grant.slug.clone(),
+            });
+    }
+    let mut existing_grants = Vec::new();
+    for account in accounts {
+        if staged.contains(&account.play_user_id) {
+            if let Some(grants) = grants_by_account.remove(&account.play_account_id) {
+                existing_grants.extend(grants.into_iter().map(|grant| PlayGrant {
+                    play_account_id: account.play_account_id.clone(),
+                    customization_type: grant.customization_type,
+                    slug: grant.slug,
+                }));
+            }
+            continue;
+        }
+        let payload = StagePlayAccount {
+            snakes: snakes_by_account
+                .remove(&account.play_account_id)
+                .unwrap_or_default(),
+            grants: grants_by_account
+                .remove(&account.play_account_id)
+                .unwrap_or_default(),
+            account,
+        };
+        let result = imported_account::stage_play_account(arena, &payload).await;
+        match result {
+            Err(error) => {
+                counts.failed_account_staging += 1;
+                tracing::warn!(
+                    play_account_id = %payload.account.play_account_id,
+                    error = %format!("{error:#}"),
+                    "Failed to atomically stage new play account"
+                );
+            }
+            Ok(result) => match result.status {
+                StageStatus::Created => {
+                    counts.newly_staged_accounts += 1;
+                    counts.newly_staged += payload.grants.len() as u64;
+                }
+                StageStatus::SkippedIdentityConflict(conflict) => {
+                    counts.skipped_identity_conflict += 1;
+                    match conflict {
+                        imported_account::IdentityConflict::GithubUid(uid) => tracing::warn!(
+                            play_account_id = %payload.account.play_account_id,
+                            github_uid = uid,
+                            "Play account skipped due to claimed identity conflict"
+                        ),
+                        imported_account::IdentityConflict::SnakeId(snake_id) => tracing::warn!(
+                            play_account_id = %payload.account.play_account_id,
+                            play_snake_id = %snake_id,
+                            "Play account skipped due to claimed identity conflict"
+                        ),
+                    }
+                }
+                StageStatus::Refreshed | StageStatus::Unchanged | StageStatus::SkippedClaimed => {
+                    // Another run published this account after the lookup.
+                    existing_grants.extend(payload.grants.into_iter().map(|grant| PlayGrant {
+                        play_account_id: payload.account.play_account_id.clone(),
+                        customization_type: grant.customization_type,
+                        slug: grant.slug,
+                    }));
+                }
+            },
+        }
+    }
+    let mut arena_tx = arena
+        .begin()
+        .await
+        .wrap_err("Failed to begin arena grant transaction")?;
+    counts.newly_staged += stage_reconcile_grants(&mut arena_tx, &existing_grants).await?;
+    (counts.newly_materialized, counts.refunded_token_grants) =
+        materialize_reconcile_grants(&mut arena_tx).await?;
+    arena_tx
+        .commit()
+        .await
+        .wrap_err("Failed to commit arena grant transaction")?;
+    Ok(counts)
+}
+
+pub async fn run_grant_reconcile(
+    database_url: &str,
+    database_name: &str,
+    arena: &PgPool,
+) -> cja::Result<Option<GrantReconcileCounts>> {
+    let options = PgConnectOptions::from_str(database_url)
+        .wrap_err("Failed to parse arena database options for play grant reconcile")?
+        .database(database_name);
+    let play = match PgPoolOptions::new()
+        .max_connections(2)
+        .connect_with(options)
+        .await
+    {
+        Ok(play) => play,
+        Err(sqlx::Error::Database(error)) if error.code().as_deref() == Some("3D000") => {
+            return Ok(None);
+        }
+        Err(error) => return Err(error).wrap_err("Failed to connect to play for grant reconcile"),
+    };
+    let result = reconcile_grants(&play, arena).await;
+    play.close().await;
+    result.map(Some)
 }
 
 /// Print deterministic literal SQL inputs without modifying either database.
@@ -491,6 +763,585 @@ fn finish_import(counts: &ImportCounts) -> cja::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::imported_account::{StageAccount, claim_account};
+    use uuid::Uuid;
+
+    async fn test_play_account(
+        pool: &PgPool,
+        number: u32,
+        github_uid: Option<i64>,
+    ) -> cja::Result<()> {
+        let user = format!("reconcile_user_{number}");
+        let account = format!("reconcile_account_{number}");
+        sqlx::query(
+            "INSERT INTO authentication_user (id, email, password) VALUES ($1, $2, 'test-hash')",
+        )
+        .bind(&user)
+        .bind(format!("reconcile-{number}@example.com"))
+        .execute(pool)
+        .await?;
+        sqlx::query("INSERT INTO core_account (id, user_id, username, display_name) VALUES ($1, $2, $3, $4)")
+            .bind(&account).bind(&user).bind(format!("reconcile_{number}"))
+            .bind(format!("Reconcile {number}")).execute(pool).await?;
+        if let Some(uid) = github_uid {
+            sqlx::query("INSERT INTO social_auth_usersocialauth (user_id, provider, uid) VALUES ($1, 'github', $2)")
+                .bind(&user).bind(uid.to_string()).execute(pool).await?;
+        }
+        Ok(())
+    }
+
+    async fn test_imported_account(pool: &PgPool, number: u32) -> cja::Result<Uuid> {
+        test_play_account(pool, number, None).await?;
+        Ok(imported_account::stage_play_account(
+            pool,
+            &StagePlayAccount {
+                account: StageAccount {
+                    play_user_id: format!("reconcile_user_{number}"),
+                    play_account_id: format!("reconcile_account_{number}"),
+                    email: format!("reconcile-{number}@example.com"),
+                    password_hash: "test-hash".to_string(),
+                    is_email_verified: true,
+                    username: format!("reconcile_{number}"),
+                    display_name: format!("Reconcile {number}"),
+                    pronouns: String::new(),
+                    country: String::new(),
+                    backstory: String::new(),
+                    github_uid: None,
+                    github_login: None,
+                    points: 0,
+                    points_high_score: 0,
+                    is_staff: false,
+                    play_created_at: None,
+                },
+                snakes: vec![],
+                grants: vec![],
+            },
+        )
+        .await?
+        .imported_account_id)
+    }
+
+    async fn test_user(pool: &PgPool, number: i64) -> cja::Result<Uuid> {
+        Ok(sqlx::query!(
+            "INSERT INTO users (external_github_id, github_login, github_access_token)
+             VALUES ($1, $2, 'test-token') RETURNING user_id",
+            number,
+            format!("reconcile-gh-{number}")
+        )
+        .fetch_one(pool)
+        .await?
+        .user_id)
+    }
+
+    async fn test_play_grant(
+        pool: &PgPool,
+        id: &str,
+        account: &str,
+        kind: &str,
+        slug: &str,
+    ) -> cja::Result<()> {
+        sqlx::query("INSERT INTO core_snakecustomization (id, customization_type, slug) VALUES ($1, $2, $3)")
+            .bind(id).bind(kind).bind(slug).execute(pool).await?;
+        sqlx::query("INSERT INTO core_snakecustomizationgrant (id, account_id, snake_customization_id) VALUES ($1, $2, $3)")
+            .bind(format!("grant_{id}")).bind(account).bind(id).execute(pool).await?;
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn reconcile_grant_bought_after_claim(pool: PgPool) -> cja::Result<()> {
+        create_play_tables(&pool).await?;
+        let account = test_imported_account(&pool, 1).await?;
+        let user = test_user(&pool, 15281).await?;
+        let claim = claim_account(&pool, account, user)
+            .await?
+            .expect("claim succeeds");
+        assert_eq!(claim.grants_created, 0);
+        assert_eq!(
+            crate::customizations::resolve_head(&pool, user, "alligator").await?,
+            "default"
+        );
+
+        test_play_grant(
+            &pool,
+            "late_head",
+            "reconcile_account_1",
+            "head",
+            "alligator",
+        )
+        .await?;
+        let counts = reconcile_grants(&pool, &pool).await?;
+        assert_eq!(counts.play_grants_read, 1);
+        assert_eq!(counts.newly_staged, 1);
+        assert_eq!(counts.newly_materialized, 1);
+        assert_eq!(counts.refunded_token_grants, 0);
+        let source: String = sqlx::query_scalar(
+            "SELECT source FROM customization_grants WHERE user_id = $1 AND customization_type = 'head' AND slug = 'alligator'",
+        )
+        .bind(user)
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(source, "play_import");
+        assert!(
+            crate::customizations::get_granted_slugs(&pool, user)
+                .await?
+                .contains(&("head".to_string(), "alligator".to_string()))
+        );
+        assert_eq!(
+            crate::customizations::resolve_head(&pool, user, "alligator").await?,
+            "alligator"
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn reconcile_refunds_only_token_sourced_grants(pool: PgPool) -> cja::Result<()> {
+        create_play_tables(&pool).await?;
+        let mut users = Vec::new();
+        for (index, source) in ["token", "pre_token", "admin", "achievement", "code"]
+            .into_iter()
+            .enumerate()
+        {
+            let number = 50 + index as u32;
+            let account = test_imported_account(&pool, number).await?;
+            let user = test_user(&pool, 15300 + i64::from(number)).await?;
+            claim_account(&pool, account, user)
+                .await?
+                .expect("claim succeeds");
+            sqlx::query("INSERT INTO customization_grants (user_id, customization_type, slug, source) VALUES ($1, 'head', 'alligator', $2)")
+                .bind(user)
+                .bind(source)
+                .execute(&pool)
+                .await?;
+            if source == "token" {
+                sqlx::query("INSERT INTO customization_active_weeks (user_id, week_start) VALUES ($1, '2026-10-05')")
+                    .bind(user)
+                    .execute(&pool)
+                    .await?;
+                assert_eq!(crate::customizations::token_balance(&pool, user).await?, 0);
+            }
+            test_play_grant(
+                &pool,
+                &format!("source_grant_{number}"),
+                &format!("reconcile_account_{number}"),
+                "head",
+                "alligator",
+            )
+            .await?;
+            users.push((user, source));
+        }
+
+        let first = reconcile_grants(&pool, &pool).await?;
+        assert_eq!(first.newly_staged, 5);
+        assert_eq!(first.newly_materialized, 0);
+        assert_eq!(first.refunded_token_grants, 1);
+        for (user, original_source) in &users {
+            let source: String = sqlx::query_scalar("SELECT source FROM customization_grants WHERE user_id = $1 AND customization_type = 'head' AND slug = 'alligator'")
+                .bind(user)
+                .fetch_one(&pool)
+                .await?;
+            assert_eq!(
+                source,
+                if *original_source == "token" {
+                    "play_import"
+                } else {
+                    original_source
+                }
+            );
+        }
+        assert_eq!(
+            crate::customizations::token_balance(&pool, users[0].0).await?,
+            1
+        );
+        let second = reconcile_grants(&pool, &pool).await?;
+        assert_eq!(second.newly_staged, 0);
+        assert_eq!(second.newly_materialized, 0);
+        assert_eq!(second.refunded_token_grants, 0);
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn reconcile_grant_bought_before_claim(pool: PgPool) -> cja::Result<()> {
+        create_play_tables(&pool).await?;
+        let account = test_imported_account(&pool, 2).await?;
+        test_play_grant(
+            &pool,
+            "early_head",
+            "reconcile_account_2",
+            "head",
+            "alligator",
+        )
+        .await?;
+        let counts = reconcile_grants(&pool, &pool).await?;
+        assert_eq!((counts.newly_staged, counts.newly_materialized), (1, 0));
+        let staged: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM imported_grants WHERE imported_account_id = $1",
+        )
+        .bind(account)
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(staged, 1);
+
+        let user = test_user(&pool, 15282).await?;
+        let claim = claim_account(&pool, account, user)
+            .await?
+            .expect("claim succeeds");
+        assert_eq!(claim.grants_created, 1);
+        assert!(
+            crate::customizations::get_granted_slugs(&pool, user)
+                .await?
+                .contains(&("head".to_string(), "alligator".to_string()))
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn reconcile_filters_and_is_idempotent(pool: PgPool) -> cja::Result<()> {
+        create_play_tables(&pool).await?;
+        let account = test_imported_account(&pool, 3).await?;
+        let user = test_user(&pool, 15283).await?;
+        claim_account(&pool, account, user)
+            .await?
+            .expect("claim succeeds");
+        crate::customizations::create_grant(&pool, user, "tail", "alligator").await?;
+        test_play_grant(&pool, "valid", "reconcile_account_3", "head", "alligator").await?;
+        sqlx::query("INSERT INTO core_snakecustomizationgrant (id, account_id, snake_customization_id) VALUES ('duplicate', 'reconcile_account_3', 'valid')")
+            .execute(&pool).await?;
+        test_play_grant(
+            &pool,
+            "invalid",
+            "reconcile_account_3",
+            "head",
+            "off-catalog",
+        )
+        .await?;
+        test_play_grant(&pool, "unknown", "missing_account", "head", "beluga").await?;
+        test_play_grant(&pool, "color", "reconcile_account_3", "color", "blue").await?;
+        let first = reconcile_grants(&pool, &pool).await?;
+        assert_eq!(first.play_grants_read, 4);
+        assert_eq!(first.newly_staged, 1);
+        assert_eq!(first.newly_materialized, 1);
+        assert_eq!(first.skipped_off_catalog, 1);
+        assert_eq!(first.newly_staged_accounts, 0);
+        assert_eq!(first.skipped_identity_conflict, 0);
+        let second = reconcile_grants(&pool, &pool).await?;
+        assert_eq!((second.newly_staged, second.newly_materialized), (0, 0));
+        let accounts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM imported_accounts")
+            .fetch_one(&pool)
+            .await?;
+        let snakes: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM imported_snakes")
+            .fetch_one(&pool)
+            .await?;
+        let staged: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM imported_grants")
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!((accounts, snakes, staged), (1, 0, 1));
+        assert!(
+            crate::customizations::get_granted_slugs(&pool, user)
+                .await?
+                .contains(&("tail".to_string(), "alligator".to_string()))
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn reconcile_stages_new_account_with_active_snakes_and_grants(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        create_play_tables(&pool).await?;
+        test_play_account(&pool, 10, Some(152810)).await?;
+        sqlx::query("INSERT INTO core_snake (id, account_id, name, url, is_archived) VALUES ('new_active', 'reconcile_account_10', 'Active', 'https://example.com/a', false), ('new_archived', 'reconcile_account_10', 'Archived', 'https://example.com/b', true)")
+            .execute(&pool).await?;
+        test_play_grant(
+            &pool,
+            "new_head",
+            "reconcile_account_10",
+            "head",
+            "alligator",
+        )
+        .await?;
+        let first = reconcile_grants(&pool, &pool).await?;
+        assert_eq!(
+            (
+                first.newly_staged_accounts,
+                first.newly_staged,
+                first.skipped_identity_conflict
+            ),
+            (1, 1, 0)
+        );
+        let snake_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM imported_snakes s JOIN imported_accounts a USING (imported_account_id) WHERE a.play_account_id = 'reconcile_account_10'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(snake_count, 1);
+        let user = test_user(&pool, 152810).await?;
+        let claimed = imported_account::try_auto_claim(&pool, user, 152810)
+            .await?
+            .expect("auto-claim succeeds");
+        assert_eq!((claimed.snakes_created, claimed.grants_created), (1, 1));
+        let second = reconcile_grants(&pool, &pool).await?;
+        assert_eq!(
+            (
+                second.newly_staged_accounts,
+                second.newly_staged,
+                second.newly_materialized
+            ),
+            (0, 0, 0)
+        );
+        Ok(())
+    }
+
+    async fn assert_conflict_skips_account(pool: PgPool, snake_conflict: bool) -> cja::Result<()> {
+        create_play_tables(&pool).await?;
+        test_play_account(&pool, 20, None).await?;
+        let mut original = StageAccount {
+            play_user_id: "reconcile_user_20".into(),
+            play_account_id: "reconcile_account_20".into(),
+            email: "reconcile-20@example.com".into(),
+            password_hash: "test-hash".into(),
+            is_email_verified: false,
+            username: "reconcile_20".into(),
+            display_name: "Reconcile 20".into(),
+            pronouns: String::new(),
+            country: String::new(),
+            backstory: String::new(),
+            github_uid: Some(152820),
+            github_login: None,
+            points: 0,
+            points_high_score: 0,
+            is_staff: false,
+            play_created_at: None,
+        };
+        let snake = StageSnake {
+            play_snake_id: "claimed_snake".into(),
+            play_account_id: "reconcile_account_20".into(),
+            name: "Claimed".into(),
+            url: "https://example.com/c".into(),
+            head: "default".into(),
+            tail: "default".into(),
+            color: "#888888".into(),
+            is_public: false,
+            engine_region: EngineRegion::UsWest1,
+        };
+        let original_id = imported_account::stage_play_account(
+            &pool,
+            &StagePlayAccount {
+                account: original.clone(),
+                snakes: vec![snake],
+                grants: vec![],
+            },
+        )
+        .await?
+        .imported_account_id;
+        let user = test_user(&pool, 152820).await?;
+        claim_account(&pool, original_id, user)
+            .await?
+            .expect("claim succeeds");
+        original.github_uid = if snake_conflict {
+            Some(152822)
+        } else {
+            Some(152820)
+        };
+        let newcomer = 21;
+        test_play_account(&pool, newcomer, original.github_uid).await?;
+        if snake_conflict {
+            sqlx::query("INSERT INTO core_snake (id, account_id, name, url) VALUES ('claimed_snake', 'reconcile_account_21', 'Conflict', 'https://example.com/d')")
+                .execute(&pool).await?;
+        }
+        test_play_grant(
+            &pool,
+            "conflict_head",
+            "reconcile_account_21",
+            "head",
+            "alligator",
+        )
+        .await?;
+        let counts = reconcile_grants(&pool, &pool).await?;
+        assert_eq!(counts.skipped_identity_conflict, 1);
+        assert_eq!(counts.newly_staged_accounts, 0);
+        let rows: (i64, i64, i64) = sqlx::query_as(
+            "SELECT (SELECT COUNT(*) FROM imported_accounts WHERE play_account_id = 'reconcile_account_21'),
+                    (SELECT COUNT(*) FROM imported_snakes WHERE play_snake_id = 'claimed_snake' AND imported_account_id NOT IN (SELECT imported_account_id FROM imported_accounts WHERE play_account_id = 'reconcile_account_20')),
+                    (SELECT COUNT(*) FROM imported_grants ig JOIN imported_accounts ia USING (imported_account_id) WHERE ia.play_account_id = 'reconcile_account_21')"
+        ).fetch_one(&pool).await?;
+        assert_eq!(rows, (0, 0, 0));
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn reconcile_skips_claimed_github_uid_conflict(pool: PgPool) -> cja::Result<()> {
+        assert_conflict_skips_account(pool, false).await
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn reconcile_skips_claimed_snake_id_conflict(pool: PgPool) -> cja::Result<()> {
+        assert_conflict_skips_account(pool, true).await
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn reconcile_repairs_claim_race(pool: PgPool) -> cja::Result<()> {
+        create_play_tables(&pool).await?;
+        let account = test_imported_account(&pool, 4).await?;
+        let user = test_user(&pool, 15284).await?;
+        let grant = PlayGrant {
+            play_account_id: "reconcile_account_4".to_string(),
+            customization_type: "head".to_string(),
+            slug: "alligator".to_string(),
+        };
+        let mut tx = pool.begin().await?;
+        assert_eq!(stage_reconcile_grants(&mut tx, &[grant]).await?, 1);
+        assert_eq!(materialize_reconcile_grants(&mut tx).await?, (0, 0));
+        let claim = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            claim_account(&pool, account, user),
+        )
+        .await??
+        .expect("claim succeeds");
+        assert_eq!(claim.grants_created, 0);
+        tx.commit().await?;
+        let claimed: bool = sqlx::query_scalar(
+            "SELECT claimed_by_user_id = $1 FROM imported_accounts WHERE imported_account_id = $2",
+        )
+        .bind(user)
+        .bind(account)
+        .fetch_one(&pool)
+        .await?;
+        let staged: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM imported_grants WHERE imported_account_id = $1",
+        )
+        .bind(account)
+        .fetch_one(&pool)
+        .await?;
+        assert!(claimed);
+        assert_eq!(staged, 1);
+        let absent: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM customization_grants WHERE user_id = $1")
+                .bind(user)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(absent, 0);
+        let counts = reconcile_grants(&pool, &pool).await?;
+        assert_eq!(counts.newly_staged, 0);
+        assert_eq!(counts.newly_materialized, 1);
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn reconcile_one_unstageable_new_account_does_not_block_other_grants(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        create_play_tables(&pool).await?;
+        let claimed_account = test_imported_account(&pool, 40).await?;
+        let user = test_user(&pool, 15340).await?;
+        claim_account(&pool, claimed_account, user)
+            .await?
+            .expect("claim succeeds");
+        // An unclaimed staged account owns this snake id in arena's staging.
+        test_play_account(&pool, 41, None).await?;
+        imported_account::stage_play_account(
+            &pool,
+            &StagePlayAccount {
+                account: StageAccount {
+                    play_user_id: "reconcile_user_41".into(),
+                    play_account_id: "reconcile_account_41".into(),
+                    email: "reconcile-41@example.com".into(),
+                    password_hash: "test-hash".into(),
+                    is_email_verified: true,
+                    username: "reconcile_41".into(),
+                    display_name: "Reconcile 41".into(),
+                    pronouns: String::new(),
+                    country: String::new(),
+                    backstory: String::new(),
+                    github_uid: None,
+                    github_login: None,
+                    points: 0,
+                    points_high_score: 0,
+                    is_staff: false,
+                    play_created_at: None,
+                },
+                snakes: vec![StageSnake {
+                    play_snake_id: "moved_snake".into(),
+                    play_account_id: "reconcile_account_41".into(),
+                    name: "Moved".into(),
+                    url: "https://example.com/m".into(),
+                    head: "default".into(),
+                    tail: "default".into(),
+                    color: "#888888".into(),
+                    is_public: false,
+                    engine_region: EngineRegion::UsWest1,
+                }],
+                grants: vec![],
+            },
+        )
+        .await?;
+        // On play the snake now belongs to a brand-new account.
+        test_play_account(&pool, 42, None).await?;
+        sqlx::query("INSERT INTO core_snake (id, account_id, name, url) VALUES ('moved_snake', 'reconcile_account_42', 'Moved', 'https://example.com/m')")
+            .execute(&pool).await?;
+        test_play_grant(
+            &pool,
+            "poison_head",
+            "reconcile_account_40",
+            "head",
+            "alligator",
+        )
+        .await?;
+
+        let counts = reconcile_grants(&pool, &pool).await;
+        assert!(
+            counts.is_ok(),
+            "one unstageable new account must not fail the run: {:#}",
+            counts.as_ref().err().unwrap()
+        );
+        assert!(
+            crate::customizations::get_granted_slugs(&pool, user)
+                .await?
+                .contains(&("head".to_string(), "alligator".to_string())),
+            "claimed account's new grant must still be materialized"
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn play_transaction_is_read_only(pool: PgPool) -> cja::Result<()> {
+        create_play_tables(&pool).await?;
+        let mut tx = begin_read_only_play_transaction(&pool).await?;
+        let error = sqlx::query("INSERT INTO core_snakecustomization (id, customization_type, slug) VALUES ('forbidden', 'head', 'alligator')")
+            .execute(&mut *tx).await.expect_err("read-only transaction rejects writes");
+        assert_eq!(
+            error
+                .as_database_error()
+                .and_then(|db| db.code())
+                .as_deref(),
+            Some("25006")
+        );
+        tx.rollback().await?;
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn missing_play_database_is_skipped(pool: PgPool) -> cja::Result<()> {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let missing = format!("missing_play_{}", Uuid::new_v4().simple());
+        assert_eq!(
+            run_grant_reconcile(&database_url, &missing, &pool).await?,
+            None
+        );
+        assert!(
+            run_grant_reconcile(
+                "postgres://invalid:invalid@127.0.0.1:5432/arena",
+                "play",
+                &pool
+            )
+            .await
+            .is_err()
+        );
+        let staged: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM imported_grants")
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(staged, 0);
+        Ok(())
+    }
 
     #[test]
     fn failed_import_reports_count_then_returns_error() {
