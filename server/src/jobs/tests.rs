@@ -54,7 +54,9 @@ async fn run_idle_gate_burst(pool: PgPool, via_enqueue: bool) -> cja::Result<()>
         .execute(&pool)
         .await?;
     let worker_pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(200)
+        // CI's PostgreSQL service allows 100 clients; two burst tests may run
+        // together, while each job releases its connection before sleeping.
+        .max_connections(30)
         .connect_with(pool.connect_options().as_ref().clone())
         .await?;
     let mut state = AppState::test_from_pool(worker_pool);
