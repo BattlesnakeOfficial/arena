@@ -1,15 +1,49 @@
-//! Typed builders for the plain-text emails arena sends. Each function
-//! returns a fully-rendered [`EmailMessage`] so send sites stay declarative
-//! and the copy lives in one place. New flows (deactivation notices,
-//! pre-cutover announcements) add a builder here.
+//! Event copy and the shared HTML/plain-text email layout.
 
-/// A rendered, ready-to-send message. Plain text only for now — arena has no
-/// HTML templating and transactional copy stays legible without it.
+use color_eyre::eyre::eyre;
+use maud::{Markup, PreEscaped, html};
+
+use crate::notifications::NotificationKind;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmailContent {
+    pub subject: String,
+    pub text: String,
+    pub html_body: String,
+}
+
+impl EmailContent {
+    pub fn from_text(subject: String, text: String) -> Self {
+        let html_body = escaped_text(&text).into_string();
+        Self {
+            subject,
+            text,
+            html_body,
+        }
+    }
+}
+
+/// Preserve legacy line breaks, escaping all event data. Standalone HTTPS
+/// action URLs become links; their exact href remains in the text alternative.
+fn escaped_text(text: &str) -> Markup {
+    html! {
+        @for line in text.lines() {
+            @if line.starts_with("https://") || line.starts_with("http://") {
+                div style="margin:0 0 8px;overflow-wrap:anywhere" { a class="email-link" href=(line) style="color:#C11655;text-decoration:underline" { (line) } }
+            } @else {
+                div style="min-height:8px;margin:0 0 4px" { (line) }
+            }
+        }
+    }
+}
+
+/// A rendered, ready-to-send multipart message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmailMessage {
     pub to: String,
     pub subject: String,
     pub text: String,
+    pub html: String,
     pub list_unsubscribe: Option<String>,
 }
 
@@ -20,6 +54,7 @@ impl EmailMessage {
             ("to", self.to.as_str()),
             ("subject", self.subject.as_str()),
             ("text", self.text.as_str()),
+            ("html", self.html.as_str()),
         ];
         if let Some(url) = &self.list_unsubscribe {
             fields.push(("h:List-Unsubscribe", url));
@@ -29,26 +64,23 @@ impl EmailMessage {
     }
 }
 
-pub fn notification_email_confirmation(to: &str, url: &str) -> EmailMessage {
-    EmailMessage {
-        to: to.to_string(),
-        subject: "Confirm your Battlesnake notification email".to_string(),
-        text: format!(
+pub fn notification_email_confirmation(url: &str) -> EmailContent {
+    EmailContent::from_text(
+        "Confirm your Battlesnake notification email".to_string(),
+        format!(
             "Confirm this address for optional Battlesnake Arena emails within 24 hours:\n\n{url}\n\nSign in to the same Arena account that requested this change. If your email app opens a signed-out browser, sign in and reopen this link. If you did not request this, you can ignore this email.\n"
         ),
-        list_unsubscribe: None,
-    }
+    )
 }
 
 /// Sent to a play account's email when that account is claimed on arena
 /// (via GitHub auto-link or password claim). Doubles as a security notice:
 /// the real owner hears about a claim even if someone else initiated it.
 pub fn account_claimed(
-    to_email: &str,
     play_username: &str,
     snakes_migrated: usize,
     grants_migrated: u64,
-) -> EmailMessage {
+) -> EmailContent {
     let text = format!(
         "Hi {play_username},\n\
          \n\
@@ -66,12 +98,7 @@ pub fn account_claimed(
          — Battlesnake Arena\n"
     );
 
-    EmailMessage {
-        to: to_email.to_string(),
-        subject: "Your Battlesnake account was claimed".to_string(),
-        text,
-        list_unsubscribe: None,
-    }
+    EmailContent::from_text("Your Battlesnake account was claimed".to_string(), text)
 }
 
 /// Sent to a snake's owner when the health sweeper pulls the snake from
@@ -83,7 +110,7 @@ pub fn matchmaking_deactivated_content(
     snake_name: &str,
     pulled: &[(String, String)],
     profile_url: &str,
-) -> (String, String) {
+) -> EmailContent {
     let where_ = if pulled.len() == 1 {
         "this Arena leaderboard"
     } else {
@@ -119,7 +146,7 @@ pub fn matchmaking_deactivated_content(
          — Battlesnake Arena\n"
     );
 
-    (
+    EmailContent::from_text(
         format!("{snake_name} was paused from Arena matchmaking"),
         text,
     )
@@ -133,7 +160,7 @@ pub fn matchmaking_reactivated_content(
     snake_name: &str,
     leaderboards: &[String],
     profile_url: &str,
-) -> (String, String) {
+) -> EmailContent {
     let leaderboards = leaderboards.join(", ");
     let text = format!(
         "Hi,\n\
@@ -149,14 +176,14 @@ pub fn matchmaking_reactivated_content(
          — Battlesnake Arena\n"
     );
 
-    (format!("{snake_name} is back in Arena matchmaking"), text)
+    EmailContent::from_text(format!("{snake_name} is back in Arena matchmaking"), text)
 }
 
 /// The email-recovery claim link (BS-7e38): sent to a play account's
 /// address when a logged-in arena user asks to claim it without a usable
 /// password. Clicking the link (while logged in as the requester) completes
 /// the claim.
-pub fn claim_verification(to_email: &str, play_username: &str, verify_url: &str) -> EmailMessage {
+pub fn claim_verification(play_username: &str, verify_url: &str) -> EmailContent {
     let text = format!(
         "Hi {play_username},\n\
          \n\
@@ -176,21 +203,265 @@ pub fn claim_verification(to_email: &str, play_username: &str, verify_url: &str)
          — Battlesnake Arena\n"
     );
 
-    EmailMessage {
-        to: to_email.to_string(),
-        subject: "Finish claiming your Battlesnake account".to_string(),
-        text,
-        list_unsubscribe: None,
+    EmailContent::from_text("Finish claiming your Battlesnake account".to_string(), text)
+}
+
+/// Assemble recipient-neutral event copy with the reason and controls.
+pub fn finish(
+    content: EmailContent,
+    to: String,
+    kind: NotificationKind,
+    base_url: &str,
+    unsubscribe_url: Option<&str>,
+) -> cja::Result<EmailMessage> {
+    if kind.toggleable() != unsubscribe_url.is_some() {
+        return Err(eyre!("Unsubscribe URL does not match notification kind"));
     }
+    let settings_url = format!("{}/me", base_url.trim_end_matches('/'));
+    let reason = kind.email_reason();
+    let mut text = content.text;
+    text.push_str(&format!(
+        "\nWhy you got this email: {reason}\nNotification settings: {settings_url}\n"
+    ));
+    if let Some(url) = unsubscribe_url {
+        text.push_str(&format!("Unsubscribe from {} emails: {url}\n", kind.name()));
+    }
+    let html = render_layout(
+        &content.subject,
+        &content.html_body,
+        reason,
+        &settings_url,
+        kind,
+        unsubscribe_url,
+    );
+    Ok(EmailMessage {
+        to,
+        subject: content.subject,
+        text,
+        html,
+        list_unsubscribe: unsubscribe_url.map(|url| format!("<{url}>")),
+    })
+}
+
+fn render_layout(
+    subject: &str,
+    body: &str,
+    reason: &str,
+    settings_url: &str,
+    kind: NotificationKind,
+    unsubscribe_url: Option<&str>,
+) -> String {
+    html! {
+        (maud::DOCTYPE)
+        html lang="en" {
+            head {
+                meta charset="utf-8";
+                meta name="viewport" content="width=device-width, initial-scale=1";
+                meta name="color-scheme" content="light dark";
+                style { "@media (prefers-color-scheme: dark) {.email-bg{background:#171117!important}.email-card{background:#171117!important}.email-copy{color:#F4EFEA!important}.email-link{color:#FF5C9E!important}}" }
+            }
+            body class="email-bg" style="margin:0;padding:0;background:#FCFBF8;color:#17141A;font-family:'Instrument Sans',Arial,Helvetica,sans-serif" {
+                div style="display:none;font-size:1px;line-height:1px;max-height:0;max-width:0;opacity:0;overflow:hidden" { (subject) }
+                table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" class="email-bg" style="background:#FCFBF8" {
+                    tr { td align="center" style="padding:20px 12px" {
+                        table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" class="email-card" style="max-width:600px;background:#FCFBF8;border:1px solid #E7DFE3" {
+                            tr { td style="padding:24px 24px 18px;border-top:6px solid #C11655" {
+                                div class="email-copy" style="font-family:'Bricolage Grotesque',Arial,Helvetica,sans-serif;font-size:20px;font-weight:800;letter-spacing:-.5px;color:#17141A" { "Battlesnake" span class="email-link" style="color:#C11655" { " Arena" } }
+                            } }
+                            tr { td class="email-copy" style="padding:4px 24px 28px;color:#17141A;font-size:16px;line-height:1.55" {
+                                h1 class="email-copy" style="font-family:'Bricolage Grotesque',Arial,Helvetica,sans-serif;font-size:27px;line-height:1.2;margin:0 0 24px;color:#17141A" { (subject) }
+                                (PreEscaped(body))
+                            } }
+                            tr { td class="email-copy" style="border-top:1px solid #E7DFE3;padding:20px 24px 28px;color:#17141A;font-size:14px;line-height:1.5" {
+                                p style="margin:0 0 12px" { "Why you got this email: " (reason) }
+                                p style="margin:0 0 12px" { a class="email-link" href=(settings_url) style="color:#C11655;text-decoration:underline" { "Notification settings" } }
+                                @if let Some(url) = unsubscribe_url {
+                                    p style="margin:0" { a class="email-link" href=(url) style="color:#C11655;text-decoration:underline" { "Unsubscribe from " (kind.name()) " emails" } }
+                                }
+                            } }
+                        }
+                    } }
+                }
+            }
+        }
+    }.into_string()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arena::design_kit::AssetKind;
+
+    fn sample(kind: NotificationKind) -> EmailContent {
+        match kind {
+            NotificationKind::SnakeMatchmakingPaused => matchmaking_deactivated_content(
+                "Hissy",
+                &[("Royale".into(), "timeout".into())],
+                "https://arena.example/snake",
+            ),
+            NotificationKind::SnakeMatchmakingResumed => matchmaking_reactivated_content(
+                "Hissy",
+                &["Royale".into()],
+                "https://arena.example/snake",
+            ),
+            NotificationKind::PlayAccountClaimed => account_claimed("player", 2, 3),
+            NotificationKind::ClaimVerification => {
+                claim_verification("player", "https://arena.example/claim?token=invented")
+            }
+            NotificationKind::NotificationEmailConfirmation => {
+                notification_email_confirmation("https://arena.example/confirm?token=invented")
+            }
+        }
+    }
+
+    fn hrefs(html: &str) -> Vec<&str> {
+        html.split("href=\"")
+            .skip(1)
+            .map(|part| part.split('"').next().unwrap())
+            .collect()
+    }
+
+    fn check_images(html: &str) {
+        for img in html.split("<img ").skip(1) {
+            let tag = img.split('>').next().unwrap();
+            let src = tag
+                .split("src=\"")
+                .nth(1)
+                .unwrap()
+                .split('"')
+                .next()
+                .unwrap();
+            let alt = tag
+                .split("alt=\"")
+                .nth(1)
+                .unwrap()
+                .split('"')
+                .next()
+                .unwrap();
+            assert!(src.starts_with("https://") && src.ends_with(".png"));
+            assert!(!alt.is_empty());
+        }
+    }
+
+    #[test]
+    fn all_kinds_have_matching_safe_alternatives() {
+        for kind in NotificationKind::ALL {
+            let unsubscribe = kind
+                .toggleable()
+                .then_some("https://arena.example/unsubscribe");
+            let message = finish(
+                sample(kind),
+                "test@example.com".into(),
+                kind,
+                "https://arena.example",
+                unsubscribe,
+            )
+            .unwrap();
+            assert!(!message.text.is_empty() && !message.html.is_empty());
+            assert!(message.text.contains(kind.email_reason()));
+            assert!(message.html.contains(kind.email_reason()));
+            assert!(message.text.contains("https://arena.example/me"));
+            assert!(message.html.contains("https://arena.example/me"));
+            for url in hrefs(&message.html) {
+                assert!(message.text.contains(url), "missing {url} in text");
+            }
+            assert_eq!(
+                message.html.matches("/unsubscribe\"").count(),
+                usize::from(kind.toggleable())
+            );
+            assert_eq!(message.list_unsubscribe.is_some(), kind.toggleable());
+            for forbidden in [
+                "<script",
+                "<svg",
+                "<link",
+                "@import",
+                "@font-face",
+                "fonts.googleapis",
+            ] {
+                assert!(!message.html.contains(forbidden), "{forbidden}");
+            }
+            check_images(&message.html);
+        }
+    }
+
+    #[test]
+    fn user_strings_are_escaped() {
+        let evil = "<script>\" &";
+        for content in [
+            account_claimed(evil, 1, 1),
+            claim_verification(evil, "https://arena.example/claim"),
+            matchmaking_deactivated_content(
+                evil,
+                &[(evil.into(), evil.into())],
+                "https://arena.example/snake",
+            ),
+            matchmaking_reactivated_content(evil, &[evil.into()], "https://arena.example/snake"),
+        ] {
+            assert!(!content.html_body.contains("<script>"));
+            assert!(content.html_body.contains("&lt;script&gt;"));
+        }
+    }
+
+    #[test]
+    fn item_images_are_https_pngs() {
+        let head = crate::routes::og::customization_png_url(AssetKind::Head, "default").unwrap();
+        let tail = crate::routes::og::customization_png_url(AssetKind::Tail, "default").unwrap();
+        let fixture =
+            html! { img src=(head) alt="Default head"; img src=(tail) alt="Default tail"; }
+                .into_string();
+        assert_eq!(fixture.matches("<img ").count(), 2);
+        check_images(&fixture);
+        assert!(crate::routes::og::customization_png_url(AssetKind::Head, "unknown").is_none());
+    }
+
+    #[test]
+    fn unsubscribe_url_must_match_kind() {
+        assert!(
+            finish(
+                sample(NotificationKind::SnakeMatchmakingPaused),
+                "a@b".into(),
+                NotificationKind::SnakeMatchmakingPaused,
+                "https://arena.example",
+                None
+            )
+            .is_err()
+        );
+        assert!(
+            finish(
+                sample(NotificationKind::PlayAccountClaimed),
+                "a@b".into(),
+                NotificationKind::PlayAccountClaimed,
+                "https://arena.example",
+                Some("https://arena.example/unsubscribe")
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    #[ignore = "writes sanitized review previews under /tmp"]
+    fn write_review_previews() {
+        let dir = std::path::Path::new("/tmp/arena-DEV-1675-previews");
+        std::fs::create_dir_all(dir).unwrap();
+        for kind in NotificationKind::ALL {
+            let unsubscribe = kind
+                .toggleable()
+                .then_some("https://arena.example/unsubscribe?token=invented");
+            let message = finish(
+                sample(kind),
+                "preview@example.com".into(),
+                kind,
+                "https://arena.example",
+                unsubscribe,
+            )
+            .unwrap();
+            std::fs::write(dir.join(format!("{}.html", kind.key())), message.html).unwrap();
+        }
+    }
 
     #[test]
     fn matchmaking_deactivated_renders_snake_and_recovery_link() {
-        let (subject, text) = matchmaking_deactivated_content(
+        let EmailContent { subject, text, .. } = matchmaking_deactivated_content(
             "Hissy",
             &[(
                 "Royale 11x11".to_string(),
@@ -209,7 +480,7 @@ mod tests {
 
     #[test]
     fn matchmaking_deactivated_lists_every_pulled_leaderboard() {
-        let (_subject, text) = matchmaking_deactivated_content(
+        let EmailContent { text, .. } = matchmaking_deactivated_content(
             "Hissy",
             &[
                 ("Royale 11x11".to_string(), "boom".to_string()),
@@ -223,7 +494,7 @@ mod tests {
 
     #[test]
     fn matchmaking_reactivated_renders_snake_and_profile_link() {
-        let (subject, text) = matchmaking_reactivated_content(
+        let EmailContent { subject, text, .. } = matchmaking_reactivated_content(
             "Hissy",
             &["Royale 11x11".to_string(), "Duels 11x11".to_string()],
             "https://arena.example.com/battlesnakes/abc/profile",
@@ -237,11 +508,9 @@ mod tests {
     #[test]
     fn claim_verification_renders_link_and_expiry_note() {
         let msg = claim_verification(
-            "player@example.com",
             "coolsnake",
             "https://arena.example.com/claim/email/verify?token=abc123",
         );
-        assert_eq!(msg.to, "player@example.com");
         assert_eq!(msg.subject, "Finish claiming your Battlesnake account");
         assert!(msg.text.contains("Hi coolsnake,"));
         assert!(
@@ -254,8 +523,7 @@ mod tests {
 
     #[test]
     fn account_claimed_renders_counts_and_recipient() {
-        let msg = account_claimed("player@example.com", "coolsnake", 3, 2);
-        assert_eq!(msg.to, "player@example.com");
+        let msg = account_claimed("coolsnake", 3, 2);
         assert_eq!(msg.subject, "Your Battlesnake account was claimed");
         assert!(msg.text.contains("Hi coolsnake,"));
         assert!(msg.text.contains("3 snake(s)"));
@@ -265,7 +533,7 @@ mod tests {
 
     #[test]
     fn account_claimed_handles_singular_zero_counts() {
-        let msg = account_claimed("p@example.com", "solo", 0, 0);
+        let msg = account_claimed("solo", 0, 0);
         assert!(msg.text.contains("0 snake(s)"));
         assert!(msg.text.contains("0 customization unlock(s)"));
     }

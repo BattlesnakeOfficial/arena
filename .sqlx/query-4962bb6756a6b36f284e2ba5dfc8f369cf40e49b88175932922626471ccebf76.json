@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO notifications (user_id, kind, title, body, in_app_visible) VALUES ($1, 'snake_matchmaking_paused', 'Legacy', 'Legacy', true) RETURNING notification_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "notification_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "4962bb6756a6b36f284e2ba5dfc8f369cf40e49b88175932922626471ccebf76"
+}

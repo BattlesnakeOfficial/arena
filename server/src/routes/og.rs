@@ -11,9 +11,11 @@ use axum::{
 };
 use color_eyre::eyre::{Context as _, eyre};
 use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex};
 use tokio::sync::{OnceCell, Semaphore};
 use uuid::Uuid;
 
+use crate::customizations::{Head, Tail};
 use arena::design_kit::AssetKind;
 
 use crate::{
@@ -64,6 +66,66 @@ const MAX_BOARD_SIDE: i32 = 25;
 const UNFURLED_TURN: i64 = 2;
 
 pub const DEFAULT_CARD_PATH: &str = "/og/default.png";
+
+type ArtCell = Arc<OnceCell<Vec<u8>>>;
+static ART_CACHE: LazyLock<Mutex<HashMap<(String, String), ArtCell>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+#[cfg(test)]
+static ART_RENDER_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+static ART_FAIL_ONCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn customization_png_url(kind: AssetKind, slug: &str) -> Option<String> {
+    let kind_path = match kind {
+        AssetKind::Head if Head::from_slug(slug).is_some() => "heads",
+        AssetKind::Tail if Tail::from_slug(slug).is_some() => "tails",
+        _ => return None,
+    };
+    Some(format!(
+        "{}/og/customizations/{kind_path}/{slug}.png",
+        crate::config::ARENA_PUBLIC_BASE_URL
+    ))
+}
+
+/// GET /og/customizations/{heads|tails}/{slug}.png
+pub async fn customization_png(
+    Path((kind, file)): Path<(String, String)>,
+) -> ServerResult<Response, StatusCode> {
+    let asset_kind = match kind.as_str() {
+        "heads" => AssetKind::Head,
+        "tails" => AssetKind::Tail,
+        _ => return Err(not_found()),
+    };
+    let slug = file.strip_suffix(".png").ok_or_else(not_found)?;
+    if customization_png_url(asset_kind, slug).is_none() {
+        return Err(not_found());
+    }
+    let key = (kind, slug.to_string());
+    let cell = {
+        let mut cache = ART_CACHE.lock().map_err(|_| eyre!("Art cache poisoned"))?;
+        cache
+            .entry(key)
+            .or_insert_with(|| Arc::new(OnceCell::new()))
+            .clone()
+    };
+    let slug = slug.to_string();
+    let bytes = cell
+        .get_or_try_init(|| async move {
+            tokio::task::spawn_blocking(move || {
+                #[cfg(test)]
+                ART_RENDER_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                #[cfg(test)]
+                if ART_FAIL_ONCE.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                    return Err(eyre!("Test render failure"));
+                }
+                crate::og::customization::render(asset_kind, &slug)
+            })
+            .await
+            .wrap_err("Art render task failed")?
+        })
+        .await?;
+    Ok(png(bytes.clone(), 2_592_000))
+}
 
 pub fn game_card_path(game_id: Uuid, spoilers: bool) -> String {
     if spoilers {
@@ -674,6 +736,78 @@ mod tests {
     use axum::http::Request;
     use sqlx::PgPool;
     use tower::ServiceExt as _;
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn catalog_pngs_are_public_strict_and_cached(pool: PgPool) {
+        let state = AppState::test_from_pool(pool);
+        let slug = Head::ALL.last().unwrap().slug();
+        let path = format!("/og/customizations/heads/{slug}.png");
+        ART_FAIL_ONCE.store(true, std::sync::atomic::Ordering::SeqCst);
+        let failed = get(&state, &path).await;
+        assert_eq!(failed.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(failed.cache_control.is_none());
+        let before = ART_RENDER_COUNT.load(std::sync::atomic::Ordering::SeqCst);
+        let requests = (0..8).map(|_| get(&state, &path));
+        let replies = futures::future::join_all(requests).await;
+        assert_eq!(
+            ART_RENDER_COUNT.load(std::sync::atomic::Ordering::SeqCst),
+            before + 1
+        );
+        for reply in &replies {
+            assert_eq!(reply.body, replies[0].body);
+        }
+        for (kind, slugs) in [
+            (
+                "heads",
+                Head::ALL.iter().map(|h| h.slug()).collect::<Vec<_>>(),
+            ),
+            ("tails", Tail::ALL.iter().map(|t| t.slug()).collect()),
+        ] {
+            for slug in slugs {
+                let reply = get(&state, &format!("/og/customizations/{kind}/{slug}.png")).await;
+                assert_eq!(reply.status, StatusCode::OK, "{kind}/{slug}");
+                assert_eq!(reply.content_type.as_deref(), Some("image/png"));
+                assert_eq!(
+                    reply.cache_control.as_deref(),
+                    Some("public, max-age=2592000")
+                );
+                let decoder = png::Decoder::new(std::io::Cursor::new(reply.body));
+                let mut reader = decoder.read_info().unwrap();
+                assert_eq!(
+                    (
+                        reader.info().width,
+                        reader.info().height,
+                        reader.info().color_type
+                    ),
+                    (128, 128, png::ColorType::Rgb)
+                );
+                let mut pixels = vec![0; reader.output_buffer_size().unwrap()];
+                reader.next_frame(&mut pixels).unwrap();
+                assert!(
+                    pixels
+                        .as_chunks::<3>()
+                        .0
+                        .iter()
+                        .filter(|pixel| pixel[0] == 0xc1 && pixel[1] == 0x16 && pixel[2] == 0x55)
+                        .count()
+                        > 100,
+                    "empty art: {kind}/{slug}"
+                );
+            }
+        }
+        assert!(std::ptr::eq(
+            crate::og::board::shape(AssetKind::Head, "viper").unwrap(),
+            arena::design_kit::catalog_shapes::find(AssetKind::Head, "rattler").unwrap(),
+        ));
+        for path in [
+            "/og/customizations/other/default.png",
+            "/og/customizations/heads/unknown.png",
+            "/og/customizations/tails/default",
+            "/og/customizations/heads/default.svg",
+        ] {
+            assert_eq!(get(&state, path).await.status, StatusCode::NOT_FOUND);
+        }
+    }
 
     struct Reply {
         status: StatusCode,
