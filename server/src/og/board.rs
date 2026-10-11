@@ -19,6 +19,11 @@ use crate::customizations::{DEFAULT_SLUG, Head, Tail};
 
 /// A head or tail cosmetic by catalog slug, falling back to the default shape.
 pub fn shape(kind: AssetKind, slug: &str) -> Option<&'static CatalogShape> {
+    catalog_shape(kind, slug).or_else(|| catalog_shapes::find(kind, DEFAULT_SLUG))
+}
+
+/// Strict catalog lookup, including image overrides, without social-card fallback.
+pub(super) fn catalog_shape(kind: AssetKind, slug: &str) -> Option<&'static CatalogShape> {
     // The art a slug draws is the file its image URL names: usually the slug,
     // but a few entries reuse another's art.
     let url = match kind {
@@ -28,7 +33,6 @@ pub fn shape(kind: AssetKind, slug: &str) -> Option<&'static CatalogShape> {
     url.as_deref()
         .and_then(media_file)
         .and_then(|file| catalog_shapes::find(kind, file))
-        .or_else(|| catalog_shapes::find(kind, DEFAULT_SLUG))
 }
 
 /// `heads/viper.svg` -> `viper`.
@@ -37,7 +41,7 @@ fn media_file(url: &str) -> Option<&str> {
 }
 
 /// A catalog shape's path, in its 100×100 box.
-fn shape_path(shape: &CatalogShape) -> Option<Path> {
+pub(super) fn shape_path(shape: &CatalogShape) -> Option<Path> {
     let mut pb = PathBuilder::new();
     for segment in SimplifyingPathParser::from(shape.d) {
         match segment.ok()? {
@@ -62,7 +66,7 @@ fn shape_path(shape: &CatalogShape) -> Option<Path> {
     pb.finish()
 }
 
-fn fill_rule(rule: FillRule) -> SkiaFillRule {
+pub(super) fn fill_rule(rule: FillRule) -> SkiaFillRule {
     match rule {
         FillRule::NonZero => SkiaFillRule::Winding,
         FillRule::EvenOdd => SkiaFillRule::EvenOdd,
@@ -361,12 +365,15 @@ impl Canvas {
         let Some(path) = shape_path(shape) else {
             return;
         };
-        let inner = side * 0.64;
-        let transform =
-            Transform::from_translate(x + (side - inner) / 2.0, y + (side - inner) / 2.0)
-                .pre_scale(inner / 100.0, inner / 100.0);
+        let transform = tile_transform(x, y, side);
         self.fill_path(&path, &solid(color), fill_rule(shape.fill_rule), transform);
     }
+}
+
+pub(super) fn tile_transform(x: f32, y: f32, side: f32) -> Transform {
+    let inner = side * 0.64;
+    Transform::from_translate(x + (side - inner) / 2.0, y + (side - inner) / 2.0)
+        .pre_scale(inner / 100.0, inner / 100.0)
 }
 
 #[cfg(test)]

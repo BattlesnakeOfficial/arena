@@ -409,6 +409,7 @@ pub async fn submit_email_claim(
             email: Some(crate::notifications::NewEmail {
                 subject: None,
                 text: None,
+                html_body: None,
                 recipient: crate::notifications::EmailRecipient::Override(account.email.clone()),
                 claim_imported_account_id: Some(account.imported_account_id),
                 notification_email_request_id: None,

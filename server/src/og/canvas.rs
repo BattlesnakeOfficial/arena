@@ -205,25 +205,29 @@ impl Canvas {
 
     /// The card as an opaque RGB PNG.
     pub fn into_png(self) -> cja::Result<Vec<u8>> {
-        let mut rgb = Vec::with_capacity((WIDTH * HEIGHT * 3) as usize);
-        for pixel in self.pixmap.pixels() {
-            let c = pixel.demultiply();
-            rgb.extend_from_slice(&[c.red(), c.green(), c.blue()]);
-        }
-        let mut png = Vec::new();
-        let mut encoder = png::Encoder::new(&mut png, WIDTH, HEIGHT);
-        encoder.set_color(png::ColorType::Rgb);
-        encoder.set_depth(png::BitDepth::Eight);
-        encoder.set_compression(png::Compression::Balanced);
-        let mut writer = encoder
-            .write_header()
-            .wrap_err("Failed to write card PNG header")?;
-        writer
-            .write_image_data(&rgb)
-            .wrap_err("Failed to write card PNG data")?;
-        writer.finish().wrap_err("Failed to finish card PNG")?;
-        Ok(png)
+        encode_png(&self.pixmap)
     }
+}
+
+pub(super) fn encode_png(pixmap: &Pixmap) -> cja::Result<Vec<u8>> {
+    let mut rgb = Vec::with_capacity((pixmap.width() * pixmap.height() * 3) as usize);
+    for pixel in pixmap.pixels() {
+        let c = pixel.demultiply();
+        rgb.extend_from_slice(&[c.red(), c.green(), c.blue()]);
+    }
+    let mut png = Vec::new();
+    let mut encoder = png::Encoder::new(&mut png, pixmap.width(), pixmap.height());
+    encoder.set_color(png::ColorType::Rgb);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder.set_compression(png::Compression::Balanced);
+    let mut writer = encoder
+        .write_header()
+        .wrap_err("Failed to write card PNG header")?;
+    writer
+        .write_image_data(&rgb)
+        .wrap_err("Failed to write card PNG data")?;
+    writer.finish().wrap_err("Failed to finish card PNG")?;
+    Ok(png)
 }
 
 pub fn solid(color: Color) -> Paint<'static> {
