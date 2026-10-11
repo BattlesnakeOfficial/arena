@@ -75,10 +75,8 @@ test('drawer, focus, badge polling, and responsive themes', async ({ authenticat
   await page.setViewportSize({ width: 375, height: 812 });
   for (const selector of ['#notification-bell', '#notification-drawer-close', '.notification-item button', '.notification-mark-all button']) {
     if (selector !== '#notification-bell') await bell.click();
-    await expect(page.locator(selector).first()).toBeVisible();
-    const box = await page.locator(selector).first().boundingBox();
-    expect(box).not.toBeNull();
-    expect(box!.height).toBeGreaterThanOrEqual(44);
+    await expect.poll(async () => (await page.locator(selector).first().boundingBox())?.height ?? 0)
+      .toBeGreaterThanOrEqual(44);
     if (selector !== '#notification-bell') await page.keyboard.press('Escape');
   }
   await bell.click();
