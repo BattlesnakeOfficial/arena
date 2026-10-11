@@ -138,6 +138,19 @@ pub fn routes(app_state: AppState) -> axum::Router {
             post(settings::update_notification_preference),
         )
         .route(
+            "/settings/notification-email",
+            post(settings::save_notification_email),
+        )
+        .route(
+            "/settings/notification-email/resend",
+            post(settings::resend_notification_email),
+        )
+        .route(
+            "/settings/notification-email/confirm",
+            get(settings::confirm_notification_email_page)
+                .post(settings::confirm_notification_email),
+        )
+        .route(
             "/notifications/unsubscribe/{token}",
             get(settings::unsubscribe_get).post(settings::unsubscribe_post),
         )
@@ -832,6 +845,12 @@ async fn profile_page(
             .wrap_err("Failed to check claim prompt state")?;
     let notification_preferences =
         crate::models::notification::preferences(&state.db, user.user_id).await?;
+    let email_settings =
+        crate::models::notification_email::settings(&state.db, user.user_id).await?;
+    let mut email_connection = state.db.acquire().await?;
+    let resolved_email =
+        crate::models::notification_email::resolved_recipient(&mut email_connection, user.user_id)
+            .await?;
 
     Ok(page_factory.create_page_with_flash(
         "My Profile".to_string(),
@@ -925,6 +944,31 @@ async fn profile_page(
             }
             section class="block" style="margin: 1rem 0; font-size: 16px" {
                 h2 { "Notifications" }
+                form action="/settings/notification-email" method="post" style="display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: end; width: 100%; max-width: 100%" {
+                    div style="flex: 1 1 240px; min-width: 0" {
+                        label for="notification-email" style="display: block; font-size: 16px" { "Notification email" }
+                        input type="email" id="notification-email" name="email" autocomplete="email" maxlength="254"
+                            value=(email_settings.confirmed_email.as_deref().unwrap_or(""))
+                            style="box-sizing: border-box; min-height: 44px; width: 100%; min-width: 0; font-size: 16px";
+                    }
+                    button type="submit" class="btn solid" style="min-height: 44px; font-size: 16px" { "Save" }
+                }
+                @if let Some(confirmed) = &email_settings.confirmed_email {
+                    p style="overflow-wrap: anywhere" { "Confirmed: " (confirmed) }
+                }
+                @if let Some(pending) = &email_settings.pending_email {
+                    p style="overflow-wrap: anywhere" { (pending) " — pending confirmation" }
+                    form action="/settings/notification-email/resend" method="post" {
+                        button type="submit" class="btn" style="min-height: 44px; font-size: 16px" { "Resend" }
+                    }
+                }
+                @if email_settings.confirmed_email.is_some() || email_settings.pending_email.is_some() {
+                    form action="/settings/notification-email" method="post" {
+                        input type="hidden" name="email" value="";
+                        button type="submit" class="btn" style="min-height: 44px; font-size: 16px" { "Clear" }
+                    }
+                }
+                @if resolved_email.is_none() { p { "Add an email to get notifications" } }
                 @for kind in crate::notifications::NotificationKind::ALL {
                     div style="padding: 0.75rem 0; border-bottom: 1px solid #555" {
                         h3 { (kind.name()) }

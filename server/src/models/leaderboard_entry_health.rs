@@ -271,30 +271,23 @@ pub async fn health_paused_entries(
     .wrap_err("Failed to fetch health-paused entries")
 }
 
-/// The owner's best notification address: their GitHub email when present,
-/// otherwise the email of a play account they claimed (migrated users often
-/// have no public GitHub email but always had a play address).
+/// Resolve only for a nondeleted snake owned by this user.
 pub async fn owner_notification_email(
     connection: &mut PgConnection,
     battlesnake_id: Uuid,
 ) -> cja::Result<Option<String>> {
-    let email = sqlx::query_scalar!(
-        r#"SELECT COALESCE(u.github_email, ia.email) as "email?"
-         FROM battlesnakes b
-         JOIN users u ON b.user_id = u.user_id
-         LEFT JOIN imported_accounts ia ON ia.claimed_by_user_id = u.user_id
-         WHERE b.battlesnake_id = $1
-           AND b.deleted_at IS NULL
-         ORDER BY ia.is_email_verified DESC NULLS LAST
-         LIMIT 1"#,
+    let user_id = sqlx::query_scalar!(
+        "SELECT user_id FROM battlesnakes WHERE battlesnake_id = $1 AND deleted_at IS NULL",
         battlesnake_id
     )
-    .fetch_optional(connection)
-    .await
-    .wrap_err("Failed to look up owner email")?
-    .flatten();
-
-    Ok(email)
+    .fetch_optional(&mut *connection)
+    .await?;
+    match user_id {
+        Some(user_id) => {
+            crate::models::notification_email::resolved_recipient(connection, user_id).await
+        }
+        None => Ok(None),
+    }
 }
 
 #[cfg(test)]
@@ -625,6 +618,30 @@ mod tests {
                 .await?
                 .as_deref(),
             Some("gh@example.com")
+        );
+
+        sqlx::query!(
+            "UPDATE users SET notification_email = 'confirmed@example.com' WHERE user_id = $1",
+            user_a
+        )
+        .execute(&pool)
+        .await?;
+        assert_eq!(
+            owner_notification_email(&mut *pool.acquire().await?, snake_a)
+                .await?
+                .as_deref(),
+            Some("confirmed@example.com")
+        );
+        sqlx::query!(
+            "UPDATE battlesnakes SET deleted_at = NOW() WHERE battlesnake_id = $1",
+            snake_a
+        )
+        .execute(&pool)
+        .await?;
+        assert!(
+            owner_notification_email(&mut *pool.acquire().await?, snake_a)
+                .await?
+                .is_none()
         );
 
         Ok(())

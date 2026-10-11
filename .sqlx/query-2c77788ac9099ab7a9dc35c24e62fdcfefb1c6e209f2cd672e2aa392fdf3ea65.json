@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE notification_email_requests SET expires_at = NOW() + INTERVAL '24 hours' WHERE user_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2c77788ac9099ab7a9dc35c24e62fdcfefb1c6e209f2cd672e2aa392fdf3ea65"
+}
