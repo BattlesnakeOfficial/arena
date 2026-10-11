@@ -1827,6 +1827,7 @@ mod live_tests {
         let job_config = reader.config.job.clone();
         let job_interval_ms = job_config.poll_interval_ms;
         let job_state = reader.clone();
+        let job_gate = job_state.idle_poll_gate.clone();
         let job_cancel = job_shutdown.clone();
         let job_worker = tokio::spawn(async move {
             cja::jobs::worker::job_worker(
@@ -1835,7 +1836,10 @@ mod live_tests {
                 Duration::from_millis(job_config.poll_interval_ms),
                 job_config.max_retries,
                 job_cancel,
-                job_config.worker_config(Duration::from_secs(job_config.shutdown_drain_secs)),
+                job_config.worker_config(
+                    Duration::from_secs(job_config.shutdown_drain_secs),
+                    job_gate,
+                ),
             )
             .await
         });

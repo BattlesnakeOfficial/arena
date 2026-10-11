@@ -5,6 +5,7 @@ use cja::jobs::{
     worker::{DEFAULT_MAX_RETRIES, job_worker},
 };
 use sqlx::PgPool;
+use std::{num::NonZeroUsize, sync::Arc};
 use tokio_util::sync::CancellationToken;
 
 use super::{AppState, Jobs, SendNotificationEmailJob};
@@ -43,6 +44,315 @@ fn html_link_parity_decodes_ampersands() {
     assert_html_links_in_text(&form);
 }
 
+mod idle_gate_probes {
+    use super::AppState;
+    use cja::jobs::Job;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Clone, Debug, Deserialize, Serialize)]
+    pub struct StartedJob {
+        pub id: uuid::Uuid,
+    }
+
+    #[async_trait::async_trait]
+    impl Job<AppState> for StartedJob {
+        const NAME: &'static str = "StartedJob";
+
+        async fn run(&self, state: AppState) -> cja::Result<()> {
+            sqlx::query(
+                "INSERT INTO job_start_markers (id, started_at) VALUES ($1, clock_timestamp())",
+            )
+            .bind(self.id)
+            .execute(&state.db)
+            .await?;
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            sqlx::query(
+                "UPDATE job_start_markers SET finished_at = clock_timestamp() WHERE id = $1",
+            )
+            .bind(self.id)
+            .execute(&state.db)
+            .await?;
+            Ok(())
+        }
+    }
+
+    use std::time::Duration;
+    cja::impl_job_registry!(AppState, StartedJob);
+}
+
+async fn run_idle_gate_burst(pool: PgPool, via_enqueue: bool) -> cja::Result<()> {
+    use idle_gate_probes::StartedJob;
+
+    sqlx::query("CREATE TABLE job_start_markers (id uuid PRIMARY KEY, started_at timestamptz NOT NULL, finished_at timestamptz)")
+        .execute(&pool)
+        .await?;
+    let worker_pool = sqlx::postgres::PgPoolOptions::new()
+        // CI's PostgreSQL service allows 100 clients; two burst tests may run
+        // together, while each job releases its connection before sleeping.
+        .max_connections(30)
+        .connect_with(pool.connect_options().as_ref().clone())
+        .await?;
+    let mut state = AppState::test_from_pool(worker_pool);
+    let job = &mut Arc::make_mut(&mut state.config).job;
+    job.workers = 100;
+    job.idle_pollers = 2;
+    job.poll_interval_ms = 200;
+    state.idle_poll_gate =
+        cja::jobs::worker::IdlePollGate::new(NonZeroUsize::new(2).expect("nonzero"));
+
+    let shutdown = CancellationToken::new();
+    let mut workers = tokio::task::JoinSet::new();
+    for _ in 0..state.config.job.workers {
+        workers.spawn(crate::job_worker_future(
+            state.clone(),
+            idle_gate_probes::Jobs,
+            shutdown.clone(),
+            Duration::from_secs(DEFAULT_JOB_SHUTDOWN_DRAIN_SECS),
+        ));
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let result: cja::Result<()> = async {
+        for _ in 0..32 {
+            let item = StartedJob { id: uuid::Uuid::new_v4() };
+            if via_enqueue {
+                item.enqueue(state.clone(), "idle-gate-burst".to_owned(), None).await?;
+            } else {
+                sqlx::query("INSERT INTO jobs (job_id, name, payload, context, priority) VALUES ($1, $2, $3, 'idle-gate-burst', 0)")
+                    .bind(uuid::Uuid::new_v4())
+                    .bind(StartedJob::NAME)
+                    .bind(serde_json::to_value(item)?)
+                    .execute(&pool)
+                    .await?;
+            }
+        }
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let started: i64 = sqlx::query_scalar("SELECT count(*) FROM job_start_markers")
+                    .fetch_one(&pool)
+                    .await?;
+                if started == 32 { break Ok::<(), cja::color_eyre::Report>(()); }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await??;
+        let latest_start: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("SELECT max(started_at) FROM job_start_markers")
+            .fetch_one(&pool).await?;
+        let earliest_start: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("SELECT min(started_at) FROM job_start_markers")
+            .fetch_one(&pool).await?;
+        cja::color_eyre::eyre::ensure!(
+            latest_start - earliest_start < chrono::Duration::seconds(2),
+            "burst took too long to enter job bodies"
+        );
+        Ok(())
+    }.await;
+
+    shutdown.cancel();
+    let drained = tokio::time::timeout(Duration::from_secs(8), async {
+        while let Some(worker) = workers.join_next().await {
+            worker??;
+        }
+        Ok::<(), cja::color_eyre::Report>(())
+    })
+    .await;
+    if drained.is_err() {
+        workers.abort_all();
+    }
+    drained??;
+    let locked: i64 = sqlx::query_scalar("SELECT count(*) FROM jobs WHERE locked_by IS NOT NULL")
+        .fetch_one(&pool)
+        .await?;
+    cja::color_eyre::eyre::ensure!(locked == 0, "worker shutdown left {locked} locks");
+    let active_overlap: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM job_start_markers WHERE started_at < (SELECT min(finished_at) FROM job_start_markers)"
+    ).fetch_one(&pool).await?;
+    cja::color_eyre::eyre::ensure!(
+        active_overlap >= 32,
+        "only {active_overlap} jobs were concurrently active"
+    );
+    result
+}
+
+#[sqlx::test(migrations = "../migrations")]
+async fn gated_workers_pick_up_local_enqueue_burst(pool: PgPool) -> cja::Result<()> {
+    run_idle_gate_burst(pool, true).await
+}
+
+#[sqlx::test(migrations = "../migrations")]
+async fn gated_workers_pick_up_sql_insert_burst(pool: PgPool) -> cja::Result<()> {
+    run_idle_gate_burst(pool, false).await
+}
+
+#[sqlx::test(migrations = "../migrations")]
+async fn free_worker_takes_game_before_backup_backlog(pool: PgPool) -> cja::Result<()> {
+    use idle_gate_probes::StartedJob;
+
+    sqlx::query("CREATE TABLE job_start_markers (id uuid PRIMARY KEY, started_at timestamptz NOT NULL, finished_at timestamptz)")
+        .execute(&pool).await?;
+    let mut state = AppState::test_from_pool(pool.clone());
+    Arc::make_mut(&mut state.config).job.poll_interval_ms = 200;
+    let shutdown = CancellationToken::new();
+    let mut worker = tokio::spawn(crate::job_worker_future(
+        state.clone(),
+        idle_gate_probes::Jobs,
+        shutdown.clone(),
+        Duration::from_secs(DEFAULT_JOB_SHUTDOWN_DRAIN_SECS),
+    ));
+    let result: cja::Result<()> = async {
+        let running = StartedJob {
+            id: uuid::Uuid::new_v4(),
+        };
+        running
+            .clone()
+            .enqueue(state.clone(), "priority-test".into(), Some(0))
+            .await?;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let count: i64 = sqlx::query_scalar("SELECT count(*) FROM job_start_markers")
+                    .fetch_one(&pool)
+                    .await?;
+                if count == 1 {
+                    break Ok::<(), cja::color_eyre::Report>(());
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await??;
+        let backup = StartedJob {
+            id: uuid::Uuid::new_v4(),
+        };
+        let game = StartedJob {
+            id: uuid::Uuid::new_v4(),
+        };
+        backup
+            .clone()
+            .enqueue(state.clone(), "priority-test".into(), Some(-10))
+            .await?;
+        game.clone()
+            .enqueue(state.clone(), "priority-test".into(), Some(0))
+            .await?;
+        tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                let count: i64 = sqlx::query_scalar("SELECT count(*) FROM job_start_markers")
+                    .fetch_one(&pool)
+                    .await?;
+                if count == 3 {
+                    break Ok::<(), cja::color_eyre::Report>(());
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await??;
+        let first: uuid::Uuid = sqlx::query_scalar(
+            "SELECT id FROM job_start_markers WHERE id IN ($1, $2) ORDER BY started_at LIMIT 1",
+        )
+        .bind(game.id)
+        .bind(backup.id)
+        .fetch_one(&pool)
+        .await?;
+        cja::color_eyre::eyre::ensure!(first == game.id, "backup claimed before game");
+        Ok(())
+    }
+    .await;
+    shutdown.cancel();
+    let joined = tokio::time::timeout(Duration::from_secs(8), &mut worker).await;
+    if joined.is_err() {
+        worker.abort();
+    }
+    joined???;
+    let locked: i64 = sqlx::query_scalar("SELECT count(*) FROM jobs WHERE locked_by IS NOT NULL")
+        .fetch_one(&pool)
+        .await?;
+    cja::color_eyre::eyre::ensure!(locked == 0, "shutdown left {locked} locks");
+    result
+}
+
+/// Run manually against an isolated PostgreSQL cluster with at least 200
+/// available connections. This measures the same table counters used in prod.
+#[sqlx::test(migrations = "../migrations")]
+#[ignore = "60-second before/after idle poll measurement"]
+async fn idle_claim_scan_rate_before_and_after_gate(pool: PgPool) -> cja::Result<()> {
+    for gated in [false, true] {
+        let worker_pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(200)
+            .connect_with(pool.connect_options().as_ref().clone())
+            .await?;
+        let mut state = AppState::test_from_pool(worker_pool);
+        let job = &mut Arc::make_mut(&mut state.config).job;
+        job.workers = 100;
+        job.idle_pollers = 2;
+        job.poll_interval_ms = 200;
+        state.idle_poll_gate =
+            cja::jobs::worker::IdlePollGate::new(NonZeroUsize::new(2).expect("nonzero"));
+        let shutdown = CancellationToken::new();
+        let mut workers = tokio::task::JoinSet::new();
+        for _ in 0..100 {
+            let worker_config = state.config.job.worker_config(
+                Duration::from_secs(DEFAULT_JOB_SHUTDOWN_DRAIN_SECS),
+                state.idle_poll_gate.clone(),
+            );
+            let worker_config = if gated {
+                worker_config
+            } else {
+                cja::jobs::worker::JobWorkerConfig {
+                    idle_poll_gate: None,
+                    ..worker_config
+                }
+            };
+            workers.spawn(job_worker(
+                state.clone(),
+                idle_gate_probes::Jobs,
+                Duration::from_millis(200),
+                DEFAULT_MAX_RETRIES,
+                shutdown.clone(),
+                worker_config,
+            ));
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let mut stats = pool.acquire().await?;
+        sqlx::query("SET default_transaction_read_only = on")
+            .execute(&mut *stats)
+            .await?;
+        sqlx::query("SELECT pg_stat_clear_snapshot()")
+            .execute(&mut *stats)
+            .await?;
+        let before: i64 = sqlx::query_scalar(
+            "SELECT seq_scan + idx_scan FROM pg_stat_user_tables WHERE schemaname = 'public' AND relname = 'jobs'"
+        ).fetch_one(&mut *stats).await?;
+        let started_at = chrono::Utc::now();
+        let instant = std::time::Instant::now();
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        sqlx::query("SELECT pg_stat_clear_snapshot()")
+            .execute(&mut *stats)
+            .await?;
+        let after: i64 = sqlx::query_scalar(
+            "SELECT seq_scan + idx_scan FROM pg_stat_user_tables WHERE schemaname = 'public' AND relname = 'jobs'"
+        ).fetch_one(&mut *stats).await?;
+        let elapsed = instant.elapsed().as_secs_f64();
+        let queued: i64 = sqlx::query_scalar("SELECT count(*) FROM jobs WHERE locked_by IS NULL")
+            .fetch_one(&pool)
+            .await?;
+        let running: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM jobs WHERE locked_by IS NOT NULL")
+                .fetch_one(&pool)
+                .await?;
+        println!(
+            "gated={gated} started_at={started_at} ended_at={} workers=100 idle_pollers=2 interval_ms=200 before={before} after={after} delta={} elapsed_secs={elapsed:.3} scans_per_sec={:.2} queued={queued} running={running}",
+            chrono::Utc::now(),
+            after - before,
+            (after - before) as f64 / elapsed
+        );
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while let Some(worker) = workers.join_next().await {
+                worker??;
+            }
+            Ok::<(), cja::color_eyre::Report>(())
+        })
+        .await??;
+    }
+    Ok(())
+}
+
 #[sqlx::test(migrations = "../migrations")]
 async fn exhausted_job_is_archived_and_worker_continues(pool: PgPool) -> cja::Result<()> {
     let failed_id = uuid::Uuid::new_v4();
@@ -67,15 +377,17 @@ async fn exhausted_job_is_archived_and_worker_continues(pool: PgPool) -> cja::Re
     .await?;
 
     let shutdown = CancellationToken::new();
+    let state = AppState::test_from_pool(pool.clone());
     let worker = job_worker(
-        AppState::test_from_pool(pool.clone()),
+        state.clone(),
         Jobs,
         Duration::from_millis(10),
         DEFAULT_MAX_RETRIES,
         shutdown.clone(),
-        AppConfig::test_default()
-            .job
-            .worker_config(Duration::from_secs(DEFAULT_JOB_SHUTDOWN_DRAIN_SECS)),
+        AppConfig::test_default().job.worker_config(
+            Duration::from_secs(DEFAULT_JOB_SHUTDOWN_DRAIN_SECS),
+            state.idle_poll_gate.clone(),
+        ),
     );
     let observe = async {
         // Cancel even on a query failure or timeout, so the worker always exits.
@@ -166,9 +478,10 @@ impl ProbeWorker {
             Duration::from_millis(50),
             max_retries,
             shutdown.clone(),
-            AppConfig::test_default()
-                .job
-                .worker_config(Duration::from_secs(DEFAULT_JOB_SHUTDOWN_DRAIN_SECS)),
+            AppConfig::test_default().job.worker_config(
+                Duration::from_secs(DEFAULT_JOB_SHUTDOWN_DRAIN_SECS),
+                cja::jobs::worker::IdlePollGate::new(std::num::NonZeroUsize::MIN),
+            ),
         ));
         Self { shutdown, handle }
     }
