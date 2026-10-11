@@ -85,6 +85,20 @@ impl NotificationKind {
             }
         }
     }
+    pub fn email_reason(self) -> &'static str {
+        match self {
+            Self::SnakeMatchmakingPaused | Self::SnakeMatchmakingResumed => {
+                "A snake associated with your Arena account changed matchmaking state."
+            }
+            Self::PlayAccountClaimed => "A play account registered to this address was claimed.",
+            Self::ClaimVerification => {
+                "Someone requested a claim for a play account registered to this address."
+            }
+            Self::NotificationEmailConfirmation => {
+                "Someone entered this address for Arena notification emails."
+            }
+        }
+    }
     pub fn toggleable(self) -> bool {
         matches!(
             self,
@@ -107,6 +121,7 @@ pub enum EmailRecipient {
 pub struct NewEmail {
     pub subject: Option<String>,
     pub text: Option<String>,
+    pub html_body: Option<String>,
     pub recipient: EmailRecipient,
     pub claim_imported_account_id: Option<Uuid>,
     pub notification_email_request_id: Option<Uuid>,
@@ -158,6 +173,13 @@ pub async fn record_in_tx(
         {
             return Err(eyre!("Email payload does not match notification kind"));
         }
+        if !(email.subject.is_some() == email.text.is_some()
+            && email.text.is_some() == email.html_body.is_some())
+        {
+            return Err(eyre!(
+                "Email subject, text, and HTML must be all present or all absent"
+            ));
+        }
         if event.kind == NotificationKind::NotificationEmailConfirmation
             && (email.subject.is_some() || email.text.is_some())
         {
@@ -184,7 +206,7 @@ pub async fn record_in_tx(
             EmailRecipient::Snake(id) => (None, Some(id), false),
             EmailRecipient::User => (None, None, true),
         };
-        sqlx::query!("INSERT INTO notification_emails (notification_id, subject, text, recipient_override, battlesnake_id, recipient_user, claim_imported_account_id, notification_email_request_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)", notification_id, email.subject, email.text, recipient_override, battlesnake_id, recipient_user, email.claim_imported_account_id, email.notification_email_request_id).execute(&mut **tx).await?;
+        sqlx::query!("INSERT INTO notification_emails (notification_id, subject, text, html_body, recipient_override, battlesnake_id, recipient_user, claim_imported_account_id, notification_email_request_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)", notification_id, email.subject, email.text, email.html_body, recipient_override, battlesnake_id, recipient_user, email.claim_imported_account_id, email.notification_email_request_id).execute(&mut **tx).await?;
         let id = Uuid::new_v4();
         let payload = serde_json::to_value(SendNotificationEmailJob { notification_id })?;
         sqlx::query!("INSERT INTO jobs (job_id, name, payload, priority, run_at, created_at, context) VALUES ($1, $2, $3, 0, NOW(), NOW(), $4)", id, SendNotificationEmailJob::NAME, payload, format!("notification:{}", event.kind.key())).execute(&mut **tx).await?;
@@ -333,6 +355,7 @@ mod tests {
                 email: Some(NewEmail {
                     subject: Some("Paused".into()),
                     text: Some("body".into()),
+                    html_body: Some("<p>body</p>".into()),
                     recipient: EmailRecipient::User,
                     claim_imported_account_id: None,
                     notification_email_request_id: None,
@@ -395,12 +418,29 @@ mod tests {
             email: Some(NewEmail {
                 subject: Some("Paused".into()),
                 text: Some("Body".into()),
+                html_body: Some("<p>body</p>".into()),
                 recipient: EmailRecipient::Override("unconfirmed@example.com".into()),
                 claim_imported_account_id: None,
                 notification_email_request_id: None,
             }),
         };
         assert!(record(&pool, toggleable_override).await.is_err());
+        let partial = NewNotification {
+            user_id,
+            kind: NotificationKind::SnakeMatchmakingPaused,
+            title: "Paused".into(),
+            body: "Body".into(),
+            link: None,
+            email: Some(NewEmail {
+                subject: Some("Paused".into()),
+                text: Some("Body".into()),
+                html_body: None,
+                recipient: EmailRecipient::User,
+                claim_imported_account_id: None,
+                notification_email_request_id: None,
+            }),
+        };
+        assert!(record(&pool, partial).await.is_err());
         assert_eq!(
             sqlx::query_scalar!("SELECT COUNT(*) AS \"count!\" FROM notifications")
                 .fetch_one(&pool)
@@ -426,6 +466,7 @@ mod tests {
                 email: Some(NewEmail {
                     subject: Some("Paused".into()),
                     text: Some("body".into()),
+                    html_body: Some("<p>body</p>".into()),
                     recipient: EmailRecipient::User,
                     claim_imported_account_id: None,
                     notification_email_request_id: None,

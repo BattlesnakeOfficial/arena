@@ -110,6 +110,10 @@ pub fn routes(app_state: AppState) -> axum::Router {
         .route("/favicon.ico", get(crate::static_assets::serve_favicon))
         // Social cards (og:image)
         .route(og::DEFAULT_CARD_PATH, get(og::default_card))
+        .route(
+            "/og/customizations/{kind}/{file}",
+            get(og::customization_png),
+        )
         .route("/og/games/{file}", get(og::game_card))
         .route("/og/battlesnakes/{file}", get(og::snake_card))
         .route("/og/users/{file}", get(og::player_card))

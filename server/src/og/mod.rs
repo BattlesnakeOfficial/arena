@@ -9,4 +9,5 @@
 pub mod board;
 pub mod canvas;
 pub mod cards;
+pub mod customization;
 pub mod text;

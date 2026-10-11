@@ -11,6 +11,39 @@ use tokio_util::sync::CancellationToken;
 use super::{AppState, Jobs, SendNotificationEmailJob};
 use crate::config::{AppConfig, DEFAULT_JOB_SHUTDOWN_DRAIN_SECS};
 
+fn assert_html_links_in_text(form: &std::collections::HashMap<String, String>) {
+    let html = form.get("html").expect("HTML part");
+    let text = form.get("text").expect("text part");
+    for href in html
+        .split("href=\"")
+        .skip(1)
+        .map(|part| part.split('"').next().unwrap())
+    {
+        let href = href
+            .replace("&quot;", "\"")
+            .replace("&#39;", "'")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&amp;", "&");
+        assert!(text.contains(&href), "HTML link missing from text: {href}");
+    }
+}
+
+#[test]
+fn html_link_parity_decodes_ampersands() {
+    let form = std::collections::HashMap::from([
+        (
+            "html".to_string(),
+            "<a href=\"https://arena.example/claim?a=1&amp;b=2\">Claim</a>".to_string(),
+        ),
+        (
+            "text".to_string(),
+            "https://arena.example/claim?a=1&b=2".to_string(),
+        ),
+    ]);
+    assert_html_links_in_text(&form);
+}
+
 mod idle_gate_probes {
     use super::AppState;
     use cja::jobs::Job;
@@ -700,6 +733,7 @@ async fn notification_email_is_sent_once_even_for_concurrent_runs(pool: PgPool) 
             email: Some(NewEmail {
                 subject: Some("Paused".into()),
                 text: Some("Message".into()),
+                html_body: Some("<p>body</p>".into()),
                 recipient: EmailRecipient::User,
                 claim_imported_account_id: None,
                 notification_email_request_id: None,
@@ -769,6 +803,15 @@ async fn notification_email_is_sent_once_even_for_concurrent_runs(pool: PgPool) 
     let form: std::collections::HashMap<_, _> = url::form_urlencoded::parse(&requests[0].body)
         .into_owned()
         .collect();
+    assert_html_links_in_text(&form);
+    let delivered_html = form.get("html").expect("HTML part");
+    let delivered_text = form.get("text").expect("text part");
+    assert!(delivered_html.contains("Why you got this email"));
+    assert!(delivered_text.contains("Why you got this email"));
+    assert!(delivered_html.contains("/me"));
+    assert!(delivered_text.contains("/me"));
+    assert!(delivered_html.contains("/notifications/unsubscribe/"));
+    assert!(delivered_text.contains("/notifications/unsubscribe/"));
     assert_eq!(
         form.get("h:List-Unsubscribe-Post").map(String::as_str),
         Some("List-Unsubscribe=One-Click")
@@ -782,6 +825,44 @@ async fn notification_email_is_sent_once_even_for_concurrent_runs(pool: PgPool) 
             |value| value.contains("Unsubscribe from Snake matchmaking paused emails:")
         )
     );
+    Ok(())
+}
+
+#[sqlx::test(migrations = "../migrations")]
+async fn legacy_text_row_gets_escaped_html(pool: PgPool) -> cja::Result<()> {
+    use crate::email::{Mailer, MailgunConfig};
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let user_id = sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login, github_access_token, github_email) VALUES (1675001, 'legacy-html-test', '', 'owner@example.com') RETURNING user_id").fetch_one(&pool).await?;
+    let notification_id = sqlx::query_scalar!("INSERT INTO notifications (user_id, kind, title, body, in_app_visible) VALUES ($1, 'snake_matchmaking_paused', 'Legacy', 'Legacy', true) RETURNING notification_id", user_id).fetch_one(&pool).await?;
+    sqlx::query!("INSERT INTO notification_emails (notification_id, subject, text, recipient_user) VALUES ($1, 'Legacy', $2, true)", notification_id, "First line\n<script>alert(1)</script>\nLast line").execute(&pool).await?;
+    let mut state = AppState::test_from_pool(pool.clone());
+    state.mailer = Mailer::new(
+        Some(MailgunConfig {
+            api_key: "test".into(),
+            domain: "mg.example.com".into(),
+            from: "Arena <reply@example.com>".into(),
+            base_url: server.uri(),
+        }),
+        reqwest::Client::new(),
+    );
+    SendNotificationEmailJob { notification_id }
+        .run(state)
+        .await?;
+    let requests = server.received_requests().await.expect("wiremock requests");
+    let form: std::collections::HashMap<_, _> = url::form_urlencoded::parse(&requests[0].body)
+        .into_owned()
+        .collect();
+    assert!(form["html"].contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
+    assert!(!form["html"].contains("<script>"));
+    assert!(form["html"].find("First line").unwrap() < form["html"].find("Last line").unwrap());
+    assert!(form["text"].contains("First line\n<script>alert(1)</script>\nLast line"));
     Ok(())
 }
 
@@ -802,6 +883,7 @@ async fn send_time_opt_out_keeps_in_app_event(pool: PgPool) -> cja::Result<()> {
             email: Some(NewEmail {
                 subject: Some("Resumed".into()),
                 text: Some("Recovered".into()),
+                html_body: Some("<p>body</p>".into()),
                 recipient: EmailRecipient::User,
                 claim_imported_account_id: None,
                 notification_email_request_id: None,
@@ -865,6 +947,7 @@ async fn in_app_opt_out_at_raise_does_not_suppress_email(pool: PgPool) -> cja::R
             email: Some(NewEmail {
                 subject: Some("Paused".into()),
                 text: Some("body".into()),
+                html_body: Some("<p>body</p>".into()),
                 recipient: EmailRecipient::User,
                 claim_imported_account_id: None,
                 notification_email_request_id: None,
@@ -938,6 +1021,7 @@ async fn verification_ignores_preferences_and_retries_transport_failure(
             email: Some(NewEmail {
                 subject: None,
                 text: None,
+                html_body: None,
                 recipient: EmailRecipient::Override("play@example.com".into()),
                 claim_imported_account_id: Some(account_id),
                 notification_email_request_id: None,
@@ -1006,14 +1090,18 @@ async fn verification_ignores_preferences_and_retries_transport_failure(
     let form: std::collections::HashMap<_, _> = url::form_urlencoded::parse(&requests[2].body)
         .into_owned()
         .collect();
+    assert_html_links_in_text(&form);
     assert_eq!(form.get("to").map(String::as_str), Some("play@example.com"));
     let delivered_text = form.get("text").expect("verification text");
+    let delivered_html = form.get("html").expect("verification HTML");
     let token = delivered_text
         .split("/claim/email/verify?token=")
         .nth(1)
         .and_then(|tail| tail.split_whitespace().next())
         .expect("delivered bearer token");
     assert_eq!(token.len(), 64);
+    assert!(delivered_html.contains(token));
+    assert!(delivered_html.contains("/me"));
     let persisted: Vec<String> = sqlx::query_scalar(
         "SELECT row_to_json(n)::text FROM notifications n
          UNION ALL SELECT row_to_json(e)::text FROM notification_emails e
@@ -1043,6 +1131,7 @@ async fn verification_ignores_preferences_and_retries_transport_failure(
             email: Some(NewEmail {
                 subject: Some("Claimed".into()),
                 text: Some("Body".into()),
+                html_body: Some("<p>body</p>".into()),
                 recipient: EmailRecipient::Override("play@example.com".into()),
                 claim_imported_account_id: None,
                 notification_email_request_id: None,
@@ -1085,6 +1174,7 @@ async fn terminal_delivery_conditions_do_not_retry(pool: PgPool) -> cja::Result<
         email: Some(NewEmail {
             subject: Some("Paused".into()),
             text: Some("body".into()),
+            html_body: Some("<p>body</p>".into()),
             recipient,
             claim_imported_account_id: None,
             notification_email_request_id: None,
@@ -1192,6 +1282,7 @@ async fn waiting_email_jobs_do_not_hold_pool_connections(pool: PgPool) -> cja::R
                 email: Some(NewEmail {
                     subject: Some("Paused".into()),
                     text: Some("body".into()),
+                    html_body: Some("<p>body</p>".into()),
                     recipient: EmailRecipient::User,
                     claim_imported_account_id: None,
                     notification_email_request_id: None,
@@ -1307,12 +1398,18 @@ async fn confirmation_uses_hashed_single_use_link_and_user_mail_uses_confirmed_a
     let form: std::collections::HashMap<_, _> = url::form_urlencoded::parse(&requests[0].body)
         .into_owned()
         .collect();
+    assert_html_links_in_text(&form);
     assert_eq!(
         form.get("to").map(String::as_str),
         Some("confirmed@example.com")
     );
     assert!(!form.contains_key("h:List-Unsubscribe"));
     let text = form.get("text").expect("confirmation body");
+    let html = form.get("html").expect("confirmation HTML");
+    assert!(html.contains("/me"));
+    assert!(html.contains("24 hours"));
+    assert!(html.contains("signed-out browser"));
+    assert!(html.contains("you can ignore this email"));
     let secret = text
         .split("token=")
         .nth(1)
@@ -1338,6 +1435,7 @@ async fn confirmation_uses_hashed_single_use_link_and_user_mail_uses_confirmed_a
         email: Some(NewEmail {
             subject: Some("Paused".into()),
             text: Some("Body".into()),
+            html_body: Some("<p>body</p>".into()),
             recipient: EmailRecipient::User,
             claim_imported_account_id: None,
             notification_email_request_id: None,
