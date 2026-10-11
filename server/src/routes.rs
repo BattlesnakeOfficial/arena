@@ -133,6 +133,14 @@ pub fn routes(app_state: AppState) -> axum::Router {
         )
         // Profile page - requires authentication
         .route("/me", get(profile_page).post(update_profile))
+        .route(
+            "/settings/notifications",
+            post(settings::update_notification_preference),
+        )
+        .route(
+            "/notifications/unsubscribe/{token}",
+            get(settings::unsubscribe_get).post(settings::unsubscribe_post),
+        )
         // Appearance (theme) preference - requires authentication
         .route("/settings/appearance", post(settings::update_appearance))
         // GitHub OAuth routes
@@ -822,6 +830,8 @@ async fn profile_page(
         crate::models::imported_account::should_show_claim_prompt(&state.db, user.user_id)
             .await
             .wrap_err("Failed to check claim prompt state")?;
+    let notification_preferences =
+        crate::models::notification::preferences(&state.db, user.user_id).await?;
 
     Ok(page_factory.create_page_with_flash(
         "My Profile".to_string(),
@@ -833,6 +843,34 @@ async fn profile_page(
 
             @if show_claim_prompt {
                 (claim::claim_prompt())
+            }
+
+            section class="block" style="margin: 1rem 0; font-size: 16px" {
+                h2 { "Notifications" }
+                @for kind in crate::notifications::NotificationKind::ALL {
+                    div style="padding: 0.75rem 0; border-bottom: 1px solid #555" {
+                        h3 { (kind.name()) }
+                        p { (kind.description()) }
+                        @if kind.toggleable() {
+                            @for channel in crate::notifications::NotificationChannel::ALL {
+                                @if kind.supports(channel) {
+                                    @let enabled = notification_preferences.iter()
+                                        .find(|(k, c, _)| k == kind.key() && c == channel.key())
+                                        .map_or(kind.default_enabled(channel), |(_, _, value)| *value);
+                                    form action="/settings/notifications" method="post" style="display: flex; flex-wrap: wrap; align-items: center; gap: 1rem; min-height: 44px" {
+                                        input type="hidden" name="kind" value=(kind.key());
+                                        input type="hidden" name="channel" value=(channel.key());
+                                        input type="hidden" name="enabled" value=(if enabled { "false" } else { "true" });
+                                        span { (channel.name()) ": " (if enabled { "On" } else { "Off" }) }
+                                        button type="submit" role="switch" aria-checked=(enabled) class="btn" style="min-height: 44px; font-size: 16px" { (if enabled { "Turn off" } else { "Turn on" }) }
+                                    }
+                                }
+                            }
+                        } @else {
+                            p { "Email: Always on" }
+                        }
+                    }
+                }
             }
 
             header class="profile-head" {

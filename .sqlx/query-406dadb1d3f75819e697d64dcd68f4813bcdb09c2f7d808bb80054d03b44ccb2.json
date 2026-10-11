@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO notification_preferences (user_id, kind, channel, enabled) VALUES ($1, 'claim_verification', 'email', false)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "406dadb1d3f75819e697d64dcd68f4813bcdb09c2f7d808bb80054d03b44ccb2"
+}

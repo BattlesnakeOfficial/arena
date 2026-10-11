@@ -8,7 +8,7 @@
 use color_eyre::eyre::Context as _;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
 /// How long a recovery link stays valid. Short on purpose: the owner is
@@ -31,7 +31,7 @@ fn hash_secret(secret: &str) -> String {
 /// arena user. Returns the raw secret for the email link — it is never
 /// stored and can't be recovered later.
 pub async fn create(
-    pool: &PgPool,
+    connection: &mut PgConnection,
     imported_account_id: Uuid,
     requested_by_user_id: Uuid,
 ) -> cja::Result<String> {
@@ -46,7 +46,7 @@ pub async fn create(
         requested_by_user_id,
         CLAIM_TOKEN_TTL_MINUTES as i32,
     )
-    .execute(pool)
+    .execute(connection)
     .await
     .wrap_err("Failed to create claim email token")?;
 
@@ -114,7 +114,7 @@ mod tests {
         let user = create_user(&pool, 8001).await?;
         let account = create_imported_account(&pool, 1).await?;
 
-        let secret = create(&pool, account, user).await?;
+        let secret = create(&mut *pool.acquire().await?, account, user).await?;
         // The raw secret never hits the DB.
         let stored: i64 = sqlx::query_scalar!(
             "SELECT COUNT(*) as \"c!\" FROM claim_email_tokens WHERE token_hash = $1",
@@ -137,7 +137,7 @@ mod tests {
         let someone_else = create_user(&pool, 8003).await?;
         let account = create_imported_account(&pool, 2).await?;
 
-        let secret = create(&pool, account, requester).await?;
+        let secret = create(&mut *pool.acquire().await?, account, requester).await?;
 
         // A different logged-in user can't redeem a forwarded link…
         assert_eq!(consume(&pool, &secret, someone_else).await?, None);
@@ -152,7 +152,7 @@ mod tests {
         let user = create_user(&pool, 8004).await?;
         let account = create_imported_account(&pool, 3).await?;
 
-        let secret = create(&pool, account, user).await?;
+        let secret = create(&mut *pool.acquire().await?, account, user).await?;
         sqlx::query!("UPDATE claim_email_tokens SET expires_at = NOW() - INTERVAL '1 minute'",)
             .execute(&pool)
             .await?;

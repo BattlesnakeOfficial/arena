@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO notifications (user_id, kind, title, body, in_app_visible) VALUES ($1, 'future_in_app_only', 'Update', 'body', true) RETURNING notification_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "notification_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "604398a9c51a051f8f7ddc3012e424318524d04a0318bb9a85e47b98d4af42e7"
+}

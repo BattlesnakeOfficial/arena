@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "ALTER TABLE jobs ADD CONSTRAINT reject_notification_job CHECK (name <> 'SendNotificationEmailJob')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "c48cba1955a859666a474c249446c6a3ad978f70a24867ed9836d98f13df6e0d"
+}

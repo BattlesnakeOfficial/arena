@@ -5,6 +5,139 @@ use color_eyre::eyre::Context as _;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::notifications::{NotificationChannel, NotificationKind};
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SendNotificationEmailJob {
+    pub notification_id: Uuid,
+}
+
+#[async_trait::async_trait]
+impl Job<AppState> for SendNotificationEmailJob {
+    const NAME: &'static str = "SendNotificationEmailJob";
+
+    async fn run(&self, state: AppState) -> cja::Result<()> {
+        use crate::email::{EmailMessage, SendOutcome};
+        use crate::models::{claim_email_token, leaderboard_entry_health, notification};
+
+        let _permit = state.mailer.acquire_delivery_permit().await?;
+        let mut tx = state.db.begin().await?;
+        let Some(email) = sqlx::query!(
+            "SELECT subject, text, recipient_override, battlesnake_id, claim_imported_account_id, outcome FROM notification_emails WHERE notification_id = $1 FOR UPDATE",
+            self.notification_id
+        ).fetch_optional(&mut *tx).await? else { return Ok(()); };
+        if email.outcome.is_some() {
+            return Ok(());
+        }
+        let event = sqlx::query!(
+            "SELECT user_id, kind FROM notifications WHERE notification_id = $1",
+            self.notification_id
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+        let kind = NotificationKind::parse(&event.kind);
+        let mut terminal = None;
+        if kind.is_none() {
+            tracing::warn!(notification_id = %self.notification_id, "Unknown notification kind");
+            terminal = Some("no_recipient");
+        }
+        if let Some(kind) = kind
+            && !notification::effective_enabled(
+                &mut tx,
+                event.user_id,
+                kind,
+                NotificationChannel::Email,
+            )
+            .await?
+        {
+            terminal = Some("opted_out");
+        }
+        if !state.mailer.is_enabled() {
+            terminal.get_or_insert("transport_disabled");
+        }
+        let mut recipient = email.recipient_override;
+        if terminal.is_none()
+            && recipient.is_none()
+            && let Some(snake_id) = email.battlesnake_id
+        {
+            recipient =
+                leaderboard_entry_health::owner_notification_email(&mut tx, snake_id).await?;
+        }
+        if terminal.is_none()
+            && recipient
+                .as_ref()
+                .is_none_or(|value| value.trim().is_empty())
+        {
+            terminal = Some("no_recipient");
+        }
+        if terminal.is_none() {
+            let to = recipient.as_deref().unwrap_or_default();
+            let mut message = if let Some(imported_account_id) = email.claim_imported_account_id {
+                let account = sqlx::query!("SELECT username FROM imported_accounts WHERE imported_account_id = $1 AND claimed_by_user_id IS NULL", imported_account_id).fetch_optional(&mut *tx).await?;
+                if let Some(account) = account {
+                    let token =
+                        claim_email_token::create(&mut tx, imported_account_id, event.user_id)
+                            .await?;
+                    let url = format!("{}/claim/email/verify?token={token}", state.config.base_url);
+                    crate::email::messages::claim_verification(to, &account.username, &url)
+                } else {
+                    terminal = Some("no_recipient");
+                    EmailMessage {
+                        to: String::new(),
+                        subject: String::new(),
+                        text: String::new(),
+                        list_unsubscribe: None,
+                    }
+                }
+            } else {
+                EmailMessage {
+                    to: to.to_string(),
+                    subject: email.subject.unwrap_or_default(),
+                    text: email.text.unwrap_or_default(),
+                    list_unsubscribe: None,
+                }
+            };
+            if terminal.is_none() {
+                if let Some(kind) = kind.filter(|kind| kind.toggleable()) {
+                    let token = crate::notifications::unsubscribe_token(
+                        &state.cookie_key,
+                        event.user_id,
+                        kind,
+                    );
+                    let url = format!(
+                        "{}/notifications/unsubscribe/{token}",
+                        state.config.base_url
+                    );
+                    message.text.push_str(&format!(
+                        "\nUnsubscribe from {} emails: {url}\n",
+                        kind.name()
+                    ));
+                    message.list_unsubscribe = Some(format!("<{url}>"));
+                }
+                terminal = Some(
+                    match state
+                        .mailer
+                        .send_limited(
+                            &mut tx,
+                            state.config.email_per_recipient_hourly_limit,
+                            kind.map_or("unknown", NotificationKind::key),
+                            &message,
+                        )
+                        .await?
+                    {
+                        SendOutcome::Sent => "sent",
+                        SendOutcome::RateLimited => "rate_limited",
+                        SendOutcome::Disabled => "transport_disabled",
+                    },
+                );
+            }
+        }
+        sqlx::query!("UPDATE notification_emails SET outcome = $2, finished_at = NOW() WHERE notification_id = $1", self.notification_id, terminal).execute(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct NoopJob;
 
@@ -392,6 +525,7 @@ cja::impl_job_registry!(
     AppState,
     NoopJob,
     PlayGrantReconcileJob,
+    SendNotificationEmailJob,
     GameRunnerJob,
     GameBackupJob,
     CustomizationActiveWeekBackfillJob,

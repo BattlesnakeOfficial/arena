@@ -32,6 +32,7 @@ mod leaderboard_matchmaker;
 mod leaderboard_ratings;
 mod models;
 mod moderation;
+mod notifications;
 mod observability;
 mod og;
 mod placement;

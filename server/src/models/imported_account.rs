@@ -642,14 +642,39 @@ async fn claim_account_inner(
         }
     }
 
-    tx.commit().await.wrap_err("Failed to commit claim tx")?;
-
-    Ok(Some(ClaimSummary {
+    let summary = ClaimSummary {
         snakes_created,
         grants_created,
         username: claimed.username,
         email: claimed.email,
-    }))
+    };
+    let message = crate::email::messages::account_claimed(
+        &summary.email,
+        &summary.username,
+        summary.snakes_created,
+        summary.grants_created,
+    );
+    let receipt = crate::notifications::record_in_tx(
+        &mut tx,
+        crate::notifications::NewNotification {
+            user_id,
+            kind: crate::notifications::NotificationKind::PlayAccountClaimed,
+            title: message.subject.clone(),
+            body: format!("Your play account {} was claimed.", summary.username),
+            link: None,
+            email: Some(crate::notifications::NewEmail {
+                subject: Some(message.subject),
+                text: Some(message.text),
+                recipient: crate::notifications::EmailRecipient::Override(summary.email.clone()),
+                claim_imported_account_id: None,
+            }),
+        },
+    )
+    .await?;
+    tx.commit().await.wrap_err("Failed to commit claim tx")?;
+    receipt.log_enqueued();
+
+    Ok(Some(summary))
 }
 
 /// Auto-claim on GitHub login: if an unclaimed imported account carries
@@ -1607,7 +1632,19 @@ mod tests {
         ).bind(id).fetch_one(&pool).await?;
         assert_eq!(before, same);
         let user_id = create_user(&pool, 8104).await?;
+        let before_notifications =
+            sqlx::query_scalar!("SELECT COUNT(*) AS \"count!\" FROM notifications")
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(before_notifications, 0);
         claim_account(&pool, id, user_id).await?;
+        let notice = sqlx::query!("SELECT n.kind, n.user_id, e.recipient_override FROM notifications n JOIN notification_emails e USING (notification_id)").fetch_one(&pool).await?;
+        assert_eq!(notice.kind, "play_account_claimed");
+        assert_eq!(notice.user_id, user_id);
+        assert_eq!(
+            notice.recipient_override.as_deref(),
+            Some(payload.account.email.as_str())
+        );
         let mut changed = complete_payload(104);
         changed.account.display_name = "Changed".to_string();
         changed.snakes.push(StageSnake {
@@ -1622,6 +1659,10 @@ mod tests {
         assert_eq!(result.status, StageStatus::SkippedClaimed);
         assert_eq!(result.snakes_processed, 0);
         assert_eq!(result.grants_processed, 2);
+        let notifications = sqlx::query_scalar!("SELECT COUNT(*) AS \"count!\" FROM notifications")
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(notifications, 1);
         let row = sqlx::query!("SELECT display_name, claimed_by_user_id FROM imported_accounts WHERE imported_account_id=$1", id).fetch_one(&pool).await?;
         assert_eq!(row.display_name, payload.account.display_name);
         assert_eq!(row.claimed_by_user_id, Some(user_id));

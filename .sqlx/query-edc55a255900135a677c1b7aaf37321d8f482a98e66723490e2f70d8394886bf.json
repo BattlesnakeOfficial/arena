@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO notification_preferences (user_id, kind, channel, enabled) VALUES ($1, $2, $3, $4) ON CONFLICT (user_id, kind, channel) DO UPDATE SET enabled = EXCLUDED.enabled",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "edc55a255900135a677c1b7aaf37321d8f482a98e66723490e2f70d8394886bf"
+}

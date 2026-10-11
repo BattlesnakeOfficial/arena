@@ -263,13 +263,6 @@ pub async fn submit_claim(
         "play account claimed via password"
     );
 
-    // Notify the play email that the account was claimed — a security signal
-    // for the real owner if a claim wasn't theirs. Best-effort.
-    state.mailer.notify_account_claimed(
-        &state.db,
-        state.config.email_per_recipient_hourly_limit,
-        &summary,
-    );
     state
         .discord
         .notify_account_claimed(&summary.username, summary.snakes_created);
@@ -407,28 +400,25 @@ pub async fn submit_email_claim(
         .or_else(|| candidates.first());
 
     if let Some(account) = target {
-        let secret =
-            claim_email_token::create(&state.db, account.imported_account_id, user.user_id)
-                .await
-                .wrap_err("Failed to create claim token")?;
-
-        let verify_url = format!(
-            "{}/claim/email/verify?token={}",
-            state.config.base_url, secret
-        );
-
-        // Fire-and-forget, like every other notification — and load-bearing
-        // here: awaiting the Mailgun call would make a matching email
-        // measurably slower than a miss (and turn a transport error into a
-        // 500 only matches can produce), handing back exactly the
-        // enumeration oracle the uniform response below exists to prevent.
-        state.mailer.notify_claim_verification(
-            &state.db,
-            state.config.email_per_recipient_hourly_limit,
-            &account.email,
-            &account.username,
-            &verify_url,
-        );
+        let event = crate::notifications::NewNotification {
+            user_id: user.user_id,
+            kind: crate::notifications::NotificationKind::ClaimVerification,
+            title: "Finish claiming your Battlesnake account".to_string(),
+            body: format!("Claim verification requested for {}.", account.username),
+            link: None,
+            email: Some(crate::notifications::NewEmail {
+                subject: None,
+                text: None,
+                recipient: crate::notifications::EmailRecipient::Override(account.email.clone()),
+                claim_imported_account_id: Some(account.imported_account_id),
+            }),
+        };
+        if let Err(error) = crate::notifications::record(&state.db, event).await {
+            tracing::error!(
+                error = format!("{error:#}"),
+                "Failed to record claim verification notification"
+            );
+        }
 
         tracing::info!(
             event_type = "email_claim_link_requested",
@@ -554,11 +544,7 @@ pub async fn complete_email_claim(
     );
 
     // Same security signal as the other claim paths.
-    state.mailer.notify_account_claimed(
-        &state.db,
-        state.config.email_per_recipient_hourly_limit,
-        &summary,
-    );
+
     state
         .discord
         .notify_account_claimed(&summary.username, summary.snakes_created);

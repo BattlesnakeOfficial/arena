@@ -10,6 +10,23 @@ pub struct EmailMessage {
     pub to: String,
     pub subject: String,
     pub text: String,
+    pub list_unsubscribe: Option<String>,
+}
+
+impl EmailMessage {
+    pub fn form_fields<'a>(&'a self, from: &'a str) -> Vec<(&'static str, &'a str)> {
+        let mut fields = vec![
+            ("from", from),
+            ("to", self.to.as_str()),
+            ("subject", self.subject.as_str()),
+            ("text", self.text.as_str()),
+        ];
+        if let Some(url) = &self.list_unsubscribe {
+            fields.push(("h:List-Unsubscribe", url));
+            fields.push(("h:List-Unsubscribe-Post", "List-Unsubscribe=One-Click"));
+        }
+        fields
+    }
 }
 
 /// Sent to a play account's email when that account is claimed on arena
@@ -42,6 +59,7 @@ pub fn account_claimed(
         to: to_email.to_string(),
         subject: "Your Battlesnake account was claimed".to_string(),
         text,
+        list_unsubscribe: None,
     }
 }
 
@@ -50,12 +68,11 @@ pub fn account_claimed(
 /// Mirrors play's arena_matchmaking_deactivated notice: says what happened,
 /// where, why, and how to get back in. `pulled` is `(leaderboard, most recent
 /// problem)` per leaderboard, in the order to list them.
-pub fn matchmaking_deactivated(
-    to_email: &str,
+pub fn matchmaking_deactivated_content(
     snake_name: &str,
     pulled: &[(String, String)],
     profile_url: &str,
-) -> EmailMessage {
+) -> (String, String) {
     let where_ = if pulled.len() == 1 {
         "this Arena leaderboard"
     } else {
@@ -91,10 +108,24 @@ pub fn matchmaking_deactivated(
          — Battlesnake Arena\n"
     );
 
+    (
+        format!("{snake_name} was paused from Arena matchmaking"),
+        text,
+    )
+}
+
+pub fn matchmaking_deactivated(
+    to_email: &str,
+    snake_name: &str,
+    pulled: &[(String, String)],
+    profile_url: &str,
+) -> EmailMessage {
+    let (subject, text) = matchmaking_deactivated_content(snake_name, pulled, profile_url);
     EmailMessage {
         to: to_email.to_string(),
-        subject: format!("{snake_name} was paused from Arena matchmaking"),
+        subject,
         text,
+        list_unsubscribe: None,
     }
 }
 
@@ -102,12 +133,11 @@ pub fn matchmaking_deactivated(
 /// back into matchmaking on its own, after enough consecutive healthy
 /// probes. Closes the loop on [`matchmaking_deactivated`] so the owner isn't
 /// left thinking they still need to press Resume.
-pub fn matchmaking_reactivated(
-    to_email: &str,
+pub fn matchmaking_reactivated_content(
     snake_name: &str,
     leaderboards: &[String],
     profile_url: &str,
-) -> EmailMessage {
+) -> (String, String) {
     let leaderboards = leaderboards.join(", ");
     let text = format!(
         "Hi,\n\
@@ -123,10 +153,21 @@ pub fn matchmaking_reactivated(
          — Battlesnake Arena\n"
     );
 
+    (format!("{snake_name} is back in Arena matchmaking"), text)
+}
+
+pub fn matchmaking_reactivated(
+    to_email: &str,
+    snake_name: &str,
+    leaderboards: &[String],
+    profile_url: &str,
+) -> EmailMessage {
+    let (subject, text) = matchmaking_reactivated_content(snake_name, leaderboards, profile_url);
     EmailMessage {
         to: to_email.to_string(),
-        subject: format!("{snake_name} is back in Arena matchmaking"),
+        subject,
         text,
+        list_unsubscribe: None,
     }
 }
 
@@ -158,6 +199,7 @@ pub fn claim_verification(to_email: &str, play_username: &str, verify_url: &str)
         to: to_email.to_string(),
         subject: "Finish claiming your Battlesnake account".to_string(),
         text,
+        list_unsubscribe: None,
     }
 }
 
