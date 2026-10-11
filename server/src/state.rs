@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
+use cja::jobs::worker::IdlePollGate;
 use color_eyre::eyre::{Context as _, eyre};
 use sqlx::{PgPool, postgres::PgPoolOptions};
+use std::num::NonZeroUsize;
 
 use crate::config::AppConfig;
 use crate::discord::DiscordNotifier;
@@ -13,6 +15,7 @@ pub struct AppState {
     /// All resolved configuration, read once at boot. Deep code reads
     /// settings from here instead of reaching for `std::env`.
     pub config: Arc<AppConfig>,
+    pub idle_poll_gate: IdlePollGate,
     pub db: sqlx::Pool<sqlx::Postgres>,
     pub cookie_key: cja::server::cookies::CookieKey,
     /// Connection to the legacy Battlesnake Engine database (for game backup)
@@ -196,6 +199,9 @@ impl AppState {
             .wrap_err("Failed to find this executable for the studio worker")?;
 
         Ok(Self {
+            idle_poll_gate: IdlePollGate::new(
+                NonZeroUsize::new(config.job.idle_pollers).unwrap_or(NonZeroUsize::MIN),
+            ),
             config: Arc::new(config),
             db: pool,
             cookie_key,
@@ -224,8 +230,10 @@ impl AppState {
     /// Minimal AppState for DB-backed tests: a real pool, inert everything
     /// else (no OAuth, no engine DB, an empty scoring registry).
     pub fn test_from_pool(db: sqlx::PgPool) -> Self {
+        let config = AppConfig::test_default();
         Self {
-            config: Arc::new(AppConfig::test_default()),
+            idle_poll_gate: IdlePollGate::new(NonZeroUsize::MIN),
+            config: Arc::new(config),
             db,
             cookie_key: cja::server::cookies::CookieKey::from_env_or_generate()
                 .expect("failed to generate a test cookie key"),
@@ -257,6 +265,10 @@ impl cja::app_state::AppState for AppState {
 
     fn db(&self) -> &sqlx::PgPool {
         &self.db
+    }
+
+    fn job_enqueued(&self) {
+        self.idle_poll_gate.wake_one();
     }
 
     fn cookie_key(&self) -> &cja::server::cookies::CookieKey {

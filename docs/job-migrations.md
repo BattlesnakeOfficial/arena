@@ -27,6 +27,15 @@ can be reclaimed after four minutes plus the next poll when the database is
 healthy. Polling is separate: `ARENA_JOB_POLL_INTERVAL_MS` is 200 ms in production.
 `ARENA_JOB_SHUTDOWN_DRAIN_SECS` controls graceful shutdown drain (default 5 seconds).
 
+Arena shares one cja `IdlePollGate` across its workers. With the production
+`ARENA_JOB_WORKERS=100`, `ARENA_JOB_IDLE_POLLERS=2`, and 200 ms interval, at
+most two workers make periodic idle claims (about 10 claims/second on an empty
+queue). A successful autocommit `Job::enqueue` wakes one parked local worker;
+direct SQL inserts, due retries, and expired leases are found by the periodic
+claims. Notifications are local and may coalesce. The gate does not limit jobs
+already running, and priority still orders the next unclaimed row. No database
+session features are used.
+
 If heartbeat writes keep failing, cja's watchdog stops the job body before the
 lease expires. A later reclaim charges one failed attempt. A panic also charges
 an attempt and releases the lock while the worker keeps running. With N retries,

@@ -12,7 +12,9 @@
 
 use std::time::Duration;
 
-use cja::jobs::worker::{DEFAULT_HEARTBEAT_INTERVAL, DEFAULT_MAX_RETRIES, JobWorkerConfig};
+use cja::jobs::worker::{
+    DEFAULT_HEARTBEAT_INTERVAL, DEFAULT_MAX_RETRIES, IdlePollGate, JobWorkerConfig,
+};
 
 use crate::email::MailgunConfig;
 use crate::github::auth::GitHubOAuthConfig;
@@ -46,16 +48,27 @@ pub struct JobConfig {
     pub shutdown_drain_secs: u64,
     pub max_retries: i32,
     pub workers: usize,
+    /// Maximum workers making periodic idle claims. Local enqueues wake parked workers.
+    pub idle_pollers: usize,
 }
 
 impl JobConfig {
-    pub fn worker_config(&self, job_drain: Duration) -> JobWorkerConfig {
+    pub fn worker_config(
+        &self,
+        job_drain: Duration,
+        idle_poll_gate: IdlePollGate,
+    ) -> JobWorkerConfig {
         JobWorkerConfig {
             heartbeat_interval: Duration::from_secs(self.heartbeat_interval_secs),
             reclaim_window: Duration::from_secs(self.reclaim_window_secs),
             shutdown_drain_timeout: job_drain,
+            idle_poll_gate: Some(idle_poll_gate),
         }
     }
+}
+
+fn clamp_idle_pollers(requested: usize, workers: usize) -> usize {
+    requested.clamp(1, workers.max(1))
 }
 
 fn validate_job_lease(job: &JobConfig) -> cja::Result<()> {
@@ -296,6 +309,7 @@ impl AppConfig {
             .map_err(|_| cja::color_eyre::eyre::eyre!("DATABASE_URL must be set"))?;
         let gcp_logging = std::env::var("GCP_LOGGING").is_ok();
 
+        let workers = parse_env::<usize>("ARENA_JOB_WORKERS", 1).max(1);
         let job = JobConfig {
             poll_interval_ms: parse_env("ARENA_JOB_POLL_INTERVAL_MS", 60_000),
             heartbeat_interval_secs: parse_env(
@@ -311,7 +325,8 @@ impl AppConfig {
                 DEFAULT_JOB_SHUTDOWN_DRAIN_SECS,
             ),
             max_retries: parse_env("ARENA_JOB_MAX_RETRIES", DEFAULT_MAX_RETRIES),
-            workers: parse_env::<usize>("ARENA_JOB_WORKERS", 1).max(1),
+            workers,
+            idle_pollers: clamp_idle_pollers(parse_env("ARENA_JOB_IDLE_POLLERS", 2), workers),
         };
         validate_job_lease(&job)?;
 
@@ -406,6 +421,7 @@ impl AppConfig {
                 shutdown_drain_secs: DEFAULT_JOB_SHUTDOWN_DRAIN_SECS,
                 max_retries: DEFAULT_MAX_RETRIES,
                 workers: 1,
+                idle_pollers: 1,
             },
             features: FeatureFlags {
                 server: true,
@@ -615,11 +631,20 @@ mod tests {
         assert!(c.gcs_bucket.is_none());
         assert!(c.gcp_project_id.is_none());
         assert_eq!(c.job.workers, 1);
+        assert_eq!(c.job.idle_pollers, 1);
         assert_eq!(c.stuck_game_max_age_hours, 2);
         assert_eq!(c.ladder_start_deadline_secs, 480);
         assert_eq!(c.job.poll_interval_ms, 60_000);
         assert_eq!(c.pg_max_connections, 5);
         assert!(c.features.server && c.features.jobs && c.features.cron);
+    }
+
+    #[test]
+    fn idle_pollers_are_clamped_to_worker_count() {
+        assert_eq!(super::clamp_idle_pollers(2, 100), 2);
+        assert_eq!(super::clamp_idle_pollers(2, 1), 1);
+        assert_eq!(super::clamp_idle_pollers(0, 100), 1);
+        assert_eq!(super::clamp_idle_pollers(200, 100), 100);
     }
 
     #[test]

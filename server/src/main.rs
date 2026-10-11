@@ -51,6 +51,26 @@ mod tournament_match;
 mod watched_games;
 mod wire;
 
+fn job_worker_future<R>(
+    app_state: AppState,
+    registry: R,
+    shutdown: tokio_util::sync::CancellationToken,
+    job_drain: Duration,
+) -> impl std::future::Future<Output = cja::Result<()>>
+where
+    R: cja::jobs::registry::JobRegistry<AppState>,
+{
+    let job = &app_state.config.job;
+    cja::jobs::worker::job_worker(
+        app_state.clone(),
+        registry,
+        Duration::from_millis(job.poll_interval_ms),
+        job.max_retries,
+        shutdown,
+        job.worker_config(job_drain, app_state.idle_poll_gate.clone()),
+    )
+}
+
 /// Frontend UI components only - do not place backend logic here
 mod components {
     pub mod avatar;
@@ -232,19 +252,22 @@ async fn spawn_application_tasks(
         info!("Job reclaim window: {}s", job.reclaim_window_secs);
         info!("Job max retries: {}", job.max_retries);
         info!("Job workers: {}", job.workers);
+        info!("Job idle pollers: {}", job.idle_pollers);
+        info!(
+            "Estimated idle claims: {:.1}/s",
+            job.idle_pollers as f64 * 1_000.0 / job.poll_interval_ms.max(1) as f64
+        );
         info!("Job shutdown drain: {}s", job.shutdown_drain_secs);
 
         for i in 0..job.workers {
             let name: &'static str = Box::leak(format!("jobs-{i}").into_boxed_str());
             supervisor.spawn(
                 name,
-                cja::jobs::worker::job_worker(
+                job_worker_future(
                     app_state.clone(),
                     jobs::Jobs,
-                    Duration::from_millis(job.poll_interval_ms),
-                    job.max_retries,
                     shutdown.clone(),
-                    job.worker_config(supervisor.budget().job_drain),
+                    supervisor.budget().job_drain,
                 ),
             );
         }
