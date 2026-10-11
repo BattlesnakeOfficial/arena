@@ -174,7 +174,7 @@ async fn spawn_application_tasks(
 
     // Build the registry once; the manifest and worker both use it when
     // this process has CRON enabled.
-    let cron_registry = cron::cron_registry();
+    let cron_registry = cron::cron_registry(&app_state.config);
 
     let manifest = observability::manifest(&cron_registry, identity, features)
         .map_err(|error| eyre!("Invalid Arena observability declarations: {error}"))?;
@@ -253,7 +253,7 @@ mod tests {
 
     #[test]
     fn boot_manifest_declares_exactly_one_health_monitor() {
-        let registry = cron::cron_registry();
+        let registry = cron::cron_registry(&config::AppConfig::test_default());
         let manifest = observability::manifest(
             &registry,
             eyes_subscriber::ProcessIdentity::new(observability::ROLE),

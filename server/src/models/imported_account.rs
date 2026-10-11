@@ -70,12 +70,19 @@ pub struct StagePlayAccount {
     pub grants: Vec<StageGrant>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StageStatus {
     Created,
     Refreshed,
     Unchanged,
     SkippedClaimed,
+    SkippedIdentityConflict(IdentityConflict),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IdentityConflict {
+    GithubUid(i64),
+    SnakeId(String),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -84,6 +91,21 @@ pub struct StageResult {
     pub status: StageStatus,
     pub snakes_processed: u64,
     pub grants_processed: u64,
+}
+
+async fn skip_identity_conflict(
+    tx: sqlx::Transaction<'_, sqlx::Postgres>,
+    conflict: IdentityConflict,
+) -> cja::Result<StageResult> {
+    tx.rollback()
+        .await
+        .wrap_err("Failed to roll back identity conflict")?;
+    Ok(StageResult {
+        imported_account_id: Uuid::nil(),
+        status: StageStatus::SkippedIdentityConflict(conflict),
+        snakes_processed: 0,
+        grants_processed: 0,
+    })
 }
 
 /// Publish one Play account and its complete active child sets in one commit.
@@ -189,23 +211,15 @@ pub async fn stage_play_account(
             .fetch_optional(&mut *tx).await.wrap_err("Failed to lock former GitHub UID owner")?;
         if let Some(owner) = owner {
             if owner.claimed_by_user_id.is_some() {
-                return Err(eyre!(
-                    "GitHub UID {} belongs to claimed account {}",
-                    uid,
-                    owner.imported_account_id
-                ));
+                return skip_identity_conflict(tx, IdentityConflict::GithubUid(uid)).await;
             }
             sqlx::query!("UPDATE imported_accounts SET github_uid = NULL WHERE imported_account_id = $1 AND github_uid = $2 AND claimed_by_user_id IS NULL", owner.imported_account_id, uid)
                 .execute(&mut *tx).await.wrap_err("Failed to release stale GitHub UID")?;
         }
         let claimed_owner = sqlx::query!("SELECT imported_account_id FROM imported_accounts WHERE github_uid = $1 AND imported_account_id <> $2 AND claimed_by_user_id IS NOT NULL", uid, id)
             .fetch_optional(&mut *tx).await.wrap_err("Failed to recheck claimed GitHub UID owner")?;
-        if let Some(owner) = claimed_owner {
-            return Err(eyre!(
-                "GitHub UID {} belongs to claimed account {}",
-                uid,
-                owner.imported_account_id
-            ));
+        if claimed_owner.is_some() {
+            return skip_identity_conflict(tx, IdentityConflict::GithubUid(uid)).await;
         }
     }
 
@@ -247,9 +261,7 @@ pub async fn stage_play_account(
         .iter()
         .map(|s| s.play_snake_id.clone())
         .collect();
-    let existing_snakes = if created {
-        Vec::new()
-    } else {
+    let existing_snakes = {
         sqlx::query!(
             "SELECT imported_account_id, play_snake_id, name, url, head, tail, color, is_public, engine_region FROM imported_snakes WHERE imported_account_id = $1 OR play_snake_id = ANY($2) FOR UPDATE",
             id, &incoming_ids
@@ -263,6 +275,17 @@ pub async fn stage_play_account(
         let color = normalize_color(&snake.color);
         if let Some(old) = snakes_by_id.remove(&snake.play_snake_id) {
             if old.imported_account_id != id {
+                let claimed_owner: Option<Uuid> = sqlx::query_scalar!(
+                    "SELECT claimed_by_user_id FROM imported_accounts WHERE imported_account_id = $1",
+                    old.imported_account_id
+                ).fetch_one(&mut *tx).await.wrap_err("Failed to check snake owner claim")?;
+                if claimed_owner.is_some() {
+                    return skip_identity_conflict(
+                        tx,
+                        IdentityConflict::SnakeId(snake.play_snake_id.clone()),
+                    )
+                    .await;
+                }
                 return Err(eyre!(
                     "Play snake {} belongs to imported account {}, not {}",
                     snake.play_snake_id,
@@ -1835,7 +1858,10 @@ mod tests {
         claim_account(&pool, a_id, user).await?;
         let mut b = complete_payload(210);
         b.account.github_uid = Some(90209);
-        assert!(stage_play_account(&pool, &b).await.is_err());
+        assert_eq!(
+            stage_play_account(&pool, &b).await?.status,
+            StageStatus::SkippedIdentityConflict(IdentityConflict::GithubUid(90209))
+        );
         assert_eq!(
             find_unclaimed_by_github_uid(&pool, 90209)
                 .await?
