@@ -2,9 +2,8 @@
 //!
 //! [`Mailer`] is a no-op when Mailgun isn't configured (no `MAILGUN_API_KEY`),
 //! mirroring play's convention: the code compiles and runs everywhere, and
-//! sending only becomes real once credentials are set. Callers treat a send
-//! as best-effort — a failed email must never break the operation that
-//! triggered it.
+//! sending only becomes real once credentials are set. Delivery jobs retry
+//! transport errors without failing the operation that raised the event.
 
 pub mod messages;
 
@@ -122,7 +121,7 @@ impl Mailer {
     /// Send a message. When disabled, logs and returns `Ok(())` without any
     /// network call — so callers get uniform behavior whether or not creds
     /// are present. When enabled, POSTs the Mailgun form and errors on a
-    /// non-2xx response; callers log-and-continue rather than propagate.
+    /// non-2xx response; delivery jobs propagate that error for retry.
     pub async fn send(&self, message: &EmailMessage) -> cja::Result<()> {
         let Some(config) = &self.config else {
             tracing::info!(

@@ -845,34 +845,6 @@ async fn profile_page(
                 (claim::claim_prompt())
             }
 
-            section class="block" style="margin: 1rem 0; font-size: 16px" {
-                h2 { "Notifications" }
-                @for kind in crate::notifications::NotificationKind::ALL {
-                    div style="padding: 0.75rem 0; border-bottom: 1px solid #555" {
-                        h3 { (kind.name()) }
-                        p { (kind.description()) }
-                        @if kind.toggleable() {
-                            @for channel in crate::notifications::NotificationChannel::ALL {
-                                @if kind.supports(channel) {
-                                    @let enabled = notification_preferences.iter()
-                                        .find(|(k, c, _)| k == kind.key() && c == channel.key())
-                                        .map_or(kind.default_enabled(channel), |(_, _, value)| *value);
-                                    form action="/settings/notifications" method="post" style="display: flex; flex-wrap: wrap; align-items: center; gap: 1rem; min-height: 44px" {
-                                        input type="hidden" name="kind" value=(kind.key());
-                                        input type="hidden" name="channel" value=(channel.key());
-                                        input type="hidden" name="enabled" value=(if enabled { "false" } else { "true" });
-                                        span { (channel.name()) ": " (if enabled { "On" } else { "Off" }) }
-                                        button type="submit" role="switch" aria-checked=(enabled) class="btn" style="min-height: 44px; font-size: 16px" { (if enabled { "Turn off" } else { "Turn on" }) }
-                                    }
-                                }
-                            }
-                        } @else {
-                            p { "Email: Always on" }
-                        }
-                    }
-                }
-            }
-
             header class="profile-head" {
                 (user_avatar(user.github_avatar_url.as_deref(), user.public_name(), "avatar"))
                 div class="who" {
@@ -951,6 +923,34 @@ async fn profile_page(
                     }
                 }
             }
+            section class="block" style="margin: 1rem 0; font-size: 16px" {
+                h2 { "Notifications" }
+                @for kind in crate::notifications::NotificationKind::ALL {
+                    div style="padding: 0.75rem 0; border-bottom: 1px solid #555" {
+                        h3 { (kind.name()) }
+                        p { (kind.description()) }
+                        @if kind.toggleable() {
+                            @for channel in crate::notifications::NotificationChannel::ALL {
+                                @if kind.supports(channel) {
+                                    @let enabled = notification_preferences.iter()
+                                        .find(|(k, c, _)| k == kind.key() && c == channel.key())
+                                        .map_or(kind.default_enabled(channel), |(_, _, value)| *value);
+                                    form action="/settings/notifications" method="post" style="display: flex; flex-wrap: wrap; align-items: center; gap: 1rem; min-height: 44px" {
+                                        input type="hidden" name="kind" value=(kind.key());
+                                        input type="hidden" name="channel" value=(channel.key());
+                                        input type="hidden" name="enabled" value=(if enabled { "false" } else { "true" });
+                                        span { (channel.name()) ": " (if enabled { "On" } else { "Off" }) }
+                                        button type="submit" role="switch" aria-checked=(enabled) class="btn" style="min-height: 44px; font-size: 16px" { (if enabled { "Turn off" } else { "Turn on" }) }
+                                    }
+                                }
+                            }
+                        } @else {
+                            p { "Email: Always on" }
+                        }
+                    }
+                }
+            }
+
         }),
         flash,
     ))

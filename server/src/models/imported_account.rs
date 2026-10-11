@@ -1438,8 +1438,32 @@ mod tests {
             .expect("auto-claim should fire");
         assert_eq!(summary.username, "player5");
 
+        let notices = sqlx::query_as::<_, (String, String, String)>(
+            "SELECT n.kind, e.recipient_override, j.name
+             FROM notifications n JOIN notification_emails e USING (notification_id)
+             JOIN jobs j ON j.payload->>'notification_id' = n.notification_id::text
+             WHERE n.user_id = $1",
+        )
+        .bind(user_id)
+        .fetch_all(&pool)
+        .await?;
+        assert_eq!(
+            notices,
+            [(
+                "play_account_claimed".into(),
+                "player5@example.com".into(),
+                "SendNotificationEmailJob".into()
+            )]
+        );
+
         // Idempotent on next login.
         assert!(try_auto_claim(&pool, user_id, 5001).await?.is_none());
+        let notice_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM notifications WHERE user_id = $1")
+                .bind(user_id)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(notice_count, 1);
 
         Ok(())
     }

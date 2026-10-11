@@ -4,11 +4,12 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Redirect},
 };
+use color_eyre::eyre::{Context as _, eyre};
 use maud::html;
 use serde::Deserialize;
 
 use crate::{
-    errors::ServerResult,
+    errors::{ServerError, ServerResult},
     models::user::{SITE_THEMES, THEATER_THEMES, update_theme_preferences},
     notifications::{self, NotificationChannel, NotificationKind},
     routes::auth::CurrentUser,
@@ -79,23 +80,34 @@ pub async fn update_notification_preference(
     Ok(Redirect::to("/me").into_response())
 }
 
-async fn apply_unsubscribe(state: &AppState, token: &str) -> Result<NotificationKind, StatusCode> {
+async fn apply_unsubscribe(
+    state: &AppState,
+    token: &str,
+) -> ServerResult<NotificationKind, StatusCode> {
     let (user_id, kind) = notifications::verify_unsubscribe_token(&state.cookie_key, token)
-        .ok_or(StatusCode::BAD_REQUEST)?;
+        .ok_or_else(|| {
+            ServerError(
+                eyre!("Invalid notification unsubscribe link"),
+                StatusCode::BAD_REQUEST,
+            )
+        })?;
     let mut tx = state
         .db
         .begin()
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .wrap_err("Failed to begin notification unsubscribe transaction")?;
     let exists = sqlx::query_scalar!(
         "SELECT user_id FROM users WHERE user_id = $1 FOR KEY SHARE",
         user_id
     )
     .fetch_optional(&mut *tx)
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .wrap_err("Failed to check notification unsubscribe user")?;
     if exists.is_none() {
-        return Err(StatusCode::BAD_REQUEST);
+        return Err(ServerError(
+            eyre!("Invalid notification unsubscribe link"),
+            StatusCode::BAD_REQUEST,
+        ));
     }
     crate::models::notification::set_preference(
         &mut tx,
@@ -105,17 +117,17 @@ async fn apply_unsubscribe(state: &AppState, token: &str) -> Result<Notification
         false,
     )
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .wrap_err("Failed to save notification unsubscribe preference")?;
     tx.commit()
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .wrap_err("Failed to commit notification unsubscribe preference")?;
     Ok(kind)
 }
 
 pub async fn unsubscribe_get(
     State(state): State<AppState>,
     Path(token): Path<String>,
-) -> Result<impl IntoResponse, StatusCode> {
+) -> ServerResult<impl IntoResponse, StatusCode> {
     let kind = apply_unsubscribe(&state, &token).await?;
     Ok(html! {
         html { head { meta name="viewport" content="width=device-width, initial-scale=1"; title { "Unsubscribed" } }
@@ -130,7 +142,7 @@ pub async fn unsubscribe_get(
 pub async fn unsubscribe_post(
     State(state): State<AppState>,
     Path(token): Path<String>,
-) -> Result<StatusCode, StatusCode> {
+) -> ServerResult<StatusCode, StatusCode> {
     apply_unsubscribe(&state, &token).await?;
     Ok(StatusCode::OK)
 }

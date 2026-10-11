@@ -345,6 +345,24 @@ fn cja_migrations_are_present_and_unchanged() {
         problems.join("\n")
     );
 }
+async fn wait_for_notification_row_waiters(pool: &PgPool, expected: i64) -> cja::Result<()> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let blocked: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%notification_emails%'",
+            )
+            .fetch_one(pool)
+            .await?;
+            if blocked >= expected {
+                break Ok::<_, color_eyre::Report>(());
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await??;
+    Ok(())
+}
+
 #[sqlx::test(migrations = "../migrations")]
 async fn notification_email_is_sent_once_even_for_concurrent_runs(pool: PgPool) -> cja::Result<()> {
     use crate::email::{Mailer, MailgunConfig};
@@ -388,9 +406,35 @@ async fn notification_email_is_sent_once_even_for_concurrent_runs(pool: PgPool) 
     let job = SendNotificationEmailJob {
         notification_id: receipt.notification_id,
     };
-    let (first, second) = tokio::join!(job.run(state.clone()), job.run(state.clone()));
-    first?;
-    second?;
+    // Separate Mailers model separate server processes: their semaphores do
+    // not coordinate, so the outbox row lock must serialize delivery.
+    let mut other_state = AppState::test_from_pool(pool.clone());
+    other_state.mailer = Mailer::new(
+        Some(MailgunConfig {
+            api_key: "test".into(),
+            domain: "mg.example.com".into(),
+            from: "Arena <reply@example.com>".into(),
+            base_url: server.uri(),
+        }),
+        reqwest::Client::new(),
+    );
+    let mut holder = pool.begin().await?;
+    sqlx::query(
+        "SELECT notification_id FROM notification_emails WHERE notification_id = $1 FOR UPDATE",
+    )
+    .bind(receipt.notification_id)
+    .fetch_one(&mut *holder)
+    .await?;
+    let first_job = job.clone();
+    let first_state = state.clone();
+    let first = tokio::spawn(async move { first_job.run(first_state).await });
+    wait_for_notification_row_waiters(&pool, 1).await?;
+    let second_job = job.clone();
+    let second = tokio::spawn(async move { second_job.run(other_state).await });
+    wait_for_notification_row_waiters(&pool, 2).await?;
+    holder.commit().await?;
+    first.await??;
+    second.await??;
     job.run(state).await?;
     let outcome = sqlx::query_scalar!(
         "SELECT outcome FROM notification_emails WHERE notification_id = $1",
@@ -639,6 +683,24 @@ async fn verification_ignores_preferences_and_retries_transport_failure(
     let form: std::collections::HashMap<_, _> = url::form_urlencoded::parse(&requests[2].body)
         .into_owned()
         .collect();
+    let delivered_text = form.get("text").expect("verification text");
+    let token = delivered_text
+        .split("/claim/email/verify?token=")
+        .nth(1)
+        .and_then(|tail| tail.split_whitespace().next())
+        .expect("delivered bearer token");
+    assert_eq!(token.len(), 64);
+    let persisted: Vec<String> = sqlx::query_scalar(
+        "SELECT row_to_json(n)::text FROM notifications n
+         UNION ALL SELECT row_to_json(e)::text FROM notification_emails e
+         UNION ALL SELECT payload::text FROM jobs",
+    )
+    .fetch_all(&pool)
+    .await?;
+    assert!(
+        persisted.iter().all(|row| !row.contains(token)),
+        "raw claim token leaked into notification or job storage"
+    );
     assert!(!form.contains_key("h:List-Unsubscribe"));
     assert!(!form.contains_key("h:List-Unsubscribe-Post"));
     assert!(
