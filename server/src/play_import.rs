@@ -86,6 +86,7 @@ pub struct GrantReconcileCounts {
     pub play_grants_read: u64,
     pub newly_staged: u64,
     pub newly_materialized: u64,
+    pub refunded_token_grants: u64,
     pub skipped_off_catalog: u64,
     pub newly_staged_accounts: u64,
     pub skipped_identity_conflict: u64,
@@ -407,7 +408,9 @@ async fn stage_reconcile_grants(
     Ok(result.rows_affected())
 }
 
-async fn materialize_reconcile_grants(tx: &mut Transaction<'_, Postgres>) -> cja::Result<u64> {
+async fn materialize_reconcile_grants(
+    tx: &mut Transaction<'_, Postgres>,
+) -> cja::Result<(u64, u64)> {
     let catalog: Vec<(&str, &str)> = Head::ALL
         .iter()
         .map(|head| (Head::KIND, head.slug()))
@@ -421,9 +424,9 @@ async fn materialize_reconcile_grants(tx: &mut Transaction<'_, Postgres>) -> cja
         .iter()
         .map(|(_, slug)| (*slug).to_string())
         .collect();
-    let result = sqlx::query!(
-        r#"INSERT INTO customization_grants (user_id, customization_type, slug)
-           SELECT ia.claimed_by_user_id, ig.customization_type, ig.slug
+    let results = sqlx::query!(
+        r#"INSERT INTO customization_grants (user_id, customization_type, slug, source)
+           SELECT ia.claimed_by_user_id, ig.customization_type, ig.slug, 'play_import'
            FROM imported_grants ig
            JOIN imported_accounts ia ON ia.imported_account_id = ig.imported_account_id
            JOIN UNNEST($1::text[], $2::text[])
@@ -431,14 +434,19 @@ async fn materialize_reconcile_grants(tx: &mut Transaction<'_, Postgres>) -> cja
              ON (catalog.customization_type, catalog.slug) = (ig.customization_type, ig.slug)
            WHERE ia.claimed_by_user_id IS NOT NULL
            ORDER BY ia.claimed_by_user_id, ig.customization_type, ig.slug
-           ON CONFLICT (user_id, customization_type, slug) DO NOTHING"#,
+           ON CONFLICT (user_id, customization_type, slug)
+           DO UPDATE SET source = 'play_import'
+           WHERE customization_grants.source = 'token'
+           RETURNING (xmax = 0) AS "inserted!""#,
         &types,
         &slugs,
     )
-    .execute(&mut **tx)
+    .fetch_all(&mut **tx)
     .await
     .wrap_err("Failed to materialize reconciled play grants")?;
-    Ok(result.rows_affected())
+    let newly_materialized = results.iter().filter(|row| row.inserted).count() as u64;
+    let refunded_token_grants = results.len() as u64 - newly_materialized;
+    Ok((newly_materialized, refunded_token_grants))
 }
 
 pub async fn reconcile_grants(play: &PgPool, arena: &PgPool) -> cja::Result<GrantReconcileCounts> {
@@ -563,7 +571,8 @@ pub async fn reconcile_grants(play: &PgPool, arena: &PgPool) -> cja::Result<Gran
         .await
         .wrap_err("Failed to begin arena grant transaction")?;
     counts.newly_staged += stage_reconcile_grants(&mut arena_tx, &existing_grants).await?;
-    counts.newly_materialized = materialize_reconcile_grants(&mut arena_tx).await?;
+    (counts.newly_materialized, counts.refunded_token_grants) =
+        materialize_reconcile_grants(&mut arena_tx).await?;
     arena_tx
         .commit()
         .await
@@ -864,6 +873,14 @@ mod tests {
         assert_eq!(counts.play_grants_read, 1);
         assert_eq!(counts.newly_staged, 1);
         assert_eq!(counts.newly_materialized, 1);
+        assert_eq!(counts.refunded_token_grants, 0);
+        let source: String = sqlx::query_scalar(
+            "SELECT source FROM customization_grants WHERE user_id = $1 AND customization_type = 'head' AND slug = 'alligator'",
+        )
+        .bind(user)
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(source, "play_import");
         assert!(
             crate::customizations::get_granted_slugs(&pool, user)
                 .await?
@@ -873,6 +890,72 @@ mod tests {
             crate::customizations::resolve_head(&pool, user, "alligator").await?,
             "alligator"
         );
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn reconcile_refunds_only_token_sourced_grants(pool: PgPool) -> cja::Result<()> {
+        create_play_tables(&pool).await?;
+        let mut users = Vec::new();
+        for (index, source) in ["token", "pre_token", "admin", "achievement", "code"]
+            .into_iter()
+            .enumerate()
+        {
+            let number = 50 + index as u32;
+            let account = test_imported_account(&pool, number).await?;
+            let user = test_user(&pool, 15300 + i64::from(number)).await?;
+            claim_account(&pool, account, user)
+                .await?
+                .expect("claim succeeds");
+            sqlx::query("INSERT INTO customization_grants (user_id, customization_type, slug, source) VALUES ($1, 'head', 'alligator', $2)")
+                .bind(user)
+                .bind(source)
+                .execute(&pool)
+                .await?;
+            if source == "token" {
+                sqlx::query("INSERT INTO customization_active_weeks (user_id, week_start) VALUES ($1, '2026-10-05')")
+                    .bind(user)
+                    .execute(&pool)
+                    .await?;
+                assert_eq!(crate::customizations::token_balance(&pool, user).await?, 0);
+            }
+            test_play_grant(
+                &pool,
+                &format!("source_grant_{number}"),
+                &format!("reconcile_account_{number}"),
+                "head",
+                "alligator",
+            )
+            .await?;
+            users.push((user, source));
+        }
+
+        let first = reconcile_grants(&pool, &pool).await?;
+        assert_eq!(first.newly_staged, 5);
+        assert_eq!(first.newly_materialized, 0);
+        assert_eq!(first.refunded_token_grants, 1);
+        for (user, original_source) in &users {
+            let source: String = sqlx::query_scalar("SELECT source FROM customization_grants WHERE user_id = $1 AND customization_type = 'head' AND slug = 'alligator'")
+                .bind(user)
+                .fetch_one(&pool)
+                .await?;
+            assert_eq!(
+                source,
+                if *original_source == "token" {
+                    "play_import"
+                } else {
+                    original_source
+                }
+            );
+        }
+        assert_eq!(
+            crate::customizations::token_balance(&pool, users[0].0).await?,
+            1
+        );
+        let second = reconcile_grants(&pool, &pool).await?;
+        assert_eq!(second.newly_staged, 0);
+        assert_eq!(second.newly_materialized, 0);
+        assert_eq!(second.refunded_token_grants, 0);
         Ok(())
     }
 
@@ -1107,7 +1190,7 @@ mod tests {
         };
         let mut tx = pool.begin().await?;
         assert_eq!(stage_reconcile_grants(&mut tx, &[grant]).await?, 1);
-        assert_eq!(materialize_reconcile_grants(&mut tx).await?, 0);
+        assert_eq!(materialize_reconcile_grants(&mut tx).await?, (0, 0));
         let claim = tokio::time::timeout(
             std::time::Duration::from_secs(5),
             claim_account(&pool, account, user),

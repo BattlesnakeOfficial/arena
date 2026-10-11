@@ -41,6 +41,7 @@ impl Job<AppState> for PlayGrantReconcileJob {
                     play_grants_read = counts.play_grants_read,
                     newly_staged = counts.newly_staged,
                     newly_materialized = counts.newly_materialized,
+                    refunded_token_grants = counts.refunded_token_grants,
                     skipped_off_catalog = counts.skipped_off_catalog,
                     newly_staged_accounts = counts.newly_staged_accounts,
                     skipped_identity_conflict = counts.skipped_identity_conflict,
