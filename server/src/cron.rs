@@ -1,10 +1,14 @@
 use std::time::Duration;
 
-use cja::cron::{CronRegistry, Worker};
+use cja::{
+    cron::{CronRegistry, Worker},
+    jobs::Job as _,
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::jobs::{
-    CustomizationActiveWeekBackfillJob, GameBackupJob, LeaderboardMatchmakerJob, RateLimitPruneJob,
+    BackfillAchievementsJob, CustomizationActiveWeekBackfillJob, GameBackupJob,
+    LeaderboardMatchmakerJob, RateLimitPruneJob, ReconcileRecentAchievementsJob,
     SnakeHealthSweeperJob, StuckGameSweeperJob, StuckMatchSweeperJob,
 };
 use crate::state::AppState;
@@ -27,6 +31,8 @@ pub const SNAKE_HEALTH_SWEEP_INTERVAL_SECS: u64 = 30 * 60;
 /// waiting/running past the configured max age.
 pub const STUCK_GAME_SWEEP_INTERVAL_SECS: u64 = 30 * 60;
 pub const CUSTOMIZATION_ACTIVE_WEEK_BACKFILL_INTERVAL_SECS: u64 = 60 * 60;
+pub const ACHIEVEMENT_BACKFILL_INTERVAL_SECS: u64 = 5 * 60;
+pub const ACHIEVEMENT_RECONCILE_INTERVAL_SECS: u64 = 60 * 60;
 
 pub(crate) fn cron_registry() -> CronRegistry<AppState> {
     let mut registry = CronRegistry::new();
@@ -41,6 +47,18 @@ pub(crate) fn cron_registry() -> CronRegistry<AppState> {
         CustomizationActiveWeekBackfillJob,
         Some("Credit historical finished-game weeks"),
         Duration::from_secs(CUSTOMIZATION_ACTIVE_WEEK_BACKFILL_INTERVAL_SECS),
+    );
+    registry.register(
+        "AchievementBackfillSchedule",
+        Some("Resume historical achievement awards"),
+        Duration::from_secs(ACHIEVEMENT_BACKFILL_INTERVAL_SECS),
+        |app_state, _| Box::pin(backfill_achievements_callback(app_state)),
+    );
+    registry.register(
+        "AchievementReconcileSchedule",
+        Some("Repair recent achievement awards"),
+        Duration::from_secs(ACHIEVEMENT_RECONCILE_INTERVAL_SECS),
+        |app_state, _| Box::pin(reconcile_achievements_callback(app_state)),
     );
 
     // Leaderboard matchmaker: one round per derived interval, subject to worker delay.
@@ -100,6 +118,26 @@ async fn dispatch_ladder_callback(
     {
         tracing::error!(error = %format!("{error:#}"), "Ladder dispatch failed");
     }
+    Ok(())
+}
+
+async fn backfill_achievements_callback(app_state: AppState) -> std::io::Result<()> {
+    BackfillAchievementsJob
+        .enqueue(app_state, "Backfill achievements".to_string(), Some(-10))
+        .await
+        .map_err(|error| std::io::Error::other(format!("{error:#}")))?;
+    Ok(())
+}
+
+async fn reconcile_achievements_callback(app_state: AppState) -> std::io::Result<()> {
+    ReconcileRecentAchievementsJob
+        .enqueue(
+            app_state,
+            "Reconcile recent achievements".to_string(),
+            Some(-10),
+        )
+        .await
+        .map_err(|error| std::io::Error::other(format!("{error:#}")))?;
     Ok(())
 }
 
@@ -179,7 +217,14 @@ mod tests {
         // the job worker, which fails names missing from impl_job_registry!.
         // Job crons enqueue exactly once per interval across schedulers;
         // callback crons take the same claim, so they run at most once.
-        assert_eq!(undispatchable, ["LeaderboardGameDispatch"]);
+        assert_eq!(
+            undispatchable,
+            [
+                "AchievementBackfillSchedule",
+                "AchievementReconcileSchedule",
+                "LeaderboardGameDispatch"
+            ]
+        );
     }
 
     #[test]
@@ -211,6 +256,72 @@ mod tests {
             now,
             cja::chrono_tz::UTC
         ));
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn achievement_schedules_enqueue_background_priority(pool: sqlx::PgPool) {
+        let app = AppState::test_from_pool(pool.clone());
+        let registry = cron_registry();
+        for (name, interval) in [
+            (
+                "AchievementBackfillSchedule",
+                ACHIEVEMENT_BACKFILL_INTERVAL_SECS,
+            ),
+            (
+                "AchievementReconcileSchedule",
+                ACHIEVEMENT_RECONCILE_INTERVAL_SECS,
+            ),
+        ] {
+            let schedule = registry.get(name).expect("achievement schedule registered");
+            let cja::cron::Schedule::Interval(actual) = &schedule.schedule else {
+                panic!("expected interval")
+            };
+            assert_eq!(actual.0, Duration::from_secs(interval));
+        }
+        backfill_achievements_callback(app.clone()).await.unwrap();
+        reconcile_achievements_callback(app.clone()).await.unwrap();
+        crate::jobs::GameRunnerJob {
+            game_id: uuid::Uuid::new_v4(),
+        }
+        .enqueue(app.clone(), "Runner priority".to_string(), None)
+        .await
+        .unwrap();
+        crate::jobs::AwardAchievementsForGameJob {
+            game_id: uuid::Uuid::new_v4(),
+        }
+        .enqueue(app, "Award priority".to_string(), None)
+        .await
+        .unwrap();
+        let rows: Vec<(String, i32)> = sqlx::query_as("SELECT name, priority FROM jobs")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert!(rows.contains(&("BackfillAchievementsJob".to_string(), -10)));
+        assert!(rows.contains(&("ReconcileRecentAchievementsJob".to_string(), -10)));
+        assert!(rows.contains(&("GameRunnerJob".to_string(), 0)));
+        assert!(rows.contains(&("AwardAchievementsForGameJob".to_string(), 0)));
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn next_backfill_schedule_resumes_an_unfinished_page(pool: sqlx::PgPool) {
+        let app = AppState::test_from_pool(pool.clone());
+        for number in 0..27_i64 {
+            sqlx::query("INSERT INTO users (external_github_id, github_login, github_access_token) VALUES ($1, $2, '')")
+                .bind(1644300 + number)
+                .bind(format!("backfill-resume-{number}"))
+                .execute(&pool).await.unwrap();
+        }
+        let page = crate::customizations::achievements::backfill_achievement_page(&pool)
+            .await
+            .unwrap();
+        assert_eq!(page.processed, 25);
+        assert!(!page.complete);
+        backfill_achievements_callback(app.clone()).await.unwrap();
+        BackfillAchievementsJob.run(app).await.unwrap();
+        let completed: bool = sqlx::query_scalar(
+            "SELECT completed_at IS NOT NULL FROM achievement_backfill_cursor WHERE singleton = TRUE"
+        ).fetch_one(&pool).await.unwrap();
+        assert!(completed);
     }
 
     #[tokio::test]

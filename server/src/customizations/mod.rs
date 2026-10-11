@@ -5,6 +5,7 @@
 //! in the type system — exhaustive matches, compile-time slug uniqueness,
 //! no seed migrations. Grants are runtime state and stay in Postgres.
 
+pub mod achievements;
 pub mod catalog;
 
 use color_eyre::eyre::Context as _;
@@ -487,27 +488,33 @@ mod tests {
                 .count(),
             49
         );
-        let hidden: Vec<_> = Head::ALL
+        let special: Vec<_> = Head::ALL
             .iter()
             .map(|item| item.def())
             .chain(Tail::ALL.iter().map(|item| item.def()))
-            .filter(|def| matches!(def.group, Group::SpecialEdition | Group::Collection2024))
+            .filter(|def| def.group == Group::SpecialEdition)
             .collect();
-        assert_eq!(
-            hidden
+        assert_eq!(special.len(), 11);
+        assert!(
+            special
                 .iter()
-                .filter(|def| def.group == Group::SpecialEdition)
-                .count(),
-            11
+                .all(|def| def.group.availability() == Availability::Hidden)
         );
-        assert_eq!(
-            hidden
+        let achievements: Vec<_> = Head::ALL
+            .iter()
+            .map(|item| item.def())
+            .chain(Tail::ALL.iter().map(|item| item.def()))
+            .filter(|def| def.group == Group::Collection2024)
+            .collect();
+        assert_eq!(achievements.len(), 9);
+        assert!(
+            achievements
                 .iter()
-                .filter(|def| def.group == Group::Collection2024)
-                .count(),
-            9
+                .all(|def| def.group.availability() == Availability::Preview
+                    && def.requires_grant
+                    && !def.is_free()
+                    && !def.is_token_unlockable())
         );
-        assert!(hidden.iter().all(|def| !def.is_token_unlockable()));
     }
 
     #[sqlx::test(migrations = "../migrations")]

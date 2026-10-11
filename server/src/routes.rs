@@ -145,6 +145,7 @@ pub fn routes(app_state: AppState) -> axum::Router {
         .route("/auth/cli-token", get(github_auth::cli_token_page))
         // Battlesnake routes
         .route("/customizations", get(customizations::list_customizations))
+        .route("/customizations/redeem", post(customizations::redeem_code))
         .route(
             "/customizations/unlock",
             post(customizations::unlock_customization),
@@ -300,6 +301,11 @@ pub fn routes(app_state: AppState) -> axum::Router {
         )
         // Admin routes
         .route("/admin", get(admin::dashboard))
+        .route(
+            "/admin/codes",
+            get(admin::list_codes).post(admin::create_code),
+        )
+        .route("/admin/codes/{id}/disable", post(admin::disable_code))
         .route("/stats", get(stats::stats_page))
         .route("/admin/moderation", get(admin::moderation_queue))
         // Game API routes for board viewer (with CORS)

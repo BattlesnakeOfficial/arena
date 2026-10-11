@@ -1,6 +1,7 @@
 pub mod api_token;
 pub mod battlesnake;
 pub mod claim_email_token;
+pub mod customization_unlock_code;
 pub mod email_log;
 pub mod flow;
 pub mod game;

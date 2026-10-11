@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT EXISTS (\n            SELECT 1 FROM (\n                SELECT gb.game_id FROM battlesnakes bs\n                JOIN game_battlesnakes gb ON gb.battlesnake_id = bs.battlesnake_id\n                WHERE bs.user_id = $1 AND gb.placement = 1\n                UNION ALL\n                SELECT gb.game_id FROM battlesnakes bs\n                JOIN leaderboard_entries le ON le.battlesnake_id = bs.battlesnake_id\n                JOIN game_battlesnakes gb ON gb.leaderboard_entry_id = le.leaderboard_entry_id\n                WHERE bs.user_id = $1 AND gb.battlesnake_id IS NULL AND gb.placement = 1\n            ) owned\n            JOIN games g ON g.game_id = owned.game_id\n            WHERE g.status = 'finished'\n              AND (NOT $3::bool OR g.game_type = $4)\n              AND (SELECT COUNT(*) FROM game_battlesnakes peer WHERE peer.game_id = owned.game_id) >= $2\n            LIMIT 1\n        ) AS \"exists!\"\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "exists!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int8",
+        "Bool",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "d6d467c02596a28ba8391cbb6495c48dfccebebe4f35f11b9abf22b246924206"
+}

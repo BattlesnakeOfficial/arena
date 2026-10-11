@@ -41,6 +41,61 @@ pub struct GameBackupJob;
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CustomizationActiveWeekBackfillJob;
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AwardAchievementsForGameJob {
+    pub game_id: Uuid,
+}
+
+#[async_trait::async_trait]
+impl Job<AppState> for AwardAchievementsForGameJob {
+    const NAME: &'static str = "AwardAchievementsForGameJob";
+
+    async fn run(&self, app_state: AppState) -> cja::Result<()> {
+        crate::customizations::achievements::award_for_game(&app_state.db, self.game_id).await?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BackfillAchievementsJob;
+
+#[async_trait::async_trait]
+impl Job<AppState> for BackfillAchievementsJob {
+    const NAME: &'static str = "BackfillAchievementsJob";
+
+    async fn run(&self, app_state: AppState) -> cja::Result<()> {
+        let started = std::time::Instant::now();
+        while started.elapsed() < std::time::Duration::from_secs(30) {
+            let page =
+                crate::customizations::achievements::backfill_achievement_page(&app_state.db)
+                    .await?;
+            tracing::info!(
+                inserted = page.inserted,
+                processed = page.processed,
+                complete = page.complete,
+                "Achievement backfill page"
+            );
+            if page.complete || page.processed == 0 {
+                break;
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ReconcileRecentAchievementsJob;
+
+#[async_trait::async_trait]
+impl Job<AppState> for ReconcileRecentAchievementsJob {
+    const NAME: &'static str = "ReconcileRecentAchievementsJob";
+
+    async fn run(&self, app_state: AppState) -> cja::Result<()> {
+        crate::customizations::achievements::reconcile_recent_achievements(&app_state.db).await?;
+        Ok(())
+    }
+}
+
 #[async_trait::async_trait]
 impl Job<AppState> for CustomizationActiveWeekBackfillJob {
     const NAME: &'static str = "CustomizationActiveWeekBackfillJob";
@@ -298,6 +353,9 @@ cja::impl_job_registry!(
     GameRunnerJob,
     GameBackupJob,
     CustomizationActiveWeekBackfillJob,
+    AwardAchievementsForGameJob,
+    BackfillAchievementsJob,
+    ReconcileRecentAchievementsJob,
     BackupSingleGameJob,
     HistoricalBackupDiscoveryJob,
     LeaderboardMatchmakerJob,
