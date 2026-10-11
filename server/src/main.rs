@@ -118,7 +118,12 @@ fn main() -> color_eyre::Result<()> {
 async fn run_application(config: config::AppConfig) -> cja::Result<()> {
     let identity = eyes_subscriber::ProcessIdentity::new(observability::ROLE);
     let eyes_shutdown_handle = if config.gcp_logging {
-        telemetry::setup_gcp_tracing(&config.rust_log, config.eyes.as_ref(), &identity)?
+        telemetry::setup_gcp_tracing(
+            &config.rust_log,
+            config.stdout_log.as_deref(),
+            config.eyes.as_ref(),
+            &identity,
+        )?
     } else {
         TracingConfig::new("arena")
             .process(identity.clone())
