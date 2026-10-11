@@ -991,7 +991,7 @@ mod tests {
         );
         let mut connection = pool.acquire().await?;
         assert_eq!(
-            leaderboard_entry_health::owner_notification_email(&mut *connection, seed.snake_id)
+            leaderboard_entry_health::owner_notification_email(&mut connection, seed.snake_id)
                 .await?,
             None
         );
