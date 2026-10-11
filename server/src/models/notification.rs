@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use color_eyre::eyre::Context as _;
 use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
@@ -41,7 +42,8 @@ pub async fn unread_badge_count(pool: &PgPool, user_id: Uuid) -> cja::Result<i64
         user_id
     )
     .fetch_one(pool)
-    .await?;
+    .await
+    .wrap_err("Failed to count unread notifications")?;
     Ok(count)
 }
 
@@ -68,7 +70,8 @@ pub async fn list_visible(
             before.notification_id
         )
         .fetch_all(pool)
-        .await?
+        .await
+        .wrap_err("Failed to list notifications after cursor")?
     } else {
         sqlx::query_as!(
             NotificationRecord,
@@ -84,7 +87,8 @@ pub async fn list_visible(
             user_id
         )
         .fetch_all(pool)
-        .await?
+        .await
+        .wrap_err("Failed to list notifications")?
     };
     let has_more = items.len() > 20;
     items.truncate(20);
@@ -117,7 +121,8 @@ pub async fn mark_one_read(
         user_id
     )
     .fetch_optional(pool)
-    .await?;
+    .await
+    .wrap_err("Failed to mark notification read")?;
     Ok(row.map(|row| row.link))
 }
 
@@ -127,7 +132,8 @@ pub async fn mark_all_read(pool: &PgPool, user_id: Uuid) -> cja::Result<()> {
         user_id
     )
     .execute(pool)
-    .await?;
+    .await
+    .wrap_err("Failed to mark all notifications read")?;
     Ok(())
 }
 

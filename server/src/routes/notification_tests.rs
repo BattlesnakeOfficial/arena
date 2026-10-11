@@ -105,6 +105,86 @@ fn now() -> DateTime<Utc> {
 }
 
 #[sqlx::test(migrations = "../migrations")]
+async fn empty_and_item_accessible_names(pool: PgPool) {
+    let fx = Fixture::new(pool).await;
+    for path in ["/notifications", "/notifications/drawer"] {
+        let html = fx.get_html(path).await;
+        assert!(html.contains("No notifications yet."));
+        assert!(!html.contains("/notifications/read-all"));
+        assert!(!html.contains("class=\"notification-items\""));
+    }
+    let unread = fx
+        .seed(
+            fx.user_id,
+            "Unread title",
+            "snake_matchmaking_paused",
+            true,
+            None,
+            now(),
+        )
+        .await;
+    let read = fx
+        .seed(
+            fx.user_id,
+            "Read title",
+            "snake_matchmaking_paused",
+            true,
+            None,
+            now(),
+        )
+        .await;
+    sqlx::query("UPDATE notifications SET read_at = now() WHERE notification_id = $1")
+        .bind(read)
+        .execute(&fx.state.db)
+        .await
+        .unwrap();
+    let html = fx.get_html("/notifications/drawer").await;
+    let unread_button = html
+        .split(&format!("/notifications/{unread}/open"))
+        .nth(1)
+        .unwrap()
+        .split("</button>")
+        .next()
+        .unwrap();
+    let read_button = html
+        .split(&format!("/notifications/{read}/open"))
+        .nth(1)
+        .unwrap()
+        .split("</button>")
+        .next()
+        .unwrap();
+    assert!(!unread_button.contains("aria-label="));
+    assert!(!read_button.contains("aria-label="));
+    assert!(unread_button.contains("Open notification: "));
+    assert!(unread_button.contains("Unread. "));
+    assert!(!read_button.contains("Unread. "));
+    assert!(unread_button.contains("aria-hidden=\"true\">New"));
+}
+
+#[sqlx::test(migrations = "../migrations")]
+async fn opening_one_decrements_badge(pool: PgPool) {
+    let fx = Fixture::new(pool).await;
+    let id = fx
+        .seed(
+            fx.user_id,
+            "One",
+            "snake_matchmaking_paused",
+            true,
+            Some("/me"),
+            now(),
+        )
+        .await;
+    assert_eq!(fx.badge().await, 1);
+    assert_eq!(
+        fx.request("POST", &format!("/notifications/{id}/open"), true, "")
+            .await
+            .status(),
+        StatusCode::SEE_OTHER
+    );
+    assert_eq!(fx.badge().await, 0);
+}
+
+#[sqlx::test(migrations = "../migrations")]
 async fn bell_count_and_guest_access(pool: PgPool) {
     let fx = Fixture::new(pool).await;
     let guest = fx.request("GET", "/", false, "").await;
@@ -114,6 +194,7 @@ async fn bell_count_and_guest_access(pool: PgPool) {
         "/notifications",
         "/notifications/drawer",
         "/notifications/count",
+        "/notifications/more",
     ] {
         assert_eq!(
             fx.request("GET", path, false, "").await.status(),
@@ -138,10 +219,38 @@ async fn bell_count_and_guest_access(pool: PgPool) {
         assert_eq!(fx.badge().await, count.min(10));
         if count == 1 || count == 9 {
             let page = fx.get_html("/notifications").await;
-            assert!(page.contains(&format!("{count} unread notifications")));
+            let label = if count == 1 {
+                "1 unread notification".to_string()
+            } else {
+                format!("{count} unread notifications")
+            };
+            assert!(page.contains(&format!("aria-label=\"{label}\"")));
             assert!(page.contains(&format!(">{count}</span>")));
         }
     }
+    let real_id: Uuid =
+        sqlx::query_scalar("SELECT notification_id FROM notifications WHERE user_id = $1 LIMIT 1")
+            .bind(fx.user_id)
+            .fetch_one(&fx.state.db)
+            .await
+            .unwrap();
+    for path in [
+        format!("/notifications/{real_id}/open"),
+        "/notifications/read-all".to_string(),
+    ] {
+        assert_eq!(
+            fx.request("POST", &path, false, "").await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    let unchanged: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM notifications WHERE user_id = $1 AND read_at IS NOT NULL",
+    )
+    .bind(fx.user_id)
+    .fetch_one(&fx.state.db)
+    .await
+    .unwrap();
+    assert_eq!(unchanged, 0);
     let page = fx.get_html("/notifications").await;
     assert!(page.contains("9 or more unread notifications"));
     assert!(page.contains(">9+</span>"));
@@ -176,6 +285,18 @@ async fn pagination_and_no_js_actions(pool: PgPool) {
             base,
         )
         .await;
+    sqlx::query("INSERT INTO notification_preferences (user_id, kind, channel, enabled) VALUES ($1, 'snake_matchmaking_resumed', 'in_app', false)")
+        .bind(fx.user_id).execute(&fx.state.db).await.unwrap();
+    let disabled = fx
+        .seed(
+            fx.user_id,
+            "Preference hidden",
+            "snake_matchmaking_resumed",
+            true,
+            None,
+            base,
+        )
+        .await;
     let foreign = fx
         .seed(
             fx.other_id,
@@ -191,6 +312,8 @@ async fn pagination_and_no_js_actions(pool: PgPool) {
         page.matches("class=\"notification-item unread\"").count(),
         20
     );
+    assert!(!page.contains("Preference hidden"));
+    assert!(!page.contains(&format!("/notifications/{disabled}/open")));
     let mut expected: Vec<_> = ids
         .iter()
         .enumerate()
@@ -214,6 +337,7 @@ async fn pagination_and_no_js_actions(pool: PgPool) {
         .replace("&amp;", "&");
     assert!(href.contains("before_id="));
     let drawer = fx.get_html("/notifications/drawer").await;
+    assert!(!drawer.contains("Preference hidden"));
     assert!(drawer.contains("data-before-id="));
     let before = drawer
         .split("data-before=\"")
@@ -238,6 +362,7 @@ async fn pagination_and_no_js_actions(pool: PgPool) {
         more.matches("class=\"notification-item unread\"").count(),
         2
     );
+    assert!(!more.contains("Preference hidden"));
     fx.seed(
         fx.user_id,
         "Newer",
@@ -252,6 +377,7 @@ async fn pagination_and_no_js_actions(pool: PgPool) {
         next.matches("class=\"notification-item unread\"").count(),
         2
     );
+    assert!(!next.contains("Preference hidden"));
     assert!(!next.contains("Newer"));
     for (_, id) in &expected[..20] {
         assert!(!next.contains(&format!("/notifications/{id}/open")));
@@ -259,6 +385,31 @@ async fn pagination_and_no_js_actions(pool: PgPool) {
     for (_, id) in &expected[20..] {
         assert!(next.contains(&format!("/notifications/{id}/open")));
     }
+    let oldest = expected.last().unwrap().1;
+    let oldest_at: DateTime<Utc> =
+        sqlx::query_scalar("SELECT created_at FROM notifications WHERE notification_id = $1")
+            .bind(oldest)
+            .fetch_one(&fx.state.db)
+            .await
+            .unwrap();
+    let exhausted_query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair(
+            "before",
+            &oldest_at.to_rfc3339_opts(chrono::SecondsFormat::Micros, true),
+        )
+        .append_pair("before_id", &oldest.to_string())
+        .finish();
+    let exhausted_page = fx
+        .get_html(&format!("/notifications?{exhausted_query}"))
+        .await;
+    assert!(exhausted_page.contains("No older notifications."));
+    assert!(exhausted_page.contains("href=\"/notifications\""));
+    let exhausted_more = fx
+        .get_html(&format!("/notifications/more?{exhausted_query}"))
+        .await;
+    assert!(exhausted_more.contains("class=\"notification-batch\""));
+    assert!(!exhausted_more.contains("<li class=\"notification-item"));
+    assert!(!exhausted_more.contains("notification-load-more"));
     for path in [
         "/notifications?before=2026-01-01T00%3A00%3A00Z",
         "/notifications/more?before_id=bad",
@@ -276,7 +427,9 @@ async fn pagination_and_no_js_actions(pool: PgPool) {
     .fetch_one(&fx.state.db)
     .await
     .unwrap();
-    assert_eq!(unread, 24);
+    assert_eq!(unread, 25);
+    let before_open: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM notifications WHERE user_id = $1 AND in_app_visible AND read_at IS NULL AND kind = 'snake_matchmaking_paused'")
+        .bind(fx.user_id).fetch_one(&fx.state.db).await.unwrap();
     let response = fx
         .request("POST", &format!("/notifications/{}/open", ids[0]), true, "")
         .await;
@@ -289,6 +442,9 @@ async fn pagination_and_no_js_actions(pool: PgPool) {
             .await
             .unwrap();
     assert!(first_read.is_some());
+    let after_open: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM notifications WHERE user_id = $1 AND in_app_visible AND read_at IS NULL AND kind = 'snake_matchmaking_paused'")
+        .bind(fx.user_id).fetch_one(&fx.state.db).await.unwrap();
+    assert_eq!(after_open, before_open - 1);
     fx.request("POST", &format!("/notifications/{}/open", ids[0]), true, "")
         .await;
     let second_read: Option<DateTime<Utc>> =
@@ -298,13 +454,22 @@ async fn pagination_and_no_js_actions(pool: PgPool) {
             .await
             .unwrap();
     assert_eq!(first_read, second_read);
-    for id in [foreign, hidden] {
+    for id in [foreign, hidden, disabled] {
         assert_eq!(
             fx.request("POST", &format!("/notifications/{id}/open"), true, "")
                 .await
                 .status(),
             StatusCode::NOT_FOUND
         );
+    }
+    for id in [hidden, disabled] {
+        let read_at: Option<DateTime<Utc>> =
+            sqlx::query_scalar("SELECT read_at FROM notifications WHERE notification_id = $1")
+                .bind(id)
+                .fetch_one(&fx.state.db)
+                .await
+                .unwrap();
+        assert!(read_at.is_none());
     }
     assert_eq!(
         fx.request("POST", "/notifications/not-a-uuid/open", true, "")
@@ -332,6 +497,21 @@ async fn pagination_and_no_js_actions(pool: PgPool) {
             .await
             .unwrap();
     assert!(hidden_read.is_some());
+    let disabled_read: Option<DateTime<Utc>> =
+        sqlx::query_scalar("SELECT read_at FROM notifications WHERE notification_id = $1")
+            .bind(disabled)
+            .fetch_one(&fx.state.db)
+            .await
+            .unwrap();
+    assert!(disabled_read.is_some());
+    fx.request(
+        "POST",
+        "/settings/notifications",
+        true,
+        "kind=snake_matchmaking_resumed&channel=in_app&enabled=true",
+    )
+    .await;
+    assert_eq!(fx.badge().await, 0);
 }
 
 #[sqlx::test(migrations = "../migrations")]
@@ -424,6 +604,29 @@ async fn current_preference_filters_every_surface(pool: PgPool) {
             now(),
         )
         .await;
+    fx.seed(
+        fx.user_id,
+        "Still unread",
+        "snake_matchmaking_paused",
+        true,
+        None,
+        now(),
+    )
+    .await;
+    assert_eq!(fx.badge().await, 2);
+    assert_eq!(
+        fx.request("POST", &format!("/notifications/{id}/open"), true, "")
+            .await
+            .status(),
+        StatusCode::SEE_OTHER
+    );
+    let first_read: Option<DateTime<Utc>> =
+        sqlx::query_scalar("SELECT read_at FROM notifications WHERE notification_id = $1")
+            .bind(id)
+            .fetch_one(&fx.state.db)
+            .await
+            .unwrap();
+    assert!(first_read.is_some());
     assert_eq!(fx.badge().await, 1);
     let response = fx
         .request(
@@ -445,12 +648,20 @@ async fn current_preference_filters_every_surface(pool: PgPool) {
             .await
             .contains("Toggleable notice")
     );
+    assert!(!fx.get_html("/notifications").await.contains("Still unread"));
     assert_eq!(
         fx.request("POST", &format!("/notifications/{id}/open"), true, "")
             .await
             .status(),
         StatusCode::NOT_FOUND
     );
+    let while_disabled: Option<DateTime<Utc>> =
+        sqlx::query_scalar("SELECT read_at FROM notifications WHERE notification_id = $1")
+            .bind(id)
+            .fetch_one(&fx.state.db)
+            .await
+            .unwrap();
+    assert_eq!(while_disabled, first_read);
     let snapshot_hidden = notifications::record(
         &fx.state.db,
         NewNotification {
@@ -483,6 +694,13 @@ async fn current_preference_filters_every_surface(pool: PgPool) {
     let page = fx.get_html("/notifications").await;
     assert!(page.contains("Toggleable notice"));
     assert!(!page.contains("Recorded while off"));
+    let after_enable: Option<DateTime<Utc>> =
+        sqlx::query_scalar("SELECT read_at FROM notifications WHERE notification_id = $1")
+            .bind(id)
+            .fetch_one(&fx.state.db)
+            .await
+            .unwrap();
+    assert_eq!(after_enable, first_read);
     assert_eq!(
         fx.request(
             "POST",

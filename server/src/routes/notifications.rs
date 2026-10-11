@@ -6,6 +6,7 @@ use axum::{
 };
 use chrono::{DateTime, SecondsFormat, Utc};
 use chrono_humanize::HumanTime;
+use color_eyre::eyre::Context as _;
 use maud::{Markup, html};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -81,7 +82,9 @@ pub async fn count(
     State(state): State<AppState>,
     CurrentUser(user): CurrentUser,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
-    let count = notification::unread_badge_count(&state.db, user.user_id).await?;
+    let count = notification::unread_badge_count(&state.db, user.user_id)
+        .await
+        .wrap_err("Failed to count unread notifications")?;
     Ok((no_store(), Json(BadgeCount { count })))
 }
 
@@ -97,12 +100,23 @@ pub async fn page(
             status,
         )
     })?;
-    let list = notification::list_visible(&state.db, user.user_id, before).await?;
+    let list = notification::list_visible(&state.db, user.user_id, before)
+        .await
+        .wrap_err("Failed to list notifications")?;
     let content = html! {
         section class="notifications-page" {
             h1 { "Notifications" }
-            (mark_all_form())
-            (items(&list.items))
+            @if list.items.is_empty() {
+                @if before.is_some() {
+                    p class="notification-empty" { "No older notifications." }
+                    a href="/notifications" { "Back to notifications" }
+                } @else {
+                    p class="notification-empty" { "No notifications yet." }
+                }
+            } @else {
+                (mark_all_form())
+                (items(&list.items))
+            }
             @if let Some(next) = list.next {
                 a class="notification-next" href=(cursor_href(next)) { "Next page" }
             }
@@ -115,8 +129,19 @@ pub async fn drawer(
     State(state): State<AppState>,
     CurrentUser(user): CurrentUser,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
-    let list = notification::list_visible(&state.db, user.user_id, None).await?;
-    Ok((no_store(), html! { (mark_all_form()) (batch(&list)) }))
+    let list = notification::list_visible(&state.db, user.user_id, None)
+        .await
+        .wrap_err("Failed to list notifications")?;
+    Ok((
+        no_store(),
+        html! {
+            @if list.items.is_empty() {
+                p class="notification-empty" { "No notifications yet." }
+            } @else {
+                (mark_all_form()) (batch(&list))
+            }
+        },
+    ))
 }
 
 pub async fn more(
@@ -130,7 +155,9 @@ pub async fn more(
             status,
         )
     })?;
-    let list = notification::list_visible(&state.db, user.user_id, before).await?;
+    let list = notification::list_visible(&state.db, user.user_id, before)
+        .await
+        .wrap_err("Failed to list notifications")?;
     Ok((no_store(), batch(&list)))
 }
 
@@ -145,7 +172,10 @@ pub async fn open(
             StatusCode::NOT_FOUND,
         )
     })?;
-    let Some(link) = notification::mark_one_read(&state.db, user.user_id, id).await? else {
+    let Some(link) = notification::mark_one_read(&state.db, user.user_id, id)
+        .await
+        .wrap_err("Failed to mark notification read")?
+    else {
         return Ok(StatusCode::NOT_FOUND.into_response());
     };
     let target = link
@@ -159,7 +189,9 @@ pub async fn read_all(
     State(state): State<AppState>,
     CurrentUser(user): CurrentUser,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
-    notification::mark_all_read(&state.db, user.user_id).await?;
+    notification::mark_all_read(&state.db, user.user_id)
+        .await
+        .wrap_err("Failed to mark all notifications read")?;
     Ok(Redirect::to("/notifications"))
 }
 
@@ -205,7 +237,9 @@ fn item_markup(item: &NotificationRecord) -> Markup {
     html! {
         li class=(if item.read_at.is_none() { "notification-item unread" } else { "notification-item" }) {
             form action=(format!("/notifications/{}/open", item.notification_id)) method="post" {
-                button type="submit" aria-label=(format!("Open notification: {}", item.title)) {
+                button type="submit" {
+                    span class="visually-hidden" { "Open notification: " }
+                    @if item.read_at.is_none() { span class="visually-hidden notification-unread-label" { "Unread. " } }
                     span class="notification-kind-icon" aria-hidden="true" { (icon) }
                     span class="notification-item-copy" {
                         span class="notification-item-title" { (item.title) }
@@ -214,7 +248,7 @@ fn item_markup(item: &NotificationRecord) -> Markup {
                             (HumanTime::from(item.created_at).to_string())
                         }
                     }
-                    @if item.read_at.is_none() { span class="notification-unread-marker" aria-label="Unread" { "New" } }
+                    @if item.read_at.is_none() { span class="notification-unread-marker" aria-hidden="true" { "New" } }
                 }
             }
         }

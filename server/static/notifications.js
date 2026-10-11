@@ -6,7 +6,7 @@
   const badge = bell.querySelector('.notification-badge');
   const updateBadge = (count) => {
     if (!Number.isInteger(count) || count < 0 || count > 10) return;
-    const label = count >= 10 ? '9 or more unread notifications' : `${count} unread notifications`;
+    const label = count >= 10 ? '9 or more unread notifications' : count === 1 ? '1 unread notification' : `${count} unread notifications`;
     const shown = count >= 10 ? '9+' : String(count);
     if (bell.getAttribute('aria-label') !== label) bell.setAttribute('aria-label', label);
     if (badge.textContent.trim() !== shown) badge.textContent = shown;
@@ -74,6 +74,7 @@
     }
   }
   bell.addEventListener('click', (event) => {
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) return;
     event.preventDefault();
     dialog.showModal();
     close.focus();
@@ -97,6 +98,7 @@
       const list = content.querySelector('.notification-items');
       list.append(...batch.querySelectorAll('.notification-items > li'));
       button.replaceWith(...batch.querySelectorAll('.notification-load-more'));
+      status.textContent = '';
     } catch {
       button.disabled = false;
       status.textContent = 'Could not load more notifications. Try again.';
@@ -117,6 +119,7 @@
       content.querySelectorAll('.notification-item.unread').forEach((item) => {
         item.classList.remove('unread');
         item.querySelector('.notification-unread-marker')?.remove();
+        item.querySelector('.notification-unread-label')?.remove();
       });
       refreshBadge();
       status.textContent = '';

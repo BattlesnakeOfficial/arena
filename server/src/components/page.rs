@@ -245,11 +245,11 @@ impl Page {
                 @if let Some(user) = &self.user {
                     @let count = self.unread_count.unwrap_or(0);
                     a #notification-bell class="notification-bell" href="/notifications"
-                        aria-label=(if count >= 10 { "9 or more unread notifications".to_string() } else { format!("{count} unread notifications") }) {
+                        aria-label=(if count >= 10 { "9 or more unread notifications".to_string() } else if count == 1 { "1 unread notification".to_string() } else { format!("{count} unread notifications") }) {
                         svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true" {
                             path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4" {}
                         }
-                        span class="notification-badge" hidden[count == 0] aria-live="polite" {
+                        span class="notification-badge" hidden[count == 0] {
                             @if count >= 10 { "9+" } @else { (count) }
                         }
                     }

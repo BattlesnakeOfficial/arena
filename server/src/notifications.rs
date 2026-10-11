@@ -140,6 +140,14 @@ pub struct RecordResult {
     pub kind: NotificationKind,
 }
 
+impl RecordResult {
+    pub fn log_enqueued(&self) {
+        if let Some(job_id) = self.job_id {
+            tracing::info!(event_type = "job_enqueued", %job_id, name = SendNotificationEmailJob::NAME, context = %format!("notification:{}", self.kind.key()), "Notification email job enqueued");
+        }
+    }
+}
+
 /// Accept only paths within this site as notification targets.
 pub fn valid_local_link(link: &str) -> bool {
     link.starts_with('/')
@@ -147,13 +155,6 @@ pub fn valid_local_link(link: &str) -> bool {
         && !link
             .chars()
             .any(|character| character == '\\' || character.is_ascii_control())
-}
-impl RecordResult {
-    pub fn log_enqueued(&self) {
-        if let Some(job_id) = self.job_id {
-            tracing::info!(event_type = "job_enqueued", %job_id, name = SendNotificationEmailJob::NAME, context = %format!("notification:{}", self.kind.key()), "Notification email job enqueued");
-        }
-    }
 }
 
 pub async fn record_in_tx(

@@ -88,7 +88,7 @@ impl FromRequestParts<AppState> for PageFactory {
             match notification::unread_badge_count(&state.db, user.user_id).await {
                 Ok(count) => Some(count),
                 Err(error) => {
-                    tracing::error!(user_id = %user.user_id, error = %error, "Notification badge count failed");
+                    tracing::error!(user_id = %user.user_id, error = ?error, "Notification badge count failed");
                     return Err(StatusCode::INTERNAL_SERVER_ERROR.into_response());
                 }
             }
