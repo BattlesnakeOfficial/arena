@@ -184,16 +184,14 @@ async fn distinct_finished_count(
     cap: i64,
     ladder_wins: bool,
 ) -> cja::Result<i64> {
-    // Deduplicate via the per-snake/per-entry indexes before probing games; the
-    // indexed participant rows are cheap, while each games lookup is costly.
-    // Both achievements require the owner's own ladder participant row.
-    // The CASE keeps Judge's peer probe beneath the finished-game lookup;
-    // without it PostgreSQL can run the peer subquery before joining games.
+    // Deduplicate via the per-snake/per-entry indexes. The indexed set of
+    // non-finished games is small; subtracting it avoids thousands of cold
+    // games_pkey lookups for an owner near the threshold. Both achievements
+    // require the owner's own ladder participant row.
     let count = sqlx::query_scalar!(
         r#"
-        SELECT COUNT(*)::bigint AS "count!" FROM (
-            SELECT 1 FROM (
-                SELECT DISTINCT owned.game_id FROM (
+        WITH distinct_games AS MATERIALIZED (
+            SELECT DISTINCT owned.game_id FROM (
                 SELECT gb.game_id FROM battlesnakes bs
                 JOIN game_battlesnakes gb ON gb.battlesnake_id = bs.battlesnake_id
                 WHERE bs.user_id = $1 AND gb.leaderboard_entry_id IS NOT NULL
@@ -204,14 +202,23 @@ async fn distinct_finished_count(
                 JOIN game_battlesnakes gb ON gb.leaderboard_entry_id = le.leaderboard_entry_id
                 WHERE bs.user_id = $1 AND gb.battlesnake_id IS NULL
                   AND (NOT $3::bool OR gb.placement = 1)
-                ) owned
-            ) distinct_games
-            JOIN games g ON g.game_id = distinct_games.game_id
-            WHERE g.status = 'finished'
-              AND CASE WHEN g.status = 'finished' THEN
-                  (NOT $3::bool OR (SELECT COUNT(*) FROM game_battlesnakes peer
-                      WHERE peer.game_id = distinct_games.game_id) >= 2)
-                  ELSE FALSE END
+            ) owned
+        ), nonfinished AS MATERIALIZED (
+            -- status is NOT NULL; two ranges use games_status_idx instead of
+            -- scanning the 5M-row games table for status <> 'finished'.
+            SELECT game_id FROM games
+            WHERE status < 'finished' OR status > 'finished'
+        ), finished_games AS MATERIALIZED (
+            SELECT d.game_id FROM distinct_games d
+            LEFT JOIN nonfinished nf ON nf.game_id = d.game_id
+            WHERE nf.game_id IS NULL
+        )
+        SELECT COUNT(*)::bigint AS "count!" FROM (
+            SELECT 1 FROM finished_games fg
+            -- The materialized finished set keeps Judge's peer probe after
+            -- the status check; see the DEV-1663 production EXPLAIN.
+            WHERE NOT $3::bool OR (SELECT COUNT(*) FROM game_battlesnakes peer
+                WHERE peer.game_id = fg.game_id) >= 2
             LIMIT $2
         ) qualifying
         "#,
@@ -813,7 +820,13 @@ mod tests {
         let a = snake(&pool, owner, "winner").await;
         let b = snake(&pool, opponent, "opponent").await;
         let a_entry = entry(&pool, a).await;
-        seed_games(&pool, a, Some(a_entry), Some(b), 999, 1, "finished").await;
+        seed_games(&pool, a, Some(a_entry), Some(b), 998, 1, "finished").await;
+        let win_999 = game(&pool, "Standard", "finished", None).await;
+        participant(&pool, win_999, a, 1, Some(a_entry)).await;
+        participant(&pool, win_999, b, 2, None).await;
+        assert_eq!(award_for_game(&pool, win_999).await.unwrap(), 1);
+        assert!(!has(&grants(&pool, owner).await, Head::KIND, "judge"));
+        assert!(!has(&grants(&pool, owner).await, Tail::KIND, "judge"));
         seed_games(&pool, a, Some(a_entry), None, 1, 1, "finished").await;
         seed_games(&pool, a, None, Some(b), 1, 1, "finished").await;
         let dirty = game(&pool, "Standard", "waiting", None).await;
@@ -838,7 +851,7 @@ mod tests {
         let other_owned = snake(&pool, owner, "ladder loss").await;
         let other_entry = entry(&pool, other_owned).await;
         participant(&pool, mixed, other_owned, 2, Some(other_entry)).await;
-        assert_eq!(award_for_game(&pool, mixed).await.unwrap(), 1);
+        assert_eq!(award_for_game(&pool, mixed).await.unwrap(), 0);
         assert!(!has(&grants(&pool, owner).await, Head::KIND, "judge"));
         let win = game(&pool, "Standard", "finished", None).await;
         participant(&pool, win, a, 1, Some(a_entry)).await;
