@@ -198,12 +198,6 @@ pub async fn github_auth_callback(
             grants = summary.grants_created,
             "play account auto-claimed via GitHub link"
         );
-        // Notify the play email that the account was claimed. Best-effort.
-        state.mailer.notify_account_claimed(
-            &state.db,
-            state.config.email_per_recipient_hourly_limit,
-            summary,
-        );
         state
             .discord
             .notify_account_claimed(&summary.username, summary.snakes_created);

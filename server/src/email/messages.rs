@@ -10,6 +10,23 @@ pub struct EmailMessage {
     pub to: String,
     pub subject: String,
     pub text: String,
+    pub list_unsubscribe: Option<String>,
+}
+
+impl EmailMessage {
+    pub fn form_fields<'a>(&'a self, from: &'a str) -> Vec<(&'static str, &'a str)> {
+        let mut fields = vec![
+            ("from", from),
+            ("to", self.to.as_str()),
+            ("subject", self.subject.as_str()),
+            ("text", self.text.as_str()),
+        ];
+        if let Some(url) = &self.list_unsubscribe {
+            fields.push(("h:List-Unsubscribe", url));
+            fields.push(("h:List-Unsubscribe-Post", "List-Unsubscribe=One-Click"));
+        }
+        fields
+    }
 }
 
 /// Sent to a play account's email when that account is claimed on arena
@@ -42,6 +59,7 @@ pub fn account_claimed(
         to: to_email.to_string(),
         subject: "Your Battlesnake account was claimed".to_string(),
         text,
+        list_unsubscribe: None,
     }
 }
 
@@ -50,12 +68,11 @@ pub fn account_claimed(
 /// Mirrors play's arena_matchmaking_deactivated notice: says what happened,
 /// where, why, and how to get back in. `pulled` is `(leaderboard, most recent
 /// problem)` per leaderboard, in the order to list them.
-pub fn matchmaking_deactivated(
-    to_email: &str,
+pub fn matchmaking_deactivated_content(
     snake_name: &str,
     pulled: &[(String, String)],
     profile_url: &str,
-) -> EmailMessage {
+) -> (String, String) {
     let where_ = if pulled.len() == 1 {
         "this Arena leaderboard"
     } else {
@@ -91,23 +108,21 @@ pub fn matchmaking_deactivated(
          — Battlesnake Arena\n"
     );
 
-    EmailMessage {
-        to: to_email.to_string(),
-        subject: format!("{snake_name} was paused from Arena matchmaking"),
+    (
+        format!("{snake_name} was paused from Arena matchmaking"),
         text,
-    }
+    )
 }
 
 /// Sent when the health sweeper puts a snake's previously paused entries
 /// back into matchmaking on its own, after enough consecutive healthy
-/// probes. Closes the loop on [`matchmaking_deactivated`] so the owner isn't
+/// probes. Closes the loop on [`matchmaking_deactivated_content`] so the owner isn't
 /// left thinking they still need to press Resume.
-pub fn matchmaking_reactivated(
-    to_email: &str,
+pub fn matchmaking_reactivated_content(
     snake_name: &str,
     leaderboards: &[String],
     profile_url: &str,
-) -> EmailMessage {
+) -> (String, String) {
     let leaderboards = leaderboards.join(", ");
     let text = format!(
         "Hi,\n\
@@ -123,11 +138,7 @@ pub fn matchmaking_reactivated(
          — Battlesnake Arena\n"
     );
 
-    EmailMessage {
-        to: to_email.to_string(),
-        subject: format!("{snake_name} is back in Arena matchmaking"),
-        text,
-    }
+    (format!("{snake_name} is back in Arena matchmaking"), text)
 }
 
 /// The email-recovery claim link (BS-7e38): sent to a play account's
@@ -158,6 +169,7 @@ pub fn claim_verification(to_email: &str, play_username: &str, verify_url: &str)
         to: to_email.to_string(),
         subject: "Finish claiming your Battlesnake account".to_string(),
         text,
+        list_unsubscribe: None,
     }
 }
 
@@ -167,8 +179,7 @@ mod tests {
 
     #[test]
     fn matchmaking_deactivated_renders_snake_and_recovery_link() {
-        let msg = matchmaking_deactivated(
-            "owner@example.com",
+        let (subject, text) = matchmaking_deactivated_content(
             "Hissy",
             &[(
                 "Royale 11x11".to_string(),
@@ -176,23 +187,18 @@ mod tests {
             )],
             "https://arena.example.com/battlesnakes/abc/profile",
         );
-        assert_eq!(msg.to, "owner@example.com");
-        assert_eq!(msg.subject, "Hissy was paused from Arena matchmaking");
-        assert!(msg.text.contains("\"Hissy\""));
-        assert!(msg.text.contains("on this Arena leaderboard because"));
-        assert!(msg.text.contains(
+        assert_eq!(subject, "Hissy was paused from Arena matchmaking");
+        assert!(text.contains("\"Hissy\""));
+        assert!(text.contains("on this Arena leaderboard because"));
+        assert!(text.contains(
             "- Royale 11x11: POST /move (turn 0): Returned non-success HTTP status 500\n"
         ));
-        assert!(
-            msg.text
-                .contains("https://arena.example.com/battlesnakes/abc/profile")
-        );
+        assert!(text.contains("https://arena.example.com/battlesnakes/abc/profile"));
     }
 
     #[test]
     fn matchmaking_deactivated_lists_every_pulled_leaderboard() {
-        let msg = matchmaking_deactivated(
-            "owner@example.com",
+        let (_subject, text) = matchmaking_deactivated_content(
             "Hissy",
             &[
                 ("Royale 11x11".to_string(), "boom".to_string()),
@@ -200,32 +206,21 @@ mod tests {
             ],
             "https://arena.example.com/battlesnakes/abc/profile",
         );
-        assert!(msg.text.contains("on these Arena leaderboards because"));
-        assert!(
-            msg.text
-                .contains("- Royale 11x11: boom\n- Constrictor 11x11: bang\n")
-        );
+        assert!(text.contains("on these Arena leaderboards because"));
+        assert!(text.contains("- Royale 11x11: boom\n- Constrictor 11x11: bang\n"));
     }
 
     #[test]
     fn matchmaking_reactivated_renders_snake_and_profile_link() {
-        let msg = matchmaking_reactivated(
-            "owner@example.com",
+        let (subject, text) = matchmaking_reactivated_content(
             "Hissy",
             &["Royale 11x11".to_string(), "Duels 11x11".to_string()],
             "https://arena.example.com/battlesnakes/abc/profile",
         );
-        assert_eq!(msg.to, "owner@example.com");
-        assert_eq!(msg.subject, "Hissy is back in Arena matchmaking");
-        assert!(msg.text.contains("\"Hissy\""));
-        assert!(
-            msg.text
-                .contains("automatically on: Royale 11x11, Duels 11x11.")
-        );
-        assert!(
-            msg.text
-                .contains("https://arena.example.com/battlesnakes/abc/profile")
-        );
+        assert_eq!(subject, "Hissy is back in Arena matchmaking");
+        assert!(text.contains("\"Hissy\""));
+        assert!(text.contains("automatically on: Royale 11x11, Duels 11x11."));
+        assert!(text.contains("https://arena.example.com/battlesnakes/abc/profile"));
     }
 
     #[test]

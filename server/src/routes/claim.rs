@@ -263,13 +263,6 @@ pub async fn submit_claim(
         "play account claimed via password"
     );
 
-    // Notify the play email that the account was claimed — a security signal
-    // for the real owner if a claim wasn't theirs. Best-effort.
-    state.mailer.notify_account_claimed(
-        &state.db,
-        state.config.email_per_recipient_hourly_limit,
-        &summary,
-    );
     state
         .discord
         .notify_account_claimed(&summary.username, summary.snakes_created);
@@ -407,28 +400,25 @@ pub async fn submit_email_claim(
         .or_else(|| candidates.first());
 
     if let Some(account) = target {
-        let secret =
-            claim_email_token::create(&state.db, account.imported_account_id, user.user_id)
-                .await
-                .wrap_err("Failed to create claim token")?;
-
-        let verify_url = format!(
-            "{}/claim/email/verify?token={}",
-            state.config.base_url, secret
-        );
-
-        // Fire-and-forget, like every other notification — and load-bearing
-        // here: awaiting the Mailgun call would make a matching email
-        // measurably slower than a miss (and turn a transport error into a
-        // 500 only matches can produce), handing back exactly the
-        // enumeration oracle the uniform response below exists to prevent.
-        state.mailer.notify_claim_verification(
-            &state.db,
-            state.config.email_per_recipient_hourly_limit,
-            &account.email,
-            &account.username,
-            &verify_url,
-        );
+        let event = crate::notifications::NewNotification {
+            user_id: user.user_id,
+            kind: crate::notifications::NotificationKind::ClaimVerification,
+            title: "Finish claiming your Battlesnake account".to_string(),
+            body: format!("Claim verification requested for {}.", account.username),
+            link: None,
+            email: Some(crate::notifications::NewEmail {
+                subject: None,
+                text: None,
+                recipient: crate::notifications::EmailRecipient::Override(account.email.clone()),
+                claim_imported_account_id: Some(account.imported_account_id),
+            }),
+        };
+        if let Err(error) = crate::notifications::record(&state.db, event).await {
+            tracing::error!(
+                error = format!("{error:#}"),
+                "Failed to record claim verification notification"
+            );
+        }
 
         tracing::info!(
             event_type = "email_claim_link_requested",
@@ -553,12 +543,6 @@ pub async fn complete_email_claim(
         "play account claimed via email link"
     );
 
-    // Same security signal as the other claim paths.
-    state.mailer.notify_account_claimed(
-        &state.db,
-        state.config.email_per_recipient_hourly_limit,
-        &summary,
-    );
     state
         .discord
         .notify_account_claimed(&summary.username, summary.snakes_created);
@@ -578,9 +562,11 @@ mod tests {
         body::{Body, to_bytes},
         http::{Method, Request, StatusCode, header},
     };
+    use sqlx::PgPool;
     use tower::ServiceExt as _;
 
     use crate::{
+        models::claim_email_token,
         routes::test_support::{create_user_session, session_user_id, signed_session_cookie},
         state::AppState,
     };
@@ -611,6 +597,158 @@ mod tests {
             .oneshot(builder.body(Body::empty()).unwrap())
             .await
             .unwrap()
+    }
+
+    async fn post_form(
+        app: &axum::Router,
+        path: &str,
+        cookie: &str,
+        form: &str,
+    ) -> axum::response::Response {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(path)
+                    .header(
+                        header::COOKIE,
+                        format!("{}={cookie}", crate::models::session::SESSION_COOKIE_NAME),
+                    )
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from(form.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    async fn seed_play_account(pool: &PgPool, suffix: i32) -> cja::Result<uuid::Uuid> {
+        let id = sqlx::query_scalar::<_, uuid::Uuid>(
+            "INSERT INTO imported_accounts (play_user_id, play_account_id, email, username, password_hash, is_email_verified)
+             VALUES ($1, $2, $3, $4, $5, true) RETURNING imported_account_id",
+        )
+        .bind(format!("claim-route-user-{suffix}"))
+        .bind(format!("claim-route-account-{suffix}"))
+        .bind(format!("play-{suffix}@example.com"))
+        .bind(format!("play-{suffix}"))
+        .bind("pbkdf2_sha256$260000$saltysalt$fdr4GEVFxx0kLHYGvrnFQUyTekgaAA8DbWRR6Z+A7/A=")
+        .fetch_one(pool)
+        .await?;
+        Ok(id)
+    }
+
+    async fn assert_claim_notice(
+        pool: &PgPool,
+        user_id: uuid::Uuid,
+        address: &str,
+    ) -> cja::Result<()> {
+        let rows = sqlx::query_as::<_, (String, String, String)>(
+            "SELECT n.kind, e.recipient_override, j.name
+             FROM notifications n
+             JOIN notification_emails e USING (notification_id)
+             JOIN jobs j ON j.payload->>'notification_id' = n.notification_id::text
+             WHERE n.user_id = $1 AND n.kind = 'play_account_claimed'",
+        )
+        .bind(user_id)
+        .fetch_all(pool)
+        .await?;
+        assert_eq!(
+            rows,
+            [(
+                "play_account_claimed".into(),
+                address.into(),
+                "SendNotificationEmailJob".into()
+            )]
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn email_claim_request_has_uniform_response_and_only_match_queues_delivery(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        let state = AppState::test_from_pool(pool.clone());
+        let app = app(&state);
+        let session = create_user_session(&pool, 1673110, false).await;
+        let user_id = session_user_id(&pool, session).await;
+        let cookie = signed_session_cookie(&state, session);
+        let account_id = seed_play_account(&pool, 110).await?;
+
+        let match_response = post_form(
+            &app,
+            "/claim/email",
+            &cookie,
+            "email=play-110%40example.com",
+        )
+        .await;
+        let match_status = match_response.status();
+        let match_body = to_bytes(match_response.into_body(), usize::MAX).await?;
+        let miss_response =
+            post_form(&app, "/claim/email", &cookie, "email=absent%40example.com").await;
+        assert_eq!(match_status, miss_response.status());
+        let miss_body = to_bytes(miss_response.into_body(), usize::MAX).await?;
+        assert_eq!(
+            match_body, miss_body,
+            "matched and unknown addresses must render the same response"
+        );
+
+        let notices = sqlx::query_as::<_, (String, uuid::Uuid, String, uuid::Uuid, String)>(
+            "SELECT n.kind, n.user_id, e.recipient_override, e.claim_imported_account_id, j.name
+             FROM notifications n JOIN notification_emails e USING (notification_id)
+             JOIN jobs j ON j.payload->>'notification_id' = n.notification_id::text",
+        )
+        .fetch_all(&pool)
+        .await?;
+        assert_eq!(
+            notices,
+            [(
+                "claim_verification".into(),
+                user_id,
+                "play-110@example.com".into(),
+                account_id,
+                "SendNotificationEmailJob".into()
+            )]
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn password_and_email_link_claim_routes_queue_original_play_address(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        let state = AppState::test_from_pool(pool.clone());
+        let app = app(&state);
+        let session = create_user_session(&pool, 1673111, false).await;
+        let user_id = session_user_id(&pool, session).await;
+        let cookie = signed_session_cookie(&state, session);
+        seed_play_account(&pool, 111).await?;
+        let response = post_form(
+            &app,
+            "/claim",
+            &cookie,
+            "email=play-111%40example.com&password=hunter2",
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_claim_notice(&pool, user_id, "play-111@example.com").await?;
+
+        let session = create_user_session(&pool, 1673112, false).await;
+        let user_id = session_user_id(&pool, session).await;
+        let cookie = signed_session_cookie(&state, session);
+        let account_id = seed_play_account(&pool, 112).await?;
+        let mut connection = pool.acquire().await?;
+        let token = claim_email_token::create(&mut connection, account_id, user_id).await?;
+        drop(connection);
+        let response = post_form(
+            &app,
+            "/claim/email/verify",
+            &cookie,
+            &format!("token={token}"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_claim_notice(&pool, user_id, "play-112@example.com").await?;
+        Ok(())
     }
 
     async fn profile_html(app: &axum::Router, session_cookie: &str) -> String {

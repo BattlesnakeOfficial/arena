@@ -11,6 +11,7 @@ pub mod imported_account;
 pub mod leaderboard;
 pub mod leaderboard_entry_health;
 pub mod moderation_flag;
+pub mod notification;
 pub mod rate_limit;
 pub mod saved_game;
 pub mod session;

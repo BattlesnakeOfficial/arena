@@ -6,7 +6,7 @@
 //! flow pointed at someone else's inbox).
 
 use color_eyre::eyre::Context as _;
-use sqlx::PgPool;
+use sqlx::PgConnection;
 
 /// Record an attempted send and return how many attempts have targeted this
 /// recipient (case-insensitive) in the trailing hour — including this one.
@@ -15,16 +15,22 @@ use sqlx::PgPool;
 /// first and therefore see each other, and a suppressed send still spends
 /// budget, so retrying a rate-limited trigger never earns extra email.
 pub async fn record_and_count_recent_sends(
-    pool: &PgPool,
+    connection: &mut PgConnection,
     recipient: &str,
     purpose: &str,
 ) -> cja::Result<i64> {
+    sqlx::query!(
+        "SELECT pg_advisory_xact_lock(hashtextextended(lower($1), 0))",
+        recipient
+    )
+    .execute(&mut *connection)
+    .await?;
     sqlx::query!(
         "INSERT INTO email_log (recipient, purpose) VALUES ($1, $2)",
         recipient,
         purpose,
     )
-    .execute(pool)
+    .execute(&mut *connection)
     .await
     .wrap_err("Failed to record email send")?;
 
@@ -35,7 +41,7 @@ pub async fn record_and_count_recent_sends(
            AND sent_at > NOW() - INTERVAL '1 hour'"#,
         recipient,
     )
-    .fetch_one(pool)
+    .fetch_one(&mut *connection)
     .await
     .wrap_err("Failed to count recent email sends")?;
 
@@ -45,23 +51,25 @@ pub async fn record_and_count_recent_sends(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sqlx::PgPool;
 
     #[sqlx::test(migrations = "../migrations")]
     async fn counts_are_per_recipient_case_insensitive_and_windowed(
         pool: PgPool,
     ) -> cja::Result<()> {
+        let mut tx = pool.begin().await?;
         assert_eq!(
-            record_and_count_recent_sends(&pool, "a@example.com", "test").await?,
+            record_and_count_recent_sends(&mut tx, "a@example.com", "test").await?,
             1
         );
         // Case variants share a budget.
         assert_eq!(
-            record_and_count_recent_sends(&pool, "A@Example.COM", "test").await?,
+            record_and_count_recent_sends(&mut tx, "A@Example.COM", "test").await?,
             2
         );
         // Different recipients don't.
         assert_eq!(
-            record_and_count_recent_sends(&pool, "b@example.com", "test").await?,
+            record_and_count_recent_sends(&mut tx, "b@example.com", "test").await?,
             1
         );
 
@@ -70,10 +78,10 @@ mod tests {
             "UPDATE email_log SET sent_at = NOW() - INTERVAL '2 hours'
              WHERE lower(recipient) = 'a@example.com'",
         )
-        .execute(&pool)
+        .execute(&mut *tx)
         .await?;
         assert_eq!(
-            record_and_count_recent_sends(&pool, "a@example.com", "test").await?,
+            record_and_count_recent_sends(&mut tx, "a@example.com", "test").await?,
             1
         );
 

@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO notification_emails (notification_id, recipient_override, claim_imported_account_id) VALUES ($1, 'owner@example.com', $2)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a378d435fed73a2ac5d8bd434673d8d2df9da0f51c21432f0c133f2cda265c75"
+}

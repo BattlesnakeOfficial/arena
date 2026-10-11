@@ -23,12 +23,14 @@
 //! step is a guarded update, and the emails are gated by the transitions in
 //! [`leaderboard_entry_health::deactivate`] and
 //! [`leaderboard_entry_health::reactivate`], which only one call can win, so
-//! a retried sweep can never double-send.
+//! a retried sweep cannot create a second event for the same transition.
 
+use crate::notifications::{self, EmailRecipient, NewEmail, NewNotification, NotificationKind};
 use chrono::{DateTime, Utc};
 use color_eyre::eyre::Context as _;
 use futures::future::join_all;
 use reqwest::Client;
+use sqlx::PgConnection;
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
@@ -248,35 +250,55 @@ pub async fn run_sweep(app_state: &AppState) -> cja::Result<()> {
         }))
         .await;
 
+        let mut tx = match app_state.db.begin().await {
+            Ok(tx) => tx,
+            Err(error) => {
+                tracing::error!(battlesnake_id = %snake.battlesnake_id, error = format!("{error:#}"), "Failed to begin health sweep transaction");
+                continue;
+            }
+        };
         let mut pulled = Vec::new();
         let mut resumed = Vec::new();
+        let mut failed = false;
         for (candidate, calls) in candidates.iter().zip(games) {
-            let transition = match calls {
-                Ok(calls) => record(app_state, snake, candidate, &calls, sweep_started).await,
-                Err(e) => Err(e),
+            let calls = match calls {
+                Ok(calls) => calls,
+                Err(e) => {
+                    tracing::error!(battlesnake_id = %snake.battlesnake_id, leaderboard_entry_id = %candidate.leaderboard_entry_id, error = format!("{e:#}"), "Failed to probe snake health");
+                    continue;
+                }
             };
+            let transition =
+                record(app_state, &mut tx, snake, candidate, &calls, sweep_started).await;
             match transition {
                 Ok(Some(Transition::Paused(problem))) => {
-                    pulled.push((candidate.spec.label.clone(), problem));
+                    pulled.push((candidate.spec.label.clone(), problem))
                 }
                 Ok(Some(Transition::Resumed)) => resumed.push(candidate.spec.label.clone()),
                 Ok(None) => {}
-                // One entry's bookkeeping failing shouldn't abort the sweep
-                // for the rest; the next run retries it.
-                Err(e) => tracing::error!(
-                    battlesnake_id = %snake.battlesnake_id,
-                    leaderboard_entry_id = %candidate.leaderboard_entry_id,
-                    error = format!("{e:#}"),
-                    "Failed to record health sweep outcome"
-                ),
+                Err(e) => {
+                    tracing::error!(battlesnake_id = %snake.battlesnake_id, leaderboard_entry_id = %candidate.leaderboard_entry_id, error = format!("{e:#}"), "Failed to record health sweep outcome");
+                    failed = true;
+                    break;
+                }
             }
         }
-        if let Err(e) = notify_owner(app_state, snake, &pulled, &resumed).await {
-            tracing::error!(
-                battlesnake_id = %snake.battlesnake_id,
-                error = format!("{e:#}"),
-                "Failed to notify owner of health sweep changes"
-            );
+        if failed {
+            continue;
+        }
+        let receipts = match notify_owner(app_state, &mut tx, snake, &pulled, &resumed).await {
+            Ok(receipts) => receipts,
+            Err(e) => {
+                tracing::error!(battlesnake_id = %snake.battlesnake_id, error = format!("{e:#}"), "Failed to record health notifications");
+                continue;
+            }
+        };
+        if let Err(e) = tx.commit().await {
+            tracing::error!(battlesnake_id = %snake.battlesnake_id, error = format!("{e:#}"), "Failed to commit health sweep");
+            continue;
+        }
+        for receipt in receipts {
+            receipt.log_enqueued();
         }
     }
 
@@ -286,6 +308,7 @@ pub async fn run_sweep(app_state: &AppState) -> cja::Result<()> {
 /// Record one entry's probe and apply any transition it earns.
 async fn record(
     app_state: &AppState,
+    connection: &mut PgConnection,
     snake: &Battlesnake,
     candidate: &Candidate,
     calls: &[HealthCheckCall],
@@ -302,9 +325,25 @@ async fn record(
         return Ok(None);
     }
     if candidate.paused {
-        apply_recovery_probe(app_state, snake, candidate, &outcome, sweep_started).await
+        apply_recovery_probe(
+            app_state,
+            connection,
+            snake,
+            candidate,
+            &outcome,
+            sweep_started,
+        )
+        .await
     } else {
-        apply_probe(app_state, snake, candidate, &outcome, sweep_started).await
+        apply_probe(
+            app_state,
+            connection,
+            snake,
+            candidate,
+            &outcome,
+            sweep_started,
+        )
+        .await
     }
 }
 
@@ -312,6 +351,7 @@ async fn record(
 /// crosses the threshold.
 async fn apply_probe(
     app_state: &AppState,
+    connection: &mut PgConnection,
     snake: &Battlesnake,
     candidate: &Candidate,
     outcome: &ProbeOutcome,
@@ -319,12 +359,12 @@ async fn apply_probe(
 ) -> cja::Result<Option<Transition>> {
     let entry_id = candidate.leaderboard_entry_id;
     if outcome.status == HealthCallStatus::Healthy {
-        leaderboard_entry_health::record_success(&app_state.db, entry_id, sweep_started).await?;
+        leaderboard_entry_health::record_success(connection, entry_id, sweep_started).await?;
         return Ok(None);
     }
 
     let Some(failures) = leaderboard_entry_health::record_failure(
-        &app_state.db,
+        connection,
         entry_id,
         &outcome.failure_summary,
         sweep_started,
@@ -344,9 +384,7 @@ async fn apply_probe(
         failure = %outcome.failure_summary,
         "Snake failed health probe"
     );
-    if failures < threshold
-        || !leaderboard_entry_health::deactivate(&app_state.db, entry_id).await?
-    {
+    if failures < threshold || !leaderboard_entry_health::deactivate(connection, entry_id).await? {
         return Ok(None);
     }
 
@@ -364,6 +402,7 @@ async fn apply_probe(
 /// streak crosses the recovery threshold.
 async fn apply_recovery_probe(
     app_state: &AppState,
+    connection: &mut PgConnection,
     snake: &Battlesnake,
     candidate: &Candidate,
     outcome: &ProbeOutcome,
@@ -372,7 +411,7 @@ async fn apply_recovery_probe(
     let entry_id = candidate.leaderboard_entry_id;
     if outcome.status != HealthCallStatus::Healthy {
         leaderboard_entry_health::record_recovery_failure(
-            &app_state.db,
+            connection,
             entry_id,
             &outcome.failure_summary,
             sweep_started,
@@ -382,7 +421,7 @@ async fn apply_recovery_probe(
     }
 
     let Some(successes) =
-        leaderboard_entry_health::record_recovery_success(&app_state.db, entry_id, sweep_started)
+        leaderboard_entry_health::record_recovery_success(connection, entry_id, sweep_started)
             .await?
     else {
         // The owner resumed it meanwhile.
@@ -397,9 +436,7 @@ async fn apply_recovery_probe(
         threshold,
         "Paused snake passed recovery probe"
     );
-    if successes < threshold
-        || !leaderboard_entry_health::reactivate(&app_state.db, entry_id).await?
-    {
+    if successes < threshold || !leaderboard_entry_health::reactivate(connection, entry_id).await? {
         return Ok(None);
     }
 
@@ -412,52 +449,78 @@ async fn apply_recovery_probe(
     Ok(Some(Transition::Resumed))
 }
 
-/// One email per snake per sweep, covering every leaderboard that changed.
+/// One event of each changed kind per snake and sweep.
 async fn notify_owner(
     app_state: &AppState,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     snake: &Battlesnake,
     pulled: &[(String, String)],
     resumed: &[String],
-) -> cja::Result<()> {
-    if pulled.is_empty() && resumed.is_empty() {
-        return Ok(());
-    }
-    let Some(email) =
-        leaderboard_entry_health::owner_notification_email(&app_state.db, snake.battlesnake_id)
-            .await?
-    else {
-        tracing::warn!(
-            battlesnake_id = %snake.battlesnake_id,
-            "Snake's matchmaking changed but owner has no known email; skipping notification"
-        );
-        return Ok(());
-    };
-    let profile_url = format!(
-        "{}/battlesnakes/{}/profile",
-        app_state.config.base_url, snake.battlesnake_id
-    );
-    let hourly_limit = app_state.config.email_per_recipient_hourly_limit;
+) -> cja::Result<Vec<notifications::RecordResult>> {
+    let mut receipts = Vec::new();
+    let link = format!("/battlesnakes/{}/profile", snake.battlesnake_id);
+    let profile_url = format!("{}{}", app_state.config.base_url, link);
     if !pulled.is_empty() {
-        app_state.mailer.notify_matchmaking_deactivated(
-            &app_state.db,
-            hourly_limit,
-            &email,
+        let (subject, text) = crate::email::messages::matchmaking_deactivated_content(
             &snake.name,
             pulled,
             &profile_url,
         );
+        receipts.push(
+            notifications::record_in_tx(
+                tx,
+                NewNotification {
+                    user_id: snake.user_id,
+                    kind: NotificationKind::SnakeMatchmakingPaused,
+                    title: subject.clone(),
+                    body: format!(
+                        "{} was paused on {} leaderboard(s).",
+                        snake.name,
+                        pulled.len()
+                    ),
+                    link: Some(link.clone()),
+                    email: Some(NewEmail {
+                        subject: Some(subject),
+                        text: Some(text),
+                        recipient: EmailRecipient::Snake(snake.battlesnake_id),
+                        claim_imported_account_id: None,
+                    }),
+                },
+            )
+            .await?,
+        );
     }
     if !resumed.is_empty() {
-        app_state.mailer.notify_matchmaking_reactivated(
-            &app_state.db,
-            hourly_limit,
-            &email,
+        let (subject, text) = crate::email::messages::matchmaking_reactivated_content(
             &snake.name,
             resumed,
             &profile_url,
         );
+        receipts.push(
+            notifications::record_in_tx(
+                tx,
+                NewNotification {
+                    user_id: snake.user_id,
+                    kind: NotificationKind::SnakeMatchmakingResumed,
+                    title: subject.clone(),
+                    body: format!(
+                        "{} resumed on {} leaderboard(s).",
+                        snake.name,
+                        resumed.len()
+                    ),
+                    link: Some(link),
+                    email: Some(NewEmail {
+                        subject: Some(subject),
+                        text: Some(text),
+                        recipient: EmailRecipient::Snake(snake.battlesnake_id),
+                        claim_imported_account_id: None,
+                    }),
+                },
+            )
+            .await?,
+        );
     }
-    Ok(())
+    Ok(receipts)
 }
 
 #[cfg(test)]
@@ -625,11 +688,15 @@ mod tests {
     }
 
     async fn pause(pool: &PgPool, entry_id: Uuid) -> cja::Result<()> {
-        let failed =
-            leaderboard_entry_health::record_failure(pool, entry_id, "was down", Utc::now())
-                .await?;
+        let failed = leaderboard_entry_health::record_failure(
+            &mut *pool.acquire().await?,
+            entry_id,
+            "was down",
+            Utc::now(),
+        )
+        .await?;
         assert_eq!(failed, Some(1));
-        assert!(leaderboard_entry_health::deactivate(pool, entry_id).await?);
+        assert!(leaderboard_entry_health::deactivate(&mut *pool.acquire().await?, entry_id).await?);
         Ok(())
     }
 
@@ -777,6 +844,162 @@ mod tests {
         let failure = state.last_failure.unwrap();
         assert!(failure.starts_with("POST /move (turn 0):"), "{failure}");
         assert!(!failure.contains("POST /start"), "{failure}");
+        let events = sqlx::query!("SELECT n.kind, n.user_id, n.title, n.link, e.battlesnake_id FROM notifications n JOIN notification_emails e USING (notification_id)").fetch_all(&pool).await?;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, "snake_matchmaking_paused");
+        assert_eq!(events[0].battlesnake_id, Some(seed.snake_id));
+        assert!(events[0].title.contains("paused"));
+        assert!(
+            events[0]
+                .link
+                .as_deref()
+                .unwrap_or_default()
+                .starts_with("/battlesnakes/")
+        );
+        run_sweep(&app_state).await?;
+        let event_count = sqlx::query_scalar!("SELECT COUNT(*) AS \"count!\" FROM notifications")
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(event_count, 1);
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn failed_notification_enqueue_rolls_back_health_transition(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        let server = broken_snake_server().await;
+        let seed = Seed::new(&pool, &server.uri()).await?;
+        let entry = seed.join("Standard", "Standard", 4).await?;
+        seed.broken_games(entry).await?;
+        let mut app_state = AppState::test_from_pool(pool.clone());
+        let mut config = (*app_state.config).clone();
+        config.snake_health_failure_threshold = 1;
+        app_state.config = std::sync::Arc::new(config);
+        sqlx::query!("ALTER TABLE jobs ADD CONSTRAINT reject_notification_job CHECK (name <> 'SendNotificationEmailJob')").execute(&pool).await?;
+        run_sweep(&app_state).await?;
+        let state = health(&pool, entry).await?;
+        assert!(!state.disabled);
+        assert_eq!(state.failures, 0);
+        let notices = sqlx::query_scalar!("SELECT COUNT(*) AS \"count!\" FROM notifications")
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(notices, 0);
+        sqlx::query!("ALTER TABLE jobs DROP CONSTRAINT reject_notification_job")
+            .execute(&pool)
+            .await?;
+        run_sweep(&app_state).await?;
+        assert!(health(&pool, entry).await?.disabled);
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn failed_entry_rolls_back_its_snake_but_other_snake_commits(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        let server = broken_snake_server().await;
+        let first = Seed::new(&pool, &server.uri()).await?;
+        let first_a = first.join("A First", "Standard", 4).await?;
+        let first_z = first.join("Z Fails", "Standard", 4).await?;
+        first.broken_games(first_a).await?;
+        first.broken_games(first_z).await?;
+
+        let second_user: Uuid = sqlx::query_scalar("INSERT INTO users (external_github_id, github_login, github_access_token) VALUES (77002, 'second-sweep-owner', 'test-token') RETURNING user_id")
+            .fetch_one(&pool).await?;
+        let second_snake: Uuid = sqlx::query_scalar("INSERT INTO battlesnakes (user_id, name, url) VALUES ($1, 'second-sweep-snake', $2) RETURNING battlesnake_id")
+            .bind(second_user).bind(server.uri()).fetch_one(&pool).await?;
+        let second = Seed {
+            pool: pool.clone(),
+            snake_id: second_snake,
+        };
+        let good_entry = second.join("Other Snake", "Standard", 4).await?;
+        second.broken_games(good_entry).await?;
+
+        // The first entry's update is valid, but the next entry aborts its
+        // entire snake transaction. The independent snake must still commit.
+        // DDL cannot take parameters; the UUID was generated by the DB.
+        sqlx::query(&format!("ALTER TABLE leaderboard_entries ADD CONSTRAINT reject_one_health_entry CHECK (leaderboard_entry_id <> '{first_z}'::uuid OR health_consecutive_failures = 0)"))
+            .execute(&pool).await?;
+        let mut state = AppState::test_from_pool(pool.clone());
+        let mut config = (*state.config).clone();
+        config.snake_health_failure_threshold = 1;
+        state.config = std::sync::Arc::new(config);
+        run_sweep(&state).await?;
+
+        assert_eq!(health(&pool, first_a).await?.failures, 0);
+        assert_eq!(health(&pool, first_z).await?.failures, 0);
+        assert!(!health(&pool, first_a).await?.disabled);
+        assert!(health(&pool, good_entry).await?.disabled);
+        let notices: Vec<Uuid> = sqlx::query_scalar("SELECT user_id FROM notifications")
+            .fetch_all(&pool)
+            .await?;
+        assert_eq!(notices, [second_user]);
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn one_sweep_groups_pause_and_resume_and_records_without_email_address(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/move"))
+            .and(body_partial_json(
+                serde_json::json!({"game": {"map": "royale"}}),
+            ))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/move"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"move":"up"}"#))
+            .mount(&server)
+            .await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let seed = Seed::new(&pool, &server.uri()).await?;
+        let failing_a = seed.join("Royale A", "Royale", 4).await?;
+        let failing_b = seed.join("Royale B", "Royale", 4).await?;
+        let recovering = seed.join("Standard Recovery", "Standard", 4).await?;
+        seed.broken_games(failing_a).await?;
+        seed.broken_games(failing_b).await?;
+        pause(&pool, recovering).await?;
+        age_checks(&pool).await?;
+        let mut state = AppState::test_from_pool(pool.clone());
+        let mut config = (*state.config).clone();
+        config.snake_health_failure_threshold = 1;
+        config.snake_health_recovery_threshold = 1;
+        state.config = std::sync::Arc::new(config);
+        run_sweep(&state).await?;
+
+        let events: Vec<(String, Uuid, Option<Uuid>)> = sqlx::query_as(
+            "SELECT n.kind, n.user_id, e.battlesnake_id FROM notifications n JOIN notification_emails e USING (notification_id) ORDER BY n.kind",
+        ).fetch_all(&pool).await?;
+        assert_eq!(
+            events.len(),
+            2,
+            "multiple winners of a kind produce one event"
+        );
+        assert_eq!(events[0].0, "snake_matchmaking_paused");
+        assert_eq!(events[1].0, "snake_matchmaking_resumed");
+        assert!(
+            events
+                .iter()
+                .all(|(_, _, snake)| *snake == Some(seed.snake_id))
+        );
+        let mut connection = pool.acquire().await?;
+        assert_eq!(
+            leaderboard_entry_health::owner_notification_email(&mut connection, seed.snake_id)
+                .await?,
+            None
+        );
+        run_sweep(&state).await?;
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM notifications")
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(count, 2);
         Ok(())
     }
 
@@ -849,6 +1072,12 @@ mod tests {
         assert!(!state.disabled);
         assert_eq!(state.reason, None);
         assert_eq!((state.failures, state.successes), (0, 0));
+        let notices =
+            sqlx::query!("SELECT kind FROM notifications ORDER BY created_at, notification_id")
+                .fetch_all(&pool)
+                .await?;
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].kind, "snake_matchmaking_resumed");
         Ok(())
     }
 
@@ -860,7 +1089,12 @@ mod tests {
         pause(&pool, entry).await?;
         age_checks(&pool).await?;
         assert_eq!(
-            leaderboard_entry_health::record_recovery_success(&pool, entry, Utc::now()).await?,
+            leaderboard_entry_health::record_recovery_success(
+                &mut *pool.acquire().await?,
+                entry,
+                Utc::now()
+            )
+            .await?,
             Some(1)
         );
 
