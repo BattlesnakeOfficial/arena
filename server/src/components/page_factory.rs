@@ -1,8 +1,13 @@
-use axum::{extract::FromRequestParts, http::request::Parts, response::Response};
+use axum::{
+    extract::FromRequestParts,
+    http::{StatusCode, request::Parts},
+    response::{IntoResponse, Response},
+};
 use maud::Render;
 
 use crate::{
     components::{flash::Flash, page::Page},
+    models::notification,
     models::user::User,
     routes::auth::OptionalUser,
     state::AppState,
@@ -22,6 +27,7 @@ pub struct PageFactory {
     pub path: String,
     /// Configured public origin for canonical and social image URLs
     pub base_url: String,
+    pub unread_count: Option<i64>,
 }
 
 impl PageFactory {
@@ -63,6 +69,7 @@ impl PageFactory {
             theater,
             description: None,
             social_image: None,
+            unread_count: self.unread_count,
         }
     }
 }
@@ -77,11 +84,23 @@ impl FromRequestParts<AppState> for PageFactory {
         let path = parts.uri.path().to_string();
         let flash = Flash::from_request_parts(parts, state).await?;
         let OptionalUser(user) = OptionalUser::from_request_parts(parts, state).await?;
+        let unread_count = if let Some(user) = &user {
+            match notification::unread_badge_count(&state.db, user.user_id).await {
+                Ok(count) => Some(count),
+                Err(error) => {
+                    tracing::error!(user_id = %user.user_id, error = %error, "Notification badge count failed");
+                    return Err(StatusCode::INTERNAL_SERVER_ERROR.into_response());
+                }
+            }
+        } else {
+            None
+        };
         Ok(Self {
             flash,
             user,
             path,
             base_url: state.config.base_url.clone(),
+            unread_count,
         })
     }
 }
