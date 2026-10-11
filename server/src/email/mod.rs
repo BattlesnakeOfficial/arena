@@ -122,11 +122,7 @@ impl Mailer {
     /// non-2xx response; delivery jobs propagate that error for retry.
     pub async fn send(&self, message: &EmailMessage) -> cja::Result<()> {
         let Some(config) = &self.config else {
-            tracing::info!(
-                to = %message.to,
-                subject = %message.subject,
-                "Email disabled (no Mailgun config); not sending"
-            );
+            tracing::info!(subject = %message.subject, "Email disabled (no Mailgun config); not sending");
             return Ok(());
         };
 
@@ -172,6 +168,7 @@ mod tests {
             to: "someone@example.com".to_string(),
             subject: "hi".to_string(),
             text: "body".to_string(),
+            html: "<p>body</p>".to_string(),
             list_unsubscribe: None,
         }
     }
@@ -264,6 +261,8 @@ mod tests {
             .and(header("authorization", "Basic YXBpOmtleS10ZXN0"))
             .and(body_string_contains("someone%40example.com"))
             .and(body_string_contains("subject=hi"))
+            .and(body_string_contains("text=body"))
+            .and(body_string_contains("html=%3Cp%3Ebody%3C%2Fp%3E"))
             .respond_with(ResponseTemplate::new(200).set_body_string("{\"id\":\"ok\"}"))
             .expect(1)
             .mount(&server)
@@ -290,6 +289,7 @@ mod tests {
             to: "   ".to_string(),
             subject: "hi".to_string(),
             text: "body".to_string(),
+            html: "<p>body</p>".to_string(),
             list_unsubscribe: None,
         };
         mailer.send(&msg).await.unwrap();

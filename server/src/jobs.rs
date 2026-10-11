@@ -17,7 +17,10 @@ impl Job<AppState> for SendNotificationEmailJob {
     const NAME: &'static str = "SendNotificationEmailJob";
 
     async fn run(&self, state: AppState) -> cja::Result<()> {
-        use crate::email::{EmailMessage, SendOutcome};
+        use crate::email::{
+            SendOutcome,
+            messages::{self, EmailContent},
+        };
         use crate::models::{
             claim_email_token, leaderboard_entry_health, notification, notification_email,
         };
@@ -25,7 +28,7 @@ impl Job<AppState> for SendNotificationEmailJob {
         let _permit = state.mailer.acquire_delivery_permit().await?;
         let mut tx = state.db.begin().await?;
         let Some(email) = sqlx::query!(
-            "SELECT subject, text, recipient_override, battlesnake_id, recipient_user, claim_imported_account_id, notification_email_request_id, outcome FROM notification_emails WHERE notification_id = $1 FOR UPDATE",
+            "SELECT subject, text, html_body, recipient_override, battlesnake_id, recipient_user, claim_imported_account_id, notification_email_request_id, outcome FROM notification_emails WHERE notification_id = $1 FOR UPDATE",
             self.notification_id
         ).fetch_optional(&mut *tx).await? else { return Ok(()); };
         if email.outcome.is_some() {
@@ -103,14 +106,14 @@ impl Job<AppState> for SendNotificationEmailJob {
         }
         if terminal.is_none() {
             let to = recipient.as_deref().unwrap_or_default();
-            let mut message = if let Some(request_id) = confirmation_request {
+            let content = if let Some(request_id) = confirmation_request {
                 let secret = notification_email::new_secret();
                 sqlx::query!("UPDATE notification_email_requests SET token_hash = $2, expires_at = NOW() + INTERVAL '24 hours' WHERE request_id = $1", request_id, notification_email::hash_secret(&secret)).execute(&mut *tx).await?;
                 let url = format!(
                     "{}/settings/notification-email/confirm?token={secret}",
                     state.config.base_url.trim_end_matches('/')
                 );
-                crate::email::messages::notification_email_confirmation(to, &url)
+                Some(messages::notification_email_confirmation(&url))
             } else if let Some(imported_account_id) = email.claim_imported_account_id {
                 let account = sqlx::query!("SELECT username FROM imported_accounts WHERE imported_account_id = $1 AND claimed_by_user_id IS NULL", imported_account_id).fetch_optional(&mut *tx).await?;
                 if let Some(account) = account {
@@ -118,47 +121,53 @@ impl Job<AppState> for SendNotificationEmailJob {
                         claim_email_token::create(&mut tx, imported_account_id, event.user_id)
                             .await?;
                     let url = format!("{}/claim/email/verify?token={token}", state.config.base_url);
-                    crate::email::messages::claim_verification(to, &account.username, &url)
+                    Some(messages::claim_verification(&account.username, &url))
                 } else {
                     terminal = Some("no_recipient");
-                    EmailMessage {
-                        to: String::new(),
-                        subject: String::new(),
-                        text: String::new(),
-                        list_unsubscribe: None,
-                    }
+                    None
                 }
             } else {
-                EmailMessage {
-                    to: to.to_string(),
-                    subject: email.subject.unwrap_or_default(),
-                    text: email.text.unwrap_or_default(),
-                    list_unsubscribe: None,
-                }
+                Some(match email.html_body {
+                    Some(html_body) => EmailContent {
+                        subject: email.subject.unwrap_or_default(),
+                        text: email.text.unwrap_or_default(),
+                        html_body,
+                    },
+                    None => EmailContent::from_text(
+                        email.subject.unwrap_or_default(),
+                        email.text.unwrap_or_default(),
+                    ),
+                })
             };
-            if terminal.is_none() {
-                if let Some(kind) = kind.filter(|kind| kind.toggleable()) {
+            if terminal.is_none()
+                && let (Some(content), Some(kind)) = (content, kind)
+            {
+                let unsubscribe_url = if kind.toggleable() {
                     let token = crate::notifications::unsubscribe_token(
                         &state.cookie_key,
                         event.user_id,
                         kind,
                     );
-                    let url = format!(
+                    Some(format!(
                         "{}/notifications/unsubscribe/{token}",
                         state.config.base_url
-                    );
-                    message.text.push_str(&format!(
-                        "\nUnsubscribe from {} emails: {url}\n",
-                        kind.name()
-                    ));
-                    message.list_unsubscribe = Some(format!("<{url}>"));
-                }
+                    ))
+                } else {
+                    None
+                };
+                let message = messages::finish(
+                    content,
+                    to.to_string(),
+                    kind,
+                    &state.config.base_url,
+                    unsubscribe_url.as_deref(),
+                )?;
                 let outcome = state
                     .mailer
                     .send_limited(
                         &mut tx,
                         state.config.email_per_recipient_hourly_limit,
-                        kind.map_or("unknown", NotificationKind::key),
+                        kind.key(),
                         &message,
                     )
                     .await?;

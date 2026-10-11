@@ -649,7 +649,6 @@ async fn claim_account_inner(
         email: claimed.email,
     };
     let message = crate::email::messages::account_claimed(
-        &summary.email,
         &summary.username,
         summary.snakes_created,
         summary.grants_created,
@@ -665,6 +664,7 @@ async fn claim_account_inner(
             email: Some(crate::notifications::NewEmail {
                 subject: Some(message.subject),
                 text: Some(message.text),
+                html_body: Some(message.html_body),
                 recipient: crate::notifications::EmailRecipient::Override(summary.email.clone()),
                 claim_imported_account_id: None,
                 notification_email_request_id: None,

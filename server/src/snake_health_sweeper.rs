@@ -461,7 +461,7 @@ async fn notify_owner(
     let link = format!("/battlesnakes/{}/profile", snake.battlesnake_id);
     let profile_url = format!("{}{}", app_state.config.base_url, link);
     if !pulled.is_empty() {
-        let (subject, text) = crate::email::messages::matchmaking_deactivated_content(
+        let content = crate::email::messages::matchmaking_deactivated_content(
             &snake.name,
             pulled,
             &profile_url,
@@ -472,7 +472,7 @@ async fn notify_owner(
                 NewNotification {
                     user_id: snake.user_id,
                     kind: NotificationKind::SnakeMatchmakingPaused,
-                    title: subject.clone(),
+                    title: content.subject.clone(),
                     body: format!(
                         "{} was paused on {} leaderboard(s).",
                         snake.name,
@@ -480,8 +480,9 @@ async fn notify_owner(
                     ),
                     link: Some(link.clone()),
                     email: Some(NewEmail {
-                        subject: Some(subject),
-                        text: Some(text),
+                        subject: Some(content.subject),
+                        text: Some(content.text),
+                        html_body: Some(content.html_body),
                         recipient: EmailRecipient::Snake(snake.battlesnake_id),
                         claim_imported_account_id: None,
                         notification_email_request_id: None,
@@ -492,7 +493,7 @@ async fn notify_owner(
         );
     }
     if !resumed.is_empty() {
-        let (subject, text) = crate::email::messages::matchmaking_reactivated_content(
+        let content = crate::email::messages::matchmaking_reactivated_content(
             &snake.name,
             resumed,
             &profile_url,
@@ -503,7 +504,7 @@ async fn notify_owner(
                 NewNotification {
                     user_id: snake.user_id,
                     kind: NotificationKind::SnakeMatchmakingResumed,
-                    title: subject.clone(),
+                    title: content.subject.clone(),
                     body: format!(
                         "{} resumed on {} leaderboard(s).",
                         snake.name,
@@ -511,8 +512,9 @@ async fn notify_owner(
                     ),
                     link: Some(link),
                     email: Some(NewEmail {
-                        subject: Some(subject),
-                        text: Some(text),
+                        subject: Some(content.subject),
+                        text: Some(content.text),
+                        html_body: Some(content.html_body),
                         recipient: EmailRecipient::Snake(snake.battlesnake_id),
                         claim_imported_account_id: None,
                         notification_email_request_id: None,

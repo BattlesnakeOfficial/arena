@@ -97,6 +97,7 @@ async fn enqueue(
             email: Some(NewEmail {
                 subject: None,
                 text: None,
+                html_body: None,
                 recipient: EmailRecipient::Override(email.into()),
                 claim_imported_account_id: None,
                 notification_email_request_id: Some(request_id),
