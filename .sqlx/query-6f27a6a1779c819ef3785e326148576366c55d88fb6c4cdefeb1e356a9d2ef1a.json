@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO imported_accounts (play_user_id, play_account_id, email, username) VALUES ('legacy-user', 'legacy-account', 'legacy@example.com', 'legacy') RETURNING imported_account_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "imported_account_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "6f27a6a1779c819ef3785e326148576366c55d88fb6c4cdefeb1e356a9d2ef1a"
+}

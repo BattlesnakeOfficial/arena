@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO customization_legacy_tokens (imported_account_id, play_points, token_count) VALUES ($1, 200, 1)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "10d1f9e0cc45eb18bac901da9d8f7638c20623bde89f76f3f61ee0cf13467d44"
+}

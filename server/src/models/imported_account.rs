@@ -909,6 +909,28 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "../migrations")]
+    async fn legacy_tokens_follow_claim_once_and_credit_existing_owner(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        let user = create_user(&pool, 164601).await?;
+        let account = stage_full_account(&pool, 164601).await?;
+        sqlx::query!("INSERT INTO customization_legacy_tokens (imported_account_id, play_points, token_count) VALUES ($1, 201, 2)", account)
+            .execute(&pool).await?;
+        assert_eq!(crate::customizations::token_balance(&pool, user).await?, 0);
+        assert!(claim_account(&pool, account, user).await?.is_some());
+        assert_eq!(crate::customizations::token_balance(&pool, user).await?, 2);
+        assert!(claim_account(&pool, account, user).await?.is_none());
+        assert_eq!(crate::customizations::token_balance(&pool, user).await?, 2);
+
+        let already_claimed = stage_full_account(&pool, 164602).await?;
+        assert!(claim_account(&pool, already_claimed, user).await?.is_some());
+        sqlx::query!("INSERT INTO customization_legacy_tokens (imported_account_id, play_points, token_count) VALUES ($1, 200, 1)", already_claimed)
+            .execute(&pool).await?;
+        assert_eq!(crate::customizations::token_balance(&pool, user).await?, 3);
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
     async fn play_claim_and_unlock_serialize_on_user(pool: PgPool) -> cja::Result<()> {
         let user_id = create_user(&pool, 1648).await?;
         let account_id = stage_full_account(&pool, 1648).await?;

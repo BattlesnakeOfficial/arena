@@ -83,6 +83,25 @@ fn main() -> color_eyre::Result<()> {
             .block_on(async { play_import::run_import().await });
     }
 
+    if std::env::args().nth(1).as_deref() == Some("convert-play-points") {
+        let trailing: Vec<String> = std::env::args().skip(2).collect();
+        let dry_run = match trailing.as_slice() {
+            [] => false,
+            [flag] if flag == "--dry-run" => true,
+            _ => {
+                return Err(color_eyre::eyre::eyre!(
+                    "usage: arena convert-play-points [--dry-run]"
+                ));
+            }
+        };
+        return tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .wrap_err("Failed to build point conversion runtime")?
+            .block_on(play_import::run_point_conversion(dry_run))
+            .wrap_err("Play point conversion failed");
+    }
+
     if std::env::args().nth(1).as_deref() == Some("export-play-regions") {
         return tokio::runtime::Builder::new_current_thread()
             .enable_all()
