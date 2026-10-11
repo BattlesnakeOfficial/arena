@@ -6,10 +6,12 @@ use cja::{
 };
 use tokio_util::sync::CancellationToken;
 
+use crate::config::AppConfig;
 use crate::jobs::{
     BackfillAchievementsJob, CustomizationActiveWeekBackfillJob, GameBackupJob,
-    LeaderboardMatchmakerJob, RateLimitPruneJob, ReconcileRecentAchievementsJob,
-    SnakeHealthSweeperJob, StuckGameSweeperJob, StuckMatchSweeperJob,
+    LeaderboardMatchmakerJob, PlayGrantReconcileJob, RateLimitPruneJob,
+    ReconcileRecentAchievementsJob, SnakeHealthSweeperJob, StuckGameSweeperJob,
+    StuckMatchSweeperJob,
 };
 use crate::state::AppState;
 
@@ -34,7 +36,7 @@ pub const CUSTOMIZATION_ACTIVE_WEEK_BACKFILL_INTERVAL_SECS: u64 = 60 * 60;
 pub const ACHIEVEMENT_BACKFILL_INTERVAL_SECS: u64 = 5 * 60;
 pub const ACHIEVEMENT_RECONCILE_INTERVAL_SECS: u64 = 60 * 60;
 
-pub(crate) fn cron_registry() -> CronRegistry<AppState> {
+pub(crate) fn cron_registry(config: &AppConfig) -> CronRegistry<AppState> {
     let mut registry = CronRegistry::new();
 
     // Game backup discovery: runs every hour, enqueues backup jobs for games from the last 4 hours
@@ -59,6 +61,13 @@ pub(crate) fn cron_registry() -> CronRegistry<AppState> {
         Some("Repair recent achievement awards"),
         Duration::from_secs(ACHIEVEMENT_RECONCILE_INTERVAL_SECS),
         |app_state, _| Box::pin(reconcile_achievements_callback(app_state)),
+    );
+
+    // Hourly play grant and new-account reconciliation; configurable for rollout.
+    registry.register_job(
+        PlayGrantReconcileJob,
+        Some("Reconcile play customization grants"),
+        Duration::from_secs(config.play_grant_reconcile_interval_secs),
     );
 
     // Leaderboard matchmaker: one round per derived interval, subject to worker delay.
@@ -202,11 +211,31 @@ mod tests {
         const { assert!(CRON_POLL_SECS < MATCHMAKER_INTERVAL_SECS) };
     }
 
+    use cja::cron::{IntervalSchedule, Schedule};
+
+    #[test]
+    fn play_reconcile_job_is_registered_with_configured_interval() {
+        assert!(
+            <crate::jobs::Jobs as cja::jobs::registry::JobRegistry<AppState>>::job_names()
+                .contains(&"PlayGrantReconcileJob")
+        );
+        let mut config = AppConfig::test_default();
+        for interval in [3600, 15] {
+            config.play_grant_reconcile_interval_secs = interval;
+            let registry = cron_registry(&config);
+            let job = registry
+                .get("PlayGrantReconcileJob")
+                .expect("cron registered");
+            assert!(
+                matches!(&job.schedule, Schedule::Interval(IntervalSchedule(duration)) if *duration == Duration::from_secs(interval))
+            );
+        }
+    }
     #[test]
     fn every_cron_job_is_dispatchable_by_the_worker() {
         let dispatchable =
             <crate::jobs::Jobs as cja::jobs::registry::JobRegistry<AppState>>::job_names();
-        let mut undispatchable: Vec<_> = cron_registry()
+        let mut undispatchable: Vec<_> = cron_registry(&AppConfig::test_default())
             .jobs()
             .keys()
             .copied()
@@ -227,7 +256,7 @@ mod tests {
 
     #[test]
     fn active_week_backfill_runs_on_boot_then_hourly() {
-        let registry = cron_registry();
+        let registry = cron_registry(&AppConfig::test_default());
         let job = registry
             .get("CustomizationActiveWeekBackfillJob")
             .expect("active-week backfill registered");
@@ -259,7 +288,7 @@ mod tests {
     #[sqlx::test(migrations = "../migrations")]
     async fn achievement_schedules_enqueue_background_priority(pool: sqlx::PgPool) {
         let app = AppState::test_from_pool(pool.clone());
-        let registry = cron_registry();
+        let registry = cron_registry(&AppConfig::test_default());
         for (name, interval) in [
             (
                 "AchievementBackfillSchedule",
