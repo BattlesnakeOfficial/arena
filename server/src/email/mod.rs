@@ -159,9 +159,13 @@ impl Mailer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as BASE64;
     use sqlx::PgPool;
     use wiremock::matchers::{body_string_contains, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const TEST_API_KEY: &str = "key-test";
 
     fn test_message() -> EmailMessage {
         EmailMessage {
@@ -234,7 +238,7 @@ mod tests {
     fn configured_mailer(base_url: String) -> Mailer {
         Mailer::new(
             Some(MailgunConfig {
-                api_key: "key-test".to_string(),
+                api_key: TEST_API_KEY.to_string(),
                 domain: "mg.example.com".to_string(),
                 from: "Arena <reply@example.com>".to_string(),
                 base_url,
@@ -254,11 +258,12 @@ mod tests {
     #[tokio::test]
     async fn configured_mailer_posts_form_to_mailgun() {
         let server = MockServer::start().await;
+        // Asserting the exact value (not just presence) catches a wrong-key
+        // regression.
+        let expected_auth = format!("Basic {}", BASE64.encode(format!("api:{TEST_API_KEY}")));
         Mock::given(method("POST"))
             .and(path("/v3/mg.example.com/messages"))
-            // Basic auth is exactly base64("api:key-test") — asserting the
-            // value (not just presence) catches a wrong-key regression.
-            .and(header("authorization", "Basic YXBpOmtleS10ZXN0"))
+            .and(header("authorization", expected_auth.as_str()))
             .and(body_string_contains("someone%40example.com"))
             .and(body_string_contains("subject=hi"))
             .and(body_string_contains("text=body"))
