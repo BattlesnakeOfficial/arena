@@ -44,7 +44,7 @@ impl Achievement {
             },
             Self::SlowAndSteady => AchievementDef {
                 name: "Slow and Steady",
-                description: "Play in 100 finished games across your snakes.",
+                description: "Play 3,000 ladder games across your snakes (about a week with a snake on every ladder).",
                 head: Head::Turtle,
                 tail: Some(Tail::Turtle),
             },
@@ -62,7 +62,7 @@ impl Achievement {
             },
             Self::LadderRegular => AchievementDef {
                 name: "Ladder Regular",
-                description: "Win 10 finished ladder games across your snakes.",
+                description: "Win 1,000 ladder games across your snakes (about a week for a snake that wins a third of its games).",
                 head: Head::Judge,
                 tail: Some(Tail::Judge),
             },
@@ -85,14 +85,24 @@ struct WinFlags {
     first: bool,
     constrictor: bool,
     crowd: bool,
+    ladder: bool,
+    ladder_win: bool,
 }
 
 impl WinFlags {
-    fn include(&mut self, placement: Option<i32>, participants: i64, game_type: &str) {
+    fn include(
+        &mut self,
+        placement: Option<i32>,
+        participants: i64,
+        game_type: &str,
+        ladder: bool,
+    ) {
+        self.ladder |= ladder;
         if placement == Some(1) && participants >= 2 {
             self.first = true;
             self.constrictor |= game_type == GameType::Constrictor.as_str();
             self.crowd |= participants >= 4;
+            self.ladder_win |= ladder;
         }
     }
 }
@@ -132,34 +142,83 @@ async fn historical_win(
     Ok(value)
 }
 
+async fn distinct_candidate_count(
+    conn: &mut PgConnection,
+    user_id: Uuid,
+    cap: i64,
+    ladder_wins: bool,
+) -> cja::Result<i64> {
+    let count = sqlx::query_scalar!(
+        r#"
+        SELECT COUNT(*)::bigint AS "count!" FROM (
+            SELECT game_id FROM (
+                SELECT DISTINCT owned.game_id FROM (
+                    SELECT gb.game_id FROM battlesnakes bs
+                    JOIN game_battlesnakes gb ON gb.battlesnake_id = bs.battlesnake_id
+                    WHERE bs.user_id = $1 AND gb.leaderboard_entry_id IS NOT NULL
+                      AND (NOT $3::bool OR gb.placement = 1)
+                    UNION ALL
+                    SELECT gb.game_id FROM battlesnakes bs
+                    JOIN leaderboard_entries le ON le.battlesnake_id = bs.battlesnake_id
+                    JOIN game_battlesnakes gb ON gb.leaderboard_entry_id = le.leaderboard_entry_id
+                    WHERE bs.user_id = $1 AND gb.battlesnake_id IS NULL
+                      AND (NOT $3::bool OR gb.placement = 1)
+                ) owned
+            ) distinct_games
+            LIMIT $2
+        ) candidates
+        "#,
+        user_id,
+        cap,
+        ladder_wins,
+    )
+    .fetch_one(conn)
+    .await
+    .wrap_err("Failed to count achievement ladder candidates")?;
+    Ok(count)
+}
+
 async fn distinct_finished_count(
     conn: &mut PgConnection,
     user_id: Uuid,
     cap: i64,
     ladder_wins: bool,
 ) -> cja::Result<i64> {
-    // Deduplicate via the per-snake/per-entry indexes before probing games; the
-    // indexed participant rows are cheap, while each games lookup is costly.
-    // For Ladder Regular the owner's winning participant row must have the entry.
+    // Deduplicate via the per-snake/per-entry indexes. The indexed set of
+    // non-finished games is small; subtracting it avoids thousands of cold
+    // games_pkey lookups for an owner near the threshold. Both achievements
+    // require the owner's own ladder participant row.
     let count = sqlx::query_scalar!(
         r#"
-        SELECT COUNT(*)::bigint AS "count!" FROM (
-            SELECT 1 FROM (
-                SELECT DISTINCT owned.game_id FROM (
+        WITH distinct_games AS MATERIALIZED (
+            SELECT DISTINCT owned.game_id FROM (
                 SELECT gb.game_id FROM battlesnakes bs
                 JOIN game_battlesnakes gb ON gb.battlesnake_id = bs.battlesnake_id
-                WHERE bs.user_id = $1
-                  AND (NOT $3::bool OR (gb.placement = 1 AND gb.leaderboard_entry_id IS NOT NULL))
+                WHERE bs.user_id = $1 AND gb.leaderboard_entry_id IS NOT NULL
+                  AND (NOT $3::bool OR gb.placement = 1)
                 UNION ALL
                 SELECT gb.game_id FROM battlesnakes bs
                 JOIN leaderboard_entries le ON le.battlesnake_id = bs.battlesnake_id
                 JOIN game_battlesnakes gb ON gb.leaderboard_entry_id = le.leaderboard_entry_id
                 WHERE bs.user_id = $1 AND gb.battlesnake_id IS NULL
                   AND (NOT $3::bool OR gb.placement = 1)
-                ) owned
-            ) distinct_games
-            JOIN games g ON g.game_id = distinct_games.game_id
-            WHERE g.status = 'finished'
+            ) owned
+        ), nonfinished AS MATERIALIZED (
+            -- status is NOT NULL; two ranges use games_status_idx instead of
+            -- scanning the 5M-row games table for status <> 'finished'.
+            SELECT game_id FROM games
+            WHERE status < 'finished' OR status > 'finished'
+        ), finished_games AS MATERIALIZED (
+            SELECT d.game_id FROM distinct_games d
+            LEFT JOIN nonfinished nf ON nf.game_id = d.game_id
+            WHERE nf.game_id IS NULL
+        )
+        SELECT COUNT(*)::bigint AS "count!" FROM (
+            SELECT 1 FROM finished_games fg
+            -- The materialized finished set keeps Judge's peer probe after
+            -- the status check; see the DEV-1663 production EXPLAIN.
+            WHERE NOT $3::bool OR (SELECT COUNT(*) FROM game_battlesnakes peer
+                WHERE peer.game_id = fg.game_id) >= 2
             LIMIT $2
         ) qualifying
         "#,
@@ -213,10 +272,21 @@ async fn award_owner(
                 None => historical_win(&mut *conn, user_id, 4, false).await?,
             },
             Achievement::SlowAndSteady => {
-                distinct_finished_count(&mut *conn, user_id, 100, false).await? >= 100
+                if !live.is_none_or(|flags| flags.ladder) {
+                    false
+                } else {
+                    distinct_candidate_count(&mut *conn, user_id, 3_000, false).await? >= 3_000
+                        && distinct_finished_count(&mut *conn, user_id, 3_000, false).await?
+                            >= 3_000
+                }
             }
             Achievement::LadderRegular => {
-                distinct_finished_count(&mut *conn, user_id, 10, true).await? >= 10
+                if !live.is_none_or(|flags| flags.ladder_win) {
+                    false
+                } else {
+                    distinct_candidate_count(&mut *conn, user_id, 1_000, true).await? >= 1_000
+                        && distinct_finished_count(&mut *conn, user_id, 1_000, true).await? >= 1_000
+                }
             }
         };
         if !earned {
@@ -254,7 +324,7 @@ pub async fn award_for_game(pool: &PgPool, game_id: Uuid) -> cja::Result<u64> {
         return Ok(0);
     };
     let rows = sqlx::query!(
-        r#"SELECT bs.user_id, gb.placement FROM game_battlesnakes gb
+        r#"SELECT bs.user_id, gb.placement, gb.leaderboard_entry_id FROM game_battlesnakes gb
         LEFT JOIN leaderboard_entries le ON le.leaderboard_entry_id = gb.leaderboard_entry_id
         JOIN battlesnakes bs ON bs.battlesnake_id = COALESCE(gb.battlesnake_id, le.battlesnake_id)
         WHERE gb.game_id = $1"#,
@@ -270,6 +340,7 @@ pub async fn award_for_game(pool: &PgPool, game_id: Uuid) -> cja::Result<u64> {
             row.placement,
             participants,
             &game.game_type,
+            row.leaderboard_entry_id.is_some(),
         );
     }
     let mut inserted = 0;
@@ -361,7 +432,7 @@ pub async fn reconcile_recent_achievements(pool: &PgPool) -> cja::Result<u64> {
         .await
         .wrap_err("Failed to begin achievement reconciliation")?;
     let rows = sqlx::query!(
-        r#"SELECT g.game_id, g.game_type, bs.user_id, gb.placement,
+        r#"SELECT g.game_id, g.game_type, bs.user_id, gb.placement, gb.leaderboard_entry_id,
             (SELECT COUNT(*) FROM game_battlesnakes peer WHERE peer.game_id = g.game_id) AS "participants!"
         FROM games g
         JOIN game_battlesnakes gb ON gb.game_id = g.game_id
@@ -377,6 +448,7 @@ pub async fn reconcile_recent_achievements(pool: &PgPool) -> cja::Result<u64> {
             row.placement,
             row.participants,
             &row.game_type,
+            row.leaderboard_entry_id.is_some(),
         );
     }
     let owner_count = owners.len();
@@ -439,6 +511,41 @@ mod tests {
         ).bind(snake_id).fetch_one(pool).await.unwrap()
     }
 
+    async fn seed_games(
+        pool: &PgPool,
+        snake_id: Uuid,
+        ladder_entry: Option<Uuid>,
+        opponent: Option<Uuid>,
+        count: i32,
+        placement: i32,
+        status: &str,
+    ) {
+        let inserted: i64 = sqlx::query_scalar(
+            "WITH inserted_games AS (\
+                INSERT INTO games (board_size, game_type, status, finished_at) \
+                SELECT '11x11', 'Standard', $1, NOW() - INTERVAL '3 hours' \
+                FROM generate_series(1, $2) RETURNING game_id\
+            ), owned AS (\
+                INSERT INTO game_battlesnakes (game_id, battlesnake_id, leaderboard_entry_id, placement) \
+                SELECT game_id, $3, $4, $5 FROM inserted_games RETURNING game_id\
+            ), peer AS (\
+                INSERT INTO game_battlesnakes (game_id, battlesnake_id, placement) \
+                SELECT game_id, $6, CASE WHEN $5 = 1 THEN 2 ELSE 1 END \
+                FROM inserted_games WHERE $6::uuid IS NOT NULL RETURNING game_id\
+            ) SELECT COUNT(*) FROM owned",
+        )
+        .bind(status)
+        .bind(count)
+        .bind(snake_id)
+        .bind(ladder_entry)
+        .bind(placement)
+        .bind(opponent)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        assert_eq!(inserted, i64::from(count));
+    }
+
     async fn grants(pool: &PgPool, owner: Uuid) -> HashSet<(String, String, String)> {
         sqlx::query_as::<_, (String, String, String)>(
             "SELECT customization_type, slug, source FROM customization_grants WHERE user_id = $1",
@@ -485,6 +592,18 @@ mod tests {
         }
         assert!(for_item(Head::KIND, "alligator").is_none());
         assert!(for_item(Tail::KIND, "alligator").is_none());
+    }
+
+    #[test]
+    fn week_scale_achievement_copy() {
+        assert_eq!(
+            Achievement::SlowAndSteady.def().description,
+            "Play 3,000 ladder games across your snakes (about a week with a snake on every ladder)."
+        );
+        assert_eq!(
+            Achievement::LadderRegular.def().description,
+            "Win 1,000 ladder games across your snakes (about a week for a snake that wins a third of its games)."
+        );
     }
 
     #[sqlx::test(migrations = "../migrations")]
@@ -565,31 +684,53 @@ mod tests {
             .unwrap();
         sqlx::query("INSERT INTO customization_grants (user_id, customization_type, slug, source) VALUES ($1, 'head', 'turtle', 'admin'), ($1, 'head', 'judge', 'play_import')")
             .bind(owner).execute(&pool).await.unwrap();
-        let mut last = Uuid::nil();
-        for number in 0..100 {
-            let id = game(&pool, "Standard", "finished", Some(0)).await;
-            last = id;
-            // Two owner rows in each game still count as one distinct game.
-            participant(&pool, id, first, 1, Some(first_entry)).await;
-            participant(&pool, id, second, 2, Some(second_entry)).await;
-            let inserted = award_for_game(&pool, id).await.unwrap();
-            if number == 8 {
-                assert_eq!(inserted, 0);
-                assert!(!has(&grants(&pool, owner).await, Tail::KIND, "judge"));
-            }
-            if number == 9 {
-                assert_eq!(inserted, 1);
-            }
-            if number == 98 {
-                assert_eq!(inserted, 0);
-                let owned = grants(&pool, owner).await;
-                assert!(!has(&owned, Tail::KIND, "turtle"));
-            }
-            if number == 99 {
-                assert_eq!(inserted, 1);
-            }
-        }
-        assert_eq!(award_for_game(&pool, last).await.unwrap(), 0);
+        let rival_owner = user(&pool, 1644013).await;
+        let rival = snake(&pool, rival_owner, "rival").await;
+        seed_games(
+            &pool,
+            first,
+            Some(first_entry),
+            Some(rival),
+            998,
+            1,
+            "finished",
+        )
+        .await;
+        let fallback_win = game(&pool, "Standard", "finished", Some(3)).await;
+        sqlx::query("INSERT INTO game_battlesnakes (game_id, battlesnake_id, leaderboard_entry_id, placement) VALUES ($1, NULL, $2, 1)")
+            .bind(fallback_win).bind(first_entry).execute(&pool).await.unwrap();
+        participant(&pool, fallback_win, rival, 2, None).await;
+        let almost_judge = game(&pool, "Standard", "finished", None).await;
+        participant(&pool, almost_judge, first, 2, Some(first_entry)).await;
+        participant(&pool, almost_judge, second, 2, Some(second_entry)).await;
+        assert_eq!(award_for_game(&pool, almost_judge).await.unwrap(), 0);
+        assert!(!has(&grants(&pool, owner).await, Tail::KIND, "judge"));
+        let thousandth_win = game(&pool, "Standard", "finished", None).await;
+        participant(&pool, thousandth_win, first, 1, Some(first_entry)).await;
+        participant(&pool, thousandth_win, rival, 2, None).await;
+        assert_eq!(award_for_game(&pool, thousandth_win).await.unwrap(), 2);
+        seed_games(
+            &pool,
+            second,
+            Some(second_entry),
+            Some(rival),
+            1998,
+            2,
+            "finished",
+        )
+        .await;
+        // Two owned rows in almost_judge count as one distinct game.
+        assert_eq!(
+            distinct_finished_count(&mut pool.acquire().await.unwrap(), owner, 3_000, false)
+                .await
+                .unwrap(),
+            2_999
+        );
+        assert!(!has(&grants(&pool, owner).await, Tail::KIND, "turtle"));
+        let last = game(&pool, "Standard", "finished", None).await;
+        participant(&pool, last, first, 2, Some(first_entry)).await;
+        participant(&pool, last, second, 1, Some(second_entry)).await;
+        assert_eq!(award_for_game(&pool, last).await.unwrap(), 1);
         let owned = grants(&pool, owner).await;
         assert!(owned.contains(&(
             Head::KIND.to_string(),
@@ -631,6 +772,298 @@ mod tests {
             Head::KIND,
             "frog"
         ));
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn ladder_counts_exclude_non_ladder_and_unfinished_candidates(pool: PgPool) {
+        let owner = user(&pool, 1663001).await;
+        let opponent = user(&pool, 1663002).await;
+        let a = snake(&pool, owner, "counted").await;
+        let b = snake(&pool, opponent, "opponent").await;
+        let a_entry = entry(&pool, a).await;
+        seed_games(&pool, a, Some(a_entry), Some(b), 2_999, 2, "finished").await;
+        seed_games(&pool, a, None, Some(b), 10, 2, "finished").await;
+        let non_ladder = game(&pool, "Standard", "finished", None).await;
+        participant(&pool, non_ladder, a, 2, None).await;
+        participant(&pool, non_ladder, b, 1, None).await;
+        assert_eq!(award_for_game(&pool, non_ladder).await.unwrap(), 1);
+        assert!(!has(&grants(&pool, owner).await, Head::KIND, "turtle"));
+        let unfinished = game(&pool, "Standard", "waiting", None).await;
+        participant(&pool, unfinished, a, 2, Some(a_entry)).await;
+        let mut conn = pool.acquire().await.unwrap();
+        assert_eq!(
+            distinct_candidate_count(&mut conn, owner, 3_000, false)
+                .await
+                .unwrap(),
+            3_000
+        );
+        assert_eq!(
+            distinct_finished_count(&mut conn, owner, 3_000, false)
+                .await
+                .unwrap(),
+            2_999
+        );
+        assert_eq!(award_owner(&mut conn, owner, None).await.unwrap(), 0);
+        drop(conn);
+        let ladder = game(&pool, "Standard", "finished", None).await;
+        participant(&pool, ladder, a, 2, Some(a_entry)).await;
+        participant(&pool, ladder, b, 1, None).await;
+        assert_eq!(award_for_game(&pool, ladder).await.unwrap(), 2);
+        assert!(has(&grants(&pool, owner).await, Head::KIND, "turtle"));
+        assert!(has(&grants(&pool, owner).await, Tail::KIND, "turtle"));
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn ladder_wins_require_owned_winning_row_and_peers(pool: PgPool) {
+        let owner = user(&pool, 1663011).await;
+        let opponent = user(&pool, 1663012).await;
+        let a = snake(&pool, owner, "winner").await;
+        let b = snake(&pool, opponent, "opponent").await;
+        let a_entry = entry(&pool, a).await;
+        seed_games(&pool, a, Some(a_entry), Some(b), 998, 1, "finished").await;
+        let win_999 = game(&pool, "Standard", "finished", None).await;
+        participant(&pool, win_999, a, 1, Some(a_entry)).await;
+        participant(&pool, win_999, b, 2, None).await;
+        assert_eq!(award_for_game(&pool, win_999).await.unwrap(), 1);
+        assert!(!has(&grants(&pool, owner).await, Head::KIND, "judge"));
+        assert!(!has(&grants(&pool, owner).await, Tail::KIND, "judge"));
+        seed_games(&pool, a, Some(a_entry), None, 1, 1, "finished").await;
+        seed_games(&pool, a, None, Some(b), 1, 1, "finished").await;
+        let dirty = game(&pool, "Standard", "waiting", None).await;
+        participant(&pool, dirty, a, 1, Some(a_entry)).await;
+        participant(&pool, dirty, b, 2, None).await;
+        let mut conn = pool.acquire().await.unwrap();
+        assert_eq!(
+            distinct_candidate_count(&mut conn, owner, 1_000, true)
+                .await
+                .unwrap(),
+            1_000
+        );
+        assert_eq!(
+            distinct_finished_count(&mut conn, owner, 1_000, true)
+                .await
+                .unwrap(),
+            999
+        );
+        drop(conn);
+        let mixed = game(&pool, "Standard", "finished", None).await;
+        participant(&pool, mixed, a, 1, None).await;
+        let other_owned = snake(&pool, owner, "ladder loss").await;
+        let other_entry = entry(&pool, other_owned).await;
+        participant(&pool, mixed, other_owned, 2, Some(other_entry)).await;
+        assert_eq!(award_for_game(&pool, mixed).await.unwrap(), 0);
+        assert!(!has(&grants(&pool, owner).await, Head::KIND, "judge"));
+        let win = game(&pool, "Standard", "finished", None).await;
+        participant(&pool, win, a, 1, Some(a_entry)).await;
+        participant(&pool, win, b, 2, None).await;
+        assert_eq!(award_for_game(&pool, win).await.unwrap(), 2);
+        assert!(has(&grants(&pool, owner).await, Head::KIND, "judge"));
+        assert!(has(&grants(&pool, owner).await, Tail::KIND, "judge"));
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn recent_reconciliation_ors_qualifying_rows_but_live_gate_stays_local(pool: PgPool) {
+        let owner = user(&pool, 1663031).await;
+        let opponent = user(&pool, 1663032).await;
+        let a = snake(&pool, owner, "reconcile").await;
+        let b = snake(&pool, opponent, "peer").await;
+        let a_entry = entry(&pool, a).await;
+        seed_games(&pool, a, Some(a_entry), Some(b), 999, 1, "finished").await;
+        seed_games(&pool, a, Some(a_entry), Some(b), 2_000, 2, "finished").await;
+        let missed = game(&pool, "Standard", "finished", Some(1)).await;
+        participant(&pool, missed, a, 1, Some(a_entry)).await;
+        participant(&pool, missed, b, 2, None).await;
+        let nonqualifying = game(&pool, "Standard", "finished", Some(1)).await;
+        participant(&pool, nonqualifying, a, 2, None).await;
+        participant(&pool, nonqualifying, b, 1, None).await;
+        assert_eq!(award_for_game(&pool, nonqualifying).await.unwrap(), 1);
+        let before = grants(&pool, owner).await;
+        assert!(!has(&before, Head::KIND, "turtle"));
+        assert!(!has(&before, Head::KIND, "judge"));
+        assert_eq!(reconcile_recent_achievements(&pool).await.unwrap(), 5);
+        let after = grants(&pool, owner).await;
+        assert!(has(&after, Head::KIND, "turtle"));
+        assert!(has(&after, Tail::KIND, "turtle"));
+        assert!(has(&after, Head::KIND, "judge"));
+        assert!(has(&after, Tail::KIND, "judge"));
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn existing_achievement_grants_survive_live_and_backfill(pool: PgPool) {
+        let full = user(&pool, 1663021).await;
+        let partial = user(&pool, 1663022).await;
+        let full_snake = snake(&pool, full, "full").await;
+        let partial_snake = snake(&pool, partial, "partial").await;
+        let full_entry = entry(&pool, full_snake).await;
+        let partial_entry = entry(&pool, partial_snake).await;
+        sqlx::query("INSERT INTO customization_grants (user_id, customization_type, slug, source) VALUES ($1, 'head', 'turtle', 'achievement'), ($1, 'tail', 'turtle', 'achievement'), ($1, 'head', 'judge', 'achievement'), ($1, 'tail', 'judge', 'achievement')")
+            .bind(full).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO customization_grants (user_id, customization_type, slug, source) VALUES ($1, 'head', 'turtle', 'achievement'), ($1, 'head', 'judge', 'achievement')")
+            .bind(partial).execute(&pool).await.unwrap();
+        let before: Vec<(Uuid, Uuid, String, String, String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+            "SELECT customization_grant_id, user_id, customization_type, slug, source, created_at FROM customization_grants WHERE user_id IN ($1, $2) ORDER BY user_id, customization_type, slug"
+        ).bind(full).bind(partial).fetch_all(&pool).await.unwrap();
+        let id = game(&pool, "Standard", "finished", Some(3)).await;
+        participant(&pool, id, full_snake, 1, Some(full_entry)).await;
+        participant(&pool, id, partial_snake, 1, Some(partial_entry)).await;
+        assert_eq!(award_for_game(&pool, id).await.unwrap(), 2);
+        let after_live: Vec<(Uuid, Uuid, String, String, String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+            "SELECT customization_grant_id, user_id, customization_type, slug, source, created_at FROM customization_grants WHERE user_id IN ($1, $2) AND slug IN ('turtle', 'judge') ORDER BY user_id, customization_type, slug"
+        ).bind(full).bind(partial).fetch_all(&pool).await.unwrap();
+        assert_eq!(after_live, before);
+        assert!(!has(&grants(&pool, partial).await, Tail::KIND, "turtle"));
+        assert!(!has(&grants(&pool, partial).await, Tail::KIND, "judge"));
+        sqlx::query("UPDATE achievement_backfill_cursor SET after_user_id = NULL, completed_at = NULL WHERE singleton = TRUE")
+            .execute(&pool).await.unwrap();
+        assert!(backfill_achievement_page(&pool).await.unwrap().complete);
+        let after_backfill: Vec<(Uuid, Uuid, String, String, String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+            "SELECT customization_grant_id, user_id, customization_type, slug, source, created_at FROM customization_grants WHERE user_id IN ($1, $2) AND slug IN ('turtle', 'judge') ORDER BY user_id, customization_type, slug"
+        ).bind(full).bind(partial).fetch_all(&pool).await.unwrap();
+        assert_eq!(after_backfill, before);
+        assert!(!has(&grants(&pool, partial).await, Tail::KIND, "turtle"));
+        assert!(!has(&grants(&pool, partial).await, Tail::KIND, "judge"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a disposable 5.16M-game database and ARENA_ACHIEVEMENT_PERF_DATABASE_URL"]
+    async fn benchmark_achievement_counts_on_large_games_table() {
+        use std::time::{Duration, Instant};
+
+        let url = std::env::var("ARENA_ACHIEVEMENT_PERF_DATABASE_URL").unwrap();
+        let pool = PgPool::connect(&url).await.unwrap();
+        let background: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM games")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(background >= 5_160_000, "large-table fixture is incomplete");
+        let rival_owner = user(&pool, 1663900).await;
+        let rival = snake(&pool, rival_owner, "benchmark peer").await;
+        let mut cases = Vec::new();
+        for (index, name) in [
+            "turtle-2999",
+            "judge-999",
+            "zero",
+            "turtle-dirty",
+            "judge-dirty",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let owner = user(&pool, 1663901 + index as i64).await;
+            let snake_id = snake(&pool, owner, name).await;
+            let ladder_entry = entry(&pool, snake_id).await;
+            match *name {
+                "turtle-2999" | "turtle-dirty" => {
+                    seed_games(
+                        &pool,
+                        snake_id,
+                        Some(ladder_entry),
+                        Some(rival),
+                        2_999,
+                        2,
+                        "finished",
+                    )
+                    .await;
+                }
+                "judge-999" => {
+                    seed_games(
+                        &pool,
+                        snake_id,
+                        Some(ladder_entry),
+                        Some(rival),
+                        999,
+                        1,
+                        "finished",
+                    )
+                    .await;
+                    seed_games(
+                        &pool,
+                        snake_id,
+                        Some(ladder_entry),
+                        Some(rival),
+                        1_998,
+                        2,
+                        "finished",
+                    )
+                    .await;
+                }
+                "judge-dirty" => {
+                    seed_games(
+                        &pool,
+                        snake_id,
+                        Some(ladder_entry),
+                        Some(rival),
+                        999,
+                        1,
+                        "finished",
+                    )
+                    .await;
+                }
+                _ => {}
+            }
+            if name.ends_with("dirty") {
+                seed_games(
+                    &pool,
+                    snake_id,
+                    Some(ladder_entry),
+                    Some(rival),
+                    1,
+                    if *name == "judge-dirty" { 1 } else { 2 },
+                    "waiting",
+                )
+                .await;
+            }
+            cases.push((*name, owner));
+        }
+        sqlx::query("ANALYZE games").execute(&pool).await.unwrap();
+        sqlx::query("ANALYZE game_battlesnakes")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let flags = WinFlags {
+            ladder: true,
+            ladder_win: true,
+            ..WinFlags::default()
+        };
+        for (name, owner) in cases {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let mut conn = pool.acquire().await.unwrap();
+            let start = Instant::now();
+            assert_eq!(award_owner(&mut conn, owner, Some(flags)).await.unwrap(), 0);
+            let cold = start.elapsed();
+            let mut warmed = Vec::new();
+            for _ in 0..20 {
+                let start = Instant::now();
+                assert_eq!(award_owner(&mut conn, owner, Some(flags)).await.unwrap(), 0);
+                warmed.push(start.elapsed());
+            }
+            warmed.sort_unstable();
+            println!(
+                "{name}: first_after_idle={cold:?} warm_p95={:?}",
+                warmed[18]
+            );
+        }
+        for index in 0..10 {
+            let batch_owner = user(&pool, 1663950 + index).await;
+            let batch_snake = snake(&pool, batch_owner, "batch seed").await;
+            let batch_entry = entry(&pool, batch_snake).await;
+            seed_games(
+                &pool,
+                batch_snake,
+                Some(batch_entry),
+                Some(rival),
+                2_999,
+                2,
+                "finished",
+            )
+            .await;
+            let recent = game(&pool, "Standard", "finished", Some(1)).await;
+            participant(&pool, recent, batch_snake, 2, Some(batch_entry)).await;
+            participant(&pool, recent, rival, 1, None).await;
+        }
+        let start = Instant::now();
+        reconcile_recent_achievements(&pool).await.unwrap();
+        println!("reconciliation_transaction={:?}", start.elapsed());
     }
 
     #[sqlx::test(migrations = "../migrations")]
@@ -703,6 +1136,7 @@ mod tests {
         let rival = snake(&pool, opponent, "rival").await;
         let fourth = snake(&pool, opponent, "fourth").await;
         let rival_entry = entry(&pool, rival).await;
+        let winner_entry = entry(&pool, winner).await;
 
         let solo = game(&pool, "Standard", "finished", None).await;
         participant(&pool, solo, winner, 1, None).await;
@@ -753,16 +1187,23 @@ mod tests {
         participant(&pool, four, fourth, 4, None).await;
         assert_eq!(award_for_game(&pool, four).await.unwrap(), 4);
 
-        // Five finished games above plus 94 distinct games reaches 99.
-        for _ in 0..94 {
-            let id = game(&pool, "Standard", "finished", None).await;
-            participant(&pool, id, winner, 2, None).await;
-            participant(&pool, id, own_peer, 2, None).await;
-            assert_eq!(award_for_game(&pool, id).await.unwrap(), 0);
-        }
-        let live_99 = grants(&pool, owner).await;
-        assert!(!has(&live_99, Head::KIND, "turtle"));
-        assert!(!has(&live_99, Head::KIND, "judge"));
+        seed_games(
+            &pool,
+            winner,
+            Some(winner_entry),
+            Some(rival),
+            2_998,
+            2,
+            "finished",
+        )
+        .await;
+        let almost = game(&pool, "Standard", "finished", None).await;
+        participant(&pool, almost, winner, 2, Some(winner_entry)).await;
+        participant(&pool, almost, own_peer, 1, None).await;
+        assert_eq!(award_for_game(&pool, almost).await.unwrap(), 0);
+        let live_2999 = grants(&pool, owner).await;
+        assert!(!has(&live_2999, Head::KIND, "turtle"));
+        assert!(!has(&live_2999, Head::KIND, "judge"));
         sqlx::query("DELETE FROM customization_grants WHERE user_id = $1")
             .bind(owner)
             .execute(&pool)
@@ -771,15 +1212,15 @@ mod tests {
         sqlx::query("UPDATE achievement_backfill_cursor SET after_user_id = NULL, completed_at = NULL WHERE singleton = TRUE")
             .execute(&pool).await.unwrap();
         assert!(backfill_achievement_page(&pool).await.unwrap().complete);
-        assert_eq!(grants(&pool, owner).await, live_99);
+        assert_eq!(grants(&pool, owner).await, live_2999);
 
-        let hundredth = game(&pool, "Standard", "finished", None).await;
-        participant(&pool, hundredth, winner, 2, None).await;
-        participant(&pool, hundredth, own_peer, 2, None).await;
-        assert_eq!(award_for_game(&pool, hundredth).await.unwrap(), 2);
-        let live_100 = grants(&pool, owner).await;
-        assert!(has(&live_100, Head::KIND, "turtle"));
-        assert!(has(&live_100, Tail::KIND, "turtle"));
+        let three_thousandth = game(&pool, "Standard", "finished", None).await;
+        participant(&pool, three_thousandth, winner, 2, Some(winner_entry)).await;
+        participant(&pool, three_thousandth, own_peer, 2, None).await;
+        assert_eq!(award_for_game(&pool, three_thousandth).await.unwrap(), 2);
+        let live_3000 = grants(&pool, owner).await;
+        assert!(has(&live_3000, Head::KIND, "turtle"));
+        assert!(has(&live_3000, Tail::KIND, "turtle"));
         sqlx::query("DELETE FROM customization_grants WHERE user_id = $1")
             .bind(owner)
             .execute(&pool)
@@ -788,7 +1229,7 @@ mod tests {
         sqlx::query("UPDATE achievement_backfill_cursor SET after_user_id = NULL, completed_at = NULL WHERE singleton = TRUE")
             .execute(&pool).await.unwrap();
         assert!(backfill_achievement_page(&pool).await.unwrap().complete);
-        assert_eq!(grants(&pool, owner).await, live_100);
+        assert_eq!(grants(&pool, owner).await, live_3000);
     }
 
     #[sqlx::test(migrations = "../migrations")]
