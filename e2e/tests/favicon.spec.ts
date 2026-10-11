@@ -10,6 +10,6 @@ test.describe('Favicon', () => {
   test('pages declare an icon link in the head', async ({ page }) => {
     await page.goto('/');
     const iconHref = await page.locator('link[rel="icon"]').getAttribute('href');
-    expect(iconHref).toContain('favicon.svg');
+    expect(iconHref).toMatch(/^\/assets\/favicon\.[0-9a-f]{8}\.svg$/);
   });
 });

@@ -5,7 +5,7 @@
    Two theme axes, resolved onto html[data-app-theme="light|dark"]:
      - site theme    (system | light | dark)  — every page
      - game theater  (match | dark | light)   — pages marked data-theater-page
-   Resolution happens in the inline head script (no-FOUC) + /static/theme.js.
+   Resolution happens in the inline head script (no-FOUC) + theme.js.
    ========================================================================== */
 
 :root {

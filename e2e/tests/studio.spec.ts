@@ -1373,11 +1373,11 @@ test.describe('Head & Tail Studio: start here', () => {
     await openStudio(page);
     const defaultTail = await refPath(page, 'tail', 'default');
     const status = page.locator('#studio-status');
-    const fetched = page.waitForResponse((r) => r.url().includes('/static/design-kit/example-drawing.png'));
+    const fetched = page.waitForResponse((r) => /^\/assets\/design-kit\/example-drawing\.[0-9a-f]{8}\.png$/.test(new URL(r.url()).pathname));
     const response = await answerTo(page, () => page.locator('#studio-example').click());
     const asset = await fetched;
     expect(asset.status()).toBe(200);
-    expect(asset.url(), 'a versioned asset URL').toMatch(/example-drawing\.png\?v=[0-9a-f]{16}$/);
+    expect(asset.url(), 'a versioned asset URL').toMatch(/\/assets\/design-kit\/example-drawing\.[0-9a-f]{8}\.png$/);
     expect(response.status(), await response.text()).toBe(200);
     expect(response.request().postDataBuffer()?.equals(await kitFile('example-drawing.png')), 'posts the committed file').toBe(true);
 
@@ -1455,7 +1455,7 @@ test.describe('Head & Tail Studio: start here', () => {
     const status = page.locator('#studio-status');
     const posted: string[] = [];
     page.on('request', (r) => { if (r.url().includes(ENDPOINT)) posted.push(r.url()); });
-    const isExample = (url: URL) => url.pathname.endsWith('/design-kit/example-drawing.png');
+    const isExample = (url: URL) => /^\/assets\/design-kit\/example-drawing\.[0-9a-f]{8}\.png$/.test(url.pathname);
 
     // Your head is still processing: the example isn't even fetched.
     const fetches: string[] = [];

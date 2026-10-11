@@ -152,18 +152,6 @@ fn tag_form_fields(catalog: &tag::TagCatalog, selected: &[Uuid]) -> Markup {
     }
 }
 
-const URL_NORMALIZATION_SCRIPT: &str = r#"
-(function() {
-  var el = document.getElementById('url');
-  el.addEventListener('change', function() {
-    var v = el.value.trim();
-    if (v && v.indexOf('://') === -1) {
-      el.value = 'https://' + v;
-    }
-  });
-})();
-"#;
-
 fn battlesnake_form(
     action: &str,
     submit_label: &str,
@@ -200,7 +188,7 @@ fn battlesnake_form(
                 p class="help" { "Pick the region closest to where your snake is hosted." }
             }
             (tag_form_fields(catalog, &form.tag_ids))
-            script { (maud::PreEscaped(URL_NORMALIZATION_SCRIPT)) }
+            script src=(crate::arena_assets::asset_url("url-normalization.js")) {}
             div class="form-cta" {
                 button type="submit" class="btn solid" { (submit_label) }
                 a href="/battlesnakes" class="btn" { "Cancel" }
@@ -474,7 +462,7 @@ pub async fn list_battlesnakes(
                                             }
                                             a href={"/battlesnakes/"(snake.battlesnake_id)"/edit"} class="btn sm" { "Edit" }
                                             form action={"/battlesnakes/"(snake.battlesnake_id)"/delete"} method="post" {
-                                                button type="submit" class="btn sm danger" onclick="return confirm('Are you sure you want to delete this battlesnake?');" { "Delete" }
+                                                button type="submit" class="btn sm danger" data-confirm="Are you sure you want to delete this battlesnake?" { "Delete" }
                                             }
                                         }
                                     }
@@ -1209,7 +1197,7 @@ fn render_battlesnake_profile(view: &ProfileView<'_>) -> Markup {
                             a href={"/battlesnakes/"(battlesnake_id)"/edit"} class="btn" { "Edit" }
                             form action={"/battlesnakes/"(battlesnake_id)"/delete"} method="post" {
                                 button type="submit" class="btn danger"
-                                    onclick="return confirm('Are you sure you want to delete this battlesnake?');" { "Delete" }
+                                    data-confirm="Are you sure you want to delete this battlesnake?" { "Delete" }
                             }
                         }
                         ProfileViewer::Visitor if is_public => {
@@ -2025,6 +2013,7 @@ mod deleted_snake_route_tests {
 
     fn app(pool: &PgPool) -> axum::Router {
         crate::routes::routes(AppState::test_from_pool(pool.clone()))
+            .expect("asset router")
             .layer(tower_cookies::CookieManagerLayer::new())
     }
 
@@ -2185,6 +2174,7 @@ mod profile_page_tests {
         async fn new(db: PgPool, visibility: &str) -> Self {
             let state = AppState::test_from_pool(db.clone());
             let app = crate::routes::routes(state.clone())
+                .expect("asset router")
                 .layer(tower_cookies::CookieManagerLayer::new());
             let owner_session = create_user_session(&db, 51001, false).await;
             let visitor_session = create_user_session(&db, 51002, false).await;

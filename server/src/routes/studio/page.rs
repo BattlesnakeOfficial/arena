@@ -3,7 +3,7 @@
 //! Everything is server-rendered: every preview board (with the default head and tail
 //! in place), a card per slot ("Your snake": the head and the tail, each with its
 //! upload button, its catalog styles and a thumbnail), a close-up per slot, and empty
-//! check lists per slot. `static/studio.js` posts uploads to the processing endpoint
+//! check lists per slot. `frontend/src/studio.ts` posts uploads to the processing endpoint
 //! and then only sets attributes and text: `d`/`fill-rule` on the placeholder paths,
 //! the `--studio-snake` colour variable, the board theme class, and the checks.
 //!
@@ -25,11 +25,11 @@ use super::guide::{
 };
 use super::process::MAX_BODY_BYTES;
 use crate::{
+    arena_assets::asset_url,
     components::{
         page_factory::PageFactory,
         snake_board::{ShapeRef, four_directions_board, live_loop_board, snake_board},
     },
-    static_assets::asset_url,
 };
 
 /// Colour presets: name, colour, and a hint shown under the swatches when picked.

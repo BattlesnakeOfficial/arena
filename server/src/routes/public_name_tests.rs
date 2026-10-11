@@ -67,6 +67,7 @@ impl Fixture {
 
     async fn get(&self, path: &str, session: Option<Uuid>) -> (StatusCode, String) {
         let app = crate::routes::routes(self.state.clone())
+            .expect("asset router")
             .layer(tower_cookies::CookieManagerLayer::new());
         let mut builder = Request::builder().uri(path);
         if path.starts_with("/api/") {

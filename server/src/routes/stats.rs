@@ -313,8 +313,9 @@ mod tests {
     #[sqlx::test(migrations = "../migrations")]
     async fn admin_router_serves_html_json_and_reports_query_failure(db: sqlx::PgPool) {
         let state = AppState::test_from_pool(db.clone());
-        let app =
-            crate::routes::routes(state.clone()).layer(tower_cookies::CookieManagerLayer::new());
+        let app = crate::routes::routes(state.clone())
+            .expect("asset router")
+            .layer(tower_cookies::CookieManagerLayer::new());
         for (stats_path, admin_path) in [("/stats", "/admin"), ("/api/stats", "/api/admin/stats")] {
             let stats = route_response(&app, stats_path, None, None).await;
             let admin = route_response(&app, admin_path, None, None).await;
