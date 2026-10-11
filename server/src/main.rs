@@ -143,6 +143,27 @@ async fn run_application(config: config::AppConfig) -> cja::Result<()> {
 /// 10 second SIGTERM-to-SIGKILL window, with room left to flush telemetry.
 pub(crate) const SHUTDOWN_EXIT_GRACE: Duration = Duration::from_secs(3);
 
+#[derive(Debug, PartialEq, Eq)]
+enum ProcessTask {
+    Server,
+    Jobs(usize),
+    Cron,
+}
+
+fn scheduled_tasks(features: config::FeatureFlags, job_workers: usize) -> Vec<ProcessTask> {
+    let mut tasks = Vec::new();
+    if features.server {
+        tasks.push(ProcessTask::Server);
+    }
+    if features.jobs {
+        tasks.extend((0..job_workers).map(ProcessTask::Jobs));
+    }
+    if features.cron {
+        tasks.push(ProcessTask::Cron);
+    }
+    tasks
+}
+
 async fn run_instrumented_application(
     config: config::AppConfig,
     identity: eyes_subscriber::ProcessIdentity,
@@ -179,7 +200,7 @@ async fn spawn_application_tasks(
     let manifest = observability::manifest(&cron_registry, identity, features)
         .map_err(|error| eyre!("Invalid Arena observability declarations: {error}"))?;
 
-    if features.server {
+    if scheduled_tasks(features, job.workers).contains(&ProcessTask::Server) {
         info!("Server Enabled");
         supervisor.spawn(
             "watched-games",
@@ -214,7 +235,16 @@ async fn spawn_application_tasks(
         info!("Job workers: {}", job.workers);
         info!("Job shutdown drain: {}s", job.shutdown_drain_secs);
 
-        for i in 0..job.workers {
+        for i in scheduled_tasks(features, job.workers)
+            .into_iter()
+            .filter_map(|task| {
+                if let ProcessTask::Jobs(i) = task {
+                    Some(i)
+                } else {
+                    None
+                }
+            })
+        {
             let name: &'static str = Box::leak(format!("jobs-{i}").into_boxed_str());
             supervisor.spawn(
                 name,
@@ -232,7 +262,7 @@ async fn spawn_application_tasks(
         info!("Jobs Disabled");
     }
 
-    if features.cron {
+    if scheduled_tasks(features, job.workers).contains(&ProcessTask::Cron) {
         info!("Cron Enabled");
         supervisor.spawn(
             "cron",
@@ -250,6 +280,32 @@ async fn spawn_application_tasks(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn process_roles_schedule_only_their_components() {
+        let flags = |server, jobs, cron| config::FeatureFlags { server, jobs, cron };
+        assert_eq!(
+            scheduled_tasks(flags(true, true, true), 2),
+            vec![
+                ProcessTask::Server,
+                ProcessTask::Jobs(0),
+                ProcessTask::Jobs(1),
+                ProcessTask::Cron,
+            ]
+        );
+        assert_eq!(
+            scheduled_tasks(flags(true, false, false), 2),
+            vec![ProcessTask::Server]
+        );
+        assert_eq!(
+            scheduled_tasks(flags(false, true, false), 2),
+            vec![ProcessTask::Jobs(0), ProcessTask::Jobs(1)]
+        );
+        assert_eq!(
+            scheduled_tasks(flags(false, false, true), 2),
+            vec![ProcessTask::Cron]
+        );
+    }
 
     #[test]
     fn boot_manifest_declares_exactly_one_health_monitor() {

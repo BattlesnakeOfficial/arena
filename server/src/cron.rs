@@ -215,6 +215,8 @@ mod tests {
         undispatchable.sort_unstable();
         // Closure crons run in the cron worker; every Job cron is enqueued for
         // the job worker, which fails names missing from impl_job_registry!.
+        // Job crons enqueue exactly once per interval across schedulers;
+        // callback crons take the same claim, so they run at most once.
         assert_eq!(
             undispatchable,
             [

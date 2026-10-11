@@ -13,6 +13,9 @@ The `arena` process role represents the combined Cloud Run service, with at
 least one instance expected. Only enabled features declare HTTP checks, cron
 schedules, and critical jobs. This assumes the current combined deployment;
 split web/worker deployments need separate role and authority design.
+The combined `arena` Eyes manifest remains the current operational contract.
+Before deploying split roles with Eyes, give each process a distinct role identity
+and coordinate app-wide expected-role and HTTP-monitor declaration authority.
 
 The `arena-operations` dashboard covers HTTP volume/latency, errors, committed
 game completions, queue wait, turn database writes, processing overhead, and job
