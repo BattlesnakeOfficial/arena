@@ -873,6 +873,9 @@ table.data.test-results pre { margin-top: 8px; font-family: var(--mono); font-si
 
 .cz-note { font-size: 16px; color: var(--muted); margin-top: 18px; }
 .cz-note a { color: var(--pink); }
+.cz-redeem .field input { font-size: 16px; min-height: 44px; }
+.cz-redeem > .btn { min-height: 44px; }
+.admin-code-form > .btn { min-height: 44px; }
 .cz-group { margin-top: 48px; }
 .cz-group-head { display: flex; align-items: baseline; gap: 12px; border-bottom: 1px solid var(--hairline); padding-bottom: 10px; }
 .cz-group-head h2 { font-size: 22px; }

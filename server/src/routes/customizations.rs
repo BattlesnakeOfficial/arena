@@ -10,12 +10,16 @@ use serde::Deserialize;
 use std::collections::HashSet;
 
 use crate::{
-    components::page_factory::PageFactory,
+    components::{page::Page, page_factory::PageFactory},
     customizations::{
         self, Availability, CustomizationDef, Group, Head, Tail, UnlockOutcome, achievements,
     },
     errors::{ServerResult, WithStatus},
     flasher::Flasher,
+    models::{
+        customization_unlock_code::{self as codes, RedeemOutcome},
+        user::User,
+    },
     routes::auth::{CurrentUser, OptionalUser},
     state::AppState,
 };
@@ -66,13 +70,22 @@ pub async fn list_customizations(
     OptionalUser(user): OptionalUser,
     page_factory: PageFactory,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
-    let granted = match &user {
+    Ok(render_customizations_page(&state, user.as_ref(), page_factory, None).await?)
+}
+
+async fn render_customizations_page(
+    state: &AppState,
+    user: Option<&User>,
+    page_factory: PageFactory,
+    redeem_error: Option<&str>,
+) -> cja::Result<Page> {
+    let granted = match user {
         Some(user) => customizations::get_granted_slugs(&state.db, user.user_id)
             .await
             .wrap_err("Failed to fetch customization grants")?,
         None => HashSet::new(),
     };
-    let balance = match &user {
+    let balance = match user {
         Some(user) => customizations::token_balance(&state.db, user.user_id).await?,
         None => 0,
     };
@@ -90,6 +103,16 @@ pub async fn list_customizations(
             }
 
             @if user.is_some() {
+                @if let Some(message) = redeem_error {
+                    p role="alert" { (message) }
+                }
+                form class="form-stack cz-redeem" method="post" action="/customizations/redeem" {
+                    div class="field" {
+                        label for="redeem-code" { "Redeem a code" }
+                        input id="redeem-code" type="text" name="code" required autocomplete="off" autocapitalize="characters" spellcheck="false";
+                    }
+                    button type="submit" class="btn solid" { "Redeem" }
+                }
                 div class="cz-token-panel" aria-label="Token unlocks" {
                     h2 { "Token unlocks" }
                     p class="cz-note" { (balance) " unlock token(s) available" }
@@ -109,9 +132,9 @@ pub async fn list_customizations(
             }
 
             @for group in Group::ALL {
-                @if group.availability() != Availability::Hidden {
-                    @let heads: Vec<_> = Head::ALL.iter().filter(|h| h.def().group == *group).collect();
-                    @let tails: Vec<_> = Tail::ALL.iter().filter(|t| t.def().group == *group).collect();
+                {
+                    @let heads: Vec<_> = Head::ALL.iter().filter(|h| h.def().group == *group && (group.availability() != Availability::Hidden || granted.contains(&(Head::KIND.to_string(), h.slug().to_string())))).collect();
+                    @let tails: Vec<_> = Tail::ALL.iter().filter(|t| t.def().group == *group && (group.availability() != Availability::Hidden || granted.contains(&(Tail::KIND.to_string(), t.slug().to_string())))).collect();
                     @if !heads.is_empty() || !tails.is_empty() {
                         section class="cz-group" {
                             div class="cz-group-head" {
@@ -142,6 +165,50 @@ pub async fn list_customizations(
             }
         }),
     ))
+}
+
+#[derive(Deserialize)]
+pub struct RedeemCodeForm {
+    code: String,
+}
+
+pub async fn redeem_code(
+    State(state): State<AppState>,
+    CurrentUser(user): CurrentUser,
+    page_factory: PageFactory,
+    flasher: Flasher,
+    Form(form): Form<RedeemCodeForm>,
+) -> ServerResult<axum::response::Response, StatusCode> {
+    let outcome = codes::redeem(&state.db, user.user_id, &form.code).await?;
+    let (status, message) = match outcome {
+        RedeemOutcome::Granted { name, kind, slug } => {
+            if let Err(error) = flasher
+                .success(format!("Unlocked {name} ({kind}: {slug})"))
+                .await
+            {
+                tracing::error!(error = %format!("{error:#}"), "Failed to flash code redemption");
+            }
+            return Ok(Redirect::to("/customizations").into_response());
+        }
+        RedeemOutcome::Unknown => (StatusCode::NOT_FOUND, "Unknown code"),
+        RedeemOutcome::Expired => (StatusCode::GONE, "This code has expired"),
+        RedeemOutcome::Disabled => (StatusCode::FORBIDDEN, "This code is disabled"),
+        RedeemOutcome::FullyRedeemed => (StatusCode::CONFLICT, "This code has been fully redeemed"),
+        RedeemOutcome::AlreadyRedeemed => (StatusCode::CONFLICT, "You already redeemed this code"),
+        RedeemOutcome::AlreadyOwned => (
+            StatusCode::CONFLICT,
+            "You already unlocked this item. The code wasn't used.",
+        ),
+        RedeemOutcome::RateLimited => (
+            StatusCode::TOO_MANY_REQUESTS,
+            "Too many failed redemptions. Try again later",
+        ),
+    };
+    Ok((
+        status,
+        render_customizations_page(&state, Some(&user), page_factory, Some(message)).await?,
+    )
+        .into_response())
 }
 
 #[derive(Deserialize)]
@@ -198,11 +265,22 @@ mod tests {
         cookie: Option<&str>,
         body: &str,
     ) -> axum::response::Response {
-        let mut builder = Request::builder().method(method).uri(if body.is_empty() {
+        let uri = if body.is_empty() {
             "/customizations"
         } else {
             "/customizations/unlock"
-        });
+        };
+        request_at(app, method, uri, cookie, body).await
+    }
+
+    async fn request_at(
+        app: &axum::Router,
+        method: Method,
+        uri: &str,
+        cookie: Option<&str>,
+        body: &str,
+    ) -> axum::response::Response {
+        let mut builder = Request::builder().method(method).uri(uri);
         if let Some(cookie) = cookie {
             builder = builder.header(
                 header::COOKIE,
@@ -226,6 +304,198 @@ mod tests {
                 .to_vec(),
         )
         .unwrap()
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn redeem_route_messages_and_hidden_catalog(db: sqlx::PgPool) {
+        use crate::models::customization_unlock_code::{CreateCode, create};
+        use sha2::Digest as _;
+        let state = AppState::test_from_pool(db.clone());
+        let app =
+            crate::routes::routes(state.clone()).layer(tower_cookies::CookieManagerLayer::new());
+        let guest = html(request_at(&app, Method::GET, "/customizations", None, "").await).await;
+        assert!(!guest.contains("action=\"/customizations/redeem\""));
+        assert!(!guest.contains("head: hydra"));
+        assert!(guest.contains("2024 Achievement Collection"));
+        assert_eq!(
+            request_at(
+                &app,
+                Method::POST,
+                "/customizations/redeem",
+                None,
+                "code=bad"
+            )
+            .await
+            .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let session = create_user_session(&db, 164561, false).await;
+        let player = session_user_id(&db, session).await;
+        let cookie = signed_session_cookie(&state, session);
+        let signed =
+            html(request_at(&app, Method::GET, "/customizations", Some(&cookie), "").await).await;
+        assert!(signed.contains("action=\"/customizations/redeem\""));
+        let redeem_form = signed
+            .split("<form class=\"form-stack cz-redeem\"")
+            .nth(1)
+            .expect("redeem form")
+            .split("</form>")
+            .next()
+            .expect("redeem form end");
+        assert!(redeem_form.contains("class=\"btn solid\""));
+        assert!(redeem_form.contains("id=\"redeem-code\""));
+        assert!(!signed.contains("head: hydra"));
+        let input = CreateCode {
+            customization_type: "head".into(),
+            slug: "hydra".into(),
+            max_redemptions: 2,
+            expires_at: None,
+            note: None,
+        };
+        let code = create(&db, player, &input).await.unwrap();
+        let before = customizations::token_balance(&db, player).await.unwrap();
+        let response = request_at(
+            &app,
+            Method::POST,
+            "/customizations/redeem",
+            Some(&cookie),
+            &format!("code={code}"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(response.headers()[header::LOCATION], "/customizations");
+        let page =
+            html(request_at(&app, Method::GET, "/customizations", Some(&cookie), "").await).await;
+        assert!(page.contains("Unlocked Community Hydra (head: hydra)"));
+        assert!(page.contains("head: hydra"));
+        assert!(!page.contains("tail: hydra"));
+        let slug_position = page.rfind("head: hydra").expect("hydra head slug");
+        let card_start = page[..slug_position]
+            .rfind("<div class=\"cz-item")
+            .expect("hydra head card");
+        let card_tail = &page[card_start..];
+        let card_end = card_tail.find("</section>").expect("end of hydra group");
+        let hydra_card = &card_tail[..card_end];
+        assert!(hydra_card.contains("badge ok"));
+        assert!(hydra_card.contains("Unlocked"));
+        assert!(!hydra_card.contains("cz-unlock-form"));
+        assert_eq!(
+            customizations::token_balance(&db, player).await.unwrap(),
+            before
+        );
+        let expired = create(&db, player, &input).await.unwrap();
+        sqlx::query("UPDATE customization_unlock_codes SET expires_at = NOW() - INTERVAL '1 second' WHERE code_hash = $1")
+            .bind(hex::encode(sha2::Sha256::digest(expired.as_bytes()))).execute(&db).await.unwrap();
+        let disabled = create(&db, player, &input).await.unwrap();
+        let disabled_id: uuid::Uuid = sqlx::query_scalar(
+            "SELECT code_id FROM customization_unlock_codes WHERE code_hash = $1",
+        )
+        .bind(hex::encode(sha2::Sha256::digest(disabled.as_bytes())))
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        codes::disable(&db, disabled_id).await.unwrap();
+        let owned = create(&db, player, &input).await.unwrap();
+        let full = create(
+            &db,
+            player,
+            &CreateCode {
+                customization_type: "head".into(),
+                slug: "turtle".into(),
+                max_redemptions: 1,
+                expires_at: None,
+                note: None,
+            },
+        )
+        .await
+        .unwrap();
+        let other_session = create_user_session(&db, 164562, false).await;
+        let other_cookie = signed_session_cookie(&state, other_session);
+        assert_eq!(
+            request_at(
+                &app,
+                Method::POST,
+                "/customizations/redeem",
+                Some(&other_cookie),
+                &format!("code={full}")
+            )
+            .await
+            .status(),
+            StatusCode::SEE_OTHER
+        );
+        for (code, status, message) in [
+            ("bad".to_string(), StatusCode::NOT_FOUND, "Unknown code"),
+            (
+                code.clone(),
+                StatusCode::CONFLICT,
+                "You already redeemed this code",
+            ),
+            (expired, StatusCode::GONE, "This code has expired"),
+            (disabled, StatusCode::FORBIDDEN, "This code is disabled"),
+            (
+                owned,
+                StatusCode::CONFLICT,
+                "You already unlocked this item. The code wasn't used.",
+            ),
+            (
+                full,
+                StatusCode::CONFLICT,
+                "This code has been fully redeemed",
+            ),
+        ] {
+            let response = request_at(
+                &app,
+                Method::POST,
+                "/customizations/redeem",
+                Some(&cookie),
+                &format!("code={code}"),
+            )
+            .await;
+            assert_eq!(response.status(), status);
+            let body = html(response).await;
+            assert!(body.contains(message));
+            assert!(body.contains("2024 Achievement Collection"));
+            assert!(body.contains("Token unlocks"));
+            assert!(body.contains(achievements::Achievement::ALL[0].def().description));
+            for word in message
+                .to_ascii_lowercase()
+                .split(|c: char| !c.is_ascii_alphabetic())
+            {
+                assert!(
+                    !["buy", "price", "paid", "owned", "free", "cost", "costs"].contains(&word)
+                );
+            }
+        }
+        let limited_session = create_user_session(&db, 164563, false).await;
+        let limited_cookie = signed_session_cookie(&state, limited_session);
+        for _ in 0..10 {
+            assert_eq!(
+                request_at(
+                    &app,
+                    Method::POST,
+                    "/customizations/redeem",
+                    Some(&limited_cookie),
+                    "code=bad"
+                )
+                .await
+                .status(),
+                StatusCode::NOT_FOUND
+            );
+        }
+        let limited = request_at(
+            &app,
+            Method::POST,
+            "/customizations/redeem",
+            Some(&limited_cookie),
+            "code=bad",
+        )
+        .await;
+        assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(
+            html(limited)
+                .await
+                .contains("Too many failed redemptions. Try again later")
+        );
     }
 
     #[test]

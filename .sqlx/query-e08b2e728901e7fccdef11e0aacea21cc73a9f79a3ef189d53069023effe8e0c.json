@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE customization_unlock_codes SET disabled_at = NOW() WHERE code_id = $1 AND disabled_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e08b2e728901e7fccdef11e0aacea21cc73a9f79a3ef189d53069023effe8e0c"
+}
