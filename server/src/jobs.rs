@@ -18,12 +18,14 @@ impl Job<AppState> for SendNotificationEmailJob {
 
     async fn run(&self, state: AppState) -> cja::Result<()> {
         use crate::email::{EmailMessage, SendOutcome};
-        use crate::models::{claim_email_token, leaderboard_entry_health, notification};
+        use crate::models::{
+            claim_email_token, leaderboard_entry_health, notification, notification_email,
+        };
 
         let _permit = state.mailer.acquire_delivery_permit().await?;
         let mut tx = state.db.begin().await?;
         let Some(email) = sqlx::query!(
-            "SELECT subject, text, recipient_override, battlesnake_id, claim_imported_account_id, outcome FROM notification_emails WHERE notification_id = $1 FOR UPDATE",
+            "SELECT subject, text, recipient_override, battlesnake_id, recipient_user, claim_imported_account_id, notification_email_request_id, outcome FROM notification_emails WHERE notification_id = $1 FOR UPDATE",
             self.notification_id
         ).fetch_optional(&mut *tx).await? else { return Ok(()); };
         if email.outcome.is_some() {
@@ -55,13 +57,42 @@ impl Job<AppState> for SendNotificationEmailJob {
         if !state.mailer.is_enabled() {
             terminal.get_or_insert("transport_disabled");
         }
-        let mut recipient = email.recipient_override;
+        let mut recipient = None;
+        let mut confirmation_request = None;
         if terminal.is_none()
-            && recipient.is_none()
-            && let Some(snake_id) = email.battlesnake_id
+            && let Some(kind) = kind
         {
-            recipient =
-                leaderboard_entry_health::owner_notification_email(&mut tx, snake_id).await?;
+            if kind.toggleable() {
+                recipient = if email.recipient_user {
+                    notification_email::resolved_recipient(&mut tx, event.user_id).await?
+                } else if let Some(snake_id) = email.battlesnake_id {
+                    leaderboard_entry_health::owner_notification_email(&mut tx, snake_id).await?
+                } else {
+                    None // Legacy override-only toggleable rows cannot bypass confirmation.
+                };
+            } else if kind == NotificationKind::NotificationEmailConfirmation {
+                if let Some(request_id) = email.notification_email_request_id {
+                    // Hold the user lock through Mailgun so only the current request can send.
+                    let pending_id = sqlx::query_scalar!("SELECT pending_notification_email_request_id FROM users WHERE user_id = $1 FOR NO KEY UPDATE", event.user_id).fetch_optional(&mut *tx).await?.flatten();
+                    if pending_id == Some(request_id) {
+                        let request = sqlx::query!("SELECT email, sent_at FROM notification_email_requests WHERE request_id = $1 AND user_id = $2 FOR UPDATE", request_id, event.user_id).fetch_optional(&mut *tx).await?;
+                        if let Some(request) = request.filter(|request| {
+                            request.sent_at.is_none()
+                                && Some(&request.email) == email.recipient_override.as_ref()
+                        }) {
+                            let sent_count = sqlx::query_scalar!("SELECT COUNT(*) AS \"count!\" FROM notification_email_requests WHERE user_id = $1 AND sent_at > NOW() - INTERVAL '24 hours'", event.user_id).fetch_one(&mut *tx).await?;
+                            if sent_count >= 5 {
+                                terminal = Some("rate_limited");
+                            } else {
+                                recipient = Some(request.email);
+                                confirmation_request = Some(request_id);
+                            }
+                        }
+                    }
+                }
+            } else {
+                recipient = email.recipient_override;
+            }
         }
         if terminal.is_none()
             && recipient
@@ -72,7 +103,15 @@ impl Job<AppState> for SendNotificationEmailJob {
         }
         if terminal.is_none() {
             let to = recipient.as_deref().unwrap_or_default();
-            let mut message = if let Some(imported_account_id) = email.claim_imported_account_id {
+            let mut message = if let Some(request_id) = confirmation_request {
+                let secret = notification_email::new_secret();
+                sqlx::query!("UPDATE notification_email_requests SET token_hash = $2, expires_at = NOW() + INTERVAL '24 hours' WHERE request_id = $1", request_id, notification_email::hash_secret(&secret)).execute(&mut *tx).await?;
+                let url = format!(
+                    "{}/settings/notification-email/confirm?token={secret}",
+                    state.config.base_url.trim_end_matches('/')
+                );
+                crate::email::messages::notification_email_confirmation(to, &url)
+            } else if let Some(imported_account_id) = email.claim_imported_account_id {
                 let account = sqlx::query!("SELECT username FROM imported_accounts WHERE imported_account_id = $1 AND claimed_by_user_id IS NULL", imported_account_id).fetch_optional(&mut *tx).await?;
                 if let Some(account) = account {
                     let token =
@@ -114,22 +153,30 @@ impl Job<AppState> for SendNotificationEmailJob {
                     ));
                     message.list_unsubscribe = Some(format!("<{url}>"));
                 }
-                terminal = Some(
-                    match state
-                        .mailer
-                        .send_limited(
-                            &mut tx,
-                            state.config.email_per_recipient_hourly_limit,
-                            kind.map_or("unknown", NotificationKind::key),
-                            &message,
-                        )
-                        .await?
-                    {
-                        SendOutcome::Sent => "sent",
-                        SendOutcome::RateLimited => "rate_limited",
-                        SendOutcome::Disabled => "transport_disabled",
-                    },
-                );
+                let outcome = state
+                    .mailer
+                    .send_limited(
+                        &mut tx,
+                        state.config.email_per_recipient_hourly_limit,
+                        kind.map_or("unknown", NotificationKind::key),
+                        &message,
+                    )
+                    .await?;
+                if let Some(request_id) = confirmation_request {
+                    match outcome {
+                        SendOutcome::Sent => {
+                            sqlx::query!("UPDATE notification_email_requests SET sent_at = NOW() WHERE request_id = $1", request_id).execute(&mut *tx).await?;
+                        }
+                        SendOutcome::RateLimited | SendOutcome::Disabled => {
+                            sqlx::query!("UPDATE notification_email_requests SET token_hash = NULL, expires_at = NULL WHERE request_id = $1", request_id).execute(&mut *tx).await?;
+                        }
+                    }
+                }
+                terminal = Some(match outcome {
+                    SendOutcome::Sent => "sent",
+                    SendOutcome::RateLimited => "rate_limited",
+                    SendOutcome::Disabled => "transport_disabled",
+                });
             }
         }
         sqlx::query!("UPDATE notification_emails SET outcome = $2, finished_at = NOW() WHERE notification_id = $1", self.notification_id, terminal).execute(&mut *tx).await?;

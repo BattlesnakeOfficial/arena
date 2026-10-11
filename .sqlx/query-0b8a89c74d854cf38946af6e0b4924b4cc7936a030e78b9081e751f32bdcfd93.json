@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT COUNT(*) AS \"count!\" FROM notification_email_requests WHERE user_id = $1 AND created_at > NOW() - INTERVAL '24 hours'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "0b8a89c74d854cf38946af6e0b4924b4cc7936a030e78b9081e751f32bdcfd93"
+}

@@ -40,14 +40,16 @@ pub enum NotificationKind {
     SnakeMatchmakingResumed,
     PlayAccountClaimed,
     ClaimVerification,
+    NotificationEmailConfirmation,
 }
 
 impl NotificationKind {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::SnakeMatchmakingPaused,
         Self::SnakeMatchmakingResumed,
         Self::PlayAccountClaimed,
         Self::ClaimVerification,
+        Self::NotificationEmailConfirmation,
     ];
     pub fn key(self) -> &'static str {
         match self {
@@ -55,6 +57,7 @@ impl NotificationKind {
             Self::SnakeMatchmakingResumed => "snake_matchmaking_resumed",
             Self::PlayAccountClaimed => "play_account_claimed",
             Self::ClaimVerification => "claim_verification",
+            Self::NotificationEmailConfirmation => "notification_email_confirmation",
         }
     }
     pub fn parse(value: &str) -> Option<Self> {
@@ -66,6 +69,7 @@ impl NotificationKind {
             Self::SnakeMatchmakingResumed => "Snake matchmaking resumed",
             Self::PlayAccountClaimed => "Play account claimed",
             Self::ClaimVerification => "Claim verification",
+            Self::NotificationEmailConfirmation => "Notification email confirmation",
         }
     }
     pub fn description(self) -> &'static str {
@@ -76,6 +80,9 @@ impl NotificationKind {
             Self::SnakeMatchmakingResumed => "A snake is restored to matchmaking after recovery.",
             Self::PlayAccountClaimed => "Security notice when a play account is claimed.",
             Self::ClaimVerification => "A link to verify a play account claim.",
+            Self::NotificationEmailConfirmation => {
+                "A link to confirm an address for optional notification emails."
+            }
         }
     }
     pub fn toggleable(self) -> bool {
@@ -95,12 +102,14 @@ impl NotificationKind {
 pub enum EmailRecipient {
     Override(String),
     Snake(Uuid),
+    User,
 }
 pub struct NewEmail {
     pub subject: Option<String>,
     pub text: Option<String>,
     pub recipient: EmailRecipient,
     pub claim_imported_account_id: Option<Uuid>,
+    pub notification_email_request_id: Option<Uuid>,
 }
 pub struct NewNotification {
     pub user_id: Uuid,
@@ -131,6 +140,30 @@ pub async fn record_in_tx(
     if event.email.is_some() != event.kind.supports(NotificationChannel::Email) {
         return Err(eyre!("Email payload does not match notification kind"));
     }
+    if let Some(email) = &event.email {
+        if event.kind.toggleable()
+            != matches!(
+                email.recipient,
+                EmailRecipient::Snake(_) | EmailRecipient::User
+            )
+        {
+            return Err(eyre!(
+                "Email recipient source does not match notification kind"
+            ));
+        }
+        if (event.kind == NotificationKind::ClaimVerification)
+            != email.claim_imported_account_id.is_some()
+            || (event.kind == NotificationKind::NotificationEmailConfirmation)
+                != email.notification_email_request_id.is_some()
+        {
+            return Err(eyre!("Email payload does not match notification kind"));
+        }
+        if event.kind == NotificationKind::NotificationEmailConfirmation
+            && (email.subject.is_some() || email.text.is_some())
+        {
+            return Err(eyre!("Confirmation content must be rendered at delivery"));
+        }
+    }
     if event.link.as_ref().is_some_and(|link| {
         !link.starts_with('/')
             || link.starts_with("//")
@@ -146,11 +179,12 @@ pub async fn record_in_tx(
     let notification_id = sqlx::query_scalar!("INSERT INTO notifications (user_id, kind, title, body, link, in_app_visible) VALUES ($1, $2, $3, $4, $5, $6) RETURNING notification_id", event.user_id, event.kind.key(), event.title, event.body, event.link, visible).fetch_one(&mut **tx).await?;
     let mut job_id = None;
     if let Some(email) = event.email {
-        let (recipient_override, battlesnake_id) = match email.recipient {
-            EmailRecipient::Override(address) => (Some(address), None),
-            EmailRecipient::Snake(id) => (None, Some(id)),
+        let (recipient_override, battlesnake_id, recipient_user) = match email.recipient {
+            EmailRecipient::Override(address) => (Some(address), None, false),
+            EmailRecipient::Snake(id) => (None, Some(id), false),
+            EmailRecipient::User => (None, None, true),
         };
-        sqlx::query!("INSERT INTO notification_emails (notification_id, subject, text, recipient_override, battlesnake_id, claim_imported_account_id) VALUES ($1, $2, $3, $4, $5, $6)", notification_id, email.subject, email.text, recipient_override, battlesnake_id, email.claim_imported_account_id).execute(&mut **tx).await?;
+        sqlx::query!("INSERT INTO notification_emails (notification_id, subject, text, recipient_override, battlesnake_id, recipient_user, claim_imported_account_id, notification_email_request_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)", notification_id, email.subject, email.text, recipient_override, battlesnake_id, recipient_user, email.claim_imported_account_id, email.notification_email_request_id).execute(&mut **tx).await?;
         let id = Uuid::new_v4();
         let payload = serde_json::to_value(SendNotificationEmailJob { notification_id })?;
         sqlx::query!("INSERT INTO jobs (job_id, name, payload, priority, run_at, created_at, context) VALUES ($1, $2, $3, 0, NOW(), NOW(), $4)", id, SendNotificationEmailJob::NAME, payload, format!("notification:{}", event.kind.key())).execute(&mut **tx).await?;
@@ -235,6 +269,14 @@ mod tests {
         }
         assert!(NotificationKind::parse("unknown").is_none());
         assert!(!NotificationKind::ClaimVerification.supports(NotificationChannel::InApp));
+        assert_eq!(
+            NotificationKind::NotificationEmailConfirmation.key(),
+            "notification_email_confirmation"
+        );
+        assert!(!NotificationKind::NotificationEmailConfirmation.toggleable());
+        assert!(
+            !NotificationKind::NotificationEmailConfirmation.supports(NotificationChannel::InApp)
+        );
         let cookie_key = cja::server::cookies::CookieKey::generate();
         let id = Uuid::new_v4();
         let token = unsubscribe_token(&cookie_key, id, NotificationKind::SnakeMatchmakingPaused);
@@ -291,8 +333,9 @@ mod tests {
                 email: Some(NewEmail {
                     subject: Some("Paused".into()),
                     text: Some("body".into()),
-                    recipient: EmailRecipient::Override("owner@example.com".into()),
+                    recipient: EmailRecipient::User,
                     claim_imported_account_id: None,
+                    notification_email_request_id: None,
                 }),
             },
         )
@@ -343,6 +386,27 @@ mod tests {
             .fetch_one(&pool)
             .await?;
         assert_eq!(count, 0);
+        let toggleable_override = NewNotification {
+            user_id,
+            kind: NotificationKind::SnakeMatchmakingPaused,
+            title: "Paused".into(),
+            body: "Body".into(),
+            link: None,
+            email: Some(NewEmail {
+                subject: Some("Paused".into()),
+                text: Some("Body".into()),
+                recipient: EmailRecipient::Override("unconfirmed@example.com".into()),
+                claim_imported_account_id: None,
+                notification_email_request_id: None,
+            }),
+        };
+        assert!(record(&pool, toggleable_override).await.is_err());
+        assert_eq!(
+            sqlx::query_scalar!("SELECT COUNT(*) AS \"count!\" FROM notifications")
+                .fetch_one(&pool)
+                .await?,
+            0
+        );
         Ok(())
     }
 
@@ -362,8 +426,9 @@ mod tests {
                 email: Some(NewEmail {
                     subject: Some("Paused".into()),
                     text: Some("body".into()),
-                    recipient: EmailRecipient::Override("owner@example.com".into()),
+                    recipient: EmailRecipient::User,
                     claim_imported_account_id: None,
+                    notification_email_request_id: None,
                 }),
             },
         )

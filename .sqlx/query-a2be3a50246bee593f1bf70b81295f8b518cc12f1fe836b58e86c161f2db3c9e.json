@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO users (external_github_id, github_login, github_access_token) VALUES (1673001, 'notification-job-test', '') RETURNING user_id",
+  "query": "INSERT INTO users (external_github_id, github_login, github_access_token) VALUES (1674094, 'confirmation-retry-test', '') RETURNING user_id",
   "describe": {
     "columns": [
       {
@@ -16,5 +16,5 @@
       false
     ]
   },
-  "hash": "01332b8ea0413416f214029b005921a1a711eba38d032b5420c0f2284abc5bf0"
+  "hash": "a2be3a50246bee593f1bf70b81295f8b518cc12f1fe836b58e86c161f2db3c9e"
 }

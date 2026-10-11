@@ -667,6 +667,7 @@ async fn claim_account_inner(
                 text: Some(message.text),
                 recipient: crate::notifications::EmailRecipient::Override(summary.email.clone()),
                 claim_imported_account_id: None,
+                notification_email_request_id: None,
             }),
         },
     )

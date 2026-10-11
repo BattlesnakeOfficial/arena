@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT COALESCE(NULLIF(btrim(u.notification_email), ''), NULLIF(btrim(u.github_email), ''), ia.email) AS \"email?\"\n           FROM users u\n           LEFT JOIN LATERAL (\n             SELECT email FROM imported_accounts\n             WHERE claimed_by_user_id = u.user_id AND email IS NOT NULL AND btrim(email) <> ''\n             ORDER BY is_email_verified DESC, imported_account_id LIMIT 1\n           ) ia ON true\n           WHERE u.user_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "email?",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "90e2bf4d7c1b750a8aa9145700f3be9465db47bbbae003057e1a43c828878051"
+}

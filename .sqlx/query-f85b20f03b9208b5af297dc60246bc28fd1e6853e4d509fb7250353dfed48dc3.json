@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE notification_email_requests SET used_at = NOW() WHERE request_id = $1 AND user_id = $2 AND token_hash = $3 AND used_at IS NULL AND expires_at > NOW() RETURNING email",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "email",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "f85b20f03b9208b5af297dc60246bc28fd1e6853e4d509fb7250353dfed48dc3"
+}

@@ -61,17 +61,64 @@ pub async fn github_auth(
     .await
     .wrap_err("Failed to store OAuth state in session")?;
 
-    // Build OAuth URL using the AppState's github_oauth_config
-    let auth_url = format!(
-        "{}?client_id={}&redirect_uri={}&state={}&scope={}",
+    let auth_url = authorization_url(oauth_config, &oauth_state);
+
+    Ok(Redirect::to(&auth_url))
+}
+
+fn authorization_url(
+    oauth_config: &crate::github::auth::GitHubOAuthConfig,
+    oauth_state: &str,
+) -> String {
+    format!(
+        "{}?client_id={}&redirect_uri={}&state={}",
         oauth_config.oauth_url,
         oauth_config.client_id,
         urlencoding::encode(&oauth_config.redirect_uri),
         oauth_state,
-        "user:email" // auth.oauth.scope: requesting user:email scope
-    );
+    )
+}
 
-    Ok(Redirect::to(&auth_url))
+#[cfg(test)]
+mod private_email_guard {
+    use std::path::Path;
+
+    fn inspect(path: &Path) {
+        for entry in std::fs::read_dir(path).expect("read server source") {
+            let path = entry.expect("source entry").path();
+            if path.is_dir() {
+                inspect(&path);
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                let source = std::fs::read_to_string(&path).expect("read Rust source");
+                assert!(
+                    !source.contains(&["/user", "/emails"].concat()),
+                    "private email endpoint in {}",
+                    path.display()
+                );
+                assert!(
+                    !source.contains(&["user", ":email"].concat()),
+                    "private email scope in {}",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn production_source_never_requests_private_github_email() {
+        inspect(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"));
+        let config = crate::github::auth::GitHubOAuthConfig {
+            client_id: "client".into(),
+            client_secret: "secret".into(),
+            redirect_uri: "https://arena.example/callback".into(),
+            oauth_url: "https://github.example/authorize".into(),
+            token_url: String::new(),
+            api_url: String::new(),
+        };
+        let url = super::authorization_url(&config, "state");
+        assert!(url.contains("state=state"));
+        assert!(!url.contains("scope="));
+    }
 }
 
 // Route handler for GitHub OAuth callback

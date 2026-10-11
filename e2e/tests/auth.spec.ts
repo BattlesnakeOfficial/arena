@@ -1,6 +1,13 @@
 import { test, expect } from '../fixtures/test';
 
 test.describe('Authentication via Mock OAuth', () => {
+  test('authorization requests no email scope', async ({ page }) => {
+    await page.goto('/');
+    const response = await page.request.get('/auth/github', { maxRedirects: 0 });
+    const location = response.headers()['location'];
+    expect(location).toBeDefined();
+    expect(new URL(location).searchParams.has('scope')).toBe(false);
+  });
   test('authenticatedPage shows logged in user on homepage', async ({ authenticatedPage, mockUser }) => {
     // authenticatedPage starts at home page after OAuth redirect
     await authenticatedPage.goto('/');
