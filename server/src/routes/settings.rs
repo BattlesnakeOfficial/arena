@@ -187,7 +187,7 @@ pub struct AppearanceForm {
 }
 
 /// POST /settings/appearance — persist the two-axis theme preference for
-/// the logged-in user. Called via fetch from /static/theme.js; anonymous
+/// the logged-in user. Called via fetch from the theme bundle; anonymous
 /// visitors keep their choice in localStorage only.
 pub async fn update_appearance(
     State(state): State<AppState>,
@@ -330,8 +330,9 @@ mod tests {
         let session_id = create_user_session(&pool, 1673010, false).await;
         let user_id = session_user_id(&pool, session_id).await;
         let cookie = signed_session_cookie(&state, session_id);
-        let app =
-            crate::routes::routes(state.clone()).layer(tower_cookies::CookieManagerLayer::new());
+        let app = crate::routes::routes(state.clone())
+            .expect("asset router")
+            .layer(tower_cookies::CookieManagerLayer::new());
         let response = app
             .clone()
             .oneshot(
@@ -518,7 +519,9 @@ mod tests {
             crate::models::session::SESSION_COOKIE_NAME,
             signed_session_cookie(&state, session)
         );
-        let app = crate::routes::routes(state).layer(tower_cookies::CookieManagerLayer::new());
+        let app = crate::routes::routes(state)
+            .expect("asset router")
+            .layer(tower_cookies::CookieManagerLayer::new());
         let response = request(
             &app,
             None,

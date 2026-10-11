@@ -120,7 +120,12 @@ test.describe('Homepage - calm surfaces', () => {
     expect(dotAnim).toBe('none');
 
     // Served stylesheet no longer carries the removed animations
-    const css = await (await page.request.get('/static/arena.css')).text();
+    const href = await page.locator('link[rel="stylesheet"]').last().getAttribute('href');
+    expect(href).toMatch(/^\/assets\/arena\.[0-9a-f]{8}\.css$/);
+    const stylesheet = await page.request.get(href!);
+    expect(stylesheet.status()).toBe(200);
+    expect(stylesheet.headers()['content-type']).toContain('text/css');
+    const css = await stylesheet.text();
     expect(css).not.toContain('home-ticker');
     expect(css).not.toContain('@keyframes pulse');
   });

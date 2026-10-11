@@ -1,14 +1,51 @@
 use maud::{DOCTYPE, Markup, PreEscaped, Render, html};
 
 use crate::{
-    components::avatar::user_avatar, config::LOCAL_BASE_URL, models::user::User,
-    routes::og::DEFAULT_CARD_PATH, static_assets::asset_url,
+    arena_assets::asset_url, components::avatar::user_avatar, config::LOCAL_BASE_URL,
+    models::user::User, routes::og::DEFAULT_CARD_PATH,
 };
 
-/// Resolves the two theme axes before first paint so there is no flash of
-/// the wrong theme. Mirrors the logic in /static/theme.js: html data
-/// attributes (logged-in account setting) win over localStorage (anonymous).
-const THEME_BOOTSTRAP_JS: &str = r#"(function(){var d=document.documentElement;function p(a,f){return d.getAttribute("data-bs-"+a)||localStorage.getItem("bs-"+a)||f}var site=p("site","system");var th=p("theater","dark");var sys=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";var s=site==="system"?sys:site;d.setAttribute("data-app-theme",d.hasAttribute("data-theater-page")?(th==="match"?s:th):s);})();"#;
+/// Render a compiled IIFE at its required synchronous position.
+///
+/// Panics like `asset_url` if the compile-time manifest is missing the entry or
+/// contains invalid UTF-8; either case is a build/registration error.
+pub(crate) fn inline_bundle(logical_name: &str) -> Markup {
+    let Some(asset) = crate::arena_assets::MANIFEST
+        .entries
+        .iter()
+        .find(|asset| asset.logical_name == logical_name)
+    else {
+        panic!("missing compiled inline bundle: {logical_name}");
+    };
+    let Ok(markup) = inline_source(asset.bytes) else {
+        panic!("compiled inline bundle is not UTF-8: {logical_name}");
+    };
+    markup
+}
+
+fn inline_source(bytes: &[u8]) -> Result<Markup, std::str::Utf8Error> {
+    let source = std::str::from_utf8(bytes)?;
+    let source = source.trim_end();
+    let source = source
+        .rsplit_once('\n')
+        .map_or(source, |(body, last_line)| {
+            let relative_map =
+                last_line
+                    .strip_prefix("//# sourceMappingURL=")
+                    .is_some_and(|path| {
+                        !path.is_empty()
+                            && !path.starts_with('/')
+                            && !path.starts_with("http:")
+                            && !path.starts_with("https:")
+                    });
+            if relative_map {
+                body.trim_end()
+            } else {
+                source
+            }
+        });
+    Ok(PreEscaped(source.to_owned()))
+}
 
 /// Site-wide fallback for social embeds (OpenGraph/Twitter) when a page
 /// doesn't set its own description. Also the default social card's tagline.
@@ -47,6 +84,7 @@ pub struct Page {
     pub description: Option<String>,
     /// Page-specific social card. Falls back to the site-wide default card.
     pub social_image: Option<SocialImage>,
+    pub unread_count: Option<i64>,
 }
 
 /// A page's social card (`og:image`), served by `routes::og`.
@@ -74,6 +112,7 @@ impl Page {
             theater: false,
             description: None,
             social_image: None,
+            unread_count: None,
         }
     }
 
@@ -241,6 +280,16 @@ impl Page {
                     }
                 }
                 @if let Some(user) = &self.user {
+                    @let count = self.unread_count.unwrap_or(0);
+                    a #notification-bell class="notification-bell" href="/notifications"
+                        aria-label=(if count >= 10 { "9 or more unread notifications".to_string() } else if count == 1 { "1 unread notification".to_string() } else { format!("{count} unread notifications") }) {
+                        svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true" {
+                            path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4" {}
+                        }
+                        span class="notification-badge" hidden[count == 0] {
+                            @if count >= 10 { "9+" } @else { (count) }
+                        }
+                    }
                     a class="nav-user" href="/me" {
                         (user_avatar(user.github_avatar_url.as_deref(), user.public_name(), "nav-avatar"))
                         span class="nav-user-name" { (user.public_name()) }
@@ -301,13 +350,29 @@ impl Render for Page {
                     link href=(GOOGLE_FONTS_HREF) rel="stylesheet";
                     link rel="stylesheet" href=(asset_url("arena.css"));
                     link rel="icon" href=(asset_url("favicon.svg")) type="image/svg+xml";
-                    script { (PreEscaped(THEME_BOOTSTRAP_JS)) }
+                    script { (inline_bundle("theme-bootstrap.js")) }
                     script src=(asset_url("viewTransition.js")) {}
+                    script src=(asset_url("ui-actions.js")) {}
                     script src=(asset_url("theme.js")) defer {}
+                    @if self.user.is_some() { script src=(asset_url("notifications.js")) defer {} }
                 }
 
                 body {
                     (self.nav())
+
+                    @if self.user.is_some() {
+                        dialog #notification-drawer aria-labelledby="notification-drawer-title" {
+                            div class="notification-drawer-head" {
+                                h2 #notification-drawer-title { "Notifications" }
+                                button #notification-drawer-close type="button" aria-label="Close notifications" { "×" }
+                            }
+                            div #notification-drawer-status role="status" {}
+                            div #notification-drawer-content {}
+                            div class="notification-drawer-footer" {
+                                a href="/notifications" { "See all notifications" }
+                            }
+                        }
+                    }
 
                     @if let Some(flash_message) = &self.flash {
                         div class="flash-message" data-flash-type=[self.flash_type.as_deref()] {
@@ -345,6 +410,74 @@ mod tests {
             Box::new(html! { p { "content" } }),
             None,
         )
+    }
+
+    #[test]
+    fn compiled_inline_scripts_keep_order_and_raw_javascript() {
+        let html = test_page().render().into_string();
+        let bootstrap = html.find("<script>").expect("bootstrap");
+        let transition = html
+            .find(&crate::arena_assets::asset_url("viewTransition.js"))
+            .expect("transition");
+        let actions = html
+            .find(&crate::arena_assets::asset_url("ui-actions.js"))
+            .expect("actions");
+        let theme = html
+            .find(&crate::arena_assets::asset_url("theme.js"))
+            .expect("theme");
+        assert!(bootstrap < transition && transition < actions && actions < theme);
+        let body = html[bootstrap..]
+            .split_once("</script>")
+            .expect("inline script")
+            .0;
+        assert!(!body.contains("sourceMappingURL="));
+        assert!(!body.contains("&amp;&amp;"));
+        assert!(!body.contains("&lt;"));
+        assert_eq!(
+            inline_source(b"a&&b<c\n//# sourceMappingURL=relative.js.map\n")
+                .expect("UTF-8")
+                .into_string(),
+            "a&&b<c"
+        );
+        assert_eq!(
+            inline_source(b"a&&b<c\n//# sourceMappingURL=/assets/map.js.map")
+                .expect("UTF-8")
+                .into_string(),
+            "a&&b<c\n//# sourceMappingURL=/assets/map.js.map"
+        );
+        assert!(inline_source(&[0xff]).is_err());
+    }
+
+    #[test]
+    #[should_panic(expected = "missing compiled inline bundle")]
+    fn missing_inline_bundle_fails_explicitly() {
+        inline_bundle("absent.js");
+    }
+
+    #[test]
+    fn signed_in_page_without_count_keeps_one_zero_badge() {
+        let mut page = test_page();
+        page.user = Some(User {
+            user_id: uuid::Uuid::new_v4(),
+            external_github_id: 1,
+            github_login: "test-player".into(),
+            github_avatar_url: None,
+            github_name: None,
+            github_email: None,
+            display_name: None,
+            pronouns: String::new(),
+            country: String::new(),
+            backstory: String::new(),
+            is_admin: false,
+            site_theme: "light".into(),
+            theater_theme: "dark".into(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        });
+        let html = page.render().into_string();
+        assert_eq!(html.matches("id=\"notification-bell\"").count(), 1);
+        assert!(html.contains("0 unread notifications"));
+        assert!(html.contains("class=\"notification-badge\" hidden"));
     }
 
     #[test]

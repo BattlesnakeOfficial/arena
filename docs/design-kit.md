@@ -800,7 +800,7 @@ report panics from the decode process.
 `GET /customizations/studio` (`server/src/routes/studio/page.rs`) is a public page that
 needs no login and stores nothing on the server. Every preview board is server-rendered
 with `components::snake_board`, with the default head and tail in place; the client,
-`server/static/studio.js`, posts uploads and then only sets attributes and text on
+`server/frontend/src/studio.ts`, posts uploads and then only sets attributes and text on
 placeholders. Per-slot ids are `studio-<part>-<kind>` (`page::slot_id`, kind `head` or
 `tail`):
 

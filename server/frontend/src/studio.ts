@@ -8,9 +8,15 @@
 // theme class, and the text of the cards and the checks (with links into the guide).
 // Per-slot ids are `studio-<part>-<kind>`. No innerHTML; every path, colour and link is
 // validated before use, including what localStorage restores.
+type Kind = "head" | "tail";
+type Lint = { code: string; severity: string; message: string; fix: "flip" | "fit" | null; guide: string | null };
+type Slot = { d: string; fillRule: string; lints: Record<Kind, Lint[]>; info: Lint[]; gaps: [number, number][]; example: boolean };
+type Job = { body: BodyInit | null; info: Lint[] | null; example: boolean; fixOf: Slot | null };
+type Ticket = { fixOf: Slot | null; example: boolean };
+
 (function () {
   "use strict";
-  const root = document.getElementById("studio");
+  const root = document.getElementById("studio") as HTMLElement;
   if (!root) return;
 
   const ENDPOINT = "/customizations/studio/process";
@@ -32,27 +38,27 @@
   const FRAME_MS = 250;
   const SVG_NS = "http://www.w3.org/2000/svg";
   const VIEWS = ["closeup", "live", "all", "game"];
-  const KINDS = ["head", "tail"];
-  const $ = (id) => document.getElementById(id);
-  const part = (name, kind) => $("studio-" + name + "-" + kind);
-  const all = (sel) => Array.from(root.querySelectorAll(sel));
-  const other = (kind) => (kind === "head" ? "tail" : "head");
-  const title = (kind) => (kind === "head" ? "Head" : "Tail");
-  const kindOf = (node) => (node.getAttribute("data-kind") === "tail" ? "tail" : "head");
-  const media = (q) => (window.matchMedia ? matchMedia(q) : { matches: false });
+  const KINDS: Kind[] = ["head", "tail"];
+  const $ = (id: string): any => document.getElementById(id);
+  const part = (name: string, kind: Kind): any => $("studio-" + name + "-" + kind);
+  const all = (sel: string): any[] => Array.from(root!.querySelectorAll(sel));
+  const other = (kind: Kind): Kind => (kind === "head" ? "tail" : "head");
+  const title = (kind: Kind) => (kind === "head" ? "Head" : "Tail");
+  const kindOf = (node: Element): Kind => (node.getAttribute("data-kind") === "tail" ? "tail" : "head");
+  const media = (q: string): MediaQueryList => matchMedia(q);
   const wide = media("(min-width: 640px)"); // Close-up and Live side by side
   const sideBySide = media("(min-width: 980px)"); // the checks beside the preview
   const reduceMotion = media("(prefers-reduced-motion: reduce)").matches;
   // createElement(NS) + setAttribute + textContent: the only way this script builds DOM.
-  function el(tag, attrs, text, ns) {
+  function el(tag: string, attrs: Record<string, string> = {}, text?: string, ns?: string): any {
     const node = ns ? document.createElementNS(ns, tag) : document.createElement(tag);
     for (const [k, v] of Object.entries(attrs || {})) node.setAttribute(k, v);
     if (text !== undefined) node.textContent = text;
     return node;
   }
-  const empty = (node) => { while (node.firstChild) node.removeChild(node.firstChild); };
+  const empty = (node: Node) => { while (node.firstChild) node.removeChild(node.firstChild); };
 
-  const state = {
+  const state: { slots: Record<Kind, Slot | null>; pick: Record<Kind, string>; color: string; theme: string; view: string } = {
     slots: { head: null, tail: null }, // uploads: { d, fillRule, lints, info, gaps, example }
     pick: { head: "default", tail: "default" }, // what each slot wears: "user" (its upload) or a reference slug
     color: "#ff4f86",
@@ -65,13 +71,13 @@
   // until the slot holds a drawing again ({ slot, replaced }); and each slot's request in
   // flight ({ fixOf, example }; a newer one for the same slot supersedes it, except that
   // a Flip/Fit never supersedes an upload).
-  const files = new WeakMap();
-  const replaced = { head: null, tail: null };
-  const removed = { head: null, tail: null };
-  const pending = { head: null, tail: null };
+  const files = new WeakMap<Slot, { body: BodyInit | null; fixes: string[]; info: Lint[] | null }>();
+  const replaced: Record<Kind, { by: Slot; prev: Slot | null } | null> = { head: null, tail: null };
+  const removed: Record<Kind, { slot: Slot; replaced: { by: Slot; prev: Slot | null } | null } | null> = { head: null, tail: null };
+  const pending: Record<Kind, Ticket | null> = { head: null, tail: null };
 
   // ---- validation -----------------------------------------------------------------
-  const cleanLints = (list) =>
+  const cleanLints = (list: any): Lint[] =>
     (Array.isArray(list) ? list : [])
       .filter((l) => l && CODE_RE.test(l.code) && ["warn", "tip", "info"].includes(l.severity) &&
         typeof l.message === "string" && l.message.length < 2000)
@@ -79,11 +85,11 @@
       .map((l) => ({ code: l.code, severity: l.severity, message: l.message,
         fix: l.fix === "flip" || l.fix === "fit" ? l.fix : null,
         guide: typeof l.guide === "string" && ANCHOR_RE.test(l.guide) ? l.guide : null }));
-  const cleanGaps = (list) =>
+  const cleanGaps = (list: any): [number, number][] =>
     (Array.isArray(list) ? list : [])
       .filter((g) => Array.isArray(g) && g.length === 2 && g.every((n) => Number.isFinite(n) && n >= 0 && n <= 100))
       .slice(0, 16);
-  function cleanSlot(s) {
+  function cleanSlot(s: any): Slot | null {
     if (!s || typeof s.d !== "string" || s.d.length > MAX_D || !D_RE.test(s.d)) return null;
     if (s.fillRule !== "nonzero" && s.fillRule !== "evenodd") return null;
     const lints = s.lints || {};
@@ -102,14 +108,14 @@
   // v2, else v1 (one "Upload as" slot, plus "Pair with" for the other): every slot
   // with an upload wears it, an empty one keeps its pairing. restore() validates either.
   function saved() {
-    const read = (key) => {
+    const read = (key: string): any => {
       try { return JSON.parse(localStorage.getItem(key) || "null"); } catch (e) { return null; }
     };
     const v2 = read(STORE);
     if (v2 && v2.v === 2) return v2;
     const v1 = read(STORE_V1);
     if (!v1 || v1.v !== 1) return null;
-    const pick = {};
+    const pick: Record<Kind, string> = { head: "default", tail: "default" };
     for (const k of KINDS) pick[k] = v1.slots && v1.slots[k] ? "user" : v1.pair && v1.pair[k];
     return { slots: v1.slots, pick: pick, color: v1.color, theme: v1.theme, view: v1.view };
   }
@@ -127,12 +133,12 @@
   }
 
   // ---- shapes ---------------------------------------------------------------------
-  function refOption(kind, slug) {
+  function refOption(kind: Kind, slug: unknown): HTMLOptionElement | null {
     if (typeof slug !== "string" || slug === "user") return null;
-    return Array.from(part("style", kind).options).find((o) => o.value === slug) || null;
+    return Array.from(part("style", kind).options as HTMLOptionElement[]).find((o) => o.value === slug) || null;
   }
   // `name` reads in a sentence ("the Curled tail"), `label` stands alone ("Curled tail").
-  function refShape(kind, slug) {
+  function refShape(kind: Kind, slug: string) {
     const o = refOption(kind, slug) || refOption(kind, "default");
     const d = o ? o.getAttribute("data-d") || "" : "";
     const style = o && o.value !== "default" ? o.textContent : "";
@@ -140,20 +146,20 @@
       name: "the " + (style || "default") + " " + kind, label: (style || "Default") + " " + kind };
   }
   // The upload a slot wears, if it wears one.
-  const own = (kind) => (state.pick[kind] === "user" && state.slots[kind]) || null;
-  function shapeFor(kind) {
+  const own = (kind: Kind): Slot | null => (state.pick[kind] === "user" && state.slots[kind]) || null;
+  function shapeFor(kind: Kind) {
     const slot = own(kind);
     if (!slot) return refShape(kind, state.pick[kind]);
     return { d: slot.d, fillRule: slot.fillRule, name: (slot.example ? "the example " : "your ") + kind,
       label: (slot.example ? "Example " : "Your ") + kind };
   }
-  function setPath(path, shape) {
+  function setPath(path: Element, shape: { d: string; fillRule: string }) {
     path.setAttribute("d", shape.d);
     path.setAttribute("fill-rule", shape.fillRule);
   }
 
   // ---- rendering ------------------------------------------------------------------
-  function colorName() {
+  function colorName(): string {
     const preset = all('input[name="studio-color"]').find((i) => i.value === state.color);
     return preset ? preset.getAttribute("data-name").toLowerCase() : "custom-coloured (" + state.color + ")";
   }
@@ -161,15 +167,15 @@
   // doesn't count), then closes, and opens again once none is left. Only on those
   // changes, so it stays however the artist leaves it.
   const start = $("studio-start");
-  let startFor = null;
-  function syncStart(drawn) {
+  let startFor: boolean | null = null;
+  function syncStart(drawn: boolean) {
     if (!start || startFor === drawn) return;
     startFor = drawn;
     start.open = !drawn;
   }
   function render() {
     syncStart(KINDS.some((k) => state.slots[k] && !state.slots[k].example));
-    const shapes = {};
+    const shapes: Record<Kind, ReturnType<typeof shapeFor>> = { head: shapeFor("head"), tail: shapeFor("tail") };
     for (const kind of KINDS) {
       if (state.pick[kind] === "user" && !state.slots[kind]) state.pick[kind] = "default";
       if (state.slots[kind]) removed[kind] = null; // Undo only puts a drawing in an empty slot
@@ -190,7 +196,7 @@
 
     const wearing = "wearing " + shapes.head.name + " and " + shapes.tail.name;
     const color = colorName();
-    const label = (node, text) => node && node.setAttribute("aria-label", text);
+    const label = (node: Element | null, text: string) => node && node.setAttribute("aria-label", text);
     label(root.querySelector(".studio-live"), "A " + color + " snake " + wearing + ", moving around the board");
     label(root.querySelector(".studio-all"), "Four " + color + " snakes " + wearing + ", facing right, left, up and down");
     all(".studio-game").forEach((b, i) => label(b, (i ? "iPad" : "Phone") + " size: four " + color + " snakes " + wearing));
@@ -200,7 +206,7 @@
     persist();
   }
   // Red brackets beside a close-up's left edge, where the neck has gaps.
-  function renderGaps(kind) {
+  function renderGaps(kind: Kind) {
     const g = part("gaps", kind);
     empty(g);
     const slot = own(kind);
@@ -210,7 +216,7 @@
   }
   // A slot's card: what it wears, its upload button, its styles ("Your head" first
   // while there is an upload), and the upload's own actions.
-  function renderCard(kind, shape) {
+  function renderCard(kind: Kind, shape: ReturnType<typeof shapeFor>) {
     const slot = state.slots[kind];
     const mine = own(kind);
     part("name", kind).textContent = shape.label;
@@ -251,10 +257,10 @@
     $("studio-color-hint").hidden = !hint;
   }
 
-  const GUIDE = (root.getAttribute("data-guide") || "").startsWith("/") ? root.getAttribute("data-guide") : "";
+  const GUIDE = (root.getAttribute("data-guide") || "").startsWith("/") ? (root.getAttribute("data-guide") || "") : "";
   // Point a "Learn more" link at the guide's section for `lint`; false if there's none.
-  function setLearn(a, lint) {
-    const topic = GUIDE && lint.guide ? GUIDE_TOPICS.get(lint.guide.slice(1)) : null;
+  function setLearn(a: Element, lint: Lint): boolean {
+    const topic = GUIDE && lint.guide ? GUIDE_TOPICS.get(lint.guide!.slice(1)) : null;
     if (!topic) return false;
     a.setAttribute("href", GUIDE + lint.guide);
     empty(a);
@@ -262,13 +268,13 @@
     return true;
   }
   // Flip or Fit, on the slot `kind`.
-  function setFix(btn, kind, fix) {
+  function setFix(btn: Element, kind: Kind, fix: "flip" | "fit") {
     btn.setAttribute("data-fix", fix);
     btn.setAttribute("data-kind", kind);
     empty(btn);
     btn.append(fix === "flip" ? "Flip" : "Fit", el("span", { class: "vh" }, " your " + kind));
   }
-  function lintItem(kind, lint, withFix) {
+  function lintItem(kind: Kind, lint: Lint, withFix: boolean) {
     const warn = lint.severity === "warn";
     const li = el("li", { class: "studio-lint " + lint.severity, "data-code": lint.code });
     li.append(el("span", { class: "studio-lint-icon", "aria-hidden": "true" }, warn ? "!" : "i"),
@@ -283,12 +289,12 @@
     }
     return li;
   }
-  function fill(list, items) {
+  function fill(list: Element, items: Node[]) {
     empty(list);
     items.forEach((li) => list.appendChild(li));
   }
   // The checks of the upload a slot wears, under its own heading.
-  function renderChecks(kind) {
+  function renderChecks(kind: Kind) {
     const slot = own(kind);
     const warns = slot ? slot.lints[kind] : [];
     const notes = slot ? slot.info : [];
@@ -301,12 +307,12 @@
     part("details-summary", kind).textContent = "Details (" + infos.length + ")";
     part("pass", kind).hidden = !slot || warns.length > 0;
   }
-  const things = (n) => n + (n === 1 ? " thing" : " things") + " to check";
+  const things = (n: number) => n + (n === 1 ? " thing" : " things") + " to check";
   // Both slots in a line ("Head: passes · Tail: 1 thing to check"), and the first
   // warning of either, with its link and fix, at the top.
   function renderSummary() {
     const line = [];
-    let first = null;
+    let first: { kind: Kind; lint: Lint } | null = null;
     for (const kind of KINDS) {
       const slot = own(kind);
       if (!slot) continue;
@@ -336,7 +342,7 @@
     if (box.top >= 0 && box.bottom <= window.innerHeight) return;
     s.scrollIntoView({ block: "center", behavior: reduceMotion ? "auto" : "smooth" });
   }
-  function setStatus(text, isError) {
+  function setStatus(text: string, isError = false) {
     const s = $("studio-status");
     s.textContent = text;
     s.classList.toggle("error", !!isError);
@@ -346,16 +352,16 @@
     if (pending.head || pending.tail) root.setAttribute("aria-busy", "true");
     else root.removeAttribute("aria-busy");
   }
-  const summary = (warns) => warns ? " " + things(warns) + " below." : " It passes every check.";
+  const summary = (warns: number) => warns ? " " + things(warns) + " below." : " It passes every check.";
   // The server's own rules for formats it rejects (rendered into data-sniff), for an
   // instant answer without uploading. Anything else is posted and the server decides.
-  const SNIFF = (() => {
+  const SNIFF: { rejected: { at: [number, number[][]][]; message: string }[]; max_bytes: number; too_large: string } | null = (() => {
     try {
       const s = JSON.parse($("studio-slots").getAttribute("data-sniff") || "null");
       return s && Array.isArray(s.rejected) && Number.isFinite(s.max_bytes) ? s : null;
     } catch (e) { return null; }
   })();
-  async function preflight(file) {
+  async function preflight(file: File): Promise<string | null> {
     if (!SNIFF) return null;
     const b = new Uint8Array(await file.slice(0, 64).arrayBuffer());
     const hit = SNIFF.rejected.find((sig) => sig.at.every(([offset, alternatives]) =>
@@ -386,7 +392,7 @@
     const blocked = exampleBlocked();
     if (blocked) return setStatus(blocked, true);
     const src = $("studio-example").getAttribute("data-src") || "";
-    if (!src.startsWith("/static/")) return;
+    if (!/^\/assets\/design-kit\/example-drawing\.[0-9a-f]{8}\.png$/.test(src)) return;
     setStatus("Loading the example…");
     let body = null;
     try {
@@ -397,7 +403,7 @@
     if (exampleBlocked()) return; // a head of the artist's own came along meanwhile: it wins
     send("head", { body: body, info: null, example: true, fixOf: null }, []);
   }
-  async function handleFile(kind, file) {
+  async function handleFile(kind: Kind, file: File | null | undefined) {
     if (!file) return;
     let problem = null;
     let body = null;
@@ -411,12 +417,12 @@
     send(kind, { body: body, info: null, example: false, fixOf: null }, []);
   }
   // The file as the page saves it: the clean path in the design kit's SVG template.
-  const svgFor = (slot) => '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><path fill-rule="' +
+  const svgFor = (slot: Slot) => '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><path fill-rule="' +
     slot.fillRule + '" d="' + slot.d + '"/></svg>';
   // Post `job.body` with `fixes` (a set: the server applies Flip before Fit) for the slot
   // `kind`. Only a success changes anything: after an error, the last result and its
   // buttons stay.
-  async function send(kind, job, fixes) {
+  async function send(kind: Kind, job: Job, fixes: string[]) {
     const ticket = { fixOf: job.fixOf, example: !!job.example };
     pending[kind] = ticket;
     setStatus(job.example ? "Processing the example…" : "Processing your " + kind + "…");
@@ -475,7 +481,7 @@
   // Flip and Fit re-post the upload while it's in memory, else (after a reload) the
   // saved path as an SVG. Both fixes are rewrites of the clean path, so they land in the
   // same place; the notes about the original file are kept.
-  function applyFix(kind, fix) {
+  function applyFix(kind: Kind, fix: "flip" | "fit") {
     const slot = own(kind);
     if (!slot) return;
     // A new upload still on its way to this slot would be dropped for the fix of the
@@ -494,7 +500,7 @@
   // "This is actually a tail": move the upload to the other slot without re-posting (the
   // response has both kinds' checks) and put back what it replaced. Over the other
   // slot's drawing only after "Replace your tail".
-  function relabel(kind, confirmed) {
+  function relabel(kind: Kind, confirmed: boolean) {
     const slot = own(kind);
     const to = other(kind);
     if (!slot || slot.example) return;
@@ -530,14 +536,14 @@
     setStatus("Moved: that drawing is now your " + to + "." + (back ? " Your previous " + kind + " is back." : ""));
     part("relabel", to).focus();
   }
-  function cancelRelabel(kind) {
+  function cancelRelabel(kind: Kind) {
     part("confirm", kind).hidden = true;
     part("relabel", kind).hidden = false;
     part("relabel", kind).focus();
   }
   // Remove: back to the catalog's default for that slot; the other slot is untouched.
   // Undo, in its place, puts the upload back until the slot holds another drawing.
-  function remove(kind) {
+  function remove(kind: Kind) {
     const slot = own(kind);
     if (!slot) return;
     removed[kind] = { slot: slot, replaced: replaced[kind] };
@@ -550,7 +556,7 @@
     setStatus("Removed " + (slot.example ? "the example " : "your ") + kind + ". The board shows the default " + kind + ".");
     part("undo", kind).focus();
   }
-  function undoRemove(kind) {
+  function undoRemove(kind: Kind) {
     const was = removed[kind];
     if (!was || state.slots[kind]) return;
     pending[kind] = null; // an upload started since doesn't land over the Undo
@@ -564,14 +570,14 @@
   }
 
   // ---- downloads ------------------------------------------------------------------
-  function download(blob, name) {
+  function download(blob: Blob, name: string) {
     const a = el("a", { href: URL.createObjectURL(blob), download: name });
     document.body.appendChild(a);
     a.click();
     a.remove();
     setTimeout(() => URL.revokeObjectURL(a.href), 10000);
   }
-  function downloadSvg(kind) {
+  function downloadSvg(kind: Kind) {
     const slot = own(kind);
     if (slot) download(new Blob([svgFor(slot)], { type: "image/svg+xml" }), "my-battlesnake-" + kind + ".svg");
   }
@@ -579,11 +585,11 @@
   // page's CSS doesn't apply inside an image, so the copy carries its own colours and
   // an SVG drop shadow matching the board's CSS one.
   async function saveImage() {
-    const board = root.querySelector(".studio-all");
+    const board = root.querySelector<SVGSVGElement>(".studio-all")!;
     const vb = board.viewBox.baseVal;
     const scale = 4;
     const dark = state.theme === "dark";
-    const copy = board.cloneNode(true);
+    const copy = board.cloneNode(true) as SVGSVGElement;
     copy.setAttribute("width", String(vb.width * scale));
     copy.setAttribute("height", String(vb.height * scale));
     // drop-shadow(0.1em 0.1em 0.05em rgba(0,0,0,.3)) at 16px: 1.6 offset, 0.8 blur radius.
@@ -607,8 +613,8 @@
     const canvas = document.createElement("canvas");
     canvas.width = Math.round(vb.width * scale);
     canvas.height = Math.round(vb.height * scale);
-    canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
-    const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+    canvas.getContext("2d")!.drawImage(img, 0, 0, canvas.width, canvas.height);
+    const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
     if (!blob) return setStatus("We couldn't make the image. Try again.", true);
     const name = "my-battlesnake-preview.png";
     const file = typeof File === "function" ? new File([blob], name, { type: "image/png" }) : null;
@@ -617,7 +623,7 @@
         await navigator.share({ files: [file], title: "My Battlesnake design" });
         return;
       } catch (e) {
-        if (e && e.name === "AbortError") return; // the artist closed the share sheet
+        if (e instanceof Error && e.name === "AbortError") return; // the artist closed the share sheet
       }
     }
     download(blob, name);
@@ -629,7 +635,7 @@
   let playing = !reduceMotion;
   let onScreen = true;
   let frame = 0;
-  let timer = null;
+  let timer: ReturnType<typeof setInterval> | null = null;
   function step() {
     frames[frame].setAttribute("hidden", "");
     frame = (frame + 1) % frames.length;
@@ -657,12 +663,12 @@
   // Each card takes a dropped file into its own slot.
   for (const kind of KINDS) {
     const card = part("slot", kind);
-    const dragging = (on) => card.classList.toggle("dragging", on);
+    const dragging = (on: boolean) => card.classList.toggle("dragging", on);
     for (const type of ["dragenter", "dragover"]) {
-      card.addEventListener(type, (e) => { e.preventDefault(); dragging(true); });
+      card.addEventListener(type, (e: DragEvent) => { e.preventDefault(); dragging(true); });
     }
-    card.addEventListener("dragleave", (e) => { if (!card.contains(e.relatedTarget)) dragging(false); });
-    card.addEventListener("drop", (e) => {
+    card.addEventListener("dragleave", (e: DragEvent) => { if (!card.contains(e.relatedTarget)) dragging(false); });
+    card.addEventListener("drop", (e: DragEvent) => {
       e.preventDefault();
       dragging(false);
       handleFile(kind, e.dataTransfer && e.dataTransfer.files[0]);
@@ -670,7 +676,8 @@
   }
   root.addEventListener("change", (e) => {
     const t = e.target;
-    if (t.classList.contains("studio-file")) {
+    if (!(t instanceof HTMLInputElement || t instanceof HTMLSelectElement)) return;
+    if (t instanceof HTMLInputElement && t.classList.contains("studio-file")) {
       handleFile(kindOf(t), t.files && t.files[0]);
       t.value = ""; // choosing the same file again still fires change
       return;
@@ -687,11 +694,11 @@
   // Live has no option of its own once it sits beside Close-up: a Split View resize or a
   // rotation that crosses 640px re-renders, so a view option stays selected.
   if (wide.addEventListener) wide.addEventListener("change", render);
-  $("studio-color-custom").addEventListener("input", (e) => {
-    if (COLOR_RE.test(e.target.value)) { state.color = e.target.value.toLowerCase(); render(); }
+  $("studio-color-custom").addEventListener("input", (e: Event) => {
+    if (e.target instanceof HTMLInputElement && COLOR_RE.test(e.target.value)) { state.color = e.target.value.toLowerCase(); render(); }
   });
   // Every per-slot button says what it does (data-action) and to which slot (data-kind).
-  const ACTIONS = new Map([
+  const ACTIONS = new Map<string, (kind: Kind, btn: HTMLElement) => void>([
     ["fix", (kind, btn) => applyFix(kind, btn.getAttribute("data-fix") === "fit" ? "fit" : "flip")],
     ["download", downloadSvg],
     ["remove", remove],
@@ -701,9 +708,9 @@
     ["relabel-cancel", cancelRelabel],
   ]);
   root.addEventListener("click", (e) => {
-    const btn = e.target.closest("button[data-action]");
-    const action = btn && ACTIONS.get(btn.getAttribute("data-action"));
-    if (action) action(kindOf(btn), btn);
+    const btn = e.target instanceof Element ? e.target.closest<HTMLElement>("button[data-action]") : null;
+    const action = btn && ACTIONS.get(btn.getAttribute("data-action") || "");
+    if (action && btn) action(kindOf(btn), btn);
   });
   $("studio-example").addEventListener("click", () => { tryExample(); });
   $("studio-play").addEventListener("click", () => { playing = !playing; syncLoop(); });

@@ -40,6 +40,9 @@ pub mod game;
 pub mod github_auth;
 pub mod health;
 pub mod leaderboard;
+#[cfg(test)]
+mod notification_tests;
+pub mod notifications;
 pub mod og;
 pub mod pagination;
 pub mod policy;
@@ -55,7 +58,7 @@ pub(crate) mod test_support;
 pub mod tournament;
 pub mod users;
 
-pub fn routes(app_state: AppState) -> axum::Router {
+pub fn routes(app_state: AppState) -> cja::Result<axum::Router> {
     // CORS layer for API routes - allows board.battlesnake.com to access our API
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -107,7 +110,7 @@ pub fn routes(app_state: AppState) -> axum::Router {
         .route("/", get(root_page))
         .route("/robots.txt", get(robots_txt))
         .route("/health", get(health::health))
-        .route("/favicon.ico", get(crate::static_assets::serve_favicon))
+        .route("/favicon.ico", get(serve_favicon))
         // Social cards (og:image)
         .route(og::DEFAULT_CARD_PATH, get(og::default_card))
         .route(
@@ -154,6 +157,12 @@ pub fn routes(app_state: AppState) -> axum::Router {
             get(settings::confirm_notification_email_page)
                 .post(settings::confirm_notification_email),
         )
+        .route("/notifications", get(notifications::page))
+        .route("/notifications/drawer", get(notifications::drawer))
+        .route("/notifications/more", get(notifications::more))
+        .route("/notifications/count", get(notifications::count))
+        .route("/notifications/{id}/open", post(notifications::open))
+        .route("/notifications/read-all", post(notifications::read_all))
         .route(
             "/notifications/unsubscribe/{token}",
             get(settings::unsubscribe_get).post(settings::unsubscribe_post),
@@ -335,23 +344,43 @@ pub fn routes(app_state: AppState) -> axum::Router {
         .route("/admin/moderation", get(admin::moderation_queue))
         // Game API routes for board viewer (with CORS)
         .nest("/api", api_routes)
-        // Static files
-        .route(
-            "/static/{*path}",
-            get(crate::static_assets::serve_static_file),
-        )
         // Internal routes
         .route("/_/version", get(version_page))
         // Unknown routes get a branded 404 instead of an empty response
         .fallback(not_found_page);
 
     // Community short links (/docs, /discord, ...) carried over from play
-    redirects::register(router)
+    let assets = cja::assets::router::<AppState>(&[&crate::arena_assets::MANIFEST])
+        .wrap_err("asset router collision")?;
+    Ok(redirects::register(router.merge(assets))
         .layer(axum::middleware::from_fn_with_state(
             app_state.clone(),
             inject_trace_context,
         ))
-        .with_state(app_state)
+        .with_state(app_state))
+}
+
+async fn serve_favicon() -> impl IntoResponse {
+    favicon_response(&crate::arena_assets::MANIFEST)
+}
+
+fn favicon_response(manifest: &cja::assets::Manifest) -> axum::response::Response {
+    use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
+    match manifest
+        .entries
+        .iter()
+        .find(|asset| asset.logical_name == "favicon.svg")
+    {
+        Some(asset) => (
+            [
+                (CONTENT_TYPE, "image/svg+xml"),
+                (CACHE_CONTROL, "public, max-age=3600"),
+            ],
+            asset.bytes,
+        )
+            .into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 async fn not_found_page(page_factory: PageFactory) -> impl IntoResponse {
@@ -1140,5 +1169,109 @@ mod home_delta_tests {
         assert_eq!(home_delta(1.26), (true, "+1.3".to_string()));
         assert_eq!(home_delta(-0.05), (false, "-0.1".to_string()));
         assert_eq!(home_delta(-2.34), (false, "-2.3".to_string()));
+    }
+}
+
+#[cfg(test)]
+mod asset_tests {
+    use axum::response::IntoResponse as _;
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode, header},
+    };
+    use tower::ServiceExt as _;
+
+    #[tokio::test]
+    async fn compiled_and_static_assets_are_hashed_immutable_and_exact() {
+        let app = cja::assets::router::<()>(&[&crate::arena_assets::MANIFEST])
+            .expect("unique asset paths");
+        for (logical, mime) in [
+            ("theme.js", "text/javascript"),
+            ("theme.js.map", "application/json"),
+            ("arena.css", "text/css"),
+            ("favicon.svg", "image/svg+xml"),
+            ("design-kit/example-drawing.png", "image/png"),
+            (
+                "design-kit/battlesnake-head-template.psd",
+                "application/octet-stream",
+            ),
+        ] {
+            let asset = crate::arena_assets::MANIFEST
+                .entries
+                .iter()
+                .find(|asset| asset.logical_name == logical)
+                .expect("asset is embedded");
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::get(crate::arena_assets::asset_url(logical))
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::OK, "{logical}");
+            assert_eq!(response.headers()[header::CONTENT_TYPE], mime, "{logical}");
+            assert_eq!(
+                response.headers()[header::CACHE_CONTROL],
+                "public, max-age=31536000, immutable"
+            );
+            let bytes = to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body");
+            assert_eq!(bytes.as_ref(), asset.bytes, "{logical}");
+            if matches!(
+                logical,
+                "arena.css"
+                    | "favicon.svg"
+                    | "design-kit/example-drawing.png"
+                    | "design-kit/battlesnake-head-template.psd"
+            ) {
+                let source = std::fs::read(
+                    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join("static")
+                        .join(logical),
+                )
+                .expect("committed static asset");
+                assert_eq!(bytes.as_ref(), source, "{logical}");
+            }
+        }
+        for path in ["/assets/missing.js", "/assets/theme.js"] {
+            let response = app
+                .clone()
+                .oneshot(Request::get(path).body(Body::empty()).expect("request"))
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn stable_favicon_is_svg_with_short_cache() {
+        let response = super::serve_favicon().await.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "image/svg+xml");
+        assert_eq!(
+            response.headers()[header::CACHE_CONTROL],
+            "public, max-age=3600"
+        );
+        let expected = crate::arena_assets::MANIFEST
+            .entries
+            .iter()
+            .find(|asset| asset.logical_name == "favicon.svg")
+            .expect("favicon");
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        assert_eq!(bytes.as_ref(), expected.bytes);
+    }
+
+    #[test]
+    fn missing_favicon_is_404() {
+        static EMPTY: cja::assets::Manifest = cja::assets::Manifest::new("test", &[]);
+        assert_eq!(
+            super::favicon_response(&EMPTY).status(),
+            StatusCode::NOT_FOUND
+        );
     }
 }

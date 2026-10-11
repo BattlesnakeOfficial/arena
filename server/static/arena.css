@@ -5,7 +5,7 @@
    Two theme axes, resolved onto html[data-app-theme="light|dark"]:
      - site theme    (system | light | dark)  — every page
      - game theater  (match | dark | light)   — pages marked data-theater-page
-   Resolution happens in the inline head script (no-FOUC) + /static/theme.js.
+   Resolution happens in the inline head script (no-FOUC) + theme.js.
    ========================================================================== */
 
 :root {
@@ -1127,10 +1127,14 @@ table.data.test-results pre { margin-top: 8px; font-family: var(--mono); font-si
 }
 
 /* --- responsive ---------------------------------------------------------- */
-/* The logged-in link row (8 links + wordmark + controls + user chip) needs
-   ~1210px; collapse it into the hamburger menu below that so links never
-   wrap or push the controls off-screen. Kept separate from the 980px query
-   so page layout still switches at 980. */
+/* Compact the logged-in nav until there is room for full spacing and names. */
+@media (min-width: 1221px) and (max-width: 1700px) {
+  .site-nav { gap: 10px; }
+  .site-nav .links { gap: 10px; }
+  .nav-user { min-width: 0; }
+  .nav-user-name { max-width: 64px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+}
+/* Collapse below 1221px; page layout still switches at 980px. */
 @media (max-width: 1220px) {
   .site-nav .links { display: none; }
   .mobile-menu { display: block; }
@@ -1147,7 +1151,7 @@ table.data.test-results pre { margin-top: 8px; font-family: var(--mono); font-si
 }
 @media (max-width: 640px) {
   .hide-sm { display: none; }
-  .site-nav { gap: 12px; padding: 18px 20px; }
+  .site-nav { gap: 8px; padding: 18px 20px; } /* Bell needs room in the collapsed nav. */
   /* sign-in moves into the mobile menu sheet; avatar stays for logged-in */
   .site-nav > .btn.solid { display: none; }
   .nav-user-name {
@@ -1738,3 +1742,129 @@ html[data-app-theme="dark"] .guide-board .studio-board .grid { fill: #393939; }
 .guide-marker circle { fill: var(--ink); stroke: var(--card); stroke-width: 1.2; }
 .guide-marker text { fill: var(--paper); font: 700 8px var(--body); text-anchor: middle; }
 .guide-figure .guide-legend { color: var(--ink); font-size: 15px; padding-left: 1.4em; display: grid; gap: 4px; }
+
+/* Notifications */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+.notification-empty { padding: 12px 24px; font-size: 16px; }
+.notifications-page .notification-empty { padding-left: 0; }
+.notification-bell {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 44px;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  color: var(--ink);
+}
+.notification-bell:hover, .notification-bell:focus-visible { background: var(--hairline); }
+.notification-bell svg { width: 23px; height: 23px; }
+.notification-badge {
+  position: absolute;
+  top: -2px;
+  right: -5px;
+  min-width: 21px;
+  height: 21px;
+  padding: 1px 4px;
+  border-radius: 99px;
+  background: var(--pink);
+  color: #fff;
+  font: 700 12px/19px var(--body);
+  text-align: center;
+}
+.notification-badge[hidden] { display: none; }
+#notification-drawer {
+  position: fixed;
+  inset: 0 0 0 auto;
+  width: min(440px, 100vw);
+  max-width: none;
+  max-height: none;
+  height: 100dvh;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: var(--paper);
+  color: var(--ink);
+  box-shadow: -12px 0 40px #0003;
+  overflow-y: auto;
+  animation: notification-slide-in .2s ease-out;
+}
+#notification-drawer::backdrop { background: #0008; }
+@keyframes notification-slide-in { from { transform: translateX(100%); } }
+.notification-drawer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 18px 24px;
+  border-bottom: 1px solid var(--hairline);
+}
+.notification-drawer-head h2 { margin: 0; font-size: 24px; }
+#notification-drawer-close {
+  min-width: 44px;
+  min-height: 44px;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font-size: 30px;
+  cursor: pointer;
+}
+#notification-drawer-status { padding: 0 24px; font-size: 16px; }
+#notification-drawer-status:not(:empty) { padding-top: 12px; padding-bottom: 12px; }
+.notification-drawer-footer { padding: 20px 24px; border-top: 1px solid var(--hairline); }
+.notification-drawer-footer a { display: inline-flex; align-items: center; min-height: 44px; font-size: 16px; }
+.notifications-page { max-width: 740px; margin: 0 auto; }
+.notifications-page h1 { margin-bottom: 16px; }
+.notification-mark-all { padding: 12px 24px; }
+.notifications-page .notification-mark-all { padding-left: 0; }
+.notification-mark-all button, .notification-load-more, .notification-next, #notification-drawer-status button {
+  min-height: 44px;
+  padding: 10px 16px;
+  border: 1px solid var(--hairline-dark);
+  border-radius: 9px;
+  background: var(--card);
+  color: var(--ink);
+  font: 600 16px var(--body);
+  cursor: pointer;
+}
+.notification-items { list-style: none; margin: 0; padding: 0; }
+.notification-item { border-top: 1px solid var(--hairline); }
+.notification-item.unread { border-left: 4px solid var(--pink); background: var(--card); }
+.notification-item form, .notification-item button { width: 100%; }
+.notification-item button {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  min-height: 72px;
+  padding: 16px 24px;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
+  font: 16px var(--body);
+}
+.notification-item button:hover, .notification-item button:focus-visible { background: var(--hairline); }
+.notification-kind-icon { flex: 0 0 24px; text-align: center; }
+.notification-item-copy { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 4px; }
+.notification-item-title { font-weight: 600; overflow-wrap: anywhere; }
+.notification-item.unread .notification-item-title { font-weight: 800; }
+.notification-item-body { color: var(--muted); line-height: 1.4; overflow-wrap: anywhere; }
+.notification-item time { color: var(--muted); font-size: 16px; }
+.notification-unread-marker { font-size: 16px; font-weight: 800; color: var(--pink); text-transform: uppercase; }
+.notification-load-more, .notification-next { display: block; margin: 20px 24px; }
+@media (max-width: 640px) {
+  #notification-drawer { width: 100vw; height: 100dvh; }
+  .notification-bell { flex-basis: 44px; }
+}

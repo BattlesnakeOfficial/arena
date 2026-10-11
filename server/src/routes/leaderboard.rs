@@ -1264,6 +1264,7 @@ mod owner_name_route_tests {
 
     async fn get(pool: &PgPool, path: &str) -> (StatusCode, String) {
         let app = crate::routes::routes(AppState::test_from_pool(pool.clone()))
+            .expect("asset router")
             .layer(tower_cookies::CookieManagerLayer::new());
         let mut builder = Request::builder().uri(path);
         if path.starts_with("/api/") {
@@ -1455,7 +1456,9 @@ mod column_route_tests {
         scoring.register(Box::new(WinRateScoring));
         scoring.register(Box::new(FoodEatenScoring));
         state.scoring = std::sync::Arc::new(scoring);
-        let app = crate::routes::routes(state).layer(tower_cookies::CookieManagerLayer::new());
+        let app = crate::routes::routes(state)
+            .expect("asset router")
+            .layer(tower_cookies::CookieManagerLayer::new());
         let response = app
             .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
             .await

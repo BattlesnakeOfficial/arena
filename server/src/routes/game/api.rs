@@ -1249,10 +1249,13 @@ mod live_tests {
         let shutdown = CancellationToken::new();
         let web_shutdown = shutdown.clone();
         let web = tokio::spawn(async move {
-            axum::serve(listener, crate::routes::routes(state.clone()))
-                .with_graceful_shutdown(web_shutdown.cancelled_owned())
-                .await
-                .unwrap();
+            axum::serve(
+                listener,
+                crate::routes::routes(state.clone()).expect("asset router"),
+            )
+            .with_graceful_shutdown(web_shutdown.cancelled_owned())
+            .await
+            .unwrap();
         });
         (format!("ws://{address}"), shutdown, web)
     }

@@ -2228,6 +2228,7 @@ mod moderation_tests {
             user: None,
             path: "/admin/moderation".to_string(),
             base_url: "http://localhost".to_string(),
+            unread_count: None,
         };
 
         let response = crate::routes::admin::moderation_queue(

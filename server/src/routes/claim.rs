@@ -576,7 +576,9 @@ mod tests {
     const PROMPT_TITLE: &str = "Played on play.battlesnake.com?";
 
     fn app(state: &AppState) -> axum::Router {
-        crate::routes::routes(state.clone()).layer(tower_cookies::CookieManagerLayer::new())
+        crate::routes::routes(state.clone())
+            .expect("asset router")
+            .layer(tower_cookies::CookieManagerLayer::new())
     }
 
     async fn send(
