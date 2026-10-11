@@ -895,6 +895,37 @@ table.data.test-results pre { margin-top: 8px; font-family: var(--mono); font-si
 .cz-slug { display: block; max-width: 100%; overflow-wrap: anywhere; font-size: 13px; margin-bottom: 8px; }
 .cz-unlock-form { width: 100%; margin-top: 12px; }
 .cz-unlock { width: 100%; min-height: 44px; }
+.cz-modes .mode { min-height: 44px; }
+.cz-group-head { flex-wrap: wrap; }
+.cz-ladder-link, .cz-catalog-link { display: inline-flex; align-items: center; min-height: 44px; color: var(--pink); font-weight: 600; }
+.cz-ladder-link { margin-left: auto; }
+.cz-ladder-section { max-width: 860px; margin-top: 36px; }
+.cz-ladder-section h2 { font-size: 24px; margin-bottom: 22px; }
+.cz-ladder { list-style: none; margin: 0; padding: 0; }
+.cz-step { display: grid; grid-template-columns: 44px minmax(0, 1fr); gap: 14px; position: relative; padding-bottom: 22px; min-width: 0; }
+.cz-step:not(:last-child)::before { content: ""; position: absolute; top: 44px; bottom: 0; left: 21px; border-left: 2px solid var(--hairline); }
+.cz-step-marker { width: 44px; height: 44px; border: 2px solid var(--pink); border-radius: 50%; display: grid; place-items: center; color: var(--pink); background: var(--paper); font-size: 18px; font-weight: 700; position: relative; z-index: 1; }
+.cz-step-marker .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+.cz-step-card { min-width: 0; padding: 18px; border: 1px solid var(--hairline); border-radius: 14px; background: var(--card); }
+.cz-step.next-up .cz-step-card { border-color: var(--pink); background: var(--pink-wash); }
+.cz-step-heading { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; min-width: 0; }
+.cz-step-heading h3 { font-size: 20px; overflow-wrap: anywhere; }
+.cz-step-state { margin-left: auto; }
+.cz-next-up { display: inline-block; margin-top: 8px; color: var(--pink); font-size: 16px; font-weight: 700; }
+.cz-step-description, .cz-ladder-foot { font-size: 16px; line-height: 1.55; overflow-wrap: anywhere; }
+.cz-step-description { color: var(--muted); margin: 12px 0 18px; }
+.cz-step-rewards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); gap: 12px; min-width: 0; }
+.cz-step-reward { display: flex; align-items: center; gap: 12px; min-width: 0; font-size: 16px; }
+.cz-step-reward .cz-swatch { width: 64px; height: 64px; flex: none; }
+.cz-step-reward-copy { display: flex; flex-direction: column; min-width: 0; overflow-wrap: anywhere; }
+.cz-step-reward-name { font-weight: 600; }
+.cz-step-reward code { font-size: 16px; white-space: normal; overflow-wrap: anywhere; }
+.cz-ladder-foot { color: var(--muted); margin: 4px 0 36px 58px; }
+@media (max-width: 640px) {
+  .cz-step { gap: 10px; }
+  .cz-step-card { padding: 14px; }
+  .cz-ladder-foot { margin-left: 0; }
+}
 
 @media (max-width: 640px) {
   .cz-grid { grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); gap: 10px; }

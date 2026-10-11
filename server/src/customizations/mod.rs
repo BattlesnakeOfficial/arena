@@ -568,7 +568,7 @@ mod tests {
             .iter()
             .map(|item| item.def())
             .chain(Tail::ALL.iter().map(|item| item.def()))
-            .filter(|def| def.group == Group::Collection2024)
+            .filter(|def| def.group == Group::GettingStarted)
             .collect();
         assert_eq!(achievements.len(), 9);
         assert!(

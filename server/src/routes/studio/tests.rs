@@ -1040,8 +1040,11 @@ async fn studio_redirects_to_the_studio() {
 async fn the_studio_is_not_linked_from_customizations_or_the_footer_yet(db: sqlx::PgPool) {
     use maud::Render as _;
 
-    let (status, _, customizations) = get_html(page_app(db), "/customizations").await;
+    let (status, _, customizations) = get_html(page_app(db.clone()), "/customizations").await;
     assert_eq!(status, StatusCode::OK);
+    let (achievements_status, _, achievements) =
+        get_html(page_app(db), "/customizations/achievements").await;
+    assert_eq!(achievements_status, StatusCode::OK);
     let footer = crate::components::page::Page::new(
         "Test".to_string(),
         Box::new(maud::html! { p { "content" } }),
@@ -1052,6 +1055,7 @@ async fn the_studio_is_not_linked_from_customizations_or_the_footer_yet(db: sqlx
 
     for (what, html) in [
         ("/customizations", &customizations),
+        ("/customizations/achievements", &achievements),
         ("the footer", &footer),
     ] {
         // A whole page, footer included, so the checks below can fail.

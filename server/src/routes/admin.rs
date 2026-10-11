@@ -728,7 +728,7 @@ mod tests {
         assert!(list.contains("head:hydra"));
         assert!(list.contains("head:turtle"));
         assert!(list.contains("Special Edition"));
-        assert!(list.contains("2024 Achievement Collection"));
+        assert!(list.contains("Getting Started"));
         for invalid in [
             "item=head%3Adefault&max_redemptions=1",
             "item=foo%3Ahydra&max_redemptions=1",
