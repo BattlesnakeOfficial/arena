@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT notification_email, pending_notification_email_request_id FROM users WHERE user_id = $1 FOR NO KEY UPDATE",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "notification_email",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "pending_notification_email_request_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true,
+      true
+    ]
+  },
+  "hash": "fbf437f489e7c8d6c51d27a489b9a2cf76fac4172796825eedacc95250e6cee1"
+}

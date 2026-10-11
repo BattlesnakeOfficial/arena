@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE customization_legacy_tokens SET play_points = 201, token_count = 2 WHERE imported_account_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "65dae3d943093e8525e989d702d55dec8fcdad22f96b2810b8ce712f690165bc"
+}

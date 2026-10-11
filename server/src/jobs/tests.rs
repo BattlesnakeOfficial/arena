@@ -1,10 +1,13 @@
 use std::{path::Path, process::Command, time::Duration};
 
-use cja::jobs::worker::{DEFAULT_MAX_RETRIES, job_worker};
+use cja::jobs::{
+    Job,
+    worker::{DEFAULT_MAX_RETRIES, job_worker},
+};
 use sqlx::PgPool;
 use tokio_util::sync::CancellationToken;
 
-use super::{AppState, Jobs};
+use super::{AppState, Jobs, SendNotificationEmailJob};
 use crate::config::{AppConfig, DEFAULT_JOB_SHUTDOWN_DRAIN_SECS};
 
 #[sqlx::test(migrations = "../migrations")]
@@ -341,4 +344,954 @@ fn cja_migrations_are_present_and_unchanged() {
          Never edit an applied migration.\n{}",
         problems.join("\n")
     );
+}
+async fn wait_for_notification_row_waiters(pool: &PgPool, expected: i64) -> cja::Result<()> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let blocked: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%notification_emails%'",
+            )
+            .fetch_one(pool)
+            .await?;
+            if blocked >= expected {
+                break Ok::<_, color_eyre::Report>(());
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await??;
+    Ok(())
+}
+
+#[sqlx::test(migrations = "../migrations")]
+async fn notification_email_is_sent_once_even_for_concurrent_runs(pool: PgPool) -> cja::Result<()> {
+    use crate::email::{Mailer, MailgunConfig};
+    use crate::notifications::{EmailRecipient, NewEmail, NewNotification, NotificationKind};
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let user_id = sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login, github_access_token, github_email) VALUES (1673001, 'notification-job-test', '', 'owner@example.com') RETURNING user_id").fetch_one(&pool).await?;
+    let receipt = crate::notifications::record(
+        &pool,
+        NewNotification {
+            user_id,
+            kind: NotificationKind::SnakeMatchmakingPaused,
+            title: "Paused".into(),
+            body: "Health checks failed".into(),
+            link: None,
+            email: Some(NewEmail {
+                subject: Some("Paused".into()),
+                text: Some("Message".into()),
+                recipient: EmailRecipient::User,
+                claim_imported_account_id: None,
+                notification_email_request_id: None,
+            }),
+        },
+    )
+    .await?;
+    let mut state = AppState::test_from_pool(pool.clone());
+    state.mailer = Mailer::new(
+        Some(MailgunConfig {
+            api_key: "test".into(),
+            domain: "mg.example.com".into(),
+            from: "Arena <reply@example.com>".into(),
+            base_url: server.uri(),
+        }),
+        reqwest::Client::new(),
+    );
+    let job = SendNotificationEmailJob {
+        notification_id: receipt.notification_id,
+    };
+    // Separate Mailers model separate server processes: their semaphores do
+    // not coordinate, so the outbox row lock must serialize delivery.
+    let mut other_state = AppState::test_from_pool(pool.clone());
+    other_state.mailer = Mailer::new(
+        Some(MailgunConfig {
+            api_key: "test".into(),
+            domain: "mg.example.com".into(),
+            from: "Arena <reply@example.com>".into(),
+            base_url: server.uri(),
+        }),
+        reqwest::Client::new(),
+    );
+    let mut holder = pool.begin().await?;
+    sqlx::query(
+        "SELECT notification_id FROM notification_emails WHERE notification_id = $1 FOR UPDATE",
+    )
+    .bind(receipt.notification_id)
+    .fetch_one(&mut *holder)
+    .await?;
+    let first_job = job.clone();
+    let first_state = state.clone();
+    let first = tokio::spawn(async move { first_job.run(first_state).await });
+    wait_for_notification_row_waiters(&pool, 1).await?;
+    let second_job = job.clone();
+    let second = tokio::spawn(async move { second_job.run(other_state).await });
+    wait_for_notification_row_waiters(&pool, 2).await?;
+    holder.commit().await?;
+    first.await??;
+    second.await??;
+    job.run(state).await?;
+    let outcome = sqlx::query_scalar!(
+        "SELECT outcome FROM notification_emails WHERE notification_id = $1",
+        receipt.notification_id
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(outcome.as_deref(), Some("sent"));
+    let purpose = sqlx::query_scalar!("SELECT purpose FROM email_log LIMIT 1")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(purpose, NotificationKind::SnakeMatchmakingPaused.key());
+    let requests = server
+        .received_requests()
+        .await
+        .ok_or_else(|| color_eyre::eyre::eyre!("wiremock did not record requests"))?;
+    assert_eq!(requests.len(), 1);
+    let form: std::collections::HashMap<_, _> = url::form_urlencoded::parse(&requests[0].body)
+        .into_owned()
+        .collect();
+    assert_eq!(
+        form.get("h:List-Unsubscribe-Post").map(String::as_str),
+        Some("List-Unsubscribe=One-Click")
+    );
+    assert!(
+        form.get("h:List-Unsubscribe")
+            .is_some_and(|value| value.starts_with('<') && value.ends_with('>'))
+    );
+    assert!(
+        form.get("text").is_some_and(
+            |value| value.contains("Unsubscribe from Snake matchmaking paused emails:")
+        )
+    );
+    Ok(())
+}
+
+#[sqlx::test(migrations = "../migrations")]
+async fn send_time_opt_out_keeps_in_app_event(pool: PgPool) -> cja::Result<()> {
+    use crate::notifications::{
+        EmailRecipient, NewEmail, NewNotification, NotificationChannel, NotificationKind,
+    };
+    let user_id = sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login, github_access_token) VALUES (1673002, 'notification-optout-test', '') RETURNING user_id").fetch_one(&pool).await?;
+    let receipt = crate::notifications::record(
+        &pool,
+        NewNotification {
+            user_id,
+            kind: NotificationKind::SnakeMatchmakingResumed,
+            title: "Resumed".into(),
+            body: "Recovered".into(),
+            link: None,
+            email: Some(NewEmail {
+                subject: Some("Resumed".into()),
+                text: Some("Recovered".into()),
+                recipient: EmailRecipient::User,
+                claim_imported_account_id: None,
+                notification_email_request_id: None,
+            }),
+        },
+    )
+    .await?;
+    let mut connection = pool.acquire().await?;
+    crate::models::notification::set_preference(
+        &mut connection,
+        user_id,
+        NotificationKind::SnakeMatchmakingResumed,
+        NotificationChannel::Email,
+        false,
+    )
+    .await?;
+    drop(connection);
+    SendNotificationEmailJob {
+        notification_id: receipt.notification_id,
+    }
+    .run(AppState::test_from_pool(pool.clone()))
+    .await?;
+    let row = sqlx::query!("SELECT n.in_app_visible, e.outcome FROM notifications n JOIN notification_emails e USING (notification_id) WHERE n.notification_id = $1", receipt.notification_id).fetch_one(&pool).await?;
+    assert!(row.in_app_visible);
+    assert_eq!(row.outcome.as_deref(), Some("opted_out"));
+    Ok(())
+}
+
+#[sqlx::test(migrations = "../migrations")]
+async fn in_app_opt_out_at_raise_does_not_suppress_email(pool: PgPool) -> cja::Result<()> {
+    use crate::email::{Mailer, MailgunConfig};
+    use crate::notifications::{
+        EmailRecipient, NewEmail, NewNotification, NotificationChannel, NotificationKind,
+    };
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let user_id = sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login, github_access_token, github_email) VALUES (1673006, 'in-app-off-test', '', 'owner@example.com') RETURNING user_id").fetch_one(&pool).await?;
+    let mut connection = pool.acquire().await?;
+    crate::models::notification::set_preference(
+        &mut connection,
+        user_id,
+        NotificationKind::SnakeMatchmakingPaused,
+        NotificationChannel::InApp,
+        false,
+    )
+    .await?;
+    drop(connection);
+    let receipt = crate::notifications::record(
+        &pool,
+        NewNotification {
+            user_id,
+            kind: NotificationKind::SnakeMatchmakingPaused,
+            title: "Paused".into(),
+            body: "Unhealthy".into(),
+            link: None,
+            email: Some(NewEmail {
+                subject: Some("Paused".into()),
+                text: Some("body".into()),
+                recipient: EmailRecipient::User,
+                claim_imported_account_id: None,
+                notification_email_request_id: None,
+            }),
+        },
+    )
+    .await?;
+    let mut state = AppState::test_from_pool(pool.clone());
+    state.mailer = Mailer::new(
+        Some(MailgunConfig {
+            api_key: "test".into(),
+            domain: "mg.example.com".into(),
+            from: "Arena <reply@example.com>".into(),
+            base_url: server.uri(),
+        }),
+        reqwest::Client::new(),
+    );
+    SendNotificationEmailJob {
+        notification_id: receipt.notification_id,
+    }
+    .run(state)
+    .await?;
+    let row = sqlx::query!("SELECT n.in_app_visible, e.outcome FROM notifications n JOIN notification_emails e USING (notification_id) WHERE n.notification_id = $1", receipt.notification_id).fetch_one(&pool).await?;
+    assert!(!row.in_app_visible);
+    assert_eq!(row.outcome.as_deref(), Some("sent"));
+    Ok(())
+}
+
+#[sqlx::test(migrations = "../migrations")]
+async fn verification_ignores_preferences_and_retries_transport_failure(
+    pool: PgPool,
+) -> cja::Result<()> {
+    use crate::email::{Mailer, MailgunConfig};
+    use crate::notifications::{EmailRecipient, NewEmail, NewNotification, NotificationKind};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+    let server = MockServer::start().await;
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let counter = attempts.clone();
+    Mock::given(method("POST"))
+        .respond_with(
+            move |_: &wiremock::Request| match counter.fetch_add(1, Ordering::SeqCst) {
+                0 => ResponseTemplate::new(500),
+                1 => ResponseTemplate::new(200).set_delay(Duration::from_secs(11)),
+                _ => ResponseTemplate::new(200),
+            },
+        )
+        .mount(&server)
+        .await;
+    let user_id = sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login, github_access_token) VALUES (1673003, 'verification-job-test', '') RETURNING user_id").fetch_one(&pool).await?;
+    sqlx::query!(
+        "UPDATE users SET notification_email = 'confirmed@example.com' WHERE user_id = $1",
+        user_id
+    )
+    .execute(&pool)
+    .await?;
+    let account_id = sqlx::query_scalar!("INSERT INTO imported_accounts (play_user_id, play_account_id, email, username) VALUES ('1673play', '1673account', 'play@example.com', 'player') RETURNING imported_account_id").fetch_one(&pool).await?;
+    sqlx::query!("INSERT INTO notification_preferences (user_id, kind, channel, enabled) VALUES ($1, 'claim_verification', 'email', false)", user_id).execute(&pool).await?;
+    let receipt = crate::notifications::record(
+        &pool,
+        NewNotification {
+            user_id,
+            kind: NotificationKind::ClaimVerification,
+            title: "Finish claiming your Battlesnake account".into(),
+            body: "Verification requested".into(),
+            link: None,
+            email: Some(NewEmail {
+                subject: None,
+                text: None,
+                recipient: EmailRecipient::Override("play@example.com".into()),
+                claim_imported_account_id: Some(account_id),
+                notification_email_request_id: None,
+            }),
+        },
+    )
+    .await?;
+    let mut state = AppState::test_from_pool(pool.clone());
+    state.mailer = Mailer::new(
+        Some(MailgunConfig {
+            api_key: "test".into(),
+            domain: "mg.example.com".into(),
+            from: "Arena <reply@example.com>".into(),
+            base_url: server.uri(),
+        }),
+        reqwest::Client::new(),
+    );
+    let job = SendNotificationEmailJob {
+        notification_id: receipt.notification_id,
+    };
+    assert!(job.run(state.clone()).await.is_err());
+    let outcome = sqlx::query_scalar!(
+        "SELECT outcome FROM notification_emails WHERE notification_id = $1",
+        receipt.notification_id
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(outcome.is_none());
+    let tokens = sqlx::query_scalar!("SELECT COUNT(*) AS \"count!\" FROM claim_email_tokens")
+        .fetch_one(&pool)
+        .await?;
+    let logs = sqlx::query_scalar!("SELECT COUNT(*) AS \"count!\" FROM email_log")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!((tokens, logs), (0, 0));
+    let started = std::time::Instant::now();
+    assert!(job.run(state.clone()).await.is_err());
+    assert!(
+        started.elapsed() < Duration::from_secs(11),
+        "request timeout was not enforced"
+    );
+    let tokens = sqlx::query_scalar!("SELECT COUNT(*) AS \"count!\" FROM claim_email_tokens")
+        .fetch_one(&pool)
+        .await?;
+    let logs = sqlx::query_scalar!("SELECT COUNT(*) AS \"count!\" FROM email_log")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!((tokens, logs), (0, 0));
+    job.run(state.clone()).await?;
+    let outcome = sqlx::query_scalar!(
+        "SELECT outcome FROM notification_emails WHERE notification_id = $1",
+        receipt.notification_id
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(outcome.as_deref(), Some("sent"));
+    let tokens = sqlx::query_scalar!("SELECT COUNT(*) AS \"count!\" FROM claim_email_tokens")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(tokens, 1);
+    let requests = server
+        .received_requests()
+        .await
+        .ok_or_else(|| color_eyre::eyre::eyre!("wiremock did not record requests"))?;
+    assert_eq!(requests.len(), 3);
+    let form: std::collections::HashMap<_, _> = url::form_urlencoded::parse(&requests[2].body)
+        .into_owned()
+        .collect();
+    assert_eq!(form.get("to").map(String::as_str), Some("play@example.com"));
+    let delivered_text = form.get("text").expect("verification text");
+    let token = delivered_text
+        .split("/claim/email/verify?token=")
+        .nth(1)
+        .and_then(|tail| tail.split_whitespace().next())
+        .expect("delivered bearer token");
+    assert_eq!(token.len(), 64);
+    let persisted: Vec<String> = sqlx::query_scalar(
+        "SELECT row_to_json(n)::text FROM notifications n
+         UNION ALL SELECT row_to_json(e)::text FROM notification_emails e
+         UNION ALL SELECT payload::text FROM jobs",
+    )
+    .fetch_all(&pool)
+    .await?;
+    assert!(
+        persisted.iter().all(|row| !row.contains(token)),
+        "raw claim token leaked into notification or job storage"
+    );
+    assert!(!form.contains_key("h:List-Unsubscribe"));
+    assert!(!form.contains_key("h:List-Unsubscribe-Post"));
+    assert!(
+        !form
+            .get("text")
+            .is_some_and(|value| value.contains("Unsubscribe"))
+    );
+    let claimed = crate::notifications::record(
+        &pool,
+        NewNotification {
+            user_id,
+            kind: NotificationKind::PlayAccountClaimed,
+            title: "Claimed".into(),
+            body: "Body".into(),
+            link: None,
+            email: Some(NewEmail {
+                subject: Some("Claimed".into()),
+                text: Some("Body".into()),
+                recipient: EmailRecipient::Override("play@example.com".into()),
+                claim_imported_account_id: None,
+                notification_email_request_id: None,
+            }),
+        },
+    )
+    .await?;
+    SendNotificationEmailJob {
+        notification_id: claimed.notification_id,
+    }
+    .run(state)
+    .await?;
+    let requests = server.received_requests().await.expect("wiremock requests");
+    let form: std::collections::HashMap<_, _> = url::form_urlencoded::parse(&requests[3].body)
+        .into_owned()
+        .collect();
+    assert_eq!(form.get("to").map(String::as_str), Some("play@example.com"));
+    Ok(())
+}
+
+#[sqlx::test(migrations = "../migrations")]
+async fn terminal_delivery_conditions_do_not_retry(pool: PgPool) -> cja::Result<()> {
+    use crate::email::{Mailer, MailgunConfig};
+    use crate::notifications::{EmailRecipient, NewEmail, NewNotification, NotificationKind};
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let user_id = sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login, github_access_token, github_email) VALUES (1673004, 'terminal-job-test', '', 'owner@example.com') RETURNING user_id").fetch_one(&pool).await?;
+    let make = |recipient| NewNotification {
+        user_id,
+        kind: NotificationKind::SnakeMatchmakingPaused,
+        title: "Paused".into(),
+        body: "Unhealthy".into(),
+        link: None,
+        email: Some(NewEmail {
+            subject: Some("Paused".into()),
+            text: Some("body".into()),
+            recipient,
+            claim_imported_account_id: None,
+            notification_email_request_id: None,
+        }),
+    };
+    let disabled = crate::notifications::record(&pool, make(EmailRecipient::User)).await?;
+    let missing =
+        crate::notifications::record(&pool, make(EmailRecipient::Snake(uuid::Uuid::new_v4())))
+            .await?;
+    let limited = crate::notifications::record(&pool, make(EmailRecipient::User)).await?;
+    SendNotificationEmailJob {
+        notification_id: disabled.notification_id,
+    }
+    .run(AppState::test_from_pool(pool.clone()))
+    .await?;
+    let mut state = AppState::test_from_pool(pool.clone());
+    state.mailer = Mailer::new(
+        Some(MailgunConfig {
+            api_key: "test".into(),
+            domain: "mg.example.com".into(),
+            from: "Arena <reply@example.com>".into(),
+            base_url: server.uri(),
+        }),
+        reqwest::Client::new(),
+    );
+    SendNotificationEmailJob {
+        notification_id: missing.notification_id,
+    }
+    .run(state.clone())
+    .await?;
+    let mut config = (*state.config).clone();
+    config.email_per_recipient_hourly_limit = 0;
+    state.config = std::sync::Arc::new(config);
+    SendNotificationEmailJob {
+        notification_id: limited.notification_id,
+    }
+    .run(state.clone())
+    .await?;
+    let legacy_id = sqlx::query_scalar!("INSERT INTO notifications (user_id, kind, title, body, in_app_visible) VALUES ($1, 'snake_matchmaking_paused', 'Legacy', 'Body', true) RETURNING notification_id", user_id).fetch_one(&pool).await?;
+    sqlx::query!("INSERT INTO notification_emails (notification_id, subject, text, recipient_override) VALUES ($1, 'Legacy', 'Body', 'legacy@example.com')", legacy_id).execute(&pool).await?;
+    SendNotificationEmailJob {
+        notification_id: legacy_id,
+    }
+    .run(state.clone())
+    .await?;
+    let snake_id = sqlx::query_scalar!("INSERT INTO battlesnakes (user_id, name, url, deleted_at) VALUES ($1, 'deleted-snake', 'https://example.com', NOW()) RETURNING battlesnake_id", user_id).fetch_one(&pool).await?;
+    let deleted =
+        crate::notifications::record(&pool, make(EmailRecipient::Snake(snake_id))).await?;
+    SendNotificationEmailJob {
+        notification_id: deleted.notification_id,
+    }
+    .run(state)
+    .await?;
+    for (id, expected) in [
+        (disabled.notification_id, "transport_disabled"),
+        (missing.notification_id, "no_recipient"),
+        (limited.notification_id, "rate_limited"),
+        (legacy_id, "no_recipient"),
+        (deleted.notification_id, "no_recipient"),
+    ] {
+        let outcome = sqlx::query_scalar!(
+            "SELECT outcome FROM notification_emails WHERE notification_id = $1",
+            id
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(outcome.as_deref(), Some(expected));
+    }
+    Ok(())
+}
+
+#[sqlx::test(migrations = "../migrations")]
+async fn waiting_email_jobs_do_not_hold_pool_connections(pool: PgPool) -> cja::Result<()> {
+    use crate::email::{Mailer, MailgunConfig};
+    use crate::notifications::{EmailRecipient, NewEmail, NewNotification, NotificationKind};
+    use sqlx::postgres::PgPoolOptions;
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(2)))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let options = pool
+        .connect_options()
+        .as_ref()
+        .clone()
+        .application_name("notification-delivery-test");
+    let delivery_pool = PgPoolOptions::new()
+        .max_connections(5)
+        .connect_with(options)
+        .await?;
+    let user_id = sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login, github_access_token, github_email) VALUES (1673005, 'semaphore-job-test', '', 'owner@example.com') RETURNING user_id").fetch_one(&pool).await?;
+    let mut ids = Vec::new();
+    for _address in ["first@example.com", "second@example.com"] {
+        let receipt = crate::notifications::record(
+            &pool,
+            NewNotification {
+                user_id,
+                kind: NotificationKind::SnakeMatchmakingPaused,
+                title: "Paused".into(),
+                body: "Unhealthy".into(),
+                link: None,
+                email: Some(NewEmail {
+                    subject: Some("Paused".into()),
+                    text: Some("body".into()),
+                    recipient: EmailRecipient::User,
+                    claim_imported_account_id: None,
+                    notification_email_request_id: None,
+                }),
+            },
+        )
+        .await?;
+        ids.push(receipt.notification_id);
+    }
+    let mut state = AppState::test_from_pool(delivery_pool.clone());
+    state.mailer = Mailer::new(
+        Some(MailgunConfig {
+            api_key: "test".into(),
+            domain: "mg.example.com".into(),
+            from: "Arena <reply@example.com>".into(),
+            base_url: server.uri(),
+        }),
+        reqwest::Client::new(),
+    );
+    let first_id = ids[0];
+    let first_state = state.clone();
+    let first = tokio::spawn(async move {
+        SendNotificationEmailJob {
+            notification_id: first_id,
+        }
+        .run(first_state)
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let count = sqlx::query_scalar!("SELECT COUNT(*) AS \"count!\" FROM pg_stat_activity WHERE datname = current_database() AND application_name = 'notification-delivery-test' AND state = 'idle in transaction'").fetch_one(&pool).await?;
+            if count == 1 { break Ok::<_, color_eyre::Report>(()); }
+            tokio::task::yield_now().await;
+        }
+    }).await??;
+    let second_id = ids[1];
+    let second = tokio::spawn(async move {
+        SendNotificationEmailJob {
+            notification_id: second_id,
+        }
+        .run(state)
+        .await
+    });
+    let unrelated = tokio::time::timeout(
+        Duration::from_secs(1),
+        sqlx::query_scalar!("SELECT 1 AS \"one!\"").fetch_one(&delivery_pool),
+    )
+    .await??;
+    assert_eq!(unrelated, 1);
+    while !first.is_finished() {
+        let count = sqlx::query_scalar!("SELECT COUNT(*) AS \"count!\" FROM pg_stat_activity WHERE datname = current_database() AND application_name = 'notification-delivery-test' AND state = 'idle in transaction'").fetch_one(&pool).await?;
+        assert!(
+            count <= 1,
+            "only the active delivery may hold a transaction"
+        );
+        tokio::task::yield_now().await;
+    }
+    first.await??;
+    second.await??;
+    Ok(())
+}
+
+#[sqlx::test(migrations = "../migrations")]
+async fn confirmation_uses_hashed_single_use_link_and_user_mail_uses_confirmed_address(
+    pool: PgPool,
+) -> cja::Result<()> {
+    use crate::email::{Mailer, MailgunConfig};
+    use crate::models::notification_email::{self, ConfirmationRequestResult};
+    use crate::notifications::{EmailRecipient, NewEmail, NewNotification, NotificationKind};
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(6)
+        .mount(&server)
+        .await;
+    let user_id = sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login, github_access_token, github_email) VALUES (1674091, 'confirmation-job-test', '', 'public@example.com') RETURNING user_id").fetch_one(&pool).await?;
+    let mut state = AppState::test_from_pool(pool.clone());
+    state.mailer = Mailer::new(
+        Some(MailgunConfig {
+            api_key: "test".into(),
+            domain: "mg.example.com".into(),
+            from: "Arena <reply@example.com>".into(),
+            base_url: server.uri(),
+        }),
+        reqwest::Client::new(),
+    );
+    let mut tx = pool.begin().await?;
+    let (request_id, confirmation_id) =
+        match notification_email::request_confirmation(&mut tx, user_id, "confirmed@example.com")
+            .await?
+        {
+            ConfirmationRequestResult::Requested {
+                request_id,
+                receipt,
+            } => (request_id, receipt.notification_id),
+            _ => panic!("first request must enqueue"),
+        };
+    tx.commit().await?;
+    SendNotificationEmailJob {
+        notification_id: confirmation_id,
+    }
+    .run(state.clone())
+    .await?;
+    SendNotificationEmailJob {
+        notification_id: confirmation_id,
+    }
+    .run(state.clone())
+    .await?;
+    let requests = server.received_requests().await.expect("wiremock requests");
+    assert_eq!(requests.len(), 1);
+    let form: std::collections::HashMap<_, _> = url::form_urlencoded::parse(&requests[0].body)
+        .into_owned()
+        .collect();
+    assert_eq!(
+        form.get("to").map(String::as_str),
+        Some("confirmed@example.com")
+    );
+    assert!(!form.contains_key("h:List-Unsubscribe"));
+    let text = form.get("text").expect("confirmation body");
+    let secret = text
+        .split("token=")
+        .nth(1)
+        .expect("confirmation token")
+        .split_whitespace()
+        .next()
+        .expect("token end");
+    let row = sqlx::query!("SELECT token_hash, expires_at, sent_at FROM notification_email_requests WHERE request_id = $1", request_id).fetch_one(&pool).await?;
+    assert_eq!(
+        row.token_hash.as_deref(),
+        Some(notification_email::hash_secret(secret).as_str())
+    );
+    assert!(!format!("{row:?}").contains(secret));
+    assert!(row.sent_at.is_some());
+    let ttl = row.expires_at.expect("expiry") - chrono::Utc::now();
+    assert!(ttl.num_hours() >= 23 && ttl.num_hours() <= 24);
+    let send_user = |user_id| NewNotification {
+        user_id,
+        kind: NotificationKind::SnakeMatchmakingPaused,
+        title: "Paused".into(),
+        body: "Body".into(),
+        link: None,
+        email: Some(NewEmail {
+            subject: Some("Paused".into()),
+            text: Some("Body".into()),
+            recipient: EmailRecipient::User,
+            claim_imported_account_id: None,
+            notification_email_request_id: None,
+        }),
+    };
+    let pending = crate::notifications::record(&pool, send_user(user_id)).await?;
+    SendNotificationEmailJob {
+        notification_id: pending.notification_id,
+    }
+    .run(state.clone())
+    .await?;
+    let requests = server.received_requests().await.expect("wiremock requests");
+    let form: std::collections::HashMap<_, _> = url::form_urlencoded::parse(&requests[1].body)
+        .into_owned()
+        .collect();
+    assert_eq!(
+        form.get("to").map(String::as_str),
+        Some("public@example.com")
+    );
+    assert!(notification_email::consume(&pool, user_id, secret).await?);
+    assert!(!notification_email::consume(&pool, user_id, secret).await?);
+
+    let receipt = crate::notifications::record(&pool, send_user(user_id)).await?;
+    SendNotificationEmailJob {
+        notification_id: receipt.notification_id,
+    }
+    .run(state.clone())
+    .await?;
+    let requests = server.received_requests().await.expect("wiremock requests");
+    let form: std::collections::HashMap<_, _> = url::form_urlencoded::parse(&requests[2].body)
+        .into_owned()
+        .collect();
+    assert_eq!(
+        form.get("to").map(String::as_str),
+        Some("confirmed@example.com")
+    );
+
+    let mut tx = pool.begin().await?;
+    let replacement_id =
+        match notification_email::request_confirmation(&mut tx, user_id, "replacement@example.com")
+            .await?
+        {
+            ConfirmationRequestResult::Requested { receipt, .. } => receipt.notification_id,
+            _ => panic!("replacement must enqueue"),
+        };
+    tx.commit().await?;
+    let receipt = crate::notifications::record(&pool, send_user(user_id)).await?;
+    SendNotificationEmailJob {
+        notification_id: receipt.notification_id,
+    }
+    .run(state.clone())
+    .await?;
+    let requests = server.received_requests().await.expect("wiremock requests");
+    let form: std::collections::HashMap<_, _> = url::form_urlencoded::parse(&requests[3].body)
+        .into_owned()
+        .collect();
+    assert_eq!(
+        form.get("to").map(String::as_str),
+        Some("confirmed@example.com")
+    );
+    let mut tx = pool.begin().await?;
+    notification_email::clear(&mut tx, user_id).await?;
+    tx.commit().await?;
+    SendNotificationEmailJob {
+        notification_id: replacement_id,
+    }
+    .run(state.clone())
+    .await?;
+    assert_eq!(
+        sqlx::query_scalar!(
+            "SELECT outcome FROM notification_emails WHERE notification_id = $1",
+            replacement_id
+        )
+        .fetch_one(&pool)
+        .await?
+        .as_deref(),
+        Some("no_recipient")
+    );
+    let public = crate::notifications::record(&pool, send_user(user_id)).await?;
+    SendNotificationEmailJob {
+        notification_id: public.notification_id,
+    }
+    .run(state.clone())
+    .await?;
+    let requests = server.received_requests().await.expect("wiremock requests");
+    let form: std::collections::HashMap<_, _> = url::form_urlencoded::parse(&requests[4].body)
+        .into_owned()
+        .collect();
+    assert_eq!(
+        form.get("to").map(String::as_str),
+        Some("public@example.com")
+    );
+    sqlx::query!(
+        "UPDATE users SET github_email = NULL WHERE user_id = $1",
+        user_id
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query!("INSERT INTO imported_accounts (play_user_id, play_account_id, email, username, claimed_by_user_id) VALUES ('job-play', 'job-account', 'play@example.com', 'player', $1)", user_id).execute(&pool).await?;
+    let play = crate::notifications::record(&pool, send_user(user_id)).await?;
+    SendNotificationEmailJob {
+        notification_id: play.notification_id,
+    }
+    .run(state)
+    .await?;
+    let requests = server.received_requests().await.expect("wiremock requests");
+    let form: std::collections::HashMap<_, _> = url::form_urlencoded::parse(&requests[5].body)
+        .into_owned()
+        .collect();
+    assert_eq!(form.get("to").map(String::as_str), Some("play@example.com"));
+    Ok(())
+}
+
+#[sqlx::test(migrations = "../migrations")]
+async fn confirmation_actual_send_budget_blocks_sixth_delayed_request(
+    pool: PgPool,
+) -> cja::Result<()> {
+    use crate::email::{Mailer, MailgunConfig};
+    use crate::models::notification_email::{self, ConfirmationRequestResult};
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(5)
+        .mount(&server)
+        .await;
+    let user_id = sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login, github_access_token) VALUES (1674092, 'confirmation-cap-test', '') RETURNING user_id").fetch_one(&pool).await?;
+    let mut state = AppState::test_from_pool(pool.clone());
+    state.mailer = Mailer::new(
+        Some(MailgunConfig {
+            api_key: "test".into(),
+            domain: "mg.example.com".into(),
+            from: "Arena <reply@example.com>".into(),
+            base_url: server.uri(),
+        }),
+        reqwest::Client::new(),
+    );
+    let mut config = (*state.config).clone();
+    config.email_per_recipient_hourly_limit = 100;
+    state.config = std::sync::Arc::new(config);
+    for n in 0..6 {
+        if n == 5 {
+            sqlx::query!("UPDATE notification_email_requests SET created_at = NOW() - INTERVAL '25 hours' WHERE user_id = $1", user_id).execute(&pool).await?;
+        }
+        let mut tx = pool.begin().await?;
+        let result = if n == 0 {
+            notification_email::request_confirmation(&mut tx, user_id, "target@example.com").await?
+        } else {
+            notification_email::resend(&mut tx, user_id).await?
+        };
+        let notification_id = match result {
+            ConfirmationRequestResult::Requested { receipt, .. } => receipt.notification_id,
+            _ => panic!("request {n} should enqueue"),
+        };
+        tx.commit().await?;
+        SendNotificationEmailJob { notification_id }
+            .run(state.clone())
+            .await?;
+        let outcome = sqlx::query_scalar!(
+            "SELECT outcome FROM notification_emails WHERE notification_id = $1",
+            notification_id
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(
+            outcome.as_deref(),
+            Some(if n == 5 { "rate_limited" } else { "sent" })
+        );
+    }
+    assert_eq!(
+        server
+            .received_requests()
+            .await
+            .expect("wiremock requests")
+            .len(),
+        5
+    );
+    Ok(())
+}
+
+#[sqlx::test(migrations = "../migrations")]
+async fn confirmation_transport_error_rolls_back_secret_and_retry_mints_another(
+    pool: PgPool,
+) -> cja::Result<()> {
+    use crate::email::{Mailer, MailgunConfig};
+    use crate::models::notification_email::{self, ConfirmationRequestResult};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+    let server = MockServer::start().await;
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let counter = attempts.clone();
+    Mock::given(method("POST"))
+        .respond_with(move |_: &wiremock::Request| {
+            if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                ResponseTemplate::new(500)
+            } else {
+                ResponseTemplate::new(200)
+            }
+        })
+        .expect(2)
+        .mount(&server)
+        .await;
+    let user_id = sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login, github_access_token) VALUES (1674094, 'confirmation-retry-test', '') RETURNING user_id").fetch_one(&pool).await?;
+    let mut tx = pool.begin().await?;
+    let (request_id, notification_id) =
+        match notification_email::request_confirmation(&mut tx, user_id, "retry@example.com")
+            .await?
+        {
+            ConfirmationRequestResult::Requested {
+                request_id,
+                receipt,
+            } => (request_id, receipt.notification_id),
+            _ => panic!("request must enqueue"),
+        };
+    tx.commit().await?;
+    let mut state = AppState::test_from_pool(pool.clone());
+    state.mailer = Mailer::new(
+        Some(MailgunConfig {
+            api_key: "test".into(),
+            domain: "mg.example.com".into(),
+            from: "Arena <reply@example.com>".into(),
+            base_url: server.uri(),
+        }),
+        reqwest::Client::new(),
+    );
+    let job = SendNotificationEmailJob { notification_id };
+    assert!(job.run(state.clone()).await.is_err());
+    let row = sqlx::query!("SELECT token_hash, expires_at, sent_at FROM notification_email_requests WHERE request_id = $1", request_id).fetch_one(&pool).await?;
+    assert!(row.token_hash.is_none() && row.expires_at.is_none() && row.sent_at.is_none());
+    assert!(
+        sqlx::query_scalar!(
+            "SELECT outcome FROM notification_emails WHERE notification_id = $1",
+            notification_id
+        )
+        .fetch_one(&pool)
+        .await?
+        .is_none()
+    );
+    job.run(state.clone()).await?;
+    job.run(state).await?;
+    let row = sqlx::query!("SELECT token_hash, expires_at, sent_at FROM notification_email_requests WHERE request_id = $1", request_id).fetch_one(&pool).await?;
+    assert!(row.token_hash.is_some() && row.expires_at.is_some() && row.sent_at.is_some());
+    let requests = server.received_requests().await.expect("wiremock requests");
+    assert_eq!(requests.len(), 2);
+    let tokens: Vec<_> = requests
+        .iter()
+        .map(|request| {
+            let form: std::collections::HashMap<_, _> = url::form_urlencoded::parse(&request.body)
+                .into_owned()
+                .collect();
+            form["text"]
+                .split("token=")
+                .nth(1)
+                .expect("token")
+                .split_whitespace()
+                .next()
+                .expect("token end")
+                .to_string()
+        })
+        .collect();
+    assert_ne!(tokens[0], tokens[1]);
+    assert_eq!(
+        row.token_hash.as_deref(),
+        Some(notification_email::hash_secret(&tokens[1]).as_str())
+    );
+    Ok(())
 }

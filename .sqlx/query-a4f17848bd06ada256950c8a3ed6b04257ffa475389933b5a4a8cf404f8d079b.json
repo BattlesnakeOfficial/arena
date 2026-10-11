@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE users SET notification_email = 'confirmed@example.com' WHERE user_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a4f17848bd06ada256950c8a3ed6b04257ffa475389933b5a4a8cf404f8d079b"
+}

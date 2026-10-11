@@ -2,9 +2,8 @@
 //!
 //! [`Mailer`] is a no-op when Mailgun isn't configured (no `MAILGUN_API_KEY`),
 //! mirroring play's convention: the code compiles and runs everywhere, and
-//! sending only becomes real once credentials are set. Callers treat a send
-//! as best-effort — a failed email must never break the operation that
-//! triggered it.
+//! sending only becomes real once credentials are set. Delivery jobs retry
+//! transport errors without failing the operation that raised the event.
 
 pub mod messages;
 
@@ -13,7 +12,6 @@ use color_eyre::eyre::Context as _;
 pub use messages::EmailMessage;
 
 use crate::models::email_log;
-use crate::models::imported_account::ClaimSummary;
 
 /// What became of a rate-limited send attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,7 +33,7 @@ impl Mailer {
     /// here; raw [`Mailer::send`] is the transport underneath.
     pub async fn send_limited(
         &self,
-        pool: &sqlx::PgPool,
+        connection: &mut sqlx::PgConnection,
         hourly_limit: i64,
         purpose: &str,
         message: &EmailMessage,
@@ -44,18 +42,17 @@ impl Mailer {
             // Keep the disabled path a true no-op (matching `send`): no log
             // rows for messages that never had a transport.
             tracing::info!(
-                to = %message.to,
                 subject = %message.subject,
                 "Email disabled (no Mailgun config); not sending"
             );
             return Ok(SendOutcome::Disabled);
         }
 
-        let recent = email_log::record_and_count_recent_sends(pool, &message.to, purpose).await?;
+        let recent =
+            email_log::record_and_count_recent_sends(connection, &message.to, purpose).await?;
         if recent > hourly_limit {
             tracing::warn!(
                 event_type = "email_rate_limited",
-                to = %message.to,
                 purpose = purpose,
                 recent = recent,
                 hourly_limit,
@@ -66,111 +63,6 @@ impl Mailer {
 
         self.send(message).await?;
         Ok(SendOutcome::Sent)
-    }
-
-    /// Notify a play account's owner that their account was claimed on
-    /// arena. Fire-and-forget: the send runs in a spawned task so it never
-    /// adds latency to the claim/login response, and a failure is logged,
-    /// never propagated, so it can't fail the claim that triggered it.
-    pub fn notify_account_claimed(
-        &self,
-        pool: &sqlx::PgPool,
-        hourly_limit: i64,
-        summary: &ClaimSummary,
-    ) {
-        let message = messages::account_claimed(
-            &summary.email,
-            &summary.username,
-            summary.snakes_created,
-            summary.grants_created,
-        );
-        self.spawn_limited_send(pool.clone(), hourly_limit, "account_claimed", message);
-    }
-
-    /// Notify a snake's owner that the health sweeper pulled their snake
-    /// from matchmaking on the `pulled` leaderboards (`(leaderboard, most
-    /// recent problem)` each). Same fire-and-forget contract as
-    /// [`Mailer::notify_account_claimed`]: the sweep never waits on or fails
-    /// because of an email.
-    pub fn notify_matchmaking_deactivated(
-        &self,
-        pool: &sqlx::PgPool,
-        hourly_limit: i64,
-        to_email: &str,
-        snake_name: &str,
-        pulled: &[(String, String)],
-        profile_url: &str,
-    ) {
-        let message = messages::matchmaking_deactivated(to_email, snake_name, pulled, profile_url);
-        self.spawn_limited_send(
-            pool.clone(),
-            hourly_limit,
-            "matchmaking_deactivated",
-            message,
-        );
-    }
-
-    /// Notify a snake's owner that the sweeper put their recovered snake
-    /// back into matchmaking on `leaderboards` automatically. Fire-and-forget
-    /// like [`Mailer::notify_matchmaking_deactivated`].
-    pub fn notify_matchmaking_reactivated(
-        &self,
-        pool: &sqlx::PgPool,
-        hourly_limit: i64,
-        to_email: &str,
-        snake_name: &str,
-        leaderboards: &[String],
-        profile_url: &str,
-    ) {
-        let message =
-            messages::matchmaking_reactivated(to_email, snake_name, leaderboards, profile_url);
-        self.spawn_limited_send(
-            pool.clone(),
-            hourly_limit,
-            "matchmaking_reactivated",
-            message,
-        );
-    }
-
-    /// Send the email-recovery magic link. Fire-and-forget on purpose: the
-    /// requesting handler must respond identically whether or not the email
-    /// matched an account, so it can never wait on (or fail with) the
-    /// transport.
-    pub fn notify_claim_verification(
-        &self,
-        pool: &sqlx::PgPool,
-        hourly_limit: i64,
-        to_email: &str,
-        play_username: &str,
-        verify_url: &str,
-    ) {
-        let message = messages::claim_verification(to_email, play_username, verify_url);
-        self.spawn_limited_send(pool.clone(), hourly_limit, "claim_verification", message);
-    }
-
-    /// The shared fire-and-forget tail: run `send_limited` in a spawned
-    /// task, log any failure, never propagate.
-    fn spawn_limited_send(
-        &self,
-        pool: sqlx::PgPool,
-        hourly_limit: i64,
-        purpose: &'static str,
-        message: EmailMessage,
-    ) {
-        let mailer = self.clone();
-        tokio::spawn(async move {
-            if let Err(e) = mailer
-                .send_limited(&pool, hourly_limit, purpose, &message)
-                .await
-            {
-                tracing::warn!(
-                    to = %message.to,
-                    purpose = purpose,
-                    error = %e,
-                    "Failed to send email"
-                );
-            }
-        });
     }
 }
 
@@ -189,16 +81,21 @@ pub struct MailgunConfig {
 
 /// Sends transactional email, or silently drops it when Mailgun isn't
 /// configured. Cloneable (the client is `Arc`-backed; the small config is
-/// copied) so it can live in `AppState` and be moved into spawned sends.
+/// copied) so it can live in `AppState` and be shared by delivery jobs.
 #[derive(Clone)]
 pub struct Mailer {
     config: Option<MailgunConfig>,
     http: reqwest::Client,
+    semaphore: std::sync::Arc<tokio::sync::Semaphore>,
 }
 
 impl Mailer {
     pub fn new(config: Option<MailgunConfig>, http: reqwest::Client) -> Self {
-        Self { config, http }
+        Self {
+            config,
+            http,
+            semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
+        }
     }
 
     /// A disabled mailer that drops every send. Used in tests and anywhere
@@ -207,6 +104,7 @@ impl Mailer {
         Self {
             config: None,
             http: reqwest::Client::new(),
+            semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
         }
     }
 
@@ -214,10 +112,14 @@ impl Mailer {
         self.config.is_some()
     }
 
+    pub async fn acquire_delivery_permit(&self) -> cja::Result<tokio::sync::OwnedSemaphorePermit> {
+        Ok(self.semaphore.clone().acquire_owned().await?)
+    }
+
     /// Send a message. When disabled, logs and returns `Ok(())` without any
     /// network call — so callers get uniform behavior whether or not creds
     /// are present. When enabled, POSTs the Mailgun form and errors on a
-    /// non-2xx response; callers log-and-continue rather than propagate.
+    /// non-2xx response; delivery jobs propagate that error for retry.
     pub async fn send(&self, message: &EmailMessage) -> cja::Result<()> {
         let Some(config) = &self.config else {
             tracing::info!(
@@ -239,12 +141,8 @@ impl Mailer {
             .post(&url)
             // Mailgun authenticates as `api:<key>` via HTTP basic auth.
             .basic_auth("api", Some(&config.api_key))
-            .form(&[
-                ("from", config.from.as_str()),
-                ("to", message.to.as_str()),
-                ("subject", message.subject.as_str()),
-                ("text", message.text.as_str()),
-            ])
+            .timeout(std::time::Duration::from_secs(10))
+            .form(&message.form_fields(&config.from))
             .send()
             .await
             .wrap_err("Failed to send request to Mailgun")?;
@@ -257,7 +155,7 @@ impl Mailer {
             ));
         }
 
-        tracing::info!(to = %message.to, subject = %message.subject, "Email sent");
+        tracing::info!(subject = %message.subject, "Email sent");
         Ok(())
     }
 }
@@ -274,6 +172,7 @@ mod tests {
             to: "someone@example.com".to_string(),
             subject: "hi".to_string(),
             text: "body".to_string(),
+            list_unsubscribe: None,
         }
     }
 
@@ -290,22 +189,23 @@ mod tests {
 
         let mailer = configured_mailer(server.uri());
         let msg = test_message();
+        let mut tx = pool.begin().await?;
 
         assert_eq!(
-            mailer.send_limited(&pool, 2, "test", &msg).await?,
+            mailer.send_limited(&mut tx, 2, "test", &msg).await?,
             SendOutcome::Sent
         );
         assert_eq!(
-            mailer.send_limited(&pool, 2, "test", &msg).await?,
+            mailer.send_limited(&mut tx, 2, "test", &msg).await?,
             SendOutcome::Sent
         );
         assert_eq!(
-            mailer.send_limited(&pool, 2, "test", &msg).await?,
+            mailer.send_limited(&mut tx, 2, "test", &msg).await?,
             SendOutcome::RateLimited
         );
         // Retrying doesn't help — the suppressed attempts spent budget too.
         assert_eq!(
-            mailer.send_limited(&pool, 2, "test", &msg).await?,
+            mailer.send_limited(&mut tx, 2, "test", &msg).await?,
             SendOutcome::RateLimited
         );
         // (Per-recipient isolation of the window is covered in email_log's
@@ -317,12 +217,14 @@ mod tests {
     #[sqlx::test(migrations = "../migrations")]
     async fn send_limited_disabled_is_a_noop_without_log_rows(pool: PgPool) -> cja::Result<()> {
         let mailer = Mailer::disabled();
+        let mut tx = pool.begin().await?;
         assert_eq!(
             mailer
-                .send_limited(&pool, 5, "test", &test_message())
+                .send_limited(&mut tx, 5, "test", &test_message())
                 .await?,
             SendOutcome::Disabled
         );
+        tx.commit().await?;
 
         let logged: i64 = sqlx::query_scalar!("SELECT COUNT(*) as \"c!\" FROM email_log")
             .fetch_one(&pool)
@@ -388,6 +290,7 @@ mod tests {
             to: "   ".to_string(),
             subject: "hi".to_string(),
             text: "body".to_string(),
+            list_unsubscribe: None,
         };
         mailer.send(&msg).await.unwrap();
     }

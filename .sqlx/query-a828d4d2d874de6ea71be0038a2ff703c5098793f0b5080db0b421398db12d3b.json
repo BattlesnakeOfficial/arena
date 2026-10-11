@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE users SET notification_email = NULL, pending_notification_email_request_id = NULL WHERE user_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a828d4d2d874de6ea71be0038a2ff703c5098793f0b5080db0b421398db12d3b"
+}

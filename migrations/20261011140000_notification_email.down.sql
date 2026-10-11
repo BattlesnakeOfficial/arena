@@ -1,0 +1,12 @@
+DELETE FROM notifications WHERE kind = 'notification_email_confirmation' OR notification_id IN (SELECT notification_id FROM notification_emails WHERE recipient_user);
+ALTER TABLE notification_emails DROP CONSTRAINT notification_email_request_recipient;
+ALTER TABLE notification_emails DROP CONSTRAINT notification_email_request_exclusive;
+ALTER TABLE notification_emails DROP CONSTRAINT notification_email_verification;
+ALTER TABLE notification_emails ADD CONSTRAINT notification_email_verification CHECK ((text IS NULL) = (claim_imported_account_id IS NOT NULL));
+ALTER TABLE notification_emails DROP CONSTRAINT notification_email_source;
+ALTER TABLE notification_emails ADD CONSTRAINT notification_email_source CHECK (num_nonnulls(recipient_override, battlesnake_id) = 1);
+ALTER TABLE notification_emails DROP COLUMN recipient_user;
+ALTER TABLE notification_emails DROP COLUMN notification_email_request_id;
+ALTER TABLE users DROP COLUMN pending_notification_email_request_id;
+ALTER TABLE users DROP COLUMN notification_email;
+DROP TABLE notification_email_requests;

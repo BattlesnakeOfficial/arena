@@ -78,6 +78,10 @@ pub async fn token_balance(pool: &PgPool, user_id: Uuid) -> cja::Result<i64> {
         r#"
         SELECT
             (SELECT COUNT(*)::bigint FROM customization_active_weeks WHERE user_id = $1)
+          + (SELECT COALESCE(SUM(l.token_count), 0)::bigint
+             FROM customization_legacy_tokens l
+             JOIN imported_accounts ia USING (imported_account_id)
+             WHERE ia.claimed_by_user_id = $1)
           - (SELECT COUNT(*)::bigint FROM customization_grants WHERE user_id = $1 AND source = 'token')
           AS "balance!"
         "#,
@@ -87,6 +91,21 @@ pub async fn token_balance(pool: &PgPool, user_id: Uuid) -> cja::Result<i64> {
     .await
     .wrap_err("Failed to read customization token balance")?;
     Ok(row.balance)
+}
+
+/// Lifetime legacy token source total; token spends are shared with activity credits.
+pub async fn legacy_token_total(pool: &PgPool, user_id: Uuid) -> cja::Result<i64> {
+    let total = sqlx::query_scalar!(
+        r#"SELECT COALESCE(SUM(l.token_count), 0)::bigint AS "total!"
+           FROM customization_legacy_tokens l
+           JOIN imported_accounts ia USING (imported_account_id)
+           WHERE ia.claimed_by_user_id = $1"#,
+        user_id,
+    )
+    .fetch_one(pool)
+    .await
+    .wrap_err("Failed to read legacy token source total")?;
+    Ok(total)
 }
 
 pub async fn unlock_with_token(
@@ -136,6 +155,10 @@ pub async fn unlock_with_token(
     let balance = sqlx::query!(
         r#"SELECT
             (SELECT COUNT(*)::bigint FROM customization_active_weeks WHERE user_id = $1)
+          + (SELECT COALESCE(SUM(l.token_count), 0)::bigint
+             FROM customization_legacy_tokens l
+             JOIN imported_accounts ia USING (imported_account_id)
+             WHERE ia.claimed_by_user_id = $1)
           - (SELECT COUNT(*)::bigint FROM customization_grants WHERE user_id = $1 AND source = 'token')
           AS "balance!""#,
         user_id,
@@ -415,6 +438,47 @@ pub fn chip_color(declared: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn legacy_sources_spend_and_refund_as_tokens(pool: PgPool) -> cja::Result<()> {
+        let user = create_test_user(&pool).await?;
+        let staged = sqlx::query_scalar!(
+            "INSERT INTO imported_accounts (play_user_id, play_account_id, email, username) VALUES ('legacy-user', 'legacy-account', 'legacy@example.com', 'legacy') RETURNING imported_account_id"
+        ).fetch_one(&pool).await?;
+        sqlx::query!("INSERT INTO customization_legacy_tokens (imported_account_id, play_points, token_count) VALUES ($1, 201, 2)", staged)
+            .execute(&pool).await?;
+        assert_eq!(token_balance(&pool, user).await?, 0);
+        sqlx::query!(
+            "UPDATE imported_accounts SET claimed_by_user_id = $1 WHERE imported_account_id = $2",
+            user,
+            staged
+        )
+        .execute(&pool)
+        .await?;
+        assert_eq!(legacy_token_total(&pool, user).await?, 2);
+        assert_eq!(token_balance(&pool, user).await?, 2);
+        assert!(matches!(
+            unlock_with_token(&pool, user, "head", "alligator").await?,
+            UnlockOutcome::Unlocked(_)
+        ));
+        assert_eq!(token_balance(&pool, user).await?, 1);
+        assert!(matches!(
+            unlock_with_token(&pool, user, "tail", "alligator").await?,
+            UnlockOutcome::Unlocked(_)
+        ));
+        assert_eq!(token_balance(&pool, user).await?, 0);
+        assert_eq!(
+            unlock_with_token(&pool, user, "head", "comet").await?,
+            UnlockOutcome::InsufficientTokens
+        );
+        sqlx::query!("INSERT INTO customization_active_weeks (user_id, week_start) VALUES ($1, '2026-10-05')", user)
+            .execute(&pool).await?;
+        assert_eq!(token_balance(&pool, user).await?, 1);
+        sqlx::query!("UPDATE customization_grants SET source = 'play_import' WHERE user_id = $1 AND customization_type = 'head' AND slug = 'alligator' AND source = 'token'", user)
+            .execute(&pool).await?;
+        assert_eq!(token_balance(&pool, user).await?, 2);
+        Ok(())
+    }
 
     async fn create_test_user(pool: &PgPool) -> cja::Result<Uuid> {
         let row = sqlx::query!(

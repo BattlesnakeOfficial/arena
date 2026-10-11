@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE notification_email_requests SET created_at = NOW() - INTERVAL '25 hours' WHERE user_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "64731acd6e430d37443d9ca800b8cdaf28c0a30266c11325c1bf7ee8759ef087"
+}

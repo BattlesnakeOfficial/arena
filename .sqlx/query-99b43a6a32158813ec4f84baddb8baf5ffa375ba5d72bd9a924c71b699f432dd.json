@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DROP TABLE customization_legacy_tokens",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "99b43a6a32158813ec4f84baddb8baf5ffa375ba5d72bd9a924c71b699f432dd"
+}

@@ -1,4 +1,5 @@
 import { test, expect } from '../fixtures/test';
+import { query } from '../fixtures/db';
 
 test.describe('Profile Page', () => {
   test('displays user information', async ({ authenticatedPage, mockUser }) => {
@@ -78,5 +79,31 @@ test.describe('Profile Page', () => {
   test('profile page requires authentication', async ({ page }) => {
     const response = await page.goto('/me');
     expect(response?.status()).toBe(401);
+  });
+
+  test('notification email controls fit a 375px viewport with pending and no-recipient states', async ({ authenticatedPage, mockUser }) => {
+    await authenticatedPage.setViewportSize({ width: 375, height: 812 });
+    await query('UPDATE users SET github_email = NULL WHERE github_login = $1', [mockUser.login]);
+    await authenticatedPage.goto('/me');
+    const input = authenticatedPage.getByRole('textbox', { name: 'Notification email' });
+    await expect(input).toBeVisible();
+    await expect(authenticatedPage.getByText('Add an email to get notifications')).toBeVisible();
+    await input.fill('pending@example.com');
+    await authenticatedPage.getByRole('button', { name: 'Save', exact: true }).click();
+    await expect(authenticatedPage.getByText(/pending confirmation/)).toBeVisible();
+    await expect(authenticatedPage.getByText('Add an email to get notifications')).toBeVisible();
+    for (const control of [input, authenticatedPage.getByRole('button', { name: 'Save', exact: true }), authenticatedPage.getByRole('button', { name: 'Resend' }), authenticatedPage.getByRole('button', { name: 'Clear' })]) {
+      const box = await control.boundingBox();
+      expect(box).not.toBeNull();
+      expect(box!.height).toBeGreaterThanOrEqual(44);
+      expect(box!.x).toBeGreaterThanOrEqual(0);
+      expect(box!.x + box!.width).toBeLessThanOrEqual(375);
+      const fontSize = await control.evaluate(element => parseFloat(getComputedStyle(element).fontSize));
+      expect(fontSize).toBeGreaterThanOrEqual(16);
+    }
+    expect(await authenticatedPage.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(375);
+    const notifications = authenticatedPage.locator('section.block').filter({ has: authenticatedPage.getByRole('heading', { name: 'Notifications' }) });
+    expect(await notifications.evaluate(element => element.scrollWidth)).toBeLessThanOrEqual(await notifications.evaluate(element => element.clientWidth));
+    await authenticatedPage.screenshot({ path: 'test-results/notification-email-mobile.png', fullPage: true });
   });
 });

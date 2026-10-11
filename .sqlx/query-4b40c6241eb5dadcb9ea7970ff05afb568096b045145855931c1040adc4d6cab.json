@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE notification_email_requests SET token_hash = NULL, expires_at = NULL WHERE request_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4b40c6241eb5dadcb9ea7970ff05afb568096b045145855931c1040adc4d6cab"
+}

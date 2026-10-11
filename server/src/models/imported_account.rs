@@ -642,14 +642,40 @@ async fn claim_account_inner(
         }
     }
 
-    tx.commit().await.wrap_err("Failed to commit claim tx")?;
-
-    Ok(Some(ClaimSummary {
+    let summary = ClaimSummary {
         snakes_created,
         grants_created,
         username: claimed.username,
         email: claimed.email,
-    }))
+    };
+    let message = crate::email::messages::account_claimed(
+        &summary.email,
+        &summary.username,
+        summary.snakes_created,
+        summary.grants_created,
+    );
+    let receipt = crate::notifications::record_in_tx(
+        &mut tx,
+        crate::notifications::NewNotification {
+            user_id,
+            kind: crate::notifications::NotificationKind::PlayAccountClaimed,
+            title: message.subject.clone(),
+            body: format!("Your play account {} was claimed.", summary.username),
+            link: None,
+            email: Some(crate::notifications::NewEmail {
+                subject: Some(message.subject),
+                text: Some(message.text),
+                recipient: crate::notifications::EmailRecipient::Override(summary.email.clone()),
+                claim_imported_account_id: None,
+                notification_email_request_id: None,
+            }),
+        },
+    )
+    .await?;
+    tx.commit().await.wrap_err("Failed to commit claim tx")?;
+    receipt.log_enqueued();
+
+    Ok(Some(summary))
 }
 
 /// Auto-claim on GitHub login: if an unclaimed imported account carries
@@ -905,6 +931,28 @@ mod tests {
             crate::customizations::token_balance(&pool, user_id).await?,
             1
         );
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn legacy_tokens_follow_claim_once_and_credit_existing_owner(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        let user = create_user(&pool, 164601).await?;
+        let account = stage_full_account(&pool, 164601).await?;
+        sqlx::query!("INSERT INTO customization_legacy_tokens (imported_account_id, play_points, token_count) VALUES ($1, 201, 2)", account)
+            .execute(&pool).await?;
+        assert_eq!(crate::customizations::token_balance(&pool, user).await?, 0);
+        assert!(claim_account(&pool, account, user).await?.is_some());
+        assert_eq!(crate::customizations::token_balance(&pool, user).await?, 2);
+        assert!(claim_account(&pool, account, user).await?.is_none());
+        assert_eq!(crate::customizations::token_balance(&pool, user).await?, 2);
+
+        let already_claimed = stage_full_account(&pool, 164602).await?;
+        assert!(claim_account(&pool, already_claimed, user).await?.is_some());
+        sqlx::query!("INSERT INTO customization_legacy_tokens (imported_account_id, play_points, token_count) VALUES ($1, 200, 1)", already_claimed)
+            .execute(&pool).await?;
+        assert_eq!(crate::customizations::token_balance(&pool, user).await?, 3);
         Ok(())
     }
 
@@ -1391,8 +1439,32 @@ mod tests {
             .expect("auto-claim should fire");
         assert_eq!(summary.username, "player5");
 
+        let notices = sqlx::query_as::<_, (String, String, String)>(
+            "SELECT n.kind, e.recipient_override, j.name
+             FROM notifications n JOIN notification_emails e USING (notification_id)
+             JOIN jobs j ON j.payload->>'notification_id' = n.notification_id::text
+             WHERE n.user_id = $1",
+        )
+        .bind(user_id)
+        .fetch_all(&pool)
+        .await?;
+        assert_eq!(
+            notices,
+            [(
+                "play_account_claimed".into(),
+                "player5@example.com".into(),
+                "SendNotificationEmailJob".into()
+            )]
+        );
+
         // Idempotent on next login.
         assert!(try_auto_claim(&pool, user_id, 5001).await?.is_none());
+        let notice_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM notifications WHERE user_id = $1")
+                .bind(user_id)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(notice_count, 1);
 
         Ok(())
     }
@@ -1585,7 +1657,19 @@ mod tests {
         ).bind(id).fetch_one(&pool).await?;
         assert_eq!(before, same);
         let user_id = create_user(&pool, 8104).await?;
+        let before_notifications =
+            sqlx::query_scalar!("SELECT COUNT(*) AS \"count!\" FROM notifications")
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(before_notifications, 0);
         claim_account(&pool, id, user_id).await?;
+        let notice = sqlx::query!("SELECT n.kind, n.user_id, e.recipient_override FROM notifications n JOIN notification_emails e USING (notification_id)").fetch_one(&pool).await?;
+        assert_eq!(notice.kind, "play_account_claimed");
+        assert_eq!(notice.user_id, user_id);
+        assert_eq!(
+            notice.recipient_override.as_deref(),
+            Some(payload.account.email.as_str())
+        );
         let mut changed = complete_payload(104);
         changed.account.display_name = "Changed".to_string();
         changed.snakes.push(StageSnake {
@@ -1600,6 +1684,10 @@ mod tests {
         assert_eq!(result.status, StageStatus::SkippedClaimed);
         assert_eq!(result.snakes_processed, 0);
         assert_eq!(result.grants_processed, 2);
+        let notifications = sqlx::query_scalar!("SELECT COUNT(*) AS \"count!\" FROM notifications")
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(notifications, 1);
         let row = sqlx::query!("SELECT display_name, claimed_by_user_id FROM imported_accounts WHERE imported_account_id=$1", id).fetch_one(&pool).await?;
         assert_eq!(row.display_name, payload.account.display_name);
         assert_eq!(row.claimed_by_user_id, Some(user_id));

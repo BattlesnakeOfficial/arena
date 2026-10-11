@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "ALTER TABLE jobs DROP CONSTRAINT reject_notification_job",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "28fef2dabec972c614f4e1df32f6ffea5f655ee2f5492b4e03e7cabf1de50440"
+}

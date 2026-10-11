@@ -18,7 +18,7 @@
 
 use chrono::{DateTime, Utc};
 use color_eyre::eyre::Context as _;
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
 /// `disabled_reason` value the sweeper writes on entries it disables. Manual
@@ -49,7 +49,7 @@ pub struct HealthPausedEntry {
 /// starts over. `checked_at` is when the sweep started (the evidence cursor:
 /// bad turns after it will be looked at next sweep).
 pub async fn record_success(
-    pool: &PgPool,
+    connection: &mut PgConnection,
     leaderboard_entry_id: Uuid,
     checked_at: DateTime<Utc>,
 ) -> cja::Result<()> {
@@ -62,7 +62,7 @@ pub async fn record_success(
         leaderboard_entry_id,
         checked_at,
     )
-    .execute(pool)
+    .execute(connection)
     .await
     .wrap_err("Failed to record entry health success")?;
 
@@ -79,7 +79,7 @@ pub async fn record_success(
 /// streak, keeping "N consecutive failures" meaning N separate sweep windows
 /// (~N × 30 min), as the threshold design assumes.
 pub async fn record_failure(
-    pool: &PgPool,
+    connection: &mut PgConnection,
     leaderboard_entry_id: Uuid,
     failure_summary: &str,
     checked_at: DateTime<Utc>,
@@ -101,7 +101,7 @@ pub async fn record_failure(
         checked_at,
         PROBE_COUNT_SPACING_MINUTES,
     )
-    .fetch_optional(pool)
+    .fetch_optional(connection)
     .await
     .wrap_err("Failed to record entry health failure")
 }
@@ -111,7 +111,7 @@ pub async fn record_failure(
 /// more (the owner resumed it meanwhile). Spacing-gated like
 /// [`record_failure`], so piled-up sweeps can't fake a recovery in minutes.
 pub async fn record_recovery_success(
-    pool: &PgPool,
+    connection: &mut PgConnection,
     leaderboard_entry_id: Uuid,
     checked_at: DateTime<Utc>,
 ) -> cja::Result<Option<i32>> {
@@ -131,7 +131,7 @@ pub async fn record_recovery_success(
         PROBE_COUNT_SPACING_MINUTES,
         DISABLED_REASON_HEALTH,
     )
-    .fetch_optional(pool)
+    .fetch_optional(connection)
     .await
     .wrap_err("Failed to record entry recovery success")
 }
@@ -139,7 +139,7 @@ pub async fn record_recovery_success(
 /// Record a failed probe of a health-paused entry: the recovery streak
 /// starts over. No spacing gate — any failure genuinely breaks the streak.
 pub async fn record_recovery_failure(
-    pool: &PgPool,
+    connection: &mut PgConnection,
     leaderboard_entry_id: Uuid,
     failure_summary: &str,
     checked_at: DateTime<Utc>,
@@ -155,7 +155,7 @@ pub async fn record_recovery_failure(
         checked_at,
         DISABLED_REASON_HEALTH,
     )
-    .execute(pool)
+    .execute(connection)
     .await
     .wrap_err("Failed to record entry recovery failure")?;
 
@@ -169,7 +169,10 @@ pub async fn record_recovery_failure(
 /// transition; the caller emails the owner exactly on that `true`, which
 /// keeps a re-entrant job from emailing twice. An entry that's already
 /// disabled (by the owner, or a deleted snake) is left alone.
-pub async fn deactivate(pool: &PgPool, leaderboard_entry_id: Uuid) -> cja::Result<bool> {
+pub async fn deactivate(
+    connection: &mut PgConnection,
+    leaderboard_entry_id: Uuid,
+) -> cja::Result<bool> {
     let flipped = sqlx::query_scalar!(
         r#"UPDATE leaderboard_entries
          SET disabled_at = NOW(),
@@ -181,7 +184,7 @@ pub async fn deactivate(pool: &PgPool, leaderboard_entry_id: Uuid) -> cja::Resul
         leaderboard_entry_id,
         DISABLED_REASON_HEALTH
     )
-    .fetch_optional(pool)
+    .fetch_optional(connection)
     .await
     .wrap_err("Failed to pull leaderboard entry from matchmaking")?;
 
@@ -194,7 +197,10 @@ pub async fn deactivate(pool: &PgPool, leaderboard_entry_id: Uuid) -> cja::Resul
 /// Returns `true` only when this call performed the paused -> enabled
 /// transition; the sweeper sends the "back in matchmaking" email exactly on
 /// that `true`.
-pub async fn reactivate(pool: &PgPool, leaderboard_entry_id: Uuid) -> cja::Result<bool> {
+pub async fn reactivate(
+    connection: &mut PgConnection,
+    leaderboard_entry_id: Uuid,
+) -> cja::Result<bool> {
     let flipped = sqlx::query_scalar!(
         r#"UPDATE leaderboard_entries
          SET disabled_at = NULL,
@@ -208,7 +214,7 @@ pub async fn reactivate(pool: &PgPool, leaderboard_entry_id: Uuid) -> cja::Resul
         leaderboard_entry_id,
         DISABLED_REASON_HEALTH
     )
-    .fetch_optional(pool)
+    .fetch_optional(connection)
     .await
     .wrap_err("Failed to put leaderboard entry back into matchmaking")?;
 
@@ -265,30 +271,23 @@ pub async fn health_paused_entries(
     .wrap_err("Failed to fetch health-paused entries")
 }
 
-/// The owner's best notification address: their GitHub email when present,
-/// otherwise the email of a play account they claimed (migrated users often
-/// have no public GitHub email but always had a play address).
+/// Resolve only for a nondeleted snake owned by this user.
 pub async fn owner_notification_email(
-    pool: &PgPool,
+    connection: &mut PgConnection,
     battlesnake_id: Uuid,
 ) -> cja::Result<Option<String>> {
-    let email = sqlx::query_scalar!(
-        r#"SELECT COALESCE(u.github_email, ia.email) as "email?"
-         FROM battlesnakes b
-         JOIN users u ON b.user_id = u.user_id
-         LEFT JOIN imported_accounts ia ON ia.claimed_by_user_id = u.user_id
-         WHERE b.battlesnake_id = $1
-           AND b.deleted_at IS NULL
-         ORDER BY ia.is_email_verified DESC NULLS LAST
-         LIMIT 1"#,
+    let user_id = sqlx::query_scalar!(
+        "SELECT user_id FROM battlesnakes WHERE battlesnake_id = $1 AND deleted_at IS NULL",
         battlesnake_id
     )
-    .fetch_optional(pool)
-    .await
-    .wrap_err("Failed to look up owner email")?
-    .flatten();
-
-    Ok(email)
+    .fetch_optional(&mut *connection)
+    .await?;
+    match user_id {
+        Some(user_id) => {
+            crate::models::notification_email::resolved_recipient(connection, user_id).await
+        }
+        None => Ok(None),
+    }
 }
 
 #[cfg(test)]
@@ -373,11 +372,14 @@ mod tests {
         let entry = create_entry(&pool, snake_id, "standard").await?;
         let t0 = Utc::now();
 
-        assert_eq!(record_failure(&pool, entry, "timeout", t0).await?, Some(1));
+        assert_eq!(
+            record_failure(&mut *pool.acquire().await?, entry, "timeout", t0).await?,
+            Some(1)
+        );
         // A piled-up sweep minutes later must not inflate the streak.
         let piled = t0 + Duration::minutes(2);
         assert_eq!(
-            record_failure(&pool, entry, "refused", piled).await?,
+            record_failure(&mut *pool.acquire().await?, entry, "refused", piled).await?,
             Some(1)
         );
         assert_eq!(
@@ -386,9 +388,12 @@ mod tests {
         );
         // A real next sweep does count.
         let t1 = next_sweep(piled);
-        assert_eq!(record_failure(&pool, entry, "refused", t1).await?, Some(2));
+        assert_eq!(
+            record_failure(&mut *pool.acquire().await?, entry, "refused", t1).await?,
+            Some(2)
+        );
 
-        record_success(&pool, entry, next_sweep(t1)).await?;
+        record_success(&mut *pool.acquire().await?, entry, next_sweep(t1)).await?;
         let after = state(&pool, entry).await?;
         assert_eq!(after.failures, 0);
         assert!(after.last_failure.is_none());
@@ -403,9 +408,15 @@ mod tests {
         leaderboard::set_disabled(&pool, entry, Some(Utc::now())).await?;
 
         let now = Utc::now();
-        assert_eq!(record_failure(&pool, entry, "down", now).await?, None);
-        assert_eq!(record_recovery_success(&pool, entry, now).await?, None);
-        assert!(!deactivate(&pool, entry).await?);
+        assert_eq!(
+            record_failure(&mut *pool.acquire().await?, entry, "down", now).await?,
+            None
+        );
+        assert_eq!(
+            record_recovery_success(&mut *pool.acquire().await?, entry, now).await?,
+            None
+        );
+        assert!(!deactivate(&mut *pool.acquire().await?, entry).await?);
         let after = state(&pool, entry).await?;
         assert_eq!((after.failures, after.successes), (0, 0));
         assert_eq!(after.reason, None, "a manual pause stays a manual pause");
@@ -419,9 +430,9 @@ mod tests {
         let royale = create_entry(&pool, snake_id, "royale").await?;
         let duels = create_entry(&pool, snake_id, "duels").await?;
 
-        assert!(deactivate(&pool, royale).await?);
+        assert!(deactivate(&mut *pool.acquire().await?, royale).await?);
         assert!(
-            !deactivate(&pool, royale).await?,
+            !deactivate(&mut *pool.acquire().await?, royale).await?,
             "a retry must not notify again"
         );
 
@@ -438,20 +449,38 @@ mod tests {
         let snake_id = create_snake(&pool, user_id, "recovering").await?;
         let entry = create_entry(&pool, snake_id, "standard").await?;
         let t0 = Utc::now();
-        record_failure(&pool, entry, "down", t0).await?;
-        assert!(deactivate(&pool, entry).await?);
+        record_failure(&mut *pool.acquire().await?, entry, "down", t0).await?;
+        assert!(deactivate(&mut *pool.acquire().await?, entry).await?);
 
         let t1 = next_sweep(t0);
-        assert_eq!(record_recovery_success(&pool, entry, t1).await?, Some(1));
+        assert_eq!(
+            record_recovery_success(&mut *pool.acquire().await?, entry, t1).await?,
+            Some(1)
+        );
         let piled = t1 + Duration::minutes(1);
-        assert_eq!(record_recovery_success(&pool, entry, piled).await?, Some(1));
+        assert_eq!(
+            record_recovery_success(&mut *pool.acquire().await?, entry, piled).await?,
+            Some(1)
+        );
         let t2 = next_sweep(piled);
-        assert_eq!(record_recovery_success(&pool, entry, t2).await?, Some(2));
-        record_recovery_failure(&pool, entry, "down again", next_sweep(t2)).await?;
+        assert_eq!(
+            record_recovery_success(&mut *pool.acquire().await?, entry, t2).await?,
+            Some(2)
+        );
+        record_recovery_failure(
+            &mut *pool.acquire().await?,
+            entry,
+            "down again",
+            next_sweep(t2),
+        )
+        .await?;
         assert_eq!(state(&pool, entry).await?.successes, 0);
 
-        assert!(reactivate(&pool, entry).await?);
-        assert!(!reactivate(&pool, entry).await?, "only one call flips it");
+        assert!(reactivate(&mut *pool.acquire().await?, entry).await?);
+        assert!(
+            !reactivate(&mut *pool.acquire().await?, entry).await?,
+            "only one call flips it"
+        );
         let after = state(&pool, entry).await?;
         assert!(!after.disabled);
         assert_eq!((after.failures, after.successes), (0, 0));
@@ -459,7 +488,7 @@ mod tests {
 
         // Owner resumed meanwhile: a late recovery probe doesn't count.
         assert_eq!(
-            record_recovery_success(&pool, entry, Utc::now()).await?,
+            record_recovery_success(&mut *pool.acquire().await?, entry, Utc::now()).await?,
             None
         );
         Ok(())
@@ -472,11 +501,11 @@ mod tests {
         let pulled = create_entry(&pool, snake_id, "standard").await?;
         let paused = create_entry(&pool, snake_id, "royale").await?;
         leaderboard::set_disabled(&pool, paused, Some(Utc::now())).await?;
-        record_failure(&pool, pulled, "down", Utc::now()).await?;
-        assert!(deactivate(&pool, pulled).await?);
+        record_failure(&mut *pool.acquire().await?, pulled, "down", Utc::now()).await?;
+        assert!(deactivate(&mut *pool.acquire().await?, pulled).await?);
 
         assert_eq!(health_paused_entries(&pool, snake_id).await?.len(), 1);
-        assert!(!reactivate(&pool, paused).await?);
+        assert!(!reactivate(&mut *pool.acquire().await?, paused).await?);
         assert_eq!(reactivate_snake(&pool, snake_id).await?, 1);
 
         assert!(!state(&pool, pulled).await?.disabled);
@@ -501,7 +530,7 @@ mod tests {
         .fetch_one(&pool)
         .await?;
 
-        record_failure(&pool, entry, "down", Utc::now()).await?;
+        record_failure(&mut *pool.acquire().await?, entry, "down", Utc::now()).await?;
         leaderboard::get_or_create_entry(&pool, leaderboard_id, snake_id).await?;
         assert_eq!(
             state(&pool, entry).await?.failures,
@@ -509,7 +538,7 @@ mod tests {
             "already in rotation"
         );
 
-        assert!(deactivate(&pool, entry).await?);
+        assert!(deactivate(&mut *pool.acquire().await?, entry).await?);
         leaderboard::get_or_create_entry(&pool, leaderboard_id, snake_id).await?;
         let after = state(&pool, entry).await?;
         assert!(!after.disabled);
@@ -525,8 +554,14 @@ mod tests {
         let live = create_entry(&pool, snake_id, "live").await?;
         let retired = create_entry(&pool, snake_id, "retired").await?;
         for entry in [live, retired] {
-            record_failure(&pool, entry, "POST /move (turn 0): boom", Utc::now()).await?;
-            assert!(deactivate(&pool, entry).await?);
+            record_failure(
+                &mut *pool.acquire().await?,
+                entry,
+                "POST /move (turn 0): boom",
+                Utc::now(),
+            )
+            .await?;
+            assert!(deactivate(&mut *pool.acquire().await?, entry).await?);
         }
         sqlx::query!("UPDATE leaderboards SET disabled_at = NOW() WHERE name = 'retired'")
             .execute(&pool)
@@ -551,7 +586,10 @@ mod tests {
         // No email anywhere -> None.
         let user_a = create_user(&pool, 9008).await?;
         let snake_a = create_snake(&pool, user_a, "no-email").await?;
-        assert_eq!(owner_notification_email(&pool, snake_a).await?, None);
+        assert_eq!(
+            owner_notification_email(&mut *pool.acquire().await?, snake_a).await?,
+            None
+        );
 
         // A claimed play account supplies the fallback address.
         sqlx::query!(
@@ -562,7 +600,9 @@ mod tests {
         .execute(&pool)
         .await?;
         assert_eq!(
-            owner_notification_email(&pool, snake_a).await?.as_deref(),
+            owner_notification_email(&mut *pool.acquire().await?, snake_a)
+                .await?
+                .as_deref(),
             Some("play@example.com")
         );
 
@@ -574,8 +614,34 @@ mod tests {
         .execute(&pool)
         .await?;
         assert_eq!(
-            owner_notification_email(&pool, snake_a).await?.as_deref(),
+            owner_notification_email(&mut *pool.acquire().await?, snake_a)
+                .await?
+                .as_deref(),
             Some("gh@example.com")
+        );
+
+        sqlx::query!(
+            "UPDATE users SET notification_email = 'confirmed@example.com' WHERE user_id = $1",
+            user_a
+        )
+        .execute(&pool)
+        .await?;
+        assert_eq!(
+            owner_notification_email(&mut *pool.acquire().await?, snake_a)
+                .await?
+                .as_deref(),
+            Some("confirmed@example.com")
+        );
+        sqlx::query!(
+            "UPDATE battlesnakes SET deleted_at = NOW() WHERE battlesnake_id = $1",
+            snake_a
+        )
+        .execute(&pool)
+        .await?;
+        assert!(
+            owner_notification_email(&mut *pool.acquire().await?, snake_a)
+                .await?
+                .is_none()
         );
 
         Ok(())

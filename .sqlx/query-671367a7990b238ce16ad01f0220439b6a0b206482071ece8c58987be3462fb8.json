@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            (SELECT COUNT(*)::bigint FROM customization_active_weeks WHERE user_id = $1)\n          + (SELECT COALESCE(SUM(l.token_count), 0)::bigint\n             FROM customization_legacy_tokens l\n             JOIN imported_accounts ia USING (imported_account_id)\n             WHERE ia.claimed_by_user_id = $1)\n          - (SELECT COUNT(*)::bigint FROM customization_grants WHERE user_id = $1 AND source = 'token')\n          AS \"balance!\"\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "balance!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "671367a7990b238ce16ad01f0220439b6a0b206482071ece8c58987be3462fb8"
+}

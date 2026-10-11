@@ -89,6 +89,10 @@ async fn render_customizations_page(
         Some(user) => customizations::token_balance(&state.db, user.user_id).await?,
         None => 0,
     };
+    let legacy_tokens = match user {
+        Some(user) => customizations::legacy_token_total(&state.db, user.user_id).await?,
+        None => 0,
+    };
 
     Ok(page_factory.create_page(
         "Customizations".to_string(),
@@ -116,6 +120,9 @@ async fn render_customizations_page(
                 div class="cz-token-panel" aria-label="Token unlocks" {
                     h2 { "Token unlocks" }
                     p class="cz-note" { (balance) " unlock token(s) available" }
+                    @if legacy_tokens > 0 {
+                        p class="cz-note" { "includes " (legacy_tokens) " token" @if legacy_tokens != 1 { "s" } " from your play points" }
+                    }
                     p class="cz-note" { "1 token for every week your snakes play a game; each unlock uses 1 token." }
                     @if balance == 0 {
                         p class="cz-note" { "To earn a token, one of your snakes needs to play a game this week." }
@@ -304,6 +311,51 @@ mod tests {
                 .to_vec(),
         )
         .unwrap()
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn legacy_only_owner_sees_source_note_and_unlock_form(db: sqlx::PgPool) {
+        let state = AppState::test_from_pool(db.clone());
+        let app =
+            crate::routes::routes(state.clone()).layer(tower_cookies::CookieManagerLayer::new());
+        let guest = html(request(&app, Method::GET, None, "").await).await;
+        assert!(!guest.contains("tokens from your play points"));
+        let session = create_user_session(&db, 164699, false).await;
+        let user = session_user_id(&db, session).await;
+        let cookie = signed_session_cookie(&state, session);
+        let empty = html(request(&app, Method::GET, Some(&cookie), "").await).await;
+        assert!(!empty.contains("tokens from your play points"));
+        let account = sqlx::query_scalar!(
+            "INSERT INTO imported_accounts (play_user_id, play_account_id, email, username, claimed_by_user_id) VALUES ('route-legacy', 'route-legacy-account', 'route@example.com', 'route', $1) RETURNING imported_account_id",
+            user,
+        ).fetch_one(&db).await.unwrap();
+        sqlx::query!("INSERT INTO customization_legacy_tokens (imported_account_id, play_points, token_count) VALUES ($1, 200, 1)", account)
+            .execute(&db).await.unwrap();
+        let page = html(request(&app, Method::GET, Some(&cookie), "").await).await;
+        let panel = page
+            .split("class=\"cz-token-panel\"")
+            .nth(1)
+            .expect("token panel")
+            .split("</div>")
+            .next()
+            .expect("panel end");
+        let balance = panel.find("1 unlock token(s) available").expect("balance");
+        let note = panel
+            .find("includes 1 token from your play points")
+            .expect("source note");
+        let rule = panel.find("1 token for every week").expect("weekly rule");
+        assert!(balance < note && note < rule);
+        assert!(page.contains("action=\"/customizations/unlock\""));
+        assert!(!page.contains("one of your snakes needs to play a game this week"));
+        sqlx::query!(
+            "UPDATE customization_legacy_tokens SET play_points = 201, token_count = 2 WHERE imported_account_id = $1",
+            account,
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        let plural = html(request(&app, Method::GET, Some(&cookie), "").await).await;
+        assert!(plural.contains("includes 2 tokens from your play points"));
     }
 
     #[sqlx::test(migrations = "../migrations")]
