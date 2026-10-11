@@ -92,6 +92,67 @@ pub struct PlayPointConversionSummary {
     pub missing_play_account_ids: Vec<String>,
 }
 
+enum ConversionOutcome {
+    AlreadyConverted,
+    Converted { owner: Option<Uuid> },
+}
+
+async fn convert_one_account(
+    arena: &PgPool,
+    balance: &PlayPointBalance,
+    tokens: i64,
+) -> cja::Result<ConversionOutcome> {
+    let mut tx = arena
+        .begin()
+        .await
+        .wrap_err("Failed to begin Arena conversion")?;
+    sqlx::query!("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+        .execute(&mut *tx)
+        .await
+        .wrap_err("Failed to set Arena conversion isolation")?;
+    let locked = sqlx::query!(
+        "SELECT imported_account_id, claimed_by_user_id FROM imported_accounts WHERE play_account_id = $1 FOR UPDATE",
+        balance.play_account_id,
+    )
+    .fetch_optional(&mut *tx)
+    .await
+    .wrap_err("Failed to lock imported account")?
+    .ok_or_else(|| {
+        color_eyre::eyre::eyre!(
+            "Imported account vanished after bulk read: {}",
+            balance.play_account_id
+        )
+    })?;
+    let prior = sqlx::query_scalar!(
+        "SELECT imported_account_id FROM customization_legacy_tokens WHERE imported_account_id = $1",
+        locked.imported_account_id,
+    )
+    .fetch_optional(&mut *tx)
+    .await
+    .wrap_err("Failed to recheck conversion after account lock")?;
+    if prior.is_some() {
+        tx.commit()
+            .await
+            .wrap_err("Failed to commit already-converted account")?;
+        return Ok(ConversionOutcome::AlreadyConverted);
+    }
+    sqlx::query!(
+        "INSERT INTO customization_legacy_tokens (imported_account_id, play_points, token_count) VALUES ($1, $2, $3)",
+        locked.imported_account_id,
+        balance.points,
+        tokens,
+    )
+    .execute(&mut *tx)
+    .await
+    .wrap_err("Failed to insert legacy token source")?;
+    tx.commit()
+        .await
+        .wrap_err("Failed to commit legacy token source")?;
+    Ok(ConversionOutcome::Converted {
+        owner: locked.claimed_by_user_id,
+    })
+}
+
 fn legacy_tokens(points: i32) -> i64 {
     (i64::from(points) + 199) / 200
 }
@@ -204,38 +265,17 @@ pub async fn convert_play_points(
         let owner = if dry_run {
             *owner
         } else {
-            let result = async {
-                let mut tx = arena.begin().await.wrap_err("Failed to begin Arena conversion")?;
-                sqlx::query!("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
-                    .execute(&mut *tx).await.wrap_err("Failed to set Arena conversion isolation")?;
-                let locked = sqlx::query!(
-                    "SELECT imported_account_id, claimed_by_user_id FROM imported_accounts WHERE play_account_id = $1 FOR UPDATE",
-                    balance.play_account_id,
-                ).fetch_optional(&mut *tx).await.wrap_err("Failed to lock imported account")?
-                    .ok_or_else(|| color_eyre::eyre::eyre!("Imported account vanished after bulk read: {}", balance.play_account_id))?;
-                let prior = sqlx::query_scalar!(
-                    "SELECT imported_account_id FROM customization_legacy_tokens WHERE imported_account_id = $1",
-                    locked.imported_account_id,
-                ).fetch_optional(&mut *tx).await.wrap_err("Failed to recheck conversion after account lock")?;
-                if prior.is_some() {
-                    tx.commit().await.wrap_err("Failed to commit already-converted account")?;
-                    return Ok::<Option<Option<Uuid>>, color_eyre::Report>(None);
-                }
-                sqlx::query!(
-                    "INSERT INTO customization_legacy_tokens (imported_account_id, play_points, token_count) VALUES ($1, $2, $3)",
-                    locked.imported_account_id, balance.points, tokens,
-                ).execute(&mut *tx).await.wrap_err("Failed to insert legacy token source")?;
-                tx.commit().await.wrap_err("Failed to commit legacy token source")?;
-                Ok(Some(locked.claimed_by_user_id))
-            }.await.wrap_err_with(|| format!(
+            let result = convert_one_account(arena, &balance, tokens).await.wrap_err_with(|| format!(
                 "Conversion stopped at Play account {}; completed claimed={}, staged={}, tokens={}. Rerun to skip completed rows",
                 balance.play_account_id, summary.claimed_converted, summary.staged_converted, summary.tokens_converted,
             ))?;
-            let Some(owner) = result else {
-                summary.already_converted += 1;
-                continue;
-            };
-            owner
+            match result {
+                ConversionOutcome::AlreadyConverted => {
+                    summary.already_converted += 1;
+                    continue;
+                }
+                ConversionOutcome::Converted { owner } => owner,
+            }
         };
         if owner.is_some() {
             summary.claimed_converted += 1;
@@ -1082,11 +1122,16 @@ mod tests {
             .is_err()
         );
         drop(read_only);
+        sqlx::query("DROP TABLE core_account")
+            .execute(&pool)
+            .await?;
         sqlx::query!("DROP TABLE customization_legacy_tokens")
             .execute(&pool)
             .await?;
         let error = convert_play_points(&pool, &pool, true).await.unwrap_err();
-        assert!(format!("{error:#}").contains("apply migrations first (deploy arena)"));
+        assert_eq!(error.to_string(), "apply migrations first (deploy arena)");
+        let error = convert_play_points(&pool, &pool, false).await.unwrap_err();
+        assert_eq!(error.to_string(), "apply migrations first (deploy arena)");
         Ok(())
     }
 

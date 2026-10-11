@@ -121,7 +121,7 @@ async fn render_customizations_page(
                     h2 { "Token unlocks" }
                     p class="cz-note" { (balance) " unlock token(s) available" }
                     @if legacy_tokens > 0 {
-                        p class="cz-note" { "includes " (legacy_tokens) " tokens from your play points" }
+                        p class="cz-note" { "includes " (legacy_tokens) " token" @if legacy_tokens != 1 { "s" } " from your play points" }
                     }
                     p class="cz-note" { "1 token for every week your snakes play a game; each unlock uses 1 token." }
                     @if balance == 0 {
@@ -341,12 +341,21 @@ mod tests {
             .expect("panel end");
         let balance = panel.find("1 unlock token(s) available").expect("balance");
         let note = panel
-            .find("includes 1 tokens from your play points")
+            .find("includes 1 token from your play points")
             .expect("source note");
         let rule = panel.find("1 token for every week").expect("weekly rule");
         assert!(balance < note && note < rule);
         assert!(page.contains("action=\"/customizations/unlock\""));
         assert!(!page.contains("one of your snakes needs to play a game this week"));
+        sqlx::query!(
+            "UPDATE customization_legacy_tokens SET play_points = 201, token_count = 2 WHERE imported_account_id = $1",
+            account,
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        let plural = html(request(&app, Method::GET, Some(&cookie), "").await).await;
+        assert!(plural.contains("includes 2 tokens from your play points"));
     }
 
     #[sqlx::test(migrations = "../migrations")]
