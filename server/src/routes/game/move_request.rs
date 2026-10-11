@@ -752,6 +752,10 @@ mod tests {
         // The compiled board-theme-sync IIFE must run synchronously immediately
         // after the iframe, before another script or board action can run.
         let iframe = body.find(r#"id="board-viewer""#).expect("board iframe");
+        let resize = body
+            .find(&crate::arena_assets::asset_url("board-resize.js"))
+            .expect("board resize script");
+        assert!(resize < iframe, "board resize must load before the iframe");
         let after_iframe = body[iframe..]
             .split_once("</iframe>")
             .expect("closed board iframe")
@@ -759,7 +763,7 @@ mod tests {
         let inline_script = after_iframe
             .strip_prefix("<script>")
             .expect("board sync is inline immediately after iframe");
-        let (inline_body, after_sync) = inline_script
+        let (inline_body, _) = inline_script
             .split_once("</script>")
             .expect("closed board sync script");
         assert_eq!(
@@ -769,10 +773,6 @@ mod tests {
         assert!(!inline_body.contains("&amp;"));
         assert!(!inline_body.contains("&lt;"));
         assert!(!inline_body.contains("sourceMappingURL="));
-        assert!(
-            after_sync.contains(&crate::arena_assets::asset_url("board-resize.js")),
-            "board resize must load after inline sync"
-        );
         assert!(
             body.contains(&format!(r#"action="/api/games/{game_id}/move-request""#)),
             "{body}"

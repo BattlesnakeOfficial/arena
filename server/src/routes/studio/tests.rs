@@ -1227,13 +1227,17 @@ async fn an_upload_in_steady_chunks_gets_through() {
 
 #[sqlx::test(migrations = "../migrations")]
 async fn old_static_urls_return_404(db: sqlx::PgPool) {
-    let response = page_app(db)
-        .oneshot(
-            Request::get("/static/studio.js")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("response");
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let app = page_app(db);
+    for path in [
+        "/static/studio.js",
+        "/static/notifications.js",
+        "/static/theme.js",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(Request::get(path).body(Body::empty()).expect("request"))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+    }
 }

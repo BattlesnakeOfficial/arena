@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT COUNT(*) AS \"count!\" FROM (\n            SELECT 1 FROM notifications AS n\n            WHERE n.user_id = $1 AND n.in_app_visible AND n.read_at IS NULL\n              AND NOT EXISTS (\n                SELECT 1 FROM notification_preferences AS p\n                WHERE p.user_id = n.user_id AND p.kind = n.kind\n                  AND p.channel = 'in_app' AND NOT p.enabled\n              )\n            ORDER BY n.created_at DESC, n.notification_id DESC LIMIT 10\n        ) AS eligible",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "cc75f1974b8230439e1efec2e18affb227667799ede17d736e3509a3c198a70b"
+}

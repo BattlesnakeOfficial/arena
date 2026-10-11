@@ -46,6 +46,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             "game-create-settings.js",
         ))
         .entry(cja_build::Entry::new("src/ui-actions.ts", "ui-actions.js"))
+        .entry(cja_build::Entry::new(
+            "src/notifications.ts",
+            "notifications.js",
+        ))
         .build()?;
 
     EmitBuilder::builder()

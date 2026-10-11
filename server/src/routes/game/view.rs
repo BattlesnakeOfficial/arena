@@ -219,6 +219,7 @@ pub async fn view_game(
             div class="theater" {
                 div {
                     div class="board-wrap" {
+                        script src=(asset_url("board-resize.js")) {}
                         @if game.status == GameStatus::Waiting {
                             // No frames exist yet, so the board viewer would just show a
                             // fetch error — hold its place until the game starts.
@@ -240,8 +241,6 @@ pub async fn view_game(
                             }
                         }
                     }
-
-                    script src=(asset_url("board-resize.js")) {}
 
                     div id="game-actions-region" class="theater-actions" {
                         @if user.is_some() {

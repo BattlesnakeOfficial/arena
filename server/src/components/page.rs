@@ -84,6 +84,7 @@ pub struct Page {
     pub description: Option<String>,
     /// Page-specific social card. Falls back to the site-wide default card.
     pub social_image: Option<SocialImage>,
+    pub unread_count: Option<i64>,
 }
 
 /// A page's social card (`og:image`), served by `routes::og`.
@@ -111,6 +112,7 @@ impl Page {
             theater: false,
             description: None,
             social_image: None,
+            unread_count: None,
         }
     }
 
@@ -278,6 +280,16 @@ impl Page {
                     }
                 }
                 @if let Some(user) = &self.user {
+                    @let count = self.unread_count.unwrap_or(0);
+                    a #notification-bell class="notification-bell" href="/notifications"
+                        aria-label=(if count >= 10 { "9 or more unread notifications".to_string() } else if count == 1 { "1 unread notification".to_string() } else { format!("{count} unread notifications") }) {
+                        svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true" {
+                            path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4" {}
+                        }
+                        span class="notification-badge" hidden[count == 0] {
+                            @if count >= 10 { "9+" } @else { (count) }
+                        }
+                    }
                     a class="nav-user" href="/me" {
                         (user_avatar(user.github_avatar_url.as_deref(), user.public_name(), "nav-avatar"))
                         span class="nav-user-name" { (user.public_name()) }
@@ -342,10 +354,25 @@ impl Render for Page {
                     script src=(asset_url("viewTransition.js")) {}
                     script src=(asset_url("ui-actions.js")) {}
                     script src=(asset_url("theme.js")) defer {}
+                    @if self.user.is_some() { script src=(asset_url("notifications.js")) defer {} }
                 }
 
                 body {
                     (self.nav())
+
+                    @if self.user.is_some() {
+                        dialog #notification-drawer aria-labelledby="notification-drawer-title" {
+                            div class="notification-drawer-head" {
+                                h2 #notification-drawer-title { "Notifications" }
+                                button #notification-drawer-close type="button" aria-label="Close notifications" { "×" }
+                            }
+                            div #notification-drawer-status role="status" {}
+                            div #notification-drawer-content {}
+                            div class="notification-drawer-footer" {
+                                a href="/notifications" { "See all notifications" }
+                            }
+                        }
+                    }
 
                     @if let Some(flash_message) = &self.flash {
                         div class="flash-message" data-flash-type=[self.flash_type.as_deref()] {
@@ -425,6 +452,32 @@ mod tests {
     #[should_panic(expected = "missing compiled inline bundle")]
     fn missing_inline_bundle_fails_explicitly() {
         inline_bundle("absent.js");
+    }
+
+    #[test]
+    fn signed_in_page_without_count_keeps_one_zero_badge() {
+        let mut page = test_page();
+        page.user = Some(User {
+            user_id: uuid::Uuid::new_v4(),
+            external_github_id: 1,
+            github_login: "test-player".into(),
+            github_avatar_url: None,
+            github_name: None,
+            github_email: None,
+            display_name: None,
+            pronouns: String::new(),
+            country: String::new(),
+            backstory: String::new(),
+            is_admin: false,
+            site_theme: "light".into(),
+            theater_theme: "dark".into(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        });
+        let html = page.render().into_string();
+        assert_eq!(html.matches("id=\"notification-bell\"").count(), 1);
+        assert!(html.contains("0 unread notifications"));
+        assert!(html.contains("class=\"notification-badge\" hidden"));
     }
 
     #[test]
