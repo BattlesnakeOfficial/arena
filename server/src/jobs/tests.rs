@@ -18,8 +18,29 @@ fn assert_html_links_in_text(form: &std::collections::HashMap<String, String>) {
         .skip(1)
         .map(|part| part.split('"').next().unwrap())
     {
-        assert!(text.contains(href), "HTML link missing from text: {href}");
+        let href = href
+            .replace("&quot;", "\"")
+            .replace("&#39;", "'")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&amp;", "&");
+        assert!(text.contains(&href), "HTML link missing from text: {href}");
     }
+}
+
+#[test]
+fn html_link_parity_decodes_ampersands() {
+    let form = std::collections::HashMap::from([
+        (
+            "html".to_string(),
+            "<a href=\"https://arena.example/claim?a=1&amp;b=2\">Claim</a>".to_string(),
+        ),
+        (
+            "text".to_string(),
+            "https://arena.example/claim?a=1&b=2".to_string(),
+        ),
+    ]);
+    assert_html_links_in_text(&form);
 }
 
 #[sqlx::test(migrations = "../migrations")]

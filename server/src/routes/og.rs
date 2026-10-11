@@ -799,6 +799,15 @@ mod tests {
             crate::og::board::shape(AssetKind::Head, "viper").unwrap(),
             arena::design_kit::catalog_shapes::find(AssetKind::Head, "rattler").unwrap(),
         ));
+        let override_png = get(&state, "/og/customizations/heads/viper.png").await;
+        let rattler = arena::design_kit::catalog_shapes::find(AssetKind::Head, "rattler")
+            .expect("rattler catalog art");
+        let source_png = crate::og::customization::render_shape(rattler).unwrap();
+        assert_eq!(override_png.status, StatusCode::OK);
+        assert_eq!(
+            override_png.body, source_png,
+            "viper must serve rattler art bytes"
+        );
         for path in [
             "/og/customizations/other/default.png",
             "/og/customizations/heads/unknown.png",

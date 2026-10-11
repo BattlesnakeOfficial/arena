@@ -37,6 +37,19 @@ fn escaped_text(text: &str) -> Markup {
     }
 }
 
+fn action_button(label: &str, url: &str) -> Markup {
+    html! {
+        table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:24px 0 10px" {
+            tr { td bgcolor="#C11655" style="background:#C11655;border-radius:6px" {
+                a class="email-cta" href=(url) style="display:inline-block;background:#C11655;color:#FFFFFF;font-size:16px;font-weight:700;line-height:24px;padding:12px 20px;min-height:44px;box-sizing:border-box;text-decoration:none;border-radius:6px" { (label) }
+            } }
+        }
+        p style="font-size:13px;line-height:1.5;overflow-wrap:anywhere;margin:0 0 24px" {
+            "Or open this link: " a class="email-link" href=(url) style="color:#C11655;text-decoration:underline" { (url) }
+        }
+    }
+}
+
 /// A rendered, ready-to-send multipart message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmailMessage {
@@ -65,12 +78,17 @@ impl EmailMessage {
 }
 
 pub fn notification_email_confirmation(url: &str) -> EmailContent {
-    EmailContent::from_text(
-        "Confirm your Battlesnake notification email".to_string(),
-        format!(
+    EmailContent {
+        subject: "Confirm your Battlesnake notification email".to_string(),
+        text: format!(
             "Confirm this address for optional Battlesnake Arena emails within 24 hours:\n\n{url}\n\nSign in to the same Arena account that requested this change. If your email app opens a signed-out browser, sign in and reopen this link. If you did not request this, you can ignore this email.\n"
         ),
-    )
+        html_body: html! {
+            p { "Confirm this address for optional Battlesnake Arena emails within 24 hours:" }
+            (action_button("Confirm this address", url))
+            p { "Sign in to the same Arena account that requested this change. If your email app opens a signed-out browser, sign in and reopen this link. If you did not request this, you can ignore this email." }
+        }.into_string(),
+    }
 }
 
 /// Sent to a play account's email when that account is claimed on arena
@@ -98,7 +116,18 @@ pub fn account_claimed(
          — Battlesnake Arena\n"
     );
 
-    EmailContent::from_text("Your Battlesnake account was claimed".to_string(), text)
+    EmailContent {
+        subject: "Your Battlesnake account was claimed".to_string(),
+        text,
+        html_body: html! {
+            p { "Hi " (play_username) "," }
+            p { "Your play.battlesnake.com account was just claimed on the new Battlesnake Arena. We moved " (snakes_migrated) " snake(s) and " (grants_migrated) " customization unlock(s) over to your account." }
+            p { "If this was you, there's nothing to do — welcome back!" }
+            p { "If this WASN'T you, please reach out to us on Discord right away so we can secure your account:" }
+            p { a class="email-link" href="https://arena.battlesnake.com/discord" style="color:#C11655;text-decoration:underline" { "https://arena.battlesnake.com/discord" } }
+            p { "— Battlesnake Arena" }
+        }.into_string(),
+    }
 }
 
 /// Sent to a snake's owner when the health sweeper pulls the snake from
@@ -146,10 +175,24 @@ pub fn matchmaking_deactivated_content(
          — Battlesnake Arena\n"
     );
 
-    EmailContent::from_text(
-        format!("{snake_name} was paused from Arena matchmaking"),
+    EmailContent {
+        subject: format!("{snake_name} was paused from Arena matchmaking"),
         text,
-    )
+        html_body: html! {
+            p { "Hi," }
+            p { "Your Battlesnake \"" (snake_name) "\" has been temporarily removed from matchmaking on " (where_) " because its server kept timing out or erroring in our health checks there:" }
+            ul style="padding-left:22px;margin:12px 0 24px" {
+                @for (leaderboard, problem) in pulled {
+                    li style="margin:0 0 8px" { (leaderboard) ": " (problem) }
+                }
+            }
+            p { "We test each leaderboard with a game shaped like its matches (same mode, board size and number of snakes), so a snake can be healthy on one leaderboard and not another. Its ratings are safe — we stop matching it so a broken server doesn't hurt its standing." }
+            p { "We'll keep checking and put it back automatically once it passes again. Or, once your snake is fixed, resume matchmaking right away from its profile page:" }
+            (action_button("Open snake profile", profile_url))
+            p { "(The \"Test Snake\" button there plays the same games we do, one per leaderboard.)" }
+            p { "— Battlesnake Arena" }
+        }.into_string(),
+    }
 }
 
 /// Sent when the health sweeper puts a snake's previously paused entries
@@ -161,13 +204,13 @@ pub fn matchmaking_reactivated_content(
     leaderboards: &[String],
     profile_url: &str,
 ) -> EmailContent {
-    let leaderboards = leaderboards.join(", ");
+    let leaderboards_text = leaderboards.join(", ");
     let text = format!(
         "Hi,\n\
          \n\
          Good news — your Battlesnake \"{snake_name}\" is passing our health \
          checks again and has been put back into Arena matchmaking \
-         automatically on: {leaderboards}. No action needed.\n\
+         automatically on: {leaderboards_text}. No action needed.\n\
          \n\
          You can see its status any time on its profile page:\n\
          \n\
@@ -176,7 +219,21 @@ pub fn matchmaking_reactivated_content(
          — Battlesnake Arena\n"
     );
 
-    EmailContent::from_text(format!("{snake_name} is back in Arena matchmaking"), text)
+    EmailContent {
+        subject: format!("{snake_name} is back in Arena matchmaking"),
+        text,
+        html_body: html! {
+            p { "Hi," }
+            p { "Good news — your Battlesnake \"" (snake_name) "\" is passing our health checks again and has been put back into Arena matchmaking automatically on:" }
+            ul style="padding-left:22px;margin:12px 0 12px" {
+                @for leaderboard in leaderboards { li style="margin:0 0 8px" { (leaderboard) } }
+            }
+            p { "No action needed." }
+            p { "You can see its status any time on its profile page:" }
+            (action_button("Open snake profile", profile_url))
+            p { "— Battlesnake Arena" }
+        }.into_string(),
+    }
 }
 
 /// The email-recovery claim link (BS-7e38): sent to a play account's
@@ -203,7 +260,18 @@ pub fn claim_verification(play_username: &str, verify_url: &str) -> EmailContent
          — Battlesnake Arena\n"
     );
 
-    EmailContent::from_text("Finish claiming your Battlesnake account".to_string(), text)
+    EmailContent {
+        subject: "Finish claiming your Battlesnake account".to_string(),
+        text,
+        html_body: html! {
+            p { "Hi " (play_username) "," }
+            p { "Someone signed in to the new Battlesnake Arena asked to claim the play.battlesnake.com account registered to this address. If that was you, open this link while signed in to finish bringing your snakes and unlocks over:" }
+            (action_button("Finish claiming", verify_url))
+            p { "The link works once and expires in 30 minutes. It only works for the arena account that requested it." }
+            p { "If this wasn't you, ignore this email — nothing happens without the link, and your play account stays unclaimed." }
+            p { "— Battlesnake Arena" }
+        }.into_string(),
+    }
 }
 
 /// Assemble recipient-neutral event copy with the reason and controls.
@@ -251,6 +319,15 @@ fn render_layout(
     kind: NotificationKind,
     unsubscribe_url: Option<&str>,
 ) -> String {
+    let preheader = match kind {
+        NotificationKind::SnakeMatchmakingPaused => {
+            "Your snake was paused while we check its server."
+        }
+        NotificationKind::SnakeMatchmakingResumed => "Your snake is back in matchmaking.",
+        NotificationKind::PlayAccountClaimed => "Your play account was claimed on Arena.",
+        NotificationKind::ClaimVerification => "Finish your play account claim within 30 minutes.",
+        NotificationKind::NotificationEmailConfirmation => "Confirm this address within 24 hours.",
+    };
     html! {
         (maud::DOCTYPE)
         html lang="en" {
@@ -261,7 +338,7 @@ fn render_layout(
                 style { "@media (prefers-color-scheme: dark) {.email-bg{background:#171117!important}.email-card{background:#171117!important}.email-copy{color:#F4EFEA!important}.email-link{color:#FF5C9E!important}}" }
             }
             body class="email-bg" style="margin:0;padding:0;background:#FCFBF8;color:#17141A;font-family:'Instrument Sans',Arial,Helvetica,sans-serif" {
-                div style="display:none;font-size:1px;line-height:1px;max-height:0;max-width:0;opacity:0;overflow:hidden" { (subject) }
+                div style="display:none;font-size:1px;line-height:1px;max-height:0;max-width:0;opacity:0;overflow:hidden" { (preheader) }
                 table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" class="email-bg" style="background:#FCFBF8" {
                     tr { td align="center" style="padding:20px 12px" {
                         table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" class="email-card" style="max-width:600px;background:#FCFBF8;border:1px solid #E7DFE3" {
@@ -314,10 +391,19 @@ mod tests {
         }
     }
 
-    fn hrefs(html: &str) -> Vec<&str> {
+    fn decode_html_entities(value: &str) -> String {
+        value
+            .replace("&quot;", "\"")
+            .replace("&#39;", "'")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&amp;", "&")
+    }
+
+    fn hrefs(html: &str) -> Vec<String> {
         html.split("href=\"")
             .skip(1)
-            .map(|part| part.split('"').next().unwrap())
+            .map(|part| decode_html_entities(part.split('"').next().unwrap()))
             .collect()
     }
 
@@ -362,9 +448,18 @@ mod tests {
             assert!(message.html.contains(kind.email_reason()));
             assert!(message.text.contains("https://arena.example/me"));
             assert!(message.html.contains("https://arena.example/me"));
+            let header = message.html.split("<h1").next().unwrap();
+            assert!(
+                !header.contains("<a "),
+                "wordmark header must not contain a link"
+            );
             for url in hrefs(&message.html) {
-                assert!(message.text.contains(url), "missing {url} in text");
+                assert!(message.text.contains(&url), "missing {url} in text");
             }
+            assert_eq!(
+                message.html.matches("class=\"email-cta\"").count(),
+                usize::from(kind != NotificationKind::PlayAccountClaimed)
+            );
             assert_eq!(
                 message.html.matches("/unsubscribe\"").count(),
                 usize::from(kind.toggleable())
@@ -381,7 +476,161 @@ mod tests {
                 assert!(!message.html.contains(forbidden), "{forbidden}");
             }
             check_images(&message.html);
+            if kind == NotificationKind::NotificationEmailConfirmation {
+                assert_eq!(
+                    message.subject,
+                    "Confirm your Battlesnake notification email"
+                );
+                assert!(message.html.contains(&message.subject));
+                for phrase in [
+                    "Confirm this address for optional Battlesnake Arena emails within 24 hours:",
+                    "https://arena.example/confirm?token=invented",
+                    "Sign in to the same Arena account that requested this change.",
+                    "If your email app opens a signed-out browser, sign in and reopen this link.",
+                    "If you did not request this, you can ignore this email.",
+                ] {
+                    assert!(message.text.contains(phrase), "text missing {phrase}");
+                    assert!(message.html.contains(phrase), "HTML missing {phrase}");
+                }
+            }
         }
+    }
+
+    #[test]
+    fn event_fragments_preserve_copy_and_explicit_links() {
+        let cases = [
+            (
+                sample(NotificationKind::SnakeMatchmakingPaused),
+                &[
+                    "Your Battlesnake",
+                    "has been temporarily removed",
+                    "We test each leaderboard",
+                    "Its ratings are safe",
+                    "We'll keep checking",
+                    "The &quot;Test Snake&quot; button",
+                    "https://arena.example/snake",
+                ][..],
+                true,
+            ),
+            (
+                sample(NotificationKind::SnakeMatchmakingResumed),
+                &[
+                    "Good news",
+                    "is passing our health checks again",
+                    "No action needed.",
+                    "You can see its status",
+                    "https://arena.example/snake",
+                ][..],
+                true,
+            ),
+            (
+                sample(NotificationKind::PlayAccountClaimed),
+                &[
+                    "Your play.battlesnake.com account was just claimed",
+                    "We moved",
+                    "If this was you",
+                    "If this WASN'T you",
+                    "https://arena.battlesnake.com/discord",
+                ][..],
+                false,
+            ),
+            (
+                sample(NotificationKind::ClaimVerification),
+                &[
+                    "Someone signed in",
+                    "The link works once and expires in 30 minutes.",
+                    "It only works for the arena account",
+                    "If this wasn't you",
+                    "https://arena.example/claim?token=invented",
+                ][..],
+                true,
+            ),
+            (
+                sample(NotificationKind::NotificationEmailConfirmation),
+                &[
+                    "Confirm this address for optional",
+                    "Sign in to the same Arena account",
+                    "If your email app opens a signed-out browser",
+                    "If you did not request this",
+                    "https://arena.example/confirm?token=invented",
+                ][..],
+                true,
+            ),
+        ];
+        for (content, phrases, has_cta) in cases {
+            for phrase in phrases {
+                assert!(content.html_body.contains(phrase), "HTML missing {phrase}");
+            }
+            assert_eq!(
+                content.html_body.matches("class=\"email-cta\"").count(),
+                usize::from(has_cta)
+            );
+            for url in hrefs(&content.html_body) {
+                assert!(content.text.contains(&url));
+            }
+        }
+        for kind in [
+            NotificationKind::SnakeMatchmakingPaused,
+            NotificationKind::SnakeMatchmakingResumed,
+        ] {
+            let html = sample(kind).html_body;
+            assert!(html.contains("<ul "));
+            assert!(html.contains("<li "));
+        }
+    }
+
+    #[test]
+    fn user_supplied_url_like_lines_are_never_links() {
+        let evil = "x\nhttps://evil.example";
+        let old_text = matchmaking_deactivated_content(
+            evil,
+            &[(evil.into(), evil.into())],
+            "https://arena.example/snake",
+        )
+        .text;
+        let old_html = EmailContent::from_text("old".into(), old_text).html_body;
+        assert!(
+            hrefs(&old_html)
+                .iter()
+                .any(|url| url.contains("evil.example")),
+            "legacy transcription must exercise the old defect"
+        );
+        for content in [
+            matchmaking_deactivated_content(
+                evil,
+                &[(evil.into(), evil.into())],
+                "https://arena.example/snake",
+            ),
+            matchmaking_reactivated_content(evil, &[evil.into()], "https://arena.example/snake"),
+        ] {
+            assert!(content.html_body.contains("https://evil.example"));
+            assert!(
+                hrefs(&content.html_body)
+                    .iter()
+                    .all(|url| !url.contains("evil.example"))
+            );
+        }
+    }
+
+    #[test]
+    fn ampersand_link_parity_requires_entity_decoding() {
+        let url = "https://arena.example/claim?a=1&b=2";
+        let content = claim_verification("player", url);
+        assert!(
+            content
+                .html_body
+                .contains("href=\"https://arena.example/claim?a=1&amp;b=2\"")
+        );
+        assert!(
+            !content
+                .text
+                .contains("https://arena.example/claim?a=1&amp;b=2")
+        );
+        assert!(
+            hrefs(&content.html_body)
+                .iter()
+                .all(|href| content.text.contains(href))
+        );
     }
 
     #[test]
