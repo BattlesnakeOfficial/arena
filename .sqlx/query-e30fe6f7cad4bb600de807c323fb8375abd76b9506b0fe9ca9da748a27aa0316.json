@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE customization_grants SET source = 'play_import' WHERE user_id = $1 AND customization_type = 'head' AND slug = 'alligator' AND source = 'token'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e30fe6f7cad4bb600de807c323fb8375abd76b9506b0fe9ca9da748a27aa0316"
+}

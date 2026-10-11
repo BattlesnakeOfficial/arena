@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT play_points, token_count, converted_at FROM customization_legacy_tokens WHERE imported_account_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "play_points",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 1,
+        "name": "token_count",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "converted_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "3afbb48247efd1811571076caa4283c7fa0ce50a4087e9efc6041abcdddd311f"
+}

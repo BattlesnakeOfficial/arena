@@ -22,6 +22,7 @@ use sqlx::{
     PgPool, Postgres, Row as _, Transaction,
     postgres::{PgConnectOptions, PgPoolOptions},
 };
+use uuid::Uuid;
 
 use crate::customizations::catalog::{Head, Tail};
 use crate::models::battlesnake::EngineRegion;
@@ -72,6 +73,207 @@ async fn begin_read_only_play_transaction(play: &PgPool) -> cja::Result<Transact
         ));
     }
     Ok(tx)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlayPointBalance {
+    pub play_account_id: String,
+    pub points: i32,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct PlayPointConversionSummary {
+    pub claimed_converted: u64,
+    pub staged_converted: u64,
+    pub already_converted: u64,
+    pub zero_points: u64,
+    pub no_imported_account: u64,
+    pub tokens_converted: i64,
+    pub missing_play_account_ids: Vec<String>,
+}
+
+fn legacy_tokens(points: i32) -> i64 {
+    (i64::from(points) + 199) / 200
+}
+
+pub async fn read_play_point_balances(play: &PgPool) -> cja::Result<Vec<PlayPointBalance>> {
+    let mut tx = begin_read_only_play_transaction(play).await?;
+    let rows = sqlx::query("SELECT id AS play_account_id, points FROM core_account ORDER BY id")
+        .fetch_all(&mut *tx)
+        .await
+        .wrap_err("Failed to read current Play point balances")?;
+    let mut balances = Vec::with_capacity(rows.len());
+    for row in rows {
+        let play_account_id: String = row
+            .try_get("play_account_id")
+            .wrap_err("Failed to decode Play account ID")?;
+        let points: i32 = row
+            .try_get("points")
+            .wrap_err_with(|| format!("Failed to decode Play points for {play_account_id}"))?;
+        if points < 0 {
+            return Err(color_eyre::eyre::eyre!(
+                "Negative Play points for account {play_account_id}: {points}"
+            ));
+        }
+        balances.push(PlayPointBalance {
+            play_account_id,
+            points,
+        });
+    }
+    tx.commit()
+        .await
+        .wrap_err("Failed to commit Play read-only point snapshot")?;
+    Ok(balances)
+}
+
+pub async fn convert_play_points(
+    play: &PgPool,
+    arena: &PgPool,
+    dry_run: bool,
+) -> cja::Result<PlayPointConversionSummary> {
+    let exists = sqlx::query_scalar!(
+        "SELECT to_regclass('customization_legacy_tokens') IS NOT NULL AS \"exists!\""
+    )
+    .fetch_one(arena)
+    .await
+    .wrap_err("Failed to check Arena conversion migration")?;
+    if !exists {
+        return Err(color_eyre::eyre::eyre!(
+            "apply migrations first (deploy arena)"
+        ));
+    }
+
+    // Play and Arena cannot share a snapshot. A dry run predicts the live
+    // result only while balances, claims, and prior conversions stay unchanged.
+    let balances = read_play_point_balances(play).await?;
+    let mut snapshot = arena
+        .begin()
+        .await
+        .wrap_err("Failed to begin Arena account snapshot")?;
+    if dry_run {
+        sqlx::query!("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            .execute(&mut *snapshot)
+            .await
+            .wrap_err("Failed to set Arena dry-run read-only snapshot")?;
+    }
+    let imported = sqlx::query!(
+        r#"SELECT ia.play_account_id AS "play_account_id!",
+                  ia.imported_account_id AS "imported_account_id!", ia.claimed_by_user_id,
+                  (l.imported_account_id IS NOT NULL) AS "converted!"
+           FROM imported_accounts ia
+           LEFT JOIN customization_legacy_tokens l USING (imported_account_id)"#
+    )
+    .fetch_all(&mut *snapshot)
+    .await
+    .wrap_err("Failed to read staged accounts")?;
+    snapshot
+        .commit()
+        .await
+        .wrap_err("Failed to close Arena account snapshot")?;
+    let by_play_id: HashMap<String, (Uuid, Option<Uuid>, bool)> = imported
+        .into_iter()
+        .map(|row| {
+            (
+                row.play_account_id,
+                (
+                    row.imported_account_id,
+                    row.claimed_by_user_id,
+                    row.converted,
+                ),
+            )
+        })
+        .collect();
+    let mut summary = PlayPointConversionSummary::default();
+    for balance in balances {
+        let Some((_, owner, converted)) = by_play_id.get(&balance.play_account_id) else {
+            summary.no_imported_account += 1;
+            summary
+                .missing_play_account_ids
+                .push(balance.play_account_id);
+            continue;
+        };
+        if *converted {
+            summary.already_converted += 1;
+            continue;
+        }
+        if balance.points == 0 {
+            summary.zero_points += 1;
+            continue;
+        }
+        let tokens = legacy_tokens(balance.points);
+        let owner = if dry_run {
+            *owner
+        } else {
+            let result = async {
+                let mut tx = arena.begin().await.wrap_err("Failed to begin Arena conversion")?;
+                sqlx::query!("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+                    .execute(&mut *tx).await.wrap_err("Failed to set Arena conversion isolation")?;
+                let locked = sqlx::query!(
+                    "SELECT imported_account_id, claimed_by_user_id FROM imported_accounts WHERE play_account_id = $1 FOR UPDATE",
+                    balance.play_account_id,
+                ).fetch_optional(&mut *tx).await.wrap_err("Failed to lock imported account")?
+                    .ok_or_else(|| color_eyre::eyre::eyre!("Imported account vanished after bulk read: {}", balance.play_account_id))?;
+                let prior = sqlx::query_scalar!(
+                    "SELECT imported_account_id FROM customization_legacy_tokens WHERE imported_account_id = $1",
+                    locked.imported_account_id,
+                ).fetch_optional(&mut *tx).await.wrap_err("Failed to recheck conversion after account lock")?;
+                if prior.is_some() {
+                    tx.commit().await.wrap_err("Failed to commit already-converted account")?;
+                    return Ok::<Option<Option<Uuid>>, color_eyre::Report>(None);
+                }
+                sqlx::query!(
+                    "INSERT INTO customization_legacy_tokens (imported_account_id, play_points, token_count) VALUES ($1, $2, $3)",
+                    locked.imported_account_id, balance.points, tokens,
+                ).execute(&mut *tx).await.wrap_err("Failed to insert legacy token source")?;
+                tx.commit().await.wrap_err("Failed to commit legacy token source")?;
+                Ok(Some(locked.claimed_by_user_id))
+            }.await.wrap_err_with(|| format!(
+                "Conversion stopped at Play account {}; completed claimed={}, staged={}, tokens={}. Rerun to skip completed rows",
+                balance.play_account_id, summary.claimed_converted, summary.staged_converted, summary.tokens_converted,
+            ))?;
+            let Some(owner) = result else {
+                summary.already_converted += 1;
+                continue;
+            };
+            owner
+        };
+        if owner.is_some() {
+            summary.claimed_converted += 1;
+        } else {
+            summary.staged_converted += 1;
+        }
+        summary.tokens_converted += tokens;
+    }
+    Ok(summary)
+}
+
+pub async fn run_point_conversion(dry_run: bool) -> cja::Result<()> {
+    let play_url = std::env::var("PLAY_DATABASE_URL").wrap_err("PLAY_DATABASE_URL is required")?;
+    let arena_url = std::env::var("DATABASE_URL").wrap_err("DATABASE_URL is required")?;
+    let play = PgPoolOptions::new()
+        .connect(&play_url)
+        .await
+        .wrap_err("Failed to connect to Play")?;
+    let arena = PgPoolOptions::new()
+        .connect(&arena_url)
+        .await
+        .wrap_err("Failed to connect to Arena")?;
+    let summary = convert_play_points(&play, &arena, dry_run)
+        .await
+        .wrap_err("Failed to convert Play point balances")?;
+    if dry_run {
+        println!("DRY RUN — Play point conversion");
+    }
+    println!("claimed converted: {}", summary.claimed_converted);
+    println!("staged converted: {}", summary.staged_converted);
+    println!("already converted: {}", summary.already_converted);
+    println!("zero points: {}", summary.zero_points);
+    println!("no imported account: {}", summary.no_imported_account);
+    println!("newly converted tokens: {}", summary.tokens_converted);
+    for id in summary.missing_play_account_ids {
+        println!("missing play_account_id: {id}");
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -765,6 +967,181 @@ mod tests {
     use super::*;
     use crate::models::imported_account::{StageAccount, claim_account};
     use uuid::Uuid;
+
+    #[test]
+    fn point_rounding_is_generous() {
+        assert_eq!(legacy_tokens(1), 1);
+        assert_eq!(legacy_tokens(199), 1);
+        assert_eq!(legacy_tokens(200), 1);
+        assert_eq!(legacy_tokens(201), 2);
+        assert_eq!(legacy_tokens(i32::MAX), 10_737_419);
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn point_conversion_reads_current_balances_and_is_idempotent(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        create_play_tables(&pool).await?;
+        let claimed = test_imported_account(&pool, 701).await?;
+        let staged = test_imported_account(&pool, 702).await?;
+        test_imported_account(&pool, 703).await?;
+        test_play_account(&pool, 704, None).await?;
+        test_play_account(&pool, 707, None).await?;
+        let user = test_user(&pool, 1646701).await?;
+        let unrelated = test_user(&pool, 1646702).await?;
+        claim_account(&pool, claimed, user).await?;
+        sqlx::query("UPDATE core_account SET points = CASE id WHEN 'reconcile_account_701' THEN 201 WHEN 'reconcile_account_702' THEN 199 WHEN 'reconcile_account_704' THEN 1 ELSE 0 END")
+            .execute(&pool).await?;
+
+        let migrations_before =
+            sqlx::query_scalar!("SELECT COUNT(*)::bigint AS \"count!\" FROM _sqlx_migrations")
+                .fetch_one(&pool)
+                .await?;
+        let dry = convert_play_points(&pool, &pool, true).await?;
+        assert_eq!(
+            (
+                dry.claimed_converted,
+                dry.staged_converted,
+                dry.zero_points,
+                dry.no_imported_account,
+                dry.tokens_converted
+            ),
+            (1, 1, 1, 2, 3)
+        );
+        assert_eq!(
+            dry.missing_play_account_ids,
+            vec!["reconcile_account_704", "reconcile_account_707"]
+        );
+        assert_eq!(crate::customizations::token_balance(&pool, user).await?, 0);
+        let before = sqlx::query_scalar!(
+            "SELECT COUNT(*)::bigint AS \"count!\" FROM customization_legacy_tokens"
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(before, 0);
+        assert_eq!(
+            sqlx::query_scalar!("SELECT COUNT(*)::bigint AS \"count!\" FROM _sqlx_migrations")
+                .fetch_one(&pool)
+                .await?,
+            migrations_before
+        );
+
+        let live = convert_play_points(&pool, &pool, false).await?;
+        assert_eq!(live, dry);
+        assert_eq!(crate::customizations::token_balance(&pool, user).await?, 2);
+        assert_eq!(
+            crate::customizations::token_balance(&pool, unrelated).await?,
+            0
+        );
+        let row = sqlx::query!("SELECT play_points, token_count, converted_at FROM customization_legacy_tokens WHERE imported_account_id = $1", staged)
+            .fetch_one(&pool).await?;
+        assert_eq!((row.play_points, row.token_count), (199, 1));
+        sqlx::query("UPDATE core_account SET points = 0 WHERE id IN ('reconcile_account_701', 'reconcile_account_702')")
+            .execute(&pool).await?;
+        let rerun = convert_play_points(&pool, &pool, false).await?;
+        assert_eq!(
+            (
+                rerun.already_converted,
+                rerun.zero_points,
+                rerun.tokens_converted
+            ),
+            (2, 1, 0)
+        );
+        let same = sqlx::query!("SELECT play_points, token_count, converted_at FROM customization_legacy_tokens WHERE imported_account_id = $1", staged)
+            .fetch_one(&pool).await?;
+        assert_eq!(
+            (same.play_points, same.token_count, same.converted_at),
+            (row.play_points, row.token_count, row.converted_at)
+        );
+        assert_eq!(crate::customizations::token_balance(&pool, user).await?, 2);
+        assert_eq!(
+            crate::customizations::token_balance(&pool, unrelated).await?,
+            0
+        );
+        assert_eq!(
+            sqlx::query_scalar!(
+                "SELECT COUNT(*)::bigint AS \"count!\" FROM customization_legacy_tokens"
+            )
+            .fetch_one(&pool)
+            .await?,
+            2
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn point_conversion_precheck_and_play_read_only_guard(pool: PgPool) -> cja::Result<()> {
+        create_play_tables(&pool).await?;
+        let mut read_only = begin_read_only_play_transaction(&pool).await?;
+        assert!(
+            sqlx::query(
+                "INSERT INTO core_account (id, user_id, username) VALUES ('forbidden', 'u', 'u')"
+            )
+            .execute(&mut *read_only)
+            .await
+            .is_err()
+        );
+        drop(read_only);
+        sqlx::query!("DROP TABLE customization_legacy_tokens")
+            .execute(&pool)
+            .await?;
+        let error = convert_play_points(&pool, &pool, true).await.unwrap_err();
+        assert!(format!("{error:#}").contains("apply migrations first (deploy arena)"));
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn negative_points_on_missing_account_are_rejected(pool: PgPool) -> cja::Result<()> {
+        create_play_tables(&pool).await?;
+        test_play_account(&pool, 706, None).await?;
+        sqlx::query("UPDATE core_account SET points = -1 WHERE id = 'reconcile_account_706'")
+            .execute(&pool)
+            .await?;
+        let error = convert_play_points(&pool, &pool, true).await.unwrap_err();
+        assert!(
+            format!("{error:#}").contains("Negative Play points for account reconcile_account_706")
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn concurrent_point_converters_wait_then_skip(pool: PgPool) -> cja::Result<()> {
+        create_play_tables(&pool).await?;
+        let account = test_imported_account(&pool, 705).await?;
+        sqlx::query("UPDATE core_account SET points = 201 WHERE id = 'reconcile_account_705'")
+            .execute(&pool)
+            .await?;
+        let mut blocker = pool.begin().await?;
+        sqlx::query!("SELECT imported_account_id FROM imported_accounts WHERE imported_account_id = $1 FOR UPDATE", account)
+            .fetch_one(&mut *blocker).await?;
+        let first = {
+            let pool = pool.clone();
+            tokio::spawn(async move { convert_play_points(&pool, &pool, false).await })
+        };
+        let second = {
+            let pool = pool.clone();
+            tokio::spawn(async move { convert_play_points(&pool, &pool, false).await })
+        };
+        let waiting = async {
+            loop {
+                let count = sqlx::query_scalar!(
+                    "SELECT COUNT(*)::bigint AS \"count!\" FROM pg_stat_activity WHERE query LIKE 'SELECT imported_account_id, claimed_by_user_id FROM imported_accounts WHERE play_account_id = $1 FOR UPDATE%' AND wait_event_type = 'Lock' AND datname = current_database()"
+                ).fetch_one(&pool).await?;
+                if count == 2 {
+                    return Ok::<(), cja::color_eyre::Report>(());
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(15), waiting).await??;
+        blocker.commit().await?;
+        let (first, second) = (first.await??, second.await??);
+        assert_eq!(first.staged_converted + second.staged_converted, 1);
+        assert_eq!(first.already_converted + second.already_converted, 1);
+        assert_eq!(first.tokens_converted + second.tokens_converted, 2);
+        assert_eq!(sqlx::query_scalar!("SELECT COUNT(*)::bigint AS \"count!\" FROM customization_legacy_tokens WHERE imported_account_id = $1", account).fetch_one(&pool).await?, 1);
+        Ok(())
+    }
 
     async fn test_play_account(
         pool: &PgPool,
