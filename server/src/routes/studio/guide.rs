@@ -13,11 +13,11 @@ use maud::{Markup, html};
 
 use super::page::default_ref;
 use crate::{
+    arena_assets::asset_url,
     components::{
         page_factory::PageFactory,
         snake_board::{ShapeRef, four_directions_board, snake_board},
     },
-    static_assets::asset_url,
 };
 
 /// Where the studio is, for links back to it.

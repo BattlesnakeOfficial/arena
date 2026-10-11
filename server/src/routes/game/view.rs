@@ -5,11 +5,12 @@ use axum::{
 };
 use axum_macros::debug_handler;
 use color_eyre::eyre::Context as _;
-use maud::{PreEscaped, html};
+use maud::html;
 use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::{
+    arena_assets::asset_url,
     components::page_factory::PageFactory,
     customizations::chip_color,
     errors::ServerResult,
@@ -21,174 +22,7 @@ use crate::{
     routes::auth::OptionalUser,
     routes::og::game_card_path,
     state::AppState,
-    static_assets::asset_url,
 };
-
-/// "Copy Link" button behavior for the share panel. Rendered via
-/// [`PreEscaped`] because maud HTML-escapes string content inside `script {}`
-/// blocks — without it, the `&&` below serializes as `&amp;&amp;`, which is a
-/// JavaScript syntax error that silently kills the whole handler (the button
-/// then does nothing). Keep any JS with `&`, `<`, `>` or `"` in a constant
-/// like this, not inline maud strings.
-const SHARE_COPY_JS: &str = r#"(function() {
-    var btn = document.getElementById('share-copy');
-    var input = document.getElementById('share-url');
-    function done() {
-        btn.textContent = 'Copied!';
-        setTimeout(function() { btn.textContent = 'Copy Link'; }, 1500);
-    }
-    function fallback() {
-        input.focus();
-        input.select();
-        try { document.execCommand('copy'); done(); } catch (e) {}
-    }
-    btn.addEventListener('click', function() {
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-            navigator.clipboard.writeText(input.value).then(done, fallback);
-        } else {
-            fallback();
-        }
-    });
-})();"#;
-
-/// Syncs the board iframe's `theme` param with the theme the pre-paint
-/// bootstrap actually resolved (`data-app-theme` on <html>). The server can
-/// only see signed-in preferences; an anonymous visitor who toggled the
-/// theater to light lives in localStorage, which only the bootstrap sees.
-/// Runs synchronously right after the iframe tag, so a rewrite lands before
-/// the board app boots; when server and client agree (the common case) the
-/// src is untouched and no reload happens. PreEscaped: contains `&&`.
-const BOARD_THEME_SYNC_JS: &str = r#"(function() {
-    var frame = document.getElementById('board-viewer');
-    var theme = document.documentElement.getAttribute('data-app-theme');
-    if (!frame || !theme) return;
-    if (frame.src.indexOf('theme=' + theme) === -1) {
-        frame.src = frame.src.replace(/theme=[a-z]+/, 'theme=' + theme);
-    }
-})();"#;
-
-/// Polls status without touching the board. Once a running game becomes
-/// terminal, only stable server-rendered regions are replaced; the connected
-/// iframe and save-title form remain exactly where they are.
-const GAME_STATUS_JS: &str = r#"(function() {
-  var root = document.getElementById('game-live-state');
-  if (!root) return;
-  var active = root.dataset.status;
-  if (active !== 'waiting' && active !== 'running') return;
-  var key = 'arena-game-poll-' + root.dataset.gameId;
-  var used = 0, failures = 0, timer = null, stopped = false, phase = 'status';
-  var inFlight = false, controller = null, epoch = 0;
-  var regions = ['game-status-region', 'game-outcome-region', 'game-actions-region', 'game-results-region', 'game-metadata-region'];
-  try { used = Number(sessionStorage.getItem(key)) || 0; } catch (_) {}
-  function store() { try { sessionStorage.setItem(key, String(used)); } catch (_) {} }
-  function clearBudget() { try { sessionStorage.removeItem(key); } catch (_) {} }
-  function revealRefresh() { var el = document.getElementById('game-manual-refresh'); if (el) el.hidden = false; }
-  function stop(done) {
-    stopped = true;
-    if (timer) clearTimeout(timer);
-    timer = null;
-    if (controller) controller.abort();
-    epoch += 1;
-    inFlight = false;
-    controller = null;
-    if (done) clearBudget();
-  }
-  function delay(ok) { if (ok) failures = 0; else failures += 1; return ok ? 2000 : Math.min(30000, 2000 * Math.pow(2, failures)); }
-  function schedule(ms) { if (!stopped && !timer) timer = setTimeout(run, ms); }
-  function attempt(url, parse) {
-    if (used >= 600) { stop(false); revealRefresh(); return null; }
-    used += 1; store();
-    var requestEpoch = epoch;
-    var current = new AbortController();
-    var timedOut = false;
-    var deadline = setTimeout(function() {
-      timedOut = true;
-      current.abort();
-    }, 15000);
-    controller = current;
-    inFlight = true;
-    return fetch(url, { credentials: 'same-origin', signal: current.signal })
-      .then(function(response) {
-        if (stopped || requestEpoch !== epoch) throw new DOMException('stale request', 'AbortError');
-        if (!response.ok) throw new Error('request failed');
-        return parse(response);
-      })
-      .then(function(value) {
-        if (stopped || requestEpoch !== epoch) throw new DOMException('stale request', 'AbortError');
-        return value;
-      })
-      .catch(function(error) {
-        if (timedOut && !stopped && requestEpoch === epoch) throw new Error('request timed out');
-        throw error;
-      })
-      .finally(function() {
-        clearTimeout(deadline);
-        if (controller === current && requestEpoch === epoch) {
-          inFlight = false;
-          controller = null;
-        }
-      });
-  }
-  function retry() { schedule(delay(false)); }
-  function refreshTerminal() {
-    phase = 'terminal';
-    var request = attempt(window.location.href, function(response) { return response.text(); });
-    if (!request) return;
-    request.then(function(text) {
-      var source = new DOMParser().parseFromString(text, 'text/html');
-      var pairs = regions.map(function(id) {
-        var from = source.querySelectorAll('#' + id);
-        var to = document.querySelectorAll('#' + id);
-        if (from.length !== 1 || to.length !== 1) throw new Error('invalid refresh regions');
-        return [to[0], from[0]];
-      });
-      pairs.forEach(function(pair) { pair[0].innerHTML = pair[1].innerHTML; });
-      stop(true);
-    }).catch(function(error) {
-      if (stopped || error.name === 'AbortError') return;
-      retry();
-    });
-  }
-  function run() {
-    timer = null;
-    if (stopped || inFlight) return;
-    if (document.hidden) { schedule(1000); return; }
-    if (phase === 'terminal') { refreshTerminal(); return; }
-    var request = attempt('/api/games/' + root.dataset.gameId, function(response) { return response.json(); });
-    if (!request) return;
-    request.then(function(body) {
-      var status = body && body.Game && body.Game.ArenaStatus;
-      if (['waiting', 'running', 'finished', 'failed'].indexOf(status) === -1) throw new Error('invalid status');
-      failures = 0;
-      if (active === 'waiting' && status !== 'waiting') { window.location.reload(); return; }
-      if (active === 'running' && (status === 'finished' || status === 'failed')) {
-        phase = 'terminal';
-        schedule(0);
-        return;
-      }
-      schedule(delay(true));
-    }).catch(function(error) {
-      if (stopped || error.name === 'AbortError') return;
-      retry();
-    });
-  }
-  var manual = document.getElementById('game-manual-refresh');
-  if (manual) manual.hidden = true;
-  document.addEventListener('visibilitychange', function() {
-    if (!document.hidden && !timer && !inFlight && !stopped) schedule(0);
-  });
-  window.addEventListener('pagehide', function() { stop(false); });
-  window.addEventListener('pageshow', function(event) {
-    if (!event.persisted) return;
-    stopped = false;
-    timer = null;
-    phase = 'status';
-    var fallback = document.getElementById('game-manual-refresh');
-    if (fallback) fallback.hidden = true;
-    schedule(0);
-  });
-  schedule(2000);
-})();"#;
 
 /// Optional viewer params forwarded to the board.battlesnake.com iframe so
 /// shared links can jump to a turn, autoplay, etc. Only params that were
@@ -380,7 +214,7 @@ pub async fn view_game(
                     }
                 }
             }
-            a id="game-manual-refresh" href="" onclick="location.reload(); return false;" class="refresh-link" { "Refresh" }
+            a id="game-manual-refresh" href="" data-manual-refresh class="refresh-link" { "Refresh" }
 
             div class="theater" {
                 div {
@@ -402,21 +236,12 @@ pub async fn view_game(
                                     title="Battlesnake Board Viewer"
                                     allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
                                     allowfullscreen {}
-                                script { (PreEscaped(BOARD_THEME_SYNC_JS)) }
+                                script { (crate::components::page::inline_bundle("board-theme-sync.js")) }
                             }
                         }
                     }
 
-                    script {
-                        "window.addEventListener('message', function(e) {"
-                            "if (e.origin !== 'https://board.battlesnake.com') return;"
-                            "var evt = e.data;"
-                            "if (evt.event === 'RESIZE') {"
-                                "document.getElementById('board-viewer-container').style"
-                                    ".setProperty('aspect-ratio', evt.data.width + ' / ' + evt.data.height);"
-                            "}"
-                        "});"
-                    }
+                    script src=(asset_url("board-resize.js")) {}
 
                     div id="game-actions-region" class="theater-actions" {
                         @if user.is_some() {
@@ -519,7 +344,7 @@ pub async fn view_game(
                         }
                     }
 
-                    script { (PreEscaped(SHARE_COPY_JS)) }
+                    script src=(asset_url("share-copy.js")) {}
 
                     @if game.status != GameStatus::Waiting {
                         div class="gmeta" {
@@ -572,7 +397,7 @@ pub async fn view_game(
                     }
                 }
             }
-            script { (PreEscaped(GAME_STATUS_JS)) }
+            script src=(asset_url("game-status.js")) {}
         }),
     )
     .with_description(description)

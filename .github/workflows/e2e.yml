@@ -27,6 +27,12 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Cache cja frontend tools
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/cja
+          key: cja-tools-${{ runner.os }}-tsc-7.0.2
+
       - name: Cache cargo registry and binaries
         uses: actions/cache@v4
         with:

@@ -43,7 +43,7 @@ mod snake_client;
 mod snake_health;
 mod snake_health_sweeper;
 mod state;
-mod static_assets;
+cja::include_assets!(arena_assets);
 mod stuck_game_sweeper;
 mod telemetry;
 mod tournament_bracket;
@@ -238,7 +238,7 @@ async fn spawn_application_tasks(
         supervisor.spawn(
             "server",
             run_server_until(
-                routes::routes(app_state.clone()),
+                routes::routes(app_state.clone())?,
                 shutdown.clone().cancelled_owned(),
             ),
         );

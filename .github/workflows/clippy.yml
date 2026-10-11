@@ -14,6 +14,12 @@ jobs:
         with:
           components: clippy
 
+      - name: Cache cja frontend tools
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/cja
+          key: cja-tools-${{ runner.os }}-tsc-7.0.2
+
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:

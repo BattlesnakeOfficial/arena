@@ -518,6 +518,7 @@ mod tests {
 
     async fn get(pool: &PgPool, path: &str) -> (StatusCode, axum::http::HeaderMap, String) {
         let response = crate::routes::routes(AppState::test_from_pool(pool.clone()))
+            .expect("asset router")
             .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
             .await
             .unwrap();
@@ -730,6 +731,7 @@ mod tests {
                     signed_session_cookie(&state, viewer_session)
                 );
                 let response = crate::routes::routes(state)
+                    .expect("asset router")
                     .layer(tower_cookies::CookieManagerLayer::new())
                     .oneshot(
                         Request::builder()
@@ -773,7 +775,10 @@ mod tests {
             "{body}"
         );
         assert!(body.contains(r#"<p id="move-request-error""#), "{body}");
-        assert!(body.contains(r#"src="/static/turn-json.js?v="#), "{body}");
+        assert!(
+            body.contains(&crate::arena_assets::asset_url("turn-json.js")),
+            "{body}"
+        );
 
         // Nothing to download before the game starts.
         sqlx::query("UPDATE games SET status = 'waiting' WHERE game_id = $1")

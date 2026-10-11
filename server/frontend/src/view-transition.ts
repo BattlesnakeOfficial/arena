@@ -13,7 +13,7 @@ window.addEventListener("pagereveal", () => {
   // so guard before reading `.url` — otherwise every such load throws
   // "Cannot read properties of null (reading 'url')" into the console.
   const activation = window.navigation?.activation;
-  if (!activation?.from || !activation.entry) return;
+  if (!activation?.from?.url || !activation.entry?.url) return;
 
   const fromURL = new URL(activation.from.url);
   const currentURL = new URL(activation.entry.url);

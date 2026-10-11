@@ -42,7 +42,7 @@ fn db_free_state(studio: StudioState) -> AppState {
 }
 
 fn app(state: &AppState) -> Router {
-    crate::routes::routes(state.clone())
+    crate::routes::routes(state.clone()).expect("asset router")
 }
 
 struct Reply {
@@ -352,7 +352,7 @@ fn studio_js_builds_the_design_kit_svg_file() {
         clean.to_svg(),
         page_svg(clean.fill_rule().as_svg(), clean.path_d())
     );
-    let js = include_str!("../../../static/studio.js");
+    let js = include_str!("../../../frontend/src/studio.ts");
     for part in PAGE_SVG {
         let in_js = part.replace('"', "\\\"");
         assert!(
@@ -609,7 +609,9 @@ fn attr_values<'a>(html: &'a str, attr: &str) -> Vec<&'a str> {
 #[sqlx::test(migrations = "../migrations")]
 async fn the_page_renders_every_board_with_placeholders(db: sqlx::PgPool) {
     let state = AppState::test_from_pool(db);
-    let app = crate::routes::routes(state).layer(tower_cookies::CookieManagerLayer::new());
+    let app = crate::routes::routes(state)
+        .expect("asset router")
+        .layer(tower_cookies::CookieManagerLayer::new());
     let response = app
         .oneshot(
             Request::get("/customizations/studio")
@@ -748,7 +750,7 @@ async fn the_page_renders_every_board_with_placeholders(db: sqlx::PgPool) {
         assert!(html.contains(&format!("id=\"{id}\"")), "{id}");
     }
     assert!(html.contains("aria-live=\"polite\""));
-    assert!(html.contains("/static/studio.js?v="));
+    assert!(html.contains(&crate::arena_assets::asset_url("studio.js")));
     assert!(html.contains("immediately discarded"));
     // No inline handlers.
     assert!(!html.contains(" onclick="));
@@ -773,7 +775,7 @@ async fn the_page_renders_every_board_with_placeholders(db: sqlx::PgPool) {
     let example = attr_values(&html, "data-src");
     assert_eq!(example.len(), 1);
     assert!(
-        example[0].starts_with("/static/design-kit/example-drawing.png?v="),
+        example[0] == crate::arena_assets::asset_url("design-kit/example-drawing.png"),
         "{example:?}"
     );
 }
@@ -809,7 +811,9 @@ fn download_tags(html: &str) -> Vec<&str> {
 
 fn page_app(db: sqlx::PgPool) -> Router {
     let state = AppState::test_from_pool(db);
-    crate::routes::routes(state).layer(tower_cookies::CookieManagerLayer::new())
+    crate::routes::routes(state)
+        .expect("asset router")
+        .layer(tower_cookies::CookieManagerLayer::new())
 }
 
 #[sqlx::test(migrations = "../migrations")]
@@ -944,7 +948,7 @@ async fn the_studio_hands_its_script_a_topic_for_every_guide_section(db: sqlx::P
         assert!(RULE_ANCHORS.contains(&anchor), "{}", lint.code());
     }
     let script = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("static/studio.js"),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("frontend/src/studio.ts"),
     )
     .expect("studio.js");
     assert!(script.contains("data-guide-topics"));
@@ -976,12 +980,13 @@ async fn every_design_kit_link_downloads_the_committed_file(db: sqlx::PgPool) {
         for (href, name) in links {
             // asset_url: the file exists in the embedded static dir (so it carries a
             // content hash), and the download name is the file's own.
-            let (path, version) = href
-                .strip_prefix("/static/")
-                .and_then(|rest| rest.split_once("?v="))
-                .unwrap_or_else(|| panic!("{page}: {href} is not a versioned asset_url"));
+            let asset = crate::arena_assets::MANIFEST
+                .entries
+                .iter()
+                .find(|asset| format!("/assets/{}", asset.hashed_name) == href)
+                .unwrap_or_else(|| panic!("{page}: {href} is not a hashed asset_url"));
+            let path = asset.logical_name;
             assert!(path.starts_with("design-kit/"), "{href}");
-            assert_eq!(version.len(), 16, "{href}");
             if let Some(name) = name {
                 assert_eq!(path.rsplit('/').next(), Some(name.as_str()), "{href}");
             }
@@ -1218,4 +1223,17 @@ async fn an_upload_in_steady_chunks_gets_through() {
     let reply = post(app(&state), "", Body::from_stream(stream)).await;
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.json);
     assert_eq!(reply.json["input"], "png");
+}
+
+#[sqlx::test(migrations = "../migrations")]
+async fn old_static_urls_return_404(db: sqlx::PgPool) {
+    let response = page_app(db)
+        .oneshot(
+            Request::get("/static/studio.js")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }

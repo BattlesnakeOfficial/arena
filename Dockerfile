@@ -1,6 +1,6 @@
 # Build stage
-# Using Rust 1.92 for Edition 2024 support (matching local version)
-FROM rust:1.92-bookworm AS builder
+# Rust 1.99 is required by cja-build / rolldown.
+FROM rust:1.99-bookworm AS builder
 
 WORKDIR /app
 
@@ -15,6 +15,8 @@ RUN apt-get update && apt-get install -y \
 COPY Cargo.toml Cargo.lock ./
 COPY server/Cargo.toml ./server/
 COPY server/build.rs ./server/
+COPY server/frontend ./server/frontend
+COPY server/static ./server/static
 COPY mock-github-oauth/Cargo.toml ./mock-github-oauth/
 COPY rules/Cargo.toml ./rules/
 
@@ -41,7 +43,6 @@ RUN rm -rf server/src rules/src
 
 # Copy actual source code (only arena and rules, not mock-github-oauth)
 COPY server/src ./server/src
-COPY server/static ./server/static
 COPY rules/src ./rules/src
 COPY migrations ./migrations
 COPY .sqlx ./.sqlx

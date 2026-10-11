@@ -54,6 +54,7 @@ impl JobConfig {
             heartbeat_interval: Duration::from_secs(self.heartbeat_interval_secs),
             reclaim_window: Duration::from_secs(self.reclaim_window_secs),
             shutdown_drain_timeout: job_drain,
+            idle_poll_gate: None,
         }
     }
 }
