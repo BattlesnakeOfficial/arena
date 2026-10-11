@@ -695,8 +695,9 @@ mod tests {
     #[sqlx::test(migrations = "../migrations")]
     async fn code_admin_guard_creation_and_disable(db: PgPool) {
         let state = AppState::test_from_pool(db.clone());
-        let app =
-            crate::routes::routes(state.clone()).layer(tower_cookies::CookieManagerLayer::new());
+        let app = crate::routes::routes(state.clone())
+            .expect("asset router")
+            .layer(tower_cookies::CookieManagerLayer::new());
         let admin_session = create_user_session(&db, 164571, true).await;
         let admin = session_user_id(&db, admin_session).await;
         let admin_cookie = signed_session_cookie(&state, admin_session);

@@ -17,8 +17,7 @@ export const TEMPLATES = [
 /** The guides alone, per kind, for other apps. */
 export const GUIDE_PNGS = ['battlesnake-head-guide.png', 'battlesnake-tail-guide.png'];
 
-// What /static serves each kind of file as. PSDs have no registered type in the
-// server's table, and octet-stream is what makes Safari save one to Files.
+// PSDs use octet-stream, which makes Safari save one to Files.
 const CONTENT_TYPES: Record<string, RegExp> = {
   psd: /^(application\/octet-stream|image\/vnd\.adobe\.photoshop)$/,
   svg: /^image\/svg\+xml\b/,
@@ -27,7 +26,7 @@ const CONTENT_TYPES: Record<string, RegExp> = {
 
 /**
  * Every design-kit link inside `scope` has a `download` attribute naming its file, points
- * at a versioned /static/design-kit/ URL, and serves the committed file byte for byte.
+ * at a hashed /assets/design-kit/ URL, and serves the committed file byte for byte.
  * Together the links offer exactly `files`, once each.
  */
 export async function expectKitDownloads(request: APIRequestContext, scope: Locator, files: string[]) {
@@ -42,9 +41,10 @@ export async function expectKitDownloads(request: APIRequestContext, scope: Loca
   for (const link of links) {
     const file = link.download as string;
     const url = new URL(link.href, 'http://localhost');
-    expect(url.pathname, link.name).toBe(`/static/design-kit/${file}`);
-    // /static is cached for a year: every link carries the content version.
-    expect(url.search, `${link.name} is versioned`).toMatch(/^\?v=[0-9a-f]{16}$/);
+    const assetPath = url.pathname.match(/^\/assets\/design-kit\/([a-z0-9-]+)\.([0-9a-f]{8})\.(psd|svg|png)$/);
+    expect(assetPath, link.name).not.toBeNull();
+    expect(`${assetPath?.[1]}.${assetPath?.[3]}`, link.name).toBe(file);
+    expect(url.search, `${link.name} has no query string`).toBe('');
 
     const response = await request.get(link.href);
     expect(response.status(), link.href).toBe(200);

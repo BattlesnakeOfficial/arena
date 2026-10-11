@@ -1324,7 +1324,7 @@ pub async fn show_tournament(
                                                                 form action={"/tournaments/"(t.tournament_id)"/unregister"} method="post" {
                                                                     input type="hidden" name="registration_id" value=(reg.registration_id);
                                                                     button type="submit" class="btn sm danger"
-                                                                        onclick="return confirm('Remove this snake from the tournament?');" { "Unregister" }
+                                                                        data-confirm="Remove this snake from the tournament?" { "Unregister" }
                                                                 }
                                                             }
                                                         }
@@ -1361,7 +1361,7 @@ pub async fn show_tournament(
                                     }
                                     form action={"/tournaments/"(t.tournament_id)"/reset"} method="post" {
                                         button type="submit" class="btn sm"
-                                            onclick="return confirm('Reset this tournament? The bracket and all match results will be deleted. Registrations are kept. Any games still running will finish on their own but won\'t count.');" { "Reset Tournament" }
+                                            data-confirm="Reset this tournament? The bracket and all match results will be deleted. Registrations are kept. Any games still running will finish on their own but won't count." { "Reset Tournament" }
                                     }
                                 }
                                 @if can_edit_registrations {
@@ -1371,7 +1371,7 @@ pub async fn show_tournament(
                                     form action={"/tournaments/"(t.tournament_id)"/status"} method="post" {
                                         input type="hidden" name="action" value="cancel";
                                         button type="submit" class="btn sm danger"
-                                            onclick="return confirm('Are you sure you want to cancel this tournament?');" { "Cancel Tournament" }
+                                            data-confirm="Are you sure you want to cancel this tournament?" { "Cancel Tournament" }
                                     }
                                 }
                             }

@@ -2,7 +2,7 @@
 //! drawing of a Battlesnake head or tail and previews it on a real board.
 //!
 //! - [`page`]: `GET /customizations/studio`, the page (server-rendered boards; the
-//!   client is `static/studio.js`).
+//!   client is `frontend/src/studio.ts`).
 //! - [`guide`]: `GET /customizations/studio/guide`, how to draw a head or tail, with the
 //!   templates to download (`static/design-kit/`, from `scripts/design-kit/`).
 //! - [`process`]: `POST /customizations/studio/process`, the guarded processing

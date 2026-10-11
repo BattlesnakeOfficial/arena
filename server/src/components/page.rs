@@ -1,14 +1,51 @@
 use maud::{DOCTYPE, Markup, PreEscaped, Render, html};
 
 use crate::{
-    components::avatar::user_avatar, config::LOCAL_BASE_URL, models::user::User,
-    routes::og::DEFAULT_CARD_PATH, static_assets::asset_url,
+    arena_assets::asset_url, components::avatar::user_avatar, config::LOCAL_BASE_URL,
+    models::user::User, routes::og::DEFAULT_CARD_PATH,
 };
 
-/// Resolves the two theme axes before first paint so there is no flash of
-/// the wrong theme. Mirrors the logic in /static/theme.js: html data
-/// attributes (logged-in account setting) win over localStorage (anonymous).
-const THEME_BOOTSTRAP_JS: &str = r#"(function(){var d=document.documentElement;function p(a,f){return d.getAttribute("data-bs-"+a)||localStorage.getItem("bs-"+a)||f}var site=p("site","system");var th=p("theater","dark");var sys=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";var s=site==="system"?sys:site;d.setAttribute("data-app-theme",d.hasAttribute("data-theater-page")?(th==="match"?s:th):s);})();"#;
+/// Render a compiled IIFE at its required synchronous position.
+///
+/// Panics like `asset_url` if the compile-time manifest is missing the entry or
+/// contains invalid UTF-8; either case is a build/registration error.
+pub(crate) fn inline_bundle(logical_name: &str) -> Markup {
+    let Some(asset) = crate::arena_assets::MANIFEST
+        .entries
+        .iter()
+        .find(|asset| asset.logical_name == logical_name)
+    else {
+        panic!("missing compiled inline bundle: {logical_name}");
+    };
+    let Ok(markup) = inline_source(asset.bytes) else {
+        panic!("compiled inline bundle is not UTF-8: {logical_name}");
+    };
+    markup
+}
+
+fn inline_source(bytes: &[u8]) -> Result<Markup, std::str::Utf8Error> {
+    let source = std::str::from_utf8(bytes)?;
+    let source = source.trim_end();
+    let source = source
+        .rsplit_once('\n')
+        .map_or(source, |(body, last_line)| {
+            let relative_map =
+                last_line
+                    .strip_prefix("//# sourceMappingURL=")
+                    .is_some_and(|path| {
+                        !path.is_empty()
+                            && !path.starts_with('/')
+                            && !path.starts_with("http:")
+                            && !path.starts_with("https:")
+                    });
+            if relative_map {
+                body.trim_end()
+            } else {
+                source
+            }
+        });
+    Ok(PreEscaped(source.to_owned()))
+}
 
 /// Site-wide fallback for social embeds (OpenGraph/Twitter) when a page
 /// doesn't set its own description. Also the default social card's tagline.
@@ -313,8 +350,9 @@ impl Render for Page {
                     link href=(GOOGLE_FONTS_HREF) rel="stylesheet";
                     link rel="stylesheet" href=(asset_url("arena.css"));
                     link rel="icon" href=(asset_url("favicon.svg")) type="image/svg+xml";
-                    script { (PreEscaped(THEME_BOOTSTRAP_JS)) }
+                    script { (inline_bundle("theme-bootstrap.js")) }
                     script src=(asset_url("viewTransition.js")) {}
+                    script src=(asset_url("ui-actions.js")) {}
                     script src=(asset_url("theme.js")) defer {}
                     @if self.user.is_some() { script src=(asset_url("notifications.js")) defer {} }
                 }
@@ -372,6 +410,48 @@ mod tests {
             Box::new(html! { p { "content" } }),
             None,
         )
+    }
+
+    #[test]
+    fn compiled_inline_scripts_keep_order_and_raw_javascript() {
+        let html = test_page().render().into_string();
+        let bootstrap = html.find("<script>").expect("bootstrap");
+        let transition = html
+            .find(&crate::arena_assets::asset_url("viewTransition.js"))
+            .expect("transition");
+        let actions = html
+            .find(&crate::arena_assets::asset_url("ui-actions.js"))
+            .expect("actions");
+        let theme = html
+            .find(&crate::arena_assets::asset_url("theme.js"))
+            .expect("theme");
+        assert!(bootstrap < transition && transition < actions && actions < theme);
+        let body = html[bootstrap..]
+            .split_once("</script>")
+            .expect("inline script")
+            .0;
+        assert!(!body.contains("sourceMappingURL="));
+        assert!(!body.contains("&amp;&amp;"));
+        assert!(!body.contains("&lt;"));
+        assert_eq!(
+            inline_source(b"a&&b<c\n//# sourceMappingURL=relative.js.map\n")
+                .expect("UTF-8")
+                .into_string(),
+            "a&&b<c"
+        );
+        assert_eq!(
+            inline_source(b"a&&b<c\n//# sourceMappingURL=/assets/map.js.map")
+                .expect("UTF-8")
+                .into_string(),
+            "a&&b<c\n//# sourceMappingURL=/assets/map.js.map"
+        );
+        assert!(inline_source(&[0xff]).is_err());
+    }
+
+    #[test]
+    #[should_panic(expected = "missing compiled inline bundle")]
+    fn missing_inline_bundle_fails_explicitly() {
+        inline_bundle("absent.js");
     }
 
     #[test]

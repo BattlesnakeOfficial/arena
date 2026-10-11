@@ -8,20 +8,21 @@
 // - reveals a Copy button that puts the JSON on the clipboard.
 (function () {
   "use strict";
-  const form = document.getElementById("move-request-form");
+  const form = document.getElementById("move-request-form") as HTMLFormElement | null;
   if (!form) return;
-  const turnInput = document.getElementById("move-request-turn");
-  const error = document.getElementById("move-request-error");
-  const copyButton = document.getElementById("move-request-copy");
-  const downloadButton = form.querySelector("button[type=submit]");
+  const turnInput = document.getElementById("move-request-turn") as HTMLInputElement;
+  const error = document.getElementById("move-request-error") as HTMLElement;
+  const copyButton = document.getElementById("move-request-copy") as HTMLButtonElement;
+  const downloadButton = form.querySelector<HTMLButtonElement>("button[type=submit]")!;
 
   // The board posts {event: "TURN", data: {turn}} on every playback change.
   window.addEventListener("message", (e) => {
     if (e.origin !== "https://board.battlesnake.com") return;
-    if (e.data && e.data.event === "TURN") turnInput.value = e.data.data.turn;
+    if (e.source !== document.querySelector<HTMLIFrameElement>("#board-viewer")?.contentWindow) return;
+    if (e.data && e.data.event === "TURN") turnInput.value = String(e.data.data.turn);
   });
 
-  function showError(message) {
+  function showError(message: string): void {
     error.textContent = message;
     error.hidden = false;
   }
@@ -30,7 +31,7 @@
   // plain-text reason, or a network message.
   async function fetchRequest() {
     error.hidden = true;
-    const url = form.action + "?" + new URLSearchParams(new FormData(form));
+    const url = form!.action + "?" + new URLSearchParams(Array.from(new FormData(form!).entries()).map(([key, value]) => [key, String(value)]));
     let res;
     try {
       res = await fetch(url);
@@ -43,7 +44,7 @@
     return { body, filename: name ? name[1] : "move-request.json" };
   }
 
-  async function whileBusy(button, work) {
+  async function whileBusy(button: HTMLButtonElement, work: Promise<unknown>): Promise<void> {
     button.disabled = true;
     try {
       await work;
@@ -52,7 +53,7 @@
     }
   }
 
-  function download(body, filename) {
+  function download(body: string, filename: string): void {
     const a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob([body], { type: "application/json" }));
     a.download = filename;
@@ -73,10 +74,10 @@
   copyButton.hidden = false;
   copyButton.addEventListener("click", () => {
     if (!form.reportValidity()) return;
-    let fetchError = null;
+    let fetchError: Error | null = null;
     const text = fetchRequest().then(
       (r) => r.body,
-      (err) => {
+      (err: Error) => {
         fetchError = err;
         throw err;
       },
@@ -93,7 +94,7 @@
         copyButton.textContent = "Copied!";
         setTimeout(() => { copyButton.textContent = "Copy"; }, 1500);
       },
-      () => showError(fetchError ? fetchError.message : "Couldn't copy to the clipboard. Try Download."),
+      () => showError(fetchError ? (fetchError as Error).message : "Couldn't copy to the clipboard. Try Download."),
     );
   });
 })();

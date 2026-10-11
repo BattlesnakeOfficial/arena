@@ -52,6 +52,7 @@ impl Fixture {
             builder = builder.header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
         }
         crate::routes::routes(self.state.clone())
+            .expect("asset router")
             .layer(tower_cookies::CookieManagerLayer::new())
             .oneshot(builder.body(Body::from(body.to_string())).unwrap())
             .await

@@ -593,8 +593,9 @@ mod tests {
     #[sqlx::test(migrations = "../migrations")]
     async fn legacy_only_owner_sees_source_note_and_unlock_form(db: sqlx::PgPool) {
         let state = AppState::test_from_pool(db.clone());
-        let app =
-            crate::routes::routes(state.clone()).layer(tower_cookies::CookieManagerLayer::new());
+        let app = crate::routes::routes(state.clone())
+            .expect("asset router")
+            .layer(tower_cookies::CookieManagerLayer::new());
         let guest = html(request(&app, Method::GET, None, "").await).await;
         assert!(!guest.contains("tokens from your play points"));
         let session = create_user_session(&db, 164699, false).await;
@@ -640,8 +641,9 @@ mod tests {
         use crate::models::customization_unlock_code::{CreateCode, create};
         use sha2::Digest as _;
         let state = AppState::test_from_pool(db.clone());
-        let app =
-            crate::routes::routes(state.clone()).layer(tower_cookies::CookieManagerLayer::new());
+        let app = crate::routes::routes(state.clone())
+            .expect("asset router")
+            .layer(tower_cookies::CookieManagerLayer::new());
         let guest = html(request_at(&app, Method::GET, "/customizations", None, "").await).await;
         assert!(!guest.contains("action=\"/customizations/redeem\""));
         assert!(!guest.contains("head: hydra"));
@@ -868,8 +870,9 @@ mod tests {
     #[sqlx::test(migrations = "../migrations")]
     async fn guest_zero_balance_and_unlock_form(db: sqlx::PgPool) {
         let state = AppState::test_from_pool(db.clone());
-        let app =
-            crate::routes::routes(state.clone()).layer(tower_cookies::CookieManagerLayer::new());
+        let app = crate::routes::routes(state.clone())
+            .expect("asset router")
+            .layer(tower_cookies::CookieManagerLayer::new());
         let guest = html(request(&app, Method::GET, None, "").await).await;
         assert!(guest.contains("sign in"));
         assert!(!guest.contains("action=\"/customizations/unlock\""));

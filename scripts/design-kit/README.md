@@ -124,9 +124,10 @@ number. Change all three together.
 
 ## Why the outputs are committed
 
-- `server/static/` is compiled into the server binary (`include_dir!`) and
-  served with a content hash. The Rust build, CI and the Docker image therefore
-  need the files to exist, and none of them should need Python or cairo.
+- `server/static/` is compiled into the server binary by `cja-build` and
+  served through `cja::assets` with a content hash. The Rust build, CI and the
+  Docker image therefore need the files to exist, and none of them should need
+  Python or cairo.
 - The contract tests read the committed SVGs, PSDs and guide PNGs.
 - Templates change rarely. A reviewer sees exactly which bytes users will
   download.

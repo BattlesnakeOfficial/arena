@@ -827,6 +827,7 @@ mod tests {
 
     async fn get(state: &AppState, uri: &str) -> Reply {
         let response = crate::routes::routes(state.clone())
+            .expect("asset router")
             .layer(tower_cookies::CookieManagerLayer::new())
             .oneshot(Request::get(uri).body(Body::empty()).unwrap())
             .await
@@ -1201,6 +1202,7 @@ mod tests {
             signed_session_cookie(&state, session_id)
         );
         let response = crate::routes::routes(state.clone())
+            .expect("asset router")
             .layer(tower_cookies::CookieManagerLayer::new())
             .oneshot(
                 Request::get(format!("/tournaments/{}", w.tournament_id))
