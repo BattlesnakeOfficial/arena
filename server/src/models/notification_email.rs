@@ -61,7 +61,7 @@ async fn lock_user(
     tx: &mut Transaction<'_, Postgres>,
     user_id: Uuid,
 ) -> cja::Result<(Option<String>, Option<Uuid>)> {
-    let row = sqlx::query!("SELECT notification_email, pending_notification_email_request_id FROM users WHERE user_id = $1 FOR UPDATE", user_id).fetch_one(&mut **tx).await?;
+    let row = sqlx::query!("SELECT notification_email, pending_notification_email_request_id FROM users WHERE user_id = $1 FOR NO KEY UPDATE", user_id).fetch_one(&mut **tx).await?;
     Ok((
         row.notification_email,
         row.pending_notification_email_request_id,
@@ -224,11 +224,29 @@ mod tests {
     async fn wait_for_user_lock_waiters(pool: &PgPool, expected: i64) -> cja::Result<()> {
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                let count = sqlx::query_scalar!("SELECT COUNT(*) AS \"count!\" FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%FROM users WHERE user_id = $1 FOR UPDATE%'").fetch_one(pool).await?;
+                let count = sqlx::query_scalar!("SELECT COUNT(*) AS \"count!\" FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%FROM users WHERE user_id = $1 FOR NO KEY UPDATE%'").fetch_one(pool).await?;
                 if count >= expected { return Ok::<_, color_eyre::Report>(()); }
                 tokio::task::yield_now().await;
             }
         }).await??;
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn user_lock_allows_foreign_key_inserts(pool: PgPool) -> cja::Result<()> {
+        let id = user(&pool, 1674008).await?;
+        let mut holder = pool.begin().await?;
+        lock_user(&mut holder, id).await?;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            sqlx::query!(
+                "INSERT INTO customization_active_weeks (user_id, week_start) VALUES ($1, date_trunc('week', now())::date)",
+                id
+            )
+            .execute(&pool)
+            .await
+        })
+        .await??;
+        holder.commit().await?;
         Ok(())
     }
 

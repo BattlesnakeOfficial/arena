@@ -43,9 +43,27 @@ fn request_status(result: &ConfirmationRequestResult) -> StatusCode {
     }
 }
 
+fn notification_email_error_page(
+    page_factory: PageFactory,
+    status: StatusCode,
+    copy: &'static str,
+) -> axum::response::Response {
+    (
+        status,
+        page_factory.create_page("Notification email".into(), Box::new(html! {
+            div class="form-page" style="font-size: 16px; max-width: 375px; overflow-wrap: anywhere" {
+                p { (copy) }
+                a href="/me" class="btn" style="min-height: 44px; font-size: 16px" { "Back to profile" }
+            }
+        })),
+    )
+        .into_response()
+}
+
 pub async fn save_notification_email(
     State(state): State<AppState>,
     CurrentUser(user): CurrentUser,
+    page_factory: PageFactory,
     Form(form): Form<NotificationEmailForm>,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
     let email = form.email.trim();
@@ -54,7 +72,11 @@ pub async fn save_notification_email(
         .bytes()
         .any(|byte| byte == b'\r' || byte == b'\n')
     {
-        return Ok(StatusCode::UNPROCESSABLE_ENTITY.into_response());
+        return Ok(notification_email_error_page(
+            page_factory,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "Enter a valid email address.",
+        ));
     }
     let mut tx = state.db.begin().await?;
     if email.is_empty() {
@@ -63,7 +85,11 @@ pub async fn save_notification_email(
         return Ok(Redirect::to("/me").into_response());
     }
     if !valid_mailbox(email) {
-        return Ok(StatusCode::UNPROCESSABLE_ENTITY.into_response());
+        return Ok(notification_email_error_page(
+            page_factory,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "Enter a valid email address.",
+        ));
     }
     let result = notification_email::request_confirmation(&mut tx, user.user_id, email).await?;
     let status = request_status(&result);
@@ -74,13 +100,18 @@ pub async fn save_notification_email(
     if status == StatusCode::SEE_OTHER {
         Ok(Redirect::to("/me").into_response())
     } else {
-        Ok(status.into_response())
+        Ok(notification_email_error_page(
+            page_factory,
+            status,
+            "You've requested 5 confirmation emails in the last 24 hours. Try again tomorrow.",
+        ))
     }
 }
 
 pub async fn resend_notification_email(
     State(state): State<AppState>,
     CurrentUser(user): CurrentUser,
+    page_factory: PageFactory,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
     let mut tx = state.db.begin().await?;
     let result = notification_email::resend(&mut tx, user.user_id).await?;
@@ -92,7 +123,12 @@ pub async fn resend_notification_email(
     if status == StatusCode::SEE_OTHER {
         Ok(Redirect::to("/me").into_response())
     } else {
-        Ok(status.into_response())
+        let copy = if status == StatusCode::TOO_MANY_REQUESTS {
+            "You've requested 5 confirmation emails in the last 24 hours. Try again tomorrow."
+        } else {
+            "There's no pending email to resend."
+        };
+        Ok(notification_email_error_page(page_factory, status, copy))
     }
 }
 
@@ -455,6 +491,18 @@ mod tests {
             .expect("route")
     }
 
+    async fn assert_notification_email_error(
+        response: axum::response::Response,
+        status: StatusCode,
+        copy: &str,
+    ) -> cja::Result<()> {
+        assert_eq!(response.status(), status);
+        let html = String::from_utf8(to_bytes(response.into_body(), usize::MAX).await?.to_vec())?;
+        assert!(html.contains(copy), "missing copy: {copy}");
+        assert!(html.contains("href=\"/me\""));
+        Ok(())
+    }
+
     #[sqlx::test(migrations = "../migrations")]
     async fn notification_email_routes_require_auth_and_expose_pending_state(
         pool: PgPool,
@@ -503,23 +551,37 @@ mod tests {
         let html = String::from_utf8(to_bytes(response.into_body(), usize::MAX).await?.to_vec())?;
         assert!(html.contains("name=\"token\""));
         assert!(html.contains("value=\"secret\""));
+        assert_notification_email_error(
+            request(
+                &app,
+                Some(&cookie),
+                Method::POST,
+                "/settings/notification-email/resend",
+                "",
+            )
+            .await,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "There's no pending email to resend.",
+        )
+        .await?;
         for invalid in [
             "email=bad%0D%0A%40example.com",
             "email=bad%40example.com%2Cother%40example.com",
             "email=no-address",
         ] {
-            assert_eq!(
+            assert_notification_email_error(
                 request(
                     &app,
                     Some(&cookie),
                     Method::POST,
                     "/settings/notification-email",
-                    invalid
+                    invalid,
                 )
-                .await
-                .status(),
-                StatusCode::UNPROCESSABLE_ENTITY
-            );
+                .await,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "Enter a valid email address.",
+            )
+            .await?;
         }
         assert_eq!(
             request(
@@ -539,6 +601,10 @@ mod tests {
         )
         .fetch_one(&pool)
         .await?;
+        let response = request(&app, Some(&cookie), Method::GET, "/me", "").await;
+        let html = String::from_utf8(to_bytes(response.into_body(), usize::MAX).await?.to_vec())?;
+        assert!(html.contains("id=\"notification-email\""));
+        assert!(html.contains("value=\"one@example.com\""));
         assert_eq!(
             request(
                 &app,
@@ -558,6 +624,13 @@ mod tests {
         .fetch_one(&pool)
         .await?;
         assert_eq!(before, after);
+        assert_eq!(
+            crate::models::notification_email::settings(&pool, user_id)
+                .await?
+                .pending_email
+                .as_deref(),
+            Some("one@example.com")
+        );
         let response = request(&app, Some(&cookie), Method::GET, "/me", "").await;
         let html = String::from_utf8(to_bytes(response.into_body(), usize::MAX).await?.to_vec())?;
         assert!(html.contains("pending confirmation"));
@@ -613,6 +686,55 @@ mod tests {
                 Some(&cookie),
                 Method::POST,
                 "/settings/notification-email",
+                "email=replacement%40example.com"
+            )
+            .await
+            .status(),
+            StatusCode::SEE_OTHER
+        );
+        let response = request(&app, Some(&cookie), Method::GET, "/me", "").await;
+        let html = String::from_utf8(to_bytes(response.into_body(), usize::MAX).await?.to_vec())?;
+        assert!(html.contains("value=\"replacement@example.com\""));
+        let before = sqlx::query_scalar!(
+            "SELECT COUNT(*) AS \"count!\" FROM notification_email_requests WHERE user_id = $1",
+            user_id
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(
+            request(
+                &app,
+                Some(&cookie),
+                Method::POST,
+                "/settings/notification-email",
+                "email=replacement%40example.com"
+            )
+            .await
+            .status(),
+            StatusCode::SEE_OTHER
+        );
+        assert_eq!(
+            sqlx::query_scalar!(
+                "SELECT COUNT(*) AS \"count!\" FROM notification_email_requests WHERE user_id = $1",
+                user_id
+            )
+            .fetch_one(&pool)
+            .await?,
+            before
+        );
+        assert_eq!(
+            crate::models::notification_email::settings(&pool, user_id)
+                .await?
+                .pending_email
+                .as_deref(),
+            Some("replacement@example.com")
+        );
+        assert_eq!(
+            request(
+                &app,
+                Some(&cookie),
+                Method::POST,
+                "/settings/notification-email",
                 "email="
             )
             .await
@@ -640,7 +762,7 @@ mod tests {
             .status(),
             StatusCode::UNPROCESSABLE_ENTITY
         );
-        for address in ["two", "three", "four"] {
+        for address in ["three", "four"] {
             assert_eq!(
                 request(
                     &app,
@@ -661,30 +783,32 @@ mod tests {
         .fetch_one(&pool)
         .await?;
         assert_eq!(before, 5);
-        assert_eq!(
+        assert_notification_email_error(
             request(
                 &app,
                 Some(&cookie),
                 Method::POST,
                 "/settings/notification-email",
-                "email=sixth%40example.com"
+                "email=sixth%40example.com",
             )
-            .await
-            .status(),
-            StatusCode::TOO_MANY_REQUESTS
-        );
-        assert_eq!(
+            .await,
+            StatusCode::TOO_MANY_REQUESTS,
+            "You've requested 5 confirmation emails in the last 24 hours. Try again tomorrow.",
+        )
+        .await?;
+        assert_notification_email_error(
             request(
                 &app,
                 Some(&cookie),
                 Method::POST,
                 "/settings/notification-email/resend",
-                ""
+                "",
             )
-            .await
-            .status(),
-            StatusCode::TOO_MANY_REQUESTS
-        );
+            .await,
+            StatusCode::TOO_MANY_REQUESTS,
+            "You've requested 5 confirmation emails in the last 24 hours. Try again tomorrow.",
+        )
+        .await?;
         assert_eq!(
             sqlx::query_scalar!(
                 "SELECT COUNT(*) AS \"count!\" FROM notification_email_requests WHERE user_id = $1",

@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO customization_active_weeks (user_id, week_start) VALUES ($1, date_trunc('week', now())::date)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "71cf789402adf3f88b0a538834a625e192a74a57840eed856cbd8b9b5cc6bc97"
+}

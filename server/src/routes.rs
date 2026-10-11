@@ -948,7 +948,7 @@ async fn profile_page(
                     div style="flex: 1 1 240px; min-width: 0" {
                         label for="notification-email" style="display: block; font-size: 16px" { "Notification email" }
                         input type="email" id="notification-email" name="email" autocomplete="email" maxlength="254"
-                            value=(email_settings.confirmed_email.as_deref().unwrap_or(""))
+                            value=(email_settings.pending_email.as_deref().or(email_settings.confirmed_email.as_deref()).unwrap_or(""))
                             style="box-sizing: border-box; min-height: 44px; width: 100%; min-width: 0; font-size: 16px";
                     }
                     button type="submit" class="btn solid" style="min-height: 44px; font-size: 16px" { "Save" }

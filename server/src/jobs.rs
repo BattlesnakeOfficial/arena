@@ -73,7 +73,7 @@ impl Job<AppState> for SendNotificationEmailJob {
             } else if kind == NotificationKind::NotificationEmailConfirmation {
                 if let Some(request_id) = email.notification_email_request_id {
                     // Hold the user lock through Mailgun so only the current request can send.
-                    let pending_id = sqlx::query_scalar!("SELECT pending_notification_email_request_id FROM users WHERE user_id = $1 FOR UPDATE", event.user_id).fetch_optional(&mut *tx).await?.flatten();
+                    let pending_id = sqlx::query_scalar!("SELECT pending_notification_email_request_id FROM users WHERE user_id = $1 FOR NO KEY UPDATE", event.user_id).fetch_optional(&mut *tx).await?.flatten();
                     if pending_id == Some(request_id) {
                         let request = sqlx::query!("SELECT email, sent_at FROM notification_email_requests WHERE request_id = $1 AND user_id = $2 FOR UPDATE", request_id, event.user_id).fetch_optional(&mut *tx).await?;
                         if let Some(request) = request.filter(|request| {
