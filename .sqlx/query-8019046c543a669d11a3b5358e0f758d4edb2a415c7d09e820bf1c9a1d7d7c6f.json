@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT COUNT(*) as \"count!\"\n         FROM email_log\n         WHERE lower(recipient) = lower($1)\n           AND sent_at > NOW() - INTERVAL '1 hour'\n           AND (purpose = 'admin_test') = ($2::text = 'admin_test')",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "8019046c543a669d11a3b5358e0f758d4edb2a415c7d09e820bf1c9a1d7d7c6f"
+}

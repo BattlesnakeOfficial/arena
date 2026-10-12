@@ -1,0 +1,62 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n            (SELECT COUNT(*) FROM users) AS \"users!\",\n            (SELECT COUNT(*) FROM games) AS \"games!\",\n            (SELECT COUNT(*) FROM customization_grants) AS \"grants!\",\n            (SELECT COUNT(*) FROM notifications) AS \"notifications!\",\n            (SELECT COUNT(*) FROM notification_emails) AS \"emails!\",\n            (SELECT COUNT(*) FROM notification_email_requests) AS \"requests!\",\n            (SELECT COUNT(*) FROM claim_email_tokens) AS \"tokens!\",\n            (SELECT COUNT(*) FROM jobs) AS \"jobs!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "users!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "games!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "grants!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "notifications!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 4,
+        "name": "emails!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 5,
+        "name": "requests!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 6,
+        "name": "tokens!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 7,
+        "name": "jobs!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "970c5782c66af64afe2bc54379ec72cd0bfa141655ccd114faa9cc03ca33b132"
+}

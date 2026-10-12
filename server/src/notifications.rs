@@ -34,23 +34,28 @@ impl NotificationChannel {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NotificationKind {
+macro_rules! notification_kinds {
+    ($($kind:ident),+ $(,)?) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum NotificationKind { $($kind),+ }
+
+        impl NotificationKind {
+            pub const ALL: [Self; notification_kinds!(@count $($kind),+)] = [$(Self::$kind),+];
+        }
+    };
+    (@count $($kind:ident),+) => { <[()]>::len(&[$(notification_kinds!(@unit $kind)),+]) };
+    (@unit $kind:ident) => { () };
+}
+
+notification_kinds!(
     SnakeMatchmakingPaused,
     SnakeMatchmakingResumed,
     PlayAccountClaimed,
     ClaimVerification,
     NotificationEmailConfirmation,
-}
+);
 
 impl NotificationKind {
-    pub const ALL: [Self; 5] = [
-        Self::SnakeMatchmakingPaused,
-        Self::SnakeMatchmakingResumed,
-        Self::PlayAccountClaimed,
-        Self::ClaimVerification,
-        Self::NotificationEmailConfirmation,
-    ];
     pub fn key(self) -> &'static str {
         match self {
             Self::SnakeMatchmakingPaused => "snake_matchmaking_paused",

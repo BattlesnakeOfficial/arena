@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "CREATE FUNCTION reject_admin_test_commit() RETURNS trigger LANGUAGE plpgsql AS $$\n            BEGIN RAISE EXCEPTION 'commit blocked'; END; $$",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "766b0a5c5bbed1afc9b927e8f0d8f8372769be92615ef4f28300de68a93f8261"
+}
