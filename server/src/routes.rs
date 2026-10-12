@@ -179,6 +179,10 @@ pub fn routes(app_state: AppState) -> cja::Result<axum::Router> {
         .route("/auth/cli-token", get(github_auth::cli_token_page))
         // Battlesnake routes
         .route("/customizations", get(customizations::list_customizations))
+        .route(
+            "/customizations/achievements",
+            get(customizations::achievements_page),
+        )
         .route("/customizations/redeem", post(customizations::redeem_code))
         .route(
             "/customizations/unlock",

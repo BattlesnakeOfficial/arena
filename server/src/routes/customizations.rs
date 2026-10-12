@@ -13,6 +13,7 @@ use crate::{
     components::{page::Page, page_factory::PageFactory},
     customizations::{
         self, Availability, CustomizationDef, Group, Head, Tail, UnlockOutcome, achievements,
+        achievements::Achievement,
     },
     errors::{ServerResult, WithStatus},
     flasher::Flasher,
@@ -24,6 +25,94 @@ use crate::{
     state::AppState,
 };
 
+fn item_unlocked(
+    def: &CustomizationDef,
+    kind: &str,
+    slug: &str,
+    granted: &HashSet<(String, String)>,
+) -> bool {
+    def.is_free() || granted.contains(&(kind.to_string(), slug.to_string()))
+}
+
+fn customization_tabs(achievements_active: bool) -> Markup {
+    html! {
+        nav class="modes cz-modes" aria-label="Customizations" {
+            a class=(if achievements_active { "mode" } else { "mode on" })
+                href="/customizations" aria-current=[(!achievements_active).then_some("page")] { "Catalog" }
+            a class=(if achievements_active { "mode on" } else { "mode" })
+                href="/customizations/achievements" aria-current=[achievements_active.then_some("page")] { "Achievements" }
+        }
+    }
+}
+
+fn guest_sign_in_note() -> Markup {
+    html! {
+        p class="cz-note" {
+            "Browsing as a guest — "
+            a href="/auth/github" { "sign in" }
+            " to see which cosmetics your account has unlocked."
+        }
+    }
+}
+
+fn root_endpoint_note() -> Markup {
+    html! { "snake declares its customizations from its root endpoint" }
+}
+
+fn ladder_reward(kind: &str, slug: &str, image_url: &str, def: &CustomizationDef) -> Markup {
+    html! {
+        div class="cz-step-reward" {
+            div class="cz-swatch" { img src=(image_url) alt=(def.display_name) loading="lazy"; }
+            div class="cz-step-reward-copy" {
+                span class="cz-step-reward-name" { (def.display_name) }
+                code { (kind) ": " (slug) }
+            }
+        }
+    }
+}
+
+fn achievement_unlocked(achievement: Achievement, granted: &HashSet<(String, String)>) -> bool {
+    let def = achievement.def();
+    item_unlocked(&def.head.def(), Head::KIND, def.head.slug(), granted)
+        && def
+            .tail
+            .is_none_or(|tail| item_unlocked(&tail.def(), Tail::KIND, tail.slug(), granted))
+}
+
+fn ladder_step(
+    achievement: Achievement,
+    index: usize,
+    granted: &HashSet<(String, String)>,
+    next_up: bool,
+) -> Markup {
+    let def = achievement.def();
+    let unlocked = achievement_unlocked(achievement, granted);
+    html! {
+        li class=(if next_up { "cz-step next-up" } else { "cz-step" }) {
+            div class="cz-step-marker" {
+                span class="sr-only" { "Step " (index + 1) }
+                span aria-hidden="true" { @if unlocked { "✓" } @else { (index + 1) } }
+            }
+            div class="cz-step-card" {
+                div class="cz-step-heading" {
+                    h3 { (def.name) }
+                    span class=(if unlocked { "cz-step-state badge ok" } else { "cz-step-state badge" }) {
+                        @if unlocked { "Unlocked" } @else { "Locked" }
+                    }
+                }
+                @if next_up { span class="cz-next-up" { "Next up" } }
+                p class="cz-step-description" { (def.description) }
+                div class="cz-step-rewards" {
+                    (ladder_reward(Head::KIND, def.head.slug(), &def.head.image_url(), &def.head.def()))
+                    @if let Some(tail) = def.tail {
+                        (ladder_reward(Tail::KIND, tail.slug(), &tail.image_url(), &tail.def()))
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn catalog_item(
     kind: &str,
     slug: &str,
@@ -33,7 +122,7 @@ fn catalog_item(
     signed_in: bool,
     balance: i64,
 ) -> Markup {
-    let unlocked = def.is_free() || granted.contains(&(kind.to_string(), slug.to_string()));
+    let unlocked = item_unlocked(def, kind, slug, granted);
     let achievement = achievements::for_item(kind, slug);
 
     html! {
@@ -73,6 +162,45 @@ pub async fn list_customizations(
     Ok(render_customizations_page(&state, user.as_ref(), page_factory, None).await?)
 }
 
+/// GET /customizations/achievements — browse the Getting Started ladder.
+pub async fn achievements_page(
+    State(state): State<AppState>,
+    OptionalUser(user): OptionalUser,
+    page_factory: PageFactory,
+) -> ServerResult<impl IntoResponse, StatusCode> {
+    let granted = match &user {
+        Some(user) => customizations::get_granted_slugs(&state.db, user.user_id)
+            .await
+            .wrap_err("Failed to fetch customization grants")?,
+        None => HashSet::new(),
+    };
+    let next_up = user.as_ref().and_then(|_| {
+        Achievement::GETTING_STARTED
+            .iter()
+            .position(|achievement| !achievement_unlocked(*achievement, &granted))
+    });
+    Ok(page_factory.create_page(
+        "Achievements".to_string(),
+        Box::new(html! {
+            div class="page-head" { h1 { "Achievements" } }
+            (customization_tabs(true))
+            @if user.is_none() { (guest_sign_in_note()) }
+            section class="cz-ladder-section" {
+                h2 { "Getting Started" }
+                ol class="cz-ladder" {
+                    @for (index, achievement) in Achievement::GETTING_STARTED.into_iter().enumerate() {
+                        (ladder_step(achievement, index, &granted, next_up == Some(index)))
+                    }
+                }
+                div class="cz-ladder-foot" {
+                    p { "To wear these rewards, have your snake declare them from its root endpoint." }
+                    a class="cz-catalog-link" href="/customizations" { "Browse the full catalog" }
+                }
+            }
+        }),
+    ))
+}
+
 async fn render_customizations_page(
     state: &AppState,
     user: Option<&User>,
@@ -100,11 +228,11 @@ async fn render_customizations_page(
             div class="page-head" {
                 h1 { "Customizations" }
                 div class="sub" {
-                    "Heads and tails your snakes can wear. A snake declares its "
-                    "customizations from its root endpoint; locked customizations "
-                    "fall back to the default."
+                    "Heads and tails your snakes can wear. A " (root_endpoint_note())
+                    "; locked customizations fall back to the default."
                 }
             }
+            (customization_tabs(false))
 
             @if user.is_some() {
                 @if let Some(message) = redeem_error {
@@ -131,11 +259,7 @@ async fn render_customizations_page(
             }
 
             @if user.is_none() {
-                p class="cz-note" {
-                    "Browsing as a guest — "
-                    a href="/auth/github" { "sign in" }
-                    " to see which cosmetics your account has unlocked."
-                }
+                (guest_sign_in_note())
             }
 
             @for group in Group::ALL {
@@ -148,6 +272,9 @@ async fn render_customizations_page(
                                 h2 { (group.title()) }
                                 span class="cz-count" {
                                     (heads.len() + tails.len()) " items"
+                                }
+                                @if *group == Group::GettingStarted {
+                                    a class="cz-ladder-link" href="/customizations/achievements" { "See the achievement ladder" }
                                 }
                             }
                             @if !heads.is_empty() {
@@ -313,6 +440,173 @@ mod tests {
         .unwrap()
     }
 
+    fn ladder_steps(page: &str) -> Vec<&str> {
+        let ladder = page
+            .split("<ol class=\"cz-ladder\">")
+            .nth(1)
+            .expect("ladder")
+            .split("</ol>")
+            .next()
+            .expect("ladder end");
+        ladder
+            .split("<li class=\"cz-step")
+            .skip(1)
+            .map(|step| step.split("</li>").next().expect("step end"))
+            .collect()
+    }
+
+    fn main_content(page: &str) -> &str {
+        page.split_once("<main>")
+            .expect("main start")
+            .1
+            .split_once("</main>")
+            .expect("main end")
+            .0
+    }
+
+    fn assert_tabs(page: &str, active: &str) {
+        let nav = page
+            .split("<nav class=\"modes cz-modes\" aria-label=\"Customizations\">")
+            .nth(1)
+            .expect("customization tabs")
+            .split("</nav>")
+            .next()
+            .expect("tabs end");
+        assert_eq!(nav.matches("class=\"mode").count(), 2);
+        assert_eq!(nav.matches("aria-current=\"page\"").count(), 1);
+        assert!(nav.contains("href=\"/customizations\""));
+        assert!(nav.contains("href=\"/customizations/achievements\""));
+        assert!(nav.contains(active));
+        assert!(!nav.contains("/customizations/studio"));
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn guest_achievement_ladder_and_catalog_tabs(db: sqlx::PgPool) {
+        let app = crate::routes::routes(AppState::test_from_pool(db))
+            .expect("asset router")
+            .layer(tower_cookies::CookieManagerLayer::new());
+        let response =
+            request_at(&app, Method::GET, "/customizations/achievements", None, "").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let page = html(response).await;
+        assert!(page.contains("Getting Started"));
+        assert!(page.contains("href=\"/auth/github\""));
+        assert!(page.contains(
+            "To wear these rewards, have your snake declare them from its root endpoint."
+        ));
+        assert!(page.contains(
+            "class=\"cz-catalog-link\" href=\"/customizations\">Browse the full catalog</a>"
+        ));
+        assert!(!main_content(&page).contains("2024"));
+        assert_tabs(
+            &page,
+            "class=\"mode on\" href=\"/customizations/achievements\" aria-current=\"page\"",
+        );
+        assert!(page.contains("class=\"active\" href=\"/customizations\""));
+        let steps = ladder_steps(&page);
+        assert_eq!(steps.len(), 5);
+        let mut previous_name_offset = 0;
+        for (index, achievement) in Achievement::GETTING_STARTED.into_iter().enumerate() {
+            let offset = page
+                .find(&format!("<h3>{}</h3>", achievement.def().name))
+                .expect("achievement heading");
+            assert!(offset > previous_name_offset);
+            previous_name_offset = offset;
+            assert!(steps[index].contains(achievement.def().name));
+            assert!(steps[index].contains(achievement.def().description));
+            assert_eq!(steps[index].matches("cz-step-state badge").count(), 1);
+            assert!(steps[index].contains("Locked"));
+            assert!(!steps[index].contains("Unlocked"));
+            assert!(!steps[index].contains("Next up"));
+        }
+        for slug in [
+            "head: frog",
+            "head: monkey",
+            "tail: monkey",
+            "head: subway",
+            "tail: subway",
+            "head: turtle",
+            "tail: turtle",
+            "head: judge",
+            "tail: judge",
+        ] {
+            assert_eq!(steps.iter().filter(|step| step.contains(slug)).count(), 1);
+        }
+        let catalog = html(request_at(&app, Method::GET, "/customizations", None, "").await).await;
+        assert_tabs(
+            &catalog,
+            "class=\"mode on\" href=\"/customizations\" aria-current=\"page\"",
+        );
+        assert!(!main_content(&catalog).contains("2024"));
+        assert!(catalog.contains("See the achievement ladder"));
+        let group = catalog
+            .split("<section class=\"cz-group\">")
+            .find(|section| section.contains("<h2>Getting Started</h2>"))
+            .expect("Getting Started group")
+            .split("</section>")
+            .next()
+            .expect("group end");
+        assert_eq!(group.matches("class=\"cz-item").count(), 9);
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn achievement_ladder_uses_all_rewards_and_marks_next_step(db: sqlx::PgPool) {
+        let state = AppState::test_from_pool(db.clone());
+        let app = crate::routes::routes(state.clone())
+            .expect("asset router")
+            .layer(tower_cookies::CookieManagerLayer::new());
+        let frog_session = create_user_session(&db, 169201, false).await;
+        let frog_user = session_user_id(&db, frog_session).await;
+        let frog_cookie = signed_session_cookie(&state, frog_session);
+        sqlx::query!("INSERT INTO customization_grants (user_id, customization_type, slug, source) VALUES ($1, $2, $3, 'achievement') ON CONFLICT (user_id, customization_type, slug) DO NOTHING", frog_user, "head", "frog").execute(&db).await.unwrap();
+        let frog_page = html(
+            request_at(
+                &app,
+                Method::GET,
+                "/customizations/achievements",
+                Some(&frog_cookie),
+                "",
+            )
+            .await,
+        )
+        .await;
+        let steps = ladder_steps(&frog_page);
+        assert!(steps[0].contains("cz-step-state badge ok\">Unlocked"));
+        for step in &steps[1..] {
+            assert!(step.contains("cz-step-state badge\">Locked"));
+        }
+        assert!(steps[1].starts_with(" next-up\""));
+        assert!(steps[1].contains("class=\"cz-next-up\">Next up"));
+        assert_eq!(
+            steps.iter().filter(|step| step.contains("Next up")).count(),
+            1
+        );
+
+        let turtle_session = create_user_session(&db, 169202, false).await;
+        let turtle_user = session_user_id(&db, turtle_session).await;
+        let turtle_cookie = signed_session_cookie(&state, turtle_session);
+        for (kind, slug) in [("head", "turtle"), ("tail", "turtle")] {
+            sqlx::query!("INSERT INTO customization_grants (user_id, customization_type, slug, source) VALUES ($1, $2, $3, 'achievement') ON CONFLICT (user_id, customization_type, slug) DO NOTHING", turtle_user, kind, slug).execute(&db).await.unwrap();
+            let page = html(
+                request_at(
+                    &app,
+                    Method::GET,
+                    "/customizations/achievements",
+                    Some(&turtle_cookie),
+                    "",
+                )
+                .await,
+            )
+            .await;
+            let step = ladder_steps(&page)[3];
+            if kind == "head" {
+                assert!(step.contains("cz-step-state badge\">Locked"));
+            } else {
+                assert!(step.contains("cz-step-state badge ok\">Unlocked"));
+            }
+        }
+    }
+
     #[sqlx::test(migrations = "../migrations")]
     async fn legacy_only_owner_sees_source_note_and_unlock_form(db: sqlx::PgPool) {
         let state = AppState::test_from_pool(db.clone());
@@ -370,7 +664,7 @@ mod tests {
         let guest = html(request_at(&app, Method::GET, "/customizations", None, "").await).await;
         assert!(!guest.contains("action=\"/customizations/redeem\""));
         assert!(!guest.contains("head: hydra"));
-        assert!(guest.contains("2024 Achievement Collection"));
+        assert!(guest.contains("Getting Started"));
         assert_eq!(
             request_at(
                 &app,
@@ -508,7 +802,7 @@ mod tests {
             assert_eq!(response.status(), status);
             let body = html(response).await;
             assert!(body.contains(message));
-            assert!(body.contains("2024 Achievement Collection"));
+            assert!(body.contains("Getting Started"));
             assert!(body.contains("Token unlocks"));
             assert!(body.contains(achievements::Achievement::ALL[0].def().description));
             for word in message
@@ -557,12 +851,12 @@ mod tests {
         let mut owned = HashSet::new();
         for (kind, slug, url, def) in Head::ALL
             .iter()
-            .filter(|item| item.def().group == Group::Collection2024)
+            .filter(|item| item.def().group == Group::GettingStarted)
             .map(|item| (Head::KIND, item.slug(), item.image_url(), item.def()))
             .chain(
                 Tail::ALL
                     .iter()
-                    .filter(|item| item.def().group == Group::Collection2024)
+                    .filter(|item| item.def().group == Group::GettingStarted)
                     .map(|item| (Tail::KIND, item.slug(), item.image_url(), item.def())),
             )
         {
@@ -600,7 +894,7 @@ mod tests {
         assert!(guest.contains("sign in"));
         assert!(!guest.contains("action=\"/customizations/unlock\""));
         assert!(guest.contains("head: default"));
-        assert!(guest.contains("2024 Achievement Collection"));
+        assert!(guest.contains("Getting Started"));
         for achievement in achievements::Achievement::ALL {
             assert!(guest.contains(achievement.def().description));
         }

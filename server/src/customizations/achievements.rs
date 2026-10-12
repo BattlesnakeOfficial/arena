@@ -26,6 +26,14 @@ pub struct AchievementDef {
 }
 
 impl Achievement {
+    pub const GETTING_STARTED: [Self; 5] = [
+        Self::FirstWin,
+        Self::CrowdPleaser,
+        Self::ConstrictorChamp,
+        Self::SlowAndSteady,
+        Self::LadderRegular,
+    ];
+
     pub const ALL: [Self; 5] = [
         Self::FirstWin,
         Self::SlowAndSteady,
@@ -563,10 +571,10 @@ mod tests {
     }
 
     #[test]
-    fn every_2024_item_has_exactly_one_rule() {
+    fn every_getting_started_item_has_exactly_one_rule() {
         for head in Head::ALL
             .iter()
-            .filter(|head| head.def().group == super::super::Group::Collection2024)
+            .filter(|head| head.def().group == super::super::Group::GettingStarted)
         {
             assert_eq!(
                 Achievement::ALL
@@ -579,7 +587,7 @@ mod tests {
         }
         for tail in Tail::ALL
             .iter()
-            .filter(|tail| tail.def().group == super::super::Group::Collection2024)
+            .filter(|tail| tail.def().group == super::super::Group::GettingStarted)
         {
             assert_eq!(
                 Achievement::ALL
