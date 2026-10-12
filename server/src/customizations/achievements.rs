@@ -1322,12 +1322,39 @@ mod tests {
         let before = grants(&pool, owner).await;
         assert!(!has(&before, Head::KIND, "turtle"));
         assert!(!has(&before, Head::KIND, "judge"));
+        // The live evaluation above may notify the opponent. Reconciliation must
+        // add no notifications, email outbox rows, or send jobs for either owner.
+        let side_effects_before: (i64, i64, i64) = sqlx::query_as(
+            "SELECT (SELECT COUNT(*) FROM notifications), \
+                    (SELECT COUNT(*) FROM notification_emails), \
+                    (SELECT COUNT(*) FROM jobs WHERE name = 'SendNotificationEmailJob')",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(reconcile_recent_achievements(&pool).await.unwrap(), 5);
         let after = grants(&pool, owner).await;
         assert!(has(&after, Head::KIND, "turtle"));
         assert!(has(&after, Tail::KIND, "turtle"));
         assert!(has(&after, Head::KIND, "judge"));
         assert!(has(&after, Tail::KIND, "judge"));
+        let side_effects_after: (i64, i64, i64) = sqlx::query_as(
+            "SELECT (SELECT COUNT(*) FROM notifications), \
+                    (SELECT COUNT(*) FROM notification_emails), \
+                    (SELECT COUNT(*) FROM jobs WHERE name = 'SendNotificationEmailJob')",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(side_effects_after, side_effects_before);
+        let owner_notifications: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM notifications WHERE user_id = $1 AND kind = 'achievement_earned'",
+        )
+        .bind(owner)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(owner_notifications, 0);
     }
 
     #[sqlx::test(migrations = "../migrations")]

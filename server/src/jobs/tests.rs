@@ -850,6 +850,17 @@ async fn achievement_email_uses_confirmed_player_address_and_one_layout(
     )
     .execute(&pool)
     .await?;
+    let pending_id = sqlx::query_scalar::<_, uuid::Uuid>(
+        "INSERT INTO notification_email_requests (user_id, email) VALUES ($1, 'pending@example.com') RETURNING request_id",
+    )
+    .bind(user_id)
+    .fetch_one(&pool)
+    .await?;
+    sqlx::query("UPDATE users SET pending_notification_email_request_id = $2 WHERE user_id = $1")
+        .bind(user_id)
+        .bind(pending_id)
+        .execute(&pool)
+        .await?;
     let url = "https://arena.example/customizations/achievements";
     let content = messages::achievement_earned(
         &[
@@ -1058,6 +1069,43 @@ async fn send_time_opt_out_keeps_in_app_event(pool: PgPool) -> cja::Result<()> {
             .expect("wiremock requests")
             .is_empty()
     );
+    let matchmaking = crate::notifications::record(
+        &pool,
+        NewNotification {
+            user_id,
+            kind: NotificationKind::SnakeMatchmakingResumed,
+            title: "Matchmaking resumed".into(),
+            body: "Your snake is back on the ladder.".into(),
+            link: None,
+            email: Some(NewEmail {
+                subject: Some("Matchmaking resumed".into()),
+                text: Some("Your snake is back on the ladder.".into()),
+                html_body: Some("<p>Matchmaking resumed</p>".into()),
+                recipient: EmailRecipient::User,
+                claim_imported_account_id: None,
+                notification_email_request_id: None,
+            }),
+        },
+    )
+    .await?;
+    let mut connection = pool.acquire().await?;
+    crate::models::notification::set_preference(
+        &mut connection,
+        user_id,
+        NotificationKind::SnakeMatchmakingResumed,
+        NotificationChannel::Email,
+        false,
+    )
+    .await?;
+    drop(connection);
+    SendNotificationEmailJob {
+        notification_id: matchmaking.notification_id,
+    }
+    .run(AppState::test_from_pool(pool.clone()))
+    .await?;
+    let row = sqlx::query!("SELECT n.in_app_visible, e.outcome FROM notifications n JOIN notification_emails e USING (notification_id) WHERE n.notification_id = $1", matchmaking.notification_id).fetch_one(&pool).await?;
+    assert!(row.in_app_visible);
+    assert_eq!(row.outcome.as_deref(), Some("opted_out"));
     Ok(())
 }
 
