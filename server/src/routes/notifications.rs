@@ -230,6 +230,7 @@ fn item_markup(item: &NotificationRecord) -> Markup {
         Some(NotificationKind::PlayAccountClaimed) => "♟",
         Some(NotificationKind::ClaimVerification) => "✓",
         Some(NotificationKind::NotificationEmailConfirmation) => "✉",
+        Some(NotificationKind::AchievementEarned) => "★",
         None => "●",
     };
     let body: String = item.body.chars().take(160).collect();

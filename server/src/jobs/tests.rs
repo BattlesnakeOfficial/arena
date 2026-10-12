@@ -829,6 +829,98 @@ async fn notification_email_is_sent_once_even_for_concurrent_runs(pool: PgPool) 
 }
 
 #[sqlx::test(migrations = "../migrations")]
+async fn achievement_email_uses_confirmed_player_address_and_one_layout(
+    pool: PgPool,
+) -> cja::Result<()> {
+    use crate::customizations::achievements::{Achievement, achievement_unlock};
+    use crate::email::{Mailer, MailgunConfig, messages};
+    use crate::notifications::{EmailRecipient, NewEmail, NewNotification, NotificationKind};
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let user_id = sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login, github_access_token, github_email) VALUES (1669008, 'achievement-mail-test', '', 'github@example.com') RETURNING user_id").fetch_one(&pool).await?;
+    sqlx::query!(
+        "UPDATE users SET notification_email = 'confirmed@example.com' WHERE user_id = $1",
+        user_id
+    )
+    .execute(&pool)
+    .await?;
+    let url = "https://arena.example/customizations/achievements";
+    let content = messages::achievement_earned(
+        &[
+            achievement_unlock(Achievement::FirstWin, true, false)?,
+            achievement_unlock(Achievement::CrowdPleaser, true, true)?,
+        ],
+        url,
+    );
+    let receipt = crate::notifications::record(
+        &pool,
+        NewNotification {
+            user_id,
+            kind: NotificationKind::AchievementEarned,
+            title: content.subject.clone(),
+            body: "First Win: head frog\nCrowd Pleaser: head monkey, tail monkey".into(),
+            link: Some("/customizations/achievements".into()),
+            email: Some(NewEmail {
+                subject: Some(content.subject),
+                text: Some(content.text),
+                html_body: Some(content.html_body),
+                recipient: EmailRecipient::User,
+                claim_imported_account_id: None,
+                notification_email_request_id: None,
+            }),
+        },
+    )
+    .await?;
+    let mut state = AppState::test_from_pool(pool.clone());
+    state.mailer = Mailer::new(
+        Some(MailgunConfig {
+            api_key: "test".into(),
+            domain: "mg.example.com".into(),
+            from: "Arena <reply@example.com>".into(),
+            base_url: server.uri(),
+        }),
+        reqwest::Client::new(),
+    );
+    let job = SendNotificationEmailJob {
+        notification_id: receipt.notification_id,
+    };
+    job.run(state.clone()).await?;
+    job.run(state).await?;
+    let outcome = sqlx::query_scalar!(
+        "SELECT outcome FROM notification_emails WHERE notification_id = $1",
+        receipt.notification_id
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(outcome.as_deref(), Some("sent"));
+    let requests = server.received_requests().await.expect("wiremock requests");
+    assert_eq!(requests.len(), 1);
+    let form: std::collections::HashMap<_, _> = url::form_urlencoded::parse(&requests[0].body)
+        .into_owned()
+        .collect();
+    assert_eq!(form["to"], "confirmed@example.com");
+    assert_eq!(form["html"].matches("<html ").count(), 1);
+    assert_eq!(form["html"].matches("<img ").count(), 3);
+    assert_eq!(
+        form["html"]
+            .matches("Unsubscribe from Achievement earned emails")
+            .count(),
+        1
+    );
+    assert!(form["text"].contains("set head to \"frog\""));
+    assert!(form["text"].contains("set tail to \"monkey\""));
+    assert!(form["text"].contains(url));
+    assert_html_links_in_text(&form);
+    Ok(())
+}
+
+#[sqlx::test(migrations = "../migrations")]
 async fn legacy_text_row_gets_escaped_html(pool: PgPool) -> cja::Result<()> {
     use crate::email::{Mailer, MailgunConfig};
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
@@ -868,21 +960,23 @@ async fn legacy_text_row_gets_escaped_html(pool: PgPool) -> cja::Result<()> {
 
 #[sqlx::test(migrations = "../migrations")]
 async fn send_time_opt_out_keeps_in_app_event(pool: PgPool) -> cja::Result<()> {
+    use crate::email::{Mailer, MailgunConfig};
     use crate::notifications::{
         EmailRecipient, NewEmail, NewNotification, NotificationChannel, NotificationKind,
     };
+    use wiremock::MockServer;
     let user_id = sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login, github_access_token) VALUES (1673002, 'notification-optout-test', '') RETURNING user_id").fetch_one(&pool).await?;
     let receipt = crate::notifications::record(
         &pool,
         NewNotification {
             user_id,
-            kind: NotificationKind::SnakeMatchmakingResumed,
-            title: "Resumed".into(),
-            body: "Recovered".into(),
+            kind: NotificationKind::AchievementEarned,
+            title: "Achievement unlocked: First Win".into(),
+            body: "First Win: head frog".into(),
             link: None,
             email: Some(NewEmail {
-                subject: Some("Resumed".into()),
-                text: Some("Recovered".into()),
+                subject: Some("Achievement unlocked: First Win".into()),
+                text: Some("First Win: head frog".into()),
                 html_body: Some("<p>body</p>".into()),
                 recipient: EmailRecipient::User,
                 claim_imported_account_id: None,
@@ -895,7 +989,7 @@ async fn send_time_opt_out_keeps_in_app_event(pool: PgPool) -> cja::Result<()> {
     crate::models::notification::set_preference(
         &mut connection,
         user_id,
-        NotificationKind::SnakeMatchmakingResumed,
+        NotificationKind::AchievementEarned,
         NotificationChannel::Email,
         false,
     )
@@ -909,6 +1003,61 @@ async fn send_time_opt_out_keeps_in_app_event(pool: PgPool) -> cja::Result<()> {
     let row = sqlx::query!("SELECT n.in_app_visible, e.outcome FROM notifications n JOIN notification_emails e USING (notification_id) WHERE n.notification_id = $1", receipt.notification_id).fetch_one(&pool).await?;
     assert!(row.in_app_visible);
     assert_eq!(row.outcome.as_deref(), Some("opted_out"));
+    let mut connection = pool.acquire().await?;
+    crate::models::notification::set_preference(
+        &mut connection,
+        user_id,
+        NotificationKind::AchievementEarned,
+        NotificationChannel::Email,
+        true,
+    )
+    .await?;
+    drop(connection);
+    let no_address = crate::notifications::record(
+        &pool,
+        NewNotification {
+            user_id,
+            kind: NotificationKind::AchievementEarned,
+            title: "Achievement unlocked: First Win".into(),
+            body: "First Win: head frog".into(),
+            link: Some("/customizations/achievements".into()),
+            email: Some(NewEmail {
+                subject: Some("Achievement unlocked: First Win".into()),
+                text: Some("First Win: head frog".into()),
+                html_body: Some("<p>Unlocked: Head Frog</p>".into()),
+                recipient: EmailRecipient::User,
+                claim_imported_account_id: None,
+                notification_email_request_id: None,
+            }),
+        },
+    )
+    .await?;
+    let server = MockServer::start().await;
+    let mut state = AppState::test_from_pool(pool.clone());
+    state.mailer = Mailer::new(
+        Some(MailgunConfig {
+            api_key: "test".into(),
+            domain: "mg.example.com".into(),
+            from: "Arena <reply@example.com>".into(),
+            base_url: server.uri(),
+        }),
+        reqwest::Client::new(),
+    );
+    SendNotificationEmailJob {
+        notification_id: no_address.notification_id,
+    }
+    .run(state)
+    .await?;
+    let row = sqlx::query!("SELECT n.in_app_visible, e.outcome FROM notifications n JOIN notification_emails e USING (notification_id) WHERE n.notification_id = $1", no_address.notification_id).fetch_one(&pool).await?;
+    assert!(row.in_app_visible);
+    assert_eq!(row.outcome.as_deref(), Some("no_recipient"));
+    assert!(
+        server
+            .received_requests()
+            .await
+            .expect("wiremock requests")
+            .is_empty()
+    );
     Ok(())
 }
 

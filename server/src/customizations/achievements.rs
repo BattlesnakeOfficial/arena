@@ -1,12 +1,15 @@
 //! Code-defined achievements and permanent cosmetic awards.
 use std::collections::{BTreeMap, HashSet};
 
-use color_eyre::eyre::Context as _;
+use arena::design_kit::AssetKind;
+use color_eyre::eyre::{Context as _, eyre};
 use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
 use super::{Head, Tail};
+use crate::email::messages::{self, AchievementUnlock, UnlockedItem};
 use crate::models::game::GameType;
+use crate::notifications::{self, EmailRecipient, NewEmail, NewNotification, NotificationKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Achievement {
@@ -113,6 +116,58 @@ impl WinFlags {
             self.ladder_win |= ladder;
         }
     }
+}
+
+#[derive(Default)]
+struct AwardResult {
+    inserted: u64,
+    newly_earned: Vec<EarnedAchievement>,
+}
+
+struct EarnedAchievement {
+    achievement: Achievement,
+    head_granted: bool,
+    tail_granted: bool,
+}
+
+pub(crate) fn achievement_unlock(
+    achievement: Achievement,
+    head_granted: bool,
+    tail_granted: bool,
+) -> cja::Result<AchievementUnlock> {
+    let def = achievement.def();
+    let head = if head_granted {
+        let slug = def.head.slug();
+        Some(UnlockedItem {
+            display_name: def.head.def().display_name.to_string(),
+            slug: slug.to_string(),
+            png_url: crate::routes::og::customization_png_url(AssetKind::Head, slug)
+                .ok_or_else(|| eyre!("Missing head PNG for {}: {slug}", def.name))
+                .wrap_err_with(|| format!("Failed to render {} head", def.name))?,
+        })
+    } else {
+        None
+    };
+    let tail = if tail_granted {
+        let item = def
+            .tail
+            .ok_or_else(|| eyre!("Missing tail for {}", def.name))?;
+        let slug = item.slug();
+        Some(UnlockedItem {
+            display_name: item.def().display_name.to_string(),
+            slug: slug.to_string(),
+            png_url: crate::routes::og::customization_png_url(AssetKind::Tail, slug)
+                .ok_or_else(|| eyre!("Missing tail PNG for {}: {slug}", def.name))
+                .wrap_err_with(|| format!("Failed to render {} tail", def.name))?,
+        })
+    } else {
+        None
+    };
+    Ok(AchievementUnlock {
+        name: def.name.to_string(),
+        head,
+        tail,
+    })
 }
 
 async fn historical_win(
@@ -244,7 +299,7 @@ async fn award_owner(
     conn: &mut PgConnection,
     user_id: Uuid,
     live: Option<WinFlags>,
-) -> cja::Result<u64> {
+) -> cja::Result<AwardResult> {
     let existing = sqlx::query!(
         "SELECT customization_type, slug FROM customization_grants WHERE user_id = $1",
         user_id,
@@ -256,7 +311,7 @@ async fn award_owner(
         .into_iter()
         .map(|r| (r.customization_type, r.slug))
         .collect();
-    let mut inserted = 0;
+    let mut result = AwardResult::default();
     for achievement in Achievement::ALL {
         let def = achievement.def();
         let head_owned = owned.contains(&(Head::KIND.to_string(), def.head.slug().to_string()));
@@ -300,6 +355,8 @@ async fn award_owner(
         if !earned {
             continue;
         }
+        let mut head_granted = false;
+        let mut tail_granted = false;
         for (kind, slug, held) in [
             (Head::KIND, def.head.slug(), head_owned),
             (Tail::KIND, def.tail.map_or("", Tail::slug), tail_owned),
@@ -307,16 +364,31 @@ async fn award_owner(
             if held || slug.is_empty() {
                 continue;
             }
-            inserted += sqlx::query!(
+            let rows = sqlx::query!(
                 "INSERT INTO customization_grants (user_id, customization_type, slug, source) VALUES ($1, $2, $3, 'achievement') ON CONFLICT (user_id, customization_type, slug) DO NOTHING",
                 user_id, kind, slug,
             ).execute(&mut *conn).await.wrap_err("Failed to insert achievement grant")?.rows_affected();
+            result.inserted += rows;
+            if rows > 0 {
+                if kind == Head::KIND {
+                    head_granted = true;
+                } else {
+                    tail_granted = true;
+                }
+            }
+        }
+        if head_granted || tail_granted {
+            result.newly_earned.push(EarnedAchievement {
+                achievement,
+                head_granted,
+                tail_granted,
+            });
         }
     }
-    Ok(inserted)
+    Ok(result)
 }
 
-pub async fn award_for_game(pool: &PgPool, game_id: Uuid) -> cja::Result<u64> {
+pub async fn award_for_game(pool: &PgPool, game_id: Uuid, base_url: &str) -> cja::Result<u64> {
     let mut tx = pool
         .begin()
         .await
@@ -352,12 +424,65 @@ pub async fn award_for_game(pool: &PgPool, game_id: Uuid) -> cja::Result<u64> {
         );
     }
     let mut inserted = 0;
+    let mut receipts = Vec::new();
     for (owner, flags) in owners {
-        inserted += award_owner(&mut tx, owner, Some(flags)).await?;
+        let awarded = award_owner(&mut tx, owner, Some(flags)).await?;
+        inserted += awarded.inserted;
+        if awarded.newly_earned.is_empty() {
+            continue;
+        }
+        let unlocks = awarded
+            .newly_earned
+            .iter()
+            .map(|item| achievement_unlock(item.achievement, item.head_granted, item.tail_granted))
+            .collect::<cja::Result<Vec<_>>>()?;
+        let body = unlocks
+            .iter()
+            .map(|unlock| {
+                let items = [("head", &unlock.head), ("tail", &unlock.tail)]
+                    .into_iter()
+                    .filter_map(|(kind, item)| {
+                        item.as_ref().map(|item| format!("{kind} {}", item.slug))
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("{}: {items}", unlock.name)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let achievements_url = format!(
+            "{}/customizations/achievements",
+            base_url.trim_end_matches('/')
+        );
+        let content = messages::achievement_earned(&unlocks, &achievements_url);
+        receipts.push(
+            notifications::record_in_tx(
+                &mut tx,
+                NewNotification {
+                    user_id: owner,
+                    kind: NotificationKind::AchievementEarned,
+                    title: content.subject.clone(),
+                    body,
+                    link: Some("/customizations/achievements".to_string()),
+                    email: Some(NewEmail {
+                        subject: Some(content.subject),
+                        text: Some(content.text),
+                        html_body: Some(content.html_body),
+                        recipient: EmailRecipient::User,
+                        claim_imported_account_id: None,
+                        notification_email_request_id: None,
+                    }),
+                },
+            )
+            .await?,
+        );
     }
     tx.commit()
         .await
         .wrap_err("Failed to commit achievement award")?;
+    for receipt in receipts {
+        receipt.log_enqueued();
+    }
     Ok(inserted)
 }
 
@@ -414,7 +539,7 @@ pub async fn backfill_achievement_page(pool: &PgPool) -> cja::Result<BackfillPag
     let processed = users.len().min(25);
     let mut inserted = 0;
     for user in users.iter().take(25) {
-        inserted += award_owner(&mut tx, user.user_id, None).await?;
+        inserted += award_owner(&mut tx, user.user_id, None).await?.inserted;
     }
     let last = users
         .get(processed.saturating_sub(1))
@@ -462,7 +587,7 @@ pub async fn reconcile_recent_achievements(pool: &PgPool) -> cja::Result<u64> {
     let owner_count = owners.len();
     let mut inserted = 0;
     for (owner, flags) in owners {
-        inserted += award_owner(&mut tx, owner, Some(flags)).await?;
+        inserted += award_owner(&mut tx, owner, Some(flags)).await?.inserted;
     }
     tx.commit()
         .await
@@ -615,6 +740,212 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "../migrations")]
+    async fn live_awards_group_new_unlocks_into_one_notification(pool: PgPool) {
+        let owner = user(&pool, 1669001).await;
+        let rival = user(&pool, 1669002).await;
+        let winner = snake(&pool, owner, "winner").await;
+        let opponents = [
+            snake(&pool, rival, "one").await,
+            snake(&pool, rival, "two").await,
+            snake(&pool, rival, "three").await,
+        ];
+        let first = game(&pool, GameType::Standard.as_str(), "finished", Some(0)).await;
+        participant(&pool, first, winner, 1, None).await;
+        participant(&pool, first, opponents[0], 2, None).await;
+        assert_eq!(
+            award_for_game(&pool, first, "https://arena.example")
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            award_for_game(&pool, first, "https://arena.example")
+                .await
+                .unwrap(),
+            0
+        );
+        let row = sqlx::query!(
+            "SELECT n.title, n.body, n.link, e.recipient_user, e.recipient_override, e.battlesnake_id, e.text, e.html_body FROM notifications n JOIN notification_emails e USING (notification_id) WHERE n.user_id = $1 AND n.kind = 'achievement_earned'",
+            owner,
+        ).fetch_one(&pool).await.unwrap();
+        assert_eq!(row.title, "Achievement unlocked: First Win");
+        assert_eq!(row.body, "First Win: head frog");
+        assert_eq!(row.link.as_deref(), Some("/customizations/achievements"));
+        assert!(row.recipient_user);
+        assert!(row.recipient_override.is_none() && row.battlesnake_id.is_none());
+        assert!(row.text.unwrap().contains("set head to \"frog\""));
+        assert!(row.html_body.unwrap().contains("frog.png"));
+
+        let next_owner = user(&pool, 1669003).await;
+        let next_winner = snake(&pool, next_owner, "next winner").await;
+        let four = game(&pool, GameType::Standard.as_str(), "finished", Some(0)).await;
+        participant(&pool, four, next_winner, 1, None).await;
+        for (index, opponent) in opponents.into_iter().enumerate() {
+            participant(&pool, four, opponent, index as i32 + 2, None).await;
+        }
+        assert_eq!(
+            award_for_game(&pool, four, "https://arena.example")
+                .await
+                .unwrap(),
+            3
+        );
+        let row = sqlx::query!(
+            "SELECT title, body FROM notifications WHERE user_id = $1 AND kind = 'achievement_earned'",
+            next_owner,
+        ).fetch_one(&pool).await.unwrap();
+        assert_eq!(row.title, "2 achievements unlocked");
+        assert_eq!(
+            row.body,
+            "First Win: head frog\nCrowd Pleaser: head monkey, tail monkey"
+        );
+        let count = sqlx::query_scalar!(
+            "SELECT COUNT(*) AS \"count!\" FROM jobs WHERE name = 'SendNotificationEmailJob'"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 2);
+        let delayed = sqlx::query_scalar!(
+            "SELECT COUNT(*) AS \"count!\" FROM jobs WHERE name = 'SendNotificationEmailJob' AND run_at > now()"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(delayed, 0);
+        assert_eq!(
+            award_for_game(&pool, four, "https://arena.example")
+                .await
+                .unwrap(),
+            0
+        );
+        let count_after = sqlx::query_scalar!(
+            "SELECT COUNT(*) AS \"count!\" FROM jobs WHERE name = 'SendNotificationEmailJob'"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(count_after, count);
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn preowned_head_only_notifies_for_new_tail(pool: PgPool) {
+        let owner = user(&pool, 1669004).await;
+        let rival = user(&pool, 1669005).await;
+        let winner = snake(&pool, owner, "winner").await;
+        let game_id = game(&pool, GameType::Standard.as_str(), "finished", Some(0)).await;
+        participant(&pool, game_id, winner, 1, None).await;
+        for index in 0..3 {
+            let opponent = snake(&pool, rival, &format!("rival {index}")).await;
+            participant(&pool, game_id, opponent, index + 2, None).await;
+        }
+        sqlx::query!(
+            "INSERT INTO customization_grants (user_id, customization_type, slug, source) VALUES ($1, 'head', 'monkey', 'achievement')",
+            owner,
+        ).execute(&pool).await.unwrap();
+        assert_eq!(
+            award_for_game(&pool, game_id, "https://arena.example")
+                .await
+                .unwrap(),
+            2
+        );
+        let row = sqlx::query!(
+            "SELECT body FROM notifications WHERE user_id = $1 AND kind = 'achievement_earned'",
+            owner,
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.body, "First Win: head frog\nCrowd Pleaser: tail monkey");
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn achievement_visibility_follows_in_app_preference(pool: PgPool) {
+        use crate::models::notification;
+        use crate::notifications::NotificationChannel;
+        let owner = user(&pool, 1669006).await;
+        let rival = user(&pool, 1669007).await;
+        notification::set_preference(
+            &mut pool.acquire().await.unwrap(),
+            owner,
+            NotificationKind::AchievementEarned,
+            NotificationChannel::InApp,
+            false,
+        )
+        .await
+        .unwrap();
+        let winner = snake(&pool, owner, "winner").await;
+        let opponent = snake(&pool, rival, "opponent").await;
+        let game_id = game(&pool, GameType::Standard.as_str(), "finished", Some(0)).await;
+        participant(&pool, game_id, winner, 1, None).await;
+        participant(&pool, game_id, opponent, 2, None).await;
+        assert_eq!(
+            award_for_game(&pool, game_id, "https://arena.example")
+                .await
+                .unwrap(),
+            1
+        );
+        let visible = sqlx::query_scalar!(
+            "SELECT in_app_visible FROM notifications WHERE user_id = $1 AND kind = 'achievement_earned'", owner,
+        ).fetch_one(&pool).await.unwrap();
+        assert!(!visible);
+        assert!(
+            notification::list_visible(&pool, owner, None)
+                .await
+                .unwrap()
+                .items
+                .is_empty()
+        );
+        assert_eq!(
+            notification::unread_badge_count(&pool, owner)
+                .await
+                .unwrap(),
+            0
+        );
+        notification::set_preference(
+            &mut pool.acquire().await.unwrap(),
+            owner,
+            NotificationKind::AchievementEarned,
+            NotificationChannel::Email,
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(
+            !notification::effective_enabled(
+                &mut pool.acquire().await.unwrap(),
+                owner,
+                NotificationKind::AchievementEarned,
+                NotificationChannel::Email,
+            )
+            .await
+            .unwrap()
+        );
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn concurrent_evaluations_do_not_double_notify(pool: PgPool) {
+        let owner = user(&pool, 1669009).await;
+        let rival = user(&pool, 1669010).await;
+        let winner = snake(&pool, owner, "winner").await;
+        let opponent = snake(&pool, rival, "opponent").await;
+        let game_id = game(&pool, GameType::Standard.as_str(), "finished", Some(0)).await;
+        participant(&pool, game_id, winner, 1, None).await;
+        participant(&pool, game_id, opponent, 2, None).await;
+        let (one, two) = tokio::join!(
+            award_for_game(&pool, game_id, "https://arena.example"),
+            award_for_game(&pool, game_id, "https://arena.example"),
+        );
+        assert_eq!(one.unwrap() + two.unwrap(), 1);
+        let count = sqlx::query_scalar!(
+            "SELECT COUNT(*) AS \"count!\" FROM notifications WHERE kind = 'achievement_earned'"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
     async fn live_win_boundaries_and_provenance(pool: PgPool) {
         let owner = user(&pool, 1644001).await;
         sqlx::query("INSERT INTO customization_active_weeks (user_id, week_start) VALUES ($1, '2026-10-05')")
@@ -626,35 +957,75 @@ mod tests {
         let fourth = snake(&pool, rival, "fourth").await;
         let solo = game(&pool, "Standard", "finished", Some(0)).await;
         participant(&pool, solo, winner, 1, None).await;
-        assert_eq!(award_for_game(&pool, solo).await.unwrap(), 0);
+        assert_eq!(
+            award_for_game(&pool, solo, "https://arena.example")
+                .await
+                .unwrap(),
+            0
+        );
         let waiting = game(&pool, "Standard", "waiting", None).await;
         participant(&pool, waiting, winner, 1, None).await;
         participant(&pool, waiting, rival_snake, 2, None).await;
-        assert_eq!(award_for_game(&pool, waiting).await.unwrap(), 0);
+        assert_eq!(
+            award_for_game(&pool, waiting, "https://arena.example")
+                .await
+                .unwrap(),
+            0
+        );
         let failed = game(&pool, "Standard", "failed", None).await;
         participant(&pool, failed, winner, 1, None).await;
         participant(&pool, failed, rival_snake, 2, None).await;
-        assert_eq!(award_for_game(&pool, failed).await.unwrap(), 0);
+        assert_eq!(
+            award_for_game(&pool, failed, "https://arena.example")
+                .await
+                .unwrap(),
+            0
+        );
         let two = game(&pool, "Standard", "finished", Some(0)).await;
         participant(&pool, two, winner, 1, None).await;
         participant(&pool, two, rival_snake, 2, None).await;
-        assert_eq!(award_for_game(&pool, two).await.unwrap(), 1);
-        assert_eq!(award_for_game(&pool, two).await.unwrap(), 0);
+        assert_eq!(
+            award_for_game(&pool, two, "https://arena.example")
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            award_for_game(&pool, two, "https://arena.example")
+                .await
+                .unwrap(),
+            0
+        );
         let lower = game(&pool, "constrictor", "finished", Some(0)).await;
         participant(&pool, lower, winner, 1, None).await;
         participant(&pool, lower, second, 2, None).await;
-        assert_eq!(award_for_game(&pool, lower).await.unwrap(), 0);
+        assert_eq!(
+            award_for_game(&pool, lower, "https://arena.example")
+                .await
+                .unwrap(),
+            0
+        );
         let three = game(&pool, "Standard", "finished", Some(0)).await;
         participant(&pool, three, winner, 1, None).await;
         participant(&pool, three, second, 2, None).await;
         participant(&pool, three, rival_snake, 3, None).await;
-        assert_eq!(award_for_game(&pool, three).await.unwrap(), 0);
+        assert_eq!(
+            award_for_game(&pool, three, "https://arena.example")
+                .await
+                .unwrap(),
+            0
+        );
         let four = game(&pool, GameType::Constrictor.as_str(), "finished", Some(0)).await;
         participant(&pool, four, winner, 1, None).await;
         participant(&pool, four, second, 2, None).await;
         participant(&pool, four, rival_snake, 3, None).await;
         participant(&pool, four, fourth, 4, None).await;
-        assert_eq!(award_for_game(&pool, four).await.unwrap(), 4);
+        assert_eq!(
+            award_for_game(&pool, four, "https://arena.example")
+                .await
+                .unwrap(),
+            4
+        );
         let owned = grants(&pool, owner).await;
         assert!(has(&owned, Head::KIND, "frog"));
         assert!(has(&owned, Head::KIND, "subway"));
@@ -711,12 +1082,22 @@ mod tests {
         let almost_judge = game(&pool, "Standard", "finished", None).await;
         participant(&pool, almost_judge, first, 2, Some(first_entry)).await;
         participant(&pool, almost_judge, second, 2, Some(second_entry)).await;
-        assert_eq!(award_for_game(&pool, almost_judge).await.unwrap(), 0);
+        assert_eq!(
+            award_for_game(&pool, almost_judge, "https://arena.example")
+                .await
+                .unwrap(),
+            0
+        );
         assert!(!has(&grants(&pool, owner).await, Tail::KIND, "judge"));
         let thousandth_win = game(&pool, "Standard", "finished", None).await;
         participant(&pool, thousandth_win, first, 1, Some(first_entry)).await;
         participant(&pool, thousandth_win, rival, 2, None).await;
-        assert_eq!(award_for_game(&pool, thousandth_win).await.unwrap(), 2);
+        assert_eq!(
+            award_for_game(&pool, thousandth_win, "https://arena.example")
+                .await
+                .unwrap(),
+            2
+        );
         seed_games(
             &pool,
             second,
@@ -738,7 +1119,12 @@ mod tests {
         let last = game(&pool, "Standard", "finished", None).await;
         participant(&pool, last, first, 2, Some(first_entry)).await;
         participant(&pool, last, second, 1, Some(second_entry)).await;
-        assert_eq!(award_for_game(&pool, last).await.unwrap(), 1);
+        assert_eq!(
+            award_for_game(&pool, last, "https://arena.example")
+                .await
+                .unwrap(),
+            1
+        );
         let owned = grants(&pool, owner).await;
         assert!(owned.contains(&(
             Head::KIND.to_string(),
@@ -760,13 +1146,23 @@ mod tests {
             "judge".to_string(),
             "achievement".to_string()
         )));
-        assert_eq!(award_for_game(&pool, last).await.unwrap(), 0);
+        assert_eq!(
+            award_for_game(&pool, last, "https://arena.example")
+                .await
+                .unwrap(),
+            0
+        );
         assert_eq!(super::super::token_balance(&pool, owner).await.unwrap(), 0);
         // The fallback owner link is still usable when the direct snake ID is null.
         let fallback = game(&pool, "Standard", "finished", Some(0)).await;
         sqlx::query("INSERT INTO game_battlesnakes (game_id, battlesnake_id, leaderboard_entry_id, placement) VALUES ($1, NULL, $2, 1)")
             .bind(fallback).bind(first_entry).execute(&pool).await.unwrap();
-        assert_eq!(award_for_game(&pool, fallback).await.unwrap(), 0);
+        assert_eq!(
+            award_for_game(&pool, fallback, "https://arena.example")
+                .await
+                .unwrap(),
+            0
+        );
         let fallback_owner = user(&pool, 1644012).await;
         let fallback_snake = snake(&pool, fallback_owner, "fallback").await;
         let fallback_entry = entry(&pool, fallback_snake).await;
@@ -774,7 +1170,12 @@ mod tests {
         sqlx::query("INSERT INTO game_battlesnakes (game_id, battlesnake_id, leaderboard_entry_id, placement) VALUES ($1, NULL, $2, 1)")
             .bind(fallback_game).bind(fallback_entry).execute(&pool).await.unwrap();
         participant(&pool, fallback_game, first, 2, None).await;
-        assert_eq!(award_for_game(&pool, fallback_game).await.unwrap(), 1);
+        assert_eq!(
+            award_for_game(&pool, fallback_game, "https://arena.example")
+                .await
+                .unwrap(),
+            1
+        );
         assert!(has(
             &grants(&pool, fallback_owner).await,
             Head::KIND,
@@ -794,7 +1195,12 @@ mod tests {
         let non_ladder = game(&pool, "Standard", "finished", None).await;
         participant(&pool, non_ladder, a, 2, None).await;
         participant(&pool, non_ladder, b, 1, None).await;
-        assert_eq!(award_for_game(&pool, non_ladder).await.unwrap(), 1);
+        assert_eq!(
+            award_for_game(&pool, non_ladder, "https://arena.example")
+                .await
+                .unwrap(),
+            1
+        );
         assert!(!has(&grants(&pool, owner).await, Head::KIND, "turtle"));
         let unfinished = game(&pool, "Standard", "waiting", None).await;
         participant(&pool, unfinished, a, 2, Some(a_entry)).await;
@@ -811,12 +1217,20 @@ mod tests {
                 .unwrap(),
             2_999
         );
-        assert_eq!(award_owner(&mut conn, owner, None).await.unwrap(), 0);
+        assert_eq!(
+            award_owner(&mut conn, owner, None).await.unwrap().inserted,
+            0
+        );
         drop(conn);
         let ladder = game(&pool, "Standard", "finished", None).await;
         participant(&pool, ladder, a, 2, Some(a_entry)).await;
         participant(&pool, ladder, b, 1, None).await;
-        assert_eq!(award_for_game(&pool, ladder).await.unwrap(), 2);
+        assert_eq!(
+            award_for_game(&pool, ladder, "https://arena.example")
+                .await
+                .unwrap(),
+            2
+        );
         assert!(has(&grants(&pool, owner).await, Head::KIND, "turtle"));
         assert!(has(&grants(&pool, owner).await, Tail::KIND, "turtle"));
     }
@@ -832,7 +1246,12 @@ mod tests {
         let win_999 = game(&pool, "Standard", "finished", None).await;
         participant(&pool, win_999, a, 1, Some(a_entry)).await;
         participant(&pool, win_999, b, 2, None).await;
-        assert_eq!(award_for_game(&pool, win_999).await.unwrap(), 1);
+        assert_eq!(
+            award_for_game(&pool, win_999, "https://arena.example")
+                .await
+                .unwrap(),
+            1
+        );
         assert!(!has(&grants(&pool, owner).await, Head::KIND, "judge"));
         assert!(!has(&grants(&pool, owner).await, Tail::KIND, "judge"));
         seed_games(&pool, a, Some(a_entry), None, 1, 1, "finished").await;
@@ -859,12 +1278,22 @@ mod tests {
         let other_owned = snake(&pool, owner, "ladder loss").await;
         let other_entry = entry(&pool, other_owned).await;
         participant(&pool, mixed, other_owned, 2, Some(other_entry)).await;
-        assert_eq!(award_for_game(&pool, mixed).await.unwrap(), 0);
+        assert_eq!(
+            award_for_game(&pool, mixed, "https://arena.example")
+                .await
+                .unwrap(),
+            0
+        );
         assert!(!has(&grants(&pool, owner).await, Head::KIND, "judge"));
         let win = game(&pool, "Standard", "finished", None).await;
         participant(&pool, win, a, 1, Some(a_entry)).await;
         participant(&pool, win, b, 2, None).await;
-        assert_eq!(award_for_game(&pool, win).await.unwrap(), 2);
+        assert_eq!(
+            award_for_game(&pool, win, "https://arena.example")
+                .await
+                .unwrap(),
+            2
+        );
         assert!(has(&grants(&pool, owner).await, Head::KIND, "judge"));
         assert!(has(&grants(&pool, owner).await, Tail::KIND, "judge"));
     }
@@ -884,7 +1313,12 @@ mod tests {
         let nonqualifying = game(&pool, "Standard", "finished", Some(1)).await;
         participant(&pool, nonqualifying, a, 2, None).await;
         participant(&pool, nonqualifying, b, 1, None).await;
-        assert_eq!(award_for_game(&pool, nonqualifying).await.unwrap(), 1);
+        assert_eq!(
+            award_for_game(&pool, nonqualifying, "https://arena.example")
+                .await
+                .unwrap(),
+            1
+        );
         let before = grants(&pool, owner).await;
         assert!(!has(&before, Head::KIND, "turtle"));
         assert!(!has(&before, Head::KIND, "judge"));
@@ -914,7 +1348,12 @@ mod tests {
         let id = game(&pool, "Standard", "finished", Some(3)).await;
         participant(&pool, id, full_snake, 1, Some(full_entry)).await;
         participant(&pool, id, partial_snake, 1, Some(partial_entry)).await;
-        assert_eq!(award_for_game(&pool, id).await.unwrap(), 2);
+        assert_eq!(
+            award_for_game(&pool, id, "https://arena.example")
+                .await
+                .unwrap(),
+            2
+        );
         let after_live: Vec<(Uuid, Uuid, String, String, String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
             "SELECT customization_grant_id, user_id, customization_type, slug, source, created_at FROM customization_grants WHERE user_id IN ($1, $2) AND slug IN ('turtle', 'judge') ORDER BY user_id, customization_type, slug"
         ).bind(full).bind(partial).fetch_all(&pool).await.unwrap();
@@ -1037,12 +1476,24 @@ mod tests {
             tokio::time::sleep(Duration::from_secs(1)).await;
             let mut conn = pool.acquire().await.unwrap();
             let start = Instant::now();
-            assert_eq!(award_owner(&mut conn, owner, Some(flags)).await.unwrap(), 0);
+            assert_eq!(
+                award_owner(&mut conn, owner, Some(flags))
+                    .await
+                    .unwrap()
+                    .inserted,
+                0
+            );
             let cold = start.elapsed();
             let mut warmed = Vec::new();
             for _ in 0..20 {
                 let start = Instant::now();
-                assert_eq!(award_owner(&mut conn, owner, Some(flags)).await.unwrap(), 0);
+                assert_eq!(
+                    award_owner(&mut conn, owner, Some(flags))
+                        .await
+                        .unwrap()
+                        .inserted,
+                    0
+                );
                 warmed.push(start.elapsed());
             }
             warmed.sort_unstable();
@@ -1125,6 +1576,19 @@ mod tests {
         let second = backfill_achievement_page(&pool).await.unwrap();
         assert_eq!(second.processed, 2);
         assert!(second.complete);
+        let silent_count = sqlx::query_scalar!(
+            "SELECT COUNT(*) AS \"count!\" FROM notifications WHERE kind = 'achievement_earned'"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(silent_count, 0);
+        let email_count =
+            sqlx::query_scalar!("SELECT COUNT(*) AS \"count!\" FROM notification_emails")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(email_count, 0);
         assert_eq!(
             backfill_achievement_page(&pool).await.unwrap(),
             BackfillPage {
@@ -1148,7 +1612,12 @@ mod tests {
 
         let solo = game(&pool, "Standard", "finished", None).await;
         participant(&pool, solo, winner, 1, None).await;
-        assert_eq!(award_for_game(&pool, solo).await.unwrap(), 0);
+        assert_eq!(
+            award_for_game(&pool, solo, "https://arena.example")
+                .await
+                .unwrap(),
+            0
+        );
         assert!(backfill_achievement_page(&pool).await.unwrap().complete);
         assert!(grants(&pool, owner).await.is_empty());
 
@@ -1156,13 +1625,23 @@ mod tests {
         participant(&pool, three, winner, 1, None).await;
         participant(&pool, three, own_peer, 2, None).await;
         participant(&pool, three, rival, 3, None).await;
-        assert_eq!(award_for_game(&pool, three).await.unwrap(), 1);
+        assert_eq!(
+            award_for_game(&pool, three, "https://arena.example")
+                .await
+                .unwrap(),
+            1
+        );
         assert!(!has(&grants(&pool, owner).await, Head::KIND, "monkey"));
 
         let lower = game(&pool, "constrictor", "finished", None).await;
         participant(&pool, lower, winner, 1, None).await;
         participant(&pool, lower, rival, 2, None).await;
-        assert_eq!(award_for_game(&pool, lower).await.unwrap(), 0);
+        assert_eq!(
+            award_for_game(&pool, lower, "https://arena.example")
+                .await
+                .unwrap(),
+            0
+        );
         assert!(!has(&grants(&pool, owner).await, Head::KIND, "subway"));
 
         let waiting = game(&pool, GameType::Constrictor.as_str(), "waiting", None).await;
@@ -1170,12 +1649,22 @@ mod tests {
         participant(&pool, waiting, own_peer, 2, None).await;
         participant(&pool, waiting, rival, 3, None).await;
         participant(&pool, waiting, fourth, 4, None).await;
-        assert_eq!(award_for_game(&pool, waiting).await.unwrap(), 0);
+        assert_eq!(
+            award_for_game(&pool, waiting, "https://arena.example")
+                .await
+                .unwrap(),
+            0
+        );
 
         let opponent_ladder = game(&pool, "Standard", "finished", None).await;
         participant(&pool, opponent_ladder, winner, 1, None).await;
         participant(&pool, opponent_ladder, rival, 2, Some(rival_entry)).await;
-        assert_eq!(award_for_game(&pool, opponent_ladder).await.unwrap(), 0);
+        assert_eq!(
+            award_for_game(&pool, opponent_ladder, "https://arena.example")
+                .await
+                .unwrap(),
+            0
+        );
         assert!(!has(&grants(&pool, owner).await, Head::KIND, "judge"));
         let live_before_four = grants(&pool, owner).await;
         sqlx::query("DELETE FROM customization_grants WHERE user_id = $1")
@@ -1193,7 +1682,12 @@ mod tests {
         participant(&pool, four, own_peer, 2, None).await;
         participant(&pool, four, rival, 3, None).await;
         participant(&pool, four, fourth, 4, None).await;
-        assert_eq!(award_for_game(&pool, four).await.unwrap(), 4);
+        assert_eq!(
+            award_for_game(&pool, four, "https://arena.example")
+                .await
+                .unwrap(),
+            4
+        );
 
         seed_games(
             &pool,
@@ -1208,7 +1702,12 @@ mod tests {
         let almost = game(&pool, "Standard", "finished", None).await;
         participant(&pool, almost, winner, 2, Some(winner_entry)).await;
         participant(&pool, almost, own_peer, 1, None).await;
-        assert_eq!(award_for_game(&pool, almost).await.unwrap(), 0);
+        assert_eq!(
+            award_for_game(&pool, almost, "https://arena.example")
+                .await
+                .unwrap(),
+            0
+        );
         let live_2999 = grants(&pool, owner).await;
         assert!(!has(&live_2999, Head::KIND, "turtle"));
         assert!(!has(&live_2999, Head::KIND, "judge"));
@@ -1225,7 +1724,12 @@ mod tests {
         let three_thousandth = game(&pool, "Standard", "finished", None).await;
         participant(&pool, three_thousandth, winner, 2, Some(winner_entry)).await;
         participant(&pool, three_thousandth, own_peer, 2, None).await;
-        assert_eq!(award_for_game(&pool, three_thousandth).await.unwrap(), 2);
+        assert_eq!(
+            award_for_game(&pool, three_thousandth, "https://arena.example")
+                .await
+                .unwrap(),
+            2
+        );
         let live_3000 = grants(&pool, owner).await;
         assert!(has(&live_3000, Head::KIND, "turtle"));
         assert!(has(&live_3000, Tail::KIND, "turtle"));
@@ -1272,7 +1776,10 @@ mod tests {
             .expect("award never blocked on the uncommitted grant");
             holder.commit().await.unwrap();
         };
-        let (award, ()) = tokio::join!(award_for_game(&pool, id), release_holder);
+        let (award, ()) = tokio::join!(
+            award_for_game(&pool, id, "https://arena.example"),
+            release_holder
+        );
         assert_eq!(award.unwrap(), 0);
         assert_eq!(grants(&pool, owner).await.len(), 1);
 

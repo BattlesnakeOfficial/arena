@@ -831,6 +831,7 @@ mod tests {
             .await?;
         assert_eq!(status, "finished");
         assert_eq!(count_jobs(&pool, "AwardAchievementsForGameJob").await?, 1);
+        assert_eq!(count_jobs(&pool, "SendNotificationEmailJob").await?, 0);
         assert_eq!(
             sqlx::query_scalar::<_, i64>(
                 "SELECT COUNT(*) FROM customization_grants WHERE user_id = $1"
@@ -902,6 +903,7 @@ mod tests {
         run_game(&app_state, game_id).await?;
 
         assert_eq!(count_jobs(&pool, "AwardAchievementsForGameJob").await?, 1);
+        assert_eq!(count_jobs(&pool, "SendNotificationEmailJob").await?, 0);
         // Not a leaderboard or tournament game: no other follow-up jobs.
         assert_eq!(count_jobs(&pool, "LeaderboardRatingUpdateJob").await?, 0);
         assert_eq!(count_jobs(&pool, "RunMatchJob").await?, 0);

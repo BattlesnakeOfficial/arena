@@ -53,6 +53,7 @@ notification_kinds!(
     PlayAccountClaimed,
     ClaimVerification,
     NotificationEmailConfirmation,
+    AchievementEarned,
 );
 
 impl NotificationKind {
@@ -63,6 +64,7 @@ impl NotificationKind {
             Self::PlayAccountClaimed => "play_account_claimed",
             Self::ClaimVerification => "claim_verification",
             Self::NotificationEmailConfirmation => "notification_email_confirmation",
+            Self::AchievementEarned => "achievement_earned",
         }
     }
     pub fn parse(value: &str) -> Option<Self> {
@@ -75,6 +77,7 @@ impl NotificationKind {
             Self::PlayAccountClaimed => "Play account claimed",
             Self::ClaimVerification => "Claim verification",
             Self::NotificationEmailConfirmation => "Notification email confirmation",
+            Self::AchievementEarned => "Achievement earned",
         }
     }
     pub fn description(self) -> &'static str {
@@ -88,6 +91,7 @@ impl NotificationKind {
             Self::NotificationEmailConfirmation => {
                 "A link to confirm an address for optional notification emails."
             }
+            Self::AchievementEarned => "Cosmetics unlocked by finishing a game.",
         }
     }
     pub fn email_reason(self) -> &'static str {
@@ -102,12 +106,13 @@ impl NotificationKind {
             Self::NotificationEmailConfirmation => {
                 "Someone entered this address for Arena notification emails."
             }
+            Self::AchievementEarned => "You earned a new achievement in Battlesnake Arena.",
         }
     }
     pub fn toggleable(self) -> bool {
         matches!(
             self,
-            Self::SnakeMatchmakingPaused | Self::SnakeMatchmakingResumed
+            Self::SnakeMatchmakingPaused | Self::SnakeMatchmakingResumed | Self::AchievementEarned
         )
     }
     pub fn supports(self, channel: NotificationChannel) -> bool {
@@ -303,6 +308,13 @@ mod tests {
             assert!(kind.default_enabled(NotificationChannel::Email));
         }
         assert!(NotificationKind::parse("unknown").is_none());
+        let earned = NotificationKind::AchievementEarned;
+        assert_eq!(NotificationKind::parse("achievement_earned"), Some(earned));
+        assert!(earned.toggleable());
+        for channel in NotificationChannel::ALL {
+            assert!(earned.supports(channel));
+            assert!(earned.default_enabled(channel));
+        }
         assert!(!NotificationKind::ClaimVerification.supports(NotificationChannel::InApp));
         assert_eq!(
             NotificationKind::NotificationEmailConfirmation.key(),
