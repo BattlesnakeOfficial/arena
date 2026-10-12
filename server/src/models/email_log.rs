@@ -1,15 +1,17 @@
 //! Per-recipient email send bookkeeping (BS-7e38).
 //!
-//! Play's safety net, ported: no matter what triggers a send, one recipient
-//! address can only receive so many emails per hour. This is the backstop
+//! Play's safety net, ported: production sends share a per-recipient hourly
+//! budget. Admin test sends have a separate budget. This is the backstop
 //! against both logic bugs (a looping job) and abuse (a user-triggerable
 //! flow pointed at someone else's inbox).
 
 use color_eyre::eyre::Context as _;
 use sqlx::PgConnection;
 
+pub const ADMIN_TEST_PURPOSE: &str = "admin_test";
+
 /// Record an attempted send and return how many attempts have targeted this
-/// recipient (case-insensitive) in the trailing hour — including this one.
+/// recipient (case-insensitive) in this lane's trailing hour, including this one.
 ///
 /// Record-before-check, like `claim_attempts`: concurrent sends each insert
 /// first and therefore see each other, and a suppressed send still spends
@@ -38,8 +40,10 @@ pub async fn record_and_count_recent_sends(
         r#"SELECT COUNT(*) as "count!"
          FROM email_log
          WHERE lower(recipient) = lower($1)
-           AND sent_at > NOW() - INTERVAL '1 hour'"#,
+           AND sent_at > NOW() - INTERVAL '1 hour'
+           AND (purpose = 'admin_test') = ($2::text = 'admin_test')"#,
         recipient,
+        purpose,
     )
     .fetch_one(&mut *connection)
     .await
@@ -85,6 +89,52 @@ mod tests {
             1
         );
 
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn admin_test_has_its_own_lane(pool: PgPool) -> cja::Result<()> {
+        let mut tx = pool.begin().await?;
+        assert_eq!(
+            record_and_count_recent_sends(&mut tx, "A@Example.com", "account_claimed").await?,
+            1
+        );
+        assert_eq!(
+            record_and_count_recent_sends(&mut tx, "a@example.com", ADMIN_TEST_PURPOSE).await?,
+            1
+        );
+        assert_eq!(
+            record_and_count_recent_sends(&mut tx, "A@example.com", "matchmaking_deactivated")
+                .await?,
+            2
+        );
+        assert_eq!(
+            record_and_count_recent_sends(&mut tx, "a@example.com", "unknown").await?,
+            3
+        );
+        assert_eq!(
+            record_and_count_recent_sends(&mut tx, "A@example.com", "snake_matchmaking_paused")
+                .await?,
+            4
+        );
+        assert_eq!(
+            record_and_count_recent_sends(&mut tx, "A@example.com", ADMIN_TEST_PURPOSE).await?,
+            2
+        );
+        sqlx::query!(
+            "UPDATE email_log SET sent_at = NOW() - INTERVAL '2 hours' WHERE purpose = $1",
+            ADMIN_TEST_PURPOSE
+        )
+        .execute(&mut *tx)
+        .await?;
+        assert_eq!(
+            record_and_count_recent_sends(&mut tx, "a@example.com", ADMIN_TEST_PURPOSE).await?,
+            1
+        );
+        assert_eq!(
+            record_and_count_recent_sends(&mut tx, "a@example.com", "account_claimed").await?,
+            5
+        );
         Ok(())
     }
 }

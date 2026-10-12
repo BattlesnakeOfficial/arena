@@ -3,16 +3,19 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::{Form, Json, extract::Path, http::header, response::Redirect};
 use chrono::{DateTime, Utc};
-use maud::html;
+use maud::{Markup, html};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::components::page_factory::PageFactory;
 use crate::customizations::{Head, Tail};
-use crate::errors::{ServerResult, WithStatus};
+use crate::email::{SendOutcome, messages};
+use crate::errors::{ServerError, ServerResult, WithStatus};
 use crate::models::customization_unlock_code::{self as codes, CreateCode, ValidationError};
 use crate::models::moderation_flag::{self, ModerationFlagListing};
+use crate::models::{email_log, notification_email};
+use crate::notifications::{NotificationChannel, NotificationKind};
 use crate::routes::auth::{AdminApiUser, AdminUser};
 use crate::state::AppState;
 
@@ -223,10 +226,11 @@ pub async fn dashboard(
             div {
                 h1 { "Admin Dashboard" }
 
-                div style="margin-bottom: 20px;" {
+                div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:20px;" {
                     a href="/admin" style="padding: 8px 16px; background: #0066cc; color: white; text-decoration: none; border-radius: 4px;" { "Refresh" }
                     a href="/admin/codes" style="padding: 8px 16px; background: #666; color: white; text-decoration: none; border-radius: 4px; margin-left: 8px;" { "Unlock codes" }
                     a href="/admin/moderation" style="padding: 8px 16px; background: #666; color: white; text-decoration: none; border-radius: 4px; margin-left: 8px;" { "Moderation queue" }
+                    a href="/admin/emails" style="display:inline-flex;align-items:center;min-height:44px;padding:8px 16px;background:#666;color:white;text-decoration:none;border-radius:4px;box-sizing:border-box;" { "Emails" }
                     a href="/stats" style="padding: 8px 16px; background: #666; color: white; text-decoration: none; border-radius: 4px; margin-left: 8px;" { "Stats" }
                 }
 
@@ -385,6 +389,164 @@ pub async fn dashboard(
             }
         }),
     ))
+}
+
+fn email_kind(key: &str) -> ServerResult<NotificationKind, StatusCode> {
+    NotificationKind::parse(key)
+        .filter(|kind| kind.supports(NotificationChannel::Email))
+        .ok_or_else(|| {
+            ServerError(
+                cja::color_eyre::eyre::eyre!("Unknown email kind"),
+                StatusCode::NOT_FOUND,
+            )
+        })
+}
+
+fn sample_message(
+    kind: NotificationKind,
+    base_url: &str,
+    to: &str,
+) -> cja::Result<messages::EmailMessage> {
+    let content = messages::sample_notification(kind, base_url)
+        .ok_or_else(|| cja::color_eyre::eyre::eyre!("Email kind lacks a sample"))?;
+    let unsubscribe = kind.toggleable().then(|| {
+        format!(
+            "{}/notifications/unsubscribe/sample-invalid-token",
+            base_url.trim_end_matches('/')
+        )
+    });
+    messages::finish(
+        content,
+        to.to_owned(),
+        kind,
+        base_url,
+        unsubscribe.as_deref(),
+    )
+}
+
+fn preview_content(
+    kind: NotificationKind,
+    message: &messages::EmailMessage,
+    destination: Option<&str>,
+    outcome: Option<&str>,
+) -> Markup {
+    let headers: Vec<_> = message
+        .form_fields("")
+        .into_iter()
+        .filter(|(name, _)| name.starts_with("h:"))
+        .collect();
+    let path = format!("/admin/emails/{}", kind.key());
+    html! {
+        div style="min-width:0;max-width:100%;font-size:16px;overflow-wrap:anywhere;" {
+            nav { a href="/admin/emails" { "← All emails" } }
+            h1 { (kind.name()) }
+            p { (kind.description()) }
+            @if let Some(outcome) = outcome {
+                p role="status" { (outcome) }
+            }
+            h2 { "Send test" }
+            @if let Some(address) = destination {
+                p { "Your resolved notification address: " (address) }
+            } @else {
+                p { "No notification address is available for your account. Add one before sending a test." }
+            }
+            form method="post" action=(format!("{path}/send-test")) {
+                button type="submit" disabled[destination.is_none()] style="min-height:44px;padding:10px 18px;font-size:16px;" { "Send test to me" }
+            }
+            h2 { "Subject" }
+            p { (message.subject) }
+            h2 { "Sample recipient" }
+            p { (message.to) }
+            h2 { "Extra headers" }
+            div style="max-width:100%;overflow-wrap:anywhere;" {
+                @if headers.is_empty() { "None" }
+                @for (name, value) in headers { p { (name) ": " (value) } }
+            }
+            h2 { "HTML" }
+            iframe title="Email HTML preview" sandbox="" srcdoc=(message.html) style="display:block;width:100%;max-width:100%;height:600px;border:1px solid var(--hairline);box-sizing:border-box;" {}
+            h2 { "Plain text" }
+            pre style="white-space:pre-wrap;overflow-wrap:anywhere;max-width:100%;box-sizing:border-box;overflow-x:auto;font-size:16px;" { (message.text) }
+        }
+    }
+}
+
+pub async fn email_catalog(
+    AdminUser(_user): AdminUser,
+    page_factory: PageFactory,
+) -> ServerResult<impl IntoResponse, StatusCode> {
+    Ok(page_factory.create_page("Emails".into(), Box::new(html! {
+        div style="min-width:0;max-width:100%;font-size:16px;overflow-wrap:anywhere;" {
+            h1 { "Emails" }
+            p { "Every email Arena sends, with an inert sample preview." }
+            @for kind in NotificationKind::ALL.into_iter().filter(|kind| kind.supports(NotificationChannel::Email)) {
+                article style="padding:12px 0;border-bottom:1px solid var(--hairline);" {
+                    a href=(format!("/admin/emails/{}", kind.key())) style="display:inline-flex;align-items:center;min-height:44px;" { (kind.name()) }
+                    p style="margin:0 0 8px;" { (kind.description()) }
+                }
+            }
+        }
+    })))
+}
+
+pub async fn email_preview(
+    State(state): State<AppState>,
+    AdminUser(user): AdminUser,
+    Path(key): Path<String>,
+    page_factory: PageFactory,
+) -> ServerResult<impl IntoResponse, StatusCode> {
+    let kind = email_kind(&key)?;
+    let mut connection = state.db.acquire().await?;
+    let address = notification_email::resolved_recipient(&mut connection, user.user_id).await?;
+    let message = sample_message(kind, &state.config.base_url, "sample@example.com")?;
+    Ok(page_factory.create_page(
+        kind.name().into(),
+        Box::new(preview_content(kind, &message, address.as_deref(), None)),
+    ))
+}
+
+pub async fn send_test_email(
+    State(state): State<AppState>,
+    AdminUser(user): AdminUser,
+    Path(key): Path<String>,
+    page_factory: PageFactory,
+) -> ServerResult<impl IntoResponse, StatusCode> {
+    let kind = email_kind(&key)?;
+    let mut tx = state.db.begin().await?;
+    let address = notification_email::resolved_recipient(&mut tx, user.user_id).await?;
+    let mut outcome = "No notification address is available; no test was sent.".to_string();
+    if let Some(to) = &address {
+        let message = sample_message(kind, &state.config.base_url, to)?;
+        outcome = match state
+            .mailer
+            .send_limited(
+                &mut tx,
+                state.config.email_per_recipient_hourly_limit,
+                email_log::ADMIN_TEST_PURPOSE,
+                &message,
+            )
+            .await
+        {
+            Ok(SendOutcome::Sent) => "Sent".into(),
+            Ok(SendOutcome::Disabled) => "Disabled (no Mailgun config)".into(),
+            Ok(SendOutcome::RateLimited) => "RateLimited".into(),
+            Err(err) => {
+                tracing::error!(error = %format!("{err:#}"), "Admin test email failed");
+                format!("{err:#}")
+            }
+        };
+    }
+    tx.commit().await?;
+    let message = sample_message(kind, &state.config.base_url, "sample@example.com")?;
+    let page = page_factory.create_page(
+        kind.name().into(),
+        Box::new(preview_content(
+            kind,
+            &message,
+            address.as_deref(),
+            Some(&outcome),
+        )),
+    );
+    Ok(([(header::CACHE_CONTROL, "no-store")], page))
 }
 
 /// GET /admin/moderation — unreviewed moderation flags, newest first.
@@ -644,6 +806,401 @@ pub async fn disable_code(
         return Err("Unlock code not found".to_string()).with_status(StatusCode::NOT_FOUND);
     }
     Ok(Redirect::to("/admin/codes"))
+}
+
+#[cfg(test)]
+mod email_tests {
+    use super::*;
+    use crate::{
+        email::{Mailer, MailgunConfig},
+        routes::test_support::{create_user_session, session_user_id, signed_session_cookie},
+    };
+    use axum::{
+        body::{Body, to_bytes},
+        http::Request,
+    };
+    use sqlx::PgPool;
+    use tower::ServiceExt as _;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+
+    async fn request(
+        state: &AppState,
+        session: Option<Uuid>,
+        method_name: &str,
+        uri: &str,
+        body: &str,
+    ) -> axum::response::Response {
+        let mut builder = Request::builder().method(method_name).uri(uri);
+        if let Some(session) = session {
+            builder = builder.header(
+                header::COOKIE,
+                format!(
+                    "{}={}",
+                    crate::models::session::SESSION_COOKIE_NAME,
+                    signed_session_cookie(state, session)
+                ),
+            );
+        }
+        crate::routes::routes(state.clone())
+            .expect("asset router")
+            .layer(tower_cookies::CookieManagerLayer::new())
+            .oneshot(builder.body(Body::from(body.to_owned())).unwrap())
+            .await
+            .unwrap()
+    }
+
+    async fn body(response: axum::response::Response) -> String {
+        String::from_utf8(
+            to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap()
+    }
+
+    async fn domain_counts(pool: &PgPool) -> cja::Result<[i64; 8]> {
+        let r = sqlx::query!(
+            r#"SELECT
+            (SELECT COUNT(*) FROM users) AS "users!",
+            (SELECT COUNT(*) FROM games) AS "games!",
+            (SELECT COUNT(*) FROM customization_grants) AS "grants!",
+            (SELECT COUNT(*) FROM notifications) AS "notifications!",
+            (SELECT COUNT(*) FROM notification_emails) AS "emails!",
+            (SELECT COUNT(*) FROM notification_email_requests) AS "requests!",
+            (SELECT COUNT(*) FROM claim_email_tokens) AS "tokens!",
+            (SELECT COUNT(*) FROM jobs) AS "jobs!""#
+        )
+        .fetch_one(pool)
+        .await?;
+        Ok([
+            r.users,
+            r.games,
+            r.grants,
+            r.notifications,
+            r.emails,
+            r.requests,
+            r.tokens,
+            r.jobs,
+        ])
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn catalog_and_previews_are_admin_only_and_escaped(pool: PgPool) -> cja::Result<()> {
+        let state = AppState::test_from_pool(pool.clone());
+        let admin = create_user_session(&pool, 1668001, true).await;
+        let regular = create_user_session(&pool, 1668002, false).await;
+        let before = domain_counts(&pool).await?;
+        for path in [
+            "/admin/emails",
+            "/admin/emails/snake_matchmaking_paused",
+            "/admin/emails/snake_matchmaking_paused/send-test",
+        ] {
+            let method_name = if path.ends_with("send-test") {
+                "POST"
+            } else {
+                "GET"
+            };
+            assert_eq!(
+                request(&state, None, method_name, path, "").await.status(),
+                StatusCode::UNAUTHORIZED
+            );
+            assert_eq!(
+                request(&state, Some(regular), method_name, path, "")
+                    .await
+                    .status(),
+                StatusCode::FORBIDDEN
+            );
+        }
+        let catalog = body(request(&state, Some(admin), "GET", "/admin/emails", "").await).await;
+        for kind in NotificationKind::ALL
+            .into_iter()
+            .filter(|kind| kind.supports(NotificationChannel::Email))
+        {
+            assert!(catalog.contains(&format!("/admin/emails/{}", kind.key())));
+            let page = body(
+                request(
+                    &state,
+                    Some(admin),
+                    "GET",
+                    &format!("/admin/emails/{}", kind.key()),
+                    "",
+                )
+                .await,
+            )
+            .await;
+            let expected = sample_message(kind, &state.config.base_url, "sample@example.com")?;
+            assert!(page.contains(&expected.subject));
+            assert!(page.contains("sandbox=\"\""));
+            assert!(page.contains("srcdoc=\""));
+            let encoded_html = html! { iframe srcdoc=(expected.html) {} }.into_string();
+            let srcdoc = encoded_html
+                .split("srcdoc=")
+                .nth(1)
+                .unwrap()
+                .split('>')
+                .next()
+                .unwrap();
+            assert!(page.contains(&format!("srcdoc={srcdoc}")));
+            assert!(page.contains(&html! { (expected.text) }.into_string()));
+            for (name, value) in expected
+                .form_fields("")
+                .into_iter()
+                .filter(|(name, _)| name.starts_with("h:"))
+            {
+                assert!(page.contains(&html! { p { (name) ": " (value) } }.into_string()));
+            }
+            if kind.toggleable() {
+                assert!(page.contains("h:List-Unsubscribe"));
+                assert!(page.contains("h:List-Unsubscribe-Post"));
+            } else {
+                assert!(!page.contains("h:List-Unsubscribe"));
+            }
+            assert!(page.contains("&lt;table role=&quot;presentation&quot;"));
+            assert!(!page.contains("<table role=\"presentation\""));
+            assert!(!page.contains("class=\"email-cta\""));
+            assert!(!page.contains("class=\"email-link\""));
+            assert!(page.contains("No notification address is available"));
+            assert!(page.contains("disabled"));
+        }
+        assert_eq!(
+            request(&state, Some(admin), "GET", "/admin/emails/unknown", "")
+                .await
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            request(
+                &state,
+                Some(admin),
+                "POST",
+                "/admin/emails/unknown/send-test",
+                ""
+            )
+            .await
+            .status(),
+            StatusCode::NOT_FOUND
+        );
+        let outcome = request(
+            &state,
+            Some(admin),
+            "POST",
+            "/admin/emails/play_account_claimed/send-test",
+            "to=other@example.com",
+        )
+        .await;
+        assert_eq!(
+            outcome.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store"
+        );
+        assert!(body(outcome).await.contains("no test was sent"));
+        assert_eq!(
+            sqlx::query_scalar!("SELECT COUNT(*) AS \"count!\" FROM email_log")
+                .fetch_one(&pool)
+                .await?,
+            0
+        );
+        assert_eq!(domain_counts(&pool).await?, before);
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn test_send_uses_only_admin_address_and_test_lane(pool: PgPool) -> cja::Result<()> {
+        let mut state = AppState::test_from_pool(pool.clone());
+        let admin = create_user_session(&pool, 1668003, true).await;
+        let user_id = session_user_id(&pool, admin).await;
+        sqlx::query!("UPDATE users SET github_email = 'github@example.com', notification_email = 'override@example.com' WHERE user_id = $1", user_id).execute(&pool).await?;
+        let before = domain_counts(&pool).await?;
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v3/example.test/messages"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        state.mailer = Mailer::new(
+            Some(MailgunConfig {
+                api_key: "test".into(),
+                domain: "example.test".into(),
+                from: "Arena <mail@example.test>".into(),
+                base_url: mock.uri(),
+            }),
+            reqwest::Client::new(),
+        );
+        std::sync::Arc::make_mut(&mut state.config).email_per_recipient_hourly_limit = 1;
+        let path = "/admin/emails/snake_matchmaking_paused/send-test?to=attacker@example.com";
+        let first = request(
+            &state,
+            Some(admin),
+            "POST",
+            path,
+            "to=attacker@example.com&email=other@example.com&recipient=bad@example.com",
+        )
+        .await;
+        assert!(body(first).await.contains(">Sent<"));
+        let second = request(&state, Some(admin), "POST", path, "").await;
+        assert!(body(second).await.contains("RateLimited"));
+        let sent = mock.received_requests().await.unwrap();
+        assert_eq!(sent.len(), 1);
+        let form: std::collections::HashMap<_, _> = url::form_urlencoded::parse(&sent[0].body)
+            .into_owned()
+            .collect();
+        let expected = sample_message(
+            NotificationKind::SnakeMatchmakingPaused,
+            &state.config.base_url,
+            "override@example.com",
+        )?;
+        let expected_form: std::collections::HashMap<_, _> = expected
+            .form_fields("Arena <mail@example.test>")
+            .into_iter()
+            .map(|(k, v)| (k.to_owned(), v.to_owned()))
+            .collect();
+        assert_eq!(form, expected_form);
+        let rows = sqlx::query!("SELECT recipient, purpose FROM email_log ORDER BY sent_at")
+            .fetch_all(&pool)
+            .await?;
+        assert_eq!(rows.len(), 2);
+        assert!(
+            rows.iter().all(|r| r.recipient == "override@example.com"
+                && r.purpose == email_log::ADMIN_TEST_PURPOSE)
+        );
+        assert_eq!(domain_counts(&pool).await?, before);
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn disabled_send_does_not_log(pool: PgPool) -> cja::Result<()> {
+        let state = AppState::test_from_pool(pool.clone());
+        let admin = create_user_session(&pool, 1668004, true).await;
+        let user_id = session_user_id(&pool, admin).await;
+        sqlx::query!(
+            "UPDATE users SET github_email = 'admin@example.com' WHERE user_id = $1",
+            user_id
+        )
+        .execute(&pool)
+        .await?;
+        let response = request(
+            &state,
+            Some(admin),
+            "POST",
+            "/admin/emails/play_account_claimed/send-test",
+            "",
+        )
+        .await;
+        assert!(
+            body(response)
+                .await
+                .contains("Disabled (no Mailgun config)")
+        );
+        assert_eq!(
+            sqlx::query_scalar!("SELECT COUNT(*) AS \"count!\" FROM email_log")
+                .fetch_one(&pool)
+                .await?,
+            0
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn mailgun_error_is_shown_and_attempt_is_committed(pool: PgPool) -> cja::Result<()> {
+        let mut state = AppState::test_from_pool(pool.clone());
+        let admin = create_user_session(&pool, 1668005, true).await;
+        let user_id = session_user_id(&pool, admin).await;
+        sqlx::query!(
+            "UPDATE users SET github_email = 'admin@example.com' WHERE user_id = $1",
+            user_id
+        )
+        .execute(&pool)
+        .await?;
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v3/example.test/messages"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("<failure>"))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        state.mailer = Mailer::new(
+            Some(MailgunConfig {
+                api_key: "test".into(),
+                domain: "example.test".into(),
+                from: "Arena <mail@example.test>".into(),
+                base_url: mock.uri(),
+            }),
+            reqwest::Client::new(),
+        );
+        let response = request(
+            &state,
+            Some(admin),
+            "POST",
+            "/admin/emails/play_account_claimed/send-test",
+            "",
+        )
+        .await;
+        let html = body(response).await;
+        assert!(html.contains("Mailgun returned 500"));
+        assert!(html.contains("&lt;failure&gt;"));
+        assert!(!html.contains("<failure>"));
+        let count = sqlx::query_scalar!("SELECT COUNT(*) AS \"count!\" FROM email_log WHERE purpose = 'admin_test' AND recipient = 'admin@example.com'").fetch_one(&pool).await?;
+        assert_eq!(count, 1);
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn commit_failure_cannot_claim_sent(pool: PgPool) -> cja::Result<()> {
+        let mut state = AppState::test_from_pool(pool.clone());
+        let admin = create_user_session(&pool, 1668006, true).await;
+        let user_id = session_user_id(&pool, admin).await;
+        sqlx::query!(
+            "UPDATE users SET github_email = 'admin@example.com' WHERE user_id = $1",
+            user_id
+        )
+        .execute(&pool)
+        .await?;
+        sqlx::query!(
+            r#"CREATE FUNCTION reject_admin_test_commit() RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN RAISE EXCEPTION 'commit blocked'; END; $$"#
+        )
+        .execute(&pool)
+        .await?;
+        sqlx::query!("CREATE CONSTRAINT TRIGGER reject_admin_test_commit AFTER INSERT ON email_log DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION reject_admin_test_commit()")
+            .execute(&pool).await?;
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v3/example.test/messages"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        state.mailer = Mailer::new(
+            Some(MailgunConfig {
+                api_key: "test".into(),
+                domain: "example.test".into(),
+                from: "Arena <mail@example.test>".into(),
+                base_url: mock.uri(),
+            }),
+            reqwest::Client::new(),
+        );
+        let response = request(
+            &state,
+            Some(admin),
+            "POST",
+            "/admin/emails/play_account_claimed/send-test",
+            "",
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(!body(response).await.contains(">Sent<"));
+        assert_eq!(
+            sqlx::query_scalar!("SELECT COUNT(*) AS \"count!\" FROM email_log")
+                .fetch_one(&pool)
+                .await?,
+            0
+        );
+        Ok(())
+    }
 }
 
 #[cfg(test)]

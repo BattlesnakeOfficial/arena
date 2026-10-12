@@ -274,6 +274,36 @@ pub fn claim_verification(play_username: &str, verify_url: &str) -> EmailContent
     }
 }
 
+/// Inert examples built with the same content functions as delivery jobs.
+/// An exhaustive match makes a new kind require an explicit sample decision.
+pub fn sample_notification(kind: NotificationKind, base_url: &str) -> Option<EmailContent> {
+    let base = base_url.trim_end_matches('/');
+    let profile = format!("{base}/battlesnakes/00000000-0000-4000-8000-000000000001/profile");
+    match kind {
+        NotificationKind::SnakeMatchmakingPaused => Some(matchmaking_deactivated_content(
+            "Sample Snake",
+            &[
+                ("Royale 11x11".into(), "POST /move timed out".into()),
+                ("Duels 11x11".into(), "HTTP 500".into()),
+            ],
+            &profile,
+        )),
+        NotificationKind::SnakeMatchmakingResumed => Some(matchmaking_reactivated_content(
+            "Sample Snake",
+            &["Royale 11x11".into(), "Duels 11x11".into()],
+            &profile,
+        )),
+        NotificationKind::PlayAccountClaimed => Some(account_claimed("sample-player", 3, 2)),
+        NotificationKind::ClaimVerification => Some(claim_verification(
+            "sample-player",
+            &format!("{base}/claim/email/verify?token=sample-invalid-token"),
+        )),
+        NotificationKind::NotificationEmailConfirmation => Some(notification_email_confirmation(
+            &format!("{base}/settings/notification-email/confirm?token=sample-invalid-token"),
+        )),
+    }
+}
+
 /// Assemble recipient-neutral event copy with the reason and controls.
 pub fn finish(
     content: EmailContent,
@@ -369,24 +399,18 @@ mod tests {
     use super::*;
     use arena::design_kit::AssetKind;
 
-    fn sample(kind: NotificationKind) -> EmailContent {
-        match kind {
-            NotificationKind::SnakeMatchmakingPaused => matchmaking_deactivated_content(
-                "Hissy",
-                &[("Royale".into(), "timeout".into())],
-                "https://arena.example/snake",
-            ),
-            NotificationKind::SnakeMatchmakingResumed => matchmaking_reactivated_content(
-                "Hissy",
-                &["Royale".into()],
-                "https://arena.example/snake",
-            ),
-            NotificationKind::PlayAccountClaimed => account_claimed("player", 2, 3),
-            NotificationKind::ClaimVerification => {
-                claim_verification("player", "https://arena.example/claim?token=invented")
-            }
-            NotificationKind::NotificationEmailConfirmation => {
-                notification_email_confirmation("https://arena.example/confirm?token=invented")
+    #[test]
+    fn every_email_kind_has_one_nonempty_sample() {
+        use crate::notifications::NotificationChannel;
+        let mut keys = std::collections::HashSet::new();
+        for kind in NotificationKind::ALL {
+            assert!(keys.insert(kind.key()), "duplicate key: {}", kind.key());
+            let sample = sample_notification(kind, "https://arena.example/");
+            assert_eq!(sample.is_some(), kind.supports(NotificationChannel::Email));
+            if let Some(sample) = sample {
+                assert!(!sample.subject.is_empty());
+                assert!(!sample.text.is_empty());
+                assert!(!sample.html_body.is_empty());
             }
         }
     }
@@ -424,8 +448,23 @@ mod tests {
                 .split('"')
                 .next()
                 .unwrap();
-            assert!(src.starts_with("https://") && src.ends_with(".png"));
             assert!(!alt.is_empty());
+            let url = url::Url::parse(src).expect("image URL must be absolute");
+            assert_eq!(url.scheme(), "https");
+            let parts: Vec<_> = url.path_segments().unwrap().collect();
+            assert_eq!(parts.len(), 4);
+            assert_eq!(parts[0], "og");
+            assert_eq!(parts[1], "customizations");
+            let kind = match parts[2] {
+                "heads" => AssetKind::Head,
+                "tails" => AssetKind::Tail,
+                _ => panic!("unknown customization image kind"),
+            };
+            let slug = parts[3].strip_suffix(".png").expect("image must be PNG");
+            assert_eq!(
+                Some(src.to_string()),
+                crate::routes::og::customization_png_url(kind, slug)
+            );
         }
     }
 
@@ -436,7 +475,7 @@ mod tests {
                 .toggleable()
                 .then_some("https://arena.example/unsubscribe");
             let message = finish(
-                sample(kind),
+                sample_notification(kind, "https://arena.example").unwrap(),
                 "test@example.com".into(),
                 kind,
                 "https://arena.example",
@@ -484,7 +523,7 @@ mod tests {
                 assert!(message.html.contains(&message.subject));
                 for phrase in [
                     "Confirm this address for optional Battlesnake Arena emails within 24 hours:",
-                    "https://arena.example/confirm?token=invented",
+                    "https://arena.example/settings/notification-email/confirm?token=sample-invalid-token",
                     "Sign in to the same Arena account that requested this change.",
                     "If your email app opens a signed-out browser, sign in and reopen this link.",
                     "If you did not request this, you can ignore this email.",
@@ -500,7 +539,11 @@ mod tests {
     fn event_fragments_preserve_copy_and_explicit_links() {
         let cases = [
             (
-                sample(NotificationKind::SnakeMatchmakingPaused),
+                sample_notification(
+                    NotificationKind::SnakeMatchmakingPaused,
+                    "https://arena.example",
+                )
+                .unwrap(),
                 &[
                     "Your Battlesnake",
                     "has been temporarily removed",
@@ -508,23 +551,31 @@ mod tests {
                     "Its ratings are safe",
                     "We'll keep checking",
                     "The &quot;Test Snake&quot; button",
-                    "https://arena.example/snake",
+                    "https://arena.example/battlesnakes/00000000-0000-4000-8000-000000000001/profile",
                 ][..],
                 true,
             ),
             (
-                sample(NotificationKind::SnakeMatchmakingResumed),
+                sample_notification(
+                    NotificationKind::SnakeMatchmakingResumed,
+                    "https://arena.example",
+                )
+                .unwrap(),
                 &[
                     "Good news",
                     "is passing our health checks again",
                     "No action needed.",
                     "You can see its status",
-                    "https://arena.example/snake",
+                    "https://arena.example/battlesnakes/00000000-0000-4000-8000-000000000001/profile",
                 ][..],
                 true,
             ),
             (
-                sample(NotificationKind::PlayAccountClaimed),
+                sample_notification(
+                    NotificationKind::PlayAccountClaimed,
+                    "https://arena.example",
+                )
+                .unwrap(),
                 &[
                     "Your play.battlesnake.com account was just claimed",
                     "We moved",
@@ -535,24 +586,29 @@ mod tests {
                 false,
             ),
             (
-                sample(NotificationKind::ClaimVerification),
+                sample_notification(NotificationKind::ClaimVerification, "https://arena.example")
+                    .unwrap(),
                 &[
                     "Someone signed in",
                     "The link works once and expires in 30 minutes.",
                     "It only works for the arena account",
                     "If this wasn't you",
-                    "https://arena.example/claim?token=invented",
+                    "https://arena.example/claim/email/verify?token=sample-invalid-token",
                 ][..],
                 true,
             ),
             (
-                sample(NotificationKind::NotificationEmailConfirmation),
+                sample_notification(
+                    NotificationKind::NotificationEmailConfirmation,
+                    "https://arena.example",
+                )
+                .unwrap(),
                 &[
                     "Confirm this address for optional",
                     "Sign in to the same Arena account",
                     "If your email app opens a signed-out browser",
                     "If you did not request this",
-                    "https://arena.example/confirm?token=invented",
+                    "https://arena.example/settings/notification-email/confirm?token=sample-invalid-token",
                 ][..],
                 true,
             ),
@@ -573,7 +629,9 @@ mod tests {
             NotificationKind::SnakeMatchmakingPaused,
             NotificationKind::SnakeMatchmakingResumed,
         ] {
-            let html = sample(kind).html_body;
+            let html = sample_notification(kind, "https://arena.example")
+                .unwrap()
+                .html_body;
             assert!(html.contains("<ul "));
             assert!(html.contains("<li "));
         }
@@ -585,7 +643,7 @@ mod tests {
         let old_text = matchmaking_deactivated_content(
             evil,
             &[(evil.into(), evil.into())],
-            "https://arena.example/snake",
+            "https://arena.example/battlesnakes/00000000-0000-4000-8000-000000000001/profile",
         )
         .text;
         let old_html = EmailContent::from_text("old".into(), old_text).html_body;
@@ -599,9 +657,13 @@ mod tests {
             matchmaking_deactivated_content(
                 evil,
                 &[(evil.into(), evil.into())],
-                "https://arena.example/snake",
+                "https://arena.example/battlesnakes/00000000-0000-4000-8000-000000000001/profile",
             ),
-            matchmaking_reactivated_content(evil, &[evil.into()], "https://arena.example/snake"),
+            matchmaking_reactivated_content(
+                evil,
+                &[evil.into()],
+                "https://arena.example/battlesnakes/00000000-0000-4000-8000-000000000001/profile",
+            ),
         ] {
             assert!(content.html_body.contains("https://evil.example"));
             assert!(
@@ -642,9 +704,13 @@ mod tests {
             matchmaking_deactivated_content(
                 evil,
                 &[(evil.into(), evil.into())],
-                "https://arena.example/snake",
+                "https://arena.example/battlesnakes/00000000-0000-4000-8000-000000000001/profile",
             ),
-            matchmaking_reactivated_content(evil, &[evil.into()], "https://arena.example/snake"),
+            matchmaking_reactivated_content(
+                evil,
+                &[evil.into()],
+                "https://arena.example/battlesnakes/00000000-0000-4000-8000-000000000001/profile",
+            ),
         ] {
             assert!(!content.html_body.contains("<script>"));
             assert!(content.html_body.contains("&lt;script&gt;"));
@@ -661,13 +727,53 @@ mod tests {
         assert_eq!(fixture.matches("<img ").count(), 2);
         check_images(&fixture);
         assert!(crate::routes::og::customization_png_url(AssetKind::Head, "unknown").is_none());
+        for bad in [
+            "<img src=\"https://arena.battlesnake.com/og/customizations/heads/default.svg\" alt=\"Head\">",
+            "<img src=\"https://arena.battlesnake.com/og/customizations/heads/unknown.png\" alt=\"Head\">",
+            "<img src=\"https://arena.battlesnake.com/og/customizations/heads/default.png\" alt=\"\">",
+            "<img src=\"/og/customizations/heads/default.png\" alt=\"Head\">",
+        ] {
+            assert!(std::panic::catch_unwind(|| check_images(bad)).is_err());
+        }
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn sample_image_fixture_resolves_through_production_router(pool: sqlx::PgPool) {
+        use axum::{
+            body::{Body, to_bytes},
+            http::{Request, StatusCode, header},
+        };
+        use tower::ServiceExt as _;
+        let app = crate::routes::routes(crate::state::AppState::test_from_pool(pool))
+            .expect("asset router")
+            .layer(tower_cookies::CookieManagerLayer::new());
+        for kind in [AssetKind::Head, AssetKind::Tail] {
+            let url = crate::routes::og::customization_png_url(kind, "default").unwrap();
+            let path = url::Url::parse(&url).unwrap().path().to_owned();
+            let response = app
+                .clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response.headers().get(header::CONTENT_TYPE).unwrap(),
+                "image/png"
+            );
+            let png = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+        }
     }
 
     #[test]
     fn unsubscribe_url_must_match_kind() {
         assert!(
             finish(
-                sample(NotificationKind::SnakeMatchmakingPaused),
+                sample_notification(
+                    NotificationKind::SnakeMatchmakingPaused,
+                    "https://arena.example"
+                )
+                .unwrap(),
                 "a@b".into(),
                 NotificationKind::SnakeMatchmakingPaused,
                 "https://arena.example",
@@ -677,7 +783,11 @@ mod tests {
         );
         assert!(
             finish(
-                sample(NotificationKind::PlayAccountClaimed),
+                sample_notification(
+                    NotificationKind::PlayAccountClaimed,
+                    "https://arena.example"
+                )
+                .unwrap(),
                 "a@b".into(),
                 NotificationKind::PlayAccountClaimed,
                 "https://arena.example",
@@ -697,7 +807,7 @@ mod tests {
                 .toggleable()
                 .then_some("https://arena.example/unsubscribe?token=invented");
             let message = finish(
-                sample(kind),
+                sample_notification(kind, "https://arena.example").unwrap(),
                 "preview@example.com".into(),
                 kind,
                 "https://arena.example",

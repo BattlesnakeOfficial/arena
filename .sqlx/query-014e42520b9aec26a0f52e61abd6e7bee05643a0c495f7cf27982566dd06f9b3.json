@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE email_log SET sent_at = NOW() - INTERVAL '2 hours' WHERE purpose = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "014e42520b9aec26a0f52e61abd6e7bee05643a0c495f7cf27982566dd06f9b3"
+}

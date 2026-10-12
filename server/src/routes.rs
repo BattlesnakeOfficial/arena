@@ -344,6 +344,12 @@ pub fn routes(app_state: AppState) -> cja::Result<axum::Router> {
             get(admin::list_codes).post(admin::create_code),
         )
         .route("/admin/codes/{id}/disable", post(admin::disable_code))
+        .route("/admin/emails", get(admin::email_catalog))
+        .route("/admin/emails/{kind}", get(admin::email_preview))
+        .route(
+            "/admin/emails/{kind}/send-test",
+            post(admin::send_test_email),
+        )
         .route("/stats", get(stats::stats_page))
         .route("/admin/moderation", get(admin::moderation_queue))
         // Game API routes for board viewer (with CORS)

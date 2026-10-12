@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "CREATE CONSTRAINT TRIGGER reject_admin_test_commit AFTER INSERT ON email_log DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION reject_admin_test_commit()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "b05daed33957be113a4cde8ef6f22ffd4a4fe6cf9770a174b1f248d324ab0c4b"
+}
