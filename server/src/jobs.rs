@@ -281,7 +281,12 @@ impl Job<AppState> for AwardAchievementsForGameJob {
     const NAME: &'static str = "AwardAchievementsForGameJob";
 
     async fn run(&self, app_state: AppState) -> cja::Result<()> {
-        crate::customizations::achievements::award_for_game(&app_state.db, self.game_id).await?;
+        crate::customizations::achievements::award_for_game(
+            &app_state.db,
+            self.game_id,
+            &app_state.config.base_url,
+        )
+        .await?;
         Ok(())
     }
 }

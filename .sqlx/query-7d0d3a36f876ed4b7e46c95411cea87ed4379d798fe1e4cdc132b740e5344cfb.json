@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT body FROM notifications WHERE user_id = $1 AND kind = 'achievement_earned'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "body",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "7d0d3a36f876ed4b7e46c95411cea87ed4379d798fe1e4cdc132b740e5344cfb"
+}

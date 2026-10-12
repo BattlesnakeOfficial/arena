@@ -12,6 +12,66 @@ pub struct EmailContent {
     pub html_body: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnlockedItem {
+    pub display_name: String,
+    pub slug: String,
+    pub png_url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AchievementUnlock {
+    pub name: String,
+    pub head: Option<UnlockedItem>,
+    pub tail: Option<UnlockedItem>,
+}
+
+pub fn achievement_earned(
+    achievements: &[AchievementUnlock],
+    achievements_url: &str,
+) -> EmailContent {
+    let subject = if achievements.len() == 1 {
+        format!("Achievement unlocked: {}", achievements[0].name)
+    } else {
+        format!("{} achievements unlocked", achievements.len())
+    };
+    let mut text = format!("{subject}\n\n");
+    for achievement in achievements {
+        text.push_str(&format!("{}\n", achievement.name));
+        for (kind, item) in [("head", &achievement.head), ("tail", &achievement.tail)] {
+            if let Some(item) = item {
+                text.push_str(&format!(
+                    "Unlocked: {} {} — set {} to \"{}\" in your snake's info response.\n",
+                    if kind == "head" { "Head" } else { "Tail" },
+                    item.display_name,
+                    kind,
+                    item.slug,
+                ));
+            }
+        }
+        text.push('\n');
+    }
+    text.push_str(&format!("View achievements: {achievements_url}\n"));
+    let html_body = html! {
+        @for achievement in achievements {
+            h2 style="font-size:20px;margin:24px 0 12px" { (&achievement.name) }
+            @for (kind, item) in [("head", &achievement.head), ("tail", &achievement.tail)] {
+                @if let Some(item) = item {
+                    p { "Unlocked: " (if kind == "head" { "Head" } else { "Tail" }) " " (&item.display_name) }
+                    p { img src=(&item.png_url) alt=(format!("{} {} unlocked by {}", item.display_name, kind, achievement.name)) width="96" height="96"; }
+                    p { "Set " (kind) " to \"" (&item.slug) "\" in your snake's info response." }
+                }
+            }
+        }
+        (action_button("View achievements", achievements_url))
+    }.into_string();
+    EmailContent {
+        subject,
+        text,
+        html_body,
+    }
+}
+
 impl EmailContent {
     pub fn from_text(subject: String, text: String) -> Self {
         let html_body = escaped_text(&text).into_string();
@@ -301,6 +361,23 @@ pub fn sample_notification(kind: NotificationKind, base_url: &str) -> Option<Ema
         NotificationKind::NotificationEmailConfirmation => Some(notification_email_confirmation(
             &format!("{base}/settings/notification-email/confirm?token=sample-invalid-token"),
         )),
+        NotificationKind::AchievementEarned => Some(achievement_earned(
+            &[
+                crate::customizations::achievements::achievement_unlock(
+                    crate::customizations::achievements::Achievement::FirstWin,
+                    true,
+                    false,
+                )
+                .ok()?,
+                crate::customizations::achievements::achievement_unlock(
+                    crate::customizations::achievements::Achievement::CrowdPleaser,
+                    true,
+                    true,
+                )
+                .ok()?,
+            ],
+            &format!("{base}/customizations/achievements"),
+        )),
     }
 }
 
@@ -357,6 +434,7 @@ fn render_layout(
         NotificationKind::PlayAccountClaimed => "Your play account was claimed on Arena.",
         NotificationKind::ClaimVerification => "Finish your play account claim within 30 minutes.",
         NotificationKind::NotificationEmailConfirmation => "Confirm this address within 24 hours.",
+        NotificationKind::AchievementEarned => "You unlocked new snake cosmetics.",
     };
     html! {
         (maud::DOCTYPE)
@@ -398,6 +476,31 @@ fn render_layout(
 mod tests {
     use super::*;
     use arena::design_kit::AssetKind;
+
+    #[test]
+    fn achievement_email_has_images_slugs_and_matching_alternatives() {
+        use crate::customizations::achievements::{Achievement, achievement_unlock};
+        let first = achievement_unlock(Achievement::FirstWin, true, false).unwrap();
+        let crowd = achievement_unlock(Achievement::CrowdPleaser, true, true).unwrap();
+        let url = "https://arena.example/customizations/achievements";
+        let singular = achievement_earned(std::slice::from_ref(&first), url);
+        assert_eq!(singular.subject, "Achievement unlocked: First Win");
+        assert!(singular.text.contains("set head to \"frog\""));
+        assert!(singular.html_body.contains("frog.png"));
+        let plural = achievement_earned(&[first, crowd], url);
+        assert_eq!(plural.subject, "2 achievements unlocked");
+        for value in ["First Win", "Crowd Pleaser", "frog", "monkey", url] {
+            assert!(plural.text.contains(value));
+            assert!(plural.html_body.contains(value));
+        }
+        assert_eq!(plural.html_body.matches("<img ").count(), 3);
+        check_images(&plural.html_body);
+        assert!(plural.text.contains("set tail to \"monkey\""));
+        for forbidden in ["2024", "Collection", "purchase", "buy"] {
+            assert!(!plural.text.contains(forbidden));
+            assert!(!plural.html_body.contains(forbidden));
+        }
+    }
 
     #[test]
     fn every_email_kind_has_one_nonempty_sample() {

@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT in_app_visible FROM notifications WHERE user_id = $1 AND kind = 'achievement_earned'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "in_app_visible",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "77c64bf770c25adb7622ebdf34ecc744031c56985774fcde07f9628ec35abbc2"
+}

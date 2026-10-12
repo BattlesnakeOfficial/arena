@@ -1,0 +1,64 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT n.title, n.body, n.link, e.recipient_user, e.recipient_override, e.battlesnake_id, e.text, e.html_body FROM notifications n JOIN notification_emails e USING (notification_id) WHERE n.user_id = $1 AND n.kind = 'achievement_earned'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "title",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "body",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "link",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "recipient_user",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 4,
+        "name": "recipient_override",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "battlesnake_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 6,
+        "name": "text",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "html_body",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "8831ab7d917d876a14faaea2ac764bb10e881b33f881a2209e4e5f98ae4e2817"
+}

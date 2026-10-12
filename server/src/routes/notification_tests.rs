@@ -106,6 +106,51 @@ fn now() -> DateTime<Utc> {
 }
 
 #[sqlx::test(migrations = "../migrations")]
+async fn achievement_drawer_respects_in_app_toggle(pool: PgPool) {
+    let fx = Fixture::new(pool).await;
+    fx.seed(
+        fx.user_id,
+        "Achievement unlocked: First Win",
+        "achievement_earned",
+        true,
+        Some("/customizations/achievements"),
+        now(),
+    )
+    .await;
+    assert_eq!(fx.badge().await, 1);
+    assert!(
+        fx.get_html("/notifications/drawer")
+            .await
+            .contains("Achievement unlocked: First Win")
+    );
+    assert!(
+        fx.get_html("/notifications")
+            .await
+            .contains("Achievement unlocked: First Win")
+    );
+    let response = fx
+        .request(
+            "POST",
+            "/settings/notifications",
+            true,
+            "kind=achievement_earned&channel=in_app&enabled=false",
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(fx.badge().await, 0);
+    assert!(
+        !fx.get_html("/notifications/drawer")
+            .await
+            .contains("Achievement unlocked: First Win")
+    );
+    assert!(
+        !fx.get_html("/notifications")
+            .await
+            .contains("Achievement unlocked: First Win")
+    );
+}
+
+#[sqlx::test(migrations = "../migrations")]
 async fn empty_and_item_accessible_names(pool: PgPool) {
     let fx = Fixture::new(pool).await;
     for path in ["/notifications", "/notifications/drawer"] {

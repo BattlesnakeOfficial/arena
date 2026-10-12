@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO customization_grants (user_id, customization_type, slug, source) VALUES ($1, 'head', 'monkey', 'achievement')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "557d7eda0bfde69dbd3df3dd85187ba3d692edd75bd6a06f612a533b5ff40b52"
+}

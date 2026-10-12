@@ -351,7 +351,7 @@ mod tests {
             assert!(html.contains(kind.name()));
         }
         assert!(html.contains("Always on"));
-        assert_eq!(html.matches("Turn off").count(), 4);
+        assert_eq!(html.matches("Turn off").count(), 6);
         let form = "kind=snake_matchmaking_paused&channel=email&enabled=false";
         let response = app
             .clone()
@@ -382,7 +382,7 @@ mod tests {
         let token = notifications::unsubscribe_token(
             &state.cookie_key,
             user_id,
-            NotificationKind::SnakeMatchmakingResumed,
+            NotificationKind::AchievementEarned,
         );
         let before_sessions = sqlx::query_scalar!("SELECT COUNT(*) AS \"count!\" FROM sessions")
             .fetch_one(&pool)
@@ -397,6 +397,26 @@ mod tests {
             )
             .await?;
         assert_eq!(response.status(), StatusCode::OK);
+        let mut connection = pool.acquire().await?;
+        assert!(
+            !crate::models::notification::effective_enabled(
+                &mut connection,
+                user_id,
+                NotificationKind::AchievementEarned,
+                NotificationChannel::Email,
+            )
+            .await?
+        );
+        assert!(
+            crate::models::notification::effective_enabled(
+                &mut connection,
+                user_id,
+                NotificationKind::SnakeMatchmakingResumed,
+                NotificationChannel::Email,
+            )
+            .await?
+        );
+        drop(connection);
         let response = app
             .clone()
             .oneshot(
@@ -412,7 +432,7 @@ mod tests {
             .fetch_one(&pool)
             .await?;
         assert_eq!(before_sessions, after_sessions);
-        let bad = token.replace("resumed", "paused");
+        let bad = token.replace("achievement_earned", "snake_matchmaking_paused");
         let response = app
             .clone()
             .oneshot(
