@@ -25,6 +25,8 @@ RETURNS TABLE (
     GROUP BY bb.user_id
 $$;
 
+DROP FUNCTION leaderboard_member(uuid, uuid);
+
 ALTER TABLE leaderboards
     DROP CONSTRAINT leaderboards_private_invite_code,
     DROP COLUMN invite_code,

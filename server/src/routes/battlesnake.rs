@@ -1476,14 +1476,11 @@ pub async fn view_battlesnake_profile(
     .await
     .wrap_err("Failed to get game history")?;
 
-    // Private ladders are unlisted: only the owner, who joined by link, sees them.
-    let leaderboard_entries = leaderboard::get_entries_for_battlesnake(
-        &state.db,
-        battlesnake_id,
-        viewer == ProfileViewer::Owner,
-    )
-    .await
-    .wrap_err("Failed to get leaderboard entries")?;
+    // Private ladders are unlisted: only their members (and admins) see them.
+    let leaderboard_entries =
+        leaderboard::get_entries_for_battlesnake(&state.db, battlesnake_id, user.as_ref())
+            .await
+            .wrap_err("Failed to get leaderboard entries")?;
 
     // Health-sweeper pauses, for the owner-facing deactivation banner
     let health_paused = leaderboard_entry_health::health_paused_entries(&state.db, battlesnake_id)

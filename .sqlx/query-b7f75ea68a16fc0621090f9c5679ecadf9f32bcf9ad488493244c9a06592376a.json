@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT\n            le.leaderboard_entry_id,\n            le.leaderboard_id,\n            l.name as leaderboard_name,\n            l.visibility as \"leaderboard_visibility: Visibility\",\n            le.display_score,\n            le.games_played,\n            le.first_place_finishes,\n            le.non_first_finishes,\n            le.disabled_at,\n            le.disabled_reason\n         FROM leaderboard_entries le\n         JOIN leaderboards l ON le.leaderboard_id = l.leaderboard_id\n         WHERE le.battlesnake_id = $1\n           AND ($2 OR l.visibility = 'public')\n         ORDER BY le.display_score DESC",
+  "query": "SELECT\n            le.leaderboard_entry_id,\n            le.leaderboard_id,\n            l.name as leaderboard_name,\n            l.visibility as \"leaderboard_visibility: Visibility\",\n            le.display_score,\n            le.games_played,\n            le.first_place_finishes,\n            le.non_first_finishes,\n            le.disabled_at,\n            le.disabled_reason\n         FROM leaderboard_entries le\n         JOIN leaderboards l ON le.leaderboard_id = l.leaderboard_id\n         WHERE le.battlesnake_id = $1\n           AND (l.visibility = 'public' OR $2 OR leaderboard_member(l.leaderboard_id, $3))\n         ORDER BY le.display_score DESC",
   "describe": {
     "columns": [
       {
@@ -57,7 +57,8 @@
     "parameters": {
       "Left": [
         "Uuid",
-        "Bool"
+        "Bool",
+        "Uuid"
       ]
     },
     "nullable": [
@@ -73,5 +74,5 @@
       true
     ]
   },
-  "hash": "be0bf4fed4dab8718b162a662a950b193a2833d1f986e17ead8d7e04dec44c41"
+  "hash": "b7f75ea68a16fc0621090f9c5679ecadf9f32bcf9ad488493244c9a06592376a"
 }

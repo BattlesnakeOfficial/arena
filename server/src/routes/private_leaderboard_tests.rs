@@ -456,8 +456,8 @@ async fn private_leaderboards_are_unlisted(pool: PgPool) {
     .await
     .unwrap();
 
-    // Nothing that lists ladders, or a snake's/user's ladders to strangers,
-    // mentions it.
+    // Nothing that lists ladders, or a snake's/user's ladders to anyone not
+    // on it, mentions it.
     for (path, session) in [
         ("/leaderboards".to_string(), None),
         (format!("/leaderboards/{public}"), None),
@@ -477,17 +477,40 @@ async fn private_leaderboards_are_unlisted(pool: PgPool) {
         assert!(!body.contains("Hidden League"), "{path} leaks its name");
     }
 
-    // The owner still sees their own entry, badged.
-    for path in [
+    // Anyone on the ladder sees it on its players' profiles, badged: the
+    // snake's owner, a fellow member, and admins.
+    let fellow_session = create_user_session(fx.db(), 9950004, false).await;
+    let fellow_id = session_user_id(fx.db(), fellow_session).await;
+    let fellow_snake = snake(fx.db(), fellow_id, "Fellow Snake").await;
+    leaderboard::get_or_create_entry(fx.db(), lb, fellow_snake)
+        .await
+        .unwrap();
+    let profiles = [
         format!("/battlesnakes/{}/profile", fx.member_snake),
         format!("/users/{member_login}"),
-    ] {
-        let (_, body) = fx.get(&path, Some(fx.member_session)).await;
-        assert!(body.contains(&lb_id), "{path}: {body}");
-        assert!(
-            body.contains(r#"<span class="live-pill quiet">Private</span>"#),
-            "{path}: {body}"
-        );
+    ];
+    for session in [fx.member_session, fellow_session, fx.admin_session] {
+        for path in &profiles {
+            let (_, body) = fx.get(path, Some(session)).await;
+            assert!(body.contains(&lb_id), "{path}: {body}");
+            assert!(
+                body.contains(r#"<span class="live-pill quiet">Private</span>"#),
+                "{path}: {body}"
+            );
+        }
+    }
+
+    // Membership lasts only as long as a snake on the ladder does.
+    sqlx::query!(
+        "UPDATE battlesnakes SET deleted_at = NOW() WHERE battlesnake_id = $1",
+        fellow_snake
+    )
+    .execute(fx.db())
+    .await
+    .unwrap();
+    for path in &profiles {
+        let (_, body) = fx.get(path, Some(fellow_session)).await;
+        assert!(!body.contains(&lb_id), "{path} after leaving: {body}");
     }
 
     // The link itself works for anyone, kept out of search engines and

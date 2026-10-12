@@ -11,6 +11,21 @@ ALTER TABLE leaderboards
     ADD CONSTRAINT leaderboards_private_invite_code
         CHECK ((visibility = 'private') = (invite_code IS NOT NULL));
 
+-- The one definition of a leaderboard member: a user with a non-deleted
+-- snake on it, active or paused. On a private ladder, members join further
+-- snakes without the code and see its entries on other players' profiles.
+CREATE FUNCTION leaderboard_member(p_leaderboard_id uuid, p_user_id uuid)
+RETURNS boolean LANGUAGE sql STABLE AS $$
+    SELECT EXISTS (
+        SELECT 1
+        FROM leaderboard_entries le
+        JOIN battlesnakes b ON b.battlesnake_id = le.battlesnake_id
+        WHERE le.leaderboard_id = p_leaderboard_id
+          AND b.user_id = p_user_id
+          AND b.deleted_at IS NULL
+    )
+$$;
+
 -- The global rating is a public rollup, so private ladders stay out of it
 -- (both the per-board bests and the enabled-board count).
 CREATE OR REPLACE FUNCTION global_player_scores(min_games integer)

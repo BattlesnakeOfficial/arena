@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, PgPool, Postgres};
 use uuid::Uuid;
 
-use crate::models::battlesnake::Visibility;
+use crate::models::{battlesnake::Visibility, user::User};
 
 /// Application constants for leaderboard configuration
 /// Smallest game the matchmaker will create when fewer than a leaderboard's match size
@@ -1036,14 +1036,17 @@ pub struct BattlesnakeLeaderboardSummary {
     pub disabled_reason: Option<String>,
 }
 
-/// Get a battlesnake's leaderboard entries. Private leaderboards are only
-/// included when `include_private` is set — i.e. for the snake's owner, who
-/// already holds the link; listing them to anyone else would leak it.
+/// Get a battlesnake's leaderboard entries as `viewer` may see them. Private
+/// leaderboards are only listed to their members (who hold the link already)
+/// and admins; listing them to anyone else would leak the link. Pass `None`
+/// for public surfaces such as social cards.
 pub async fn get_entries_for_battlesnake(
     pool: &PgPool,
     battlesnake_id: Uuid,
-    include_private: bool,
+    viewer: Option<&User>,
 ) -> cja::Result<Vec<BattlesnakeLeaderboardSummary>> {
+    let viewer_id = viewer.map(|u| u.user_id);
+    let viewer_is_admin = viewer.is_some_and(|u| u.is_admin);
     let entries = sqlx::query_as!(
         BattlesnakeLeaderboardSummary,
         r#"SELECT
@@ -1060,10 +1063,11 @@ pub async fn get_entries_for_battlesnake(
          FROM leaderboard_entries le
          JOIN leaderboards l ON le.leaderboard_id = l.leaderboard_id
          WHERE le.battlesnake_id = $1
-           AND ($2 OR l.visibility = 'public')
+           AND (l.visibility = 'public' OR $2 OR leaderboard_member(l.leaderboard_id, $3))
          ORDER BY le.display_score DESC"#,
         battlesnake_id,
-        include_private
+        viewer_is_admin,
+        viewer_id as Option<Uuid>
     )
     .fetch_all(pool)
     .await

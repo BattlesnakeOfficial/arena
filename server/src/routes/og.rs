@@ -391,7 +391,7 @@ async fn load_snake_card(
     // The snake's best current rank across the ladders it's on.
     let mut best: Option<(i64, String)> = None;
     // Social cards are public, so they never name a private ladder.
-    let entries = leaderboard::get_entries_for_battlesnake(&state.db, battlesnake_id, false)
+    let entries = leaderboard::get_entries_for_battlesnake(&state.db, battlesnake_id, None)
         .await
         .wrap_err("Failed to get snake leaderboard entries for social card")?;
     for entry in entries.into_iter().filter(|e| e.disabled_at.is_none()) {

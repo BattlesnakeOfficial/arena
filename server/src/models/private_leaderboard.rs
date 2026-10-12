@@ -53,16 +53,12 @@ fn normalize_code(submitted: &str) -> String {
 }
 
 /// A user with a (non-deleted) snake on the leaderboard, active or paused, is
-/// a member. The leaderboard page and the join check both use this, so the
-/// page never hides the invite-code field from someone the join would refuse.
+/// a member — see the `leaderboard_member` SQL function, which profile
+/// listings share. The leaderboard page and the join check both use this, so
+/// the page never hides the invite-code field from someone the join would refuse.
 pub async fn is_member(pool: &PgPool, leaderboard_id: Uuid, user_id: Uuid) -> cja::Result<bool> {
     sqlx::query_scalar!(
-        r#"SELECT EXISTS (
-            SELECT 1
-            FROM leaderboard_entries le
-            JOIN battlesnakes b ON b.battlesnake_id = le.battlesnake_id
-            WHERE le.leaderboard_id = $1 AND b.user_id = $2 AND b.deleted_at IS NULL
-        ) AS "member!""#,
+        r#"SELECT leaderboard_member($1, $2) AS "member!""#,
         leaderboard_id,
         user_id
     )
