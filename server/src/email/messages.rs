@@ -747,21 +747,57 @@ mod tests {
         let app = crate::routes::routes(crate::state::AppState::test_from_pool(pool))
             .expect("asset router")
             .layer(tower_cookies::CookieManagerLayer::new());
-        for kind in [AssetKind::Head, AssetKind::Tail] {
-            let url = crate::routes::og::customization_png_url(kind, "default").unwrap();
-            let path = url::Url::parse(&url).unwrap().path().to_owned();
-            let response = app
-                .clone()
-                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::OK);
-            assert_eq!(
-                response.headers().get(header::CONTENT_TYPE).unwrap(),
-                "image/png"
-            );
-            let png = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-            assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+        let head = crate::routes::og::customization_png_url(AssetKind::Head, "default").unwrap();
+        let tail = crate::routes::og::customization_png_url(AssetKind::Tail, "default").unwrap();
+        let fixture =
+            html! { img src=(head) alt="Default head"; img src=(tail) alt="Default tail"; }
+                .into_string();
+        assert_eq!(fixture.matches("<img ").count(), 2);
+        let mut rendered = vec![fixture];
+        for kind in NotificationKind::ALL {
+            let Some(sample) = sample_notification(kind, "https://arena.example") else {
+                continue;
+            };
+            let unsubscribe = kind
+                .toggleable()
+                .then_some("https://arena.example/notifications/unsubscribe/sample-invalid-token");
+            let message = finish(
+                sample,
+                "sample@example.com".into(),
+                kind,
+                "https://arena.example",
+                unsubscribe,
+            )
+            .unwrap();
+            rendered.push(message.html);
+        }
+        for html in rendered {
+            check_images(&html);
+            for img in html.split("<img ").skip(1) {
+                let url = img
+                    .split('>')
+                    .next()
+                    .unwrap()
+                    .split("src=\"")
+                    .nth(1)
+                    .unwrap()
+                    .split('"')
+                    .next()
+                    .unwrap();
+                let path = url::Url::parse(url).unwrap().path().to_owned();
+                let response = app
+                    .clone()
+                    .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                assert_eq!(
+                    response.headers().get(header::CONTENT_TYPE).unwrap(),
+                    "image/png"
+                );
+                let png = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+                assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+            }
         }
     }
 

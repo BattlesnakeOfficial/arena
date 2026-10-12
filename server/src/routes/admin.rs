@@ -227,11 +227,11 @@ pub async fn dashboard(
                 h1 { "Admin Dashboard" }
 
                 div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:20px;" {
-                    a href="/admin" style="padding: 8px 16px; background: #0066cc; color: white; text-decoration: none; border-radius: 4px;" { "Refresh" }
-                    a href="/admin/codes" style="padding: 8px 16px; background: #666; color: white; text-decoration: none; border-radius: 4px; margin-left: 8px;" { "Unlock codes" }
-                    a href="/admin/moderation" style="padding: 8px 16px; background: #666; color: white; text-decoration: none; border-radius: 4px; margin-left: 8px;" { "Moderation queue" }
+                    a href="/admin" style="display:inline-flex;align-items:center;min-height:44px;box-sizing:border-box;padding: 8px 16px; background: #0066cc; color: white; text-decoration: none; border-radius: 4px;" { "Refresh" }
+                    a href="/admin/codes" style="display:inline-flex;align-items:center;min-height:44px;box-sizing:border-box;padding: 8px 16px; background: #666; color: white; text-decoration: none; border-radius: 4px;" { "Unlock codes" }
+                    a href="/admin/moderation" style="display:inline-flex;align-items:center;min-height:44px;box-sizing:border-box;padding: 8px 16px; background: #666; color: white; text-decoration: none; border-radius: 4px;" { "Moderation queue" }
                     a href="/admin/emails" style="display:inline-flex;align-items:center;min-height:44px;padding:8px 16px;background:#666;color:white;text-decoration:none;border-radius:4px;box-sizing:border-box;" { "Emails" }
-                    a href="/stats" style="padding: 8px 16px; background: #666; color: white; text-decoration: none; border-radius: 4px; margin-left: 8px;" { "Stats" }
+                    a href="/stats" style="display:inline-flex;align-items:center;min-height:44px;box-sizing:border-box;padding: 8px 16px; background: #666; color: white; text-decoration: none; border-radius: 4px;" { "Stats" }
                 }
 
                 h2 { "Job Queue" }
@@ -535,7 +535,18 @@ pub async fn send_test_email(
             }
         };
     }
-    tx.commit().await?;
+    let status = match tx.commit().await {
+        Ok(()) => StatusCode::OK,
+        Err(err) => {
+            tracing::error!(error = %format!("{err:#}"), "Admin test email attempt commit failed");
+            outcome = if outcome == "Sent" {
+                format!("Mailgun accepted the email, but recording the attempt failed: {err:#}")
+            } else {
+                format!("{outcome}; recording the attempt failed: {err:#}")
+            };
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    };
     let message = sample_message(kind, &state.config.base_url, "sample@example.com")?;
     let page = page_factory.create_page(
         kind.name().into(),
@@ -546,7 +557,7 @@ pub async fn send_test_email(
             Some(&outcome),
         )),
     );
-    Ok(([(header::CACHE_CONTROL, "no-store")], page))
+    Ok((status, [(header::CACHE_CONTROL, "no-store")], page))
 }
 
 /// GET /admin/moderation — unreviewed moderation flags, newest first.
@@ -820,6 +831,7 @@ mod email_tests {
         http::Request,
     };
     use sqlx::PgPool;
+    use std::collections::BTreeSet;
     use tower::ServiceExt as _;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
@@ -916,6 +928,18 @@ mod email_tests {
             );
         }
         let catalog = body(request(&state, Some(admin), "GET", "/admin/emails", "").await).await;
+        let catalog_keys: BTreeSet<_> = catalog
+            .split("href=\"/admin/emails/")
+            .skip(1)
+            .filter_map(|part| part.split('"').next())
+            .filter(|path| !path.contains('/'))
+            .collect();
+        let expected_keys: BTreeSet<_> = NotificationKind::ALL
+            .into_iter()
+            .filter(|kind| kind.supports(NotificationChannel::Email))
+            .map(NotificationKind::key)
+            .collect();
+        assert_eq!(catalog_keys, expected_keys);
         for kind in NotificationKind::ALL
             .into_iter()
             .filter(|kind| kind.supports(NotificationChannel::Email))
@@ -1072,6 +1096,82 @@ mod email_tests {
     }
 
     #[sqlx::test(migrations = "../migrations")]
+    async fn test_send_uses_github_then_claimed_play_when_override_is_pending(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        let mut state = AppState::test_from_pool(pool.clone());
+        let github_admin = create_user_session(&pool, 1668007, true).await;
+        let github_user = session_user_id(&pool, github_admin).await;
+        sqlx::query!(
+            "UPDATE users SET github_email = 'admin@example.com' WHERE user_id = $1",
+            github_user
+        )
+        .execute(&pool)
+        .await?;
+        let request_id = sqlx::query_scalar!("INSERT INTO notification_email_requests (user_id, email) VALUES ($1, $2) RETURNING request_id", github_user, "pending@example.com").fetch_one(&pool).await?;
+        sqlx::query!(
+            "UPDATE users SET pending_notification_email_request_id = $2 WHERE user_id = $1",
+            github_user,
+            request_id
+        )
+        .execute(&pool)
+        .await?;
+
+        let play_admin = create_user_session(&pool, 1668008, true).await;
+        let play_user = session_user_id(&pool, play_admin).await;
+        sqlx::query!("INSERT INTO imported_accounts (play_user_id, play_account_id, email, username, claimed_by_user_id, is_email_verified) VALUES ('p1','a1',' ','one',$1,true), ('p2','a2','play@example.com','two',$1,false)", play_user).execute(&pool).await?;
+
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v3/example.test/messages"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(2)
+            .mount(&mock)
+            .await;
+        state.mailer = Mailer::new(
+            Some(MailgunConfig {
+                api_key: "test".into(),
+                domain: "example.test".into(),
+                from: "Arena <mail@example.test>".into(),
+                base_url: mock.uri(),
+            }),
+            reqwest::Client::new(),
+        );
+        for (index, (admin, expected)) in [
+            (github_admin, "admin@example.com"),
+            (play_admin, "play@example.com"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let response = request(
+                &state,
+                Some(admin),
+                "POST",
+                "/admin/emails/play_account_claimed/send-test",
+                "",
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert!(body(response).await.contains(">Sent<"));
+            let requests = mock.received_requests().await.unwrap();
+            assert_eq!(requests.len(), index + 1);
+            let to = url::form_urlencoded::parse(&requests[index].body)
+                .find(|(key, _)| key == "to")
+                .unwrap()
+                .1;
+            assert_eq!(to, expected);
+            let rows = sqlx::query!("SELECT recipient, purpose FROM email_log ORDER BY sent_at")
+                .fetch_all(&pool)
+                .await?;
+            assert_eq!(rows.len(), index + 1);
+            assert_eq!(rows[index].recipient, expected);
+            assert_eq!(rows[index].purpose, email_log::ADMIN_TEST_PURPOSE);
+        }
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
     async fn disabled_send_does_not_log(pool: PgPool) -> cja::Result<()> {
         let state = AppState::test_from_pool(pool.clone());
         let admin = create_user_session(&pool, 1668004, true).await;
@@ -1159,9 +1259,9 @@ mod email_tests {
         )
         .execute(&pool)
         .await?;
-        sqlx::query!(
+        sqlx::query(
             r#"CREATE FUNCTION reject_admin_test_commit() RETURNS trigger LANGUAGE plpgsql AS $$
-            BEGIN RAISE EXCEPTION 'commit blocked'; END; $$"#
+            BEGIN RAISE EXCEPTION 'commit <blocked>'; END; $$"#,
         )
         .execute(&pool)
         .await?;
@@ -1192,7 +1292,15 @@ mod email_tests {
         )
         .await;
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        assert!(!body(response).await.contains(">Sent<"));
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store"
+        );
+        let html = body(response).await;
+        assert!(html.contains("Mailgun accepted the email, but recording the attempt failed"));
+        assert!(html.contains("commit &lt;blocked&gt;"));
+        assert!(!html.contains("commit <blocked>"));
+        assert!(!html.contains(">Sent<"));
         assert_eq!(
             sqlx::query_scalar!("SELECT COUNT(*) AS \"count!\" FROM email_log")
                 .fetch_one(&pool)
