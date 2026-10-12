@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, PgPool, Postgres};
 use uuid::Uuid;
 
+use crate::models::battlesnake::Visibility;
+
 /// Application constants for leaderboard configuration
 /// Smallest game the matchmaker will create when fewer than a leaderboard's match size
 /// snakes are enabled. Below this the ladder is starved and matchmaking
@@ -18,6 +20,9 @@ pub struct Leaderboard {
     pub game_type: String,
     pub board_size: String,
     pub match_size: i32,
+    /// Private leaderboards are unlisted: reachable by direct link only, and
+    /// joining takes an invite code (see `models::private_leaderboard`).
+    pub visibility: Visibility,
     pub disabled_at: Option<chrono::DateTime<chrono::Utc>>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
@@ -109,25 +114,33 @@ impl LeaderboardSort {
 
 // --- Leaderboard queries ---
 
-pub async fn get_all_leaderboards(pool: &PgPool) -> cja::Result<Vec<Leaderboard>> {
+/// Every public leaderboard, inactive ones included. Private leaderboards are
+/// unlisted, so anything that lists ladders to users goes through here.
+pub async fn get_public_leaderboards(pool: &PgPool) -> cja::Result<Vec<Leaderboard>> {
     let rows = sqlx::query_as!(
         Leaderboard,
         r#"SELECT leaderboard_id, name, game_type, board_size, match_size,
+                visibility as "visibility: Visibility",
                 disabled_at, created_at, updated_at
          FROM leaderboards
+         WHERE visibility = 'public'
          ORDER BY created_at ASC, name ASC"#
     )
     .fetch_all(pool)
     .await
-    .wrap_err("Failed to fetch leaderboards")?;
+    .wrap_err("Failed to fetch public leaderboards")?;
 
     Ok(rows)
 }
 
+/// Every active leaderboard, private ones included. For background work
+/// (matchmaking, health sweeps) that must treat private ladders like any
+/// other — never for anything a user sees as a list.
 pub async fn get_active_leaderboards(pool: &PgPool) -> cja::Result<Vec<Leaderboard>> {
     let rows = sqlx::query_as!(
         Leaderboard,
         r#"SELECT leaderboard_id, name, game_type, board_size, match_size,
+                visibility as "visibility: Visibility",
                 disabled_at, created_at, updated_at
          FROM leaderboards
          WHERE disabled_at IS NULL
@@ -140,6 +153,25 @@ pub async fn get_active_leaderboards(pool: &PgPool) -> cja::Result<Vec<Leaderboa
     Ok(rows)
 }
 
+/// Active public leaderboards: the user-facing subset of
+/// [`get_active_leaderboards`].
+pub async fn get_active_public_leaderboards(pool: &PgPool) -> cja::Result<Vec<Leaderboard>> {
+    let rows = sqlx::query_as!(
+        Leaderboard,
+        r#"SELECT leaderboard_id, name, game_type, board_size, match_size,
+                visibility as "visibility: Visibility",
+                disabled_at, created_at, updated_at
+         FROM leaderboards
+         WHERE disabled_at IS NULL AND visibility = 'public'
+         ORDER BY created_at ASC, name ASC"#
+    )
+    .fetch_all(pool)
+    .await
+    .wrap_err("Failed to fetch active public leaderboards")?;
+
+    Ok(rows)
+}
+
 pub async fn get_leaderboard_by_id(
     pool: &PgPool,
     leaderboard_id: Uuid,
@@ -147,6 +179,7 @@ pub async fn get_leaderboard_by_id(
     let row = sqlx::query_as!(
         Leaderboard,
         r#"SELECT leaderboard_id, name, game_type, board_size, match_size,
+                visibility as "visibility: Visibility",
                 disabled_at, created_at, updated_at
          FROM leaderboards
          WHERE leaderboard_id = $1"#,
@@ -994,6 +1027,7 @@ pub struct BattlesnakeLeaderboardSummary {
     pub leaderboard_entry_id: Uuid,
     pub leaderboard_id: Uuid,
     pub leaderboard_name: String,
+    pub leaderboard_visibility: Visibility,
     pub display_score: f64,
     pub games_played: i32,
     pub first_place_finishes: i32,
@@ -1002,10 +1036,13 @@ pub struct BattlesnakeLeaderboardSummary {
     pub disabled_reason: Option<String>,
 }
 
-/// Get all leaderboard entries for a battlesnake
+/// Get a battlesnake's leaderboard entries. Private leaderboards are only
+/// included when `include_private` is set — i.e. for the snake's owner, who
+/// already holds the link; listing them to anyone else would leak it.
 pub async fn get_entries_for_battlesnake(
     pool: &PgPool,
     battlesnake_id: Uuid,
+    include_private: bool,
 ) -> cja::Result<Vec<BattlesnakeLeaderboardSummary>> {
     let entries = sqlx::query_as!(
         BattlesnakeLeaderboardSummary,
@@ -1013,6 +1050,7 @@ pub async fn get_entries_for_battlesnake(
             le.leaderboard_entry_id,
             le.leaderboard_id,
             l.name as leaderboard_name,
+            l.visibility as "leaderboard_visibility: Visibility",
             le.display_score,
             le.games_played,
             le.first_place_finishes,
@@ -1022,8 +1060,10 @@ pub async fn get_entries_for_battlesnake(
          FROM leaderboard_entries le
          JOIN leaderboards l ON le.leaderboard_id = l.leaderboard_id
          WHERE le.battlesnake_id = $1
+           AND ($2 OR l.visibility = 'public')
          ORDER BY le.display_score DESC"#,
-        battlesnake_id
+        battlesnake_id,
+        include_private
     )
     .fetch_all(pool)
     .await
@@ -1120,7 +1160,7 @@ pub struct HomeFeed {
 pub async fn load_home_feed(pool: &sqlx::PgPool) -> cja::Result<HomeFeed> {
     use color_eyre::eyre::Context as _;
 
-    let leaderboards = get_active_leaderboards(pool)
+    let leaderboards = get_active_public_leaderboards(pool)
         .await
         .wrap_err("Failed to fetch leaderboards")?;
     let featured = leaderboards.into_iter().next();

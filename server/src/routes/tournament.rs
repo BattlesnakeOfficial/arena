@@ -1114,7 +1114,7 @@ pub async fn show_tournament(
 
     // Leaderboards for the owner's import form
     let leaderboards = if is_owner && registrations_editable(t.status) {
-        leaderboard::get_active_leaderboards(&state.db)
+        leaderboard::get_active_public_leaderboards(&state.db)
             .await
             .wrap_err("Failed to fetch leaderboards")?
     } else {
@@ -2451,9 +2451,12 @@ pub async fn import_leaderboard(
         .await;
     }
 
+    // Private ladders are unlisted, so they can't be imported from: treat
+    // one like an unknown id rather than confirm it exists.
     let Some(lb) = leaderboard::get_leaderboard_by_id(&state.db, form.leaderboard_id)
         .await
         .wrap_err("Failed to fetch leaderboard")?
+        .filter(|lb| lb.visibility == battlesnake::Visibility::Public)
     else {
         return flash_redirect(
             &state,

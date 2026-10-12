@@ -587,6 +587,7 @@ mod tests {
         let lb = sqlx::query_as!(
             Leaderboard,
             r#"SELECT leaderboard_id, name, game_type, board_size, match_size,
+                      visibility as "visibility: crate::models::battlesnake::Visibility",
                       disabled_at, created_at, updated_at
                FROM leaderboards WHERE name = $1"#,
             name,

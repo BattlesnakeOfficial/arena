@@ -477,8 +477,11 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
 .rail .mstats { font-family: var(--mono); font-size: 12px; color: var(--muted); margin: 4px 0 0 44px; }
 .rail .railp { font-size: 14px; color: var(--muted); margin-top: 10px; }
 .owner-inline { color: var(--muted); font-size: 12.5px; }
-.join-form { display: flex; gap: 8px; margin-top: 16px; }
+.join-form { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
 .join-form select { flex: 1; min-width: 0; font-family: var(--body); font-size: 14px; padding: 8px 10px; border: 1px solid var(--hairline-dark); border-radius: 10px; background: var(--card); color: var(--ink); }
+/* Private ladders: the invite code gets its own row above snake + Join.
+   16px so iOS doesn't zoom on focus. */
+.join-form input { flex: 1 1 100%; min-width: 0; font-family: var(--mono); font-size: 16px; padding: 8px 10px; border: 1px solid var(--hairline-dark); border-radius: 10px; background: var(--card); color: var(--ink); }
 
 /* --- flash message ------------------------------------------------------ */
 .flash-message {
@@ -876,6 +879,13 @@ table.data.test-results pre { margin-top: 8px; font-family: var(--mono); font-si
 .cz-redeem .field input { font-size: 16px; min-height: 44px; }
 .cz-redeem > .btn { min-height: 44px; }
 .admin-code-form > .btn { min-height: 44px; }
+.admin-lb-form > .btn { min-height: 44px; }
+.admin-lb { margin-top: 16px; padding: 16px; border: 1px solid var(--hairline); border-radius: 12px; }
+.admin-lb h3 { overflow-wrap: anywhere; }
+.admin-lb .meta-list div { gap: 16px; }
+.admin-lb .meta-list dd { min-width: 0; text-align: right; overflow-wrap: anywhere; }
+.admin-lb form { margin-top: 12px; }
+.admin-lb .btn { min-height: 44px; }
 .cz-group { margin-top: 48px; }
 .cz-group-head { display: flex; align-items: baseline; gap: 12px; border-bottom: 1px solid var(--hairline); padding-bottom: 10px; }
 .cz-group-head h2 { font-size: 22px; }

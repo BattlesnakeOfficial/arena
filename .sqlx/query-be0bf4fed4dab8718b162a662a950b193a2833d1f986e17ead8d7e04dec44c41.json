@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT\n            le.leaderboard_entry_id,\n            le.leaderboard_id,\n            l.name as leaderboard_name,\n            le.display_score,\n            le.games_played,\n            le.first_place_finishes,\n            le.non_first_finishes,\n            le.disabled_at,\n            le.disabled_reason\n         FROM leaderboard_entries le\n         JOIN leaderboards l ON le.leaderboard_id = l.leaderboard_id\n         WHERE le.battlesnake_id = $1\n         ORDER BY le.display_score DESC",
+  "query": "SELECT\n            le.leaderboard_entry_id,\n            le.leaderboard_id,\n            l.name as leaderboard_name,\n            l.visibility as \"leaderboard_visibility: Visibility\",\n            le.display_score,\n            le.games_played,\n            le.first_place_finishes,\n            le.non_first_finishes,\n            le.disabled_at,\n            le.disabled_reason\n         FROM leaderboard_entries le\n         JOIN leaderboards l ON le.leaderboard_id = l.leaderboard_id\n         WHERE le.battlesnake_id = $1\n           AND ($2 OR l.visibility = 'public')\n         ORDER BY le.display_score DESC",
   "describe": {
     "columns": [
       {
@@ -20,41 +20,48 @@
       },
       {
         "ordinal": 3,
+        "name": "leaderboard_visibility: Visibility",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
         "name": "display_score",
         "type_info": "Float8"
       },
       {
-        "ordinal": 4,
+        "ordinal": 5,
         "name": "games_played",
         "type_info": "Int4"
       },
       {
-        "ordinal": 5,
+        "ordinal": 6,
         "name": "first_place_finishes",
         "type_info": "Int4"
       },
       {
-        "ordinal": 6,
+        "ordinal": 7,
         "name": "non_first_finishes",
         "type_info": "Int4"
       },
       {
-        "ordinal": 7,
+        "ordinal": 8,
         "name": "disabled_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 8,
+        "ordinal": 9,
         "name": "disabled_reason",
         "type_info": "Text"
       }
     ],
     "parameters": {
       "Left": [
-        "Uuid"
+        "Uuid",
+        "Bool"
       ]
     },
     "nullable": [
+      false,
       false,
       false,
       false,
@@ -66,5 +73,5 @@
       true
     ]
   },
-  "hash": "7ce762e8ff72a5b46d0e90e72be11e409ef46adb3e181b2e3c6f870c15ebfe25"
+  "hash": "be0bf4fed4dab8718b162a662a950b193a2833d1f986e17ead8d7e04dec44c41"
 }

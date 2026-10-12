@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE leaderboards SET invite_code = $2\n         WHERE leaderboard_id = $1 AND visibility = 'private'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "3620bf36c661263b85b053f977a893ddc4d079b817c76fa4dad5aece2cd1e308"
+}

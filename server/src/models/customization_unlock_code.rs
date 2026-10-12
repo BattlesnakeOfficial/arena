@@ -79,7 +79,7 @@ fn hash(code: &str) -> String {
     hex::encode(Sha256::digest(code.as_bytes()))
 }
 
-fn generate_code() -> String {
+pub(crate) fn generate_code() -> String {
     (0..12)
         .map(|_| ALPHABET[OsRng.gen_range(0..ALPHABET.len())] as char)
         .collect()

@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE leaderboard_entries SET games_played = 50, display_score = 99\n             WHERE leaderboard_entry_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b00d4b660ae46c634e10edb42e2c854548cb4bb88340863a0fd5b33199d5e591"
+}

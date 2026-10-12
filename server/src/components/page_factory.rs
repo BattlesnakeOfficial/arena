@@ -70,6 +70,7 @@ impl PageFactory {
             description: None,
             social_image: None,
             unread_count: self.unread_count,
+            noindex: false,
         }
     }
 }

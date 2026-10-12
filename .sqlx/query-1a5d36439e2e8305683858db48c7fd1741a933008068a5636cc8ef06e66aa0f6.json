@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT EXISTS (\n            SELECT 1\n            FROM leaderboard_entries le\n            JOIN battlesnakes b ON b.battlesnake_id = le.battlesnake_id\n            WHERE le.leaderboard_id = $1 AND b.user_id = $2 AND b.deleted_at IS NULL\n        ) AS \"member!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "member!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "1a5d36439e2e8305683858db48c7fd1741a933008068a5636cc8ef06e66aa0f6"
+}

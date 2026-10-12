@@ -1319,6 +1319,10 @@ fn render_battlesnake_profile(view: &ProfileView<'_>) -> Markup {
                                             a href={"/leaderboards/"(entry.leaderboard_id)"/entries/"(entry.leaderboard_entry_id)} {
                                                 (entry.leaderboard_name)
                                             }
+                                            @if entry.leaderboard_visibility == Visibility::Private {
+                                                " "
+                                                span class="live-pill quiet" { "Private" }
+                                            }
                                         }
                                         td class="r num" { (format!("{:.1}", entry.display_score)) }
                                         td class="r num" { (entry.games_played) }
@@ -1472,9 +1476,14 @@ pub async fn view_battlesnake_profile(
     .await
     .wrap_err("Failed to get game history")?;
 
-    let leaderboard_entries = leaderboard::get_entries_for_battlesnake(&state.db, battlesnake_id)
-        .await
-        .wrap_err("Failed to get leaderboard entries")?;
+    // Private ladders are unlisted: only the owner, who joined by link, sees them.
+    let leaderboard_entries = leaderboard::get_entries_for_battlesnake(
+        &state.db,
+        battlesnake_id,
+        viewer == ProfileViewer::Owner,
+    )
+    .await
+    .wrap_err("Failed to get leaderboard entries")?;
 
     // Health-sweeper pauses, for the owner-facing deactivation banner
     let health_paused = leaderboard_entry_health::health_paused_entries(&state.db, battlesnake_id)
@@ -1575,7 +1584,7 @@ pub async fn test_battlesnake(
             .with_status(StatusCode::FORBIDDEN);
     }
 
-    let mut specs = leaderboard::get_active_leaderboards(&state.db)
+    let mut specs = leaderboard::get_active_public_leaderboards(&state.db)
         .await
         .wrap_err("Failed to get active leaderboards")?
         .iter()

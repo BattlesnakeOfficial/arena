@@ -1,0 +1,74 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT l.leaderboard_id, l.name, l.game_type, l.board_size, l.match_size,\n                  l.visibility as \"visibility: Visibility\",\n                  l.invite_code, l.disabled_at, l.created_at,\n                  (SELECT COUNT(*) FROM leaderboard_entries le\n                    WHERE le.leaderboard_id = l.leaderboard_id\n                      AND le.disabled_at IS NULL) AS \"active_entries!\"\n           FROM leaderboards l\n           ORDER BY l.visibility = 'private', l.created_at ASC, l.name ASC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "leaderboard_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "game_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "board_size",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "match_size",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 5,
+        "name": "visibility: Visibility",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "invite_code",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "disabled_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 8,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 9,
+        "name": "active_entries!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      null
+    ]
+  },
+  "hash": "fb011691cb4ca11ef6c16a9de96a22a04c0427eca55b1c6b1f6631cbef121429"
+}
