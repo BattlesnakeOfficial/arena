@@ -335,7 +335,8 @@ async fn joining_takes_the_invite_code_unless_already_a_member(pool: PgPool) {
     );
 
     // Members don't see the field again...
-    let (_, body) = fx.get(&page, Some(fx.member_session)).await;
+    let (status, body) = fx.get(&page, Some(fx.member_session)).await;
+    assert_eq!(status, StatusCode::OK);
     assert!(!body.contains(r#"name="invite_code""#), "{body}");
 
     // ...and pause/resume and further snakes need no code.
@@ -494,7 +495,7 @@ async fn private_leaderboards_are_unlisted(pool: PgPool) {
             let (_, body) = fx.get(path, Some(session)).await;
             assert!(body.contains(&lb_id), "{path}: {body}");
             assert!(
-                body.contains(r#"<span class="live-pill quiet">Private</span>"#),
+                body.contains(r#"<span class="live-pill quiet">Private ladder</span>"#),
                 "{path}: {body}"
             );
         }
@@ -509,7 +510,8 @@ async fn private_leaderboards_are_unlisted(pool: PgPool) {
     .await
     .unwrap();
     for path in &profiles {
-        let (_, body) = fx.get(path, Some(fellow_session)).await;
+        let (status, body) = fx.get(path, Some(fellow_session)).await;
+        assert_eq!(status, StatusCode::OK, "{path}");
         assert!(!body.contains(&lb_id), "{path} after leaving: {body}");
     }
 
@@ -531,7 +533,8 @@ async fn private_leaderboards_are_unlisted(pool: PgPool) {
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("Member Snake"), "{body}");
     // Public ladders stay indexable.
-    let (_, body) = fx.get(&format!("/leaderboards/{public}"), None).await;
+    let (status, body) = fx.get(&format!("/leaderboards/{public}"), None).await;
+    assert_eq!(status, StatusCode::OK);
     assert!(!body.contains(NOINDEX));
 
     // The global rating ignores private ladders, including the board count.

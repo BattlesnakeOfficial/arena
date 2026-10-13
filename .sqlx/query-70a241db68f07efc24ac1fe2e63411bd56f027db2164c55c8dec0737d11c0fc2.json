@@ -1,0 +1,70 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT l.leaderboard_id, l.name, l.game_type, l.board_size, l.match_size,\n                l.visibility as \"visibility: Visibility\",\n                l.disabled_at, l.created_at, l.updated_at\n         FROM leaderboards l\n         WHERE l.disabled_at IS NULL\n           AND (l.visibility = 'public' OR EXISTS (\n                SELECT 1 FROM leaderboard_entries le\n                WHERE le.leaderboard_id = l.leaderboard_id AND le.battlesnake_id = $1\n           ))\n         ORDER BY l.created_at ASC, l.name ASC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "leaderboard_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "game_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "board_size",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "match_size",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 5,
+        "name": "visibility: Visibility",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "disabled_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 7,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 8,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "70a241db68f07efc24ac1fe2e63411bd56f027db2164c55c8dec0737d11c0fc2"
+}

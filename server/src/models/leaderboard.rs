@@ -172,6 +172,35 @@ pub async fn get_active_public_leaderboards(pool: &PgPool) -> cja::Result<Vec<Le
     Ok(rows)
 }
 
+/// Active leaderboards to Test Snake against: every active public ladder plus
+/// the private ladders this snake is on. Test Snake is owner-only and the
+/// owner is a member of those, so nothing leaks — and a snake the health
+/// sweeper paused on a private ladder's shape can reproduce the failure.
+pub async fn get_active_leaderboards_for_battlesnake(
+    pool: &PgPool,
+    battlesnake_id: Uuid,
+) -> cja::Result<Vec<Leaderboard>> {
+    let rows = sqlx::query_as!(
+        Leaderboard,
+        r#"SELECT l.leaderboard_id, l.name, l.game_type, l.board_size, l.match_size,
+                l.visibility as "visibility: Visibility",
+                l.disabled_at, l.created_at, l.updated_at
+         FROM leaderboards l
+         WHERE l.disabled_at IS NULL
+           AND (l.visibility = 'public' OR EXISTS (
+                SELECT 1 FROM leaderboard_entries le
+                WHERE le.leaderboard_id = l.leaderboard_id AND le.battlesnake_id = $1
+           ))
+         ORDER BY l.created_at ASC, l.name ASC"#,
+        battlesnake_id
+    )
+    .fetch_all(pool)
+    .await
+    .wrap_err("Failed to fetch leaderboards for battlesnake")?;
+
+    Ok(rows)
+}
+
 pub async fn get_leaderboard_by_id(
     pool: &PgPool,
     leaderboard_id: Uuid,

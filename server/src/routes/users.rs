@@ -187,7 +187,7 @@ async fn render_user_profile(
                                                     }
                                                     @if entry.leaderboard_visibility == Visibility::Private {
                                                         " "
-                                                        span class="live-pill quiet" { "Private" }
+                                                        span class="live-pill quiet" { "Private ladder" }
                                                     }
                                                 }
                                                 dd {

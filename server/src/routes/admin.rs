@@ -3,6 +3,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::{Form, Json, extract::Path, http::header, response::Redirect};
 use chrono::{DateTime, Utc};
+use color_eyre::eyre::Context as _;
 use maud::{Markup, html};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -13,6 +14,7 @@ use crate::customizations::{Head, Tail};
 use crate::email::{SendOutcome, messages};
 use crate::errors::{ServerError, ServerResult, WithStatus};
 use crate::flasher::Flasher;
+use crate::models::battlesnake::Visibility;
 use crate::models::customization_unlock_code::{self as codes, CreateCode, ValidationError};
 use crate::models::moderation_flag::{self, ModerationFlagListing};
 use crate::models::private_leaderboard::{
@@ -841,10 +843,12 @@ pub async fn list_leaderboards(
     page_factory: PageFactory,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
     let listings = private_leaderboard::list_for_admin(&state.db).await?;
-    let (private, public): (Vec<_>, Vec<_>) =
-        listings.iter().partition(|lb| lb.invite_code.is_some());
+    let (private, public): (Vec<_>, Vec<_>) = listings
+        .iter()
+        .partition(|lb| lb.visibility == Visibility::Private);
     let base_url = state.config.base_url.trim_end_matches('/');
-    Ok(page_factory.create_page(
+    // The page shows live invite codes, so keep it out of caches.
+    let page = page_factory.create_page(
         "Leaderboards".to_string(),
         Box::new(html! {
             div class="crumb" { a href="/admin" { "Admin" } " / Leaderboards" }
@@ -957,7 +961,8 @@ pub async fn list_leaderboards(
                 }
             }
         }),
-    ))
+    );
+    Ok(([(header::CACHE_CONTROL, "no-store")], page))
 }
 
 /// POST /admin/leaderboards — create a private leaderboard.
@@ -980,13 +985,17 @@ pub async fn create_private_leaderboard(
                     "Created {}. Share its link and invite code from the list below.",
                     input.name.trim()
                 ))
-                .await?;
+                .await
+                .wrap_err("Failed to flash")?;
         }
         Err(error) => {
             let Some(validation) = error.downcast_ref::<ValidationError>() else {
                 return Err(error.into());
             };
-            flasher.error(validation.0).await?;
+            flasher
+                .error(validation.0)
+                .await
+                .wrap_err("Failed to flash")?;
         }
     }
     Ok(Redirect::to("/admin/leaderboards"))
@@ -1006,7 +1015,8 @@ pub async fn regenerate_invite_code(
     }
     flasher
         .success("New invite code generated. The old code no longer lets anyone join.")
-        .await?;
+        .await
+        .wrap_err("Failed to flash")?;
     Ok(Redirect::to("/admin/leaderboards"))
 }
 

@@ -1,3 +1,12 @@
+-- Dropping visibility would turn every private ladder into a listed, code-free
+-- public one. Refuse while any exist; delete them deliberately first.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM leaderboards WHERE visibility = 'private') THEN
+        RAISE EXCEPTION 'private leaderboards exist; delete them before rolling back this migration';
+    END IF;
+END $$;
+
 CREATE OR REPLACE FUNCTION global_player_scores(min_games integer)
 RETURNS TABLE (
     user_id uuid,

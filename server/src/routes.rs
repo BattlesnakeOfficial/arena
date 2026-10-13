@@ -556,7 +556,7 @@ async fn root_page(
     auth::OptionalUser(user): auth::OptionalUser,
     page_factory: PageFactory,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
-    // The home page features the first active leaderboard: its recent games
+    // The home page features the first active public leaderboard: its recent games
     // feed the rail, and its top five make the ladder preview.
     // User-independent, so it sits behind a short TTL cache — this is the
     // highest-traffic anonymous page.
