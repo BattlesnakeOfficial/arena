@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT enabled_leaderboards AS \"enabled!\" FROM global_player_scores(0) LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "enabled!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "4c08b9cf939678f2a28f8df56269db7917e2bea0f4c25c8deae8d408b9d7f20c"
+}

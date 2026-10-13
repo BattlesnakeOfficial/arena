@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT leaderboard_id, name, game_type, board_size, match_size,\n                disabled_at, created_at, updated_at\n         FROM leaderboards\n         WHERE disabled_at IS NULL\n         ORDER BY created_at ASC, name ASC",
+  "query": "SELECT leaderboard_id, name, game_type, board_size, match_size,\n                visibility as \"visibility: Visibility\",\n                disabled_at, created_at, updated_at\n         FROM leaderboards\n         WHERE disabled_at IS NULL AND visibility = 'public'\n         ORDER BY created_at ASC, name ASC",
   "describe": {
     "columns": [
       {
@@ -30,16 +30,21 @@
       },
       {
         "ordinal": 5,
+        "name": "visibility: Visibility",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
         "name": "disabled_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 6,
+        "ordinal": 7,
         "name": "created_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 7,
+        "ordinal": 8,
         "name": "updated_at",
         "type_info": "Timestamptz"
       }
@@ -53,10 +58,11 @@
       false,
       false,
       false,
+      false,
       true,
       false,
       false
     ]
   },
-  "hash": "c3fa8eeef0b00a557666c352733a12acd437d06e5251b446d65484d0710ef564"
+  "hash": "68cc2331d4223c80caaa2a6c03761712ddd030d2389b3743151d197b23292b31"
 }

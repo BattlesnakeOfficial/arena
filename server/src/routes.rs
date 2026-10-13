@@ -47,6 +47,8 @@ pub mod og;
 pub mod pagination;
 pub mod policy;
 #[cfg(test)]
+mod private_leaderboard_tests;
+#[cfg(test)]
 mod public_name_tests;
 pub mod redirects;
 pub mod saved_games;
@@ -344,6 +346,14 @@ pub fn routes(app_state: AppState) -> cja::Result<axum::Router> {
             get(admin::list_codes).post(admin::create_code),
         )
         .route("/admin/codes/{id}/disable", post(admin::disable_code))
+        .route(
+            "/admin/leaderboards",
+            get(admin::list_leaderboards).post(admin::create_private_leaderboard),
+        )
+        .route(
+            "/admin/leaderboards/{id}/invite-code",
+            post(admin::regenerate_invite_code),
+        )
         .route("/admin/emails", get(admin::email_catalog))
         .route("/admin/emails/{kind}", get(admin::email_preview))
         .route(
@@ -546,7 +556,7 @@ async fn root_page(
     auth::OptionalUser(user): auth::OptionalUser,
     page_factory: PageFactory,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
-    // The home page features the first active leaderboard: its recent games
+    // The home page features the first active public leaderboard: its recent games
     // feed the rail, and its top five make the ladder preview.
     // User-independent, so it sits behind a short TTL cache — this is the
     // highest-traffic anonymous page.

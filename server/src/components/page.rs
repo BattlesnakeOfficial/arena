@@ -85,6 +85,9 @@ pub struct Page {
     /// Page-specific social card. Falls back to the site-wide default card.
     pub social_image: Option<SocialImage>,
     pub unread_count: Option<i64>,
+    /// Ask search engines not to index this page (unlisted content that is
+    /// shared by link, e.g. private leaderboards).
+    pub noindex: bool,
 }
 
 /// A page's social card (`og:image`), served by `routes::og`.
@@ -113,6 +116,7 @@ impl Page {
             description: None,
             social_image: None,
             unread_count: None,
+            noindex: false,
         }
     }
 
@@ -129,6 +133,12 @@ impl Page {
             path: path.into(),
             alt: alt.into(),
         });
+        self
+    }
+
+    /// Keep the page out of search indexes (builder style, like `with_description`).
+    pub fn with_noindex(mut self, noindex: bool) -> Self {
+        self.noindex = noindex;
         self
     }
 
@@ -332,6 +342,9 @@ impl Render for Page {
                     meta name="viewport" content="width=device-width, initial-scale=1.0";
                     title { (self.title) " — Battlesnake" }
                     meta name="description" content=(self.description());
+                    @if self.noindex {
+                        meta name="robots" content="noindex";
+                    }
                     meta property="og:site_name" content="Battlesnake Arena";
                     meta property="og:title" content=(self.title);
                     meta property="og:type" content="website";

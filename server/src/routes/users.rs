@@ -103,9 +103,14 @@ async fn render_user_profile(
     // Snake counts per user are small, so per-snake entry lookups are fine.
     let mut snakes_with_entries = Vec::with_capacity(snakes.len());
     for snake in snakes {
-        let entries = leaderboard::get_entries_for_battlesnake(&state.db, snake.battlesnake_id)
-            .await
-            .wrap_err("Failed to fetch leaderboard entries")?;
+        // Private ladders are unlisted: only their members (and admins) see them.
+        let entries = leaderboard::get_entries_for_battlesnake(
+            &state.db,
+            snake.battlesnake_id,
+            viewer.as_ref(),
+        )
+        .await
+        .wrap_err("Failed to fetch leaderboard entries")?;
         let tags = tag::get_tags_for_battlesnake(&state.db, snake.battlesnake_id)
             .await
             .wrap_err("Failed to fetch battlesnake tags")?;
@@ -179,6 +184,10 @@ async fn render_user_profile(
                                                 dt {
                                                     a href={"/leaderboards/"(entry.leaderboard_id)"/entries/"(entry.leaderboard_entry_id)} {
                                                         (entry.leaderboard_name)
+                                                    }
+                                                    @if entry.leaderboard_visibility == Visibility::Private {
+                                                        " "
+                                                        span class="live-pill quiet" { "Private ladder" }
                                                     }
                                                 }
                                                 dd {

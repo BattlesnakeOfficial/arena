@@ -23,10 +23,10 @@ use crate::{
     errors::{ServerResult, WithRedirect},
     models::leaderboard_entry_health,
     models::{
-        battlesnake,
+        battlesnake::{self, Visibility},
         game::GameType,
         leaderboard::{self, MIN_GAMES_FOR_RANKING},
-        tag, user,
+        private_leaderboard, tag, user,
     },
     routes::auth::{CurrentUser, OptionalUser},
     routes::{UuidPath, UuidPath2},
@@ -48,7 +48,7 @@ pub async fn list_leaderboards(
     OptionalUser(_user): OptionalUser,
     page_factory: PageFactory,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
-    let leaderboards = leaderboard::get_all_leaderboards(&state.db)
+    let leaderboards = leaderboard::get_public_leaderboards(&state.db)
         .await
         .wrap_err("Failed to fetch leaderboards")?;
 
@@ -116,9 +116,16 @@ pub async fn show_leaderboard(
         return Ok(crate::routes::render_not_found(page_factory));
     };
 
-    let all_leaderboards = leaderboard::get_all_leaderboards(&state.db)
-        .await
-        .wrap_err("Failed to fetch leaderboards")?;
+    // Mode nav lists public ladders only; a private ladder is unlisted, so it
+    // neither shows up in the nav nor shows it.
+    let is_private = lb.visibility == Visibility::Private;
+    let mode_nav = if is_private {
+        vec![]
+    } else {
+        leaderboard::get_public_leaderboards(&state.db)
+            .await
+            .wrap_err("Failed to fetch leaderboards")?
+    };
 
     let game_type: GameType = lb
         .game_type
@@ -189,6 +196,16 @@ pub async fn show_leaderboard(
         vec![]
     };
 
+    // Non-members of a private ladder must enter the invite code to join.
+    let needs_invite_code = match &user {
+        Some(u) if is_private => {
+            !private_leaderboard::is_member(&state.db, leaderboard_id, u.user_id)
+                .await
+                .wrap_err("Failed to check leaderboard membership")?
+        }
+        _ => false,
+    };
+
     // Compute next matchmaker run time. When the ladder is starved the
     // matchmaker no-ops, so "last game + interval" would show an ever-staler
     // past timestamp — say why matchmaking is paused instead.
@@ -257,16 +274,26 @@ pub async fn show_leaderboard(
                 " / " (lb.name)
             }
             div class="page-head" {
-                h1 { (lb.name) }
+                h1 {
+                    (lb.name)
+                    @if is_private {
+                        " "
+                        span class="badge" { "Private" }
+                    }
+                }
                 div class="sub" {
+                    @if is_private {
+                        "Private ladder — only people with this link can find it, and "
+                        "joining takes an invite code. "
+                    }
                     "Ranked play — register a snake, join the ladder, and the "
                     "matchmaker starts new games every few minutes."
                 }
             }
 
-            @if all_leaderboards.len() > 1 {
+            @if mode_nav.len() > 1 {
                 nav class="modes" aria-label="Game modes" {
-                    @for other in &all_leaderboards {
+                    @for other in &mode_nav {
                         @if other.leaderboard_id == leaderboard_id {
                             span class="mode on" aria-current="page" { (other.name) }
                         } @else {
@@ -522,6 +549,11 @@ pub async fn show_leaderboard(
                             @let joinable: Vec<_> = user_snakes.iter().collect();
                             @if !joinable.is_empty() {
                                 form class="join-form" action={"/leaderboards/"(leaderboard_id)"/join"} method="post" {
+                                    @if needs_invite_code {
+                                        input type="text" name="invite_code" required
+                                            aria-label="Invite code" placeholder="Invite code"
+                                            autocomplete="off" autocapitalize="characters" spellcheck="false";
+                                    }
                                     select name="battlesnake_id" aria-label="Snake to join with" {
                                         @for snake in joinable {
                                             option value=(snake.battlesnake_id) { (snake.name) }
@@ -578,6 +610,7 @@ pub async fn show_leaderboard(
     )
     .with_description(description)
     .with_social_image(crate::routes::og::leaderboard_card_path(leaderboard_id), social_alt)
+    .with_noindex(is_private)
     .into_response())
 }
 
@@ -996,12 +1029,16 @@ pub async fn show_leaderboard_entry(
         crate::routes::og::entry_card_path(leaderboard_id, entry_id),
         social_alt,
     )
+    .with_noindex(lb.visibility == Visibility::Private)
     .into_response())
 }
 
 #[derive(serde::Deserialize)]
 pub struct JoinLeaveForm {
     pub battlesnake_id: Uuid,
+    /// Required to join a private leaderboard you aren't a member of yet.
+    #[serde(default)]
+    pub invite_code: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -1058,6 +1095,19 @@ pub async fn join_leaderboard(
             color_eyre::eyre::eyre!("You don't own this battlesnake"),
             redirect,
         ));
+    }
+
+    if !private_leaderboard::join_allowed(&state.db, &lb, user.user_id, form.invite_code.as_deref())
+        .await
+        .wrap_err("Failed to check invite code")
+        .with_redirect(redirect.clone())?
+    {
+        flasher
+            .error("That invite code isn't right. Ask the leaderboard's organizer for the current one.")
+            .await
+            .wrap_err("Failed to flash")
+            .with_redirect(redirect.clone())?;
+        return Ok(redirect);
     }
 
     // Opt-in (or resume if paused). Resuming also clears the entry's health

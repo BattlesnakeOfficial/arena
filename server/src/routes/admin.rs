@@ -3,6 +3,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::{Form, Json, extract::Path, http::header, response::Redirect};
 use chrono::{DateTime, Utc};
+use color_eyre::eyre::Context as _;
 use maud::{Markup, html};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -12,8 +13,13 @@ use crate::components::page_factory::PageFactory;
 use crate::customizations::{Head, Tail};
 use crate::email::{SendOutcome, messages};
 use crate::errors::{ServerError, ServerResult, WithStatus};
+use crate::flasher::Flasher;
+use crate::models::battlesnake::Visibility;
 use crate::models::customization_unlock_code::{self as codes, CreateCode, ValidationError};
 use crate::models::moderation_flag::{self, ModerationFlagListing};
+use crate::models::private_leaderboard::{
+    self, BOARD_SIZES, CreatePrivateLeaderboard, GAME_TYPES, MATCH_SIZES,
+};
 use crate::models::{email_log, notification_email};
 use crate::notifications::{NotificationChannel, NotificationKind};
 use crate::routes::auth::{AdminApiUser, AdminUser};
@@ -229,6 +235,7 @@ pub async fn dashboard(
                 div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:20px;" {
                     a href="/admin" style="display:inline-flex;align-items:center;min-height:44px;box-sizing:border-box;padding: 8px 16px; background: #0066cc; color: white; text-decoration: none; border-radius: 4px;" { "Refresh" }
                     a href="/admin/codes" style="display:inline-flex;align-items:center;min-height:44px;box-sizing:border-box;padding: 8px 16px; background: #666; color: white; text-decoration: none; border-radius: 4px;" { "Unlock codes" }
+                    a href="/admin/leaderboards" style="display:inline-flex;align-items:center;min-height:44px;box-sizing:border-box;padding: 8px 16px; background: #666; color: white; text-decoration: none; border-radius: 4px;" { "Leaderboards" }
                     a href="/admin/moderation" style="display:inline-flex;align-items:center;min-height:44px;box-sizing:border-box;padding: 8px 16px; background: #666; color: white; text-decoration: none; border-radius: 4px;" { "Moderation queue" }
                     a href="/admin/emails" style="display:inline-flex;align-items:center;min-height:44px;padding:8px 16px;background:#666;color:white;text-decoration:none;border-radius:4px;box-sizing:border-box;" { "Emails" }
                     a href="/stats" style="display:inline-flex;align-items:center;min-height:44px;box-sizing:border-box;padding: 8px 16px; background: #666; color: white; text-decoration: none; border-radius: 4px;" { "Stats" }
@@ -817,6 +824,200 @@ pub async fn disable_code(
         return Err("Unlock code not found".to_string()).with_status(StatusCode::NOT_FOUND);
     }
     Ok(Redirect::to("/admin/codes"))
+}
+
+#[derive(Deserialize)]
+pub struct CreateLeaderboardForm {
+    name: String,
+    game_type: String,
+    board_size: String,
+    match_size: i32,
+}
+
+/// GET /admin/leaderboards — every leaderboard (public and private) and the
+/// form that creates private ones. Private leaderboards are unlisted
+/// everywhere else, so this page is where their links and codes live.
+pub async fn list_leaderboards(
+    State(state): State<AppState>,
+    AdminUser(_user): AdminUser,
+    page_factory: PageFactory,
+) -> ServerResult<impl IntoResponse, StatusCode> {
+    let listings = private_leaderboard::list_for_admin(&state.db).await?;
+    let (private, public): (Vec<_>, Vec<_>) = listings
+        .iter()
+        .partition(|lb| lb.visibility == Visibility::Private);
+    let base_url = state.config.base_url.trim_end_matches('/');
+    // The page shows live invite codes, so keep it out of caches.
+    let page = page_factory.create_page(
+        "Leaderboards".to_string(),
+        Box::new(html! {
+            div class="crumb" { a href="/admin" { "Admin" } " / Leaderboards" }
+            div class="page-head" {
+                h1 { "Leaderboards" }
+                div class="sub" {
+                    "Private leaderboards are unlisted: anyone with the link can view one, "
+                    "and joining takes its invite code. Otherwise they run like any other ladder."
+                }
+            }
+
+            div class="section" {
+                h2 { "New private leaderboard" }
+                form class="form-stack admin-lb-form" method="post" action="/admin/leaderboards" {
+                    div class="field" {
+                        label for="lb-name" { "Name" }
+                        input id="lb-name" type="text" name="name" required maxlength="100";
+                    }
+                    div class="field" {
+                        label for="lb-game-type" { "Game type" }
+                        select id="lb-game-type" name="game_type" {
+                            @for game_type in GAME_TYPES {
+                                option value=(game_type) { (game_type) }
+                            }
+                        }
+                    }
+                    div class="field" {
+                        label for="lb-board-size" { "Board size" }
+                        select id="lb-board-size" name="board_size" {
+                            @for size in BOARD_SIZES {
+                                option value=(size) selected[*size == "11x11"] { (size) }
+                            }
+                        }
+                    }
+                    div class="field" {
+                        label for="lb-match-size" { "Snakes per game" }
+                        select id="lb-match-size" name="match_size" {
+                            @for size in MATCH_SIZES {
+                                option value=(size) selected[size == *MATCH_SIZES.end()] { (size) }
+                            }
+                        }
+                    }
+                    button type="submit" class="btn solid" { "Create private leaderboard" }
+                }
+            }
+
+            // Cards, not table rows: the link and code are what an admin
+            // copies, so they must fit a phone without sideways scrolling.
+            div class="section" {
+                h2 { "Private leaderboards" }
+                @if private.is_empty() {
+                    p class="empty" { "None yet." }
+                }
+                @for lb in &private {
+                    @let path = format!("/leaderboards/{}", lb.leaderboard_id);
+                    article class="admin-lb" aria-label=(lb.name) {
+                        h3 {
+                            a href=(path) { (lb.name) }
+                            " "
+                            @if lb.disabled_at.is_some() {
+                                span class="badge" { "Inactive" }
+                            } @else {
+                                span class="badge ok" { "Active" }
+                            }
+                        }
+                        dl class="meta-list" {
+                            div { dt { "Link" } dd { (base_url) (path) } }
+                            div { dt { "Invite code" } dd { code { (lb.invite_code.as_deref().unwrap_or_default()) } } }
+                            div { dt { "Mode" } dd { (lb.game_type) " · " (lb.board_size) " · " (lb.match_size) " snakes" } }
+                            div { dt { "Active snakes" } dd { (lb.active_entries) } }
+                        }
+                        form method="post" action=(format!("/admin/leaderboards/{}/invite-code", lb.leaderboard_id)) {
+                            button type="submit" class="btn" aria-label={"Regenerate invite code for " (lb.name)} {
+                                "Regenerate invite code"
+                            }
+                        }
+                    }
+                }
+            }
+
+            div class="section" {
+                h2 { "Public leaderboards" }
+                div class="table-scroll" {
+                    table class="data" {
+                        thead {
+                            tr {
+                                th { "Leaderboard" }
+                                th { "Mode" }
+                                th class="r" { "Active snakes" }
+                                th class="r" { "Status" }
+                            }
+                        }
+                        tbody {
+                            @for lb in &public {
+                                tr {
+                                    td { a href={"/leaderboards/"(lb.leaderboard_id)} { (lb.name) } }
+                                    td { (lb.game_type) " · " (lb.board_size) " · " (lb.match_size) }
+                                    td class="r num" { (lb.active_entries) }
+                                    td class="r" {
+                                        @if lb.disabled_at.is_some() {
+                                            span class="badge" { "Inactive" }
+                                        } @else {
+                                            span class="badge ok" { "Active" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }),
+    );
+    Ok(([(header::CACHE_CONTROL, "no-store")], page))
+}
+
+/// POST /admin/leaderboards — create a private leaderboard.
+pub async fn create_private_leaderboard(
+    State(state): State<AppState>,
+    AdminUser(_user): AdminUser,
+    flasher: Flasher,
+    Form(form): Form<CreateLeaderboardForm>,
+) -> ServerResult<impl IntoResponse, StatusCode> {
+    let input = CreatePrivateLeaderboard {
+        name: form.name,
+        game_type: form.game_type,
+        board_size: form.board_size,
+        match_size: form.match_size,
+    };
+    match private_leaderboard::create(&state.db, &input).await {
+        Ok(_) => {
+            flasher
+                .success(format!(
+                    "Created {}. Share its link and invite code from the list below.",
+                    input.name.trim()
+                ))
+                .await
+                .wrap_err("Failed to flash")?;
+        }
+        Err(error) => {
+            let Some(validation) = error.downcast_ref::<ValidationError>() else {
+                return Err(error.into());
+            };
+            flasher
+                .error(validation.0)
+                .await
+                .wrap_err("Failed to flash")?;
+        }
+    }
+    Ok(Redirect::to("/admin/leaderboards"))
+}
+
+/// POST /admin/leaderboards/:id/invite-code — rotate a private leaderboard's
+/// invite code. Existing members keep their place; the old code stops
+/// admitting new ones.
+pub async fn regenerate_invite_code(
+    State(state): State<AppState>,
+    AdminUser(_user): AdminUser,
+    flasher: Flasher,
+    Path(leaderboard_id): Path<Uuid>,
+) -> ServerResult<impl IntoResponse, StatusCode> {
+    if !private_leaderboard::regenerate_invite_code(&state.db, leaderboard_id).await? {
+        return Err("Private leaderboard not found".to_string()).with_status(StatusCode::NOT_FOUND);
+    }
+    flasher
+        .success("New invite code generated. The old code no longer lets anyone join.")
+        .await
+        .wrap_err("Failed to flash")?;
+    Ok(Redirect::to("/admin/leaderboards"))
 }
 
 #[cfg(test)]

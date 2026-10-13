@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::str::FromStr;
 use uuid::Uuid;
 
-// Visibility enum for battlesnakes
+// Public/private visibility, shared by battlesnakes and leaderboards
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Type)]
 #[sqlx(type_name = "text", rename_all = "lowercase")]
 #[serde(rename_all = "lowercase")]

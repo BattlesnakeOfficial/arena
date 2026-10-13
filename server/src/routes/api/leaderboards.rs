@@ -13,6 +13,7 @@ use crate::{
     models::{
         battlesnake,
         leaderboard::{self, MIN_GAMES_FOR_RANKING},
+        private_leaderboard,
     },
     routes::auth::ApiUser,
     state::AppState,
@@ -58,6 +59,9 @@ pub struct RankingsResponse {
 #[derive(Debug, Deserialize)]
 pub struct OptInRequest {
     pub battlesnake_id: Uuid,
+    /// Required to join a private leaderboard you aren't a member of yet.
+    #[serde(default)]
+    pub invite_code: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -81,7 +85,7 @@ pub struct EntryResponse {
 pub async fn list_leaderboards(
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let leaderboards = leaderboard::get_all_leaderboards(&state.db)
+    let leaderboards = leaderboard::get_public_leaderboards(&state.db)
         .await
         .map_err(|e| {
             tracing::error!("Failed to list leaderboards: {}", e);
@@ -259,6 +263,27 @@ pub async fn create_entry(
         return Err((
             StatusCode::FORBIDDEN,
             "You don't own this battlesnake".to_string(),
+        ));
+    }
+
+    let allowed = private_leaderboard::join_allowed(
+        &state.db,
+        &lb,
+        user.user_id,
+        request.invite_code.as_deref(),
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to check invite code: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Internal server error".to_string(),
+        )
+    })?;
+    if !allowed {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "A valid invite_code is required to join this leaderboard".to_string(),
         ));
     }
 

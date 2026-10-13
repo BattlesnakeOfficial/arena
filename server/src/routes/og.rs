@@ -390,7 +390,8 @@ async fn load_snake_card(
 
     // The snake's best current rank across the ladders it's on.
     let mut best: Option<(i64, String)> = None;
-    let entries = leaderboard::get_entries_for_battlesnake(&state.db, battlesnake_id)
+    // Social cards are public, so they never name a private ladder.
+    let entries = leaderboard::get_entries_for_battlesnake(&state.db, battlesnake_id, None)
         .await
         .wrap_err("Failed to get snake leaderboard entries for social card")?;
     for entry in entries.into_iter().filter(|e| e.disabled_at.is_none()) {
@@ -1095,6 +1096,39 @@ mod tests {
         assert_eq!(player.stats[0].value, "1");
         assert_eq!(player.board.snakes.len(), 1);
         assert_eq!(player.board.snakes[0].head.map(|h| h.file), Some("bendr"));
+    }
+
+    /// Social cards are public, so a snake's best rank never names a private
+    /// ladder — even when that's where it ranks highest.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn snake_card_skips_private_ladders(pool: PgPool) {
+        let state = AppState::test_from_pool(pool.clone());
+        let w = fixture_world(&pool).await;
+        let private = crate::models::private_leaderboard::create(
+            &pool,
+            &crate::models::private_leaderboard::CreatePrivateLeaderboard {
+                name: "Secret Ladder".to_string(),
+                game_type: "Standard".to_string(),
+                board_size: "11x11".to_string(),
+                match_size: 4,
+            },
+        )
+        .await
+        .unwrap();
+        let entry = leaderboard::get_or_create_entry(&pool, private, w.snake_id)
+            .await
+            .unwrap();
+        sqlx::query!(
+            "UPDATE leaderboard_entries SET games_played = 50, display_score = 99
+             WHERE leaderboard_entry_id = $1",
+            entry.leaderboard_entry_id
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let snake = load_snake_card(&state, w.snake_id).await.unwrap().unwrap();
+        assert_eq!(snake.highlight.as_deref(), Some("#1 on OG Ladder"));
     }
 
     #[sqlx::test(migrations = "../migrations")]

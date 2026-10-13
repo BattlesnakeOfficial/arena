@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO leaderboards (name, game_type, board_size, match_size, visibility, invite_code)\n         VALUES ($1, $2, $3, $4, 'private', $5)\n         RETURNING leaderboard_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "leaderboard_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Int4",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "302a3c52b4a7d45e6cbf2498df39e9322474fdd2410f1050b6e1faf295fe5ade"
+}

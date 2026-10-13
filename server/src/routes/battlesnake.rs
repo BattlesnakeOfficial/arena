@@ -1319,6 +1319,10 @@ fn render_battlesnake_profile(view: &ProfileView<'_>) -> Markup {
                                             a href={"/leaderboards/"(entry.leaderboard_id)"/entries/"(entry.leaderboard_entry_id)} {
                                                 (entry.leaderboard_name)
                                             }
+                                            @if entry.leaderboard_visibility == Visibility::Private {
+                                                " "
+                                                span class="live-pill quiet" { "Private ladder" }
+                                            }
                                         }
                                         td class="r num" { (format!("{:.1}", entry.display_score)) }
                                         td class="r num" { (entry.games_played) }
@@ -1472,9 +1476,11 @@ pub async fn view_battlesnake_profile(
     .await
     .wrap_err("Failed to get game history")?;
 
-    let leaderboard_entries = leaderboard::get_entries_for_battlesnake(&state.db, battlesnake_id)
-        .await
-        .wrap_err("Failed to get leaderboard entries")?;
+    // Private ladders are unlisted: only their members (and admins) see them.
+    let leaderboard_entries =
+        leaderboard::get_entries_for_battlesnake(&state.db, battlesnake_id, user.as_ref())
+            .await
+            .wrap_err("Failed to get leaderboard entries")?;
 
     // Health-sweeper pauses, for the owner-facing deactivation banner
     let health_paused = leaderboard_entry_health::health_paused_entries(&state.db, battlesnake_id)
@@ -1552,9 +1558,9 @@ pub async fn view_battlesnake_profile(
 //
 // Owner-only: the snake URL may be publicly visible, but the test makes the
 // server poke the user's infrastructure on demand, so only the owner can
-// trigger it. Plays one test game per active leaderboard (enrolled or not),
-// shaped like that leaderboard's matches, so owners see exactly where their
-// snake would break. Renders the results page directly from the POST (a
+// trigger it. Plays one test game per active public leaderboard (enrolled or
+// not) plus each private one the snake is on, shaped like that leaderboard's
+// matches, so owners see exactly where their snake would break. Renders the results page directly from the POST (a
 // flash + redirect would lose the per-call details).
 pub async fn test_battlesnake(
     State(state): State<AppState>,
@@ -1575,7 +1581,7 @@ pub async fn test_battlesnake(
             .with_status(StatusCode::FORBIDDEN);
     }
 
-    let mut specs = leaderboard::get_active_leaderboards(&state.db)
+    let mut specs = leaderboard::get_active_leaderboards_for_battlesnake(&state.db, battlesnake_id)
         .await
         .wrap_err("Failed to get active leaderboards")?
         .iter()
@@ -2266,8 +2272,9 @@ mod profile_page_tests {
         }
     }
 
-    /// Test Snake plays one game per active leaderboard — enrolled or not —
-    /// and names the leaderboards a real game would break on.
+    /// Test Snake plays one game per active public leaderboard — enrolled or
+    /// not — plus the private ones the snake is on, and names the leaderboards
+    /// a real game would break on.
     #[sqlx::test(migrations = "../migrations")]
     async fn test_snake_plays_every_active_leaderboard(db: PgPool) {
         use wiremock::matchers::{any, body_partial_json, method, path};
@@ -2312,6 +2319,29 @@ mod profile_page_tests {
                 .await
                 .unwrap();
         assert!(active.iter().any(|name| name == "Royale 11x11"));
+        // A private ladder the snake is on gets tested (its own shape); one
+        // it isn't on stays invisible.
+        for (name, board_size) in [("Joined Private", "19x19"), ("Other Private", "7x7")] {
+            crate::models::private_leaderboard::create(
+                &fx.db,
+                &crate::models::private_leaderboard::CreatePrivateLeaderboard {
+                    name: name.to_string(),
+                    game_type: "Standard".to_string(),
+                    board_size: board_size.to_string(),
+                    match_size: 2,
+                },
+            )
+            .await
+            .unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id)
+             SELECT leaderboard_id, $1 FROM leaderboards WHERE name = 'Joined Private'",
+        )
+        .bind(fx.snake_id)
+        .execute(&fx.db)
+        .await
+        .unwrap();
 
         let (status, _) = fx.post(fx.visitor_session, "test").await;
         assert_eq!(status, StatusCode::FORBIDDEN);
@@ -2327,6 +2357,9 @@ mod profile_page_tests {
             !html.contains("Constrictor 11x11"),
             "retired boards aren't tested"
         );
+        assert!(html.contains("<h2>Joined Private</h2>"), "{html}");
+        assert!(html.contains("2 snakes · Standard · 19x19"), "{html}");
+        assert!(!html.contains("Other Private"), "{html}");
         assert!(html.contains("4 snakes · Royale · 11x11"));
         assert!(html.contains("real games would break on: Royale 11x11."));
         assert!(html.contains("POST /move (turn 1)"));

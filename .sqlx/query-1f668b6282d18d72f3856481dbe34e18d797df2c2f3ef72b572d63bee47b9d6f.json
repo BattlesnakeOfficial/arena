@@ -1,0 +1,50 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT leaderboard_id, game_type, board_size, match_size, visibility,\n                  invite_code AS \"invite_code!\"\n           FROM leaderboards WHERE name = 'Friday League'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "leaderboard_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "game_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "board_size",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "match_size",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 4,
+        "name": "visibility",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "invite_code!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "1f668b6282d18d72f3856481dbe34e18d797df2c2f3ef72b572d63bee47b9d6f"
+}

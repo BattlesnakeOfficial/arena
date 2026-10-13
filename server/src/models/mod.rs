@@ -13,6 +13,7 @@ pub mod leaderboard_entry_health;
 pub mod moderation_flag;
 pub mod notification;
 pub mod notification_email;
+pub mod private_leaderboard;
 pub mod rate_limit;
 pub mod saved_game;
 pub mod session;
