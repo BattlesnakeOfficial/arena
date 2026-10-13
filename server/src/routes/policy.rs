@@ -31,7 +31,7 @@ fn conduct_content() -> Markup {
 
             h2 { "Our Standards" }
             p {
-                "Battlesnake Arena is a community where developers build and "
+                "Battlesnake is a community where developers build and "
                 "compete with programmable snakes. We expect everyone to be "
                 "welcoming, respectful, and collaborative. Whether you're a "
                 "beginner or a veteran, treat fellow competitors with kindness."
@@ -48,7 +48,7 @@ fn conduct_content() -> Markup {
 
             h2 { "Unacceptable Behavior" }
             p {
-                "The following behaviors are unacceptable in the Arena community:"
+                "The following behaviors are unacceptable in the Battlesnake community:"
             }
             ul {
                 li { "Harassment, discrimination, or intimidation of any kind." }
@@ -59,7 +59,7 @@ fn conduct_content() -> Markup {
 
             h2 { "Enforcement" }
             p {
-                "Arena moderators may take action when this Code of Conduct "
+                "Battlesnake moderators may take action when this Code of Conduct "
                 "is violated. Actions may include removing content, revoking "
                 "customization unlocks, or suspending accounts. Tournament "
                 "results may be invalidated for cheating."
@@ -106,11 +106,11 @@ fn privacy_content() -> Markup {
                 "imported your email, username, display name, profile fields "
                 "(pronouns, country, backstory), and historical Play points totals "
                 "as migration records. Points are not used to unlock customizations "
-                "in Arena. Your play password was imported "
+                "in Battlesnake. Your play password was imported "
                 "in hashed form only — it is never stored in plaintext, and "
                 "it is checked only to verify a claim. When you claim your "
                 "account, your play snakes and customization unlocks are "
-                "merged into your Arena account."
+                "merged into your Battlesnake account."
             }
 
             h2 { "How We Use Your Information" }
@@ -124,7 +124,7 @@ fn privacy_content() -> Markup {
                 li { "Maintain leaderboards and tournament results." }
                 li {
                     "Compute aggregate usage statistics, such as daily, weekly, and monthly active "
-                    "accounts, to operate and improve the arena. We may publish these statistics in "
+                    "accounts, to operate and improve Battlesnake. We may publish these statistics in "
                     "aggregate form; published statistics never identify individual accounts."
                 }
                 li { "Send transactional email (via Mailgun) when your play account is claimed, as a security notice." }
@@ -133,20 +133,20 @@ fn privacy_content() -> Markup {
             p {
                 "We do not send marketing emails. We do not show "
                 "advertisements. We do not sell your data. We share it only "
-                "with the service providers that run Arena on our behalf — "
+                "with the service providers that run Battlesnake on our behalf — "
                 "Mailgun for transactional email and Google Cloud for hosting "
                 "and storage."
             }
 
             h2 { "Data Storage" }
             p {
-                "Arena is hosted on Google Cloud. Game data from the legacy "
+                "Battlesnake is hosted on Google Cloud. Game data from the legacy "
                 "Battlesnake Engine may be archived to Google Cloud Storage."
             }
 
             h2 { "Cookies" }
             p {
-                "Arena uses a single functional session cookie (HttpOnly, "
+                "Battlesnake uses a single functional session cookie (HttpOnly, "
                 "Secure, SameSite=Lax) to keep you logged in. We do not use "
                 "tracking cookies, analytics cookies, or advertising cookies."
             }
@@ -169,7 +169,7 @@ fn terms_content() -> Markup {
 
             h2 { "Acceptance" }
             p {
-                "By using Battlesnake Arena, you agree to these terms. If you "
+                "By using Battlesnake, you agree to these terms. If you "
                 "do not agree, do not use the service."
             }
 
@@ -182,7 +182,7 @@ fn terms_content() -> Markup {
 
             h2 { "Your Content" }
             p {
-                "You own the code and servers for your snakes. Arena stores "
+                "You own the code and servers for your snakes. Battlesnake stores "
                 "the URL you provide and calls it during games. You are "
                 "responsible for ensuring your snake server is available and "
                 "does not violate these terms."
@@ -192,7 +192,7 @@ fn terms_content() -> Markup {
             p {
                 "Do not abuse the platform. This includes flooding games with "
                 "requests, attacking other players' snake servers, or "
-                "manipulating leaderboards. Arena may throttle or remove "
+                "manipulating leaderboards. Battlesnake may throttle or remove "
                 "content, or suspend accounts that violate these terms."
             }
             p {
@@ -202,9 +202,9 @@ fn terms_content() -> Markup {
 
             h2 { "Disclaimers" }
             p {
-                "Arena is provided \u{201C}as is\u{201D} without warranties of "
+                "Battlesnake is provided \u{201C}as is\u{201D} without warranties of "
                 "any kind. Tournament and leaderboard results are public. "
-                "Arena may modify or discontinue features at any time."
+                "Battlesnake may modify or discontinue features at any time."
             }
 
             h2 { "Contact" }

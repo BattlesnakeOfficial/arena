@@ -1220,9 +1220,15 @@ table.data.test-results pre { margin-top: 8px; font-family: var(--mono); font-si
   .table-scroll th, .table-scroll td { white-space: nowrap; }
   .site-footer .inner { padding: 24px 20px; }
 }
-/* Narrow phones: logged-in nav is glyph + 2 theme buttons + menu + avatar.
-   With the wordmark text that sums past 375px and the avatar clips. */
+/* Narrow phones: the signed-in nav (glyph + 2 theme buttons + menu + bell +
+   avatar) sums past 375px with the wordmark text and the avatar clips, so
+   hide the text there only. Logged-out pages keep the brand visible. */
 @media (max-width: 420px) {
+  [data-authed] .wordmark-text { display: none; }
+}
+/* Sub-360px phones: even the logged-out nav (~350px with the text) would
+   overflow, so fall back to the glyph there. */
+@media (max-width: 359px) {
   .wordmark-text { display: none; }
 }
 

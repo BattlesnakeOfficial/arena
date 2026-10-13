@@ -285,7 +285,7 @@ pub async fn show_game_flow(
                         @if user_battlesnakes.is_empty() {
                             div class="gc-empty" {
                                 p { "You don't have any battlesnakes yet." }
-                                p class="gc-sub" { "Point the Arena at your snake server first — then it can play." }
+                                p class="gc-sub" { "Point Battlesnake at your snake server first — then it can play." }
                                 a href="/battlesnakes/new" class="btn solid" { "Create a Battlesnake" }
                             }
                         } @else {

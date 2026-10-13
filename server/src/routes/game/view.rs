@@ -164,13 +164,13 @@ pub async fn view_game(
     };
     let description = match winner {
         Some(winner) if spoilers => format!(
-            "{} game on a {} board — {} won. Watch the replay on Battlesnake Arena.",
+            "{} game on a {} board — {} won. Watch the replay on Battlesnake.",
             game.game_type.as_str(),
             game.board_size.as_str(),
             winner.name,
         ),
         _ => format!(
-            "{} game on a {} board with {} snakes — watch the replay on Battlesnake Arena.",
+            "{} game on a {} board with {} snakes — watch the replay on Battlesnake.",
             game.game_type.as_str(),
             game.board_size.as_str(),
             battlesnakes.len(),

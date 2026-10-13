@@ -70,7 +70,7 @@ fn claim_form(error: Option<Markup>) -> Markup {
                 }
                 p class="fine" {
                     "Your old password is checked once to prove the account is "
-                    "yours and is never stored. Arena sign-in stays GitHub-only. "
+                    "yours and is never stored. Battlesnake sign-in stays GitHub-only. "
                     "Imported play data is handled per our "
                     a href="/privacy" { "privacy policy" }
                     "."
@@ -329,7 +329,7 @@ fn email_claim_sent_notice() -> Markup {
         div class="form-ok" role="status" {
             "If that address matches an unclaimed play account, a claim "
             "link is on its way. It works once, expires in 30 minutes, "
-            "and only completes on this arena account."
+            "and only completes on this Battlesnake account."
         }
     }
 }
@@ -467,7 +467,7 @@ pub async fn email_claim_verify_page(
                 }
                 p class="lede" {
                     "You're about to attach the play account from your claim "
-                    "email to this arena login, bringing its snakes and "
+                    "email to this Battlesnake login, bringing its snakes and "
                     "customization unlocks with it."
                 }
                 form class="form-stack" method="post" action="/claim/email/verify" {
@@ -506,7 +506,7 @@ pub async fn complete_email_claim(
                         }
                         p class="lede" {
                             "The claim link is invalid, expired, already used, "
-                            "or was requested from a different arena account. "
+                            "or was requested from a different Battlesnake account. "
                             "You can "
                             a href="/claim/email" { "request a fresh one" }
                             "."

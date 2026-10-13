@@ -97,16 +97,16 @@ impl NotificationKind {
     pub fn email_reason(self) -> &'static str {
         match self {
             Self::SnakeMatchmakingPaused | Self::SnakeMatchmakingResumed => {
-                "A snake associated with your Arena account changed matchmaking state."
+                "A snake associated with your Battlesnake account changed matchmaking state."
             }
             Self::PlayAccountClaimed => "A play account registered to this address was claimed.",
             Self::ClaimVerification => {
                 "Someone requested a claim for a play account registered to this address."
             }
             Self::NotificationEmailConfirmation => {
-                "Someone entered this address for Arena notification emails."
+                "Someone entered this address for Battlesnake notification emails."
             }
-            Self::AchievementEarned => "You earned a new achievement in Battlesnake Arena.",
+            Self::AchievementEarned => "You earned a new achievement in Battlesnake.",
         }
     }
     pub fn toggleable(self) -> bool {

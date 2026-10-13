@@ -61,7 +61,7 @@ fn footer(c: &mut Canvas) {
     let cap = c.cap_height(Font::Display, 26.0);
     let size = 34.0;
     glyph(c, PAD - 3.0, FOOTER_BASELINE - cap / 2.0 - size / 2.0, size);
-    c.text("Battlesnake Arena", style, PAD + 38.0, FOOTER_BASELINE);
+    c.text("Battlesnake", style, PAD + 38.0, FOOTER_BASELINE);
     let url = TextStyle::new(Font::Mono, 17.0, palette::muted());
     c.text_right(SITE_HOST, url, COLUMN_RIGHT, FOOTER_BASELINE);
 }
@@ -162,7 +162,7 @@ pub fn default_card(tagline: &str) -> cja::Result<Vec<u8>> {
     let mut c = Canvas::new()?;
     backdrop(&mut c);
     c.board(&home_board(), BOARD_X, PAD, BOARD_SIDE);
-    kicker(&mut c, None, "Battlesnake Arena");
+    kicker(&mut c, None, "Battlesnake");
 
     let headline = TextStyle::new(Font::Display, 84.0, palette::ink()).tracking(-0.03);
     let cap = c.cap_height(Font::Display, 84.0);
@@ -1118,8 +1118,8 @@ mod tests {
 
     #[test]
     fn default_card_renders() {
-        let png = default_card("A competitive arena where your code battles other Battlesnakes.")
-            .unwrap();
+        let png =
+            default_card("A competitive game where your code battles other Battlesnakes.").unwrap();
         assert_eq!(decode(&png), (WIDTH, HEIGHT));
     }
 
@@ -1146,8 +1146,7 @@ mod tests {
         let write = |name: &str, png: Vec<u8>| std::fs::write(dir.join(name), png).unwrap();
         write(
             "default.png",
-            default_card("A competitive arena where your code battles other Battlesnakes.")
-                .unwrap(),
+            default_card("A competitive game where your code battles other Battlesnakes.").unwrap(),
         );
         write(
             "snake.png",

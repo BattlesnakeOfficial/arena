@@ -516,7 +516,7 @@ fn mailgun_config_from_env() -> Option<MailgunConfig> {
         domain: std::env::var("MAILGUN_DOMAIN")
             .unwrap_or_else(|_| "mg.battlesnake.com".to_string()),
         from: std::env::var("MAILGUN_FROM")
-            .unwrap_or_else(|_| "Battlesnake Arena <reply@battlesnake.com>".to_string()),
+            .unwrap_or_else(|_| "Battlesnake <reply@battlesnake.com>".to_string()),
         base_url: std::env::var("MAILGUN_BASE_URL")
             .unwrap_or_else(|_| "https://api.mailgun.net".to_string()),
     })

@@ -484,7 +484,7 @@ pub async fn email_catalog(
     Ok(page_factory.create_page("Emails".into(), Box::new(html! {
         div style="min-width:0;max-width:100%;font-size:16px;overflow-wrap:anywhere;" {
             h1 { "Emails" }
-            p { "Every email Arena sends, with an inert sample preview." }
+            p { "Every email Battlesnake sends, with an inert sample preview." }
             @for kind in NotificationKind::ALL.into_iter().filter(|kind| kind.supports(NotificationChannel::Email)) {
                 article style="padding:12px 0;border-bottom:1px solid var(--hairline);" {
                     a href=(format!("/admin/emails/{}", kind.key())) style="display:inline-flex;align-items:center;min-height:44px;" { (kind.name()) }

@@ -141,12 +141,12 @@ pub fn notification_email_confirmation(url: &str) -> EmailContent {
     EmailContent {
         subject: "Confirm your Battlesnake notification email".to_string(),
         text: format!(
-            "Confirm this address for optional Battlesnake Arena emails within 24 hours:\n\n{url}\n\nSign in to the same Arena account that requested this change. If your email app opens a signed-out browser, sign in and reopen this link. If you did not request this, you can ignore this email.\n"
+            "Confirm this address for optional Battlesnake emails within 24 hours:\n\n{url}\n\nSign in to the same Battlesnake account that requested this change. If your email app opens a signed-out browser, sign in and reopen this link. If you did not request this, you can ignore this email.\n"
         ),
         html_body: html! {
-            p { "Confirm this address for optional Battlesnake Arena emails within 24 hours:" }
+            p { "Confirm this address for optional Battlesnake emails within 24 hours:" }
             (action_button("Confirm this address", url))
-            p { "Sign in to the same Arena account that requested this change. If your email app opens a signed-out browser, sign in and reopen this link. If you did not request this, you can ignore this email." }
+            p { "Sign in to the same Battlesnake account that requested this change. If your email app opens a signed-out browser, sign in and reopen this link. If you did not request this, you can ignore this email." }
         }.into_string(),
     }
 }
@@ -163,7 +163,7 @@ pub fn account_claimed(
         "Hi {play_username},\n\
          \n\
          Your play.battlesnake.com account was just claimed on the new \
-         Battlesnake Arena. We moved {snakes_migrated} snake(s) and \
+         Battlesnake. We moved {snakes_migrated} snake(s) and \
          {grants_migrated} customization unlock(s) over to your account.\n\
          \n\
          If this was you, there's nothing to do — welcome back!\n\
@@ -173,7 +173,7 @@ pub fn account_claimed(
          \n\
          https://arena.battlesnake.com/discord\n\
          \n\
-         — Battlesnake Arena\n"
+         — Battlesnake\n"
     );
 
     EmailContent {
@@ -181,11 +181,11 @@ pub fn account_claimed(
         text,
         html_body: html! {
             p { "Hi " (play_username) "," }
-            p { "Your play.battlesnake.com account was just claimed on the new Battlesnake Arena. We moved " (snakes_migrated) " snake(s) and " (grants_migrated) " customization unlock(s) over to your account." }
+            p { "Your play.battlesnake.com account was just claimed on the new Battlesnake. We moved " (snakes_migrated) " snake(s) and " (grants_migrated) " customization unlock(s) over to your account." }
             p { "If this was you, there's nothing to do — welcome back!" }
             p { "If this WASN'T you, please reach out to us on Discord right away so we can secure your account:" }
             p { a class="email-link" href="https://arena.battlesnake.com/discord" style="color:#C11655;text-decoration:underline" { "https://arena.battlesnake.com/discord" } }
-            p { "— Battlesnake Arena" }
+            p { "— Battlesnake" }
         }.into_string(),
     }
 }
@@ -201,9 +201,9 @@ pub fn matchmaking_deactivated_content(
     profile_url: &str,
 ) -> EmailContent {
     let where_ = if pulled.len() == 1 {
-        "this Arena leaderboard"
+        "this leaderboard"
     } else {
-        "these Arena leaderboards"
+        "these leaderboards"
     };
     let problems: String = pulled
         .iter()
@@ -232,11 +232,11 @@ pub fn matchmaking_deactivated_content(
          (The \"Test Snake\" button there plays the same games we do, one per \
          leaderboard.)\n\
          \n\
-         — Battlesnake Arena\n"
+         — Battlesnake\n"
     );
 
     EmailContent {
-        subject: format!("{snake_name} was paused from Arena matchmaking"),
+        subject: format!("{snake_name} was paused from matchmaking"),
         text,
         html_body: html! {
             p { "Hi," }
@@ -250,7 +250,7 @@ pub fn matchmaking_deactivated_content(
             p { "We'll keep checking and put it back automatically once it passes again. Or, once your snake is fixed, resume matchmaking right away from its profile page:" }
             (action_button("Open snake profile", profile_url))
             p { "(The \"Test Snake\" button there plays the same games we do, one per leaderboard.)" }
-            p { "— Battlesnake Arena" }
+            p { "— Battlesnake" }
         }.into_string(),
     }
 }
@@ -269,29 +269,29 @@ pub fn matchmaking_reactivated_content(
         "Hi,\n\
          \n\
          Good news — your Battlesnake \"{snake_name}\" is passing our health \
-         checks again and has been put back into Arena matchmaking \
+         checks again and has been put back into matchmaking \
          automatically on: {leaderboards_text}. No action needed.\n\
          \n\
          You can see its status any time on its profile page:\n\
          \n\
          {profile_url}\n\
          \n\
-         — Battlesnake Arena\n"
+         — Battlesnake\n"
     );
 
     EmailContent {
-        subject: format!("{snake_name} is back in Arena matchmaking"),
+        subject: format!("{snake_name} is back in matchmaking"),
         text,
         html_body: html! {
             p { "Hi," }
-            p { "Good news — your Battlesnake \"" (snake_name) "\" is passing our health checks again and has been put back into Arena matchmaking automatically on:" }
+            p { "Good news — your Battlesnake \"" (snake_name) "\" is passing our health checks again and has been put back into matchmaking automatically on:" }
             ul style="padding-left:22px;margin:12px 0 12px" {
                 @for leaderboard in leaderboards { li style="margin:0 0 8px" { (leaderboard) } }
             }
             p { "No action needed." }
             p { "You can see its status any time on its profile page:" }
             (action_button("Open snake profile", profile_url))
-            p { "— Battlesnake Arena" }
+            p { "— Battlesnake" }
         }.into_string(),
     }
 }
@@ -304,7 +304,7 @@ pub fn claim_verification(play_username: &str, verify_url: &str) -> EmailContent
     let text = format!(
         "Hi {play_username},\n\
          \n\
-         Someone signed in to the new Battlesnake Arena asked to claim the \
+         Someone signed in to Battlesnake asked to claim the \
          play.battlesnake.com account registered to this address. If that \
          was you, open this link while signed in to finish bringing your \
          snakes and unlocks over:\n\
@@ -312,12 +312,12 @@ pub fn claim_verification(play_username: &str, verify_url: &str) -> EmailContent
          {verify_url}\n\
          \n\
          The link works once and expires in 30 minutes. It only works for \
-         the arena account that requested it.\n\
+         the Battlesnake account that requested it.\n\
          \n\
          If this wasn't you, ignore this email — nothing happens without \
          the link, and your play account stays unclaimed.\n\
          \n\
-         — Battlesnake Arena\n"
+         — Battlesnake\n"
     );
 
     EmailContent {
@@ -325,11 +325,11 @@ pub fn claim_verification(play_username: &str, verify_url: &str) -> EmailContent
         text,
         html_body: html! {
             p { "Hi " (play_username) "," }
-            p { "Someone signed in to the new Battlesnake Arena asked to claim the play.battlesnake.com account registered to this address. If that was you, open this link while signed in to finish bringing your snakes and unlocks over:" }
+            p { "Someone signed in to Battlesnake asked to claim the play.battlesnake.com account registered to this address. If that was you, open this link while signed in to finish bringing your snakes and unlocks over:" }
             (action_button("Finish claiming", verify_url))
-            p { "The link works once and expires in 30 minutes. It only works for the arena account that requested it." }
+            p { "The link works once and expires in 30 minutes. It only works for the Battlesnake account that requested it." }
             p { "If this wasn't you, ignore this email — nothing happens without the link, and your play account stays unclaimed." }
-            p { "— Battlesnake Arena" }
+            p { "— Battlesnake" }
         }.into_string(),
     }
 }
@@ -431,7 +431,7 @@ fn render_layout(
             "Your snake was paused while we check its server."
         }
         NotificationKind::SnakeMatchmakingResumed => "Your snake is back in matchmaking.",
-        NotificationKind::PlayAccountClaimed => "Your play account was claimed on Arena.",
+        NotificationKind::PlayAccountClaimed => "Your play account was claimed on Battlesnake.",
         NotificationKind::ClaimVerification => "Finish your play account claim within 30 minutes.",
         NotificationKind::NotificationEmailConfirmation => "Confirm this address within 24 hours.",
         NotificationKind::AchievementEarned => "You unlocked new snake cosmetics.",
@@ -451,7 +451,7 @@ fn render_layout(
                     tr { td align="center" style="padding:20px 12px" {
                         table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" class="email-card" style="max-width:600px;background:#FCFBF8;border:1px solid #E7DFE3" {
                             tr { td style="padding:24px 24px 18px;border-top:6px solid #C11655" {
-                                div class="email-copy" style="font-family:'Bricolage Grotesque',Arial,Helvetica,sans-serif;font-size:20px;font-weight:800;letter-spacing:-.5px;color:#17141A" { "Battlesnake" span class="email-link" style="color:#C11655" { " Arena" } }
+                                div class="email-copy" style="font-family:'Bricolage Grotesque',Arial,Helvetica,sans-serif;font-size:20px;font-weight:800;letter-spacing:-.5px;color:#17141A" { "Battlesnake" }
                             } }
                             tr { td class="email-copy" style="padding:4px 24px 28px;color:#17141A;font-size:16px;line-height:1.55" {
                                 h1 class="email-copy" style="font-family:'Bricolage Grotesque',Arial,Helvetica,sans-serif;font-size:27px;line-height:1.2;margin:0 0 24px;color:#17141A" { (subject) }
@@ -618,6 +618,22 @@ mod tests {
                 assert!(!message.html.contains(forbidden), "{forbidden}");
             }
             check_images(&message.html);
+            // DEV-1751: the product is branded Battlesnake — no "Arena" may
+            // survive in any rendered email surface. Case-sensitive on purpose:
+            // lowercase "arena" legitimately appears in test URLs like
+            // https://arena.example.
+            assert!(
+                !message.subject.contains("Arena"),
+                "{}: subject mentions Arena",
+                kind.key()
+            );
+            for body in [&message.text, &message.html] {
+                assert!(
+                    !body.contains("Arena"),
+                    "{}: rendered email mentions Arena",
+                    kind.key()
+                );
+            }
             if kind == NotificationKind::NotificationEmailConfirmation {
                 assert_eq!(
                     message.subject,
@@ -625,9 +641,9 @@ mod tests {
                 );
                 assert!(message.html.contains(&message.subject));
                 for phrase in [
-                    "Confirm this address for optional Battlesnake Arena emails within 24 hours:",
+                    "Confirm this address for optional Battlesnake emails within 24 hours:",
                     "https://arena.example/settings/notification-email/confirm?token=sample-invalid-token",
-                    "Sign in to the same Arena account that requested this change.",
+                    "Sign in to the same Battlesnake account that requested this change.",
                     "If your email app opens a signed-out browser, sign in and reopen this link.",
                     "If you did not request this, you can ignore this email.",
                 ] {
@@ -694,7 +710,7 @@ mod tests {
                 &[
                     "Someone signed in",
                     "The link works once and expires in 30 minutes.",
-                    "It only works for the arena account",
+                    "It only works for the Battlesnake account",
                     "If this wasn't you",
                     "https://arena.example/claim/email/verify?token=sample-invalid-token",
                 ][..],
@@ -708,7 +724,7 @@ mod tests {
                 .unwrap(),
                 &[
                     "Confirm this address for optional",
-                    "Sign in to the same Arena account",
+                    "Sign in to the same Battlesnake account",
                     "If your email app opens a signed-out browser",
                     "If you did not request this",
                     "https://arena.example/settings/notification-email/confirm?token=sample-invalid-token",
@@ -967,9 +983,9 @@ mod tests {
             )],
             "https://arena.example.com/battlesnakes/abc/profile",
         );
-        assert_eq!(subject, "Hissy was paused from Arena matchmaking");
+        assert_eq!(subject, "Hissy was paused from matchmaking");
         assert!(text.contains("\"Hissy\""));
-        assert!(text.contains("on this Arena leaderboard because"));
+        assert!(text.contains("on this leaderboard because"));
         assert!(text.contains(
             "- Royale 11x11: POST /move (turn 0): Returned non-success HTTP status 500\n"
         ));
@@ -986,7 +1002,7 @@ mod tests {
             ],
             "https://arena.example.com/battlesnakes/abc/profile",
         );
-        assert!(text.contains("on these Arena leaderboards because"));
+        assert!(text.contains("on these leaderboards because"));
         assert!(text.contains("- Royale 11x11: boom\n- Constrictor 11x11: bang\n"));
     }
 
@@ -997,7 +1013,7 @@ mod tests {
             &["Royale 11x11".to_string(), "Duels 11x11".to_string()],
             "https://arena.example.com/battlesnakes/abc/profile",
         );
-        assert_eq!(subject, "Hissy is back in Arena matchmaking");
+        assert_eq!(subject, "Hissy is back in matchmaking");
         assert!(text.contains("\"Hissy\""));
         assert!(text.contains("automatically on: Royale 11x11, Duels 11x11."));
         assert!(text.contains("https://arena.example.com/battlesnakes/abc/profile"));

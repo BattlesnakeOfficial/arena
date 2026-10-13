@@ -790,7 +790,7 @@ fn evaluate_info_body(body: &str) -> (bool, String) {
                 false,
                 format!(
                     "apiversion is {other:?} — the Battlesnake API spec expects \"1\" \
-                     (games on this arena will still run)"
+                     (games on Battlesnake will still run)"
                 ),
             ),
             None => (
@@ -1462,7 +1462,7 @@ mod tests {
         assert!(!ok);
         assert!(summary.contains("apiversion is \"2\""));
         assert!(summary.contains("the Battlesnake API spec expects \"1\""));
-        assert!(summary.contains("games on this arena will still run"));
+        assert!(summary.contains("games on Battlesnake will still run"));
     }
 
     #[test]

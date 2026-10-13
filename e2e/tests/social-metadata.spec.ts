@@ -66,7 +66,7 @@ test('emits complete social metadata for home, leaderboard, and game pages', asy
 
   try {
     await page.goto('/');
-    await assertMetadata(page, baseURL!, '/', '/og/default.png', 'Battlesnake Arena');
+    await assertMetadata(page, baseURL!, '/', '/og/default.png', 'Battlesnake');
 
     const leaderboardId = leaderboards[0].leaderboard_id;
     const leaderboardPath = `/leaderboards/${leaderboardId}`;
