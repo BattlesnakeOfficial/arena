@@ -250,6 +250,10 @@ pub struct AppConfig {
     pub gcp_logging: bool,
     pub gcp_project_id: Option<String>,
     pub rust_log: String,
+    /// `ARENA_STDOUT_LOG`: extra `EnvFilter` directives for the JSON stdout
+    /// layer only (`GCP_LOGGING` path), e.g. `warn` or `off`. `RUST_LOG` still
+    /// governs Eyes. Unset leaves stdout at `RUST_LOG`.
+    pub stdout_log: Option<String>,
     /// Eyes telemetry, enabled when `EYES_ORG_ID` + `EYES_APP_ID` are set.
     pub eyes: Option<EyesConfig>,
 
@@ -372,6 +376,7 @@ impl AppConfig {
             gcp_logging,
             gcp_project_id: optional_env("GCP_PROJECT_ID"),
             rust_log: std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
+            stdout_log: optional_env("ARENA_STDOUT_LOG"),
             eyes: eyes_config_from_env()?,
 
             job,
@@ -413,6 +418,7 @@ impl AppConfig {
             gcp_logging: false,
             gcp_project_id: None,
             rust_log: "info".to_string(),
+            stdout_log: None,
             eyes: None,
             job: JobConfig {
                 poll_interval_ms: 60_000,

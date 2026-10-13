@@ -1,9 +1,11 @@
 use std::fmt;
 
 use cja::setup::EyesShutdownHandle;
+use color_eyre::eyre::Context as _;
 use tracing::{Event, Subscriber};
 use tracing_subscriber::{
-    fmt::{self as fmt_layer, FmtContext, FormatEvent, FormatFields},
+    EnvFilter, Layer,
+    fmt::{self as fmt_layer, FmtContext, FormatEvent, FormatFields, MakeWriter},
     registry::LookupSpan,
 };
 
@@ -125,6 +127,32 @@ impl tracing::field::Visit for JsonVisitor {
     }
 }
 
+/// The structured JSON stdout layer.
+///
+/// `stdout_log` (`ARENA_STDOUT_LOG`) narrows what reaches stdout below the
+/// global `RUST_LOG` filter without touching the other layers, so Eyes keeps
+/// everything `RUST_LOG` admits: `"warn"` keeps warnings and errors, `"off"`
+/// silences stdout. `None` passes through everything `RUST_LOG` admits.
+fn stdout_layer<S, W>(stdout_log: Option<&str>, make_writer: W) -> color_eyre::Result<impl Layer<S>>
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+    W: for<'w> MakeWriter<'w> + Send + Sync + 'static,
+{
+    let filter = stdout_log
+        .map(|directives| {
+            EnvFilter::builder()
+                .parse(directives)
+                .wrap_err_with(|| format!("Couldn't create stdout filter from {directives}"))
+        })
+        .transpose()?;
+
+    Ok(fmt_layer::Layer::default()
+        .event_format(GcpJsonFormatter)
+        .with_ansi(false)
+        .with_writer(make_writer)
+        .with_filter(filter))
+}
+
 /// Sets up GCP-compatible structured JSON logging, plus the Eyes telemetry
 /// layer when configured (see `AppConfig::eyes`).
 ///
@@ -133,10 +161,11 @@ impl tracing::field::Visit for JsonVisitor {
 /// wires the same layer itself).
 pub fn setup_gcp_tracing(
     rust_log: &str,
+    stdout_log: Option<&str>,
     eyes: Option<&crate::config::EyesConfig>,
     identity: &eyes_subscriber::ProcessIdentity,
 ) -> color_eyre::Result<Option<EyesShutdownHandle>> {
-    use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
+    use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
     let env_filter = EnvFilter::builder().parse(rust_log).map_err(|e| {
         color_eyre::eyre::eyre!("Couldn't create env filter from {}: {}", rust_log, e)
@@ -172,11 +201,7 @@ pub fn setup_gcp_tracing(
 
     tracing_subscriber::registry()
         .with(env_filter)
-        .with(
-            fmt::Layer::default()
-                .event_format(GcpJsonFormatter)
-                .with_ansi(false),
-        )
+        .with(stdout_layer(stdout_log, std::io::stdout)?)
         .with(eyes_layer)
         .try_init()?;
 
@@ -222,6 +247,85 @@ pub fn insert_trace_context_into_current_span(trace_path: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::sync::{Arc, Mutex};
+
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    /// In-memory stand-in for stdout.
+    #[derive(Clone, Default)]
+    struct CapturedOutput(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedOutput {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl CapturedOutput {
+        fn text(&self) -> String {
+            String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+        }
+    }
+
+    /// Emits one INFO and one WARN event under a global `info` filter (the
+    /// `RUST_LOG` role). Returns what reached the stdout layer and what reached
+    /// an unfiltered sibling layer (the Eyes role).
+    fn emit_info_and_warn(stdout_log: Option<&str>) -> (String, String) {
+        let stdout = CapturedOutput::default();
+        let sibling = CapturedOutput::default();
+        let (stdout_writer, sibling_writer) = (stdout.clone(), sibling.clone());
+
+        let subscriber = tracing_subscriber::registry()
+            .with(EnvFilter::new("info"))
+            .with(stdout_layer(stdout_log, move || stdout_writer.clone()).unwrap())
+            .with(fmt_layer::layer().with_writer(move || sibling_writer.clone()));
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!("info event");
+            tracing::warn!("warn event");
+            tracing::debug!("debug event");
+        });
+
+        (stdout.text(), sibling.text())
+    }
+
+    #[test]
+    fn stdout_log_unset_passes_everything_rust_log_admits() {
+        let (stdout, _) = emit_info_and_warn(None);
+        assert!(stdout.contains("info event"), "{stdout}");
+        assert!(stdout.contains("warn event"), "{stdout}");
+        assert!(!stdout.contains("debug event"), "{stdout}");
+    }
+
+    #[test]
+    fn stdout_log_warn_keeps_only_warnings_on_stdout() {
+        let (stdout, sibling) = emit_info_and_warn(Some("warn"));
+        assert!(!stdout.contains("info event"), "{stdout}");
+        assert!(stdout.contains("\"severity\":\"WARNING\""), "{stdout}");
+        // Narrowing stdout must not narrow Eyes.
+        assert!(sibling.contains("info event"), "{sibling}");
+        assert!(sibling.contains("warn event"), "{sibling}");
+    }
+
+    #[test]
+    fn stdout_log_off_silences_stdout_only() {
+        let (stdout, sibling) = emit_info_and_warn(Some("off"));
+        assert!(stdout.is_empty(), "{stdout}");
+        assert!(sibling.contains("info event"), "{sibling}");
+    }
+
+    #[test]
+    fn stdout_log_rejects_invalid_directives() {
+        let result =
+            stdout_layer::<tracing_subscriber::Registry, _>(Some("arena=loud"), std::io::sink);
+        assert!(result.is_err());
+    }
 
     #[test]
     fn test_extract_trace_context_valid() {
