@@ -136,7 +136,7 @@ fn render_stats(s: &StatsSnapshot) -> Markup {
     html! {
         div class="public-stats" {
             div class="page-head" {
-                h1 { "Arena stats" }
+                h1 { "Battlesnake stats" }
                 p class="sub" { "Aggregate usage for admins. No per-user data." }
             }
             p class="stats-period" { "UTC; through " (s.as_of_utc_date) }
@@ -153,7 +153,7 @@ fn render_stats(s: &StatsSnapshot) -> Markup {
             div class="public-stats-note" {
                 p { "Active-user tracking began " (s.tracking_started_on) " UTC. The first complete tracked day is " (s.live_tracking_started_on) "." }
                 p { "An active user is an account making at least one signed-in web request or API-token request during a UTC day. Automated API clients count." }
-                p { "A played game finished on Arena, excludes legacy imports, and is dated by game creation. An active snake appeared in a played game during the period." }
+                p { "A played game finished on Battlesnake, excludes legacy imports, and is dated by game creation. An active snake appeared in a played game during the period." }
                 p { "Read the " a href="/privacy" { "privacy policy" } " for how activity dates are stored." }
             }
 

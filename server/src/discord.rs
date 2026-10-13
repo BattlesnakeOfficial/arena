@@ -133,10 +133,7 @@ fn truncated(name: &str) -> String {
 }
 
 fn user_signup_message(github_login: &str) -> String {
-    format!(
-        "👋 {} just joined Battlesnake Arena",
-        truncated(github_login)
-    )
+    format!("👋 {} just joined Battlesnake", truncated(github_login))
 }
 
 fn account_claimed_message(play_username: &str, snakes_migrated: usize) -> String {

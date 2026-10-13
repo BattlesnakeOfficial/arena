@@ -418,7 +418,7 @@ pub async fn list_battlesnakes(
             div class="crumb" { a href="/me" { "My Profile" } " / battlesnakes" }
             div class="page-head" {
                 h1 { "Your Battlesnakes" }
-                div class="sub" { "The snake servers the Arena calls when your games run." }
+                div class="sub" { "The snake servers Battlesnake calls when your games run." }
                 div class="head-actions" {
                     a href="/battlesnakes/new" class="btn solid" { "Add New Battlesnake" }
                 }
@@ -511,7 +511,7 @@ pub async fn new_battlesnake(
             div class="crumb" { a href="/battlesnakes" { "Your Battlesnakes" } " / new" }
             div class="page-head" {
                 h1 { "Add New Battlesnake" }
-                div class="sub" { "Point the Arena at your snake server and pick who can play it." }
+                div class="sub" { "Point Battlesnake at your snake server and pick who can play it." }
             }
 
             (battlesnake_form("/battlesnakes", "Create Battlesnake", &form, &catalog))
@@ -1506,7 +1506,7 @@ pub async fn view_battlesnake_profile(
     );
     let social_alt = format!("{}, a Battlesnake by {owner_name}", snake.name);
     let description = format!(
-        "{}, a Battlesnake by {owner_name}: {} {} played on Battlesnake Arena.",
+        "{}, a Battlesnake by {owner_name}: {} {} played on Battlesnake.",
         snake.name,
         crate::routes::game::view::comma_separate(stats.total_games),
         if stats.total_games == 1 {

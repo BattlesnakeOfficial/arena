@@ -73,7 +73,7 @@ pub struct MailgunConfig {
     pub api_key: String,
     /// Sending domain, e.g. `mg.battlesnake.com`.
     pub domain: String,
-    /// `From` header, e.g. `Battlesnake Arena <reply@battlesnake.com>`.
+    /// `From` header, e.g. `Battlesnake <reply@battlesnake.com>`.
     pub from: String,
     /// API base, overridable so tests can point at a mock server.
     pub base_url: String,

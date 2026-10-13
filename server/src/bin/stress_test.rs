@@ -24,7 +24,7 @@ use uuid::Uuid;
 
 #[derive(Parser)]
 #[command(name = "stress-test")]
-#[command(about = "Stress test Arena by generating game creation load")]
+#[command(about = "Stress test Battlesnake by generating game creation load")]
 struct Cli {
     /// Arena API base URL
     #[arg(long, default_value = "http://localhost:3000")]

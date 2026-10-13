@@ -9,7 +9,7 @@ test('logged-out visitors cannot reach stats or find it in navigation', async ({
   await expect(page.locator('.mobile-menu').getByRole('link', { name: 'Stats' })).toHaveCount(0);
   const response = await page.goto('/stats');
   expect(response?.status()).toBe(401);
-  await expect(page.getByRole('heading', { name: 'Arena stats' })).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: 'Battlesnake stats' })).toHaveCount(0);
   expect((await page.request.get('/api/stats')).ok()).toBeFalsy();
 });
 
@@ -18,7 +18,7 @@ test('admin reaches stats from dashboard and sees aggregates at mobile width', a
   await authenticatedPage.goto('/admin');
   await authenticatedPage.getByRole('link', { name: 'Stats' }).click();
   await expect(authenticatedPage).toHaveURL(/\/stats$/);
-  await expect(authenticatedPage.getByRole('heading', { name: 'Arena stats' })).toBeVisible();
+  await expect(authenticatedPage.getByRole('heading', { name: 'Battlesnake stats' })).toBeVisible();
   await expect(authenticatedPage.locator('.public-stats-tiles .stat')).toHaveCount(8);
   await expect(authenticatedPage.locator('svg.public-stats-chart')).toHaveCount(4);
   await expect(authenticatedPage.locator('table.public-stats-table')).toHaveCount(4);
@@ -69,7 +69,7 @@ test('admin stats charts and tables render without JavaScript', async ({ browser
     await context.addCookies(await authenticatedPage.context().cookies());
     const page = await context.newPage();
     await page.goto('/stats');
-    await expect(page.getByRole('heading', { name: 'Arena stats' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Battlesnake stats' })).toBeVisible();
     await expect(page.locator('svg.public-stats-chart')).toHaveCount(4);
     await expect(page.locator('table.public-stats-table')).toHaveCount(4);
     await expect(page.locator('.public-stats-collecting')).toHaveCount(2);

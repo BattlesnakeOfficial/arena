@@ -34,6 +34,8 @@ pub mod admin;
 pub mod api;
 pub mod auth;
 pub mod battlesnake;
+#[cfg(test)]
+mod branding_tests;
 pub mod claim;
 pub mod customizations;
 pub mod game;
@@ -634,7 +636,7 @@ async fn root_page(
                     section class="hero" {
                         div class="copy" {
                             div class="kicker" { "A game for programmers" }
-                            h1 { "Your code is the " em { "controller." } }
+                            h1 { "Battlesnake. Your code is the " em { "controller." } }
                             p class="lede" {
                                 "Write a web server that plays snake. Deploy it in any language. "
                                 "Climb the leaderboards while your code competes around the clock — "
@@ -910,7 +912,7 @@ async fn profile_page(
         Box::new(html! {
             div class="page-head" {
                 h1 { "My Profile" }
-                div class="sub" { "How you appear across the Arena — and the account behind it." }
+                div class="sub" { "How you appear across Battlesnake — and the account behind it." }
             }
 
             @if show_claim_prompt {
@@ -1135,7 +1137,7 @@ async fn version_page() -> impl IntoResponse {
                 }
             }
             body {
-                h1 { "Arena Version Info" }
+                h1 { "Version Info" }
                 table {
                     tr {
                         th { "Property" }

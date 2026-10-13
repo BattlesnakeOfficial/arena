@@ -50,7 +50,7 @@ fn inline_source(bytes: &[u8]) -> Result<Markup, std::str::Utf8Error> {
 /// Site-wide fallback for social embeds (OpenGraph/Twitter) when a page
 /// doesn't set its own description. Also the default social card's tagline.
 pub const DEFAULT_DESCRIPTION: &str =
-    "A competitive arena where your code battles other Battlesnakes.";
+    "A competitive game where your code battles other Battlesnakes.";
 
 const GOOGLE_FONTS_HREF: &str = "https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,300;12..96,500;12..96,600;12..96,700;12..96,800&family=Instrument+Sans:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap";
 
@@ -100,7 +100,7 @@ pub struct SocialImage {
 }
 
 /// Alt text for the default card.
-const DEFAULT_IMAGE_ALT: &str = "Battlesnake Arena";
+const DEFAULT_IMAGE_ALT: &str = "Battlesnake";
 
 impl Page {
     pub fn new(title: String, content: Box<dyn Render>, flash: Option<String>) -> Self {
@@ -194,7 +194,7 @@ impl Page {
 
     fn wordmark(&self) -> Markup {
         html! {
-            a class="wordmark" href="/" aria-label="Battlesnake Arena — home" {
+            a class="wordmark" href="/" aria-label="Battlesnake — home" {
                 svg class="glyph" viewBox="0 0 24 24" fill="none" aria-hidden="true" {
                     rect x="2" y="2" width="9" height="9" rx="2.5" fill="var(--pink)" {}
                     rect x="13" y="2" width="9" height="9" rx="2.5" fill="currentColor" opacity=".2" {}
@@ -315,7 +315,7 @@ impl Page {
         html! {
             footer class="site-footer" {
                 div class="inner" {
-                    span { "Battlesnake Arena" }
+                    span { "Battlesnake" }
                     div class="spacer" {}
                     a href="/conduct" { "Code of Conduct" }
                     a href="/privacy" { "Privacy Policy" }
@@ -345,7 +345,7 @@ impl Render for Page {
                     @if self.noindex {
                         meta name="robots" content="noindex";
                     }
-                    meta property="og:site_name" content="Battlesnake Arena";
+                    meta property="og:site_name" content="Battlesnake";
                     meta property="og:title" content=(self.title);
                     meta property="og:type" content="website";
                     meta property="og:description" content=(self.description());
@@ -499,7 +499,7 @@ mod tests {
         page.base_url = "https://arena.battlesnake.com/".to_string();
         page.current_path = "/games/example".to_string();
         let html = page.render().into_string();
-        assert!(html.contains(r#"<meta property="og:site_name" content="Battlesnake Arena">"#));
+        assert!(html.contains(r#"<meta property="og:site_name" content="Battlesnake">"#));
         assert!(html.contains(r#"<meta property="og:title" content="Test Title">"#));
         assert!(html.contains(r#"<meta property="og:type" content="website">"#));
         assert!(html.contains(&format!(
@@ -515,10 +515,10 @@ mod tests {
             (r#"property="og:image:type""#, "image/png"),
             (r#"property="og:image:width""#, "1200"),
             (r#"property="og:image:height""#, "630"),
-            (r#"property="og:image:alt""#, "Battlesnake Arena"),
+            (r#"property="og:image:alt""#, "Battlesnake"),
             (r#"name="twitter:card""#, "summary_large_image"),
             (r#"name="twitter:image""#, image_url),
-            (r#"name="twitter:image:alt""#, "Battlesnake Arena"),
+            (r#"name="twitter:image:alt""#, "Battlesnake"),
         ];
         for (selector, value) in expected {
             assert_eq!(html.matches(selector).count(), 1, "{selector}");

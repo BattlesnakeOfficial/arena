@@ -123,7 +123,7 @@ async fn render_user_profile(
 
     let name = user.public_name().to_string();
     let social_image = crate::routes::og::player_card_path(user.user_id);
-    let social_alt = format!("{name} on Battlesnake Arena");
+    let social_alt = format!("{name} on Battlesnake");
 
     Ok(page_factory.create_page(
         name.clone(),
@@ -345,9 +345,7 @@ pub async fn list_global_rankings(
             "Global rankings".to_string(),
             Box::new(render_global_rankings(&entries, page, total_pages, total)),
         )
-        .with_description(
-            "Compare combined player ratings across every Battlesnake Arena leaderboard.",
-        ))
+        .with_description("Compare combined player ratings across every Battlesnake leaderboard."))
 }
 
 /// Rows per page in the public `/players` directory.
@@ -415,7 +413,7 @@ fn render_player_directory(
         div class="page-head" {
             h1 { "Players" }
             div class="sub" {
-                "Everyone who has joined the arena. Follow a name through to see their snakes."
+                "Everyone who has joined Battlesnake. Follow a name through to see their snakes."
             }
         }
 
@@ -535,7 +533,7 @@ pub async fn list_players(
                 total,
             )),
         )
-        .with_description("Browse the players competing in the Battlesnake arena."))
+        .with_description("Browse the players competing on Battlesnake."))
 }
 
 #[cfg(test)]

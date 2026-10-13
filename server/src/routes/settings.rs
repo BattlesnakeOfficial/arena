@@ -146,13 +146,13 @@ pub async fn confirm_notification_email_page(
         div class="form-page" style="font-size: 16px; max-width: 375px; overflow-wrap: anywhere" {
             h1 { "Confirm notification email" }
             @if user.is_some() {
-                p { "Confirm this address for notification emails on your signed-in Arena account." }
+                p { "Confirm this address for notification emails on your signed-in Battlesnake account." }
                 form method="post" action="/settings/notification-email/confirm" {
                     input type="hidden" name="token" value=(query.token);
                     button type="submit" class="btn solid" style="min-height: 44px; font-size: 16px" { "Confirm email" }
                 }
             } @else {
-                p { "Sign in to the same Arena account that requested this change, then reopen the link from your email." }
+                p { "Sign in to the same Battlesnake account that requested this change, then reopen the link from your email." }
                 a href="/auth/github" class="btn" style="min-height: 44px; font-size: 16px" { "Sign in with GitHub" }
             }
         }

@@ -261,7 +261,7 @@ pub async fn show_leaderboard(
     }
 
     let description = format!(
-        "{} leaderboard on Battlesnake Arena — {} ranked snakes, {} games played.",
+        "{} leaderboard on Battlesnake — {} ranked snakes, {} games played.",
         lb.name, total_ranked, status.total_games
     );
     let social_alt = format!("{}: the top of the leaderboard", lb.name);

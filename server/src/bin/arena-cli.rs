@@ -10,7 +10,7 @@ use arena::cli::output::{
 
 #[derive(Parser)]
 #[command(name = "arena")]
-#[command(about = "Battlesnake Arena CLI", long_about = None)]
+#[command(about = "Battlesnake CLI", long_about = None)]
 struct Cli {
     /// Output format: 'json' or 'human'. Default: human for TTY, json for pipes.
     #[arg(long, global = true)]

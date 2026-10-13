@@ -36,7 +36,7 @@
     try {
       res = await fetch(url);
     } catch (e) {
-      throw new Error("Couldn't reach Arena. Try again.");
+      throw new Error("Couldn't reach Battlesnake. Try again.");
     }
     const body = await res.text();
     if (!res.ok) throw new Error(body || `Request failed (${res.status}).`);
