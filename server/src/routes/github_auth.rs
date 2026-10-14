@@ -1,7 +1,7 @@
 use axum::{
     extract::{Query, State},
-    http::StatusCode,
-    response::{IntoResponse, Redirect},
+    http::{StatusCode, header},
+    response::{IntoResponse, Redirect, Response},
 };
 use color_eyre::eyre::{Context as _, eyre};
 use maud::html;
@@ -9,7 +9,7 @@ use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue, USER_AGENT}
 use serde::Deserialize;
 
 use crate::{
-    components::page_factory::PageFactory,
+    components::{flash::Flash, page_factory::PageFactory},
     errors::{ServerError, ServerResult},
     flasher::Flasher,
     github::auth::{GitHubAuthParams, GitHubTokenResponse, GitHubUser},
@@ -79,55 +79,13 @@ fn authorization_url(
     )
 }
 
-#[cfg(test)]
-mod private_email_guard {
-    use std::path::Path;
-
-    fn inspect(path: &Path) {
-        for entry in std::fs::read_dir(path).expect("read server source") {
-            let path = entry.expect("source entry").path();
-            if path.is_dir() {
-                inspect(&path);
-            } else if path.extension().is_some_and(|extension| extension == "rs") {
-                let source = std::fs::read_to_string(&path).expect("read Rust source");
-                assert!(
-                    !source.contains(&["/user", "/emails"].concat()),
-                    "private email endpoint in {}",
-                    path.display()
-                );
-                assert!(
-                    !source.contains(&["user", ":email"].concat()),
-                    "private email scope in {}",
-                    path.display()
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn production_source_never_requests_private_github_email() {
-        inspect(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"));
-        let config = crate::github::auth::GitHubOAuthConfig {
-            client_id: "client".into(),
-            client_secret: "secret".into(),
-            redirect_uri: "https://arena.example/callback".into(),
-            oauth_url: "https://github.example/authorize".into(),
-            token_url: String::new(),
-            api_url: String::new(),
-        };
-        let url = super::authorization_url(&config, "state");
-        assert!(url.contains("state=state"));
-        assert!(!url.contains("scope="));
-    }
-}
-
 // Route handler for GitHub OAuth callback
 pub async fn github_auth_callback(
     State(state): State<AppState>,
     Query(params): Query<GitHubAuthParams>,
     current_session: CurrentSession,
     flasher: Flasher,
-) -> ServerResult<impl IntoResponse, StatusCode> {
+) -> ServerResult<Response, StatusCode> {
     // Check if OAuth is configured
     let oauth_config = state.config.github.as_ref().ok_or_else(|| {
         ServerError(
@@ -267,17 +225,60 @@ pub async fn github_auth_callback(
         "user authenticated via GitHub OAuth"
     );
 
-    // If CLI auth, create an API token and redirect to the token display page
+    // If CLI auth, create an API token and render the token page directly as
+    // this response. Never put the secret in a URL (redirect Location, query,
+    // or fragment): browser history, proxies, and Cloud Run request logs all
+    // capture URLs, and this token can call every /api/* route.
     if is_cli_auth {
         let new_token = api_token::create_api_token(&state.db, user.user_id, "arena-cli")
             .await
             .wrap_err("Failed to create API token for CLI")?;
 
-        // Redirect to the CLI token display page with the token as a query param
-        return Ok(Redirect::to(&format!(
-            "/auth/cli-token?token={}",
-            new_token.secret
-        )));
+        let secret = new_token.secret;
+        let page_factory = PageFactory {
+            flash: Flash {
+                message: None,
+                flash_type: None,
+            },
+            user: Some(user),
+            path: "/auth/github/callback".to_string(),
+            base_url: state.config.base_url.clone(),
+            unread_count: None,
+        };
+        let page = page_factory.create_page(
+            "CLI Authentication Complete".to_string(),
+            Box::new(html! {
+                div style="max-width: 600px; margin: 40px auto; padding: 20px;" {
+                    h1 { "CLI Authentication Successful" }
+
+                    div class="alert alert-success" style="margin: 20px 0;" {
+                        "You have successfully authenticated with GitHub!"
+                    }
+
+                    div style="background: #f5f5f5; border: 1px solid #ddd; border-radius: 8px; padding: 20px; margin: 20px 0;" {
+                        h3 style="margin-top: 0;" { "Your API Token" }
+                        p style="color: #666; margin-bottom: 10px;" {
+                            "Copy this token and paste it into the CLI when prompted:"
+                        }
+
+                        div style="background: #fff; border: 1px solid #ccc; border-radius: 4px; padding: 15px; font-family: monospace; word-break: break-all; font-size: 14px;" {
+                            (secret)
+                        }
+
+                        p style="color: #856404; background: #fff3cd; border: 1px solid #ffc107; border-radius: 4px; padding: 10px; margin-top: 15px;" {
+                            strong { "Important: " }
+                            "This token will only be shown once. Make sure to copy it now!"
+                        }
+                    }
+
+                    div style="margin-top: 20px;" {
+                        p { "You can close this browser tab and return to the CLI." }
+                        a href="/" class="btn btn-secondary" { "Go to Home" }
+                    }
+                }
+            }),
+        );
+        return Ok(([(header::CACHE_CONTROL, "no-store")], page).into_response());
     }
 
     // Redirect to home page with success message
@@ -293,7 +294,7 @@ pub async fn github_auth_callback(
             .add_flash("Successfully logged in with GitHub!")
             .await?;
     }
-    Ok(Redirect::to("/"))
+    Ok(Redirect::to("/").into_response())
 }
 
 // Route handler for logging out
@@ -315,48 +316,44 @@ pub async fn logout(
     Redirect::to("/")
 }
 
-/// Query parameters for CLI token display
-#[derive(Debug, Deserialize)]
-pub struct CliTokenQuery {
-    pub token: String,
-}
+#[cfg(test)]
+mod private_email_guard {
+    use std::path::Path;
 
-/// Route handler for displaying CLI token after OAuth
-pub async fn cli_token_page(
-    Query(query): Query<CliTokenQuery>,
-    page_factory: PageFactory,
-) -> impl IntoResponse {
-    page_factory.create_page(
-        "CLI Authentication Complete".to_string(),
-        Box::new(html! {
-            div style="max-width: 600px; margin: 40px auto; padding: 20px;" {
-                h1 { "CLI Authentication Successful" }
-
-                div class="alert alert-success" style="margin: 20px 0;" {
-                    "You have successfully authenticated with GitHub!"
-                }
-
-                div style="background: #f5f5f5; border: 1px solid #ddd; border-radius: 8px; padding: 20px; margin: 20px 0;" {
-                    h3 style="margin-top: 0;" { "Your API Token" }
-                    p style="color: #666; margin-bottom: 10px;" {
-                        "Copy this token and paste it into the CLI when prompted:"
-                    }
-
-                    div style="background: #fff; border: 1px solid #ccc; border-radius: 4px; padding: 15px; font-family: monospace; word-break: break-all; font-size: 14px;" {
-                        (query.token)
-                    }
-
-                    p style="color: #856404; background: #fff3cd; border: 1px solid #ffc107; border-radius: 4px; padding: 10px; margin-top: 15px;" {
-                        strong { "Important: " }
-                        "This token will only be shown once. Make sure to copy it now!"
-                    }
-                }
-
-                div style="margin-top: 20px;" {
-                    p { "You can close this browser tab and return to the CLI." }
-                    a href="/" class="btn btn-secondary" { "Go to Home" }
-                }
+    fn inspect(path: &Path) {
+        for entry in std::fs::read_dir(path).expect("read server source") {
+            let path = entry.expect("source entry").path();
+            if path.is_dir() {
+                inspect(&path);
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                let source = std::fs::read_to_string(&path).expect("read Rust source");
+                assert!(
+                    !source.contains(&["/user", "/emails"].concat()),
+                    "private email endpoint in {}",
+                    path.display()
+                );
+                assert!(
+                    !source.contains(&["user", ":email"].concat()),
+                    "private email scope in {}",
+                    path.display()
+                );
             }
-        }),
-    )
+        }
+    }
+
+    #[test]
+    fn production_source_never_requests_private_github_email() {
+        inspect(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"));
+        let config = crate::github::auth::GitHubOAuthConfig {
+            client_id: "client".into(),
+            client_secret: "secret".into(),
+            redirect_uri: "https://arena.example/callback".into(),
+            oauth_url: "https://github.example/authorize".into(),
+            token_url: String::new(),
+            api_url: String::new(),
+        };
+        let url = super::authorization_url(&config, "state");
+        assert!(url.contains("state=state"));
+        assert!(!url.contains("scope="));
+    }
 }
