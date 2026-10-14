@@ -27,6 +27,8 @@ enum Commands {
         #[command(subcommand)]
         command: AuthCommands,
     },
+    /// Show who you are logged in as
+    Whoami,
     /// Battlesnake management commands
     Snakes {
         #[command(subcommand)]
@@ -162,6 +164,7 @@ async fn main() -> color_eyre::Result<()> {
 
     match cli.command {
         Commands::Auth { command } => handle_auth_command(command).await?,
+        Commands::Whoami => handle_whoami(output_format).await?,
         Commands::Snakes { command } => handle_snakes_command(command, output_format).await?,
         Commands::Games { command } => handle_games_command(command).await?,
     }
@@ -509,6 +512,90 @@ fn print_snake_details(snake: &serde_json::Value) {
     }
 }
 
+/// Error from `fetch_me`: distinguishes "the server answered no" (invalid or
+/// expired token, server error) from "we never got an answer" (transport).
+#[derive(Debug)]
+enum FetchMeError {
+    /// Non-2xx HTTP response, with the body for context.
+    Status(reqwest::StatusCode, String),
+    /// Transport or parse failure; the eyre context chain is preserved.
+    Request(color_eyre::Report),
+}
+
+/// GET /api/me with the given token; returns the parsed response body.
+async fn fetch_me(base_url: &str, token: &str) -> Result<serde_json::Value, FetchMeError> {
+    let client = reqwest::Client::new();
+    let response = client
+        .get(format!("{base_url}/api/me"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .wrap_err("Failed to contact arena")
+        .map_err(FetchMeError::Request)?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(FetchMeError::Status(status, body));
+    }
+
+    response
+        .json()
+        .await
+        .wrap_err("Failed to parse response")
+        .map_err(FetchMeError::Request)
+}
+
+/// The label/value rows `whoami` prints.
+fn whoami_fields(me: &serde_json::Value) -> Vec<(&'static str, String)> {
+    vec![
+        (
+            "Login",
+            me["github_login"].as_str().unwrap_or("").to_string(),
+        ),
+        (
+            "Display name",
+            me["display_name"].as_str().unwrap_or("").to_string(),
+        ),
+        ("ID", me["id"].as_str().unwrap_or("").to_string()),
+    ]
+}
+
+async fn handle_whoami(output_format: OutputFormat) -> color_eyre::Result<()> {
+    let config = CliConfig::load()?;
+    let token = config
+        .auth
+        .as_ref()
+        .and_then(|a| a.token.as_ref())
+        .ok_or_else(|| eyre!("Not logged in. Run 'arena auth login' first."))?;
+
+    let me = match fetch_me(config.api_url(), token).await {
+        Ok(me) => me,
+        // whoami's whole job is reporting auth state: a 401 IS the answer, so
+        // say it in the same friendly terms as the not-logged-in path rather
+        // than dumping a raw HTTP error like the other authed commands do.
+        Err(FetchMeError::Status(reqwest::StatusCode::UNAUTHORIZED, _)) => {
+            return Err(eyre!(
+                "Token rejected (revoked or expired). Run 'arena auth login' first."
+            ));
+        }
+        Err(FetchMeError::Status(status, body)) => {
+            return Err(eyre!("Failed to fetch current user: {status} - {body}"));
+        }
+        Err(FetchMeError::Request(report)) => return Err(report),
+    };
+
+    match output_format {
+        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&me)?),
+        OutputFormat::Human => {
+            for (label, value) in whoami_fields(&me) {
+                print_field(label, &value);
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn login() -> color_eyre::Result<()> {
     let config = CliConfig::load()?;
     let base_url = config.api_url();
@@ -534,25 +621,27 @@ async fn login() -> color_eyre::Result<()> {
         return Err(eyre!("No token provided"));
     }
 
-    // Validate the token by trying to list tokens
-    let client = reqwest::Client::new();
-    let response = client
-        .get(format!("{}/api/tokens", base_url))
-        .bearer_auth(&token)
-        .send()
-        .await
-        .wrap_err("Failed to validate token")?;
-
-    if !response.status().is_success() {
-        return Err(eyre!("Invalid token"));
-    }
+    // Validate the token by fetching our own profile (GET /api/me)
+    let me = match fetch_me(base_url, &token).await {
+        Ok(me) => me,
+        // The server answered: any non-2xx means the token is no good.
+        Err(FetchMeError::Status(_, _)) => return Err(eyre!("Invalid token")),
+        // Transport/parse failures are not the token's fault; preserve today's
+        // wording ("Failed to validate token: <cause>") so an unreachable server
+        // is never misreported as a bad token.
+        Err(FetchMeError::Request(report)) => {
+            return Err(report.wrap_err("Failed to validate token"));
+        }
+    };
 
     // Save the token
     let mut config = config;
     config.auth = Some(AuthConfig { token: Some(token) });
     config.save()?;
 
-    println!("Login successful! Token saved.");
+    let login = me["github_login"].as_str().unwrap_or("unknown");
+    println!("Logged in as {login}");
+    println!("Token saved.");
     Ok(())
 }
 
@@ -689,4 +778,90 @@ async fn handle_games_command(command: GamesCommands) -> color_eyre::Result<()> 
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use reqwest::StatusCode;
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::{FetchMeError, fetch_me, whoami_fields};
+
+    fn me_body() -> serde_json::Value {
+        serde_json::json!({
+            "id": "4f0a3c2e-1111-4222-8333-444455556666",
+            "github_login": "gh-me",
+            "display_name": "Display Person",
+            "avatar_url": null,
+            "pronouns": null,
+            "country": null,
+            "profile_url": "http://localhost:3000/users/gh-me",
+            "created_at": "2026-10-14T00:00:00Z",
+        })
+    }
+
+    #[test]
+    fn whoami_fields_lists_login_display_name_and_id() {
+        let fields = whoami_fields(&me_body());
+        assert_eq!(
+            fields,
+            vec![
+                ("Login", "gh-me".to_string()),
+                ("Display name", "Display Person".to_string()),
+                ("ID", "4f0a3c2e-1111-4222-8333-444455556666".to_string()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_me_sends_bearer_token_and_parses_response() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/me"))
+            .and(header("Authorization", "Bearer test-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(me_body()))
+            .mount(&server)
+            .await;
+
+        let me = fetch_me(&server.uri(), "test-token").await.unwrap();
+        assert_eq!(me["github_login"], "gh-me");
+        assert_eq!(me["display_name"], "Display Person");
+        assert_eq!(me["id"], "4f0a3c2e-1111-4222-8333-444455556666");
+    }
+
+    #[tokio::test]
+    async fn fetch_me_distinguishes_status_from_transport_failure() {
+        // A 401 is a Status error — the server answered no.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/me"))
+            .respond_with(ResponseTemplate::new(401).set_body_string("unauthorized"))
+            .mount(&server)
+            .await;
+        match fetch_me(&server.uri(), "bad-token").await {
+            Err(FetchMeError::Status(StatusCode::UNAUTHORIZED, body)) => {
+                assert_eq!(body, "unauthorized");
+            }
+            other => panic!("expected Status(UNAUTHORIZED), got {other:?}"),
+        }
+
+        // So is a 500.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/me"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+            .mount(&server)
+            .await;
+        match fetch_me(&server.uri(), "any-token").await {
+            Err(FetchMeError::Status(StatusCode::INTERNAL_SERVER_ERROR, _)) => {}
+            other => panic!("expected Status(INTERNAL_SERVER_ERROR), got {other:?}"),
+        }
+
+        // An unreachable server is a Request error, not a bad token.
+        match fetch_me("http://127.0.0.1:1", "any-token").await {
+            Err(FetchMeError::Request(_)) => {}
+            other => panic!("expected Request, got {other:?}"),
+        }
+    }
 }
