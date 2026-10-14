@@ -1603,7 +1603,7 @@ pub async fn test_battlesnake(
     // so a slow snake's answer is still visible, and flags moves over the
     // game budget. Redirect handling matches the game client (reqwest
     // defaults).
-    let client = reqwest::Client::builder()
+    let client = crate::snake_client::client_builder()
         .timeout(snake_health::HEALTH_CHECK_TIMEOUT)
         .build()
         .wrap_err("Failed to build HTTP client for snake test")?;

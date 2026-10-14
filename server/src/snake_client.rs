@@ -22,6 +22,14 @@ const PROXY_TRANSIT_MARGIN: Duration = Duration::from_millis(300);
 const LATENCY_HEADER: &str = "x-battlesnake-latency-ms";
 const SERVER_ERROR_HEADER: &str = "x-battlesnake-server-error";
 
+/// Sent on every request to a snake, like Play's `BattlesnakeEngine/<version>`.
+pub const USER_AGENT: &str = concat!("BattlesnakeArena/", env!("VERGEN_GIT_SHA"));
+
+/// Builder for every client that talks to snakes, so they all identify as Arena.
+pub fn client_builder() -> reqwest::ClientBuilder {
+    Client::builder().user_agent(USER_AGENT)
+}
+
 #[derive(Clone)]
 pub struct SnakeEndpoint {
     pub snake_id: String,
@@ -1347,6 +1355,32 @@ mod tests {
         assert_eq!(result.direction, Direction::Up);
         assert_eq!(result.latency_ms, Some(450));
         assert!(!result.timed_out);
+    }
+
+    #[tokio::test]
+    async fn snake_requests_identify_as_arena() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/move"))
+            .and(header("user-agent", USER_AGENT))
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"move":"left"}"#))
+            .mount(&server)
+            .await;
+        let client = client_builder().build().unwrap();
+        let game = create_test_engine_game_with_snakes(vec!["snake-1"]);
+        let result = request_move(
+            &client,
+            &server.uri(),
+            &game,
+            "snake-1",
+            Duration::from_secs(2),
+            None,
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .await;
+        assert_eq!(result.direction, Direction::Left);
+        assert!(USER_AGENT.starts_with("BattlesnakeArena/"));
     }
 
     #[tokio::test]

@@ -118,14 +118,14 @@ impl AppState {
         }
 
         // HTTP client for calling snake APIs (connection pooling, timeout slightly longer than game timeout)
-        let http_client = reqwest::Client::builder()
+        let http_client = crate::snake_client::client_builder()
             .timeout(std::time::Duration::from_millis(600))
             .pool_max_idle_per_host(10)
             .build()
             .wrap_err("Failed to create HTTP client")?;
         tracing::info!("HTTP client initialized for snake API calls");
         let proxy_client = |timeout| -> cja::Result<reqwest::Client> {
-            reqwest::Client::builder()
+            crate::snake_client::client_builder()
                 .timeout(timeout)
                 .pool_max_idle_per_host(80)
                 .build()

@@ -29,7 +29,6 @@ use crate::notifications::{self, EmailRecipient, NewEmail, NewNotification, Noti
 use chrono::{DateTime, Utc};
 use color_eyre::eyre::Context as _;
 use futures::future::join_all;
-use reqwest::Client;
 use sqlx::PgConnection;
 use std::collections::BTreeMap;
 use uuid::Uuid;
@@ -233,7 +232,7 @@ pub async fn run_sweep(app_state: &AppState) -> cja::Result<()> {
     // Same generous per-call budget as the on-demand test. Snakes are probed
     // one at a time to keep the sweep from hammering shared snake hosts; a
     // snake's own entries play concurrently, like the real games it serves.
-    let client = Client::builder()
+    let client = crate::snake_client::client_builder()
         .timeout(HEALTH_CHECK_TIMEOUT)
         .build()
         .wrap_err("Failed to build health check client")?;
