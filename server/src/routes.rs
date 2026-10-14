@@ -40,6 +40,8 @@ pub mod claim;
 pub mod customizations;
 pub mod game;
 pub mod github_auth;
+#[cfg(test)]
+mod github_auth_tests;
 pub mod health;
 pub mod leaderboard;
 #[cfg(test)]
@@ -181,7 +183,6 @@ pub fn routes(app_state: AppState) -> cja::Result<axum::Router> {
             get(github_auth::github_auth_callback),
         )
         .route("/auth/logout", get(github_auth::logout))
-        .route("/auth/cli-token", get(github_auth::cli_token_page))
         // Battlesnake routes
         .route("/customizations", get(customizations::list_customizations))
         .route(
