@@ -80,6 +80,7 @@ pub fn routes(app_state: AppState) -> cja::Result<axum::Router> {
         .route("/tokens", post(api::tokens::create_token))
         .route("/tokens", get(api::tokens::list_tokens))
         .route("/tokens/{id}", delete(api::tokens::revoke_token))
+        .route("/me", get(api::me::me))
         // Snake management endpoints
         .route("/snakes", get(api::snakes::list_snakes))
         .route("/snakes", post(api::snakes::create_snake))
