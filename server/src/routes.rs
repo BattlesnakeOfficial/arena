@@ -72,6 +72,11 @@ pub fn routes(app_state: AppState) -> cja::Result<axum::Router> {
         .allow_headers(Any);
 
     // API routes with CORS enabled (for board viewer and CLI/programmatic access)
+    //
+    // NOTE: every authenticated /api route must appear in ROUTES in
+    // server/src/routes/api/route_coverage_tests.rs (zero-permission token
+    // must get 403).
+    // API-ROUTES-START
     let api_routes = axum::Router::new()
         .route("/games/{id}", get(game::get_game_info))
         .route("/games/{id}/events", get(game::game_events_websocket))
@@ -111,6 +116,7 @@ pub fn routes(app_state: AppState) -> cja::Result<axum::Router> {
             delete(api::leaderboards::delete_entry),
         )
         .layer(cors);
+    // API-ROUTES-END
 
     let router = axum::Router::new()
         // Public pages

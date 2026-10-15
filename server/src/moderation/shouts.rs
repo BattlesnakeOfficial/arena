@@ -894,7 +894,7 @@ mod tests {
         }
         let response = crate::routes::api::games::show_game(
             State(AppState::test_from_pool(pool.clone())),
-            crate::routes::auth::ApiUser(nobody()),
+            crate::routes::auth::ApiUser(crate::routes::auth::ApiAuth::session(nobody())),
             Path(game_id),
         )
         .await

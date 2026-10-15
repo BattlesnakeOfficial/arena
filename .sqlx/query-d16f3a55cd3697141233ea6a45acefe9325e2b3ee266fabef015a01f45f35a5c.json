@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DROP TRIGGER fail_token_snake_insert ON api_token_snakes",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "d16f3a55cd3697141233ea6a45acefe9325e2b3ee266fabef015a01f45f35a5c"
+}

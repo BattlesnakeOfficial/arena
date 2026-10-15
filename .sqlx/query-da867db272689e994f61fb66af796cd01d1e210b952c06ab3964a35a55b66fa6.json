@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        INSERT INTO api_tokens (user_id, token_hash, name, snake_access)\n        VALUES ($1, $2, $3, 'all')\n        RETURNING id, user_id, token_hash, name, last_used_at, created_at, revoked_at\n        ",
+  "query": "\n        SELECT id, user_id, token_hash, name,\n            snake_access AS \"snake_access: SnakeAccess\",\n            last_used_at, created_at, revoked_at\n        FROM api_tokens\n        WHERE user_id = $1 AND revoked_at IS NULL\n        ORDER BY created_at DESC\n        ",
   "describe": {
     "columns": [
       {
@@ -25,28 +25,32 @@
       },
       {
         "ordinal": 4,
+        "name": "snake_access: SnakeAccess",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
         "name": "last_used_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 5,
+        "ordinal": 6,
         "name": "created_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 6,
+        "ordinal": 7,
         "name": "revoked_at",
         "type_info": "Timestamptz"
       }
     ],
     "parameters": {
       "Left": [
-        "Uuid",
-        "Text",
-        "Text"
+        "Uuid"
       ]
     },
     "nullable": [
+      false,
       false,
       false,
       false,
@@ -56,5 +60,5 @@
       true
     ]
   },
-  "hash": "a32ba9d01c0a5e2cf3f6c62d4b6a93100f7e875f39eb392bf2b801b559a98057"
+  "hash": "da867db272689e994f61fb66af796cd01d1e210b952c06ab3964a35a55b66fa6"
 }

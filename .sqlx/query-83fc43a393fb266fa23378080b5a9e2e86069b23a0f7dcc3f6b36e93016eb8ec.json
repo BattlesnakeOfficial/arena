@@ -1,0 +1,46 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        WITH tok AS (\n            UPDATE api_tokens SET last_used_at = NOW()\n            WHERE token_hash = $1 AND revoked_at IS NULL\n            RETURNING id, user_id, snake_access\n        )\n        SELECT tok.id AS \"token_id!: Uuid\", tok.user_id AS \"user_id!: Uuid\",\n               tok.snake_access AS \"snake_access!: SnakeAccess\",\n               ARRAY(SELECT p.permission FROM api_token_permissions p WHERE p.api_token_id = tok.id) AS \"permissions!: Vec<String>\",\n               ARRAY(SELECT s.battlesnake_id FROM api_token_snakes s WHERE s.api_token_id = tok.id) AS \"snake_ids!: Vec<Uuid>\"\n        FROM tok\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "token_id!: Uuid",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "user_id!: Uuid",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "snake_access!: SnakeAccess",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "permissions!: Vec<String>",
+        "type_info": "TextArray"
+      },
+      {
+        "ordinal": 4,
+        "name": "snake_ids!: Vec<Uuid>",
+        "type_info": "UuidArray"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      null,
+      null
+    ]
+  },
+  "hash": "83fc43a393fb266fa23378080b5a9e2e86069b23a0f7dcc3f6b36e93016eb8ec"
+}
