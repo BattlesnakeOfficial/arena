@@ -1411,7 +1411,7 @@ mod moderation_tests {
         let (status, message) = expect_api_rejection(
             crate::routes::api::snakes::create_snake(
                 axum::extract::State(test_state(&pool, &jev.uri())),
-                crate::routes::auth::ApiUser(user.clone()),
+                crate::routes::auth::ApiUser(crate::routes::auth::ApiAuth::session(user.clone())),
                 axum::Json(crate::routes::api::snakes::CreateSnakeRequest {
                     engine_region: None,
                     name: "Bad".to_string(),
@@ -1493,7 +1493,7 @@ mod moderation_tests {
 
         let response = crate::routes::api::snakes::create_snake(
             axum::extract::State(test_state(&pool, &jev.uri())),
-            crate::routes::auth::ApiUser(user.clone()),
+            crate::routes::auth::ApiUser(crate::routes::auth::ApiAuth::session(user.clone())),
             axum::Json(crate::routes::api::snakes::CreateSnakeRequest {
                 engine_region: None,
                 name: "Slitherbot".to_string(),
@@ -1541,7 +1541,7 @@ mod moderation_tests {
 
         let response = crate::routes::api::snakes::create_snake(
             axum::extract::State(state),
-            crate::routes::auth::ApiUser(user.clone()),
+            crate::routes::auth::ApiUser(crate::routes::auth::ApiAuth::session(user.clone())),
             axum::Json(crate::routes::api::snakes::CreateSnakeRequest {
                 engine_region: None,
                 name: "SlowJudge".to_string(),
@@ -1581,7 +1581,7 @@ mod moderation_tests {
 
         let response = crate::routes::api::snakes::create_snake(
             axum::extract::State(state),
-            crate::routes::auth::ApiUser(user.clone()),
+            crate::routes::auth::ApiUser(crate::routes::auth::ApiAuth::session(user.clone())),
             axum::Json(crate::routes::api::snakes::CreateSnakeRequest {
                 engine_region: None,
                 name: "NoKey".to_string(),
@@ -1617,7 +1617,7 @@ mod moderation_tests {
         let state = discord_state(&pool, &jev.uri(), &discord.uri());
         let response = crate::routes::api::snakes::create_snake(
             axum::extract::State(state),
-            crate::routes::auth::ApiUser(user.clone()),
+            crate::routes::auth::ApiUser(crate::routes::auth::ApiAuth::session(user.clone())),
             axum::Json(crate::routes::api::snakes::CreateSnakeRequest {
                 engine_region: None,
                 name: "FlaggedName".to_string(),
@@ -1648,7 +1648,7 @@ mod moderation_tests {
         let state = discord_state(&pool, &jev.uri(), &discord.uri());
         let response = crate::routes::api::snakes::create_snake(
             axum::extract::State(state),
-            crate::routes::auth::ApiUser(user.clone()),
+            crate::routes::auth::ApiUser(crate::routes::auth::ApiAuth::session(user.clone())),
             axum::Json(crate::routes::api::snakes::CreateSnakeRequest {
                 engine_region: None,
                 name: "RelayMe".to_string(),
@@ -1746,7 +1746,7 @@ mod moderation_tests {
         // API update without a name field: still no second call.
         let response = crate::routes::api::snakes::update_snake(
             axum::extract::State(test_state(&pool, &jev.uri())),
-            crate::routes::auth::ApiUser(user.clone()),
+            crate::routes::auth::ApiUser(crate::routes::auth::ApiAuth::session(user.clone())),
             axum::extract::Path(snake_id),
             axum::Json(crate::routes::api::snakes::UpdateSnakeRequest {
                 engine_region: None,

@@ -1,3 +1,5 @@
+use std::ops::Deref;
+
 use axum::{
     extract::FromRequestParts,
     http::{StatusCode, header::AUTHORIZATION, request::Parts},
@@ -10,7 +12,7 @@ use uuid::Uuid;
 use crate::{
     errors::ServerError,
     models::{
-        api_token::validate_token,
+        api_token::{Permission, TokenAuth, authenticate_token},
         session::{
             SESSION_COOKIE_NAME, SESSION_EXPIRATION_SECONDS, Session, create_session,
             get_session_with_user,
@@ -264,6 +266,126 @@ async fn sign_in_required_response(parts: &mut Parts, state: &AppState) -> Respo
     }
 }
 
+/// The authorization context for `/api/*` handlers: the authenticated user
+/// plus what their credential (browser session or API token) may do.
+///
+/// A session scope has full power: every permission, all snakes. A token
+/// scope carries the token's permission set and snake access, loaded at auth
+/// time.
+///
+/// Deref covers `User` field access (`auth.user_id`, `auth.github_login`);
+/// when a `&User` is needed use `auth.user()`. Never clone the whole context.
+pub struct ApiAuth {
+    user: User,
+    scope: AuthScope,
+}
+
+pub enum AuthScope {
+    /// Browser session on /api/*: every permission, all snakes.
+    Session,
+    Token(crate::models::api_token::TokenAuth),
+}
+
+impl ApiAuth {
+    pub fn session(user: User) -> ApiAuth {
+        ApiAuth {
+            user,
+            scope: AuthScope::Session,
+        }
+    }
+
+    pub fn token(user: User, auth: TokenAuth) -> ApiAuth {
+        ApiAuth {
+            user,
+            scope: AuthScope::Token(auth),
+        }
+    }
+
+    pub fn user(&self) -> &User {
+        &self.user
+    }
+
+    pub fn token_scope(&self) -> Option<&TokenAuth> {
+        match &self.scope {
+            AuthScope::Session => None,
+            AuthScope::Token(auth) => Some(auth),
+        }
+    }
+
+    /// Does this credential hold `permission`? Sessions hold everything.
+    pub fn has(&self, permission: Permission) -> bool {
+        match &self.scope {
+            AuthScope::Session => true,
+            AuthScope::Token(auth) => auth.permissions.contains(&permission),
+        }
+    }
+
+    /// May this credential touch `snake_id`? Sessions and `all`-access
+    /// tokens may touch any of the user's snakes; `selected` tokens only
+    /// the snakes in their list.
+    pub fn can_access_snake(&self, snake_id: Uuid) -> bool {
+        match &self.scope {
+            AuthScope::Session => true,
+            AuthScope::Token(auth) => match auth.snake_access {
+                crate::models::api_token::SnakeAccess::All => true,
+                crate::models::api_token::SnakeAccess::Selected => {
+                    auth.snake_ids.contains(&snake_id)
+                }
+            },
+        }
+    }
+
+    /// Require an account-wide permission, else 403 naming it.
+    pub fn require(&self, permission: Permission) -> Result<(), (StatusCode, String)> {
+        if self.has(permission) {
+            Ok(())
+        } else {
+            Err((
+                StatusCode::FORBIDDEN,
+                format!("missing permission: {}", permission.as_str()),
+            ))
+        }
+    }
+
+    /// Require a per-snake permission for `snake_id`: access first (the
+    /// message must match what actually blocked), then the permission.
+    pub fn require_snake(
+        &self,
+        snake_id: Uuid,
+        permission: Permission,
+    ) -> Result<(), (StatusCode, String)> {
+        if !self.can_access_snake(snake_id) {
+            return Err((
+                StatusCode::FORBIDDEN,
+                format!("battlesnake {snake_id} is not in this token's access"),
+            ));
+        }
+        self.require(permission)
+    }
+
+    /// Record that `snake_id` now belongs to this token's `selected` list.
+    ///
+    /// Called after `add_snake_to_token` persists the row, so the response
+    /// built in the same request sees the freshly created snake (the scope
+    /// was loaded at auth time and predates it). No-op for session and
+    /// `all`-access scopes.
+    pub fn record_selected_snake(&mut self, snake_id: Uuid) {
+        if let AuthScope::Token(auth) = &mut self.scope
+            && auth.snake_access == crate::models::api_token::SnakeAccess::Selected
+        {
+            auth.snake_ids.insert(snake_id);
+        }
+    }
+}
+
+impl Deref for ApiAuth {
+    type Target = User;
+
+    fn deref(&self) -> &Self::Target {
+        &self.user
+    }
+}
+
 /// Extractor for API authentication via Bearer token OR session cookie
 ///
 /// This extractor tries Bearer token auth first, then falls back to session auth.
@@ -272,22 +394,25 @@ async fn sign_in_required_response(parts: &mut Parts, state: &AppState) -> Respo
 /// Example:
 /// ```
 /// async fn api_route(
-///    ApiUser(user): ApiUser,
+///    ApiUser(auth): ApiUser,
 /// ) -> impl IntoResponse {
-///    // User is authenticated via API token or session
-///    Json(user)
+///    auth.require(Permission::SnakesRead)?;
+///    // User is authenticated via API token or session, with permission checked
 /// }
 /// ```
-pub struct ApiUser(pub User);
+pub struct ApiUser(pub ApiAuth);
 
 /// Result of attempting Bearer token authentication
 enum BearerAuthResult {
-    /// Successfully authenticated user
-    Authenticated(Box<User>),
+    /// Successfully authenticated user with token scope
+    Authenticated(Box<User>, Box<TokenAuth>),
     /// Authorization header present but token invalid/revoked
     InvalidToken,
     /// No Authorization header present
     NoHeader,
+    /// The lookup itself failed (DB error): a 500, not a 401 — a revoked
+    /// token and an outage must not look the same.
+    LookupFailed,
 }
 
 /// Attempt Bearer token authentication
@@ -304,21 +429,29 @@ async fn try_bearer_auth(parts: &Parts, state: &AppState) -> BearerAuthResult {
         return BearerAuthResult::InvalidToken;
     };
 
-    // validate_token hashes the token internally
-    let user_id = match validate_token(&state.db, token).await {
-        Ok(Some(id)) => id,
-        _ => return BearerAuthResult::InvalidToken,
+    // authenticate_token hashes the token internally
+    let token_auth = match authenticate_token(&state.db, token).await {
+        Ok(Some(auth)) => auth,
+        Ok(None) => return BearerAuthResult::InvalidToken,
+        Err(e) => {
+            tracing::error!("Failed to authenticate API token: {e:#}");
+            return BearerAuthResult::LookupFailed;
+        }
     };
 
-    match get_user_by_id(&state.db, user_id).await {
+    match get_user_by_id(&state.db, token_auth.user_id).await {
         Ok(Some(user)) => {
             state
                 .activity_recorder
                 .record(&state.db, user.user_id)
                 .await;
-            BearerAuthResult::Authenticated(Box::new(user))
+            BearerAuthResult::Authenticated(Box::new(user), Box::new(token_auth))
         }
-        _ => BearerAuthResult::InvalidToken,
+        Ok(None) => BearerAuthResult::InvalidToken,
+        Err(e) => {
+            tracing::error!("Failed to load API token user: {e:#}");
+            BearerAuthResult::LookupFailed
+        }
     }
 }
 
@@ -344,8 +477,10 @@ impl FromRequestParts<AppState> for AdminUser {
 
 /// Extractor for requiring an authenticated admin user (Bearer token OR session auth)
 ///
-/// Returns 401 if not authenticated, 403 if authenticated but not admin.
-pub struct AdminApiUser(pub User);
+/// Returns 401 if not authenticated, 403 (`Admin access required`) if the
+/// user is not an admin, 403 (`missing permission: admin`) for a scoped
+/// token without the `admin` permission.
+pub struct AdminApiUser(pub ApiAuth);
 
 impl FromRequestParts<AppState> for AdminApiUser {
     type Rejection = axum::response::Response;
@@ -354,11 +489,13 @@ impl FromRequestParts<AppState> for AdminApiUser {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        let ApiUser(user) = ApiUser::from_request_parts(parts, state).await?;
-        if !user.is_admin {
+        let ApiUser(auth) = ApiUser::from_request_parts(parts, state).await?;
+        if !auth.is_admin {
             return Err((StatusCode::FORBIDDEN, "Admin access required").into_response());
         }
-        Ok(AdminApiUser(user))
+        auth.require(Permission::Admin)
+            .map_err(|rejection| rejection.into_response())?;
+        Ok(AdminApiUser(auth))
     }
 }
 
@@ -370,9 +507,16 @@ impl FromRequestParts<AppState> for ApiUser {
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
         match try_bearer_auth(parts, state).await {
-            BearerAuthResult::Authenticated(user) => return Ok(ApiUser(*user)),
+            BearerAuthResult::Authenticated(user, token_auth) => {
+                return Ok(ApiUser(ApiAuth::token(*user, *token_auth)));
+            }
             BearerAuthResult::InvalidToken => {
                 return Err((StatusCode::UNAUTHORIZED, "Invalid or revoked token").into_response());
+            }
+            BearerAuthResult::LookupFailed => {
+                return Err(
+                    (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error").into_response()
+                );
             }
             BearerAuthResult::NoHeader => {
                 // Fall through to session auth
@@ -384,6 +528,7 @@ impl FromRequestParts<AppState> for ApiUser {
 
         session
             .user
+            .map(ApiAuth::session)
             .map(ApiUser)
             .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Authentication required").into_response())
     }
@@ -418,7 +563,16 @@ mod tests {
         .fetch_one(&db)
         .await
         .unwrap();
-        let token = create_api_token(&db, user_id, "extractor").await.unwrap();
+        let token = create_api_token(
+            &db,
+            user_id,
+            "extractor",
+            crate::models::api_token::Permission::ALL.as_slice(),
+            crate::models::api_token::SnakeAccess::All,
+            &[],
+        )
+        .await
+        .unwrap();
         let state = AppState::test_from_pool(db.clone());
         for _ in 0..3 {
             let (mut parts, ()) = Request::builder().uri("/me").body(()).unwrap().into_parts();
@@ -475,6 +629,51 @@ mod tests {
         .unwrap();
         assert_eq!(count, 1);
         assert!(!state.activity_recorder.record(&db, user_id).await);
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn token_lookup_failure_is_500_not_401(db: sqlx::PgPool) {
+        let user_id = sqlx::query_scalar!(
+            "INSERT INTO users(external_github_id, github_login, github_access_token) VALUES (1, 'lookup', '') RETURNING user_id"
+        ).fetch_one(&db).await.unwrap();
+        let token = create_api_token(
+            &db,
+            user_id,
+            "lookup",
+            &[],
+            crate::models::api_token::SnakeAccess::All,
+            &[],
+        )
+        .await
+        .unwrap();
+        let state = AppState::test_from_pool(db.clone());
+        let bearer = |secret: &str| {
+            Request::builder()
+                .uri("/api/me")
+                .header(AUTHORIZATION, format!("Bearer {secret}"))
+                .body(())
+                .unwrap()
+                .into_parts()
+                .0
+        };
+
+        // An unknown token is still a 401.
+        let rejection = ApiUser::from_request_parts(&mut bearer("unknown"), &state)
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(rejection.status(), StatusCode::UNAUTHORIZED);
+
+        // A failing lookup is a 500, not "Invalid or revoked token".
+        sqlx::query!("DROP TABLE api_token_permissions")
+            .execute(&db)
+            .await
+            .unwrap();
+        let rejection = ApiUser::from_request_parts(&mut bearer(&token.secret), &state)
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(rejection.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[sqlx::test(migrations = "../migrations")]

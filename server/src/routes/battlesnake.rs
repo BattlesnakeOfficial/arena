@@ -2119,9 +2119,16 @@ mod deleted_snake_route_tests {
     #[sqlx::test(migrations = "../migrations")]
     async fn api_delete_refuses_active_tournaments_then_soft_deletes(pool: PgPool) {
         let (owner, snake) = owner_with_snake(&pool, 9201, "Api Snake").await;
-        let token = crate::models::api_token::create_api_token(&pool, owner, "delete-test")
-            .await
-            .unwrap();
+        let token = crate::models::api_token::create_api_token(
+            &pool,
+            owner,
+            "delete-test",
+            crate::models::api_token::Permission::ALL.as_slice(),
+            crate::models::api_token::SnakeAccess::All,
+            &[],
+        )
+        .await
+        .unwrap();
         let tournament_id: Uuid = sqlx::query_scalar(
             "INSERT INTO tournaments (name, user_id, status)
              VALUES ('Open', $1, 'registration') RETURNING tournament_id",

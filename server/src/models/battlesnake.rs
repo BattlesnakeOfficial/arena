@@ -307,11 +307,14 @@ pub async fn get_battlesnake_by_id(
 }
 
 // Create a new battlesnake
-pub async fn create_battlesnake(
-    pool: &PgPool,
+pub async fn create_battlesnake<'e, E>(
+    executor: E,
     user_id: Uuid,
     data: CreateBattlesnake,
-) -> cja::Result<Battlesnake> {
+) -> cja::Result<Battlesnake>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
     let visibility_str = data.visibility.as_str();
 
     let result = sqlx::query_as!(
@@ -344,7 +347,7 @@ pub async fn create_battlesnake(
         visibility_str,
         data.engine_region.as_str()
     )
-    .fetch_one(pool)
+    .fetch_one(executor)
     .await;
 
     match result {

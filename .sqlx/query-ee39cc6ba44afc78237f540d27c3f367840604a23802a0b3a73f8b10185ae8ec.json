@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DROP TABLE api_token_permissions",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "ee39cc6ba44afc78237f540d27c3f367840604a23802a0b3a73f8b10185ae8ec"
+}

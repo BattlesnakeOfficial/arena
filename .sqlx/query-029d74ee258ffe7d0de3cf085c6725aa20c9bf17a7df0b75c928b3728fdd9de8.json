@@ -1,11 +1,11 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT permission FROM api_token_permissions WHERE api_token_id = $1 ORDER BY permission COLLATE \"C\"",
+  "query": "SELECT name FROM battlesnakes WHERE battlesnake_id = $1",
   "describe": {
     "columns": [
       {
         "ordinal": 0,
-        "name": "permission",
+        "name": "name",
         "type_info": "Text"
       }
     ],
@@ -18,5 +18,5 @@
       false
     ]
   },
-  "hash": "aa6b810774173b8fc1693aca3f36e2df8ee45f974e7a329c38af34971d7a8e06"
+  "hash": "029d74ee258ffe7d0de3cf085c6725aa20c9bf17a7df0b75c928b3728fdd9de8"
 }
