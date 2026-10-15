@@ -14,7 +14,7 @@ use crate::{
     flasher::Flasher,
     github::auth::{GitHubAuthParams, GitHubTokenResponse, GitHubUser},
     models::{
-        api_token,
+        api_token::{self, Permission, SnakeAccess},
         session::{
             associate_user_with_session, clear_github_oauth_state, disassociate_user_from_session,
             set_github_oauth_state_with_cli,
@@ -230,9 +230,21 @@ pub async fn github_auth_callback(
     // or fragment): browser history, proxies, and Cloud Run request logs all
     // capture URLs, and this token can call every /api/* route.
     if is_cli_auth {
-        let new_token = api_token::create_api_token(&state.db, user.user_id, "arena-cli")
-            .await
-            .wrap_err("Failed to create API token for CLI")?;
+        // Full power: all access, every permission; `admin` only for admins.
+        let mut permissions = Permission::ALL.to_vec();
+        if !user.is_admin {
+            permissions.retain(|p| *p != Permission::Admin);
+        }
+        let new_token = api_token::create_api_token(
+            &state.db,
+            user.user_id,
+            "arena-cli",
+            &permissions,
+            SnakeAccess::All,
+            &[],
+        )
+        .await
+        .wrap_err("Failed to create API token for CLI")?;
 
         let secret = new_token.secret;
         let page_factory = PageFactory {

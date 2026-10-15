@@ -161,10 +161,16 @@ async fn cli_callback_renders_token_page_without_url_secret(pool: PgPool) {
     .fetch_one(&pool)
     .await
     .unwrap();
-    let validated = crate::models::api_token::validate_token(&pool, secret)
+    let validated = crate::models::api_token::authenticate_token(&pool, secret)
         .await
         .unwrap();
-    assert_eq!(validated, Some(user_id));
+    let (validated_user, validated_permissions) = validated
+        .map(|auth| (Some(auth.user_id), auth.permissions.len()))
+        .unwrap_or((None, 0));
+    assert_eq!(validated_user, Some(user_id));
+    // CLI tokens are full-power: all 12 non-admin permissions (the fixture
+    // user is not an admin).
+    assert_eq!(validated_permissions, 12);
 }
 
 #[sqlx::test(migrations = "../migrations")]

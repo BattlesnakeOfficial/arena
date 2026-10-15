@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
+    models::api_token::Permission,
     models::{
         battlesnake,
         leaderboard::{self, MIN_GAMES_FOR_RANKING},
@@ -224,10 +225,14 @@ pub async fn get_rankings(
 /// POST /api/leaderboards/:id/entries — opt-in a snake
 pub async fn create_entry(
     State(state): State<AppState>,
-    ApiUser(user): ApiUser,
+    ApiUser(auth): ApiUser,
     Path(leaderboard_id): Path<Uuid>,
     Json(request): Json<OptInRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    // Competition permission before any fetch: a permission failure must be
+    // visible even against a random leaderboard id.
+    auth.require_snake(request.battlesnake_id, Permission::SnakeCompete)?;
+
     // Verify leaderboard exists and is active
     let lb = leaderboard::get_leaderboard_by_id(&state.db, leaderboard_id)
         .await
@@ -259,7 +264,7 @@ pub async fn create_entry(
         })?
         .ok_or((StatusCode::NOT_FOUND, "Battlesnake not found".to_string()))?;
 
-    if snake.user_id != user.user_id {
+    if snake.user_id != auth.user_id {
         return Err((
             StatusCode::FORBIDDEN,
             "You don't own this battlesnake".to_string(),
@@ -269,7 +274,7 @@ pub async fn create_entry(
     let allowed = private_leaderboard::join_allowed(
         &state.db,
         &lb,
-        user.user_id,
+        auth.user_id,
         request.invite_code.as_deref(),
     )
     .await
@@ -327,9 +332,12 @@ pub async fn create_entry(
 /// DELETE /api/leaderboards/:id/entries/:battlesnake_id — opt-out (pause)
 pub async fn delete_entry(
     State(state): State<AppState>,
-    ApiUser(user): ApiUser,
+    ApiUser(auth): ApiUser,
     Path((leaderboard_id, battlesnake_id)): Path<(Uuid, Uuid)>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    // Competition permission before the snake fetch.
+    auth.require_snake(battlesnake_id, Permission::SnakeCompete)?;
+
     // Verify snake belongs to user
     let snake = battlesnake::get_battlesnake_by_id(&state.db, battlesnake_id)
         .await
@@ -342,7 +350,7 @@ pub async fn delete_entry(
         })?
         .ok_or((StatusCode::NOT_FOUND, "Battlesnake not found".to_string()))?;
 
-    if snake.user_id != user.user_id {
+    if snake.user_id != auth.user_id {
         return Err((
             StatusCode::FORBIDDEN,
             "You don't own this battlesnake".to_string(),
@@ -378,4 +386,118 @@ pub async fn delete_entry(
     })?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod scoped_token_tests {
+    use crate::models::api_token::{Permission, SnakeAccess, create_api_token};
+    use crate::models::battlesnake::{CreateBattlesnake, Visibility, create_battlesnake};
+    use crate::routes::test_support::{api_app, create_user, send_api};
+    use crate::state::AppState;
+    use axum::http::StatusCode;
+    use sqlx::PgPool;
+    use uuid::Uuid;
+
+    async fn make_snake(db: &PgPool, user: Uuid, name: &str) -> Uuid {
+        create_battlesnake(
+            db,
+            user,
+            CreateBattlesnake {
+                name: name.to_string(),
+                url: format!("https://{name}.example"),
+                visibility: Visibility::Public,
+                engine_region: Default::default(),
+            },
+        )
+        .await
+        .unwrap()
+        .battlesnake_id
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn compete_permission_gates_join_and_leave(db: PgPool) {
+        let state = AppState::test_from_pool(db.clone());
+        let app = api_app(&state);
+        let user = create_user(&db, 9922100, false).await;
+        let inside = make_snake(&db, user, "compete-in").await;
+        let outside = make_snake(&db, user, "compete-out").await;
+        let random_lb = Uuid::new_v4();
+
+        // Zero-permission: 403 naming snake.compete, even against a random
+        // leaderboard id (permission check precedes the leaderboard fetch).
+        let zero = create_api_token(&db, user, "zero", &[], SnakeAccess::All, &[])
+            .await
+            .unwrap();
+        let (status, body) = send_api(
+            &app,
+            "POST",
+            &format!("/api/leaderboards/{random_lb}/entries"),
+            Some(&zero.secret),
+            Some(serde_json::json!({"battlesnake_id": inside.to_string()})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body, "missing permission: snake.compete");
+
+        // Selected token, snake outside its selection: not-in-access 403.
+        let token = create_api_token(
+            &db,
+            user,
+            "selected-compete",
+            &[Permission::SnakeCompete],
+            SnakeAccess::Selected,
+            &[inside],
+        )
+        .await
+        .unwrap();
+        let (status, body) = send_api(
+            &app,
+            "POST",
+            &format!("/api/leaderboards/{random_lb}/entries"),
+            Some(&token.secret),
+            Some(serde_json::json!({"battlesnake_id": outside.to_string()})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            body,
+            format!("battlesnake {outside} is not in this token's access")
+        );
+
+        // In selection with the permission: passes auth (random leaderboard
+        // → 404 from the fetch, which is a pass for the auth gate).
+        let (status, _body) = send_api(
+            &app,
+            "POST",
+            &format!("/api/leaderboards/{random_lb}/entries"),
+            Some(&token.secret),
+            Some(serde_json::json!({"battlesnake_id": inside.to_string()})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        // DELETE with the same shape.
+        let (status, body) = send_api(
+            &app,
+            "DELETE",
+            &format!("/api/leaderboards/{random_lb}/entries/{outside}"),
+            Some(&token.secret),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            body,
+            format!("battlesnake {outside} is not in this token's access")
+        );
+        let (status, _body) = send_api(
+            &app,
+            "DELETE",
+            &format!("/api/leaderboards/{random_lb}/entries/{inside}"),
+            Some(&token.secret),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
 }
