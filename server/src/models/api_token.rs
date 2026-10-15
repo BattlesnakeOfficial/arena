@@ -38,7 +38,12 @@ fn hash_token(secret: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
-/// Create a new API token for a user
+/// Create a new API token for a user.
+///
+/// Also writes the token's scope: `all` snake access plus the default
+/// permission set every token holds today (the migration backfill's set:
+/// `admin` only for admin users, no `email.read`). Nothing enforces scopes
+/// yet; the next deploy does, and it must find these rows on every token.
 pub async fn create_api_token(
     pool: &PgPool,
     user_id: Uuid,
@@ -47,19 +52,49 @@ pub async fn create_api_token(
     let secret = generate_token_secret();
     let token_hash = hash_token(&secret);
 
-    let token: ApiToken = sqlx::query_as(
+    let mut tx = pool
+        .begin()
+        .await
+        .wrap_err("Failed to begin token creation transaction")?;
+
+    let token = sqlx::query_as!(
+        ApiToken,
         r#"
-        INSERT INTO api_tokens (user_id, token_hash, name)
-        VALUES ($1, $2, $3)
+        INSERT INTO api_tokens (user_id, token_hash, name, snake_access)
+        VALUES ($1, $2, $3, 'all')
         RETURNING id, user_id, token_hash, name, last_used_at, created_at, revoked_at
         "#,
+        user_id,
+        token_hash,
+        name
     )
-    .bind(user_id)
-    .bind(&token_hash)
-    .bind(name)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await
     .wrap_err("Failed to create API token")?;
+
+    sqlx::query!(
+        r#"
+        INSERT INTO api_token_permissions (api_token_id, permission)
+        SELECT $1::uuid, p.permission
+        FROM (VALUES
+            ('profile.read'), ('snakes.read'), ('snakes.create'),
+            ('games.read'), ('games.create'), ('tokens.manage'),
+            ('snake.url.read'), ('snake.url.write'), ('snake.edit'),
+            ('snake.delete'), ('snake.compete')
+        ) AS p(permission)
+        UNION ALL
+        SELECT $1::uuid, 'admin' FROM users WHERE user_id = $2::uuid AND is_admin
+        "#,
+        token.id,
+        user_id
+    )
+    .execute(&mut *tx)
+    .await
+    .wrap_err("Failed to insert token permissions")?;
+
+    tx.commit()
+        .await
+        .wrap_err("Failed to commit token creation")?;
 
     Ok(NewApiToken { token, secret })
 }
@@ -151,5 +186,56 @@ mod tests {
     fn test_hash_token_length() {
         let hash = hash_token("test");
         assert_eq!(hash.len(), 64); // SHA-256 = 64 hex chars
+    }
+
+    async fn scope_of(pool: &PgPool, token_id: Uuid) -> (String, Vec<String>) {
+        let access = sqlx::query_scalar!(
+            "SELECT snake_access FROM api_tokens WHERE id = $1",
+            token_id
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        let permissions = sqlx::query_scalar!(
+            "SELECT permission FROM api_token_permissions WHERE api_token_id = $1 ORDER BY permission COLLATE \"C\"",
+            token_id
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap();
+        (access, permissions)
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn new_tokens_get_the_default_scope(pool: PgPool) {
+        let regular = crate::routes::test_support::create_user(&pool, 9917101, false).await;
+        let admin = crate::routes::test_support::create_user(&pool, 9917102, true).await;
+        let defaults = [
+            "games.create",
+            "games.read",
+            "profile.read",
+            "snake.compete",
+            "snake.delete",
+            "snake.edit",
+            "snake.url.read",
+            "snake.url.write",
+            "snakes.create",
+            "snakes.read",
+            "tokens.manage",
+        ];
+
+        let token = create_api_token(&pool, regular, "regular").await.unwrap();
+        let (access, permissions) = scope_of(&pool, token.token.id).await;
+        assert_eq!(access, "all");
+        assert_eq!(permissions, defaults);
+
+        // Admins also get `admin`; nobody gets `email.read` by default.
+        let token = create_api_token(&pool, admin, "admin").await.unwrap();
+        let (access, permissions) = scope_of(&pool, token.token.id).await;
+        assert_eq!(access, "all");
+        let mut expected: Vec<&str> = defaults.to_vec();
+        expected.push("admin");
+        expected.sort_unstable();
+        assert_eq!(permissions, expected);
     }
 }
