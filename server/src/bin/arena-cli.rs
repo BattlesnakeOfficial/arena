@@ -3,6 +3,7 @@ use color_eyre::eyre::{Context as _, eyre};
 use std::time::Duration;
 
 // Include the cli module from the library
+use arena::api_scope::Permission;
 use arena::cli::config::{AuthConfig, CliConfig};
 use arena::cli::output::{
     OutputFormat, format_timestamp, print_field, print_success, print_table, status_colored,
@@ -61,6 +62,15 @@ enum TokenCommands {
         /// Name for the token (e.g., "My laptop", "CI")
         #[arg(short, long)]
         name: Option<String>,
+        /// Permission to grant (repeatable). Combines with --all-permissions as a union.
+        #[arg(long = "permission", value_name = "PERM")]
+        permission: Vec<String>,
+        /// Grant every non-admin permission (add --permission admin on top if you're an admin)
+        #[arg(long)]
+        all_permissions: bool,
+        /// Restrict the token to these snake IDs (repeatable; omitted means all snakes)
+        #[arg(long = "snake", value_name = "ID")]
+        snake: Vec<String>,
     },
     /// List all active API tokens
     List,
@@ -69,6 +79,119 @@ enum TokenCommands {
         /// Token ID to revoke
         id: String,
     },
+}
+
+/// Build the `POST /api/tokens` body for `token create`. Snake IDs are
+/// checked client-side; permission names go through as given, so the
+/// server's 400 (which names the bad permission) is the single authority and
+/// an older CLI can still request permissions a newer server added.
+fn build_create_token_body(
+    name: &str,
+    permission: &[String],
+    all_permissions: bool,
+    snake: &[String],
+) -> color_eyre::Result<serde_json::Value> {
+    if permission.is_empty() && !all_permissions {
+        return Err(eyre!(
+            "pass --permission <p> (repeatable), --all-permissions, or both"
+        ));
+    }
+    let mut permissions: Vec<String> = Vec::new();
+    if all_permissions {
+        permissions.extend(
+            Permission::ALL
+                .into_iter()
+                .filter(|p| *p != Permission::Admin)
+                .map(|p| p.as_str().to_string()),
+        );
+    }
+    for permission_name in permission {
+        // Union, de-duplicated (order-preserving).
+        if !permissions.contains(permission_name) {
+            permissions.push(permission_name.clone());
+        }
+    }
+    if snake.is_empty() {
+        Ok(serde_json::json!({
+            "name": name,
+            "permissions": permissions,
+            "snake_access": "all",
+        }))
+    } else {
+        let snake_ids: Vec<String> = snake
+            .iter()
+            .map(|id| {
+                uuid::Uuid::parse_str(id)
+                    .map(|id| id.to_string())
+                    .map_err(|_| eyre!("invalid snake id: {id}"))
+            })
+            .collect::<color_eyre::Result<_>>()?;
+        Ok(serde_json::json!({
+            "name": name,
+            "permissions": permissions,
+            "snake_access": "selected",
+            "snake_ids": snake_ids,
+        }))
+    }
+}
+
+/// Failure of a token-create request: either the server answered no
+/// (status + body) or the request never landed.
+#[derive(Debug)]
+enum CreateTokenError {
+    Status(reqwest::StatusCode, String),
+    Transport(color_eyre::Report),
+}
+
+impl CreateTokenError {
+    fn into_report(self) -> color_eyre::Report {
+        match self {
+            // The subset-rule 403: tokens minted before scoped permissions
+            // lack email.read, so `--all-permissions` from one of them hits it.
+            CreateTokenError::Status(status, body)
+                if status == reqwest::StatusCode::FORBIDDEN
+                    && body.contains("exceed this token's") =>
+            {
+                eyre!(
+                    "Failed to create token: {status} - {body}\n\
+                     A token can only create tokens within its own permissions and snake \
+                     access. If you logged in before token permissions existed, run \
+                     'arena auth login' for a token with every permission."
+                )
+            }
+            CreateTokenError::Status(status, body) => {
+                eyre!("Failed to create token: {status} - {body}")
+            }
+            CreateTokenError::Transport(report) => report,
+        }
+    }
+}
+
+/// Send the token-create request. Split from `handle_token_command` so tests
+/// can target a wiremock server (`CliConfig::load()` reads the real home
+/// config, which is not injectable).
+async fn post_create_token(
+    base_url: &str,
+    token: &str,
+    body: &serde_json::Value,
+) -> Result<serde_json::Value, CreateTokenError> {
+    let response = reqwest::Client::new()
+        .post(format!("{base_url}/api/tokens"))
+        .bearer_auth(token)
+        .json(body)
+        .send()
+        .await
+        .map_err(|e| CreateTokenError::Transport(eyre!("Failed to create token: {e}")))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(CreateTokenError::Status(status, body));
+    }
+    response
+        .json()
+        .await
+        .map_err(|e| CreateTokenError::Transport(eyre!("Failed to parse token response: {e}")))
 }
 
 #[derive(Subcommand)]
@@ -199,7 +322,12 @@ async fn handle_token_command(command: TokenCommands) -> color_eyre::Result<()> 
     let base_url = config.api_url();
 
     match command {
-        TokenCommands::Create { name } => {
+        TokenCommands::Create {
+            name,
+            permission,
+            all_permissions,
+            snake,
+        } => {
             let name = name.unwrap_or_else(|| {
                 hostname::get()
                     .ok()
@@ -207,24 +335,34 @@ async fn handle_token_command(command: TokenCommands) -> color_eyre::Result<()> 
                     .unwrap_or_else(|| "CLI Token".to_string())
             });
 
-            let response = client
-                .post(format!("{}/api/tokens", base_url))
-                .bearer_auth(token)
-                .json(&serde_json::json!({ "name": name }))
-                .send()
+            let body = build_create_token_body(&name, &permission, all_permissions, &snake)?;
+            let result = post_create_token(base_url, token, &body)
                 .await
-                .wrap_err("Failed to create token")?;
+                .map_err(CreateTokenError::into_report)?;
 
-            if !response.status().is_success() {
-                let status = response.status();
-                let body = response.text().await.unwrap_or_default();
-                return Err(eyre!("Failed to create token: {} - {}", status, body));
-            }
-
-            let result: serde_json::Value = response.json().await?;
             println!("Token created successfully!");
             println!("ID: {}", result["id"]);
             println!("Name: {}", result["name"]);
+            let permissions = result["permissions"]
+                .as_array()
+                .map(|p| {
+                    p.iter()
+                        .filter_map(|v| v.as_str())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                })
+                .unwrap_or_default();
+            println!("Permissions: {permissions}");
+            let access = result["snake_access"].as_str().unwrap_or("all");
+            let ids = result["snake_ids"].as_array().map(|a| a.len()).unwrap_or(0);
+            if access == "selected" {
+                println!(
+                    "Access: selected ({ids} snake{})",
+                    if ids == 1 { "" } else { "s" }
+                );
+            } else {
+                println!("Access: all");
+            }
             println!("\nSecret (save this - it won't be shown again):");
             println!("{}", result["secret"]);
         }
@@ -247,15 +385,38 @@ async fn handle_token_command(command: TokenCommands) -> color_eyre::Result<()> 
             if tokens.is_empty() {
                 println!("No active tokens found.");
             } else {
-                println!("{:<38} {:<20} {:<20}", "ID", "NAME", "LAST USED");
-                println!("{}", "-".repeat(78));
+                // PERMISSIONS is last and unpadded: a full token's list runs
+                // ~150 characters, so no fixed width fits it.
+                println!(
+                    "{:<38} {:<20} {:<20} {:<14} PERMISSIONS",
+                    "ID", "NAME", "LAST USED", "ACCESS"
+                );
+                println!("{}", "-".repeat(106));
                 for token in tokens {
                     let last_used = token["last_used_at"].as_str().unwrap_or("Never");
+                    let permissions = token["permissions"]
+                        .as_array()
+                        .map(|p| {
+                            p.iter()
+                                .filter_map(|v| v.as_str())
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        })
+                        .unwrap_or_default();
+                    let access = match token["snake_access"].as_str() {
+                        Some("selected") => format!(
+                            "selected ({})",
+                            token["snake_ids"].as_array().map(|a| a.len()).unwrap_or(0)
+                        ),
+                        _ => "all".to_string(),
+                    };
                     println!(
-                        "{:<38} {:<20} {:<20}",
+                        "{:<38} {:<20} {:<20} {:<14} {}",
                         token["id"].as_str().unwrap_or(""),
                         token["name"].as_str().unwrap_or(""),
-                        last_used
+                        last_used,
+                        access,
+                        permissions
                     );
                 }
             }
@@ -862,6 +1023,183 @@ mod tests {
         match fetch_me("http://127.0.0.1:1", "any-token").await {
             Err(FetchMeError::Request(_)) => {}
             other => panic!("expected Request, got {other:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod token_create_tests {
+    use wiremock::matchers::{body_partial_json, header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use arena::api_scope::Permission;
+
+    use super::{CreateTokenError, build_create_token_body, post_create_token};
+
+    fn token_response() -> serde_json::Value {
+        serde_json::json!({
+            "id": "4f0a3c2e-1111-4222-8333-444455556666",
+            "name": "CLI Token",
+            "secret": "deadbeef",
+            "permissions": ["profile.read"],
+            "snake_access": "all",
+            "snake_ids": [],
+            "created_at": "2026-10-14T00:00:00Z",
+        })
+    }
+
+    fn perms(
+        name: &str,
+        all_permissions: bool,
+        permission: &[&str],
+        snake: &[&str],
+    ) -> serde_json::Value {
+        let permission: Vec<String> = permission.iter().map(|s| s.to_string()).collect();
+        let snake: Vec<String> = snake.iter().map(|s| s.to_string()).collect();
+        build_create_token_body(name, &permission, all_permissions, &snake).unwrap()
+    }
+
+    #[test]
+    fn neither_flag_is_a_client_side_error() {
+        let err = build_create_token_body("x", &[], false, &[]).unwrap_err();
+        assert!(err.to_string().contains("--all-permissions"), "{err}");
+    }
+
+    #[test]
+    fn unknown_permission_is_left_to_the_server() {
+        let body = perms("x", false, &["not.a.permission"], &[]);
+        assert_eq!(body["permissions"], serde_json::json!(["not.a.permission"]));
+    }
+
+    #[test]
+    fn malformed_snake_id_is_a_client_side_error() {
+        let err = build_create_token_body(
+            "x",
+            &["profile.read".to_string()],
+            false,
+            &["nope".to_string()],
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("invalid snake id"));
+    }
+
+    fn sent(body: &serde_json::Value) -> Vec<&str> {
+        body["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn all_permissions_is_every_permission_but_admin() {
+        let body = perms("x", true, &[], &[]);
+        let expected: Vec<&str> = Permission::ALL
+            .into_iter()
+            .filter(|p| *p != Permission::Admin)
+            .map(Permission::as_str)
+            .collect();
+        assert_eq!(sent(&body), expected);
+        assert!(expected.contains(&"email.read"));
+        assert_eq!(expected.len(), 12);
+    }
+
+    #[test]
+    fn all_permissions_union_admin_sends_all_thirteen() {
+        let body = perms("x", true, &["admin"], &[]);
+        assert_eq!(sent(&body).len(), 13);
+    }
+
+    #[test]
+    fn all_permissions_union_existing_still_deduplicates() {
+        let body = perms("x", true, &["snakes.read"], &[]);
+        assert_eq!(sent(&body).len(), 12, "{body}");
+    }
+
+    #[test]
+    fn scope_403_suggests_logging_in_again() {
+        let report = CreateTokenError::Status(
+            reqwest::StatusCode::FORBIDDEN,
+            "requested permissions or snake access exceed this token's".to_string(),
+        )
+        .into_report()
+        .to_string();
+        assert!(report.contains("exceed this token's"), "{report}");
+        assert!(report.contains("arena auth login"), "{report}");
+
+        // Other 403s are reported as-is.
+        let report = CreateTokenError::Status(
+            reqwest::StatusCode::FORBIDDEN,
+            "missing permission: tokens.manage".to_string(),
+        )
+        .into_report()
+        .to_string();
+        assert!(!report.contains("arena auth login"), "{report}");
+    }
+
+    #[test]
+    fn omitted_snake_sends_all_access_without_snake_ids() {
+        let body = perms("x", true, &[], &[]);
+        assert_eq!(body["snake_access"], "all");
+        assert!(body.get("snake_ids").is_none());
+    }
+
+    #[test]
+    fn snake_flags_send_selected_with_ids() {
+        let body = perms(
+            "x",
+            false,
+            &["profile.read"],
+            &["4f0a3c2e-1111-4222-8333-444455556666"],
+        );
+        assert_eq!(body["snake_access"], "selected");
+        assert_eq!(
+            body["snake_ids"],
+            serde_json::json!(["4f0a3c2e-1111-4222-8333-444455556666"])
+        );
+    }
+
+    #[tokio::test]
+    async fn token_create_sends_bearer_and_scope_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/tokens"))
+            .and(header("Authorization", "Bearer test-token"))
+            .and(body_partial_json(serde_json::json!({
+                "permissions": ["profile.read"],
+                "snake_access": "all",
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(token_response()))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let body = perms("CLI Token", false, &["profile.read"], &[]);
+        let created = post_create_token(&server.uri(), "test-token", &body)
+            .await
+            .unwrap();
+        assert_eq!(created["name"], "CLI Token");
+    }
+
+    #[tokio::test]
+    async fn token_create_surfaces_status_errors() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/tokens"))
+            .respond_with(
+                ResponseTemplate::new(403).set_body_string("cannot grant admin permission"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let body = perms("x", true, &["admin"], &[]);
+        match post_create_token(&server.uri(), "t", &body).await {
+            Err(super::CreateTokenError::Status(reqwest::StatusCode::FORBIDDEN, body)) => {
+                assert_eq!(body, "cannot grant admin permission");
+            }
+            other => panic!("expected FORBIDDEN, got {other:?}"),
         }
     }
 }
