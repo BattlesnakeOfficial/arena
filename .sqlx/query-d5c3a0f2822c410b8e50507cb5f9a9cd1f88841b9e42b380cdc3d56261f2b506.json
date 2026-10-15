@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO battlesnakes (user_id, name, url)\n               VALUES ($1, $2, 'https://snake.example') RETURNING battlesnake_id",
+  "query": "INSERT INTO battlesnakes (user_id, name, url)\n               VALUES ($1, 'list-snake', 'https://list.example') RETURNING battlesnake_id",
   "describe": {
     "columns": [
       {
@@ -11,13 +11,12 @@
     ],
     "parameters": {
       "Left": [
-        "Uuid",
-        "Text"
+        "Uuid"
       ]
     },
     "nullable": [
       false
     ]
   },
-  "hash": "52b0272ed1cf03ec119879a753a9365f0edc0c052e4fab5236caeb4451522448"
+  "hash": "d5c3a0f2822c410b8e50507cb5f9a9cd1f88841b9e42b380cdc3d56261f2b506"
 }
