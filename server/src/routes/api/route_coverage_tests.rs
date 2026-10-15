@@ -111,8 +111,15 @@ fn routes() -> Vec<CoveredRoute> {
         covered(
             "POST",
             "/tokens",
-            // Name-only: the new token copies the caller's own scope.
-            |_s| Some(serde_json::json!({"name": "coverage"})),
+            |_s| {
+                Some(serde_json::json!({
+                    "name": "coverage",
+                    // A subset of this row's own permission, so the
+                    // exactly-listed test may really create it.
+                    "permissions": ["tokens.manage"],
+                    "snake_access": "all",
+                }))
+            },
             Some(Permission::TokensManage),
             false,
         ),
