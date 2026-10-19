@@ -34,11 +34,43 @@ pub struct TokenAuth {
     pub snake_ids: HashSet<Uuid>,
 }
 
+impl TokenAuth {
+    /// Is a token with this scope no wider than `self`? Permissions must be a
+    /// subset, and snake access no wider: `all` only from `all`; `selected`
+    /// from `all`, or from `selected` when every snake is in this list.
+    ///
+    /// Gates revoking a token (`DELETE /api/tokens/{id}`): a token never acts
+    /// on a wider one.
+    pub fn covers(
+        &self,
+        permissions: &BTreeSet<Permission>,
+        snake_access: SnakeAccess,
+        snake_ids: &BTreeSet<Uuid>,
+    ) -> bool {
+        let access_ok = match (self.snake_access, snake_access) {
+            (SnakeAccess::All, _) => true,
+            (SnakeAccess::Selected, SnakeAccess::All) => false,
+            (SnakeAccess::Selected, SnakeAccess::Selected) => {
+                snake_ids.iter().all(|id| self.snake_ids.contains(id))
+            }
+        };
+        access_ok && permissions.is_subset(&self.permissions)
+    }
+}
+
 /// Result of creating a new token - includes the raw secret (only shown once)
 pub struct NewApiToken {
     pub token: ApiToken,
     /// The raw secret token to give to the user. Only shown once!
     pub secret: String,
+}
+
+/// A token plus its scope, as returned by [`get_user_token`].
+pub struct TokenSummary {
+    pub token: ApiToken,
+    pub permissions: BTreeSet<Permission>,
+    /// Empty when access is `All`.
+    pub snake_ids: BTreeSet<Uuid>,
 }
 
 /// Decode stored permission names, skipping any this binary doesn't know.
@@ -193,6 +225,64 @@ pub async fn list_user_tokens(pool: &PgPool, user_id: Uuid) -> cja::Result<Vec<A
     .wrap_err("Failed to list API tokens")
 }
 
+/// Active (non-revoked) tokens for a user with their scope, newest first.
+/// `token_id` narrows the result to that one token.
+async fn load_token_summaries(
+    pool: &PgPool,
+    user_id: Uuid,
+    token_id: Option<Uuid>,
+) -> cja::Result<Vec<TokenSummary>> {
+    let rows = sqlx::query!(
+        r#"
+        SELECT t.id, t.user_id, t.token_hash, t.name,
+            t.snake_access AS "snake_access: SnakeAccess",
+            t.last_used_at, t.created_at, t.revoked_at,
+            ARRAY(SELECT p.permission FROM api_token_permissions p WHERE p.api_token_id = t.id) AS "permissions!: Vec<String>",
+            ARRAY(SELECT s.battlesnake_id FROM api_token_snakes s WHERE s.api_token_id = t.id) AS "snake_ids!: Vec<Uuid>"
+        FROM api_tokens t
+        WHERE t.user_id = $1 AND t.revoked_at IS NULL
+          AND ($2::uuid IS NULL OR t.id = $2)
+        ORDER BY t.created_at DESC
+        "#,
+        user_id,
+        token_id
+    )
+    .fetch_all(pool)
+    .await
+    .wrap_err("Failed to load API tokens")?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| TokenSummary {
+            permissions: decode_permissions(row.id, row.permissions),
+            snake_ids: row.snake_ids.into_iter().collect(),
+            token: ApiToken {
+                id: row.id,
+                user_id: row.user_id,
+                token_hash: row.token_hash,
+                name: row.name,
+                snake_access: row.snake_access,
+                last_used_at: row.last_used_at,
+                created_at: row.created_at,
+                revoked_at: row.revoked_at,
+            },
+        })
+        .collect())
+}
+
+/// Get one of the user's active tokens, with its scope. `None` when the token
+/// is unknown, revoked, or belongs to someone else.
+pub async fn get_user_token(
+    pool: &PgPool,
+    user_id: Uuid,
+    token_id: Uuid,
+) -> cja::Result<Option<TokenSummary>> {
+    Ok(load_token_summaries(pool, user_id, Some(token_id))
+        .await?
+        .into_iter()
+        .next())
+}
+
 /// Authenticate a raw token secret: stamps `last_used_at` and loads the
 /// token's full scope in one statement. Returns `None` for unknown/revoked
 /// tokens.
@@ -279,6 +369,54 @@ mod tests {
     fn test_hash_token_length() {
         let hash = hash_token("test");
         assert_eq!(hash.len(), 64); // SHA-256 = 64 hex chars
+    }
+
+    fn scope(
+        permissions: &[Permission],
+        snake_access: SnakeAccess,
+        snake_ids: &[Uuid],
+    ) -> TokenAuth {
+        TokenAuth {
+            token_id: Uuid::new_v4(),
+            user_id: Uuid::new_v4(),
+            permissions: permissions.iter().copied().collect(),
+            snake_access,
+            snake_ids: snake_ids.iter().copied().collect(),
+        }
+    }
+
+    #[test]
+    fn covers_requires_permission_subset_and_no_wider_access() {
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let perms = |ps: &[Permission]| ps.iter().copied().collect::<BTreeSet<_>>();
+        let ids = |ids: &[Uuid]| ids.iter().copied().collect::<BTreeSet<_>>();
+
+        let all = scope(
+            &[Permission::SnakesRead, Permission::TokensManage],
+            SnakeAccess::All,
+            &[],
+        );
+        // Itself, and anything narrower.
+        assert!(all.covers(&all.permissions, SnakeAccess::All, &ids(&[])));
+        assert!(all.covers(&perms(&[]), SnakeAccess::Selected, &ids(&[a, b])));
+        // A permission it lacks.
+        assert!(!all.covers(
+            &perms(&[Permission::ProfileRead]),
+            SnakeAccess::All,
+            &ids(&[])
+        ));
+
+        let selected = scope(&[Permission::SnakesRead], SnakeAccess::Selected, &[a]);
+        assert!(selected.covers(
+            &perms(&[Permission::SnakesRead]),
+            SnakeAccess::Selected,
+            &ids(&[a])
+        ));
+        assert!(selected.covers(&perms(&[]), SnakeAccess::Selected, &ids(&[])));
+        // Wider selection, or `all`.
+        assert!(!selected.covers(&perms(&[]), SnakeAccess::Selected, &ids(&[a, b])));
+        assert!(!selected.covers(&perms(&[]), SnakeAccess::All, &ids(&[])));
     }
 
     #[test]

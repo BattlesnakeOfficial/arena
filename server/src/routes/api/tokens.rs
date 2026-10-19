@@ -122,6 +122,10 @@ pub async fn create_token(
         )
     })?;
 
+    if let Some(scope) = auth.token_scope() {
+        revoke_if_creator_revoked(&state, scope.token_id, &new_token).await?;
+    }
+
     Ok((
         StatusCode::CREATED,
         Json(CreateTokenResponse {
@@ -130,6 +134,40 @@ pub async fn create_token(
             secret: new_token.secret,
             created_at: new_token.token.created_at,
         }),
+    ))
+}
+
+/// A token revoked while it was minting must not leave a live copy behind.
+/// The copy's INSERT can queue behind a revoke's table lock (the enforce down
+/// migration takes one) and commit right after it. Its secret is only ever
+/// disclosed in this response, so revoking it here, before responding, means
+/// no one can use a copy that escaped. Any error also withholds the secret.
+async fn revoke_if_creator_revoked(
+    state: &AppState,
+    creator_token_id: Uuid,
+    new_token: &api_token::NewApiToken,
+) -> Result<(), (StatusCode, String)> {
+    let internal = |e: color_eyre::Report| {
+        tracing::error!("Failed to confirm the minting token is live: {e:#}");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to create API token".to_string(),
+        )
+    };
+    let user_id = new_token.token.user_id;
+    if api_token::get_user_token(&state.db, user_id, creator_token_id)
+        .await
+        .map_err(internal)?
+        .is_some()
+    {
+        return Ok(());
+    }
+    api_token::revoke_token(&state.db, new_token.token.id, user_id)
+        .await
+        .map_err(internal)?;
+    Err((
+        StatusCode::UNAUTHORIZED,
+        "Invalid or revoked token".to_string(),
     ))
 }
 
@@ -155,12 +193,39 @@ pub async fn list_tokens(
 }
 
 /// DELETE /api/v1/tokens/:id - Revoke a token
+///
+/// A token may revoke only tokens within its own scope (itself included), so
+/// a narrow token can't log out a wider one. Sessions may revoke any.
 pub async fn revoke_token(
     State(state): State<AppState>,
     ApiUser(auth): ApiUser,
     Path(token_id): Path<Uuid>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     auth.require(Permission::TokensManage)?;
+
+    if let Some(scope) = auth.token_scope() {
+        let target = api_token::get_user_token(&state.db, auth.user_id, token_id)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to load API token: {e:#}");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to revoke API token".to_string(),
+                )
+            })?
+            .ok_or_else(|| (StatusCode::NOT_FOUND, "Token not found".to_string()))?;
+        if !scope.covers(
+            &target.permissions,
+            target.token.snake_access,
+            &target.snake_ids,
+        ) {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "cannot revoke a token with wider permissions or snake access than this token's"
+                    .to_string(),
+            ));
+        }
+    }
 
     let revoked = api_token::revoke_token(&state.db, token_id, auth.user_id)
         .await
@@ -330,6 +395,61 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "../migrations")]
+    async fn a_token_revoked_mid_mint_leaves_no_live_copy(db: PgPool) {
+        let state = crate::state::AppState::test_from_pool(db.clone());
+        let app = api_app(&state);
+        let user = create_user(&db, 9921705, false).await;
+        let creator = api_token::create_api_token(
+            &db,
+            user,
+            "creator",
+            &[Permission::TokensManage],
+            SnakeAccess::All,
+            &[],
+        )
+        .await
+        .unwrap();
+
+        // The revoke lands after the request authenticated but before the copy
+        // commits, as when the copy's INSERT queues behind a revoke's lock.
+        sqlx::raw_sql(&format!(
+            r"CREATE FUNCTION revoke_creator() RETURNS trigger LANGUAGE plpgsql AS $$
+              BEGIN
+                UPDATE api_tokens SET revoked_at = NOW()
+                WHERE id = '{}' AND revoked_at IS NULL;
+                RETURN NULL;
+              END $$;
+              CREATE TRIGGER revoke_creator AFTER INSERT ON api_tokens
+              FOR EACH ROW EXECUTE FUNCTION revoke_creator();",
+            creator.token.id
+        ))
+        .execute(&db)
+        .await
+        .unwrap();
+
+        let (status, body) = send_api(
+            &app,
+            "POST",
+            "/api/tokens",
+            Some(&creator.secret),
+            Some(serde_json::json!({"name": "copy"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+        assert_eq!(body, "Invalid or revoked token");
+
+        let live: i64 = sqlx::query_scalar!(
+            r#"SELECT COUNT(*) AS "count!: i64" FROM api_tokens
+               WHERE user_id = $1 AND revoked_at IS NULL"#,
+            user
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(live, 0, "neither the creator nor its copy is live");
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
     async fn a_session_mints_the_default_set(db: PgPool) {
         let state = crate::state::AppState::test_from_pool(db.clone());
         let app = api_app(&state);
@@ -392,5 +512,112 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn narrow_token_cannot_revoke_a_wider_one(db: PgPool) {
+        let state = crate::state::AppState::test_from_pool(db.clone());
+        let app = api_app(&state);
+        let user = create_user(&db, 9921811, false).await;
+        let snake_a = create_snake(&db, user, "revoke-a").await;
+        let snake_b = create_snake(&db, user, "revoke-b").await;
+        let mint_row = |permissions: &'static [Permission], access, snakes: Vec<Uuid>| {
+            let db = db.clone();
+            async move {
+                api_token::create_api_token(&db, user, "row", permissions, access, &snakes)
+                    .await
+                    .unwrap()
+            }
+        };
+
+        // The narrow token: tokens.manage, selected [A].
+        let narrow = mint_row(
+            &[Permission::TokensManage],
+            SnakeAccess::Selected,
+            vec![snake_a],
+        )
+        .await;
+        let delete = |id: Uuid, bearer: String| {
+            let app = app.clone();
+            async move {
+                send_api(
+                    &app,
+                    "DELETE",
+                    &format!("/api/tokens/{id}"),
+                    Some(&bearer),
+                    None,
+                )
+                .await
+            }
+        };
+
+        // Wider by permission, by `all` access, and by selection → 403, and
+        // each target stays live.
+        let more_perms = mint_row(
+            &[Permission::TokensManage, Permission::ProfileRead],
+            SnakeAccess::Selected,
+            vec![snake_a],
+        )
+        .await;
+        let all_access = mint_row(&[Permission::TokensManage], SnakeAccess::All, vec![]).await;
+        let wider_selection = mint_row(
+            &[Permission::TokensManage],
+            SnakeAccess::Selected,
+            vec![snake_a, snake_b],
+        )
+        .await;
+        for target in [&more_perms, &all_access, &wider_selection] {
+            let (status, body) = delete(target.token.id, narrow.secret.clone()).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+            assert_eq!(
+                body,
+                "cannot revoke a token with wider permissions or snake access than this token's"
+            );
+            assert!(
+                api_token::get_user_token(&db, user, target.token.id)
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+        }
+
+        // Narrower (fewer permissions, empty selection) → 204.
+        let narrower = mint_row(&[], SnakeAccess::Selected, vec![]).await;
+        let (status, body) = delete(narrower.token.id, narrow.secret.clone()).await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+        // A wider token revokes the narrow one; then the narrow token is dead.
+        let (status, body) = delete(narrow.token.id, all_access.secret.clone()).await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+        let (status, _) = delete(more_perms.token.id, narrow.secret.clone()).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        // A token can always revoke itself.
+        let (status, body) = delete(wider_selection.token.id, wider_selection.secret.clone()).await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+        // Sessions revoke anything.
+        let session = create_user_session(&db, 9921812, false).await;
+        let session_user = session_user_id(&db, session).await;
+        let cookie = signed_session_cookie(&state, session);
+        let full = api_token::create_api_token(
+            &db,
+            session_user,
+            "full",
+            Permission::ALL.as_slice(),
+            SnakeAccess::All,
+            &[],
+        )
+        .await
+        .unwrap();
+        let (status, body) = send_api_with_cookie(
+            &app,
+            "DELETE",
+            &format!("/api/tokens/{}", full.token.id),
+            &cookie,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
     }
 }

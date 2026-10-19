@@ -1,8 +1,15 @@
 SET LOCAL lock_timeout = '5s';
 
--- Block concurrent token creation (INSERT/UPDATE on api_tokens take ROW
--- EXCLUSIVE): a token committed between the revoke UPDATE below and the
--- deploy of the revert would escape revocation.
+-- Make the revoke a clean cut: INSERT/UPDATE on api_tokens take ROW
+-- EXCLUSIVE, so no token is created while the UPDATE below runs. The lock
+-- ends at COMMIT and does NOT stop a revision that is still serving from
+-- minting afterwards: an insert queued behind it commits right after, and the
+-- tables stay, so it survives. So the rollback runbook runs this only once
+-- the enforce code is the only code serving (the contract code mints narrow
+-- tokens directly). The enforce code's copy-mint re-checks that its caller is
+-- still live after the INSERT and revokes a copy that escaped this revoke
+-- before returning its secret. The runbook then re-runs this UPDATE by hand
+-- as a check before deploying the expand code.
 LOCK TABLE api_tokens IN SHARE ROW EXCLUSIVE MODE;
 
 -- Reverting enforcement fails open unless narrow tokens go first: the expand
