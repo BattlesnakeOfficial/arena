@@ -17,6 +17,18 @@ use crate::{
 #[derive(Debug, Deserialize)]
 pub struct CreateTokenRequest {
     pub name: String,
+    /// Scoped tokens ship in a later deploy. Until then a request naming a
+    /// scope is refused, never ignored: ignoring it would mint a full-power
+    /// token the caller asked to be narrow.
+    pub permissions: Option<serde_json::Value>,
+    pub snake_access: Option<serde_json::Value>,
+    pub snake_ids: Option<serde_json::Value>,
+}
+
+impl CreateTokenRequest {
+    fn names_a_scope(&self) -> bool {
+        self.permissions.is_some() || self.snake_access.is_some() || self.snake_ids.is_some()
+    }
 }
 
 /// Response for a newly created token (includes the secret)
@@ -53,12 +65,22 @@ pub async fn create_token(
     State(state): State<AppState>,
     ApiUser(user): ApiUser,
     Json(request): Json<CreateTokenRequest>,
-) -> Result<impl IntoResponse, StatusCode> {
+) -> Result<impl IntoResponse, (StatusCode, &'static str)> {
+    if request.names_a_scope() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "scoped tokens are not supported by this server yet",
+        ));
+    }
+
     let new_token = api_token::create_api_token(&state.db, user.user_id, &request.name)
         .await
         .map_err(|e| {
             tracing::error!("Failed to create API token: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to create API token",
+            )
         })?;
 
     Ok((
@@ -105,5 +127,54 @@ pub async fn revoke_token(
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(StatusCode::NOT_FOUND)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::StatusCode;
+
+    use crate::models::api_token::create_api_token;
+    use crate::routes::test_support::{api_app, create_user, send_api};
+    use crate::state::AppState;
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn a_scoped_request_is_refused_not_ignored(db: sqlx::PgPool) {
+        let state = AppState::test_from_pool(db.clone());
+        let app = api_app(&state);
+        let user = create_user(&db, 9921701, false).await;
+        let bearer = create_api_token(&db, user, "caller").await.unwrap().secret;
+
+        for body in [
+            serde_json::json!({"name": "narrow", "permissions": ["profile.read"]}),
+            serde_json::json!({"name": "narrow", "snake_access": "selected"}),
+            serde_json::json!({"name": "narrow", "snake_ids": []}),
+        ] {
+            let (status, response) =
+                send_api(&app, "POST", "/api/tokens", Some(&bearer), Some(body)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+            assert_eq!(
+                response,
+                "scoped tokens are not supported by this server yet"
+            );
+        }
+        let minted: i64 = sqlx::query_scalar!(
+            r#"SELECT COUNT(*) AS "count!: i64" FROM api_tokens WHERE user_id = $1"#,
+            user
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(minted, 1, "only the caller's own token exists");
+
+        let (status, response) = send_api(
+            &app,
+            "POST",
+            "/api/tokens",
+            Some(&bearer),
+            Some(serde_json::json!({"name": "plain"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{response}");
     }
 }

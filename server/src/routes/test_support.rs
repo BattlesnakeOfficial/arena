@@ -4,6 +4,92 @@ use uuid::Uuid;
 
 use crate::state::AppState;
 
+/// Insert a user; returns the user id.
+pub async fn create_user(db: &sqlx::PgPool, github_id: i64, is_admin: bool) -> Uuid {
+    sqlx::query_scalar(
+        "INSERT INTO users (external_github_id, github_login, github_access_token, is_admin) VALUES ($1, $2, '', $3) RETURNING user_id",
+    )
+    .bind(github_id)
+    .bind(format!("test-user-{github_id}"))
+    .bind(is_admin)
+    .fetch_one(db)
+    .await
+    .unwrap()
+}
+
+/// The real router plus the cookie layer — the minimum an `/api` request
+/// needs in tests (session-cookie auth and JSON bodies both work).
+pub fn api_app(state: &AppState) -> axum::Router {
+    crate::routes::routes(state.clone())
+        .expect("asset router")
+        .layer(tower_cookies::CookieManagerLayer::new())
+}
+
+/// Send a JSON (or empty) request to the API app. `bearer` sets the
+/// Authorization header; `body` sends a JSON body with the content type.
+pub async fn send_api(
+    app: &axum::Router,
+    method: &str,
+    path: &str,
+    bearer: Option<&str>,
+    body: Option<serde_json::Value>,
+) -> (axum::http::StatusCode, String) {
+    send_api_request(app, method, path, bearer, None, body).await
+}
+
+/// Like [`send_api`] but authenticates with a signed session cookie instead
+/// of a Bearer token.
+pub async fn send_api_with_cookie(
+    app: &axum::Router,
+    method: &str,
+    path: &str,
+    cookie: &str,
+    body: Option<serde_json::Value>,
+) -> (axum::http::StatusCode, String) {
+    send_api_request(app, method, path, None, Some(cookie), body).await
+}
+
+async fn send_api_request(
+    app: &axum::Router,
+    method: &str,
+    path: &str,
+    bearer: Option<&str>,
+    cookie: Option<&str>,
+    body: Option<serde_json::Value>,
+) -> (axum::http::StatusCode, String) {
+    use tower::ServiceExt as _;
+
+    let mut builder = axum::http::Request::builder()
+        .method(method)
+        .uri(path)
+        .header(axum::http::header::ORIGIN, "https://example.com");
+    if let Some(token) = bearer {
+        builder = builder.header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"));
+    }
+    if let Some(value) = cookie {
+        builder = builder.header(
+            axum::http::header::COOKIE,
+            format!("{}={value}", crate::models::session::SESSION_COOKIE_NAME),
+        );
+    }
+    if body.is_some() {
+        builder = builder.header(axum::http::header::CONTENT_TYPE, "application/json");
+    }
+    let request = if let Some(body) = body {
+        builder
+            .body(axum::body::Body::from(body.to_string()))
+            .unwrap()
+    } else {
+        builder.body(axum::body::Body::empty()).unwrap()
+    };
+    let response = app.clone().oneshot(request).await.unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
 /// The private (encrypted) session cookie value the auth extractors accept
 /// for `session_id`.
 pub fn signed_session_cookie(state: &AppState, session_id: Uuid) -> String {
@@ -23,15 +109,7 @@ pub fn signed_session_cookie(state: &AppState, session_id: Uuid) -> String {
 
 /// Insert a user plus a session logged in as them; returns the session ID.
 pub async fn create_user_session(db: &sqlx::PgPool, github_id: i64, is_admin: bool) -> Uuid {
-    let user_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO users (external_github_id, github_login, github_access_token, is_admin) VALUES ($1, $2, '', $3) RETURNING user_id",
-    )
-    .bind(github_id)
-    .bind(format!("test-user-{github_id}"))
-    .bind(is_admin)
-    .fetch_one(db)
-    .await
-    .unwrap();
+    let user_id = create_user(db, github_id, is_admin).await;
     let session_id: Uuid =
         sqlx::query_scalar("INSERT INTO sessions (user_id) VALUES ($1) RETURNING session_id")
             .bind(user_id)
