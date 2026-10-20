@@ -166,7 +166,7 @@ pub async fn create_token(
         .fetch_one(&state.db)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to check snake ownership: {e}");
+            tracing::error!("Failed to check snake ownership: {e:#}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Internal server error".to_string(),
@@ -208,7 +208,7 @@ pub async fn create_token(
     )
     .await
     .map_err(|e| {
-        tracing::error!("Failed to create API token: {e}");
+        tracing::error!("Failed to create API token: {e:#}");
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             "Failed to create API token".to_string(),
@@ -277,7 +277,7 @@ pub async fn list_tokens(
     let tokens = api_token::list_user_tokens(&state.db, auth.user_id)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to list API tokens: {e}");
+            tracing::error!("Failed to list API tokens: {e:#}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Failed to list API tokens".to_string(),
@@ -326,7 +326,7 @@ pub async fn revoke_token(
     let revoked = api_token::revoke_token(&state.db, token_id, auth.user_id)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to revoke API token: {e}");
+            tracing::error!("Failed to revoke API token: {e:#}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Failed to revoke API token".to_string(),
