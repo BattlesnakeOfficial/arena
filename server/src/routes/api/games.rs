@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 use crate::{
     jobs::GameRunnerJob,
+    models::api_token::Permission,
     models::{
         game::{self, CreateGameWithSnakes, Game, GameBoardSize, GameStatus, GameType},
         game_battlesnake::{self, GameBattlesnakeWithDetails},
@@ -150,9 +151,14 @@ fn build_game_list_item(game: &Game, battlesnakes: &[GameBattlesnakeWithDetails]
 /// POST /api/games - Create a new game
 pub async fn create_game(
     State(state): State<AppState>,
-    ApiUser(user): ApiUser,
+    ApiUser(auth): ApiUser,
     Json(request): Json<CreateGameRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    // Account-wide permission first: unauthorized 403s must not burn the
+    // account's game-creation budget. Snake selection is account-wide —
+    // any of the user's snakes, whatever the token's access.
+    auth.require(Permission::GamesCreate)?;
+
     // Rate limit game creation per account (shared with the web flow).
     // The attempt is recorded before the check so concurrent requests see
     // each other, and the returned count includes this attempt — reject
@@ -161,7 +167,7 @@ pub async fn create_game(
     let window_minutes = state.config.game_creation_rate_limit_window_minutes;
     let attempts = rate_limit::record_and_count_game_creation_attempts(
         &state.db,
-        user.user_id,
+        auth.user_id,
         "api",
         window_minutes,
     )
@@ -176,7 +182,7 @@ pub async fn create_game(
     if attempts > limit {
         tracing::warn!(
             event_type = "game_creation_rate_limited",
-            user_id = %user.user_id,
+            user_id = %auth.user_id,
             attempts = attempts,
             limit = limit,
             source = "api",
@@ -214,7 +220,7 @@ pub async fn create_game(
         battlesnake_ids: request.snakes,
     };
 
-    let game = game::create_game_with_snakes_for_user(&state.db, create_request, user.user_id)
+    let game = game::create_game_with_snakes_for_user(&state.db, create_request, auth.user_id)
         .await
         .map_err(|e| {
             if e.downcast_ref::<game::InaccessibleBattlesnake>().is_some() {
@@ -266,7 +272,7 @@ pub async fn create_game(
         board_size = game.board_size.as_str(),
         game_type = game.game_type.as_str(),
         snake_count = snake_count,
-        user_id = %user.user_id,
+        user_id = %auth.user_id,
         source = "api",
         "game created via API"
     );
@@ -284,9 +290,11 @@ pub async fn create_game(
 /// GET /api/games - List games
 pub async fn list_games(
     State(state): State<AppState>,
-    ApiUser(user): ApiUser,
+    ApiUser(auth): ApiUser,
     Query(query): Query<ListGamesQuery>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    auth.require(Permission::GamesRead)?;
+
     let limit = query.limit.min(100) as i64;
 
     // If filtering by snake_id, validate access first
@@ -300,7 +308,7 @@ pub async fn list_games(
               AND deleted_at IS NULL
             "#,
             snake_id,
-            user.user_id
+            auth.user_id
         )
         .fetch_optional(&state.db)
         .await
@@ -370,7 +378,7 @@ pub async fn list_games(
             ORDER BY g.created_at DESC
             LIMIT $2
             "#,
-            user.user_id,
+            auth.user_id,
             limit
         )
         .fetch_all(&state.db)
@@ -423,9 +431,11 @@ pub async fn list_games(
 /// GET /api/games/{id}/details - Show game details with frames
 pub async fn show_game(
     State(state): State<AppState>,
-    ApiUser(_user): ApiUser,
+    ApiUser(auth): ApiUser,
     Path(game_id): Path<Uuid>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    auth.require(Permission::GamesRead)?;
+
     // Fetch the game
     let game = game::get_game_by_id(&state.db, game_id)
         .await
@@ -505,9 +515,11 @@ pub struct GameStatusItem {
 /// POST /api/games/status - Batch lookup game statuses
 pub async fn batch_game_status(
     State(state): State<AppState>,
-    ApiUser(user): ApiUser,
+    ApiUser(auth): ApiUser,
     Json(request): Json<BatchGameStatusRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    auth.require(Permission::GamesRead)?;
+
     if request.game_ids.len() > 500 {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -531,7 +543,7 @@ pub async fn batch_game_status(
           )
         "#,
         &request.game_ids as &[Uuid],
-        user.user_id
+        auth.user_id
     )
     .fetch_all(&state.db)
     .await
@@ -671,5 +683,88 @@ mod tests {
         assert!(json.contains("\"status\":\"waiting\""));
         assert!(json.contains("\"board\":\"11x11\""));
         assert!(json.contains("\"game_type\":\"Standard\""));
+    }
+}
+
+#[cfg(test)]
+mod scoped_token_tests {
+    use crate::models::api_token::{Permission, SnakeAccess, create_api_token};
+    use crate::models::battlesnake::{CreateBattlesnake, Visibility, create_battlesnake};
+    use crate::routes::test_support::{api_app, create_user, send_api};
+    use crate::state::AppState;
+    use axum::http::StatusCode;
+    use sqlx::PgPool;
+    use uuid::Uuid;
+
+    async fn make_snake(db: &PgPool, user: Uuid, name: &str) -> Uuid {
+        create_battlesnake(
+            db,
+            user,
+            CreateBattlesnake {
+                name: name.to_string(),
+                url: format!("https://{name}.example"),
+                visibility: Visibility::Public,
+                engine_region: Default::default(),
+            },
+        )
+        .await
+        .unwrap()
+        .battlesnake_id
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn selected_token_creates_game_with_outside_snake(db: PgPool) {
+        // games.create is account-wide: a `selected` token may use any of the
+        // user's snakes, whatever the selection.
+        let state = AppState::test_from_pool(db.clone());
+        let app = api_app(&state);
+        let user = create_user(&db, 9922000, false).await;
+        let snake_a = make_snake(&db, user, "game-a").await;
+        let snake_b = make_snake(&db, user, "game-b").await;
+
+        let token = create_api_token(
+            &db,
+            user,
+            "selected-games",
+            &[Permission::GamesCreate],
+            SnakeAccess::Selected,
+            &[snake_a],
+        )
+        .await
+        .unwrap();
+
+        let (status, body) = send_api(
+            &app,
+            "POST",
+            "/api/games",
+            Some(&token.secret),
+            Some(serde_json::json!({ "snakes": [snake_b.to_string()] })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "body: {body}");
+
+        // Zero-permission token: 403 before rate limiting.
+        let zero = create_api_token(&db, user, "zero", &[], SnakeAccess::All, &[])
+            .await
+            .unwrap();
+        let (status, body) = send_api(
+            &app,
+            "POST",
+            "/api/games",
+            Some(&zero.secret),
+            Some(serde_json::json!({ "snakes": [snake_b.to_string()] })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body, "missing permission: games.create");
+        // The unauthorized attempts must not burn the game-creation budget.
+        let attempts: i64 = sqlx::query_scalar!(
+            r#"SELECT COUNT(*) AS "count!: i64" FROM game_creation_attempts WHERE user_id = $1"#,
+            user
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(attempts, 1, "only the authorized create records an attempt");
     }
 }

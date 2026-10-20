@@ -1,9 +1,13 @@
+use std::collections::{BTreeSet, HashSet};
+
 use color_eyre::eyre::Context as _;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use sqlx::{FromRow, PgPool};
+use sqlx::{Executor, FromRow, PgPool, Postgres};
 use uuid::Uuid;
+
+pub use arena::api_scope::{Permission, SnakeAccess};
 
 /// API token stored in the database (hashed)
 #[derive(Debug, Serialize, Deserialize, FromRow)]
@@ -12,9 +16,46 @@ pub struct ApiToken {
     pub user_id: Uuid,
     pub token_hash: String,
     pub name: String,
+    pub snake_access: SnakeAccess,
     pub last_used_at: Option<chrono::DateTime<chrono::Utc>>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// A token's scope, loaded at auth time: permission set + snake access.
+/// Doubles as the model's decoded scope; the OAuth task will surface a client
+/// reference here without rework.
+#[derive(Debug, Clone)]
+pub struct TokenAuth {
+    pub token_id: Uuid,
+    pub user_id: Uuid,
+    pub permissions: BTreeSet<Permission>,
+    pub snake_access: SnakeAccess,
+    pub snake_ids: HashSet<Uuid>,
+}
+
+impl TokenAuth {
+    /// Is a token with this scope no wider than `self`? Permissions must be a
+    /// subset, and snake access no wider: `all` only from `all`; `selected`
+    /// from `all`, or from `selected` when every snake is in this list.
+    ///
+    /// Gates revoking a token (`DELETE /api/tokens/{id}`): a token never acts
+    /// on a wider one.
+    pub fn covers(
+        &self,
+        permissions: &BTreeSet<Permission>,
+        snake_access: SnakeAccess,
+        snake_ids: &BTreeSet<Uuid>,
+    ) -> bool {
+        let access_ok = match (self.snake_access, snake_access) {
+            (SnakeAccess::All, _) => true,
+            (SnakeAccess::Selected, SnakeAccess::All) => false,
+            (SnakeAccess::Selected, SnakeAccess::Selected) => {
+                snake_ids.iter().all(|id| self.snake_ids.contains(id))
+            }
+        };
+        access_ok && permissions.is_subset(&self.permissions)
+    }
 }
 
 /// Result of creating a new token - includes the raw secret (only shown once)
@@ -22,6 +63,31 @@ pub struct NewApiToken {
     pub token: ApiToken,
     /// The raw secret token to give to the user. Only shown once!
     pub secret: String,
+}
+
+/// A token plus its scope, as returned by [`get_user_token`].
+pub struct TokenSummary {
+    pub token: ApiToken,
+    pub permissions: BTreeSet<Permission>,
+    /// Empty when access is `All`.
+    pub snake_ids: BTreeSet<Uuid>,
+}
+
+/// Decode stored permission names, skipping any this binary doesn't know.
+///
+/// Fails closed: during a rolling deploy that adds a permission, an older
+/// instance treats the new one as not held rather than failing the request.
+fn decode_permissions(token_id: Uuid, names: Vec<String>) -> BTreeSet<Permission> {
+    names
+        .into_iter()
+        .filter_map(|name| match name.parse() {
+            Ok(permission) => Some(permission),
+            Err(_) => {
+                tracing::warn!(%token_id, permission = %name, "ignoring unknown token permission");
+                None
+            }
+        })
+        .collect()
 }
 
 /// Generate a random 32-byte token and return it as a hex string (64 chars)
@@ -38,16 +104,17 @@ fn hash_token(secret: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
-/// Create a new API token for a user.
+/// Create a new API token for a user with the given scope.
 ///
-/// Also writes the token's scope: `all` snake access plus the default
-/// permission set every token holds today (the migration backfill's set:
-/// `admin` only for admin users, no `email.read`). Nothing enforces scopes
-/// yet; the next deploy does, and it must find these rows on every token.
+/// `snake_ids` must be empty when `snake_access` is `All`, and both lists must
+/// be de-duplicated — the handler layer guarantees both.
 pub async fn create_api_token(
     pool: &PgPool,
     user_id: Uuid,
     name: &str,
+    permissions: &[Permission],
+    snake_access: SnakeAccess,
+    snake_ids: &[Uuid],
 ) -> cja::Result<NewApiToken> {
     let secret = generate_token_secret();
     let token_hash = hash_token(&secret);
@@ -61,36 +128,51 @@ pub async fn create_api_token(
         ApiToken,
         r#"
         INSERT INTO api_tokens (user_id, token_hash, name, snake_access)
-        VALUES ($1, $2, $3, 'all')
-        RETURNING id, user_id, token_hash, name, last_used_at, created_at, revoked_at
+        VALUES ($1, $2, $3, $4)
+        RETURNING id, user_id, token_hash, name,
+            snake_access as "snake_access: SnakeAccess",
+            last_used_at, created_at, revoked_at
         "#,
         user_id,
         token_hash,
-        name
+        name,
+        snake_access as SnakeAccess
     )
     .fetch_one(&mut *tx)
     .await
     .wrap_err("Failed to create API token")?;
 
-    sqlx::query!(
-        r#"
-        INSERT INTO api_token_permissions (api_token_id, permission)
-        SELECT $1::uuid, p.permission
-        FROM (VALUES
-            ('profile.read'), ('snakes.read'), ('snakes.create'),
-            ('games.read'), ('games.create'), ('tokens.manage'),
-            ('snake.url.read'), ('snake.url.write'), ('snake.edit'),
-            ('snake.delete'), ('snake.compete')
-        ) AS p(permission)
-        UNION ALL
-        SELECT $1::uuid, 'admin' FROM users WHERE user_id = $2::uuid AND is_admin
-        "#,
-        token.id,
-        user_id
-    )
-    .execute(&mut *tx)
-    .await
-    .wrap_err("Failed to insert token permissions")?;
+    if !permissions.is_empty() {
+        let permission_names: Vec<String> =
+            permissions.iter().map(|p| p.as_str().to_string()).collect();
+        sqlx::query!(
+            r#"
+            INSERT INTO api_token_permissions (api_token_id, permission)
+            SELECT $1, p.permission
+            FROM UNNEST($2::text[]) AS p(permission)
+            "#,
+            token.id,
+            &permission_names
+        )
+        .execute(&mut *tx)
+        .await
+        .wrap_err("Failed to insert token permissions")?;
+    }
+
+    if snake_access == SnakeAccess::Selected && !snake_ids.is_empty() {
+        sqlx::query!(
+            r#"
+            INSERT INTO api_token_snakes (api_token_id, battlesnake_id)
+            SELECT $1, s.battlesnake_id
+            FROM UNNEST($2::uuid[]) AS s(battlesnake_id)
+            "#,
+            token.id,
+            snake_ids
+        )
+        .execute(&mut *tx)
+        .await
+        .wrap_err("Failed to insert token snake access")?;
+    }
 
     tx.commit()
         .await
@@ -99,57 +181,158 @@ pub async fn create_api_token(
     Ok(NewApiToken { token, secret })
 }
 
+/// Add a snake to a token's selected-access list (idempotent). Used when a
+/// `selected` token creates a snake: the new snake joins that token's list.
+pub async fn add_snake_to_token<'e, E>(
+    executor: E,
+    token_id: Uuid,
+    battlesnake_id: Uuid,
+) -> cja::Result<()>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    sqlx::query!(
+        r#"
+        INSERT INTO api_token_snakes (api_token_id, battlesnake_id)
+        VALUES ($1, $2)
+        ON CONFLICT DO NOTHING
+        "#,
+        token_id,
+        battlesnake_id
+    )
+    .execute(executor)
+    .await
+    .wrap_err("Failed to add snake to token access")?;
+    Ok(())
+}
+
 /// Get all active (non-revoked) tokens for a user
 pub async fn list_user_tokens(pool: &PgPool, user_id: Uuid) -> cja::Result<Vec<ApiToken>> {
-    let tokens: Vec<ApiToken> = sqlx::query_as(
+    sqlx::query_as!(
+        ApiToken,
         r#"
-        SELECT id, user_id, token_hash, name, last_used_at, created_at, revoked_at
+        SELECT id, user_id, token_hash, name,
+            snake_access AS "snake_access: SnakeAccess",
+            last_used_at, created_at, revoked_at
         FROM api_tokens
         WHERE user_id = $1 AND revoked_at IS NULL
         ORDER BY created_at DESC
         "#,
+        user_id
     )
-    .bind(user_id)
     .fetch_all(pool)
     .await
-    .wrap_err("Failed to list API tokens")?;
-
-    Ok(tokens)
+    .wrap_err("Failed to list API tokens")
 }
 
-/// Validate a raw token secret and return the associated user_id if valid (not revoked)
+/// Active (non-revoked) tokens for a user with their scope, newest first.
+/// `token_id` narrows the result to that one token.
+async fn load_token_summaries(
+    pool: &PgPool,
+    user_id: Uuid,
+    token_id: Option<Uuid>,
+) -> cja::Result<Vec<TokenSummary>> {
+    let rows = sqlx::query!(
+        r#"
+        SELECT t.id, t.user_id, t.token_hash, t.name,
+            t.snake_access AS "snake_access: SnakeAccess",
+            t.last_used_at, t.created_at, t.revoked_at,
+            ARRAY(SELECT p.permission FROM api_token_permissions p WHERE p.api_token_id = t.id) AS "permissions!: Vec<String>",
+            ARRAY(SELECT s.battlesnake_id FROM api_token_snakes s WHERE s.api_token_id = t.id) AS "snake_ids!: Vec<Uuid>"
+        FROM api_tokens t
+        WHERE t.user_id = $1 AND t.revoked_at IS NULL
+          AND ($2::uuid IS NULL OR t.id = $2)
+        ORDER BY t.created_at DESC
+        "#,
+        user_id,
+        token_id
+    )
+    .fetch_all(pool)
+    .await
+    .wrap_err("Failed to load API tokens")?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| TokenSummary {
+            permissions: decode_permissions(row.id, row.permissions),
+            snake_ids: row.snake_ids.into_iter().collect(),
+            token: ApiToken {
+                id: row.id,
+                user_id: row.user_id,
+                token_hash: row.token_hash,
+                name: row.name,
+                snake_access: row.snake_access,
+                last_used_at: row.last_used_at,
+                created_at: row.created_at,
+                revoked_at: row.revoked_at,
+            },
+        })
+        .collect())
+}
+
+/// Get one of the user's active tokens, with its scope. `None` when the token
+/// is unknown, revoked, or belongs to someone else.
+pub async fn get_user_token(
+    pool: &PgPool,
+    user_id: Uuid,
+    token_id: Uuid,
+) -> cja::Result<Option<TokenSummary>> {
+    Ok(load_token_summaries(pool, user_id, Some(token_id))
+        .await?
+        .into_iter()
+        .next())
+}
+
+/// Authenticate a raw token secret: stamps `last_used_at` and loads the
+/// token's full scope in one statement. Returns `None` for unknown/revoked
+/// tokens.
 ///
 /// This function hashes the token internally to prevent accidentally passing unhashed tokens.
-pub async fn validate_token(pool: &PgPool, token_secret: &str) -> cja::Result<Option<Uuid>> {
+pub async fn authenticate_token(
+    pool: &PgPool,
+    token_secret: &str,
+) -> cja::Result<Option<TokenAuth>> {
     let token_hash = hash_token(token_secret);
 
-    let result: Option<Uuid> = sqlx::query_scalar(
+    let row = sqlx::query!(
         r#"
-        UPDATE api_tokens
-        SET last_used_at = NOW()
-        WHERE token_hash = $1 AND revoked_at IS NULL
-        RETURNING user_id
+        WITH tok AS (
+            UPDATE api_tokens SET last_used_at = NOW()
+            WHERE token_hash = $1 AND revoked_at IS NULL
+            RETURNING id, user_id, snake_access
+        )
+        SELECT tok.id AS "token_id!: Uuid", tok.user_id AS "user_id!: Uuid",
+               tok.snake_access AS "snake_access!: SnakeAccess",
+               ARRAY(SELECT p.permission FROM api_token_permissions p WHERE p.api_token_id = tok.id) AS "permissions!: Vec<String>",
+               ARRAY(SELECT s.battlesnake_id FROM api_token_snakes s WHERE s.api_token_id = tok.id) AS "snake_ids!: Vec<Uuid>"
+        FROM tok
         "#,
+        token_hash
     )
-    .bind(token_hash)
     .fetch_optional(pool)
     .await
-    .wrap_err("Failed to validate API token")?;
+    .wrap_err("Failed to authenticate API token")?;
 
-    Ok(result)
+    Ok(row.map(|row| TokenAuth {
+        token_id: row.token_id,
+        user_id: row.user_id,
+        permissions: decode_permissions(row.token_id, row.permissions),
+        snake_access: row.snake_access,
+        snake_ids: row.snake_ids.into_iter().collect(),
+    }))
 }
 
 /// Revoke a token by ID (must belong to the user)
 pub async fn revoke_token(pool: &PgPool, token_id: Uuid, user_id: Uuid) -> cja::Result<bool> {
-    let result = sqlx::query(
+    let result = sqlx::query!(
         r#"
         UPDATE api_tokens
         SET revoked_at = NOW()
         WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL
         "#,
+        token_id,
+        user_id
     )
-    .bind(token_id)
-    .bind(user_id)
     .execute(pool)
     .await
     .wrap_err("Failed to revoke API token")?;
@@ -188,54 +371,172 @@ mod tests {
         assert_eq!(hash.len(), 64); // SHA-256 = 64 hex chars
     }
 
-    async fn scope_of(pool: &PgPool, token_id: Uuid) -> (String, Vec<String>) {
-        let access = sqlx::query_scalar!(
-            "SELECT snake_access FROM api_tokens WHERE id = $1",
-            token_id
-        )
-        .fetch_one(pool)
-        .await
-        .unwrap();
-        let permissions = sqlx::query_scalar!(
-            "SELECT permission FROM api_token_permissions WHERE api_token_id = $1 ORDER BY permission COLLATE \"C\"",
-            token_id
-        )
-        .fetch_all(pool)
-        .await
-        .unwrap();
-        (access, permissions)
+    fn scope(
+        permissions: &[Permission],
+        snake_access: SnakeAccess,
+        snake_ids: &[Uuid],
+    ) -> TokenAuth {
+        TokenAuth {
+            token_id: Uuid::new_v4(),
+            user_id: Uuid::new_v4(),
+            permissions: permissions.iter().copied().collect(),
+            snake_access,
+            snake_ids: snake_ids.iter().copied().collect(),
+        }
+    }
+
+    #[test]
+    fn covers_requires_permission_subset_and_no_wider_access() {
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let perms = |ps: &[Permission]| ps.iter().copied().collect::<BTreeSet<_>>();
+        let ids = |ids: &[Uuid]| ids.iter().copied().collect::<BTreeSet<_>>();
+
+        let all = scope(
+            &[Permission::SnakesRead, Permission::TokensManage],
+            SnakeAccess::All,
+            &[],
+        );
+        // Itself, and anything narrower.
+        assert!(all.covers(&all.permissions, SnakeAccess::All, &ids(&[])));
+        assert!(all.covers(&perms(&[]), SnakeAccess::Selected, &ids(&[a, b])));
+        // A permission it lacks.
+        assert!(!all.covers(
+            &perms(&[Permission::ProfileRead]),
+            SnakeAccess::All,
+            &ids(&[])
+        ));
+
+        let selected = scope(&[Permission::SnakesRead], SnakeAccess::Selected, &[a]);
+        assert!(selected.covers(
+            &perms(&[Permission::SnakesRead]),
+            SnakeAccess::Selected,
+            &ids(&[a])
+        ));
+        assert!(selected.covers(&perms(&[]), SnakeAccess::Selected, &ids(&[])));
+        // Wider selection, or `all`.
+        assert!(!selected.covers(&perms(&[]), SnakeAccess::Selected, &ids(&[a, b])));
+        assert!(!selected.covers(&perms(&[]), SnakeAccess::All, &ids(&[])));
+    }
+
+    #[test]
+    fn decode_permissions_skips_unknown_names() {
+        let decoded = decode_permissions(
+            Uuid::new_v4(),
+            vec![
+                "snakes.read".to_string(),
+                "from.the.future".to_string(),
+                "profile.read".to_string(),
+            ],
+        );
+        assert_eq!(
+            decoded,
+            [Permission::ProfileRead, Permission::SnakesRead]
+                .into_iter()
+                .collect::<BTreeSet<_>>()
+        );
     }
 
     #[sqlx::test(migrations = "../migrations")]
-    async fn new_tokens_get_the_default_scope(pool: PgPool) {
-        let regular = crate::routes::test_support::create_user(&pool, 9917101, false).await;
-        let admin = crate::routes::test_support::create_user(&pool, 9917102, true).await;
-        let defaults = [
-            "games.create",
-            "games.read",
-            "profile.read",
-            "snake.compete",
-            "snake.delete",
-            "snake.edit",
-            "snake.url.read",
-            "snake.url.write",
-            "snakes.create",
-            "snakes.read",
-            "tokens.manage",
-        ];
+    async fn authenticate_token_loads_scope(pool: sqlx::PgPool) {
+        let user_id: Uuid = sqlx::query_scalar!(
+            "INSERT INTO users (external_github_id, github_login, github_access_token)
+             VALUES (9917001, 'token-scope', '') RETURNING user_id"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
 
-        let token = create_api_token(&pool, regular, "regular").await.unwrap();
-        let (access, permissions) = scope_of(&pool, token.token.id).await;
-        assert_eq!(access, "all");
-        assert_eq!(permissions, defaults);
+        let snake_id: Uuid = sqlx::query_scalar!(
+            r#"INSERT INTO battlesnakes (user_id, name, url)
+               VALUES ($1, 'scope-snake', 'https://scope.example') RETURNING battlesnake_id"#,
+            user_id
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
 
-        // Admins also get `admin`; nobody gets `email.read` by default.
-        let token = create_api_token(&pool, admin, "admin").await.unwrap();
-        let (access, permissions) = scope_of(&pool, token.token.id).await;
-        assert_eq!(access, "all");
-        let mut expected: Vec<&str> = defaults.to_vec();
-        expected.push("admin");
-        expected.sort_unstable();
-        assert_eq!(permissions, expected);
+        let created = create_api_token(
+            &pool,
+            user_id,
+            "scoped",
+            &[Permission::ProfileRead, Permission::SnakesRead],
+            SnakeAccess::Selected,
+            &[snake_id],
+        )
+        .await
+        .unwrap();
+
+        let auth = authenticate_token(&pool, &created.secret)
+            .await
+            .unwrap()
+            .expect("fresh token authenticates");
+        assert_eq!(auth.token_id, created.token.id);
+        assert_eq!(auth.user_id, user_id);
+        assert_eq!(
+            auth.permissions,
+            [Permission::ProfileRead, Permission::SnakesRead]
+                .into_iter()
+                .collect::<BTreeSet<_>>()
+        );
+        assert_eq!(auth.snake_access, SnakeAccess::Selected);
+        assert!(auth.snake_ids.contains(&snake_id));
+
+        // Revoked tokens do not authenticate.
+        revoke_token(&pool, created.token.id, user_id)
+            .await
+            .unwrap();
+        assert!(
+            authenticate_token(&pool, &created.secret)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn add_snake_to_token_is_idempotent_and_scoped(pool: sqlx::PgPool) {
+        let user_id: Uuid = sqlx::query_scalar!(
+            "INSERT INTO users (external_github_id, github_login, github_access_token)
+             VALUES (9917002, 'token-add', '') RETURNING user_id"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let snake_ids: Vec<Uuid> = sqlx::query_scalar!(
+            r#"INSERT INTO battlesnakes (user_id, name, url)
+               VALUES ($1, 'a-snake', 'https://a.example'), ($1, 'b-snake', 'https://b.example')
+               RETURNING battlesnake_id"#,
+            user_id
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+
+        let created = create_api_token(
+            &pool,
+            user_id,
+            "empty-selection",
+            &[Permission::SnakesRead],
+            SnakeAccess::Selected,
+            &[],
+        )
+        .await
+        .unwrap();
+
+        // Join twice: one row, no error.
+        add_snake_to_token(&pool, created.token.id, snake_ids[0])
+            .await
+            .unwrap();
+        add_snake_to_token(&pool, created.token.id, snake_ids[0])
+            .await
+            .unwrap();
+
+        let auth = authenticate_token(&pool, &created.secret)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(auth.snake_ids.contains(&snake_ids[0]));
+        assert!(!auth.snake_ids.contains(&snake_ids[1]));
     }
 }

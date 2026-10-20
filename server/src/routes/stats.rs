@@ -311,6 +311,86 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "../migrations")]
+    async fn admin_api_user_two_step_rejection(db: sqlx::PgPool) {
+        let state = AppState::test_from_pool(db.clone());
+        let app = crate::routes::routes(state.clone())
+            .expect("asset router")
+            .layer(tower_cookies::CookieManagerLayer::new());
+
+        let admin_session = create_user_session(&db, 14623, true).await;
+        let admin_id = session_user_id(&db, admin_session).await;
+
+        // Token WITH admin permission: 200.
+        let with_admin = crate::models::api_token::create_api_token(
+            &db,
+            admin_id,
+            "stats-two-step",
+            crate::models::api_token::Permission::ALL.as_slice(),
+            crate::models::api_token::SnakeAccess::All,
+            &[],
+        )
+        .await
+        .unwrap();
+        let response = route_response(&app, "/api/stats", None, Some(&with_admin.secret)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Same token after the user loses is_admin: "Admin access required"
+        // (the use-time check).
+        sqlx::query!(
+            "UPDATE users SET is_admin = false WHERE user_id = $1",
+            admin_id
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        let response = route_response(&app, "/api/stats", None, Some(&with_admin.secret)).await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = String::from_utf8(
+            to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert_eq!(body, "Admin access required");
+
+        // An is_admin user's token WITHOUT the admin permission: the second
+        // step fires — "missing permission: admin".
+        sqlx::query!(
+            "UPDATE users SET is_admin = true WHERE user_id = $1",
+            admin_id
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        let without_admin: Vec<crate::models::api_token::Permission> =
+            crate::models::api_token::Permission::ALL
+                .into_iter()
+                .filter(|p| *p != crate::models::api_token::Permission::Admin)
+                .collect();
+        let scoped = crate::models::api_token::create_api_token(
+            &db,
+            admin_id,
+            "stats-two-step-no-admin",
+            &without_admin,
+            crate::models::api_token::SnakeAccess::All,
+            &[],
+        )
+        .await
+        .unwrap();
+        let response = route_response(&app, "/api/stats", None, Some(&scoped.secret)).await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = String::from_utf8(
+            to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert_eq!(body, "missing permission: admin");
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
     async fn admin_router_serves_html_json_and_reports_query_failure(db: sqlx::PgPool) {
         let state = AppState::test_from_pool(db.clone());
         let app = crate::routes::routes(state.clone())
@@ -332,10 +412,21 @@ mod tests {
             assert_eq!(stats.status(), StatusCode::FORBIDDEN);
         }
         let non_admin_id = session_user_id(&db, non_admin_session).await;
-        let non_admin_token =
-            crate::models::api_token::create_api_token(&db, non_admin_id, "stats-test")
-                .await
-                .unwrap();
+        let non_admin_permissions: Vec<crate::models::api_token::Permission> =
+            crate::models::api_token::Permission::ALL
+                .into_iter()
+                .filter(|p| *p != crate::models::api_token::Permission::Admin)
+                .collect();
+        let non_admin_token = crate::models::api_token::create_api_token(
+            &db,
+            non_admin_id,
+            "stats-test",
+            &non_admin_permissions,
+            crate::models::api_token::SnakeAccess::All,
+            &[],
+        )
+        .await
+        .unwrap();
         let stats = route_response(&app, "/api/stats", None, Some(&non_admin_token.secret)).await;
         let admin = route_response(
             &app,
@@ -386,9 +477,16 @@ mod tests {
         assert!(!html.contains("u1-secret"));
 
         let admin_id = session_user_id(&db, admin_session).await;
-        let admin_token = crate::models::api_token::create_api_token(&db, admin_id, "stats-test")
-            .await
-            .unwrap();
+        let admin_token = crate::models::api_token::create_api_token(
+            &db,
+            admin_id,
+            "stats-test",
+            crate::models::api_token::Permission::ALL.as_slice(),
+            crate::models::api_token::SnakeAccess::All,
+            &[],
+        )
+        .await
+        .unwrap();
         let json_response =
             route_response(&app, "/api/stats", None, Some(&admin_token.secret)).await;
         assert_eq!(json_response.status(), StatusCode::OK);
