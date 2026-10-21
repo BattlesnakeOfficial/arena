@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use cja::{
     server::run_server_until,
-    setup::{TracingConfig, setup_sentry},
+    setup::TracingConfig,
     tasks::{ShutdownBudget, Supervisor},
 };
 use color_eyre::eyre::{Context as _, eyre};
@@ -93,7 +93,6 @@ fn main() -> color_eyre::Result<()> {
     }
 
     // Initialize Sentry for error tracking
-    let _sentry_guard = setup_sentry();
 
     // One-shot subcommand: copy play's DB into the migration staging
     // tables, then exit (no server, no job workers).
