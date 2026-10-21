@@ -11,29 +11,12 @@ build = "build.rs"
 tokio = { version = "1.21", features = ["full"] }
 color-eyre = "0.6.2"
 
-opentelemetry = { version = "0.22.0" }
-opentelemetry_sdk = { version = "0.22.0", features = ["rt-tokio"] }
 tracing = "0.1.37"
-tracing-opentelemetry = "0.23.0"
 tracing-subscriber = { version = "0.3.16", features = ["env-filter"] }
 tracing-tree = "0.3.0"
 # Same version cja uses; needed directly to wire the Eyes layer into the
 # GCP logging path (cja's setup_tracing only wires it in the non-GCP path).
 eyes-subscriber = "0.8.3"
-opentelemetry-otlp = { version = "0.15.0", features = [
-  "http-proto",
-  "reqwest-rustls",
-  "reqwest-client",
-], default-features = false }
-sentry = { version = "0.32.2", default-features = false, features = [
-  "rustls",
-  "backtrace",
-  "contexts",
-  "panic",
-  "tower",
-  "reqwest",
-] }
-sentry-tower = { version = "0.32.2", features = ["http"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 maud = { version = "0.27.0", features = ["axum"] }
