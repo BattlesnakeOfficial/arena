@@ -97,6 +97,7 @@ pub fn routes(app_state: AppState) -> cja::Result<axum::Router> {
         .route("/snakes/{id}", get(api::snakes::get_snake))
         .route("/snakes/{id}", put(api::snakes::update_snake))
         .route("/snakes/{id}", delete(api::snakes::delete_snake))
+        .route("/snakes/{id}/hosting", put(api::snakes::mark_hosting))
         // Games API endpoints (list, create, details)
         .route("/games", post(api::games::create_game))
         .route("/games", get(api::games::list_games))

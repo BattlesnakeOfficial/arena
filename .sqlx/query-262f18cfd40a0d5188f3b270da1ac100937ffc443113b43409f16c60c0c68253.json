@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT session_id FROM sessions WHERE user_id = (SELECT user_id FROM users WHERE external_github_id = 9922013)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "session_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "262f18cfd40a0d5188f3b270da1ac100937ffc443113b43409f16c60c0c68253"
+}

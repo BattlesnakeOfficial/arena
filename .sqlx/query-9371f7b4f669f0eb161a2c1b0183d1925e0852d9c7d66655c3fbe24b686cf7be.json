@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE battlesnakes\n        SET hosted_by_oauth_client_id = $3\n        WHERE battlesnake_id = $1\n          AND user_id = $2\n          AND deleted_at IS NULL\n          AND url = $4\n          AND (hosted_by_oauth_client_id IS NULL OR hosted_by_oauth_client_id = $3)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "9371f7b4f669f0eb161a2c1b0183d1925e0852d9c7d66655c3fbe24b686cf7be"
+}

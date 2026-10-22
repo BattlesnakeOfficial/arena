@@ -28,6 +28,54 @@ The admin hands back two values, shown once:
 - `client_id` — public, identifies your application
 - `client_secret` — authenticate at the token endpoint; keep it server-side
 
+## Hosting providers
+
+A **hosting provider** is a privileged kind of client (`kind =
+hosting_provider`, set by an admin at creation — a standard client can
+never claim it). A partner that runs snake servers for players. Hosting
+clients carry three extra fields at creation:
+
+- **Onboarding URL** — an absolute `https://` URL; the create-snake
+  "Host with a partner" card sends players here.
+- **Description** — one short line shown on the card.
+- **Hosting domains** — the registered domains. A snake URL matches a
+  client when its URL's host **equals** a registered domain or is a
+  **subdomain** of one (`api.softmax.com` matches a `softmax.com`
+  registration). The match is label-boundary: `softmax.com.evil.io` and
+  `evilsoftmax.com` do NOT match `softmax.com`. Ports are ignored, hosts
+  are lowercased, and IDN hosts are punycoded before matching.
+
+Domains are **ASCII only** — international domains must be entered in
+punycode (`xn--…`) form; anything non-ASCII is rejected with the punycode
+form in the error. Trailing-dot forms are **not** normalized
+(`softmax.com.` does not match a `softmax.com` registration).
+
+Marking a snake hosted: `PUT /api/snakes/{id}/hosting` with the client's
+token (empty body, `204 No Content`). The token must hold `snake.url.write`
+for that snake, the client must be a hosting provider, and the snake's
+current URL must sit on one of the client's registered domains — else
+`400`. Another provider already hosting the snake, or the URL changing
+mid-request, is a `409` (retry is safe; marking is idempotent for the
+same client).
+
+The **"Hosted on X" badge** follows the URL: any URL change through any
+path (web edit, API, moderation) that moves the snake off the hosting
+client's domains clears the mark in the same database update — the badge
+can never disagree with the URL. The owner releases a snake by changing
+its URL; there is no "stop hosting" button.
+
+**Hosting fields are create-time only.** Changing a partner's domains,
+onboarding URL, or description means disabling the client and creating a
+new one — which kills every player's grant for it (disabled clients fail
+token authentication) and leaves existing marks pointing at the disabled
+client until each snake's URL changes. A small "edit hosting fields"
+admin form is a named follow-up, deliberately not built yet.
+
+Per-client game quotas are an **open question**: today the per-user
+game-creation rate limit applies to everyone equally. A per-client quota
+would plug into `game_creation_attempts` (add `oauth_client_id`, count per
+client) — deliberately not built.
+
 ## The authorization request
 
 Send the player's browser to:

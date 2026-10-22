@@ -19,6 +19,7 @@ use crate::{
     models::game_battlesnake,
     models::leaderboard,
     models::leaderboard_entry_health,
+    models::oauth,
     models::session,
     models::snake_latency,
     models::tag,
@@ -408,6 +409,17 @@ pub async fn list_battlesnakes(
         .await
         .wrap_err("Failed to get battlesnakes")?;
 
+    // Hosting badges for the whole list in one round trip.
+    let hosting = oauth::hosting_clients_for_snakes(
+        &state.db,
+        &battlesnakes
+            .iter()
+            .map(|snake| snake.battlesnake_id)
+            .collect::<Vec<_>>(),
+    )
+    .await
+    .wrap_err("Failed to get hosting clients for snakes")?;
+
     // Use flash from page_factory (already extracted and cleared from DB)
     let flash = page_factory.flash.clone();
 
@@ -444,6 +456,23 @@ pub async fn list_battlesnakes(
                                             span class="chip" style={"background:" (chip_color(&snake.color))} {}
                                             span class="snake-details" {
                                                 a class="name" href={"/battlesnakes/"(snake.battlesnake_id)"/profile"} { (snake.name) }
+                                                @if let Some(host) = hosting.get(&snake.battlesnake_id) {
+                                                    @if let Some(homepage) = oauth::renderable_https_url(&host.homepage_url) {
+                                                        a class="badge host-badge" href=(homepage) rel="noopener" {
+                                                            @if let Some(logo) = oauth::renderable_https_url(&host.logo_url) {
+                                                                img src=(logo) alt="";
+                                                            }
+                                                            "Hosted on " (host.name)
+                                                        }
+                                                    } @else {
+                                                        span class="badge host-badge" {
+                                                            @if let Some(logo) = oauth::renderable_https_url(&host.logo_url) {
+                                                                img src=(logo) alt="";
+                                                            }
+                                                            "Hosted on " (host.name)
+                                                        }
+                                                    }
+                                                }
                                                 a class="snake-url" href=(snake.url) target="_blank" rel="noopener" { (snake.url) }
                                             }
                                         }
@@ -478,6 +507,47 @@ pub async fn list_battlesnakes(
 }
 
 // Show the form to create a new battlesnake
+/// The "Host with a partner" section of /battlesnakes/new: one card per
+/// enabled hosting provider, above the unchanged self-host form. No JS,
+/// mobile-first (≥44px tap targets, 16px text, flexes to 375px) — inline
+/// styles following consent_screen's pattern in routes/oauth.rs. A card
+/// whose onboarding URL is not a renderable https URL is skipped
+/// (defense in depth against a stale or directly-inserted row).
+fn hosting_fork_section(providers: &[oauth::HostingProviderDisplay]) -> Markup {
+    html! {
+        p style="font-size: 16px; color: var(--muted); margin-top: 6px;" {
+            "Two ways to get a snake running — pick where it should live."
+        }
+        h2 style="margin-top: 28px;" { "Host with a partner" }
+        p style="font-size: 16px; color: var(--muted);" {
+            "Let a hosting partner run your snake for you — no server to manage."
+        }
+        div style="display: flex; flex-direction: column; gap: 12px; margin-top: 12px;" {
+            @for provider in providers {
+                @if let Some(onboarding) = oauth::renderable_https_url(&provider.onboarding_url) {
+                    a href=(onboarding) rel="noopener" target="_blank"
+                        style="display: flex; align-items: center; gap: 14px; min-height: 44px; padding: 12px 14px; border: 1px solid var(--border, #ddd); border-radius: 10px; text-decoration: none; color: inherit;" {
+                        @if let Some(logo) = oauth::renderable_https_url(&provider.logo_url) {
+                            img src=(logo) alt="" width="44" height="44"
+                                style="width: 44px; height: 44px; border-radius: 8px; object-fit: cover; flex: none;";
+                        }
+                        span style="display: flex; flex-direction: column; gap: 4px; min-width: 0;" {
+                            span style="font-size: 16px; font-weight: 600;" { (provider.name) }
+                            @if let Some(description) = provider.description.as_deref().filter(|d| !d.is_empty()) {
+                                span style="font-size: 14px; color: var(--muted); overflow-wrap: anywhere;" { (description) }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        h2 style="margin-top: 28px;" { "Host it yourself" }
+        p style="font-size: 16px; color: var(--muted);" {
+            "Run your snake on your own server — you keep full control."
+        }
+    }
+}
+
 pub async fn new_battlesnake(
     State(state): State<AppState>,
     CurrentUserWithSession { session, .. }: CurrentUserWithSession,
@@ -486,6 +556,10 @@ pub async fn new_battlesnake(
     let catalog = tag::get_tag_catalog(&state.db)
         .await
         .wrap_err("Failed to get tag catalog")?;
+
+    let providers = oauth::list_enabled_hosting_providers(&state.db)
+        .await
+        .wrap_err("Failed to get hosting providers")?;
 
     let form = match session::take_pending_form_data(&state.db, session.session_id)
         .await
@@ -514,6 +588,10 @@ pub async fn new_battlesnake(
                 div class="sub" { "Point Battlesnake at your snake server and pick who can play it." }
             }
 
+            // Zero providers: the page is exactly what it is today.
+            @if !providers.is_empty() {
+                (hosting_fork_section(&providers))
+            }
             (battlesnake_form("/battlesnakes", "Create Battlesnake", &form, &catalog))
         }),
         flash,
@@ -1092,6 +1170,9 @@ struct ProfileView<'a> {
     health_paused: &'a [leaderboard_entry_health::HealthPausedEntry],
     tags: &'a [tag::Tag],
     latency: &'a snake_latency::RecentLatency,
+    /// The hosting client whose mark this snake carries, for the
+    /// "Hosted on X" badge (public page — display projection only).
+    host: Option<oauth::HostingProviderDisplay>,
 }
 
 fn placement_badge(placement: i32) -> Markup {
@@ -1173,6 +1254,23 @@ fn render_battlesnake_profile(view: &ProfileView<'_>) -> Markup {
                             span class="badge" { "Private" }
                         }
                         span class="badge" { (snake.engine_region.label()) }
+                        @if let Some(host) = &view.host {
+                            @if let Some(homepage) = oauth::renderable_https_url(&host.homepage_url) {
+                                a class="badge host-badge" href=(homepage) rel="noopener" {
+                                    @if let Some(logo) = oauth::renderable_https_url(&host.logo_url) {
+                                        img src=(logo) alt="";
+                                    }
+                                    "Hosted on " (host.name)
+                                }
+                            } @else {
+                                span class="badge host-badge" {
+                                    @if let Some(logo) = oauth::renderable_https_url(&host.logo_url) {
+                                        img src=(logo) alt="";
+                                    }
+                                    "Hosted on " (host.name)
+                                }
+                            }
+                        }
                         span { "created " (snake.created_at.format("%b %-d, %Y")) }
                         span { "head " (display_head) }
                         span { "tail " (display_tail) }
@@ -1487,18 +1585,18 @@ pub async fn view_battlesnake_profile(
         .await
         .wrap_err("Failed to get health-paused entries")?;
 
-    // Curated language/platform tags for this snake
-    let snake_tags = tag::get_tags_for_battlesnake(&state.db, battlesnake_id)
-        .await
-        .wrap_err("Failed to get battlesnake tags")?;
-
-    let recent_latency = snake_latency::get_recent_latency_for_battlesnake(
-        &state.db,
-        battlesnake_id,
-        snake_latency::RECENT_GAMES_LIMIT,
+    // Curated language/platform tags, recent latency, and the hosting badge
+    // — three independent fetches, one round trip of waiting.
+    let (snake_tags, recent_latency, host) = tokio::try_join!(
+        tag::get_tags_for_battlesnake(&state.db, battlesnake_id),
+        snake_latency::get_recent_latency_for_battlesnake(
+            &state.db,
+            battlesnake_id,
+            snake_latency::RECENT_GAMES_LIMIT,
+        ),
+        oauth::hosting_client_for_snake(&state.db, battlesnake_id),
     )
-    .await
-    .wrap_err("Failed to get recent latency")?;
+    .wrap_err("Failed to load snake profile data")?;
 
     let (owner_login, owner_name) = owner.as_ref().map_or_else(
         || ("Unknown User".to_string(), "Unknown User".to_string()),
@@ -1536,6 +1634,7 @@ pub async fn view_battlesnake_profile(
         health_paused: &health_paused,
         tags: &snake_tags,
         latency: &recent_latency,
+        host,
     });
 
     // The page shell renders the flash; don't render it again in the body.
@@ -2624,5 +2723,276 @@ mod profile_page_tests {
         assert!(html.contains(&format!(r#"href="/games/{game_id}""#)));
         assert!(html.contains("1 of 3 moves timed out"));
         assert!(html.contains("p95 Latency"));
+    }
+}
+
+#[cfg(test)]
+mod hosting_route_tests {
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Method, Request, StatusCode, header},
+    };
+    use sqlx::PgPool;
+    use tower::ServiceExt as _;
+    use uuid::Uuid;
+
+    use crate::models::battlesnake::{self, MarkHostingOutcome};
+    use crate::state::AppState;
+
+    fn app(state: &AppState) -> axum::Router {
+        crate::routes::routes(state.clone())
+            .expect("asset router")
+            .layer(tower_cookies::CookieManagerLayer::new())
+    }
+
+    async fn send(
+        app: &axum::Router,
+        method: Method,
+        path: &str,
+        cookie: Option<&str>,
+        form: Option<String>,
+    ) -> (StatusCode, String) {
+        let mut builder = Request::builder().method(method).uri(path);
+        if let Some(cookie) = cookie {
+            builder = builder.header(header::COOKIE, cookie);
+        }
+        let body = match form {
+            Some(form) => {
+                builder = builder.header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
+                Body::from(form)
+            }
+            None => Body::empty(),
+        };
+        let response = app
+            .clone()
+            .oneshot(builder.body(body).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        (status, String::from_utf8_lossy(&body).into_owned())
+    }
+
+    async fn owner_with_snake(
+        pool: &PgPool,
+        github_id: i64,
+        name: &str,
+        url: &str,
+    ) -> (Uuid, Uuid) {
+        let user_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO users (external_github_id, github_login, github_access_token)
+             VALUES ($1, $2, '') RETURNING user_id",
+        )
+        .bind(github_id)
+        .bind(format!("hosting-owner-{github_id}"))
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        let snake_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO battlesnakes (user_id, name, url) VALUES ($1, $2, $3) RETURNING battlesnake_id",
+        )
+        .bind(user_id)
+        .bind(name)
+        .bind(url)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        (user_id, snake_id)
+    }
+
+    async fn hosted_mark(pool: &PgPool, snake_id: Uuid) -> Option<Uuid> {
+        sqlx::query_scalar!(
+            "SELECT hosted_by_oauth_client_id FROM battlesnakes WHERE battlesnake_id = $1",
+            snake_id
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn seed_hosting_provider(pool: &PgPool) -> Uuid {
+        let created = crate::models::oauth::create_client(
+            pool,
+            crate::models::oauth::CreateOauthClientInput {
+                name: "Softmax Host".to_string(),
+                logo_url: Some("https://softmax.example/logo.png".to_string()),
+                homepage_url: Some("https://softmax.example".to_string()),
+                onboarding_url: Some("https://soft.max/start".to_string()),
+                description: Some("We run your snake for you".to_string()),
+                kind: crate::models::oauth::OauthClientKind::HostingProvider,
+                redirect_uris: vec!["https://softmax.example/cb".to_string()],
+                hosting_domains: vec!["softmax.example".to_string()],
+            },
+        )
+        .await
+        .unwrap();
+        created.client.id
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn fork_hidden_with_zero_providers(pool: PgPool) {
+        let state = AppState::test_from_pool(pool.clone());
+        let app = app(&state);
+        let session = crate::routes::test_support::create_user_session(&pool, 9301, false).await;
+        let cookie = format!(
+            "{}={}",
+            crate::models::session::SESSION_COOKIE_NAME,
+            crate::routes::test_support::signed_session_cookie(&state, session)
+        );
+
+        let (status, body) =
+            send(&app, Method::GET, "/battlesnakes/new", Some(&cookie), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("Create Battlesnake"), "form still renders");
+        assert!(
+            !body.contains("Host with a partner"),
+            "zero providers must render today's page byte-for-byte in spirit"
+        );
+        assert!(!body.contains("Host it yourself"));
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn fork_shown_with_one_provider(pool: PgPool) {
+        let state = AppState::test_from_pool(pool.clone());
+        seed_hosting_provider(&pool).await;
+        let app = app(&state);
+        let session = crate::routes::test_support::create_user_session(&pool, 9302, false).await;
+        let cookie = format!(
+            "{}={}",
+            crate::models::session::SESSION_COOKIE_NAME,
+            crate::routes::test_support::signed_session_cookie(&state, session)
+        );
+
+        let (status, body) =
+            send(&app, Method::GET, "/battlesnakes/new", Some(&cookie), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("Host with a partner"), "{body}");
+        assert!(body.contains("Softmax Host"));
+        assert!(body.contains("We run your snake for you"));
+        assert!(body.contains(r#"href="https://soft.max/start""#));
+        // The unchanged self-host form is still there, under its own header.
+        assert!(body.contains("Host it yourself"));
+        assert!(body.contains("Create Battlesnake"));
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn badge_on_profile_and_owner_list(pool: PgPool) {
+        let client = seed_hosting_provider(&pool).await;
+        let session = crate::routes::test_support::create_user_session(&pool, 9303, false).await;
+        let user = crate::routes::test_support::session_user_id(&pool, session).await;
+        let snake: Uuid = sqlx::query_scalar(
+            "INSERT INTO battlesnakes (user_id, name, url) VALUES ($1, 'Badged Snake', 'https://softmax.example/s') RETURNING battlesnake_id",
+        )
+        .bind(user)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            battlesnake::mark_hosted_by(&pool, snake, user, client, "https://softmax.example/s")
+                .await
+                .unwrap(),
+            MarkHostingOutcome::Marked
+        );
+
+        let state = AppState::test_from_pool(pool.clone());
+        let app = app(&state);
+
+        // Profile badge is public: no cookie at all.
+        let (status, body) = send(
+            &app,
+            Method::GET,
+            &format!("/battlesnakes/{snake}/profile"),
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("Hosted on Softmax Host"), "{body}");
+        assert!(body.contains(r#"href="https://softmax.example""#));
+        assert!(body.contains(r#"src="https://softmax.example/logo.png""#));
+
+        // Owner's snake list carries the same badge (same user, session
+        // minted once above).
+        let cookie = format!(
+            "{}={}",
+            crate::models::session::SESSION_COOKIE_NAME,
+            crate::routes::test_support::signed_session_cookie(&state, session)
+        );
+        let (status, body) = send(&app, Method::GET, "/battlesnakes", Some(&cookie), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("Hosted on Softmax Host"), "{body}");
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn web_update_clears_and_keeps_hosting_mark(pool: PgPool) {
+        let client = seed_hosting_provider(&pool).await;
+        let state = AppState::test_from_pool(pool.clone());
+        let app = app(&state);
+        let session = crate::routes::test_support::create_user_session(&pool, 9304, false).await;
+        let user = crate::routes::test_support::session_user_id(&pool, session).await;
+        let cookie = format!(
+            "{}={}",
+            crate::models::session::SESSION_COOKIE_NAME,
+            crate::routes::test_support::signed_session_cookie(&state, session)
+        );
+        let snake: Uuid = sqlx::query_scalar(
+            "INSERT INTO battlesnakes (user_id, name, url) VALUES ($1, 'Web Clear Snake', 'https://softmax.example/s') RETURNING battlesnake_id",
+        )
+        .bind(user)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            battlesnake::mark_hosted_by(&pool, snake, user, client, "https://softmax.example/s")
+                .await
+                .unwrap(),
+            MarkHostingOutcome::Marked
+        );
+
+        // Off-domain URL via the web form: redirect + mark cleared.
+        let (status, _) = send(
+            &app,
+            Method::POST,
+            &format!("/battlesnakes/{snake}/update"),
+            Some(&cookie),
+            Some("name=Web+Clear+Snake&url=https://elsewhere.example/s&visibility=public&engine_region=us-west1".to_string()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+        assert_eq!(hosted_mark(&pool, snake).await, None);
+
+        // Move back on-domain via the web form, re-mark, then edit within
+        // the client's domains: mark kept.
+        let (status, _) = send(
+            &app,
+            Method::POST,
+            &format!("/battlesnakes/{snake}/update"),
+            Some(&cookie),
+            Some("name=Web+Clear+Snake&url=https://api.softmax.example/s&visibility=public&engine_region=us-west1".to_string()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+        assert_eq!(
+            battlesnake::mark_hosted_by(
+                &pool,
+                snake,
+                user,
+                client,
+                "https://api.softmax.example/s"
+            )
+            .await
+            .unwrap(),
+            MarkHostingOutcome::Marked
+        );
+        let (status, _) = send(
+            &app,
+            Method::POST,
+            &format!("/battlesnakes/{snake}/update"),
+            Some(&cookie),
+            Some("name=Web+Clear+Snake&url=https://deep.softmax.example/s&visibility=public&engine_region=us-west1".to_string()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+        assert_eq!(hosted_mark(&pool, snake).await, Some(client));
     }
 }

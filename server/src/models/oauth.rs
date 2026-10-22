@@ -10,7 +10,7 @@
 //! their join rows) are inert (hashed, expired, single-use) and are not
 //! pruned in v1; a periodic prune is accepted follow-up debt.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use base64::Engine as _;
 use color_eyre::eyre::Context as _;
@@ -64,6 +64,8 @@ pub struct OauthClient {
     pub name: String,
     pub logo_url: Option<String>,
     pub homepage_url: Option<String>,
+    pub onboarding_url: Option<String>,
+    pub description: Option<String>,
     pub kind: OauthClientKind,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub disabled_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -75,6 +77,7 @@ pub struct OauthClient {
 pub struct OauthClientWithUris {
     pub client: OauthClient,
     pub redirect_uris: Vec<String>,
+    pub hosting_domains: Vec<String>,
 }
 
 /// A freshly created client: `secret` is the raw secret, shown once.
@@ -87,8 +90,11 @@ pub struct CreateOauthClientInput {
     pub name: String,
     pub logo_url: Option<String>,
     pub homepage_url: Option<String>,
+    pub onboarding_url: Option<String>,
+    pub description: Option<String>,
     pub kind: OauthClientKind,
     pub redirect_uris: Vec<String>,
+    pub hosting_domains: Vec<String>,
 }
 
 /// Generate a random 32-byte secret, hex-encoded (64 chars) — same shape as
@@ -139,8 +145,8 @@ pub async fn create_client(
         OauthClient,
         r#"
         INSERT INTO oauth_clients
-            (public_client_id, secret_hash, name, logo_url, homepage_url, kind)
-        VALUES ($1, $2, $3, $4, $5, $6)
+            (public_client_id, secret_hash, name, logo_url, homepage_url, onboarding_url, description, kind)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         RETURNING
             id,
             public_client_id,
@@ -148,6 +154,8 @@ pub async fn create_client(
             name,
             logo_url,
             homepage_url,
+            onboarding_url,
+            description,
             kind as "kind: OauthClientKind",
             created_at,
             disabled_at
@@ -157,6 +165,8 @@ pub async fn create_client(
         input.name,
         input.logo_url,
         input.homepage_url,
+        input.onboarding_url,
+        input.description,
         input.kind as OauthClientKind
     )
     .fetch_one(&mut *tx)
@@ -178,6 +188,21 @@ pub async fn create_client(
         .wrap_err("Failed to insert OAuth client redirect URI")?;
     }
 
+    for domain in input.hosting_domains {
+        let domain = domain.trim();
+        if domain.is_empty() {
+            continue;
+        }
+        sqlx::query!(
+            "INSERT INTO oauth_client_hosting_domains (oauth_client_id, domain) VALUES ($1, $2)",
+            client.id,
+            domain
+        )
+        .execute(&mut *tx)
+        .await
+        .wrap_err("Failed to insert OAuth client hosting domain")?;
+    }
+
     tx.commit()
         .await
         .wrap_err("Failed to commit OAuth client creation transaction")?;
@@ -196,6 +221,8 @@ pub async fn list_clients(pool: &PgPool) -> cja::Result<Vec<OauthClientWithUris>
             c.name,
             c.logo_url,
             c.homepage_url,
+            c.onboarding_url,
+            c.description,
             c.kind as "kind: OauthClientKind",
             c.created_at,
             c.disabled_at,
@@ -203,7 +230,12 @@ pub async fn list_clients(pool: &PgPool) -> cja::Result<Vec<OauthClientWithUris>
                 SELECT uri FROM oauth_client_redirect_uris u
                 WHERE u.oauth_client_id = c.id
                 ORDER BY uri
-            ) AS "redirect_uris!: Vec<String>"
+            ) AS "redirect_uris!: Vec<String>",
+            ARRAY(
+                SELECT domain FROM oauth_client_hosting_domains d
+                WHERE d.oauth_client_id = c.id
+                ORDER BY domain
+            ) AS "hosting_domains!: Vec<String>"
         FROM oauth_clients c
         ORDER BY c.name ASC
         "#
@@ -222,11 +254,14 @@ pub async fn list_clients(pool: &PgPool) -> cja::Result<Vec<OauthClientWithUris>
                 name: row.name,
                 logo_url: row.logo_url,
                 homepage_url: row.homepage_url,
+                onboarding_url: row.onboarding_url,
+                description: row.description,
                 kind: row.kind,
                 created_at: row.created_at,
                 disabled_at: row.disabled_at,
             },
             redirect_uris: row.redirect_uris,
+            hosting_domains: row.hosting_domains,
         })
         .collect())
 }
@@ -246,6 +281,8 @@ pub async fn get_client_by_public_id(
             name,
             logo_url,
             homepage_url,
+            onboarding_url,
+            description,
             kind as "kind: OauthClientKind",
             created_at,
             disabled_at
@@ -257,6 +294,35 @@ pub async fn get_client_by_public_id(
     .fetch_optional(pool)
     .await
     .wrap_err("Failed to fetch OAuth client by public id")?;
+
+    Ok(client)
+}
+
+/// Look up a client by its DB primary key (marks, kind checks).
+pub async fn get_client_by_id(pool: &PgPool, id: Uuid) -> cja::Result<Option<OauthClient>> {
+    let client = sqlx::query_as!(
+        OauthClient,
+        r#"
+        SELECT
+            id,
+            public_client_id,
+            secret_hash,
+            name,
+            logo_url,
+            homepage_url,
+            onboarding_url,
+            description,
+            kind as "kind: OauthClientKind",
+            created_at,
+            disabled_at
+        FROM oauth_clients
+        WHERE id = $1
+        "#,
+        id
+    )
+    .fetch_optional(pool)
+    .await
+    .wrap_err("Failed to fetch OAuth client by id")?;
 
     Ok(client)
 }
@@ -275,6 +341,8 @@ pub async fn get_client_with_uris(
             c.name,
             c.logo_url,
             c.homepage_url,
+            c.onboarding_url,
+            c.description,
             c.kind as "kind: OauthClientKind",
             c.created_at,
             c.disabled_at,
@@ -282,7 +350,12 @@ pub async fn get_client_with_uris(
                 SELECT uri FROM oauth_client_redirect_uris u
                 WHERE u.oauth_client_id = c.id
                 ORDER BY uri
-            ) AS "redirect_uris!: Vec<String>"
+            ) AS "redirect_uris!: Vec<String>",
+            ARRAY(
+                SELECT domain FROM oauth_client_hosting_domains d
+                WHERE d.oauth_client_id = c.id
+                ORDER BY domain
+            ) AS "hosting_domains!: Vec<String>"
         FROM oauth_clients c
         WHERE c.id = $1
         "#,
@@ -300,11 +373,14 @@ pub async fn get_client_with_uris(
             name: row.name,
             logo_url: row.logo_url,
             homepage_url: row.homepage_url,
+            onboarding_url: row.onboarding_url,
+            description: row.description,
             kind: row.kind,
             created_at: row.created_at,
             disabled_at: row.disabled_at,
         },
         redirect_uris: row.redirect_uris,
+        hosting_domains: row.hosting_domains,
     }))
 }
 
@@ -379,6 +455,224 @@ pub fn renderable_https_url(value: &Option<String>) -> Option<&str> {
     let value = value.as_deref()?;
     let parsed = url::Url::parse(value).ok()?;
     (parsed.scheme() == "https").then_some(value)
+}
+
+/// Display-only projection of a hosting-provider client for page-render
+/// code (fork cards, badge). Deliberately excludes `secret_hash`,
+/// `public_client_id`, `kind`, and timestamps: these queries back public
+/// pages (the profile badge renders for anonymous visitors) and have no
+/// business loading admin/protocol columns. Admin code keeps using
+/// `OauthClient`.
+#[derive(Debug, FromRow)]
+pub struct HostingProviderDisplay {
+    pub id: Uuid,
+    pub name: String,
+    pub logo_url: Option<String>,
+    pub homepage_url: Option<String>,
+    pub onboarding_url: Option<String>,
+    pub description: Option<String>,
+}
+
+/// THE single host extractor for snake URLs (Decision: no second inline
+/// `Url::parse(..).host_str()` chain anywhere). Lowercased host of a URL
+/// (port-free; the url crate also converts IDN to punycode and preserves
+/// trailing dots — `softmax.com.` stays `softmax.com.`, which then does
+/// NOT match a registration of `softmax.com`), or `None` when
+/// unparseable. Called by `client_domain_covers_url` AND
+/// `models::battlesnake::update_battlesnake`.
+pub fn url_host(url: &str) -> Option<String> {
+    let parsed = url::Url::parse(url).ok()?;
+    let host = parsed.host_str()?;
+    (!host.is_empty()).then(|| host.to_string())
+}
+
+/// A snake URL matches a registered hosting domain when the URL's host
+/// equals the domain or is a subdomain of it (label-boundary match).
+/// `softmax.com.evil.io` and `evilsoftmax.com` do NOT match `softmax.com`.
+pub fn host_matches_domain(host: &str, domain: &str) -> bool {
+    host == domain
+        || host
+            .strip_suffix(domain)
+            .is_some_and(|prefix| prefix.ends_with('.'))
+}
+
+/// Validate and normalize an admin-entered hosting domain: trimmed;
+/// REJECTS non-ASCII input with an error naming the punycode form
+/// ("domains must be ASCII — enter the punycode (xn--) form, e.g.
+/// xn--…"); then lowercased, >=2 DNS labels, each 1-63 chars of
+/// [a-z0-9-] not starting or ending with '-'. Mirrors the table's CHECK
+/// constraint (which additionally rejects uppercase).
+pub fn validate_hosting_domain(domain: &str) -> Result<String, String> {
+    let domain = domain.trim();
+    if !domain.is_ascii() {
+        let punycode = idna_punycode_hint(domain);
+        return Err(format!(
+            "hosting domain {domain:?} must be ASCII — enter the punycode (xn--) form, e.g. {punycode}"
+        ));
+    }
+    let domain = domain.to_ascii_lowercase();
+    let labels: Vec<&str> = domain.split('.').collect();
+    if labels.len() < 2 {
+        return Err(format!(
+            "hosting domain {domain:?} must have at least two dot-separated labels (e.g. softmax.com)"
+        ));
+    }
+    for label in labels {
+        let valid = (1..=63).contains(&label.len())
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+        if !valid {
+            return Err(format!(
+                "hosting domain {domain:?} is not a valid DNS domain (lowercase letters, digits and hyphens per label)"
+            ));
+        }
+    }
+    Ok(domain)
+}
+
+/// The punycode form of a non-ASCII host, for the admin error message —
+/// exactly what the url crate will turn the host into at match time, so
+/// the admin sees the string that would actually have to be registered.
+fn idna_punycode_hint(domain: &str) -> String {
+    url::Url::parse(&format!("https://{domain}"))
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_string))
+        .unwrap_or_else(|| "xn--…".to_string())
+}
+
+/// Does `url`'s host sit on one of this client's registered hosting
+/// domains (equal or subdomain)? Used by the mark-hosting route. Fetches
+/// the client's domains and matches in Rust via `url_host` +
+/// `host_matches_domain`.
+pub async fn client_domain_covers_url(
+    pool: &PgPool,
+    client_id: Uuid,
+    url: &str,
+) -> cja::Result<bool> {
+    let Some(host) = url_host(url) else {
+        return Ok(false);
+    };
+    let domains = sqlx::query_scalar!(
+        "SELECT domain FROM oauth_client_hosting_domains WHERE oauth_client_id = $1",
+        client_id
+    )
+    .fetch_all(pool)
+    .await
+    .wrap_err("Failed to fetch OAuth client hosting domains")?;
+    Ok(domains
+        .iter()
+        .any(|domain| host_matches_domain(&host, domain)))
+}
+
+/// Enabled hosting_provider clients, ordered by name — the create-snake
+/// fork cards. Display projection; the fork hides disabled providers.
+pub async fn list_enabled_hosting_providers(
+    pool: &PgPool,
+) -> cja::Result<Vec<HostingProviderDisplay>> {
+    let providers = sqlx::query_as!(
+        HostingProviderDisplay,
+        r#"
+        SELECT id, name, logo_url, homepage_url, onboarding_url, description
+        FROM oauth_clients
+        WHERE disabled_at IS NULL AND kind = 'hosting_provider'
+        ORDER BY name ASC
+        "#
+    )
+    .fetch_all(pool)
+    .await
+    .wrap_err("Failed to list enabled hosting providers")?;
+    Ok(providers)
+}
+
+/// The client whose mark this snake carries (badge on the profile page).
+/// Display projection. No disabled filter: the mark is truthful while
+/// the URL is on-domain. No kind filter: the mark column is only ever
+/// set through the kind-checked mark endpoint, and kind never changes
+/// after creation.
+pub async fn hosting_client_for_snake(
+    pool: &PgPool,
+    snake_id: Uuid,
+) -> cja::Result<Option<HostingProviderDisplay>> {
+    let client = sqlx::query_as!(
+        HostingProviderDisplay,
+        r#"
+        SELECT c.id, c.name, c.logo_url, c.homepage_url, c.onboarding_url, c.description
+        FROM oauth_clients c
+        JOIN battlesnakes b ON b.hosted_by_oauth_client_id = c.id
+        WHERE b.battlesnake_id = $1 AND b.deleted_at IS NULL
+        "#,
+        snake_id
+    )
+    .fetch_optional(pool)
+    .await
+    .wrap_err("Failed to fetch snake's hosting client")?;
+    Ok(client)
+}
+
+/// Per-snake hosting client for a batch (owner's snake list badge) — one
+/// round trip, returns a map keyed by battlesnake_id. Display projection;
+/// unmarked and soft-deleted snakes are simply absent.
+pub async fn hosting_clients_for_snakes(
+    pool: &PgPool,
+    snake_ids: &[Uuid],
+) -> cja::Result<HashMap<Uuid, HostingProviderDisplay>> {
+    /// Row of the single join query: the snake id plus the client's
+    /// display columns (one struct because `query_as!` cannot return two
+    /// values per row).
+    #[derive(FromRow)]
+    struct HostedRow {
+        battlesnake_id: Uuid,
+        id: Uuid,
+        name: String,
+        logo_url: Option<String>,
+        homepage_url: Option<String>,
+        onboarding_url: Option<String>,
+        description: Option<String>,
+    }
+
+    let rows = sqlx::query_as!(
+        HostedRow,
+        r#"
+        SELECT b.battlesnake_id, c.id, c.name, c.logo_url,
+               c.homepage_url, c.onboarding_url, c.description
+        FROM oauth_clients c
+        JOIN battlesnakes b ON b.hosted_by_oauth_client_id = c.id
+        WHERE b.battlesnake_id = ANY($1) AND b.deleted_at IS NULL
+        "#,
+        snake_ids
+    )
+    .fetch_all(pool)
+    .await
+    .wrap_err("Failed to fetch hosting clients for snakes")?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            let HostedRow {
+                battlesnake_id,
+                id,
+                name,
+                logo_url,
+                homepage_url,
+                onboarding_url,
+                description,
+            } = row;
+            (
+                battlesnake_id,
+                HostingProviderDisplay {
+                    id,
+                    name,
+                    logo_url,
+                    homepage_url,
+                    onboarding_url,
+                    description,
+                },
+            )
+        })
+        .collect())
 }
 
 /// A player's standing consent to one client, as shown on the "Authorized
@@ -1088,5 +1382,177 @@ mod tests {
         let public = generate_public_client_id();
         assert_eq!(public.len(), 32);
         assert_ne!(generate_public_client_id(), public);
+    }
+
+    /// The shared vector table for host extraction and domain matching,
+    /// pinned to `url` 2.5.8 behavior: exact host strings, so a url-crate
+    /// upgrade that changes lowercasing, port-stripping, punycoding, or
+    /// trailing-dot preservation cannot slip through silently.
+    #[test]
+    fn url_host_extracts_exact_hosts() {
+        let cases = [
+            ("https://softmax.com/s", Some("softmax.com")),
+            ("https://api.softmax.com/s", Some("api.softmax.com")),
+            // userinfo is not the host
+            ("https://user@api.softmax.com/s", Some("api.softmax.com")),
+            // host_str() drops the port
+            ("https://api.softmax.com:8443/s", Some("api.softmax.com")),
+            // the crate lowercases hosts
+            ("https://API.SoftMax.com/s", Some("api.softmax.com")),
+            // the real host is evil.io
+            ("https://softmax.com@evil.io/s", Some("evil.io")),
+            // trailing dot, deliberately unnormalized
+            ("https://softmax.com./s", Some("softmax.com.")),
+            // IDN → punycode
+            ("https://softm\u{0430}x.com/s", Some("xn--softmx-7nf.com")),
+            ("https://softmax.com.evil.io/s", Some("softmax.com.evil.io")),
+            ("https://evilsoftmax.com/s", Some("evilsoftmax.com")),
+            ("https://notsoftmax.com/s", Some("notsoftmax.com")),
+            // IP literal
+            ("https://1.2.3.4/s", Some("1.2.3.4")),
+            // fails safe
+            ("not a url", None),
+        ];
+        for (url, expected) in cases {
+            assert_eq!(url_host(url).as_deref(), expected, "{url}");
+        }
+    }
+
+    #[test]
+    fn host_matches_domain_is_label_boundary() {
+        let softmax = "softmax.com";
+        for host in ["softmax.com", "api.softmax.com", "deep.sub.softmax.com"] {
+            assert!(host_matches_domain(host, softmax), "{host} must match");
+        }
+        for host in [
+            "softmax.com.evil.io",
+            "evilsoftmax.com",
+            "notsoftmax.com",
+            "softmax.com.",
+            "xn--softmx-7nf.com",
+            "evil.io",
+            "1.2.3.4",
+        ] {
+            assert!(!host_matches_domain(host, softmax), "{host} must NOT match");
+        }
+        // A host never matches the empty domain or a domain it merely ends with.
+        assert!(!host_matches_domain("softmax.com", ""));
+        assert!(!host_matches_domain("xsoftmax.com", "oftmax.com"));
+    }
+
+    #[test]
+    fn validate_hosting_domain_normalizes_and_rejects() {
+        // Case-fold + trim
+        assert_eq!(
+            validate_hosting_domain(" SoftMax.COM ").unwrap(),
+            "softmax.com"
+        );
+        assert_eq!(
+            validate_hosting_domain("api.softmax.com").unwrap(),
+            "api.softmax.com"
+        );
+
+        // Shape rejections
+        for bad in [
+            "-bad.com",
+            "bad-.com",
+            "nodot",
+            "a..b",
+            "softmax.com.",
+            "soft max.com",
+            "soft_max.com",
+        ] {
+            assert!(
+                validate_hosting_domain(bad).is_err(),
+                "{bad} must be rejected"
+            );
+        }
+        // A single label longer than 63 chars (a domain whose only labels are
+        // one 64-char blob and a TLD)
+        let too_long = format!("{}.com", "a".repeat(64));
+        assert!(validate_hosting_domain(&too_long).is_err());
+
+        // Non-ASCII is rejected with the punycode hint (Cyrillic а).
+        let err = validate_hosting_domain("softm\u{0430}x.com").unwrap_err();
+        assert!(err.contains("ASCII"), "{err}");
+        assert!(err.contains("xn--softmx-7nf.com"), "{err}");
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn create_client_domains_are_transactional(pool: sqlx::PgPool) {
+        // Force the hosting-domain insert to fail: the client row must not
+        // survive.
+        sqlx::query(
+            "CREATE OR REPLACE FUNCTION raise_domain_boom() RETURNS trigger AS $fn$ BEGIN RAISE EXCEPTION 'boom'; END $fn$ LANGUAGE plpgsql",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TRIGGER hosting_domain_boom BEFORE INSERT ON oauth_client_hosting_domains
+             FOR EACH ROW EXECUTE FUNCTION raise_domain_boom()",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let result = create_client(
+            &pool,
+            CreateOauthClientInput {
+                name: "Boom Host".to_string(),
+                logo_url: None,
+                homepage_url: None,
+                onboarding_url: Some("https://boom.example/start".to_string()),
+                description: None,
+                kind: OauthClientKind::HostingProvider,
+                redirect_uris: vec!["https://boom.example/cb".to_string()],
+                hosting_domains: vec!["boom.example".to_string()],
+            },
+        )
+        .await;
+        assert!(result.is_err(), "create must fail while the trigger stands");
+        let count: i64 = sqlx::query_scalar!(
+            r#"SELECT COUNT(*) AS "count!: i64" FROM oauth_clients WHERE name = 'Boom Host'"#
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 0, "no client row may survive a failed domain insert");
+
+        // Drop the trigger and retry: success, domains stored.
+        sqlx::query("DROP TRIGGER hosting_domain_boom ON oauth_client_hosting_domains")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let created = create_client(
+            &pool,
+            CreateOauthClientInput {
+                name: "Boom Host".to_string(),
+                logo_url: None,
+                homepage_url: None,
+                onboarding_url: Some("https://boom.example/start".to_string()),
+                description: Some("We boom politely".to_string()),
+                kind: OauthClientKind::HostingProvider,
+                redirect_uris: vec!["https://boom.example/cb".to_string()],
+                hosting_domains: vec!["boom.example".to_string(), "alt.boom.example".to_string()],
+            },
+        )
+        .await
+        .unwrap();
+        let with_uris = get_client_with_uris(&pool, created.client.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            with_uris.hosting_domains,
+            vec!["alt.boom.example".to_string(), "boom.example".to_string()]
+        );
+        assert_eq!(
+            with_uris.client.onboarding_url.as_deref(),
+            Some("https://boom.example/start")
+        );
+        assert_eq!(
+            with_uris.client.description.as_deref(),
+            Some("We boom politely")
+        );
     }
 }

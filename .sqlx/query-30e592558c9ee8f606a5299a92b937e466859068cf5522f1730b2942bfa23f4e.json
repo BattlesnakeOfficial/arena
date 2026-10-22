@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT\n            c.id,\n            c.public_client_id,\n            c.secret_hash,\n            c.name,\n            c.logo_url,\n            c.homepage_url,\n            c.kind as \"kind: OauthClientKind\",\n            c.created_at,\n            c.disabled_at,\n            ARRAY(\n                SELECT uri FROM oauth_client_redirect_uris u\n                WHERE u.oauth_client_id = c.id\n                ORDER BY uri\n            ) AS \"redirect_uris!: Vec<String>\"\n        FROM oauth_clients c\n        WHERE c.id = $1\n        ",
+  "query": "\n        SELECT\n            id,\n            public_client_id,\n            secret_hash,\n            name,\n            logo_url,\n            homepage_url,\n            onboarding_url,\n            description,\n            kind as \"kind: OauthClientKind\",\n            created_at,\n            disabled_at\n        FROM oauth_clients\n        WHERE public_client_id = $1\n        ",
   "describe": {
     "columns": [
       {
@@ -35,28 +35,33 @@
       },
       {
         "ordinal": 6,
-        "name": "kind: OauthClientKind",
+        "name": "onboarding_url",
         "type_info": "Text"
       },
       {
         "ordinal": 7,
+        "name": "description",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "kind: OauthClientKind",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
         "name": "created_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 8,
+        "ordinal": 10,
         "name": "disabled_at",
         "type_info": "Timestamptz"
-      },
-      {
-        "ordinal": 9,
-        "name": "redirect_uris!: Vec<String>",
-        "type_info": "TextArray"
       }
     ],
     "parameters": {
       "Left": [
-        "Uuid"
+        "Text"
       ]
     },
     "nullable": [
@@ -66,11 +71,12 @@
       false,
       true,
       true,
-      false,
-      false,
       true,
-      null
+      true,
+      false,
+      false,
+      true
     ]
   },
-  "hash": "eec99aa980f849a13dfde6b182710b6efb279098708ac42042160728eabcc68a"
+  "hash": "30e592558c9ee8f606a5299a92b937e466859068cf5522f1730b2942bfa23f4e"
 }

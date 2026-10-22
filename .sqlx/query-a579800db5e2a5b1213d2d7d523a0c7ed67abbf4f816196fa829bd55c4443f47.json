@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT\n            id,\n            public_client_id,\n            secret_hash,\n            name,\n            logo_url,\n            homepage_url,\n            kind as \"kind: OauthClientKind\",\n            created_at,\n            disabled_at\n        FROM oauth_clients\n        WHERE public_client_id = $1\n        ",
+  "query": "\n        INSERT INTO oauth_clients\n            (public_client_id, secret_hash, name, logo_url, homepage_url, onboarding_url, description, kind)\n        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)\n        RETURNING\n            id,\n            public_client_id,\n            secret_hash,\n            name,\n            logo_url,\n            homepage_url,\n            onboarding_url,\n            description,\n            kind as \"kind: OauthClientKind\",\n            created_at,\n            disabled_at\n        ",
   "describe": {
     "columns": [
       {
@@ -35,22 +35,39 @@
       },
       {
         "ordinal": 6,
-        "name": "kind: OauthClientKind",
+        "name": "onboarding_url",
         "type_info": "Text"
       },
       {
         "ordinal": 7,
+        "name": "description",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "kind: OauthClientKind",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
         "name": "created_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 8,
+        "ordinal": 10,
         "name": "disabled_at",
         "type_info": "Timestamptz"
       }
     ],
     "parameters": {
       "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
         "Text"
       ]
     },
@@ -61,10 +78,12 @@
       false,
       true,
       true,
+      true,
+      true,
       false,
       false,
       true
     ]
   },
-  "hash": "6211b5f1984c3be801320671dfb378c5e941c73931164ce688e61201ddeaf5df"
+  "hash": "a579800db5e2a5b1213d2d7d523a0c7ed67abbf4f816196fa829bd55c4443f47"
 }

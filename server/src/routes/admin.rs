@@ -1032,6 +1032,13 @@ pub struct CreateOauthClientForm {
     pub logo_url: Option<String>,
     pub homepage_url: Option<String>,
     pub redirect_uris: String,
+    pub onboarding_url: Option<String>,
+    pub description: Option<String>,
+    /// One hosting domain per line (hosting providers only). `serde(default)`
+    /// so existing standard-kind posts without the field still deserialize —
+    /// a missing required field would 422 before handler validation runs.
+    #[serde(default)]
+    pub hosting_domains: String,
 }
 
 /// A client's one-time credential reveal (create/rotate response only,
@@ -1135,6 +1142,21 @@ async fn render_oauth_clients_page(
                     textarea id="oc-uris" name="redirect_uris" rows="3" placeholder="https://app.example/oauth/callback" {}
                     p class="help" { "One per line. Registered URIs match exactly." }
                 }
+                div class="field" {
+                    label for="oc-onboarding" { "Onboarding URL" }
+                    input id="oc-onboarding" type="url" name="onboarding_url" placeholder="https://…/start";
+                    p class="help" { "Where the create-snake “Host with a partner” flow sends players. Hosting providers only." }
+                }
+                div class="field" {
+                    label for="oc-desc" { "Description" }
+                    textarea id="oc-desc" name="description" rows="2" placeholder="Let us run your snake for you." {}
+                    p class="help" { "Short line shown on the create-snake fork. Hosting providers only." }
+                }
+                div class="field" {
+                    label for="oc-domains" { "Hosting domains" }
+                    textarea id="oc-domains" name="hosting_domains" rows="2" placeholder="softmax.com" {}
+                    p class="help" { "One per line, ASCII only (use the punycode xn-- form for international domains). A snake URL matches when its host equals a domain or is a subdomain of one. Hosting providers only; at least one required." }
+                }
                 button type="submit" class="btn solid" { "Create OAuth client" }
             }
         }
@@ -1175,6 +1197,31 @@ async fn render_oauth_clients_page(
                             dd {
                                 @for uri in &entry.redirect_uris {
                                     code { (uri) } br;
+                                }
+                            }
+                        }
+                        @if client.kind == crate::models::oauth::OauthClientKind::HostingProvider {
+                            @if let Some(onboarding) = client.onboarding_url.as_deref().filter(|u| !u.is_empty()) {
+                                div {
+                                    dt { "Onboarding URL" }
+                                    dd { code { (onboarding) } }
+                                }
+                            }
+                            @if let Some(description) = client.description.as_deref().filter(|d| !d.is_empty()) {
+                                div {
+                                    dt { "Description" }
+                                    dd { (description) }
+                                }
+                            }
+                            div {
+                                dt { "Hosting domains" }
+                                dd {
+                                    @for domain in &entry.hosting_domains {
+                                        code { (domain) } br;
+                                    }
+                                    @if entry.hosting_domains.is_empty() {
+                                        em { "none" }
+                                    }
                                 }
                             }
                         }
@@ -1268,6 +1315,74 @@ pub async fn create_oauth_client(
         }
     }
 
+    // Hosting-provider fields (create-time only — see docs/oauth.md for the
+    // recreate-to-change cost). Standard clients ignore all three.
+    let mut onboarding_url = None;
+    let mut description = None;
+    let mut hosting_domains: Vec<String> = Vec::new();
+    if kind == crate::models::oauth::OauthClientKind::HostingProvider {
+        let submitted = form
+            .onboarding_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|u| !u.is_empty());
+        match submitted {
+            Some(url) if valid_client_url(url) => onboarding_url = Some(url.to_string()),
+            Some(_) => {
+                flasher
+                    .error(
+                        "Hosting providers need an onboarding URL that is an absolute https URL.",
+                    )
+                    .await
+                    .wrap_err("Failed to flash")?;
+                return Ok(Redirect::to("/admin/oauth-clients").into_response());
+            }
+            None => {
+                flasher
+                    .error("Hosting providers need an onboarding URL (an absolute https URL).")
+                    .await
+                    .wrap_err("Failed to flash")?;
+                return Ok(Redirect::to("/admin/oauth-clients").into_response());
+            }
+        }
+        if let Some(desc) = form
+            .description
+            .as_deref()
+            .map(str::trim)
+            .filter(|d| !d.is_empty())
+        {
+            if desc.chars().count() > 200 {
+                flasher
+                    .error("Description must be 200 characters or fewer.")
+                    .await
+                    .wrap_err("Failed to flash")?;
+                return Ok(Redirect::to("/admin/oauth-clients").into_response());
+            }
+            description = Some(desc.to_string());
+        }
+        // One domain per line; blanks skipped, duplicates collapsed (a
+        // duplicate would hit the composite PK and 500).
+        for line in form.hosting_domains.lines().map(str::trim) {
+            if line.is_empty() || hosting_domains.iter().any(|d| d == line) {
+                continue;
+            }
+            match crate::models::oauth::validate_hosting_domain(line) {
+                Ok(domain) => hosting_domains.push(domain),
+                Err(e) => {
+                    flasher.error(e).await.wrap_err("Failed to flash")?;
+                    return Ok(Redirect::to("/admin/oauth-clients").into_response());
+                }
+            }
+        }
+        if hosting_domains.is_empty() {
+            flasher
+                .error("Hosting providers need at least one registered hosting domain (e.g. softmax.com, one per line).")
+                .await
+                .wrap_err("Failed to flash")?;
+            return Ok(Redirect::to("/admin/oauth-clients").into_response());
+        }
+    }
+
     let created = crate::models::oauth::create_client(
         &state.db,
         crate::models::oauth::CreateOauthClientInput {
@@ -1280,8 +1395,11 @@ pub async fn create_oauth_client(
                 .homepage_url
                 .map(|u| u.trim().to_string())
                 .filter(|u| !u.is_empty()),
+            onboarding_url,
+            description,
             kind,
             redirect_uris,
+            hosting_domains,
         },
     )
     .await?;

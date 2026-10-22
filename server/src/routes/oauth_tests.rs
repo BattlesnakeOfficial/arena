@@ -30,8 +30,11 @@ async fn make_client(db: &PgPool, name: &str, uris: &[&str]) -> oauth::NewOauthC
             name: name.to_string(),
             logo_url: Some("https://client.example/logo.png".to_string()),
             homepage_url: Some("https://client.example".to_string()),
+            onboarding_url: None,
+            description: None,
             kind: oauth::OauthClientKind::Standard,
             redirect_uris: uris.iter().map(|u| u.to_string()).collect(),
+            hosting_domains: vec![],
         },
     )
     .await
@@ -364,6 +367,15 @@ impl Fixture {
             .unwrap();
         response.status()
     }
+}
+
+/// Owned-string form encoder for posts built from dynamic values.
+fn form_encode_owned(fields: Vec<(String, String)>) -> String {
+    let borrowed: Vec<(&str, &str)> = fields
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    form_encode(&borrowed)
 }
 
 fn form_encode(fields: &[(&str, &str)]) -> String {
@@ -2717,6 +2729,9 @@ async fn oauth_client_admin_lifecycle(pool: PgPool) {
                         "redirect_uris",
                         "https://made.example/cb\nhttps://made.example/cb2\n\n",
                     ),
+                    ("onboarding_url", "https://made.example/start"),
+                    ("description", "We run your snake"),
+                    ("hosting_domains", "made.com\nsub.made.com"),
                 ])))
                 .unwrap(),
         )
@@ -2760,6 +2775,23 @@ async fn oauth_client_admin_lifecycle(pool: PgPool) {
             "https://made.example/cb".to_string(),
             "https://made.example/cb2".to_string()
         ]
+    );
+    let stored = oauth::get_client_with_uris(&pool, created.0)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        stored.hosting_domains,
+        vec!["made.com".to_string(), "sub.made.com".to_string()],
+        "hosting domains are stored and ordered"
+    );
+    assert_eq!(
+        stored.client.onboarding_url.as_deref(),
+        Some("https://made.example/start")
+    );
+    assert_eq!(
+        stored.client.description.as_deref(),
+        Some("We run your snake")
     );
 
     // Rotate: the old secret stops working, the new one works.
@@ -2956,6 +2988,235 @@ async fn admin_create_validates_redirect_uris(pool: PgPool) {
         vec!["https://dup.example/cb".to_string()],
         "duplicate lines must collapse"
     );
+}
+
+#[sqlx::test(migrations = "../migrations")]
+async fn admin_hosting_create_requires_and_validates_domains(pool: PgPool) {
+    let fx = Fixture::new(&pool).await;
+    let admin_session = create_user_session(&pool, 9922013, true).await;
+    let admin_cookie = signed_session_cookie(&fx.state, admin_session);
+    let cookie = format!(
+        "{}={admin_cookie}",
+        crate::models::session::SESSION_COOKIE_NAME
+    );
+
+    let app = fx.app.clone();
+    let post = |fields: Vec<(String, String)>| {
+        let app = app.clone();
+        let cookie = cookie.clone();
+        async move {
+            app.oneshot(
+                Request::post("/admin/oauth-clients")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(header::COOKIE, cookie)
+                    .body(Body::from(form_encode_owned(fields)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        }
+    };
+
+    // Hosting kind with no domains at all: flash redirect, no client row.
+    let response = post(vec![
+        ("name".to_string(), "No Domains".to_string()),
+        ("kind".to_string(), "hosting_provider".to_string()),
+        ("logo_url".to_string(), "".to_string()),
+        ("homepage_url".to_string(), "".to_string()),
+        (
+            "redirect_uris".to_string(),
+            "https://nd.example/cb".to_string(),
+        ),
+        (
+            "onboarding_url".to_string(),
+            "https://nd.example/start".to_string(),
+        ),
+        ("hosting_domains".to_string(), "".to_string()),
+    ])
+    .await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let count: i64 = sqlx::query_scalar!(
+        r#"SELECT COUNT(*) AS "count!: i64" FROM oauth_clients WHERE name = 'No Domains'"#
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 0);
+
+    // Missing onboarding URL: rejected too.
+    let response = post(vec![
+        ("name".to_string(), "No Onboarding".to_string()),
+        ("kind".to_string(), "hosting_provider".to_string()),
+        ("logo_url".to_string(), "".to_string()),
+        ("homepage_url".to_string(), "".to_string()),
+        (
+            "redirect_uris".to_string(),
+            "https://no.example/cb".to_string(),
+        ),
+        ("hosting_domains".to_string(), "no.example".to_string()),
+    ])
+    .await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let count: i64 = sqlx::query_scalar!(
+        r#"SELECT COUNT(*) AS "count!: i64" FROM oauth_clients WHERE name = 'No Onboarding'"#
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 0);
+
+    // Invalid domain shapes: `-bad.com` (leading hyphen), `nodot` (one
+    // label), `s%ftmax.com` (bad char). NOTE `softmax.com.evil.io` is
+    // VALID-shaped — it's a matching concern, not a shape concern, and the
+    // endpoint tests cover it.
+    for domain in ["-bad.com", "nodot", "s%ftmax.com"] {
+        let response = post(vec![
+            ("name".to_string(), "Bad Domain".to_string()),
+            ("kind".to_string(), "hosting_provider".to_string()),
+            ("logo_url".to_string(), "".to_string()),
+            ("homepage_url".to_string(), "".to_string()),
+            (
+                "redirect_uris".to_string(),
+                "https://bd.example/cb".to_string(),
+            ),
+            (
+                "onboarding_url".to_string(),
+                "https://bd.example/start".to_string(),
+            ),
+            ("hosting_domains".to_string(), domain.to_string()),
+        ])
+        .await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER, "{domain}");
+        let count: i64 = sqlx::query_scalar!(
+            r#"SELECT COUNT(*) AS "count!: i64" FROM oauth_clients WHERE name = 'Bad Domain'"#
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 0, "{domain}: no client row");
+    }
+
+    // Non-ASCII domain (Cyrillic \u{0430}): rejected. The flash names the
+    // punycode form — read it back through the session's error flash.
+    let response = post(vec![
+        ("name".to_string(), "IDN Domain".to_string()),
+        ("kind".to_string(), "hosting_provider".to_string()),
+        ("logo_url".to_string(), "".to_string()),
+        ("homepage_url".to_string(), "".to_string()),
+        (
+            "redirect_uris".to_string(),
+            "https://idn.example/cb".to_string(),
+        ),
+        (
+            "onboarding_url".to_string(),
+            "https://idn.example/start".to_string(),
+        ),
+        (
+            "hosting_domains".to_string(),
+            "softm\u{0430}x.com".to_string(),
+        ),
+    ])
+    .await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let count: i64 = sqlx::query_scalar!(
+        r#"SELECT COUNT(*) AS "count!: i64" FROM oauth_clients WHERE name = 'IDN Domain'"#
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 0, "non-ASCII domain must be rejected");
+    let admin_session_id = sqlx::query_scalar!(
+        "SELECT session_id FROM sessions WHERE user_id = (SELECT user_id FROM users WHERE external_github_id = 9922013)"
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let flash = sqlx::query_scalar!(
+        "SELECT flash_message FROM sessions WHERE session_id = $1",
+        admin_session_id
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap()
+    .unwrap_or_default();
+    assert!(flash.contains("ASCII"), "flash: {flash}");
+    assert!(flash.contains("xn--softmx-7nf.com"), "flash: {flash}");
+}
+
+#[sqlx::test(migrations = "../migrations")]
+async fn admin_standard_kind_ignores_or_omits_hosting_fields(pool: PgPool) {
+    let fx = Fixture::new(&pool).await;
+    let admin_session = create_user_session(&pool, 9922014, true).await;
+    let admin_cookie = signed_session_cookie(&fx.state, admin_session);
+    let cookie = format!(
+        "{}={admin_cookie}",
+        crate::models::session::SESSION_COOKIE_NAME
+    );
+
+    let app = fx.app.clone();
+    let post = |fields: Vec<(String, String)>| {
+        let app = app.clone();
+        let cookie = cookie.clone();
+        async move {
+            app.oneshot(
+                Request::post("/admin/oauth-clients")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(header::COOKIE, cookie)
+                    .body(Body::from(form_encode_owned(fields)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        }
+    };
+
+    // Omitted entirely (the pre-hosting form shape): still creates — pins
+    // the `#[serde(default)]` on hosting_domains.
+    let response = post(vec![
+        ("name".to_string(), "Plain Standard".to_string()),
+        ("kind".to_string(), "standard".to_string()),
+        ("logo_url".to_string(), "".to_string()),
+        ("homepage_url".to_string(), "".to_string()),
+        (
+            "redirect_uris".to_string(),
+            "https://plain.example/cb".to_string(),
+        ),
+    ])
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Present but blank: fields ignored for standard kind.
+    let response = post(vec![
+        ("name".to_string(), "Blank Fields Standard".to_string()),
+        ("kind".to_string(), "standard".to_string()),
+        ("logo_url".to_string(), "".to_string()),
+        ("homepage_url".to_string(), "".to_string()),
+        (
+            "redirect_uris".to_string(),
+            "https://blank.example/cb".to_string(),
+        ),
+        ("onboarding_url".to_string(), "".to_string()),
+        ("description".to_string(), "".to_string()),
+        ("hosting_domains".to_string(), "".to_string()),
+    ])
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Neither standard client carries hosting data.
+    for name in ["Plain Standard", "Blank Fields Standard"] {
+        let client = sqlx::query_as::<_, (Uuid,)>("SELECT id FROM oauth_clients WHERE name = $1")
+            .bind(name)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let stored = oauth::get_client_with_uris(&pool, client.0)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(stored.hosting_domains.is_empty(), "{name}");
+        assert!(stored.client.onboarding_url.is_none(), "{name}");
+        assert!(stored.client.description.is_none(), "{name}");
+    }
 }
 
 #[sqlx::test(migrations = "../migrations")]

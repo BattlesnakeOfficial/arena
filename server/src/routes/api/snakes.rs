@@ -12,6 +12,7 @@ use crate::{
     models::battlesnake::{
         self, Battlesnake, CreateBattlesnake, EngineRegion, UpdateBattlesnake, Visibility,
     },
+    models::oauth,
     routes::auth::{ApiAuth, ApiUser},
     state::AppState,
 };
@@ -449,10 +450,110 @@ pub async fn delete_snake(
     }
 }
 
+/// PUT /api/snakes/{id}/hosting — a hosting-provider client marks a
+/// snake as hosted by it. Empty body; 204 on success.
+///
+/// Check order is pinned by route_coverage_tests: permission 403 first,
+/// then snake existence/ownership 404 (the coverage table drives a
+/// random UUID + exactly-listed personal token through here), then the
+/// client-kind 403, then the domain 400, then the mark.
+pub async fn mark_hosting(
+    State(state): State<AppState>,
+    ApiUser(auth): ApiUser,
+    Path(snake_id): Path<Uuid>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    auth.require_snake(snake_id, Permission::SnakeUrlWrite)?;
+
+    let snake = battlesnake::get_battlesnake_by_id(&state.db, snake_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get snake for hosting mark: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to mark hosting".to_string(),
+            )
+        })?
+        .ok_or((StatusCode::NOT_FOUND, "Snake not found".to_string()))?;
+
+    // Ownership: no existence oracle for another user's snake.
+    if snake.user_id != auth.user_id {
+        return Err((StatusCode::NOT_FOUND, "Snake not found".to_string()));
+    }
+
+    // Only hosting-provider clients may mark; a personal token or a
+    // standard client gets the same 403.
+    let Some(client_id) = auth.token_scope().and_then(|scope| scope.oauth_client_id) else {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "only hosting provider apps can mark hosting".to_string(),
+        ));
+    };
+    let client = oauth::get_client_by_id(&state.db, client_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to load OAuth client for hosting mark: {e:#}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to mark hosting".to_string(),
+            )
+        })?;
+    // A dangling client id can't be a hosting client — same 403.
+    let client = match client {
+        Some(c) if c.kind == oauth::OauthClientKind::HostingProvider => c,
+        _ => {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "only hosting provider apps can mark hosting".to_string(),
+            ));
+        }
+    };
+
+    // The mark is accepted only when the snake's CURRENT URL sits on one
+    // of this client's registered domains.
+    if !oauth::client_domain_covers_url(&state.db, client.id, &snake.url)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to check hosting domains: {e:#}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to mark hosting".to_string(),
+            )
+        })?
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "snake URL is not on a domain registered to this hosting provider".to_string(),
+        ));
+    }
+
+    match battlesnake::mark_hosted_by(&state.db, snake_id, auth.user_id, client.id, &snake.url)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to mark snake hosted: {e:#}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to mark hosting".to_string(),
+            )
+        })? {
+        battlesnake::MarkHostingOutcome::Marked => Ok(StatusCode::NO_CONTENT),
+        battlesnake::MarkHostingOutcome::AlreadyHosted => Err((
+            StatusCode::CONFLICT,
+            "battlesnake is already hosted by another provider".to_string(),
+        )),
+        battlesnake::MarkHostingOutcome::UrlChanged => Err((
+            StatusCode::CONFLICT,
+            "snake URL changed since the request; retry".to_string(),
+        )),
+        battlesnake::MarkHostingOutcome::NotFound => {
+            Err((StatusCode::NOT_FOUND, "Snake not found".to_string()))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::api_token::{SnakeAccess, create_api_token};
+    use crate::models::api_token::{NewApiToken, SnakeAccess, create_api_token};
     use crate::routes::test_support::{api_app, create_user, send_api};
     use crate::state::AppState;
     use sqlx::PgPool;
@@ -1093,5 +1194,457 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::FORBIDDEN, "body: {json}");
+    }
+
+    // ---- Hosting mark endpoint (PUT /api/snakes/{id}/hosting) ----
+
+    async fn make_hosting_client(
+        db: &PgPool,
+        name: &str,
+        kind: oauth::OauthClientKind,
+        domains: &[&str],
+    ) -> Uuid {
+        let created = oauth::create_client(
+            db,
+            oauth::CreateOauthClientInput {
+                name: name.to_string(),
+                logo_url: None,
+                homepage_url: Some(format!("https://{name}.example")),
+                onboarding_url: Some(format!("https://{name}.example/start")),
+                description: None,
+                kind,
+                redirect_uris: vec![format!("https://{name}.example/cb")],
+                hosting_domains: domains.iter().map(|d| d.to_string()).collect(),
+            },
+        )
+        .await
+        .unwrap();
+        created.client.id
+    }
+
+    /// An OAuth-client token: a grant row + a token bound to it (the
+    /// established pattern — see authenticate_token_loads_scope and the
+    /// oauth_tests grant inserts).
+    async fn mint_client_token(
+        db: &PgPool,
+        user_id: Uuid,
+        client_id: Uuid,
+        permissions: &[Permission],
+        access: SnakeAccess,
+        snake_ids: &[Uuid],
+    ) -> String {
+        let mut tx = db.begin().await.unwrap();
+        let grant_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO oauth_grants (user_id, oauth_client_id) VALUES ($1, $2) RETURNING id",
+        )
+        .bind(user_id)
+        .bind(client_id)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+        let NewApiToken { secret, .. } = crate::models::api_token::create_api_token_on(
+            &mut tx,
+            user_id,
+            "client-token",
+            permissions,
+            access,
+            snake_ids,
+            Some(grant_id),
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        secret
+    }
+
+    async fn hosted_mark(db: &PgPool, snake_id: Uuid) -> Option<Uuid> {
+        sqlx::query_scalar!(
+            "SELECT hosted_by_oauth_client_id FROM battlesnakes WHERE battlesnake_id = $1",
+            snake_id
+        )
+        .fetch_one(db)
+        .await
+        .unwrap()
+    }
+
+    async fn make_snake_with_url(db: &PgPool, user: Uuid, name: &str, url: &str) -> Battlesnake {
+        battlesnake::create_battlesnake(
+            db,
+            user,
+            CreateBattlesnake {
+                name: name.to_string(),
+                url: url.to_string(),
+                visibility: Visibility::Private,
+                engine_region: Default::default(),
+            },
+        )
+        .await
+        .unwrap()
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn mark_accepted_on_domain_and_subdomain(db: PgPool) {
+        let state = AppState::test_from_pool(db.clone());
+        let app = api_app(&state);
+        let user = create_user(&db, 9921910, false).await;
+        let client = make_hosting_client(
+            &db,
+            "Softmax",
+            oauth::OauthClientKind::HostingProvider,
+            &["softmax.com"],
+        )
+        .await;
+
+        let token = mint_client_token(
+            &db,
+            user,
+            client,
+            &[Permission::SnakeUrlWrite],
+            SnakeAccess::All,
+            &[],
+        )
+        .await;
+
+        // The accepted rows of the shared vector table: equal host,
+        // subdomain, userinfo-before-host, port-dropped, uppercase-folded.
+        let vectors = [
+            ("softmax-accept-eq", "https://softmax.com/s"),
+            ("softmax-accept-sub", "https://api.softmax.com/s"),
+            ("softmax-accept-user", "https://user@api.softmax.com/s"),
+            ("softmax-accept-port", "https://api.softmax.com:8443/s"),
+            ("softmax-accept-upper", "https://API.SoftMax.com/s"),
+        ];
+        for (name, url) in vectors {
+            let snake = make_snake_with_url(&db, user, name, url).await;
+            let (status, body) = send_api(
+                &app,
+                "PUT",
+                &format!("/api/snakes/{}/hosting", snake.battlesnake_id),
+                Some(&token),
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::NO_CONTENT, "{url}: body: {body}");
+            assert_eq!(hosted_mark(&db, snake.battlesnake_id).await, Some(client));
+        }
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn mark_rejected_on_non_matching_and_lookalike_hosts(db: PgPool) {
+        let state = AppState::test_from_pool(db.clone());
+        let app = api_app(&state);
+        let user = create_user(&db, 9921911, false).await;
+        let client = make_hosting_client(
+            &db,
+            "Softmax",
+            oauth::OauthClientKind::HostingProvider,
+            &["softmax.com"],
+        )
+        .await;
+        let token = mint_client_token(
+            &db,
+            user,
+            client,
+            &[Permission::SnakeUrlWrite],
+            SnakeAccess::All,
+            &[],
+        )
+        .await;
+
+        // Lookalikes (label boundary), userinfo trick, trailing dot,
+        // IDN-punycode, unrelated host, IP literal.
+        let vectors = [
+            ("reject-unrelated", "https://example.com/s"),
+            ("reject-suffix", "https://softmax.com.evil.io/s"),
+            ("reject-prefix", "https://evilsoftmax.com/s"),
+            ("reject-userinfo", "https://softmax.com@evil.io/s"),
+            ("reject-trailing-dot", "https://softmax.com./s"),
+            (
+                "reject-idn",
+                "https://softm\u{0430}x.com/s", // Cyrillic а → xn--softmx-7nf.com
+            ),
+            ("reject-ip", "https://1.2.3.4/s"),
+        ];
+        for (name, url) in vectors {
+            let snake = make_snake_with_url(&db, user, name, url).await;
+            let (status, body) = send_api(
+                &app,
+                "PUT",
+                &format!("/api/snakes/{}/hosting", snake.battlesnake_id),
+                Some(&token),
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{url}: body: {body}");
+            assert_eq!(hosted_mark(&db, snake.battlesnake_id).await, None);
+        }
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn mark_rejected_for_standard_client(db: PgPool) {
+        let state = AppState::test_from_pool(db.clone());
+        let app = api_app(&state);
+        let user = create_user(&db, 9921912, false).await;
+        let client =
+            make_hosting_client(&db, "Regular", oauth::OauthClientKind::Standard, &[]).await;
+        let snake =
+            make_snake_with_url(&db, user, "standard-client-snake", "https://softmax.com/s").await;
+        let token = mint_client_token(
+            &db,
+            user,
+            client,
+            &[Permission::SnakeUrlWrite],
+            SnakeAccess::All,
+            &[],
+        )
+        .await;
+
+        let (status, body) = send_api(
+            &app,
+            "PUT",
+            &format!("/api/snakes/{}/hosting", snake.battlesnake_id),
+            Some(&token),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body, "only hosting provider apps can mark hosting");
+        assert_eq!(hosted_mark(&db, snake.battlesnake_id).await, None);
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn mark_rejected_without_url_write(db: PgPool) {
+        let state = AppState::test_from_pool(db.clone());
+        let app = api_app(&state);
+        let user = create_user(&db, 9921913, false).await;
+        let client = make_hosting_client(
+            &db,
+            "Softmax",
+            oauth::OauthClientKind::HostingProvider,
+            &["softmax.com"],
+        )
+        .await;
+        let snake =
+            make_snake_with_url(&db, user, "no-url-write-snake", "https://softmax.com/s").await;
+        let path = format!("/api/snakes/{}/hosting", snake.battlesnake_id);
+
+        // Hosting-client token WITHOUT snake.url.write (only snakes.read).
+        let token = mint_client_token(
+            &db,
+            user,
+            client,
+            &[Permission::SnakesRead],
+            SnakeAccess::All,
+            &[],
+        )
+        .await;
+        let (status, body) = send_api(&app, "PUT", &path, Some(&token), None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body, "missing permission: snake.url.write");
+
+        // Personal token with snake.url.write but no client: 403 (kind).
+        let token = mint(
+            &db,
+            user,
+            &[Permission::SnakeUrlWrite],
+            SnakeAccess::All,
+            &[],
+        )
+        .await;
+        let (status, body) = send_api(&app, "PUT", &path, Some(&token), None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body, "only hosting provider apps can mark hosting");
+
+        // Zero-permission personal token: 403 naming the permission.
+        let token = mint(&db, user, &[], SnakeAccess::All, &[]).await;
+        let (status, body) = send_api(&app, "PUT", &path, Some(&token), None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body, "missing permission: snake.url.write");
+
+        assert_eq!(hosted_mark(&db, snake.battlesnake_id).await, None);
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn mark_conflict_idempotency_and_not_found(db: PgPool) {
+        let state = AppState::test_from_pool(db.clone());
+        let app = api_app(&state);
+        let user = create_user(&db, 9921914, false).await;
+        let other = create_user(&db, 9921915, false).await;
+        let client_a = make_hosting_client(
+            &db,
+            "HostA",
+            oauth::OauthClientKind::HostingProvider,
+            &["a.example"],
+        )
+        .await;
+        let client_b = make_hosting_client(
+            &db,
+            "HostB",
+            oauth::OauthClientKind::HostingProvider,
+            &["b.example"],
+        )
+        .await;
+        let snake = make_snake_with_url(&db, user, "conflict-snake", "https://a.example/s").await;
+        let path = format!("/api/snakes/{}/hosting", snake.battlesnake_id);
+
+        let token_a = mint_client_token(
+            &db,
+            user,
+            client_a,
+            &[Permission::SnakeUrlWrite],
+            SnakeAccess::All,
+            &[],
+        )
+        .await;
+        let token_b = mint_client_token(
+            &db,
+            user,
+            client_b,
+            &[Permission::SnakeUrlWrite],
+            SnakeAccess::All,
+            &[],
+        )
+        .await;
+
+        // Displacement needs two clients that BOTH cover the URL: two
+        // clients sharing one registered domain.
+        let shared_snake =
+            make_snake_with_url(&db, user, "shared-domain-snake", "https://shared.example/s").await;
+        let shared_a = make_hosting_client(
+            &db,
+            "SharedA",
+            oauth::OauthClientKind::HostingProvider,
+            &["shared.example"],
+        )
+        .await;
+        let shared_b = make_hosting_client(
+            &db,
+            "SharedB",
+            oauth::OauthClientKind::HostingProvider,
+            &["shared.example"],
+        )
+        .await;
+        let shared_path = format!("/api/snakes/{}/hosting", shared_snake.battlesnake_id);
+        let token_sa = mint_client_token(
+            &db,
+            user,
+            shared_a,
+            &[Permission::SnakeUrlWrite],
+            SnakeAccess::All,
+            &[],
+        )
+        .await;
+        let token_sb = mint_client_token(
+            &db,
+            user,
+            shared_b,
+            &[Permission::SnakeUrlWrite],
+            SnakeAccess::All,
+            &[],
+        )
+        .await;
+
+        // Idempotency + conflict: A marks 204, B 409, A re-marks 204.
+        let (status, _) = send_api(&app, "PUT", &shared_path, Some(&token_sa), None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (status, body) = send_api(&app, "PUT", &shared_path, Some(&token_sb), None).await;
+        assert_eq!(status, StatusCode::CONFLICT, "body: {body}");
+        assert_eq!(body, "battlesnake is already hosted by another provider");
+        let (status, _) = send_api(&app, "PUT", &shared_path, Some(&token_sa), None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(
+            hosted_mark(&db, shared_snake.battlesnake_id).await,
+            Some(shared_a)
+        );
+
+        // B's token on A's snake (domain not covered): 400, not 409.
+        let (status, body) = send_api(&app, "PUT", &path, Some(&token_b), None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+
+        // A's own mark on its own-domain snake still works after all that.
+        let (status, _) = send_api(&app, "PUT", &path, Some(&token_a), None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        // Unknown snake and another user's snake: 404.
+        let (status, _) = send_api(
+            &app,
+            "PUT",
+            &format!("/api/snakes/{}/hosting", Uuid::new_v4()),
+            Some(&token_a),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let foreign = make_snake_with_url(&db, other, "foreign-snake", "https://a.example/s").await;
+        let (status, _) = send_api(
+            &app,
+            "PUT",
+            &format!("/api/snakes/{}/hosting", foreign.battlesnake_id),
+            Some(&token_a),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn url_update_clears_hosting_mark_through_api(db: PgPool) {
+        let state = AppState::test_from_pool(db.clone());
+        let app = api_app(&state);
+        let user = create_user(&db, 9921916, false).await;
+        let client = make_hosting_client(
+            &db,
+            "Softmax",
+            oauth::OauthClientKind::HostingProvider,
+            &["softmax.com"],
+        )
+        .await;
+        let snake =
+            make_snake_with_url(&db, user, "api-clear-snake", "https://softmax.com/s").await;
+        assert_eq!(
+            battlesnake::mark_hosted_by(
+                &db,
+                snake.battlesnake_id,
+                user,
+                client,
+                "https://softmax.com/s",
+            )
+            .await
+            .unwrap(),
+            battlesnake::MarkHostingOutcome::Marked
+        );
+
+        // API update to an off-domain URL: 200, mark cleared.
+        let token = mint(
+            &db,
+            user,
+            &[Permission::SnakeUrlWrite, Permission::SnakeEdit],
+            SnakeAccess::All,
+            &[],
+        )
+        .await;
+        let (status, _) = send_api(
+            &app,
+            "PUT",
+            &format!("/api/snakes/{}", snake.battlesnake_id),
+            Some(&token),
+            Some(serde_json::json!({"url": "https://elsewhere.example"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(hosted_mark(&db, snake.battlesnake_id).await, None);
+
+        // API update back on-domain: still unmarked (marks only come from
+        // the endpoint).
+        let (status, _) = send_api(
+            &app,
+            "PUT",
+            &format!("/api/snakes/{}", snake.battlesnake_id),
+            Some(&token),
+            Some(serde_json::json!({"url": "https://softmax.com/back"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(hosted_mark(&db, snake.battlesnake_id).await, None);
     }
 }

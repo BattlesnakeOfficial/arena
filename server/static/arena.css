@@ -459,6 +459,8 @@ table.data .snake-cell .name, table.data .snake-cell .owner { overflow-wrap: any
 .badge { font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; background: var(--pill); color: var(--muted); padding: 2px 9px; border-radius: 999px; white-space: nowrap; }
 .badge.ok { color: var(--up); }
 .badge.warn { color: var(--down); }
+.badge.host-badge { display: inline-flex; align-items: center; gap: 5px; text-decoration: none; }
+.badge.host-badge img { width: 14px; height: 14px; border-radius: 3px; }
 .section { margin-top: 48px; }
 .section h2 { margin-bottom: 4px; }
 .section table.data { margin-top: 16px; }
