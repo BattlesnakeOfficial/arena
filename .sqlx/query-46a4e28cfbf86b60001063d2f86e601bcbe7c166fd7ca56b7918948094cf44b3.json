@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT t.id\n        FROM oauth_grants g\n        JOIN api_tokens t ON t.oauth_grant_id = g.id AND t.revoked_at IS NULL\n        WHERE g.id = $1 AND g.user_id = $2 AND g.revoked_at IS NULL\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "46a4e28cfbf86b60001063d2f86e601bcbe7c166fd7ca56b7918948094cf44b3"
+}

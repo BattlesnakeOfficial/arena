@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE battlesnakes\n        SET created_by_oauth_client_id = $2\n        WHERE battlesnake_id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a9b01ce5e3883bf329248c74b636efdc87f6944ebdf306c29a2baf5e17f492cc"
+}

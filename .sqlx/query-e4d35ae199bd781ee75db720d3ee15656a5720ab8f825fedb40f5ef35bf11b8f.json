@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE oauth_clients SET disabled_at = NULL WHERE id = $1 AND disabled_at IS NOT NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e4d35ae199bd781ee75db720d3ee15656a5720ab8f825fedb40f5ef35bf11b8f"
+}

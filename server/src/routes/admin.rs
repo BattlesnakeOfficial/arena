@@ -3,7 +3,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::{Form, Json, extract::Path, http::header, response::Redirect};
 use chrono::{DateTime, Utc};
-use color_eyre::eyre::Context as _;
+use color_eyre::eyre::{Context as _, eyre};
 use maud::{Markup, html};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -1018,6 +1018,279 @@ pub async fn regenerate_invite_code(
         .await
         .wrap_err("Failed to flash")?;
     Ok(Redirect::to("/admin/leaderboards"))
+}
+
+// ---------------------------------------------------------------------------
+// OAuth clients (admin-created only; no self-serve registration)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct CreateOauthClientForm {
+    pub name: String,
+    pub kind: String,
+    pub logo_url: Option<String>,
+    pub homepage_url: Option<String>,
+    pub redirect_uris: String,
+}
+
+/// A client's one-time credential reveal (create/rotate response only,
+/// `Cache-Control: no-store`, never a redirect).
+struct OneTimeClientSecret {
+    client_name: String,
+    public_client_id: String,
+    secret: String,
+}
+
+async fn render_oauth_clients_page(
+    state: &AppState,
+    one_time: Option<&OneTimeClientSecret>,
+) -> cja::Result<Markup> {
+    let clients = crate::models::oauth::list_clients(&state.db).await?;
+
+    Ok(html! {
+        div class="crumb" { a href="/admin" { "Admin" } " / OAuth Clients" }
+        div class="page-head" {
+            h1 { "OAuth Clients" }
+            div class="sub" {
+                "Registered third-party applications for the OAuth provider. Clients are "
+                "admin-created only — a developer asks an admin; bring the name, logo and "
+                "homepage URLs, and the exact redirect URIs."
+            }
+        }
+
+        @if let Some(reveal) = one_time {
+            div class="section" style="background: #f5f5f5; border: 1px solid #ddd; border-radius: 8px; padding: 20px; margin-top: 20px;" {
+                h2 style="margin-top: 0;" { "Client secret for " (reveal.client_name) " — shown once" }
+                p { "Copy the client secret now and hand it to the developer over a secure channel. It will not be shown again." }
+                dl class="meta-list" {
+                    div { dt { "client_id" } dd { code { (reveal.public_client_id) } } }
+                    div { dt { "client_secret" } dd { code style="word-break: break-all;" { (reveal.secret) } } }
+                }
+            }
+        }
+
+        div class="section" {
+            h2 { "New OAuth client" }
+            form class="form-stack" method="post" action="/admin/oauth-clients" {
+                div class="field" {
+                    label for="oc-name" { "Name" }
+                    input id="oc-name" type="text" name="name" required maxlength="100";
+                }
+                div class="field" {
+                    label for="oc-kind" { "Kind" }
+                    select id="oc-kind" name="kind" {
+                        option value="standard" selected[true] { "standard" }
+                        option value="hosting_provider" { "hosting_provider" }
+                    }
+                }
+                div class="field" {
+                    label for="oc-logo" { "Logo URL" }
+                    input id="oc-logo" type="url" name="logo_url" placeholder="https://…";
+                }
+                div class="field" {
+                    label for="oc-home" { "Homepage URL" }
+                    input id="oc-home" type="url" name="homepage_url" placeholder="https://…";
+                }
+                div class="field" {
+                    label for="oc-uris" { "Redirect URIs" }
+                    textarea id="oc-uris" name="redirect_uris" rows="3" placeholder="https://app.example/oauth/callback" {}
+                    p class="help" { "One per line. Registered URIs match exactly." }
+                }
+                button type="submit" class="btn solid" { "Create OAuth client" }
+            }
+        }
+
+        div class="section" {
+            h2 { "Clients" }
+            @if clients.is_empty() {
+                p class="empty" { "None yet." }
+            }
+            @for entry in &clients {
+                @let client = &entry.client;
+                article class="admin-lb" aria-label=(client.name) {
+                    h3 {
+                        (client.name) " "
+                        span class="badge" { (client.kind.as_str()) }
+                        @if client.disabled_at.is_some() {
+                            span class="badge" { "Inactive" }
+                        } @else {
+                            span class="badge ok" { "Active" }
+                        }
+                    }
+                    dl class="meta-list" {
+                        div { dt { "client_id" } dd { code { (client.public_client_id) } } }
+                        @if let Some(homepage) = client.homepage_url.as_deref() {
+                            div { dt { "Homepage" } dd { a href=(homepage) { (homepage) } } }
+                        }
+                        div {
+                            dt { "Redirect URIs" }
+                            dd {
+                                @for uri in &entry.redirect_uris {
+                                    code { (uri) } br;
+                                }
+                            }
+                        }
+                    }
+                    div style="display: flex; gap: 12px; flex-wrap: wrap; margin-top: 10px;" {
+                        form method="post" action=(format!("/admin/oauth-clients/{}/rotate", client.id)) {
+                            button type="submit" class="btn" { "Rotate secret" }
+                        }
+                        @if client.disabled_at.is_some() {
+                            form method="post" action=(format!("/admin/oauth-clients/{}/enable", client.id)) {
+                                button type="submit" class="btn" { "Enable" }
+                            }
+                        } @else {
+                            form method="post" action=(format!("/admin/oauth-clients/{}/disable", client.id)) {
+                                button type="submit" class="btn danger" { "Disable" }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    })
+}
+
+/// GET /admin/oauth-clients — list clients + the create form.
+pub async fn list_oauth_clients(
+    State(state): State<AppState>,
+    AdminUser(_user): AdminUser,
+    page_factory: PageFactory,
+) -> ServerResult<axum::response::Response, StatusCode> {
+    let body = render_oauth_clients_page(&state, None).await?;
+    let page = page_factory.create_page("OAuth Clients".to_string(), Box::new(body));
+    Ok(([(header::CACHE_CONTROL, "no-store")], page).into_response())
+}
+
+/// POST /admin/oauth-clients — create a client. On success the list page is
+/// rendered directly as this response with the one-time secret panel (never
+/// a redirect: the secret must not travel in a URL).
+pub async fn create_oauth_client(
+    State(state): State<AppState>,
+    AdminUser(_user): AdminUser,
+    page_factory: PageFactory,
+    flasher: Flasher,
+    Form(form): Form<CreateOauthClientForm>,
+) -> ServerResult<axum::response::Response, StatusCode> {
+    let name = form.name.trim().to_string();
+    if name.is_empty() {
+        flasher
+            .error("Name is required.")
+            .await
+            .wrap_err("Failed to flash")?;
+        return Ok(Redirect::to("/admin/oauth-clients").into_response());
+    }
+    let kind = form
+        .kind
+        .parse::<crate::models::oauth::OauthClientKind>()
+        .map_err(|e| ServerError(e, StatusCode::BAD_REQUEST))?;
+    let redirect_uris: Vec<String> = form
+        .redirect_uris
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect();
+    if redirect_uris.is_empty()
+        || redirect_uris
+            .iter()
+            .any(|uri| !(uri.starts_with("http://") || uri.starts_with("https://")))
+    {
+        flasher
+            .error("At least one redirect URI is required, each an absolute http(s) URL.")
+            .await
+            .wrap_err("Failed to flash")?;
+        return Ok(Redirect::to("/admin/oauth-clients").into_response());
+    }
+
+    let created = crate::models::oauth::create_client(
+        &state.db,
+        crate::models::oauth::CreateOauthClientInput {
+            name,
+            logo_url: form.logo_url.filter(|u| !u.trim().is_empty()),
+            homepage_url: form.homepage_url.filter(|u| !u.trim().is_empty()),
+            kind,
+            redirect_uris,
+        },
+    )
+    .await?;
+
+    let one_time = OneTimeClientSecret {
+        client_name: created.client.name.clone(),
+        public_client_id: created.client.public_client_id.clone(),
+        secret: created.secret,
+    };
+    let body = render_oauth_clients_page(&state, Some(&one_time)).await?;
+    let page = page_factory.create_page("OAuth Clients".to_string(), Box::new(body));
+    Ok(([(header::CACHE_CONTROL, "no-store")], page).into_response())
+}
+
+/// POST /admin/oauth-clients/{id}/rotate — new secret; the old one stops
+/// authenticating. Renders the list page with the one-time reveal.
+pub async fn rotate_oauth_client_secret(
+    State(state): State<AppState>,
+    AdminUser(_user): AdminUser,
+    page_factory: PageFactory,
+    Path(client_id): Path<Uuid>,
+) -> ServerResult<axum::response::Response, StatusCode> {
+    let Some(secret) = crate::models::oauth::rotate_client_secret(&state.db, client_id).await?
+    else {
+        return Err("OAuth client not found".to_string()).with_status(StatusCode::NOT_FOUND);
+    };
+    // Load the client for the reveal panel (it exists — rotate succeeded).
+    let client = crate::models::oauth::get_client_with_uris(&state.db, client_id)
+        .await?
+        .ok_or_else(|| {
+            ServerError(
+                eyre!("rotated client {client_id} vanished"),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            )
+        })?
+        .client;
+    let one_time = OneTimeClientSecret {
+        client_name: client.name,
+        public_client_id: client.public_client_id,
+        secret,
+    };
+    let body = render_oauth_clients_page(&state, Some(&one_time)).await?;
+    let page = page_factory.create_page("OAuth Clients".to_string(), Box::new(body));
+    Ok(([(header::CACHE_CONTROL, "no-store")], page).into_response())
+}
+
+/// POST /admin/oauth-clients/{id}/disable — a disabled client's tokens stop
+/// working at auth time; its rows are never revoked (re-enabling revives
+/// them by design).
+pub async fn disable_oauth_client(
+    State(state): State<AppState>,
+    AdminUser(_user): AdminUser,
+    flasher: Flasher,
+    Path(client_id): Path<Uuid>,
+) -> ServerResult<impl IntoResponse, StatusCode> {
+    if !crate::models::oauth::set_client_disabled(&state.db, client_id, true).await? {
+        return Err("OAuth client not found".to_string()).with_status(StatusCode::NOT_FOUND);
+    }
+    flasher
+        .success("Client disabled. Its tokens stop working immediately; enabling it later restores them.")
+        .await
+        .wrap_err("Failed to flash")?;
+    Ok(Redirect::to("/admin/oauth-clients"))
+}
+
+/// POST /admin/oauth-clients/{id}/enable
+pub async fn enable_oauth_client(
+    State(state): State<AppState>,
+    AdminUser(_user): AdminUser,
+    flasher: Flasher,
+    Path(client_id): Path<Uuid>,
+) -> ServerResult<impl IntoResponse, StatusCode> {
+    if !crate::models::oauth::set_client_disabled(&state.db, client_id, false).await? {
+        return Err("OAuth client not found".to_string()).with_status(StatusCode::NOT_FOUND);
+    }
+    flasher
+        .success("Client enabled. Its existing tokens work again.")
+        .await
+        .wrap_err("Failed to flash")?;
+    Ok(Redirect::to("/admin/oauth-clients"))
 }
 
 #[cfg(test)]

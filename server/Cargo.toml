@@ -53,6 +53,8 @@ google-cloud-storage = "0.22"
 zstd = "0.13"
 thiserror = "1"
 hex = "0.4"
+serde_urlencoded = "0.7"
+hmac = "0.12"
 clap = { version = "4", features = ["derive", "env"] }
 dirs = "5"
 toml = "0.8"

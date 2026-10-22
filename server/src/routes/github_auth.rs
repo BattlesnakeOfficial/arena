@@ -16,8 +16,9 @@ use crate::{
     models::{
         api_token::{self, Permission, SnakeAccess},
         session::{
-            associate_user_with_session, clear_github_oauth_state, disassociate_user_from_session,
-            set_github_oauth_state_with_cli,
+            associate_user_with_session, clear_github_oauth_state, clear_post_login_redirect,
+            disassociate_user_from_session, set_github_oauth_state_with_cli,
+            take_post_login_redirect,
         },
         user::create_or_update_user,
     },
@@ -32,6 +33,10 @@ pub struct GitHubAuthQuery {
     /// If true, this is a CLI authentication request
     #[serde(default)]
     pub cli: bool,
+    /// If true, this login was started by /oauth/authorize: keep (rather
+    /// than clear) any saved post-login redirect.
+    #[serde(default)]
+    pub resume_oauth: bool,
 }
 
 // Route handler for initiating GitHub OAuth flow
@@ -60,6 +65,15 @@ pub async fn github_auth(
     )
     .await
     .wrap_err("Failed to store OAuth state in session")?;
+
+    // Unless this login resumes an OAuth consent flow, drop any saved
+    // post-login redirect so an abandoned consent can't hijack this login.
+    if !query.resume_oauth
+        && let Err(e) =
+            clear_post_login_redirect(&state.db, current_session.session.session_id).await
+    {
+        tracing::warn!(?e, "Failed to clear post-login redirect");
+    }
 
     let auth_url = authorization_url(oauth_config, &oauth_state);
 
@@ -306,6 +320,20 @@ pub async fn github_auth_callback(
             .add_flash("Successfully logged in with GitHub!")
             .await?;
     }
+
+    // Resume an OAuth consent flow: if /oauth/authorize parked its request
+    // on this session (and it still looks like one — second half of the
+    // open-redirect guard), send the user back to the same authorize URL.
+    // CLI logins never get here (they returned above).
+    let resume = take_post_login_redirect(&state.db, current_session.session.session_id)
+        .await
+        .wrap_err("Failed to take post-login redirect")?;
+    if let Some(path) = resume
+        && path.starts_with("/oauth/authorize")
+    {
+        return Ok(Redirect::to(&path).into_response());
+    }
+
     Ok(Redirect::to("/").into_response())
 }
 

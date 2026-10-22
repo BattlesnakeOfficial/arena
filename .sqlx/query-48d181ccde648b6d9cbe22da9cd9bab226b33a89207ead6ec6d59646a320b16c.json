@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO oauth_authorization_code_snakes (oauth_authorization_code_id, battlesnake_id)\n            SELECT $1, s.battlesnake_id\n            FROM UNNEST($2::uuid[]) AS s(battlesnake_id)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "UuidArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "48d181ccde648b6d9cbe22da9cd9bab226b33a89207ead6ec6d59646a320b16c"
+}

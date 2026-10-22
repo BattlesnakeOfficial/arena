@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE oauth_grants SET revoked_at = NOW()\n        WHERE revoked_at IS NULL\n          AND id = (SELECT oauth_grant_id FROM api_tokens\n                    WHERE id = (SELECT issued_token_id FROM oauth_authorization_codes WHERE code_hash = $1))\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "72c9d05d5d6f6bba1b9b95661d738987ce6d310b332c2c54afc7d72d2608473d"
+}

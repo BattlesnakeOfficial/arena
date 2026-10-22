@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        WITH pending AS (\n            SELECT post_login_redirect\n            FROM sessions\n            WHERE session_id = $1\n            FOR UPDATE\n        )\n        UPDATE sessions s\n        SET post_login_redirect = NULL\n        FROM pending\n        WHERE s.session_id = $1\n        RETURNING pending.post_login_redirect AS \"post_login_redirect?\"\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "post_login_redirect?",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "6e2830e4579fd7dadad929dd0480cfadccd2f333ec403fe24ad78f737c4cacbb"
+}

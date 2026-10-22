@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        INSERT INTO api_tokens (user_id, token_hash, name, snake_access)\n        VALUES ($1, $2, $3, $4)\n        RETURNING id, user_id, token_hash, name,\n            snake_access as \"snake_access: SnakeAccess\",\n            last_used_at, created_at, revoked_at\n        ",
+  "query": "\n        INSERT INTO api_tokens (user_id, token_hash, name, snake_access, oauth_grant_id)\n        VALUES ($1, $2, $3, $4, $5)\n        RETURNING id, user_id, token_hash, name,\n            snake_access as \"snake_access: SnakeAccess\",\n            last_used_at, created_at, revoked_at\n        ",
   "describe": {
     "columns": [
       {
@@ -49,7 +49,8 @@
         "Uuid",
         "Text",
         "Text",
-        "Text"
+        "Text",
+        "Uuid"
       ]
     },
     "nullable": [
@@ -63,5 +64,5 @@
       true
     ]
   },
-  "hash": "893951fbff51e92512779ee3c7e990dbd4dec29d8117a53fcf2d62706b2d644a"
+  "hash": "1b8a457091d0e678f225fa5baef65d5dd7ff21ebe8154715a0fabbcfa3bbb5c7"
 }

@@ -1,0 +1,58 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            g.id AS grant_id,\n            g.created_at,\n            c.name AS \"client_name!\",\n            c.logo_url AS \"client_logo_url?\",\n            t.snake_access AS \"snake_access: SnakeAccess\",\n            ARRAY(SELECT p.permission FROM api_token_permissions p WHERE p.api_token_id = t.id) AS \"permissions!: Vec<String>\",\n            ARRAY(SELECT s.battlesnake_id FROM api_token_snakes s WHERE s.api_token_id = t.id) AS \"snake_ids!: Vec<Uuid>\"\n        FROM oauth_grants g\n        JOIN api_tokens t ON t.oauth_grant_id = g.id AND t.revoked_at IS NULL\n        JOIN oauth_clients c ON c.id = g.oauth_client_id\n        WHERE g.user_id = $1 AND g.revoked_at IS NULL\n        ORDER BY g.created_at DESC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "grant_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 2,
+        "name": "client_name!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "client_logo_url?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "snake_access: SnakeAccess",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "permissions!: Vec<String>",
+        "type_info": "TextArray"
+      },
+      {
+        "ordinal": 6,
+        "name": "snake_ids!: Vec<Uuid>",
+        "type_info": "UuidArray"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      null,
+      null
+    ]
+  },
+  "hash": "3c9de80707dd2b6de7a108be6ed311cc78aac3d92e6b84a240563973feb83ae4"
+}

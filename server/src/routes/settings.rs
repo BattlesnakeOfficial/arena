@@ -1,6 +1,6 @@
 use axum::{
     Form,
-    extract::{Path, Query, State},
+    extract::{Path, Query, RawForm, State},
     http::StatusCode,
     response::{IntoResponse, Redirect},
 };
@@ -10,8 +10,11 @@ use serde::Deserialize;
 
 use crate::{
     components::page_factory::PageFactory,
-    errors::{ServerError, ServerResult},
+    errors::{ServerError, ServerResult, WithStatus},
+    flasher::Flasher,
+    models::api_token::{Permission, SnakeAccess},
     models::notification_email::{self, ConfirmationRequestResult},
+    models::oauth,
     models::user::{SITE_THEMES, THEATER_THEMES, update_theme_preferences},
     notifications::{self, NotificationChannel, NotificationKind},
     routes::auth::{CurrentUser, OptionalUser},
@@ -309,6 +312,240 @@ pub async fn unsubscribe_post(
 ) -> ServerResult<StatusCode, StatusCode> {
     apply_unsubscribe(&state, &token).await?;
     Ok(StatusCode::OK)
+}
+
+// ---------------------------------------------------------------------------
+// Authorized apps (player-facing OAuth grant management)
+// ---------------------------------------------------------------------------
+
+/// GET /settings/authorized-apps — every active OAuth grant with its
+/// permissions and snake access, plus revoke and edit-snakes forms.
+pub async fn authorized_apps_page(
+    State(state): State<AppState>,
+    CurrentUser(user): CurrentUser,
+    page_factory: PageFactory,
+) -> ServerResult<impl IntoResponse, StatusCode> {
+    let grants = oauth::list_active_grants(&state.db, user.user_id).await?;
+
+    // One batched lookup for every snake name the page shows.
+    let all_ids: Vec<uuid::Uuid> = grants
+        .iter()
+        .flat_map(|grant| grant.snake_ids.iter().copied())
+        .collect();
+    let names: std::collections::BTreeMap<uuid::Uuid, String> = if all_ids.is_empty() {
+        Default::default()
+    } else {
+        sqlx::query!(
+            "SELECT battlesnake_id, name FROM battlesnakes WHERE battlesnake_id = ANY($1)",
+            &all_ids
+        )
+        .fetch_all(&state.db)
+        .await?
+        .into_iter()
+        .map(|row| (row.battlesnake_id, row.name))
+        .collect()
+    };
+
+    let snakes =
+        crate::models::battlesnake::get_battlesnakes_by_user_id(&state.db, user.user_id).await?;
+
+    let flash = page_factory.flash.clone();
+    let page = page_factory.create_page_with_flash(
+        "Authorized Apps".to_string(),
+        Box::new(html! {
+            div class="page-head" {
+                h1 { "Authorized Apps" }
+                div class="sub" {
+                    "Applications you've authorized to act as you. Revoking signs them "
+                    "out everywhere, immediately."
+                }
+            }
+
+            @if grants.is_empty() {
+                p class="empty-state" { "You haven't authorized any applications." }
+            }
+
+            @for grant in &grants {
+                article class="section" aria-label=(grant.client_name) {
+                    div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;" {
+                        @if let Some(logo) = grant.client_logo_url.as_deref().filter(|l| !l.is_empty()) {
+                            img src=(logo) alt="" width="44" height="44"
+                                style="width: 44px; height: 44px; border-radius: 8px; object-fit: cover;";
+                        }
+                        h3 style="margin: 0;" { (grant.client_name) }
+                        span class="badge" { "authorized " (grant.created_at.format("%b %d, %Y")) }
+                    }
+
+                    h4 style="margin: 18px 0 6px;" { "Can:" }
+                    ul style="list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 6px;" {
+                        @if grant.permissions.is_empty() {
+                            li { "Nothing (no permissions granted)." }
+                        }
+                        @for permission in Permission::ALL {
+                            @if grant.permissions.contains(&permission) {
+                                li { (permission.description()) }
+                            }
+                        }
+                    }
+
+                    form method="post" class="form-stack" style="max-width: 480px; margin-top: 20px;"
+                        action=(format!("/settings/authorized-apps/{}/snakes", grant.grant_id)) {
+                        div class="field" {
+                            label { "Snake access" }
+                            label style="display: flex; gap: 12px; align-items: center; font-size: 16px; min-height: 44px; cursor: pointer; margin-top: 8px;" {
+                                input type="radio" name="snake_access" value="all"
+                                    checked[grant.snake_access == SnakeAccess::All]
+                                    style="width: 22px; height: 22px; flex: none;";
+                                span { "All of my snakes" }
+                            }
+                            label style="display: flex; gap: 12px; align-items: center; font-size: 16px; min-height: 44px; cursor: pointer;" {
+                                input type="radio" name="snake_access" value="selected"
+                                    checked[grant.snake_access == SnakeAccess::Selected]
+                                    style="width: 22px; height: 22px; flex: none;";
+                                span { "Only the snakes I pick" }
+                            }
+                        }
+                        @if snakes.is_empty() {
+                            p class="help" { "You have no battlesnakes." }
+                        } @else {
+                            ul style="list-style: none; padding: 0; margin: 12px 0 0; display: flex; flex-direction: column; gap: 4px;" {
+                                @for snake in &snakes {
+                                    li {
+                                        label style="display: flex; gap: 12px; align-items: center; font-size: 16px; min-height: 44px; cursor: pointer;" {
+                                            input type="checkbox" name="snake_ids" value=(snake.battlesnake_id)
+                                                checked[grant.snake_access == SnakeAccess::All
+                                                    || grant.snake_ids.contains(&snake.battlesnake_id)]
+                                                style="width: 22px; height: 22px; flex: none;";
+                                            span { (snake.name) }
+                                        }
+                                    }
+                                }
+                            }
+                            p class="help" {
+                                "Changing the snake selection takes effect immediately — the app's "
+                                "token can only act on the checked snakes from its next request."
+                            }
+                        }
+                        button type="submit" class="btn" style="min-height: 44px; font-size: 16px;" {
+                            "Save snake selection"
+                        }
+                    }
+
+                    form method="post" style="margin-top: 18px;"
+                        action=(format!("/settings/authorized-apps/{}/revoke", grant.grant_id)) {
+                        button type="submit" class="btn danger" style="min-height: 44px; font-size: 16px;" {
+                            "Revoke " (grant.client_name)
+                        }
+                    }
+                }
+            }
+        }),
+        flash,
+    );
+    let _ = names;
+    Ok(page)
+}
+
+/// POST /settings/authorized-apps/{id}/revoke — revoke a grant and its
+/// tokens immediately.
+pub async fn revoke_authorized_app(
+    State(state): State<AppState>,
+    CurrentUser(_user): CurrentUser,
+    flasher: Flasher,
+    Path(grant_id): Path<uuid::Uuid>,
+) -> ServerResult<impl IntoResponse, StatusCode> {
+    if !oauth::revoke_grant(&state.db, grant_id, _user.user_id).await? {
+        return Err("Authorized app not found".to_string()).with_status(StatusCode::NOT_FOUND);
+    }
+    flasher
+        .success("Application revoked. Its access stops working immediately.")
+        .await
+        .wrap_err("Failed to flash")?;
+    Ok(Redirect::to("/settings/authorized-apps"))
+}
+
+/// POST /settings/authorized-apps/{id}/snakes — edit a grant's snake
+/// selection (both directions: all ↔ selected). Repeated `snake_ids` keys
+/// parsed manually (axum's `Form` can't do repeated keys). Does not revoke
+/// or re-issue the token: the new selection takes effect on its next use.
+pub async fn edit_authorized_app_snakes(
+    State(state): State<AppState>,
+    CurrentUser(user): CurrentUser,
+    flasher: Flasher,
+    Path(grant_id): Path<uuid::Uuid>,
+    RawForm(form_bytes): RawForm,
+) -> ServerResult<impl IntoResponse, StatusCode> {
+    let form: Vec<(String, String)> = url::form_urlencoded::parse(&form_bytes)
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    let field = |name: &str| {
+        form.iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
+    };
+
+    let snake_access = match field("snake_access") {
+        Some("all") => SnakeAccess::All,
+        Some("selected") => SnakeAccess::Selected,
+        _ => {
+            flasher
+                .error("Pick a snake access option.")
+                .await
+                .wrap_err("Failed to flash")?;
+            return Ok(Redirect::to("/settings/authorized-apps"));
+        }
+    };
+
+    let mut snake_ids: std::collections::BTreeSet<uuid::Uuid> = Default::default();
+    let mut malformed = false;
+    for (_, value) in form.iter().filter(|(key, _)| key == "snake_ids") {
+        match uuid::Uuid::parse_str(value) {
+            Ok(id) => {
+                snake_ids.insert(id);
+            }
+            Err(_) => malformed = true,
+        }
+    }
+
+    let id_list: Vec<uuid::Uuid> = snake_ids.iter().copied().collect();
+    let owned = if id_list.is_empty() {
+        true
+    } else {
+        sqlx::query_scalar!(
+            r#"SELECT COUNT(*) AS "count!: i64"
+               FROM battlesnakes
+               WHERE battlesnake_id = ANY($1) AND user_id = $2 AND deleted_at IS NULL"#,
+            &id_list,
+            user.user_id
+        )
+        .fetch_one(&state.db)
+        .await?
+            == snake_ids.len() as i64
+    };
+
+    let snake_ids: Vec<uuid::Uuid> = if snake_access == SnakeAccess::All {
+        Vec::new()
+    } else {
+        snake_ids.into_iter().collect()
+    };
+
+    let updated = !malformed
+        && owned
+        && oauth::set_grant_snakes(&state.db, grant_id, user.user_id, snake_access, &snake_ids)
+            .await?;
+
+    if updated {
+        flasher
+            .success("Snake selection updated. It takes effect immediately.")
+            .await
+            .wrap_err("Failed to flash")?;
+    } else {
+        flasher
+            .error("Couldn't update the snake selection — is the app still authorized, and are all snakes yours?")
+            .await
+            .wrap_err("Failed to flash")?;
+    }
+    Ok(Redirect::to("/settings/authorized-apps"))
 }
 
 #[cfg(test)]

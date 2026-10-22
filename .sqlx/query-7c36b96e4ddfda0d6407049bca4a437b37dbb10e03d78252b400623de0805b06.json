@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "CREATE FUNCTION fail_token_insert() RETURNS trigger\n         LANGUAGE plpgsql AS 'BEGIN RAISE EXCEPTION ''injected failure''; END'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "7c36b96e4ddfda0d6407049bca4a437b37dbb10e03d78252b400623de0805b06"
+}
