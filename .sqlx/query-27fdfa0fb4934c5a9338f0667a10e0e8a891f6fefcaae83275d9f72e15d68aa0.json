@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        UPDATE battlesnakes\n        SET\n            name = $3,\n            url = $4,\n            visibility = $5,\n            engine_region = COALESCE($6, engine_region)\n        WHERE\n            battlesnake_id = $1\n            AND user_id = $2\n            AND deleted_at IS NULL\n        RETURNING\n            battlesnake_id,\n            user_id,\n            name,\n            url,\n            visibility as \"visibility: Visibility\",\n            engine_region as \"engine_region: EngineRegion\",\n            color,\n            head,\n            tail,\n            created_at,\n            updated_at\n        ",
+  "query": "\n        UPDATE battlesnakes\n        SET\n            name = $3,\n            url = $4,\n            visibility = $5,\n            engine_region = COALESCE($6, engine_region),\n            hosted_by_oauth_client_id = CASE\n                WHEN hosted_by_oauth_client_id IS NULL THEN NULL\n                WHEN $7::text IS NULL THEN NULL\n                WHEN EXISTS (\n                    SELECT 1 FROM oauth_client_hosting_domains d\n                    WHERE d.oauth_client_id = battlesnakes.hosted_by_oauth_client_id\n                      AND ($7::text = d.domain\n                           OR right($7::text, length(d.domain) + 1) = '.' || d.domain)\n                ) THEN hosted_by_oauth_client_id\n                ELSE NULL\n            END\n        WHERE\n            battlesnake_id = $1\n            AND user_id = $2\n            AND deleted_at IS NULL\n        RETURNING\n            battlesnake_id,\n            user_id,\n            name,\n            url,\n            visibility as \"visibility: Visibility\",\n            engine_region as \"engine_region: EngineRegion\",\n            color,\n            head,\n            tail,\n            created_at,\n            updated_at\n        ",
   "describe": {
     "columns": [
       {
@@ -66,6 +66,7 @@
         "Text",
         "Text",
         "Text",
+        "Text",
         "Text"
       ]
     },
@@ -83,5 +84,5 @@
       false
     ]
   },
-  "hash": "980052b6fa181898e1daba298c567e65c10c7f68db7e65015a923b115880f268"
+  "hash": "27fdfa0fb4934c5a9338f0667a10e0e8a891f6fefcaae83275d9f72e15d68aa0"
 }

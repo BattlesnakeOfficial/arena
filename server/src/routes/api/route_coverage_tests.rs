@@ -180,6 +180,16 @@ fn routes() -> Vec<CoveredRoute> {
             Some(Permission::SnakeDelete),
             false,
         ),
+        // The generic concrete_path arm substitutes a random UUID for {id};
+        // the handler's snake fetch 404s after the permission check passes,
+        // satisfying both coverage assertions (see mark_hosting's doc).
+        covered(
+            "PUT",
+            "/snakes/{id}/hosting",
+            no_body,
+            Some(Permission::SnakeUrlWrite),
+            false,
+        ),
         covered(
             "POST",
             "/games",

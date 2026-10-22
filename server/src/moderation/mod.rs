@@ -1764,6 +1764,84 @@ mod moderation_tests {
         Ok(())
     }
 
+    #[sqlx::test(migrations = "../migrations")]
+    async fn update_clears_hosting_mark_on_moderation_path(pool: PgPool) -> cja::Result<()> {
+        let (user, session) = user_with_session(&pool, 9488).await?;
+        let jev = MockServer::start().await;
+        mount(&jev, allow_response(), 1).await; // one call: creation only
+
+        let state = test_state(&pool, &jev.uri());
+        crate::routes::battlesnake::create_battlesnake(
+            axum::extract::State(state),
+            crate::routes::auth::CurrentUserWithSession {
+                user: user.clone(),
+                session: session.clone(),
+            },
+            RawForm(axum::body::Bytes::from(
+                "name=HostMark&url=https://softmax.com/s&visibility=public&engine_region=us-west1",
+            )),
+        )
+        .await
+        .unwrap_html();
+        let snake_id = snake_id_for(&pool, user.user_id, "HostMark").await;
+
+        // Seed a hosting client + the mark (as the endpoint would).
+        let client = crate::models::oauth::create_client(
+            &pool,
+            crate::models::oauth::CreateOauthClientInput {
+                name: "Mod Host".to_string(),
+                logo_url: None,
+                homepage_url: None,
+                onboarding_url: None,
+                description: None,
+                kind: crate::models::oauth::OauthClientKind::HostingProvider,
+                redirect_uris: vec!["https://mod.example/cb".to_string()],
+                hosting_domains: vec!["softmax.com".to_string()],
+            },
+        )
+        .await?;
+        assert_eq!(
+            crate::models::battlesnake::mark_hosted_by(
+                &pool,
+                snake_id,
+                user.user_id,
+                client.client.id,
+                "https://softmax.com/s",
+            )
+            .await?,
+            crate::models::battlesnake::MarkHostingOutcome::Marked
+        );
+
+        // Name-unchanged form update with an off-domain URL: no second
+        // Jev call, and the mark clears in the same UPDATE.
+        let response = crate::routes::battlesnake::update_battlesnake(
+            axum::extract::State(test_state(&pool, &jev.uri())),
+            crate::routes::auth::CurrentUserWithSession {
+                user: user.clone(),
+                session: session.clone(),
+            },
+            axum::extract::Path(snake_id),
+            RawForm(axum::body::Bytes::from(
+                "name=HostMark&url=https://elsewhere.example/s&visibility=public&engine_region=us-west1",
+            )),
+        )
+        .await
+        .unwrap_html();
+        assert_eq!(response.status(), axum::http::StatusCode::SEE_OTHER);
+
+        let mark = sqlx::query_scalar!(
+            "SELECT hosted_by_oauth_client_id FROM battlesnakes WHERE battlesnake_id = $1",
+            snake_id
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(mark, None, "off-domain URL update must clear the mark");
+
+        // Creation was the one and only Jev call.
+        jev.verify().await;
+        Ok(())
+    }
+
     async fn snake_id_for(pool: &PgPool, user_id: Uuid, name: &str) -> Uuid {
         crate::models::battlesnake::get_battlesnakes_by_user_id(pool, user_id)
             .await

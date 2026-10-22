@@ -379,6 +379,16 @@ pub async fn update_battlesnake(
 ) -> cja::Result<Battlesnake> {
     let visibility_str = data.visibility.as_str();
 
+    // The badge always matches the URL: extract the new URL's host with the
+    // ONE host extractor (oauth::url_host — the same fn the mark endpoint's
+    // domain check uses; the url crate lowercases hosts, drops ports,
+    // punycodes IDN, and PRESERVES trailing dots, which then fail to match)
+    // and clear the hosting mark in this same UPDATE when it no longer sits
+    // on the marked client's registered domains. Unparseable URL => no host
+    // => mark cleared. In a SET clause the column reference reads the OLD
+    // row value, which is exactly what the invariant needs.
+    let new_host = crate::models::oauth::url_host(&data.url);
+
     let result = sqlx::query_as!(
         Battlesnake,
         r#"
@@ -387,7 +397,18 @@ pub async fn update_battlesnake(
             name = $3,
             url = $4,
             visibility = $5,
-            engine_region = COALESCE($6, engine_region)
+            engine_region = COALESCE($6, engine_region),
+            hosted_by_oauth_client_id = CASE
+                WHEN hosted_by_oauth_client_id IS NULL THEN NULL
+                WHEN $7::text IS NULL THEN NULL
+                WHEN EXISTS (
+                    SELECT 1 FROM oauth_client_hosting_domains d
+                    WHERE d.oauth_client_id = battlesnakes.hosted_by_oauth_client_id
+                      AND ($7::text = d.domain
+                           OR right($7::text, length(d.domain) + 1) = '.' || d.domain)
+                ) THEN hosted_by_oauth_client_id
+                ELSE NULL
+            END
         WHERE
             battlesnake_id = $1
             AND user_id = $2
@@ -410,7 +431,8 @@ pub async fn update_battlesnake(
         data.name,
         data.url,
         visibility_str,
-        data.engine_region.map(EngineRegion::as_str)
+        data.engine_region.map(EngineRegion::as_str),
+        new_host
     )
     .fetch_one(pool)
     .await;
@@ -433,6 +455,113 @@ pub async fn update_battlesnake(
             Err(err).wrap_err("Failed to update battlesnake in database")
         }
     }
+}
+
+/// Outcome of marking a snake hosted by a client. The decision table is
+/// normative (see the plan's Binding Decision 4): 1 row ⇒ `Marked`; 0 rows
+/// disambiguated by a follow-up SELECT on the live owned row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarkHostingOutcome {
+    Marked,
+    /// Live owned snake, already hosted by a different client.
+    AlreadyHosted,
+    /// The snake's URL changed after the caller's domain check
+    /// (the mark UPDATE's `AND url = checked_url` missed).
+    UrlChanged,
+    NotFound,
+}
+
+/// Set hosted_by_oauth_client_id on a live snake owned by `user_id`.
+/// `checked_url` is the exact URL the caller domain-checked; the
+/// conditional UPDATE re-asserts it, so a URL that changed between the
+/// check and the mark makes the mark miss (EvalPlanQual re-evaluates
+/// the WHERE on the concurrently updated row under READ COMMITTED).
+/// Either interleaving is safe: mark-first ⇒ the later URL update goes
+/// through `update_battlesnake`, whose CASE clears it off-domain;
+/// update-first ⇒ `url <> checked_url` ⇒ 0 rows ⇒ `UrlChanged`.
+pub async fn mark_hosted_by(
+    pool: &PgPool,
+    battlesnake_id: Uuid,
+    user_id: Uuid,
+    oauth_client_id: Uuid,
+    checked_url: &str,
+) -> cja::Result<MarkHostingOutcome> {
+    // The conditional mark: url must still be byte-identical to what the
+    // caller checked, and no OTHER client may hold the mark.
+    let marked = sqlx::query!(
+        r#"
+        UPDATE battlesnakes
+        SET hosted_by_oauth_client_id = $3
+        WHERE battlesnake_id = $1
+          AND user_id = $2
+          AND deleted_at IS NULL
+          AND url = $4
+          AND (hosted_by_oauth_client_id IS NULL OR hosted_by_oauth_client_id = $3)
+        "#,
+        battlesnake_id,
+        user_id,
+        oauth_client_id,
+        checked_url
+    )
+    .execute(pool)
+    .await
+    .wrap_err("Failed to mark battlesnake hosted")?;
+    if marked.rows_affected() == 1 {
+        return Ok(MarkHostingOutcome::Marked);
+    }
+
+    // Disambiguate the miss on the live owned row.
+    let live = sqlx::query!(
+        r#"
+        SELECT url, hosted_by_oauth_client_id
+        FROM battlesnakes
+        WHERE battlesnake_id = $1 AND user_id = $2 AND deleted_at IS NULL
+        "#,
+        battlesnake_id,
+        user_id
+    )
+    .fetch_optional(pool)
+    .await
+    .wrap_err("Failed to load battlesnake for hosting-mark disambiguation")?;
+    let Some(live) = live else {
+        return Ok(MarkHostingOutcome::NotFound);
+    };
+    if live.url != checked_url {
+        return Ok(MarkHostingOutcome::UrlChanged);
+    }
+    if let Some(other) = live.hosted_by_oauth_client_id
+        && other != oauth_client_id
+    {
+        return Ok(MarkHostingOutcome::AlreadyHosted);
+    }
+
+    // hosted_by is NULL here: a concurrent `update_battlesnake` cleared
+    // the old mark between the two statements. Re-run the identical
+    // conditional UPDATE once; another miss is `AlreadyHosted`
+    // (conservative — the caller's 409-then-retry resolves precisely).
+    let retry = sqlx::query!(
+        r#"
+        UPDATE battlesnakes
+        SET hosted_by_oauth_client_id = $3
+        WHERE battlesnake_id = $1
+          AND user_id = $2
+          AND deleted_at IS NULL
+          AND url = $4
+          AND (hosted_by_oauth_client_id IS NULL OR hosted_by_oauth_client_id = $3)
+        "#,
+        battlesnake_id,
+        user_id,
+        oauth_client_id,
+        checked_url
+    )
+    .execute(pool)
+    .await
+    .wrap_err("Failed to mark battlesnake hosted (retry)")?;
+    Ok(if retry.rows_affected() == 1 {
+        MarkHostingOutcome::Marked
+    } else {
+        MarkHostingOutcome::AlreadyHosted
+    })
 }
 
 /// Stamp which OAuth client created this snake (same transaction as the
@@ -1369,6 +1498,222 @@ mod tests {
             entry_state(&pool, entry).await?,
             (true, Some(DISABLED_REASON_DELETED.to_string()))
         );
+
+        Ok(())
+    }
+
+    async fn create_hosting_client(
+        pool: &PgPool,
+        name: &str,
+        domains: &[&str],
+    ) -> cja::Result<Uuid> {
+        let created = crate::models::oauth::create_client(
+            pool,
+            crate::models::oauth::CreateOauthClientInput {
+                name: name.to_string(),
+                logo_url: None,
+                homepage_url: None,
+                onboarding_url: Some("https://partner.example/start".to_string()),
+                description: None,
+                kind: crate::models::oauth::OauthClientKind::HostingProvider,
+                redirect_uris: vec!["https://partner.example/cb".to_string()],
+                hosting_domains: domains.iter().map(|d| d.to_string()).collect(),
+            },
+        )
+        .await?;
+        Ok(created.client.id)
+    }
+
+    async fn snake_with_url(
+        pool: &PgPool,
+        user_id: Uuid,
+        name: &str,
+        url: &str,
+    ) -> cja::Result<Uuid> {
+        let row = sqlx::query!(
+            "INSERT INTO battlesnakes (user_id, name, url) VALUES ($1, $2, $3) RETURNING battlesnake_id",
+            user_id,
+            name,
+            url
+        )
+        .fetch_one(pool)
+        .await?;
+        Ok(row.battlesnake_id)
+    }
+
+    async fn hosted_by(pool: &PgPool, snake_id: Uuid) -> cja::Result<Option<Uuid>> {
+        let mark = sqlx::query_scalar!(
+            "SELECT hosted_by_oauth_client_id FROM battlesnakes WHERE battlesnake_id = $1",
+            snake_id
+        )
+        .fetch_one(pool)
+        .await?;
+        Ok(mark)
+    }
+
+    async fn update_url(
+        pool: &PgPool,
+        snake_id: Uuid,
+        user_id: Uuid,
+        url: &str,
+    ) -> cja::Result<()> {
+        update_battlesnake(
+            pool,
+            snake_id,
+            user_id,
+            UpdateBattlesnake {
+                name: "Hosting Case".to_string(),
+                url: url.to_string(),
+                visibility: Visibility::Private,
+                engine_region: None,
+            },
+        )
+        .await?;
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn hosting_mark_follows_url_updates(pool: PgPool) -> cja::Result<()> {
+        let owner = create_user(&pool, 8901, "hosting-owner").await?;
+        let client = create_hosting_client(&pool, "Softmax Host", &["softmax.com"]).await?;
+
+        // Marked snake on-domain.
+        let snake = snake_with_url(&pool, owner, "Hosting Case", "https://softmax.com/s").await?;
+        assert_eq!(
+            mark_hosted_by(&pool, snake, owner, client, "https://softmax.com/s").await?,
+            MarkHostingOutcome::Marked
+        );
+
+        // (a) URL change to another subdomain of the same client: kept.
+        update_url(&pool, snake, owner, "https://api.softmax.com/s").await?;
+        assert_eq!(hosted_by(&pool, snake).await?, Some(client));
+
+        // (c) lookalike `softmax.com.evil.io`: cleared — pins the SQL
+        // right() twin to the Rust label-boundary rule.
+        update_url(&pool, snake, owner, "https://softmax.com.evil.io/s").await?;
+        assert_eq!(hosted_by(&pool, snake).await?, None);
+
+        // Re-mark, then (f) userinfo trick `https://softmax.com@evil.io/s`
+        // (host is evil.io): cleared.
+        update_url(&pool, snake, owner, "https://softmax.com/s").await?;
+        assert_eq!(
+            mark_hosted_by(&pool, snake, owner, client, "https://softmax.com/s").await?,
+            MarkHostingOutcome::Marked
+        );
+        update_url(&pool, snake, owner, "https://softmax.com@evil.io/s").await?;
+        assert_eq!(hosted_by(&pool, snake).await?, None);
+
+        // Re-mark, then (g) trailing-dot host `softmax.com.`: cleared
+        // (deliberately NOT normalized anywhere).
+        update_url(&pool, snake, owner, "https://softmax.com/s").await?;
+        assert_eq!(
+            mark_hosted_by(&pool, snake, owner, client, "https://softmax.com/s").await?,
+            MarkHostingOutcome::Marked
+        );
+        update_url(&pool, snake, owner, "https://softmax.com./s").await?;
+        assert_eq!(hosted_by(&pool, snake).await?, None);
+
+        // Re-mark, then (b) plain off-domain host: cleared.
+        update_url(&pool, snake, owner, "https://softmax.com/s").await?;
+        assert_eq!(
+            mark_hosted_by(&pool, snake, owner, client, "https://softmax.com/s").await?,
+            MarkHostingOutcome::Marked
+        );
+        update_url(&pool, snake, owner, "https://elsewhere.example/s").await?;
+        assert_eq!(hosted_by(&pool, snake).await?, None);
+
+        // (d) an unmarked snake stays unmarked through a URL update.
+        update_url(&pool, snake, owner, "https://api.softmax.com/s").await?;
+        assert_eq!(hosted_by(&pool, snake).await?, None);
+
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn hosting_mark_kept_on_same_url_and_name_only_edit(pool: PgPool) -> cja::Result<()> {
+        let owner = create_user(&pool, 8902, "hosting-owner-2").await?;
+        let client = create_hosting_client(&pool, "Softmax Host 2", &["softmax.com"]).await?;
+        let snake = snake_with_url(&pool, owner, "Hosting Case 2", "https://softmax.com/s").await?;
+        assert_eq!(
+            mark_hosted_by(&pool, snake, owner, client, "https://softmax.com/s").await?,
+            MarkHostingOutcome::Marked
+        );
+
+        // Resubmitting the SAME URL (what today's forms always do): kept.
+        update_url(&pool, snake, owner, "https://softmax.com/s").await?;
+        assert_eq!(hosted_by(&pool, snake).await?, Some(client));
+
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn mark_refuses_when_url_changed_since_check(pool: PgPool) -> cja::Result<()> {
+        let owner = create_user(&pool, 8903, "hosting-owner-3").await?;
+        let client = create_hosting_client(&pool, "Softmax Host 3", &["softmax.com"]).await?;
+        // Snake stored OFF-domain; the caller domain-checked a different
+        // URL — the deterministic pin of the EvalPlanQual race guard.
+        let snake = snake_with_url(
+            &pool,
+            owner,
+            "Hosting Case 3",
+            "https://elsewhere.example/s",
+        )
+        .await?;
+        assert_eq!(
+            mark_hosted_by(&pool, snake, owner, client, "https://softmax.com/s").await?,
+            MarkHostingOutcome::UrlChanged
+        );
+        assert_eq!(hosted_by(&pool, snake).await?, None);
+
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn mark_hosting_outcomes_for_missing_other_owner_and_conflict(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        let owner = create_user(&pool, 8904, "hosting-owner-4").await?;
+        let stranger = create_user(&pool, 8905, "hosting-owner-5").await?;
+        let client_a = create_hosting_client(&pool, "Host A", &["a.example"]).await?;
+        let client_b = create_hosting_client(&pool, "Host B", &["b.example"]).await?;
+
+        // Unknown snake.
+        assert_eq!(
+            mark_hosted_by(
+                &pool,
+                Uuid::new_v4(),
+                owner,
+                client_a,
+                "https://a.example/s"
+            )
+            .await?,
+            MarkHostingOutcome::NotFound
+        );
+        // Another user's snake: indistinguishable from missing.
+        let foreign =
+            snake_with_url(&pool, stranger, "Hosting Foreign", "https://a.example/s").await?;
+        assert_eq!(
+            mark_hosted_by(&pool, foreign, owner, client_a, "https://a.example/s").await?,
+            MarkHostingOutcome::NotFound
+        );
+
+        // Another client holds the mark: AlreadyHosted; same client re-mark
+        // is idempotent Marked.
+        let snake = snake_with_url(&pool, owner, "Hosting Case 4", "https://a.example/s").await?;
+        assert_eq!(
+            mark_hosted_by(&pool, snake, owner, client_a, "https://a.example/s").await?,
+            MarkHostingOutcome::Marked
+        );
+        assert_eq!(
+            mark_hosted_by(&pool, snake, owner, client_b, "https://a.example/s").await?,
+            MarkHostingOutcome::AlreadyHosted
+        );
+        assert_eq!(hosted_by(&pool, snake).await?, Some(client_a));
+        assert_eq!(
+            mark_hosted_by(&pool, snake, owner, client_a, "https://a.example/s").await?,
+            MarkHostingOutcome::Marked
+        );
+        assert_eq!(hosted_by(&pool, snake).await?, Some(client_a));
 
         Ok(())
     }

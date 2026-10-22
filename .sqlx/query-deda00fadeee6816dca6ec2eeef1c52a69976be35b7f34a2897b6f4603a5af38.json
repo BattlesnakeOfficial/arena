@@ -1,0 +1,92 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            c.id,\n            c.public_client_id,\n            c.secret_hash,\n            c.name,\n            c.logo_url,\n            c.homepage_url,\n            c.onboarding_url,\n            c.description,\n            c.kind as \"kind: OauthClientKind\",\n            c.created_at,\n            c.disabled_at,\n            ARRAY(\n                SELECT uri FROM oauth_client_redirect_uris u\n                WHERE u.oauth_client_id = c.id\n                ORDER BY uri\n            ) AS \"redirect_uris!: Vec<String>\",\n            ARRAY(\n                SELECT domain FROM oauth_client_hosting_domains d\n                WHERE d.oauth_client_id = c.id\n                ORDER BY domain\n            ) AS \"hosting_domains!: Vec<String>\"\n        FROM oauth_clients c\n        ORDER BY c.name ASC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "public_client_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "secret_hash",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "logo_url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "homepage_url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "onboarding_url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "description",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "kind: OauthClientKind",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 10,
+        "name": "disabled_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 11,
+        "name": "redirect_uris!: Vec<String>",
+        "type_info": "TextArray"
+      },
+      {
+        "ordinal": 12,
+        "name": "hosting_domains!: Vec<String>",
+        "type_info": "TextArray"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false,
+      true,
+      null,
+      null
+    ]
+  },
+  "hash": "deda00fadeee6816dca6ec2eeef1c52a69976be35b7f34a2897b6f4603a5af38"
+}

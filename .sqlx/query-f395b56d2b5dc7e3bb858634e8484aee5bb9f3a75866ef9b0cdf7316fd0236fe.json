@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT c.id, c.name, c.logo_url, c.homepage_url, c.onboarding_url, c.description\n        FROM oauth_clients c\n        JOIN battlesnakes b ON b.hosted_by_oauth_client_id = c.id\n        WHERE b.battlesnake_id = $1 AND b.deleted_at IS NULL\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "logo_url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "homepage_url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "onboarding_url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "description",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "f395b56d2b5dc7e3bb858634e8484aee5bb9f3a75866ef9b0cdf7316fd0236fe"
+}
