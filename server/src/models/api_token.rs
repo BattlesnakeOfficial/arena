@@ -376,7 +376,7 @@ pub async fn revoke_token(pool: &PgPool, token_id: Uuid, user_id: Uuid) -> cja::
         // The subquery still reads the row: revoking sets a column, it does
         // not delete. Tokens without a grant (the common case) leave the
         // subquery NULL and this UPDATE a no-op.
-        sqlx::query!(
+        let grant_revoked = sqlx::query!(
             r#"
             UPDATE oauth_grants
             SET revoked_at = NOW()
@@ -388,6 +388,20 @@ pub async fn revoke_token(pool: &PgPool, token_id: Uuid, user_id: Uuid) -> cja::
         .execute(&mut *tx)
         .await
         .wrap_err("Failed to revoke token's OAuth grant")?;
+        if grant_revoked.rows_affected() > 0 {
+            // The grant is gone: outstanding codes for this (user, client)
+            // must not be able to re-mint it at exchange time.
+            let client = sqlx::query_scalar!(
+                "SELECT oauth_client_id FROM oauth_grants WHERE id = (SELECT oauth_grant_id FROM api_tokens WHERE id = $1)",
+                token_id
+            )
+            .fetch_optional(&mut *tx)
+            .await
+            .wrap_err("Failed to load token's OAuth client")?;
+            if let Some(client) = client {
+                crate::models::oauth::delete_outstanding_codes(&mut tx, user_id, client).await?;
+            }
+        }
     }
 
     tx.commit()

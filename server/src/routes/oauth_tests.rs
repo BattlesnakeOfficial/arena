@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use crate::models::api_token::Permission;
 use crate::models::oauth::{self, OauthClient};
-use crate::routes::oauth::{consent_csrf_message, mint_consent_csrf};
+use crate::routes::oauth::{consent_csrf_key, consent_csrf_message, mint_consent_csrf};
 use crate::routes::test_support::{
     api_app, create_user_session, send_api, session_user_id, signed_session_cookie,
 };
@@ -143,7 +143,7 @@ impl Fixture {
         state: &str,
     ) -> String {
         mint_consent_csrf(
-            self.state.cookie_key.master(),
+            &consent_csrf_key(self.state.cookie_key.master()),
             &consent_csrf_message(
                 self.session_id,
                 &self.client.public_client_id,
@@ -332,6 +332,36 @@ impl Fixture {
         .await
         .unwrap()
     }
+
+    /// POST the authorized-apps snake edit; returns the response status.
+    async fn post_grant_snake_edit(
+        &self,
+        grant_id: Uuid,
+        snake_access: &str,
+        snake_ids: &[Uuid],
+    ) -> StatusCode {
+        let mut body = form_encode(&[("snake_access", snake_access)]);
+        for id in snake_ids {
+            body.push_str(&format!(
+                "&snake_ids={}",
+                urlencoding::encode(&id.to_string())
+            ));
+        }
+        let (name, value) = self.cookie_header();
+        let response = self
+            .app
+            .clone()
+            .oneshot(
+                Request::post(format!("/settings/authorized-apps/{grant_id}/snakes"))
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(name, value)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        response.status()
+    }
 }
 
 fn form_encode(fields: &[(&str, &str)]) -> String {
@@ -357,6 +387,12 @@ async fn full_flow_authorize_to_api(pool: PgPool) {
     let (status, location, body, headers) = fx.get_authorize(&uri).await;
     assert_eq!(status, StatusCode::OK);
     assert!(location.is_none());
+    // Rendered through the full site layout (viewport meta, styles, header)
+    // — a bare fragment would lay out at ~980px on phones.
+    assert!(
+        body.contains("viewport"),
+        "consent screen must use the site layout: {body}"
+    );
     assert!(body.contains("Test Client"), "{body}");
     for text in [
         Permission::ProfileRead.description(),
@@ -513,13 +549,13 @@ async fn full_flow_authorize_to_api(pool: PgPool) {
 #[sqlx::test(migrations = "../migrations")]
 async fn decision_ignores_non_email_permission_subset(pool: PgPool) {
     let fx = Fixture::new(&pool).await;
-    let (_verifier, challenge) = make_verifier_pair();
+    let (verifier, challenge) = make_verifier_pair();
     let scope = "profile.read snakes.read";
     let csrf = fx.consent_csrf(&challenge, scope);
 
     // A stray permissions= key carrying a subset — ignored outright: the
     // code's permissions are the full requested scope.
-    let (status, _location, _body) = fx
+    let (status, location, _body) = fx
         .post_decision(&[
             ("client_id", &fx.client.public_client_id),
             ("redirect_uri", REDIRECT_URI),
@@ -533,6 +569,7 @@ async fn decision_ignores_non_email_permission_subset(pool: PgPool) {
         ])
         .await;
     assert_eq!(status, StatusCode::SEE_OTHER);
+    let code = query_param(&location.unwrap(), "code").unwrap();
 
     let count: i64 = sqlx::query_scalar!(
         r#"SELECT COUNT(*) AS "count!: i64"
@@ -544,6 +581,21 @@ async fn decision_ignores_non_email_permission_subset(pool: PgPool) {
     .await
     .unwrap();
     assert_eq!(count, 1, "snakes.read must survive the stray subset key");
+
+    // And after exchange the token's scope is the full requested set.
+    let (status, json, _headers) = fx
+        .post_token(
+            &[
+                ("grant_type", "authorization_code"),
+                ("code", &code),
+                ("redirect_uri", REDIRECT_URI),
+                ("code_verifier", &verifier),
+            ],
+            Some((&fx.client.public_client_id, &fx.secret)),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["scope"], "profile.read snakes.read");
 }
 
 #[sqlx::test(migrations = "../migrations")]
@@ -560,7 +612,7 @@ async fn decision_rejects_missing_or_forged_csrf(pool: PgPool) {
     let minted_over_other_scope = fx.consent_csrf(&challenge, "profile.read snakes.read");
 
     let other_session_csrf = mint_consent_csrf(
-        fx.state.cookie_key.master(),
+        &consent_csrf_key(fx.state.cookie_key.master()),
         &consent_csrf_message(
             Uuid::new_v4(),
             &fx.client.public_client_id,
@@ -660,6 +712,181 @@ async fn only_email_read_may_be_withheld_and_empty_scope_is_valid(pool: PgPool) 
     let (status, body) = send_api(&fx.app, "GET", "/api/me", Some(token), None).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
     assert_eq!(body, "missing permission: profile.read");
+}
+
+#[sqlx::test(migrations = "../migrations")]
+async fn email_read_checked_grants_email(pool: PgPool) {
+    let fx = Fixture::new(&pool).await;
+    sqlx::query!(
+        "UPDATE users SET github_email = 'dev1766@example.com' WHERE user_id = $1",
+        fx.user_id
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (verifier, challenge) = make_verifier_pair();
+
+    // email.read left CHECKED: it is granted, and /api/me returns the email.
+    let code = fx
+        .approve("profile.read email.read", &challenge, "all", &[], true)
+        .await;
+    let (status, json, _headers) = fx
+        .post_token(
+            &[
+                ("grant_type", "authorization_code"),
+                ("code", &code),
+                ("redirect_uri", REDIRECT_URI),
+                ("code_verifier", &verifier),
+            ],
+            Some((&fx.client.public_client_id, &fx.secret)),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["scope"], "profile.read email.read");
+    let token = json["access_token"].as_str().unwrap();
+    let (status, body) = send_api(&fx.app, "GET", "/api/me", Some(token), None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let me: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(me["email"], "dev1766@example.com", "{me}");
+}
+
+#[sqlx::test(migrations = "../migrations")]
+async fn decision_rejects_foreign_or_deleted_snakes(pool: PgPool) {
+    let fx = Fixture::new(&pool).await;
+    let (_verifier, challenge) = make_verifier_pair();
+    let scope = "snakes.read snake.url.read";
+
+    // Another user's snake.
+    let other_session = create_user_session(&pool, 9922003, false).await;
+    let other_user = session_user_id(&pool, other_session).await;
+    let foreign_snake = make_snake(&pool, other_user, "not-yours").await;
+
+    // One of the user's own snakes, soft-deleted.
+    sqlx::query!(
+        "UPDATE battlesnakes SET deleted_at = NOW() WHERE battlesnake_id = $1",
+        fx.snakes[2]
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    for (label, snake_id) in [
+        ("foreign snake", foreign_snake),
+        ("own soft-deleted snake", fx.snakes[2]),
+    ] {
+        let csrf = fx.consent_csrf(&challenge, scope);
+        let body = form_encode(&[
+            ("client_id", &fx.client.public_client_id),
+            ("redirect_uri", REDIRECT_URI),
+            ("state", "xyz"),
+            ("code_challenge", &challenge),
+            ("scope", scope),
+            ("csrf", &csrf),
+            ("decision", "approve"),
+            ("snake_access", "selected"),
+        ]) + "&snake_ids="
+            + &urlencoding::encode(&snake_id.to_string());
+        let (name, value) = fx.cookie_header();
+        let response = fx
+            .app
+            .clone()
+            .oneshot(
+                Request::post("/oauth/authorize/decision")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(name, value)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let has_location = response.headers().contains_key(header::LOCATION);
+        let body = body_string(response).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{label}: {body}");
+        assert!(!has_location, "{label} must never redirect");
+
+        let codes: i64 = sqlx::query_scalar!(
+            r#"SELECT COUNT(*) AS "count!: i64" FROM oauth_authorization_codes"#
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(codes, 0, "{label}: no code row");
+    }
+}
+
+#[sqlx::test(migrations = "../migrations")]
+async fn decision_deny_redirects_without_code(pool: PgPool) {
+    let fx = Fixture::new(&pool).await;
+    let (_verifier, challenge) = make_verifier_pair();
+    let scope = "profile.read";
+    let csrf = fx.consent_csrf(&challenge, scope);
+
+    let (status, location, _body) = fx
+        .post_decision(&[
+            ("client_id", &fx.client.public_client_id),
+            ("redirect_uri", REDIRECT_URI),
+            ("state", "xyz"),
+            ("code_challenge", &challenge),
+            ("scope", scope),
+            ("csrf", &csrf),
+            ("decision", "deny"),
+            ("snake_access", "all"),
+        ])
+        .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    let location = location.unwrap();
+    assert_eq!(
+        query_param(&location, "error").as_deref(),
+        Some("access_denied")
+    );
+    assert_eq!(query_param(&location, "state").as_deref(), Some("xyz"));
+
+    let codes: i64 =
+        sqlx::query_scalar!(r#"SELECT COUNT(*) AS "count!: i64" FROM oauth_authorization_codes"#)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(codes, 0, "deny must not create a code");
+}
+
+#[sqlx::test(migrations = "../migrations")]
+async fn decision_requires_explicit_approve(pool: PgPool) {
+    let fx = Fixture::new(&pool).await;
+    let (_verifier, challenge) = make_verifier_pair();
+    let scope = "profile.read";
+
+    for (label, decision) in [
+        ("missing decision", None),
+        ("unknown decision", Some("maybe")),
+    ] {
+        let csrf = fx.consent_csrf(&challenge, scope);
+        let mut fields: Vec<(&str, &str)> = vec![
+            ("client_id", &fx.client.public_client_id),
+            ("redirect_uri", REDIRECT_URI),
+            ("state", "xyz"),
+            ("code_challenge", &challenge),
+            ("scope", scope),
+            ("csrf", &csrf),
+            ("snake_access", "all"),
+        ];
+        if let Some(decision) = decision {
+            fields.push(("decision", decision));
+        }
+        let (status, location, _body) = fx.post_decision(&fields).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{label}");
+        assert!(
+            location.is_none(),
+            "{label} must never redirect: {location:?}"
+        );
+    }
+
+    let codes: i64 =
+        sqlx::query_scalar!(r#"SELECT COUNT(*) AS "count!: i64" FROM oauth_authorization_codes"#)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(codes, 0, "no decision value may approve implicitly");
 }
 
 // ---------------------------------------------------------------------------
@@ -936,6 +1163,47 @@ async fn client_b_cannot_redeem_client_a_code(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "../migrations")]
+async fn wrong_redirect_uri_at_exchange(pool: PgPool) {
+    let fx = Fixture::new(&pool).await;
+    // Register a second URI on the fixture client.
+    let alt_uri = "https://client.example/cb2";
+    sqlx::query!(
+        "INSERT INTO oauth_client_redirect_uris (oauth_client_id, uri) VALUES ($1, $2)",
+        fx.client.id,
+        alt_uri
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let (verifier, challenge) = make_verifier_pair();
+    let code = fx
+        .approve("profile.read", &challenge, "all", &[], false)
+        .await;
+
+    // The code was issued for REDIRECT_URI; presenting the (also
+    // registered) alt URI is invalid_grant — and the code is NOT consumed,
+    // so the right URI still works.
+    let (status, json, _headers) = fx
+        .post_token(
+            &[
+                ("grant_type", "authorization_code"),
+                ("code", &code),
+                ("redirect_uri", alt_uri),
+                ("code_verifier", &verifier),
+            ],
+            Some((&fx.client.public_client_id, &fx.secret)),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert_eq!(json["error"], "invalid_grant");
+
+    let token = fx.exchange(&code, &verifier).await;
+    let (status, _body) = send_api(&fx.app, "GET", "/api/me", Some(&token), None).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[sqlx::test(migrations = "../migrations")]
 async fn disabled_client_and_revival(pool: PgPool) {
     let fx = Fixture::new(&pool).await;
     let token = fx.full_flow("profile.read", "all", &[]).await;
@@ -1061,6 +1329,295 @@ async fn revoked_grant_token_dies(pool: PgPool) {
             .await
             .unwrap();
     assert!(revoked.is_some());
+}
+
+#[sqlx::test(migrations = "../migrations")]
+async fn revoke_grant_invalidates_outstanding_codes(pool: PgPool) {
+    let fx = Fixture::new(&pool).await;
+    // A live grant via an earlier exchange (the Authorized apps revoke only
+    // reaches an existing grant).
+    let _token = fx.full_flow("profile.read", "all", &[]).await;
+    let grant = fx.active_grant(&pool).await;
+
+    // A second approval, not yet exchanged — the code a client could be
+    // holding when the player revokes.
+    let (verifier, challenge) = make_verifier_pair();
+    let code = fx
+        .approve("profile.read", &challenge, "all", &[], false)
+        .await;
+
+    let (name, value) = fx.cookie_header();
+    let response = fx
+        .app
+        .clone()
+        .oneshot(
+            Request::post(format!("/settings/authorized-apps/{grant}/revoke"))
+                .header(name, value)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+
+    // The outstanding code cannot resurrect the grant.
+    let (status, json, _headers) = fx
+        .post_token(
+            &[
+                ("grant_type", "authorization_code"),
+                ("code", &code),
+                ("redirect_uri", REDIRECT_URI),
+                ("code_verifier", &verifier),
+            ],
+            Some((&fx.client.public_client_id, &fx.secret)),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert_eq!(json["error"], "invalid_grant");
+
+    let active: i64 = sqlx::query_scalar!(
+        r#"SELECT COUNT(*) AS "count!: i64" FROM oauth_grants WHERE user_id = $1 AND oauth_client_id = $2 AND revoked_at IS NULL"#,
+        fx.user_id,
+        fx.client.id
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(active, 0, "no active grant may survive the revoke");
+}
+
+#[sqlx::test(migrations = "../migrations")]
+async fn earlier_code_cannot_supersede_newer_exchange(pool: PgPool) {
+    let fx = Fixture::new(&pool).await;
+    let (verifier, challenge) = make_verifier_pair();
+    // Two approvals: the broader one first, the narrower one second.
+    let earlier = fx
+        .approve("profile.read snakes.read", &challenge, "all", &[], false)
+        .await;
+    let later = fx
+        .approve("profile.read", &challenge, "all", &[], false)
+        .await;
+
+    // The NEWER code is exchanged: the grant rotation invalidates the older
+    // outstanding code.
+    let token = fx.exchange(&later, &verifier).await;
+
+    let (status, json, _headers) = fx
+        .post_token(
+            &[
+                ("grant_type", "authorization_code"),
+                ("code", &earlier),
+                ("redirect_uri", REDIRECT_URI),
+                ("code_verifier", &verifier),
+            ],
+            Some((&fx.client.public_client_id, &fx.secret)),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert_eq!(json["error"], "invalid_grant");
+
+    // The newer exchange's grant and token are still live.
+    let (status, _body) = send_api(&fx.app, "GET", "/api/me", Some(&token), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let active: i64 = sqlx::query_scalar!(
+        r#"SELECT COUNT(*) AS "count!: i64" FROM oauth_grants WHERE user_id = $1 AND oauth_client_id = $2 AND revoked_at IS NULL"#,
+        fx.user_id,
+        fx.client.id
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(active, 1);
+}
+
+#[sqlx::test(migrations = "../migrations")]
+async fn grant_snake_edit_invalidates_outstanding_codes(pool: PgPool) {
+    let fx = Fixture::new(&pool).await;
+    // A live grant narrowed to [A], via an earlier exchange.
+    let _token = fx
+        .full_flow("snakes.read snake.url.read", "selected", &[fx.snakes[0]])
+        .await;
+    let grant = fx.active_grant(&pool).await;
+
+    // A pre-edit approval selecting [A, B] — the code that could undo the
+    // narrowing below.
+    let (verifier, challenge) = make_verifier_pair();
+    let code = fx
+        .approve(
+            "snakes.read snake.url.read",
+            &challenge,
+            "selected",
+            &[fx.snakes[0], fx.snakes[1]],
+            false,
+        )
+        .await;
+
+    // Re-narrow the live grant to [A].
+    let status = fx
+        .post_grant_snake_edit(grant, "selected", &[fx.snakes[0]])
+        .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+
+    // The pre-edit code is dead.
+    let (status, json, _headers) = fx
+        .post_token(
+            &[
+                ("grant_type", "authorization_code"),
+                ("code", &code),
+                ("redirect_uri", REDIRECT_URI),
+                ("code_verifier", &verifier),
+            ],
+            Some((&fx.client.public_client_id, &fx.secret)),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert_eq!(json["error"], "invalid_grant");
+
+    // The live grant's selection is still exactly [A].
+    let rows: Vec<Uuid> = sqlx::query_scalar!(
+        "SELECT battlesnake_id FROM api_token_snakes s\n         JOIN api_tokens t ON t.id = s.api_token_id\n         WHERE t.oauth_grant_id = $1 AND t.revoked_at IS NULL",
+        grant
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rows, vec![fx.snakes[0]]);
+}
+
+#[sqlx::test(migrations = "../migrations")]
+async fn edit_grant_can_remove_and_widen_selection(pool: PgPool) {
+    let fx = Fixture::new(&pool).await;
+    let token = fx
+        .full_flow(
+            "snakes.read snake.url.read",
+            "selected",
+            &[fx.snakes[0], fx.snakes[1]],
+        )
+        .await;
+    let grant = fx.active_grant(&pool).await;
+
+    let url_of = |token: &str, name: &str| {
+        let app = fx.app.clone();
+        let token = token.to_string();
+        let name = name.to_string();
+        async move {
+            let (status, body) = send_api(&app, "GET", "/api/snakes", Some(&token), None).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let snakes: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
+            snakes
+                .iter()
+                .find(|s| s["name"] == name)
+                .unwrap()
+                .get("url")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null)
+        }
+    };
+
+    // Before: both visible.
+    assert!(url_of(&token, "oauth-a").await.is_string());
+    assert!(url_of(&token, "oauth-b").await.is_string());
+
+    // REMOVING: selected {A, B} → {A} — B's url is redacted on the same
+    // token.
+    let status = fx
+        .post_grant_snake_edit(grant, "selected", &[fx.snakes[0]])
+        .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    assert!(url_of(&token, "oauth-a").await.is_string());
+    assert!(
+        url_of(&token, "oauth-b").await.is_null(),
+        "removal must take effect on the SAME token"
+    );
+
+    // WIDENING: selected → all.
+    let status = fx.post_grant_snake_edit(grant, "all", &[]).await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    assert!(url_of(&token, "oauth-a").await.is_string());
+    assert!(url_of(&token, "oauth-b").await.is_string());
+}
+
+#[sqlx::test(migrations = "../migrations")]
+async fn grant_snake_edit_rejects_foreign_snake(pool: PgPool) {
+    let fx = Fixture::new(&pool).await;
+    let _token = fx
+        .full_flow("snakes.read snake.url.read", "selected", &[fx.snakes[0]])
+        .await;
+    let grant = fx.active_grant(&pool).await;
+
+    let other_session = create_user_session(&pool, 9922004, false).await;
+    let other_user = session_user_id(&pool, other_session).await;
+    let foreign_snake = make_snake(&pool, other_user, "still-not-yours").await;
+
+    // The edit tries to add another user's snake: rejected (flash error +
+    // redirect), and the selection is unchanged.
+    let status = fx
+        .post_grant_snake_edit(grant, "selected", &[fx.snakes[0], foreign_snake])
+        .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+
+    let rows: Vec<Uuid> = sqlx::query_scalar!(
+        "SELECT battlesnake_id FROM api_token_snakes s\n         JOIN api_tokens t ON t.id = s.api_token_id\n         WHERE t.oauth_grant_id = $1 AND t.revoked_at IS NULL",
+        grant
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rows, vec![fx.snakes[0]], "selection must be unchanged");
+}
+
+#[sqlx::test(migrations = "../migrations")]
+async fn grant_snake_edit_rejects_foreign_grant(pool: PgPool) {
+    let fx = Fixture::new(&pool).await;
+
+    // Another user's grant, created through the model layer directly.
+    let other_session = create_user_session(&pool, 9922005, false).await;
+    let other_user = session_user_id(&pool, other_session).await;
+    let other_snake = make_snake(&pool, other_user, "their-snake").await;
+    let (verifier, challenge) = make_verifier_pair();
+    let code = oauth::create_authorization_code(
+        &pool,
+        oauth::NewAuthorizationCode {
+            client_db_id: fx.client.id,
+            user_id: other_user,
+            redirect_uri: REDIRECT_URI,
+            code_challenge: &challenge,
+            permissions: &[Permission::SnakesRead, Permission::SnakeUrlRead],
+            snake_access: crate::models::api_token::SnakeAccess::Selected,
+            snake_ids: &[other_snake],
+        },
+    )
+    .await
+    .unwrap();
+    oauth::exchange_authorization_code(&pool, fx.client.id, &code, REDIRECT_URI, &verifier)
+        .await
+        .unwrap()
+        .unwrap();
+    let other_grant: Uuid = sqlx::query_scalar!(
+        "SELECT id FROM oauth_grants WHERE user_id = $1 AND revoked_at IS NULL",
+        other_user
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    // The fixture user POSTs an edit against the other user's grant
+    // (IDOR): rejected, and the other user's grant is untouched.
+    let status = fx.post_grant_snake_edit(other_grant, "all", &[]).await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+
+    let rows: Vec<Uuid> = sqlx::query_scalar!(
+        "SELECT battlesnake_id FROM api_token_snakes s\n         JOIN api_tokens t ON t.id = s.api_token_id\n         WHERE t.oauth_grant_id = $1 AND t.revoked_at IS NULL",
+        other_grant
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        rows,
+        vec![other_snake],
+        "the other user's grant must be unchanged"
+    );
 }
 
 #[sqlx::test(migrations = "../migrations")]
@@ -1231,8 +1788,10 @@ async fn exchange_after_selected_snake_deleted(pool: PgPool) {
         )
         .await;
 
-    // Snake B is deleted between approve and exchange: the join row cascades
-    // away and the exchange mints with the surviving selection.
+    // Snake B is soft-deleted between approve and exchange: the exchange
+    // filters soft-deleted snakes out when copying the code's selection
+    // into the token (snakes are soft-deleted, so the FK cascade never
+    // fires).
     sqlx::query!(
         "UPDATE battlesnakes SET deleted_at = NOW() WHERE battlesnake_id = $1",
         fx.snakes[1]
@@ -1249,6 +1808,22 @@ async fn exchange_after_selected_snake_deleted(pool: PgPool) {
     assert!(a.get("url").is_some(), "{a}");
     let c = snakes.iter().find(|s| s["name"] == "oauth-c").unwrap();
     assert!(c.get("url").is_none(), "{c}");
+
+    // The token's snake selection is EXACTLY {A} — the soft-deleted B was
+    // dropped at exchange, not carried into api_token_snakes.
+    let rows: Vec<Uuid> = sqlx::query_scalar!(
+        "SELECT battlesnake_id FROM api_token_snakes s
+         JOIN api_tokens t ON t.id = s.api_token_id
+         WHERE t.revoked_at IS NULL"
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        rows,
+        vec![fx.snakes[0]],
+        "soft-deleted snake must not be copied into the token"
+    );
 }
 
 #[sqlx::test(migrations = "../migrations")]
@@ -1428,13 +2003,22 @@ async fn authorized_apps_page_renders(pool: PgPool) {
     fx.full_flow("profile.read snake.url.read", "selected", &[fx.snakes[0]])
         .await;
 
-    let (status, _location, body, _headers) = fx.get_authorize("/settings/authorized-apps").await;
+    let (status, _location, body, headers) = fx.get_authorize("/settings/authorized-apps").await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("Test Client"), "{body}");
     assert!(body.contains("oauth-a"), "{body}");
     assert!(
         body.contains(Permission::SnakeUrlRead.description()),
         "{body}"
+    );
+    // Anti-framing: the page (and its POSTs) refuse framing.
+    assert_eq!(headers[header::X_FRAME_OPTIONS], "DENY");
+    assert!(
+        headers[header::CONTENT_SECURITY_POLICY]
+            .to_str()
+            .unwrap()
+            .contains("frame-ancestors 'none'"),
+        "authorized apps page must refuse framing"
     );
 
     // Another user's session: not listed, and their revoke 404s.
@@ -1632,6 +2216,54 @@ async fn token_endpoint_basic_auth_and_dual_method(pool: PgPool) {
     assert_eq!(json["error"], "invalid_request");
 }
 
+#[sqlx::test(migrations = "../migrations")]
+async fn token_endpoint_rejects_malformed_bodies(pool: PgPool) {
+    let fx = Fixture::new(&pool).await;
+
+    // A duplicate parameter fails serde_urlencoded parsing → invalid_request,
+    // not invalid_client/unsupported_grant_type.
+    let response = fx
+        .app
+        .clone()
+        .oneshot(
+            Request::post("/oauth/token")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(
+                    "grant_type=authorization_code&grant_type=authorization_code",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let headers = response.headers().clone();
+    let body = body_string(response).await;
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert_eq!(json["error"], "invalid_request");
+    assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+
+    // A JSON body (with a JSON content type) → invalid_request too.
+    let response = fx
+        .app
+        .clone()
+        .oneshot(
+            Request::post("/oauth/token")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    "{\"grant_type\":\"authorization_code\",\"code\":\"x\"}",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = body_string(response).await;
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert_eq!(json["error"], "invalid_request");
+}
+
 // ---------------------------------------------------------------------------
 // Admin
 // ---------------------------------------------------------------------------
@@ -1766,6 +2398,190 @@ async fn oauth_client_admin_lifecycle(pool: PgPool) {
             .unwrap()
             .is_none()
     );
+}
+
+#[sqlx::test(migrations = "../migrations")]
+async fn admin_create_rejects_javascript_urls(pool: PgPool) {
+    let fx = Fixture::new(&pool).await;
+    let admin_session = create_user_session(&pool, 9922011, true).await;
+    let admin_cookie = signed_session_cookie(&fx.state, admin_session);
+    let cookie = format!(
+        "{}={admin_cookie}",
+        crate::models::session::SESSION_COOKIE_NAME
+    );
+
+    for (label, logo_url, homepage_url) in [
+        ("javascript homepage", "", "javascript:alert(1)"),
+        ("javascript logo", "javascript:alert(1)", ""),
+        ("data homepage", "", "data:text/html,alert(1)"),
+    ] {
+        let response = fx
+            .app
+            .clone()
+            .oneshot(
+                Request::post("/admin/oauth-clients")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(header::COOKIE, cookie.clone())
+                    .body(Body::from(form_encode(&[
+                        ("name", "XSS Client"),
+                        ("kind", "standard"),
+                        ("logo_url", logo_url),
+                        ("homepage_url", homepage_url),
+                        ("redirect_uris", "https://xss.example/cb"),
+                    ])))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::SEE_OTHER,
+            "{label}: rejected with a flash redirect"
+        );
+
+        let count: i64 = sqlx::query_scalar!(
+            r#"SELECT COUNT(*) AS "count!: i64" FROM oauth_clients WHERE name = 'XSS Client'"#
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 0, "{label}: no client row may be created");
+    }
+}
+
+#[sqlx::test(migrations = "../migrations")]
+async fn admin_create_validates_redirect_uris(pool: PgPool) {
+    let fx = Fixture::new(&pool).await;
+    let admin_session = create_user_session(&pool, 9922012, true).await;
+    let admin_cookie = signed_session_cookie(&fx.state, admin_session);
+    let cookie = format!(
+        "{}={admin_cookie}",
+        crate::models::session::SESSION_COOKIE_NAME
+    );
+
+    let post_create = |uris: &str| {
+        let app = fx.app.clone();
+        let cookie = cookie.clone();
+        let uris = uris.to_string();
+        async move {
+            app.oneshot(
+                Request::post("/admin/oauth-clients")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(header::COOKIE, cookie)
+                    .body(Body::from(form_encode(&[
+                        ("name", "URI Test Client"),
+                        ("kind", "standard"),
+                        ("logo_url", ""),
+                        ("homepage_url", ""),
+                        ("redirect_uris", &uris),
+                    ])))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        }
+    };
+
+    // Rejected: non-loopback http, fragment, unparseable.
+    for uris in [
+        "http://example.com/cb",
+        "https://x.example/cb#frag",
+        "not a uri at all",
+    ] {
+        let response = post_create(uris).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER, "{uris}");
+        let count: i64 = sqlx::query_scalar!(
+            r#"SELECT COUNT(*) AS "count!: i64" FROM oauth_clients WHERE name = 'URI Test Client'"#
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 0, "{uris}: no client row");
+    }
+
+    // Accepted: loopback http (for local development).
+    let response = post_create("http://127.0.0.1:8080/cb").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let client = sqlx::query_as::<_, (Uuid, String)>(
+        "SELECT id, public_client_id FROM oauth_clients WHERE name = 'URI Test Client'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let uris = oauth::get_client_with_uris(&pool, client.0)
+        .await
+        .unwrap()
+        .unwrap()
+        .redirect_uris;
+    assert_eq!(uris, vec!["http://127.0.0.1:8080/cb".to_string()]);
+
+    // Duplicate lines collapse to one registration (a duplicate would hit
+    // the composite PK and 500).
+    let response = post_create("https://dup.example/cb\nhttps://dup.example/cb").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let dup = sqlx::query_as::<_, (Uuid, String)>(
+        "SELECT id, public_client_id FROM oauth_clients WHERE name = 'URI Test Client' ORDER BY created_at DESC",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_ne!(dup.0, client.0);
+    let uris = oauth::get_client_with_uris(&pool, dup.0)
+        .await
+        .unwrap()
+        .unwrap()
+        .redirect_uris;
+    assert_eq!(
+        uris,
+        vec!["https://dup.example/cb".to_string()],
+        "duplicate lines must collapse"
+    );
+}
+
+#[sqlx::test(migrations = "../migrations")]
+async fn consent_screen_renders_no_javascript_urls(pool: PgPool) {
+    let fx = Fixture::new(&pool).await;
+
+    // A row inserted directly with javascript: URLs (bypassing admin
+    // validation) must not reach href/src on the consent screen — defense
+    // in depth at render.
+    let public_client_id = "cafe0000deadbeefcafe0000deadbeef".to_string();
+    sqlx::query!(
+        r#"
+        INSERT INTO oauth_clients (public_client_id, secret_hash, name, logo_url, homepage_url)
+        VALUES ($1, 'never-authenticated', 'Evil Client', 'javascript:alert(1)', 'javascript:alert(1)')
+        "#,
+        public_client_id
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query!(
+        "INSERT INTO oauth_client_redirect_uris (oauth_client_id, uri) SELECT id, $2 FROM oauth_clients WHERE public_client_id = $1",
+        public_client_id,
+        REDIRECT_URI
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let (_verifier, challenge) = make_verifier_pair();
+    let uri = format!(
+        "/oauth/authorize?client_id={public_client_id}&redirect_uri={}&response_type=code&scope=profile.read&code_challenge={challenge}&code_challenge_method=S256",
+        urlencoding::encode(REDIRECT_URI),
+    );
+    let (status, _location, body, headers) = fx.get_authorize(&uri).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("Evil Client"), "{body}");
+    assert!(
+        !body.contains("href=\"javascript:"),
+        "javascript: homepage must not render as a link: {body}"
+    );
+    assert!(
+        !body.contains("src=\"javascript:"),
+        "javascript: logo must not render as an image: {body}"
+    );
+    assert_eq!(headers[header::X_FRAME_OPTIONS], "DENY");
 }
 
 // ---------------------------------------------------------------------------

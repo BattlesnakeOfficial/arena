@@ -1,7 +1,7 @@
 use axum::{
     Form,
     extract::{Path, Query, RawForm, State},
-    http::StatusCode,
+    http::{StatusCode, header},
     response::{IntoResponse, Redirect},
 };
 use color_eyre::eyre::{Context as _, eyre};
@@ -320,31 +320,14 @@ pub async fn unsubscribe_post(
 
 /// GET /settings/authorized-apps — every active OAuth grant with its
 /// permissions and snake access, plus revoke and edit-snakes forms.
+/// Carries anti-framing headers: the snake editor can widen access
+/// (selected → all), so clickjacking matters here too.
 pub async fn authorized_apps_page(
     State(state): State<AppState>,
     CurrentUser(user): CurrentUser,
     page_factory: PageFactory,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
     let grants = oauth::list_active_grants(&state.db, user.user_id).await?;
-
-    // One batched lookup for every snake name the page shows.
-    let all_ids: Vec<uuid::Uuid> = grants
-        .iter()
-        .flat_map(|grant| grant.snake_ids.iter().copied())
-        .collect();
-    let names: std::collections::BTreeMap<uuid::Uuid, String> = if all_ids.is_empty() {
-        Default::default()
-    } else {
-        sqlx::query!(
-            "SELECT battlesnake_id, name FROM battlesnakes WHERE battlesnake_id = ANY($1)",
-            &all_ids
-        )
-        .fetch_all(&state.db)
-        .await?
-        .into_iter()
-        .map(|row| (row.battlesnake_id, row.name))
-        .collect()
-    };
 
     let snakes =
         crate::models::battlesnake::get_battlesnakes_by_user_id(&state.db, user.user_id).await?;
@@ -368,7 +351,7 @@ pub async fn authorized_apps_page(
             @for grant in &grants {
                 article class="section" aria-label=(grant.client_name) {
                     div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;" {
-                        @if let Some(logo) = grant.client_logo_url.as_deref().filter(|l| !l.is_empty()) {
+                        @if let Some(logo) = oauth::renderable_https_url(&grant.client_logo_url) {
                             img src=(logo) alt="" width="44" height="44"
                                 style="width: 44px; height: 44px; border-radius: 8px; object-fit: cover;";
                         }
@@ -442,8 +425,28 @@ pub async fn authorized_apps_page(
         }),
         flash,
     );
-    let _ = names;
-    Ok(page)
+    Ok((
+        [
+            (header::X_FRAME_OPTIONS, "DENY"),
+            (header::CONTENT_SECURITY_POLICY, "frame-ancestors 'none'"),
+        ],
+        page,
+    )
+        .into_response())
+}
+
+/// Redirect back to the Authorized apps page carrying the anti-framing
+/// headers — the page and its POSTs all refuse framing (the snake editor
+/// can widen access, so clickjacking matters here too).
+fn back_to_authorized_apps() -> axum::response::Response {
+    (
+        [
+            (header::X_FRAME_OPTIONS, "DENY"),
+            (header::CONTENT_SECURITY_POLICY, "frame-ancestors 'none'"),
+        ],
+        Redirect::to("/settings/authorized-apps"),
+    )
+        .into_response()
 }
 
 /// POST /settings/authorized-apps/{id}/revoke — revoke a grant and its
@@ -461,7 +464,7 @@ pub async fn revoke_authorized_app(
         .success("Application revoked. Its access stops working immediately.")
         .await
         .wrap_err("Failed to flash")?;
-    Ok(Redirect::to("/settings/authorized-apps"))
+    Ok(back_to_authorized_apps())
 }
 
 /// POST /settings/authorized-apps/{id}/snakes — edit a grant's snake
@@ -492,7 +495,7 @@ pub async fn edit_authorized_app_snakes(
                 .error("Pick a snake access option.")
                 .await
                 .wrap_err("Failed to flash")?;
-            return Ok(Redirect::to("/settings/authorized-apps"));
+            return Ok(back_to_authorized_apps());
         }
     };
 
@@ -545,7 +548,7 @@ pub async fn edit_authorized_app_snakes(
             .await
             .wrap_err("Failed to flash")?;
     }
-    Ok(Redirect::to("/settings/authorized-apps"))
+    Ok(back_to_authorized_apps())
 }
 
 #[cfg(test)]

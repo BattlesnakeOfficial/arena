@@ -238,6 +238,7 @@ pub async fn dashboard(
                     a href="/admin/leaderboards" style="display:inline-flex;align-items:center;min-height:44px;box-sizing:border-box;padding: 8px 16px; background: #666; color: white; text-decoration: none; border-radius: 4px;" { "Leaderboards" }
                     a href="/admin/moderation" style="display:inline-flex;align-items:center;min-height:44px;box-sizing:border-box;padding: 8px 16px; background: #666; color: white; text-decoration: none; border-radius: 4px;" { "Moderation queue" }
                     a href="/admin/emails" style="display:inline-flex;align-items:center;min-height:44px;padding:8px 16px;background:#666;color:white;text-decoration:none;border-radius:4px;box-sizing:border-box;" { "Emails" }
+                    a href="/admin/oauth-clients" style="display:inline-flex;align-items:center;min-height:44px;box-sizing:border-box;padding: 8px 16px; background: #666; color: white; text-decoration: none; border-radius: 4px;" { "OAuth clients" }
                     a href="/stats" style="display:inline-flex;align-items:center;min-height:44px;box-sizing:border-box;padding: 8px 16px; background: #666; color: white; text-decoration: none; border-radius: 4px;" { "Stats" }
                 }
 
@@ -1041,6 +1042,44 @@ struct OneTimeClientSecret {
     secret: String,
 }
 
+/// Is this host a loopback host (allowed with plain http, for local
+/// development)?
+fn loopback_host(url: &url::Url) -> bool {
+    match url.host() {
+        Some(url::Host::Domain("localhost")) => true,
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        _ => false,
+    }
+}
+
+/// A valid registered redirect URI: parses, absolute, no fragment (RFC 6749
+/// §3.1.2), and https — or http only on a loopback host, for local
+/// development.
+fn valid_redirect_uri(uri: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(uri) else {
+        return false;
+    };
+    if parsed.fragment().is_some() {
+        return false;
+    }
+    match parsed.scheme() {
+        "https" => true,
+        "http" => loopback_host(&parsed),
+        _ => false,
+    }
+}
+
+/// A valid client logo/homepage URL: parses as an absolute https URL.
+/// These values reach `href`/`src` on player-facing pages, so anything
+/// else (`javascript:` in particular — arena serves no script-src CSP) is
+/// rejected outright.
+fn valid_client_url(uri: &str) -> bool {
+    url::Url::parse(uri)
+        .map(|parsed| parsed.scheme() == "https")
+        .unwrap_or(false)
+}
+
 async fn render_oauth_clients_page(
     state: &AppState,
     one_time: Option<&OneTimeClientSecret>,
@@ -1119,8 +1158,17 @@ async fn render_oauth_clients_page(
                     }
                     dl class="meta-list" {
                         div { dt { "client_id" } dd { code { (client.public_client_id) } } }
-                        @if let Some(homepage) = client.homepage_url.as_deref() {
-                            div { dt { "Homepage" } dd { a href=(homepage) { (homepage) } } }
+                        @if let Some(homepage) = client.homepage_url.as_deref().filter(|h| !h.is_empty()) {
+                            div {
+                                dt { "Homepage" }
+                                dd {
+                                    @if crate::models::oauth::renderable_https_url(&Some(homepage.to_string())).is_some() {
+                                        a href=(homepage) { (homepage) }
+                                    } @else {
+                                        (homepage)
+                                    }
+                                }
+                            }
                         }
                         div {
                             dt { "Redirect URIs" }
@@ -1184,31 +1232,54 @@ pub async fn create_oauth_client(
         .kind
         .parse::<crate::models::oauth::OauthClientKind>()
         .map_err(|e| ServerError(e, StatusCode::BAD_REQUEST))?;
-    let redirect_uris: Vec<String> = form
-        .redirect_uris
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(str::to_string)
-        .collect();
-    if redirect_uris.is_empty()
-        || redirect_uris
-            .iter()
-            .any(|uri| !(uri.starts_with("http://") || uri.starts_with("https://")))
-    {
+    // Redirect URIs: absolute https URLs (http on loopback hosts for local
+    // development), no fragments, byte-exact match at authorize time
+    // (RFC 6749 §3.1.2). Identical lines are collapsed — a duplicate would
+    // otherwise hit the composite PK and 500.
+    let mut redirect_uris: Vec<String> = Vec::new();
+    for line in form.redirect_uris.lines().map(str::trim) {
+        if line.is_empty() || redirect_uris.iter().any(|uri| uri == line) {
+            continue;
+        }
+        redirect_uris.push(line.to_string());
+    }
+    if redirect_uris.is_empty() || redirect_uris.iter().any(|uri| !valid_redirect_uri(uri)) {
         flasher
-            .error("At least one redirect URI is required, each an absolute http(s) URL.")
+            .error("At least one redirect URI is required, each an absolute https URL without a fragment (http is allowed only on localhost/127.0.0.1).")
             .await
             .wrap_err("Failed to flash")?;
         return Ok(Redirect::to("/admin/oauth-clients").into_response());
+    }
+    // Logo and homepage URLs become href/src on player-facing pages — they
+    // must be absolute https URLs, never anything else.
+    for (label, url) in [
+        ("Logo URL", form.logo_url.as_deref()),
+        ("Homepage URL", form.homepage_url.as_deref()),
+    ] {
+        if url
+            .filter(|u| !u.trim().is_empty())
+            .is_some_and(|u| !valid_client_url(u.trim()))
+        {
+            flasher
+                .error(format!("{label} must be an absolute https URL."))
+                .await
+                .wrap_err("Failed to flash")?;
+            return Ok(Redirect::to("/admin/oauth-clients").into_response());
+        }
     }
 
     let created = crate::models::oauth::create_client(
         &state.db,
         crate::models::oauth::CreateOauthClientInput {
             name,
-            logo_url: form.logo_url.filter(|u| !u.trim().is_empty()),
-            homepage_url: form.homepage_url.filter(|u| !u.trim().is_empty()),
+            logo_url: form
+                .logo_url
+                .map(|u| u.trim().to_string())
+                .filter(|u| !u.is_empty()),
+            homepage_url: form
+                .homepage_url
+                .map(|u| u.trim().to_string())
+                .filter(|u| !u.is_empty()),
             kind,
             redirect_uris,
         },

@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM oauth_authorization_codes WHERE user_id = $1 AND oauth_client_id = $2 AND consumed_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "05ba25a7a3fca2ce2fd59a11d58b9fa3d1d10b88fd4cb82e15993c17c8b56762"
+}

@@ -15,10 +15,8 @@ use axum::{
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use color_eyre::eyre::Context as _;
-use hmac::{Hmac, Mac};
 use maud::{Markup, html};
 use serde::Deserialize;
-use sha2::Sha256;
 use uuid::Uuid;
 
 use crate::{
@@ -46,7 +44,8 @@ pub struct AuthorizeQuery {
 /// A request that passed full validation.
 struct ValidatedAuthorize {
     client: oauth::OauthClient,
-    redirect_uris: Vec<String>,
+    /// The exact redirect URI that was validated (a registered one).
+    redirect_uri: String,
     /// Requested scope, canonical order, de-duplicated.
     permissions: BTreeSet<Permission>,
     /// The space-joined request the user saw (what the consent token binds).
@@ -98,9 +97,13 @@ async fn validate_authorize_request(
     let Some(client_id) = client_id.filter(|id| !id.is_empty()) else {
         return Err(AuthorizeFailure::ErrorPage);
     };
-    let client = oauth::get_client_by_public_id(&state.db, client_id)
-        .await
-        .map_err(|_| AuthorizeFailure::ErrorPage)?;
+    let client = match oauth::get_client_by_public_id(&state.db, client_id).await {
+        Ok(client) => client,
+        Err(e) => {
+            tracing::error!("Failed to load OAuth client: {e:#}");
+            return Err(AuthorizeFailure::ErrorPage);
+        }
+    };
     let Some(client) = client else {
         return Err(AuthorizeFailure::ErrorPage);
     };
@@ -113,11 +116,13 @@ async fn validate_authorize_request(
     let Some(redirect_uri) = redirect_uri.filter(|uri| !uri.is_empty()) else {
         return Err(AuthorizeFailure::ErrorPage);
     };
-    let redirect_uris = oauth::get_client_with_uris(&state.db, client.id)
-        .await
-        .map_err(|_| AuthorizeFailure::ErrorPage)?
-        .map(|with_uris| with_uris.redirect_uris)
-        .unwrap_or_default();
+    let redirect_uris = match oauth::get_client_with_uris(&state.db, client.id).await {
+        Ok(with_uris) => with_uris.map(|w| w.redirect_uris).unwrap_or_default(),
+        Err(e) => {
+            tracing::error!("Failed to load OAuth client redirect URIs: {e:#}");
+            return Err(AuthorizeFailure::ErrorPage);
+        }
+    };
     if !redirect_uris
         .iter()
         .any(|registered| registered == redirect_uri)
@@ -172,7 +177,7 @@ async fn validate_authorize_request(
 
     Ok(ValidatedAuthorize {
         client,
-        redirect_uris,
+        redirect_uri: redirect_uri.to_string(),
         permissions,
         scope_str,
         code_challenge: code_challenge.to_string(),
@@ -270,27 +275,32 @@ pub(crate) fn consent_csrf_message(
     .join("\n")
 }
 
-/// hex(HMAC-SHA256(key, message)). The key is the server cookie key's master
-/// bytes — no new secret; rotating COOKIE_KEY invalidates in-flight consents
-/// at the same moment it invalidates all sessions.
-pub(crate) fn mint_consent_csrf(key: &[u8], message: &str) -> String {
-    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC accepts any key length");
-    mac.update(message.as_bytes());
-    hex::encode(mac.finalize().into_bytes())
+/// Domain-separated HMAC key for consent tokens: a labeled subkey derived
+/// from the server cookie key's master bytes (the `unsubscribe_key`
+/// pattern in notifications.rs) — never the raw master key. Rotating
+/// COOKIE_KEY invalidates in-flight consents at the same moment it
+/// invalidates all sessions.
+pub(crate) fn consent_csrf_key(cookie_key_master: &[u8]) -> ring::hmac::Key {
+    let root = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, cookie_key_master);
+    let digest = ring::hmac::sign(&root, b"arena.oauth-consent.v1");
+    ring::hmac::Key::new(ring::hmac::HMAC_SHA256, digest.as_ref())
 }
 
-/// Constant-time verification; non-hex or wrong-length tokens are rejected
-/// before any comparison.
-pub(crate) fn verify_consent_csrf(key: &[u8], message: &str, token: &str) -> bool {
+/// hex(HMAC-SHA256(key, message)).
+pub(crate) fn mint_consent_csrf(key: &ring::hmac::Key, message: &str) -> String {
+    hex::encode(ring::hmac::sign(key, message.as_bytes()).as_ref())
+}
+
+/// Constant-time verification (`ring::hmac::verify`); non-hex or
+/// wrong-length tokens are rejected before any comparison.
+pub(crate) fn verify_consent_csrf(key: &ring::hmac::Key, message: &str, token: &str) -> bool {
     if token.len() != 64 || !token.bytes().all(|b| b.is_ascii_hexdigit()) {
         return false;
     }
-    let Ok(actual) = hex::decode(token) else {
+    let Ok(tag) = hex::decode(token) else {
         return false;
     };
-    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC accepts any key length");
-    mac.update(message.as_bytes());
-    mac.verify_slice(&actual).is_ok()
+    ring::hmac::verify(key, message.as_bytes(), &tag).is_ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -338,10 +348,7 @@ pub async fn authorize(
         }
     };
 
-    let redirect_uri = query
-        .redirect_uri
-        .clone()
-        .expect("validated requests carry one");
+    let redirect_uri = validated.redirect_uri.clone();
 
     // Not logged in: remember this exact authorize request, then run the
     // existing GitHub login and come back to it.
@@ -360,8 +367,9 @@ pub async fn authorize(
         .await
         .wrap_err("Failed to load user's snakes for consent screen")?;
 
+    let key = consent_csrf_key(state.cookie_key.master());
     let csrf = mint_consent_csrf(
-        state.cookie_key.master(),
+        &key,
         &consent_csrf_message(
             session.session_id,
             &validated.client.public_client_id,
@@ -372,35 +380,36 @@ pub async fn authorize(
         ),
     );
 
-    let page = consent_screen(&validated, &redirect_uri, &snakes, &csrf);
+    // The full site layout (viewport meta, styles, the logged-in header) —
+    // a bare fragment would lay out at ~980px on phones.
+    let page = page_factory.create_page(
+        format!("Authorize {}", validated.client.name),
+        Box::new(consent_screen(&validated, &redirect_uri, &snakes, &csrf)),
+    );
     Ok((anti_framing_headers(), page).into_response())
 }
 
 /// Rebuild the request's query string (the value stored in
 /// `post_login_redirect`). Only the original params, nothing added.
 fn query_string_of(query: &AuthorizeQuery) -> String {
-    let mut url = url::Url::parse("https://placeholder.invalid/oauth/authorize")
-        .expect("static base URL parses");
-    {
-        let mut pairs = url.query_pairs_mut();
-        for (key, value) in [
-            ("client_id", query.client_id.as_deref()),
-            ("redirect_uri", query.redirect_uri.as_deref()),
-            ("response_type", query.response_type.as_deref()),
-            ("scope", query.scope.as_deref()),
-            ("state", query.state.as_deref()),
-            ("code_challenge", query.code_challenge.as_deref()),
-            (
-                "code_challenge_method",
-                query.code_challenge_method.as_deref(),
-            ),
-        ] {
-            if let Some(value) = value {
-                pairs.append_pair(key, value);
-            }
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    for (key, value) in [
+        ("client_id", query.client_id.as_deref()),
+        ("redirect_uri", query.redirect_uri.as_deref()),
+        ("response_type", query.response_type.as_deref()),
+        ("scope", query.scope.as_deref()),
+        ("state", query.state.as_deref()),
+        ("code_challenge", query.code_challenge.as_deref()),
+        (
+            "code_challenge_method",
+            query.code_challenge_method.as_deref(),
+        ),
+    ] {
+        if let Some(value) = value {
+            serializer.append_pair(key, value);
         }
     }
-    url.query().unwrap_or_default().to_string()
+    serializer.finish()
 }
 
 /// The mobile-first approval screen: one plain-words line per requested
@@ -413,11 +422,13 @@ fn consent_screen(
     csrf: &str,
 ) -> Markup {
     let requestable = &validated.permissions;
+    let logo = oauth::renderable_https_url(&validated.client.logo_url);
+    let homepage = oauth::renderable_https_url(&validated.client.homepage_url);
     html! {
         div class="home" style="max-width: 480px; margin: 0 auto;" {
             section class="section" {
                 div style="display: flex; align-items: center; gap: 14px; flex-wrap: wrap;" {
-                    @if let Some(logo) = validated.client.logo_url.as_deref().filter(|l| !l.is_empty()) {
+                    @if let Some(logo) = logo {
                         img src=(logo) alt="" width="44" height="44"
                             style="width: 44px; height: 44px; border-radius: 8px; object-fit: cover;";
                     }
@@ -426,7 +437,7 @@ fn consent_screen(
                     }
                 }
                 p style="font-size: 16px; color: var(--muted); margin-top: 6px;" {
-                    @if let Some(homepage) = validated.client.homepage_url.as_deref().filter(|h| !h.is_empty()) {
+                    @if let Some(homepage) = homepage {
                         a href=(homepage) rel="noopener" { (validated.client.name) }
                         " wants to access your Battlesnake account."
                     } @else {
@@ -472,7 +483,7 @@ fn consent_screen(
                         p style="font-size: 16px;" { "No permissions requested." }
                     }
                     @if requestable.contains(&Permission::EmailRead) {
-                        p style="font-size: 14px; color: var(--muted); margin-top: 4px;" {
+                        p style="font-size: 16px; color: var(--muted); margin-top: 4px;" {
                             "You can uncheck your email address above."
                         }
                     }
@@ -490,7 +501,7 @@ fn consent_screen(
                             span { "Only the snakes I pick" }
                         }
                     }
-                    p style="font-size: 14px; color: var(--muted); margin-top: 10px;" {
+                    p style="font-size: 16px; color: var(--muted); margin-top: 10px;" {
                         "This choice limits which snakes the app can see the URL of, edit, "
                         "delete (app-created only), and enter into leaderboards. It does not "
                         "limit seeing your snakes or starting games — those permissions "
@@ -498,7 +509,7 @@ fn consent_screen(
                     }
 
                     @if snakes.is_empty() {
-                        p style="font-size: 14px; color: var(--muted);" {
+                        p style="font-size: 16px; color: var(--muted);" {
                             "You have no battlesnakes yet."
                         }
                     } @else {
@@ -566,8 +577,8 @@ pub async fn authorize_decision(
         field("scope").unwrap_or_default(),
         field("state").filter(|s| !s.is_empty()),
     );
-    let csrf_ok = field("csrf")
-        .is_some_and(|token| verify_consent_csrf(state.cookie_key.master(), &message, token));
+    let key = consent_csrf_key(state.cookie_key.master());
+    let csrf_ok = field("csrf").is_some_and(|token| verify_consent_csrf(&key, &message, token));
     if !csrf_ok {
         return Ok(authorization_error_page(page_factory));
     }
@@ -599,12 +610,21 @@ pub async fn authorize_decision(
     };
     let redirect_uri = field("redirect_uri").unwrap_or_default().to_string();
 
-    if field("decision") == Some("deny") {
-        return Ok(error_redirect(
-            &redirect_uri,
-            "access_denied",
-            validated.state.as_deref(),
-        ));
+    // The decision must be explicit: `deny` → access_denied, `approve` →
+    // grant, anything else (or missing) → the error page. Never treat an
+    // unknown submit as approval.
+    match field("decision") {
+        Some("deny") => {
+            return Ok(error_redirect(
+                &redirect_uri,
+                "access_denied",
+                validated.state.as_deref(),
+            ));
+        }
+        Some("approve") => {}
+        _ => {
+            return Ok(authorization_error_page(page_factory));
+        }
     }
 
     // Approve. Granted = the re-validated requested scope, minus email.read
@@ -712,7 +732,32 @@ fn oauth_error(status: StatusCode, error: &str) -> Response {
 /// JSON, whatever the body's content type or parse failures (the body is
 /// parsed manually for exactly that reason).
 pub async fn token(State(state): State<AppState>, headers: HeaderMap, body: String) -> Response {
-    let request: TokenRequest = serde_urlencoded::from_str(&body).unwrap_or_default();
+    // The request body MUST be application/x-www-form-urlencoded (RFC 6749
+    // §4.1.3). A body that names another media type, or one that fails to
+    // parse as form encoding at all, is a malformed request — not an auth
+    // or grant-type failure.
+    if let Some(content_type) = headers.get(header::CONTENT_TYPE) {
+        let is_form = content_type
+            .to_str()
+            .map(|value| {
+                value.split(';').next().is_some_and(|media_type| {
+                    media_type
+                        .trim()
+                        .eq_ignore_ascii_case("application/x-www-form-urlencoded")
+                })
+            })
+            .unwrap_or(false);
+        if !is_form {
+            return oauth_error(StatusCode::BAD_REQUEST, "invalid_request");
+        }
+    }
+    let request: TokenRequest = match serde_urlencoded::from_str(&body) {
+        Ok(request) => request,
+        Err(e) => {
+            tracing::debug!("Malformed token endpoint body: {e}");
+            return oauth_error(StatusCode::BAD_REQUEST, "invalid_request");
+        }
+    };
 
     // Client authentication — exactly one method per request (RFC 6749
     // §2.3). Basic auth: base64, split at the first ':', then
@@ -761,17 +806,20 @@ pub async fn token(State(state): State<AppState>, headers: HeaderMap, body: Stri
         }
     };
 
-    let Some(client) = oauth::authenticate_client(&state.db, &client_id, &client_secret)
-        .await
-        .unwrap_or_else(|e| {
+    let client = match oauth::authenticate_client(&state.db, &client_id, &client_secret).await {
+        Ok(Some(client)) => client,
+        Ok(None) => {
+            return match credentials {
+                ClientCredentials::Basic { .. } => oauth_error_client_basic(),
+                ClientCredentials::Form => oauth_error(StatusCode::UNAUTHORIZED, "invalid_client"),
+            };
+        }
+        Err(e) => {
+            // A DB failure is arena's problem, not a bad client: 500 with
+            // temporarily_unavailable (RFC 6749 §5.2), logged.
             tracing::error!("Failed to authenticate OAuth client: {e:#}");
-            None
-        })
-    else {
-        return match credentials {
-            ClientCredentials::Basic { .. } => oauth_error_client_basic(),
-            ClientCredentials::Form => oauth_error(StatusCode::UNAUTHORIZED, "invalid_client"),
-        };
+            return oauth_error(StatusCode::INTERNAL_SERVER_ERROR, "temporarily_unavailable");
+        }
     };
 
     if request.grant_type.as_deref() != Some("authorization_code") {

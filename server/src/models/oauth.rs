@@ -370,6 +370,17 @@ pub async fn set_client_disabled(pool: &PgPool, id: Uuid, disabled: bool) -> cja
     Ok(result.rows_affected() > 0)
 }
 
+/// A stored client URL that is safe to render into `href`/`src`: the value
+/// only when it parses as an absolute `https` URL. Client URLs are
+/// admin-validated at create; this is defense in depth against a stale or
+/// directly-inserted row carrying a `javascript:` value (arena serves no
+/// script-src CSP).
+pub fn renderable_https_url(value: &Option<String>) -> Option<&str> {
+    let value = value.as_deref()?;
+    let parsed = url::Url::parse(value).ok()?;
+    (parsed.scheme() == "https").then_some(value)
+}
+
 /// A player's standing consent to one client, as shown on the "Authorized
 /// apps" page. The scope shown is the live token's scope.
 pub struct GrantSummary {
@@ -421,6 +432,27 @@ pub async fn list_active_grants(pool: &PgPool, user_id: Uuid) -> cja::Result<Vec
         .collect())
 }
 
+/// Delete every outstanding (unconsumed) authorization code for a (user,
+/// client), join rows cascading — run inside the same transaction as any
+/// grant-affecting change (revoke, snake edit, token revoke, exchange
+/// rotation) so a client holding an older code cannot resurrect or
+/// supersede the new state within the code lifetime.
+pub(crate) async fn delete_outstanding_codes(
+    conn: &mut sqlx::PgConnection,
+    user_id: Uuid,
+    oauth_client_id: Uuid,
+) -> cja::Result<()> {
+    sqlx::query!(
+        "DELETE FROM oauth_authorization_codes WHERE user_id = $1 AND oauth_client_id = $2 AND consumed_at IS NULL",
+        user_id,
+        oauth_client_id
+    )
+    .execute(&mut *conn)
+    .await
+    .wrap_err("Failed to invalidate outstanding authorization codes")?;
+    Ok(())
+}
+
 /// Revoke a grant and its live tokens in one transaction. `false` when the
 /// grant isn't found, already revoked, or not the user's.
 pub async fn revoke_grant(pool: &PgPool, grant_id: Uuid, user_id: Uuid) -> cja::Result<bool> {
@@ -429,21 +461,21 @@ pub async fn revoke_grant(pool: &PgPool, grant_id: Uuid, user_id: Uuid) -> cja::
         .await
         .wrap_err("Failed to begin grant revocation transaction")?;
 
-    let result = sqlx::query!(
+    let revoked_client = sqlx::query_scalar!(
         r#"
         UPDATE oauth_grants
         SET revoked_at = NOW()
         WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL
+        RETURNING oauth_client_id
         "#,
         grant_id,
         user_id
     )
-    .execute(&mut *tx)
+    .fetch_optional(&mut *tx)
     .await
     .wrap_err("Failed to revoke OAuth grant")?;
 
-    let revoked = result.rows_affected() > 0;
-    if revoked {
+    if let Some(oauth_client_id) = revoked_client {
         sqlx::query!(
             "UPDATE api_tokens SET revoked_at = NOW() WHERE oauth_grant_id = $1 AND revoked_at IS NULL",
             grant_id
@@ -451,13 +483,16 @@ pub async fn revoke_grant(pool: &PgPool, grant_id: Uuid, user_id: Uuid) -> cja::
         .execute(&mut *tx)
         .await
         .wrap_err("Failed to revoke grant's tokens")?;
+        // Outstanding codes die with the grant: exchanging one would re-mint
+        // a grant (and a token) after the player revoked the app.
+        delete_outstanding_codes(&mut tx, user_id, oauth_client_id).await?;
     }
 
     tx.commit()
         .await
         .wrap_err("Failed to commit grant revocation transaction")?;
 
-    Ok(revoked)
+    Ok(revoked_client.is_some())
 }
 
 /// Edit a grant's snake selection: rewrites the live token's `snake_access`
@@ -478,9 +513,9 @@ pub async fn set_grant_snakes(
         .await
         .wrap_err("Failed to begin grant snake-edit transaction")?;
 
-    let token_id = sqlx::query_scalar!(
+    let token_and_client = sqlx::query!(
         r#"
-        SELECT t.id
+        SELECT t.id AS token_id, g.oauth_client_id
         FROM oauth_grants g
         JOIN api_tokens t ON t.oauth_grant_id = g.id AND t.revoked_at IS NULL
         WHERE g.id = $1 AND g.user_id = $2 AND g.revoked_at IS NULL
@@ -492,12 +527,13 @@ pub async fn set_grant_snakes(
     .await
     .wrap_err("Failed to find grant's live token")?;
 
-    let Some(token_id) = token_id else {
+    let Some(row) = token_and_client else {
         tx.rollback()
             .await
             .wrap_err("Failed to roll back grant snake-edit transaction")?;
         return Ok(false);
     };
+    let token_id = row.token_id;
 
     sqlx::query!(
         "UPDATE api_tokens SET snake_access = $2 WHERE id = $1",
@@ -530,6 +566,10 @@ pub async fn set_grant_snakes(
         .await
         .wrap_err("Failed to insert grant token snake selection")?;
     }
+
+    // A pre-approval code still in flight would mint a token with the OLD
+    // selection at exchange time, undoing this narrowing — kill it.
+    delete_outstanding_codes(&mut tx, user_id, row.oauth_client_id).await?;
 
     tx.commit()
         .await
@@ -698,6 +738,7 @@ pub async fn exchange_authorization_code(
                ARRAY(SELECT p.permission FROM oauth_authorization_code_permissions p
                      WHERE p.oauth_authorization_code_id = c.id) AS "permissions!: Vec<String>",
                ARRAY(SELECT s.battlesnake_id FROM oauth_authorization_code_snakes s
+                     JOIN battlesnakes b ON b.battlesnake_id = s.battlesnake_id AND b.deleted_at IS NULL
                      WHERE s.oauth_authorization_code_id = c.id) AS "snake_ids!: Vec<Uuid>"
         FROM oauth_authorization_codes c
         WHERE c.code_hash = $1
@@ -732,9 +773,12 @@ pub async fn exchange_authorization_code(
         return Ok(Err(ExchangeError::VerifierMismatch));
     }
 
-    // Race-safe consume: exactly one concurrent exchange wins.
+    // Race-safe consume: exactly one concurrent exchange wins. Expiry is
+    // checked against the DB clock here too, so app/DB clock skew cannot
+    // keep a dead code consumable (the Rust-side check above only picks
+    // the error message).
     let consumed = sqlx::query!(
-        "UPDATE oauth_authorization_codes SET consumed_at = NOW() WHERE id = $1 AND consumed_at IS NULL",
+        "UPDATE oauth_authorization_codes SET consumed_at = NOW() WHERE id = $1 AND consumed_at IS NULL AND expires_at > NOW()",
         row.id
     )
     .execute(&mut *tx)
@@ -743,6 +787,12 @@ pub async fn exchange_authorization_code(
     if consumed.rows_affected() == 0 {
         return Ok(Err(ExchangeError::Replayed));
     }
+
+    // Every OTHER outstanding code for this (user, client) dies with the
+    // rotation: an older, broader code must not supersede the grant this
+    // exchange is about to create. (The code being exchanged is already
+    // consumed above, so it is not deleted.)
+    delete_outstanding_codes(&mut tx, row.user_id, row.oauth_client_id).await?;
 
     // Grant rotation: revoke the prior active grant (and its tokens) for
     // this (user, client), then insert the new grant. The prior token's
@@ -802,9 +852,9 @@ pub async fn exchange_authorization_code(
         .collect();
     let snake_ids = row.snake_ids;
 
-    // A snake deleted between approve and exchange has already cascaded out
-    // of oauth_authorization_code_snakes, so this INSERT can never hit a
-    // dead FK.
+    // A snake soft-deleted between approve and exchange (snakes are
+    // soft-deleted; the FK cascade never fires) was filtered out of
+    // `snake_ids` above, so this INSERT can never hit a dead snake.
     let NewApiToken { token, secret } = create_api_token_on(
         &mut tx,
         row.user_id,

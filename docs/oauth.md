@@ -13,12 +13,15 @@ RFC 7636). `S256` is required; the `plain` method is rejected.
 Clients are admin-created only — there is no self-serve registration. Ask an
 Arena admin and bring:
 
-- your application's **name**, **logo URL**, and **homepage URL**
+- your application's **name**, **logo URL**, and **homepage URL** — both
+  URLs must be absolute `https://` URLs
 - every **redirect URI** you will use, as absolute `https://` URLs
+  (`http://` is accepted only on loopback hosts — `localhost`,
+  `127.0.0.1`, `[::1]` — for local development)
 
 Redirect URIs match **exactly, byte for byte** — `https://app.example/cb`
 and `https://app.example/cb/` are different registrations. Query strings are
-part of the URI.
+part of the URI; fragments are not allowed.
 
 The admin hands back two values, shown once:
 
@@ -89,6 +92,9 @@ authorize request, then prove you hold the verifier at the token exchange.
 
 ## The token exchange
 
+The request body must be `application/x-www-form-urlencoded` (JSON bodies
+are rejected with `invalid_request`).
+
 ```bash
 curl -s -X POST {base}/oauth/token \
   -H 'Content-Type: application/x-www-form-urlencoded' \
@@ -126,6 +132,11 @@ app or the grant's token.
 > **revokes the access token that code issued and the grant it created**
 > (RFC 6749 §4.1.2). Treat a successful exchange as final; never blindly
 > retry it.
+>
+> Codes are also invalidated by the player: revoking the app, editing its
+> snake selection, deleting its token, or re-authorizing kills every
+> outstanding code for your client. Don't sit on a code — exchange it as
+> soon as the player approves.
 
 ### Errors
 
@@ -134,9 +145,13 @@ The token endpoint always answers JSON (`{"error": "…"}`):
 - `invalid_client` (401) — unknown client, wrong secret, or a disabled
   client
 - `unsupported_grant_type` (400) — anything but `authorization_code`
-- `invalid_request` (400) — missing parameter, or two client-auth methods
+- `invalid_request` (400) — missing parameter, two client-auth methods, a
+  body that isn't valid `application/x-www-form-urlencoded`, or a
+  non-form content type
 - `invalid_grant` (400) — unknown/expired/replayed code, wrong client,
   wrong `redirect_uri`, or a wrong `code_verifier`
+- `temporarily_unavailable` (500) — Arena is temporarily unable to handle
+  the request; retry later
 
 ## Permissions
 

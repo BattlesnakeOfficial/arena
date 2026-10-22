@@ -195,7 +195,6 @@ dependencies = [
  "futures",
  "google-cloud-storage",
  "hex",
- "hmac",
  "hostname",
  "is-terminal",
  "jpeg-encoder",
