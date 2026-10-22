@@ -3220,6 +3220,54 @@ async fn admin_standard_kind_ignores_or_omits_hosting_fields(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "../migrations")]
+async fn admin_hosting_create_collapses_domains_after_normalization(pool: PgPool) {
+    let fx = Fixture::new(&pool).await;
+    let admin_session = create_user_session(&pool, 9922015, true).await;
+    let admin_cookie = signed_session_cookie(&fx.state, admin_session);
+    let cookie = format!(
+        "{}={admin_cookie}",
+        crate::models::session::SESSION_COOKIE_NAME
+    );
+
+    let response = fx
+        .app
+        .oneshot(
+            Request::post("/admin/oauth-clients")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(header::COOKIE, cookie)
+                .body(Body::from(form_encode_owned(vec![
+                    ("name".to_string(), "Case Folded Host".to_string()),
+                    ("kind".to_string(), "hosting_provider".to_string()),
+                    (
+                        "redirect_uris".to_string(),
+                        "https://host.example/cb".to_string(),
+                    ),
+                    (
+                        "onboarding_url".to_string(),
+                        "https://host.example/start".to_string(),
+                    ),
+                    (
+                        "hosting_domains".to_string(),
+                        "softmax.com\nSoftMax.com".to_string(),
+                    ),
+                ])))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let domains: Vec<String> = sqlx::query_scalar(
+        "SELECT domain FROM oauth_client_hosting_domains d JOIN oauth_clients c ON c.id = d.oauth_client_id WHERE c.name = $1",
+    )
+    .bind("Case Folded Host")
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(domains, vec!["softmax.com"]);
+}
+
+#[sqlx::test(migrations = "../migrations")]
 async fn consent_screen_renders_no_javascript_urls(pool: PgPool) {
     let fx = Fixture::new(&pool).await;
 
