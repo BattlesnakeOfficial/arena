@@ -534,7 +534,7 @@ fn hosting_fork_section(providers: &[oauth::HostingProviderDisplay]) -> Markup {
                         span style="display: flex; flex-direction: column; gap: 4px; min-width: 0;" {
                             span style="font-size: 16px; font-weight: 600;" { (provider.name) }
                             @if let Some(description) = provider.description.as_deref().filter(|d| !d.is_empty()) {
-                                span style="font-size: 14px; color: var(--muted); overflow-wrap: anywhere;" { (description) }
+                                span style="font-size: 16px; color: var(--muted); overflow-wrap: anywhere;" { (description) }
                             }
                         }
                     }

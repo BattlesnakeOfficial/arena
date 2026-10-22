@@ -1360,14 +1360,20 @@ pub async fn create_oauth_client(
             }
             description = Some(desc.to_string());
         }
-        // One domain per line; blanks skipped, duplicates collapsed (a
-        // duplicate would hit the composite PK and 500).
+        // One domain per line; blanks skipped. Validate and normalize each
+        // line FIRST, then dedupe the canonical strings — comparing the raw
+        // line against already-normalized entries lets `SoftMax.com` slip
+        // past `softmax.com` and hit the composite PK (500).
         for line in form.hosting_domains.lines().map(str::trim) {
-            if line.is_empty() || hosting_domains.iter().any(|d| d == line) {
+            if line.is_empty() {
                 continue;
             }
             match crate::models::oauth::validate_hosting_domain(line) {
-                Ok(domain) => hosting_domains.push(domain),
+                Ok(domain) => {
+                    if !hosting_domains.contains(&domain) {
+                        hosting_domains.push(domain);
+                    }
+                }
                 Err(e) => {
                     flasher.error(e).await.wrap_err("Failed to flash")?;
                     return Ok(Redirect::to("/admin/oauth-clients").into_response());
