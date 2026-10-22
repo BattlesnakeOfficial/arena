@@ -8,6 +8,7 @@
 use std::collections::BTreeSet;
 
 use axum::{
+    body::Bytes,
     extract::{Query, RawForm, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Redirect, Response},
@@ -729,9 +730,11 @@ fn oauth_error(status: StatusCode, error: &str) -> Response {
 }
 
 /// POST /oauth/token — the authorization-code exchange. Always answers
-/// JSON, whatever the body's content type or parse failures (the body is
-/// parsed manually for exactly that reason).
-pub async fn token(State(state): State<AppState>, headers: HeaderMap, body: String) -> Response {
+/// JSON, whatever the body's content type, encoding, or parse failures (the
+/// body is taken as raw bytes and parsed manually for exactly that reason:
+/// the `String` extractor would reject invalid UTF-8 before this handler
+/// runs, with a plain-text error).
+pub async fn token(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
     // The request body MUST be application/x-www-form-urlencoded (RFC 6749
     // §4.1.3). A body that names another media type, or one that fails to
     // parse as form encoding at all, is a malformed request — not an auth
@@ -751,7 +754,16 @@ pub async fn token(State(state): State<AppState>, headers: HeaderMap, body: Stri
             return oauth_error(StatusCode::BAD_REQUEST, "invalid_request");
         }
     }
-    let request: TokenRequest = match serde_urlencoded::from_str(&body) {
+    // Form-encoded bodies are UTF-8 by definition (RFC 6749 §4.1.3 via the
+    // urlencoded spec); anything else is malformed the same way.
+    let body = match std::str::from_utf8(&body) {
+        Ok(body) => body,
+        Err(e) => {
+            tracing::debug!("Non-UTF-8 token endpoint body: {e}");
+            return oauth_error(StatusCode::BAD_REQUEST, "invalid_request");
+        }
+    };
+    let request: TokenRequest = match serde_urlencoded::from_str(body) {
         Ok(request) => request,
         Err(e) => {
             tracing::debug!("Malformed token endpoint body: {e}");
