@@ -39,8 +39,8 @@ impl TokenAuth {
     /// subset, and snake access no wider: `all` only from `all`; `selected`
     /// from `all`, or from `selected` when every snake is in this list.
     ///
-    /// Gates revoking a token (`DELETE /api/tokens/{id}`): a token never acts
-    /// on a wider one.
+    /// Gates minting a token (`POST /api/tokens`) and revoking one
+    /// (`DELETE /api/tokens/{id}`): a token never acts on a wider one.
     pub fn covers(
         &self,
         permissions: &BTreeSet<Permission>,
@@ -65,7 +65,8 @@ pub struct NewApiToken {
     pub secret: String,
 }
 
-/// A token plus its scope, as returned by [`get_user_token`].
+/// A token plus its scope, as returned by [`list_user_tokens`] and
+/// [`get_user_token`].
 pub struct TokenSummary {
     pub token: ApiToken,
     pub permissions: BTreeSet<Permission>,
@@ -206,25 +207,6 @@ where
     Ok(())
 }
 
-/// Get all active (non-revoked) tokens for a user
-pub async fn list_user_tokens(pool: &PgPool, user_id: Uuid) -> cja::Result<Vec<ApiToken>> {
-    sqlx::query_as!(
-        ApiToken,
-        r#"
-        SELECT id, user_id, token_hash, name,
-            snake_access AS "snake_access: SnakeAccess",
-            last_used_at, created_at, revoked_at
-        FROM api_tokens
-        WHERE user_id = $1 AND revoked_at IS NULL
-        ORDER BY created_at DESC
-        "#,
-        user_id
-    )
-    .fetch_all(pool)
-    .await
-    .wrap_err("Failed to list API tokens")
-}
-
 /// Active (non-revoked) tokens for a user with their scope, newest first.
 /// `token_id` narrows the result to that one token.
 async fn load_token_summaries(
@@ -268,6 +250,11 @@ async fn load_token_summaries(
             },
         })
         .collect())
+}
+
+/// Get all active (non-revoked) tokens for a user, with their scope.
+pub async fn list_user_tokens(pool: &PgPool, user_id: Uuid) -> cja::Result<Vec<TokenSummary>> {
+    load_token_summaries(pool, user_id, None).await
 }
 
 /// Get one of the user's active tokens, with its scope. `None` when the token
@@ -538,5 +525,87 @@ mod tests {
             .unwrap();
         assert!(auth.snake_ids.contains(&snake_ids[0]));
         assert!(!auth.snake_ids.contains(&snake_ids[1]));
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn list_user_tokens_returns_scope(pool: sqlx::PgPool) {
+        let user_id: Uuid = sqlx::query_scalar!(
+            "INSERT INTO users (external_github_id, github_login, github_access_token)
+             VALUES (9917003, 'token-list', '') RETURNING user_id"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let snake_id: Uuid = sqlx::query_scalar!(
+            r#"INSERT INTO battlesnakes (user_id, name, url)
+               VALUES ($1, 'list-snake', 'https://list.example') RETURNING battlesnake_id"#,
+            user_id
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        create_api_token(
+            &pool,
+            user_id,
+            "all-access",
+            Permission::ALL.as_slice(),
+            SnakeAccess::All,
+            &[],
+        )
+        .await
+        .unwrap();
+        create_api_token(
+            &pool,
+            user_id,
+            "selected",
+            &[Permission::SnakesRead],
+            SnakeAccess::Selected,
+            &[snake_id],
+        )
+        .await
+        .unwrap();
+
+        let summaries = list_user_tokens(&pool, user_id).await.unwrap();
+        assert_eq!(summaries.len(), 2);
+        // Ordered by created_at DESC; same-transaction timestamps can tie, so
+        // look up by name.
+        let all = summaries
+            .iter()
+            .find(|s| s.token.name == "all-access")
+            .unwrap();
+        assert_eq!(all.token.snake_access, SnakeAccess::All);
+        assert_eq!(all.permissions.len(), 13);
+        assert!(all.snake_ids.is_empty());
+        let selected = summaries
+            .iter()
+            .find(|s| s.token.name == "selected")
+            .unwrap();
+        assert_eq!(selected.token.snake_access, SnakeAccess::Selected);
+        assert_eq!(selected.snake_ids, BTreeSet::from([snake_id]));
+
+        // get_user_token: the user's own active token, else None.
+        let fetched = get_user_token(&pool, user_id, selected.token.id)
+            .await
+            .unwrap()
+            .expect("own token");
+        assert_eq!(fetched.token.id, selected.token.id);
+        assert_eq!(fetched.permissions, selected.permissions);
+        assert_eq!(fetched.snake_ids, selected.snake_ids);
+        assert!(
+            get_user_token(&pool, Uuid::new_v4(), selected.token.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        revoke_token(&pool, selected.token.id, user_id)
+            .await
+            .unwrap();
+        assert!(
+            get_user_token(&pool, user_id, selected.token.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 }
