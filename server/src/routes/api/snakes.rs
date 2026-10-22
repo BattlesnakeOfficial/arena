@@ -1614,7 +1614,10 @@ mod tests {
             battlesnake::MarkHostingOutcome::Marked
         );
 
-        // API update to an off-domain URL: 200, mark cleared.
+        // API update to another subdomain of the same client's domain:
+        // 200 and the mark SURVIVES — the API path delegates to
+        // update_battlesnake's on-domain CASE rather than clearing
+        // unconditionally.
         let token = mint(
             &db,
             user,
@@ -1623,6 +1626,18 @@ mod tests {
             &[],
         )
         .await;
+        let (status, _) = send_api(
+            &app,
+            "PUT",
+            &format!("/api/snakes/{}", snake.battlesnake_id),
+            Some(&token),
+            Some(serde_json::json!({"url": "https://api.softmax.com/t"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(hosted_mark(&db, snake.battlesnake_id).await, Some(client));
+
+        // API update to an off-domain URL: 200, mark cleared.
         let (status, _) = send_api(
             &app,
             "PUT",
