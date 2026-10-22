@@ -2869,6 +2869,10 @@ mod hosting_route_tests {
         assert!(body.contains("Host with a partner"), "{body}");
         assert!(body.contains("Softmax Host"));
         assert!(body.contains("We run your snake for you"));
+        assert!(
+            body.contains("font-size: 16px; color: var(--muted); overflow-wrap: anywhere;\">We run your snake for you"),
+            "partner description must use at least 16px text at mobile width"
+        );
         assert!(body.contains(r#"href="https://soft.max/start""#));
         // The unchanged self-host form is still there, under its own header.
         assert!(body.contains("Host it yourself"));
