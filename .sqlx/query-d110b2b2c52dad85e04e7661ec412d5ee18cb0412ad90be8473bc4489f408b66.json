@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO oauth_authorization_code_permissions (oauth_authorization_code_id, permission)\n            SELECT $1, p.permission\n            FROM UNNEST($2::text[]) AS p(permission)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "TextArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d110b2b2c52dad85e04e7661ec412d5ee18cb0412ad90be8473bc4489f408b66"
+}

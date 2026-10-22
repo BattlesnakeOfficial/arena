@@ -47,6 +47,9 @@ pub mod leaderboard;
 #[cfg(test)]
 mod notification_tests;
 pub mod notifications;
+pub mod oauth;
+#[cfg(test)]
+mod oauth_tests;
 pub mod og;
 pub mod pagination;
 pub mod policy;
@@ -189,6 +192,23 @@ pub fn routes(app_state: AppState) -> cja::Result<axum::Router> {
             get(github_auth::github_auth_callback),
         )
         .route("/auth/logout", get(github_auth::logout))
+        // OAuth provider (main router, NOT the /api nest)
+        .route("/oauth/authorize", get(oauth::authorize))
+        .route("/oauth/authorize/decision", post(oauth::authorize_decision))
+        .route("/oauth/token", post(oauth::token))
+        // Authorized apps (player-facing OAuth grant management)
+        .route(
+            "/settings/authorized-apps",
+            get(settings::authorized_apps_page),
+        )
+        .route(
+            "/settings/authorized-apps/{id}/revoke",
+            post(settings::revoke_authorized_app),
+        )
+        .route(
+            "/settings/authorized-apps/{id}/snakes",
+            post(settings::edit_authorized_app_snakes),
+        )
         // Battlesnake routes
         .route("/customizations", get(customizations::list_customizations))
         .route(
@@ -372,6 +392,22 @@ pub fn routes(app_state: AppState) -> cja::Result<axum::Router> {
         )
         .route("/stats", get(stats::stats_page))
         .route("/admin/moderation", get(admin::moderation_queue))
+        .route(
+            "/admin/oauth-clients",
+            get(admin::list_oauth_clients).post(admin::create_oauth_client),
+        )
+        .route(
+            "/admin/oauth-clients/{id}/rotate",
+            post(admin::rotate_oauth_client_secret),
+        )
+        .route(
+            "/admin/oauth-clients/{id}/disable",
+            post(admin::disable_oauth_client),
+        )
+        .route(
+            "/admin/oauth-clients/{id}/enable",
+            post(admin::enable_oauth_client),
+        )
         // Game API routes for board viewer (with CORS)
         .nest("/api", api_routes)
         // Internal routes
@@ -946,6 +982,7 @@ async fn profile_page(
             div class="profile-actions" {
                 a href={"/users/"(user.github_login)} class="btn" { "View Public Profile" }
                 a href="/battlesnakes" class="btn" { "Manage Battlesnakes" }
+                a href="/settings/authorized-apps" class="btn" { "Authorized Apps" }
                 a href="/games/new" class="btn" { "Create New Game" }
                 a href="/" class="btn" { "Back to Home" }
                 a href="/auth/logout" class="btn" { "Logout" }

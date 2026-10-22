@@ -202,6 +202,81 @@ pub async fn take_pending_form_data(
     Ok(row.flatten())
 }
 
+/// Remember where to send the user after a successful GitHub login.
+/// Only "/oauth/authorize" paths may be stored (validated by the caller both
+/// here-adjacent and before redirecting).
+pub async fn set_post_login_redirect(
+    pool: &PgPool,
+    session_id: Uuid,
+    path: String,
+) -> cja::Result<()> {
+    let result = sqlx::query!(
+        r#"
+        UPDATE sessions
+        SET post_login_redirect = $2
+        WHERE session_id = $1
+        "#,
+        session_id,
+        path
+    )
+    .execute(pool)
+    .await
+    .wrap_err("Failed to set post-login redirect for session")?;
+
+    if result.rows_affected() == 0 {
+        return Err(eyre!("Session {session_id} not found"));
+    }
+
+    Ok(())
+}
+
+/// Atomically read-and-clear the saved post-login path (`None` when unset).
+pub async fn take_post_login_redirect(
+    pool: &PgPool,
+    session_id: Uuid,
+) -> cja::Result<Option<String>> {
+    let row = sqlx::query_scalar!(
+        r#"
+        WITH pending AS (
+            SELECT post_login_redirect
+            FROM sessions
+            WHERE session_id = $1
+            FOR UPDATE
+        )
+        UPDATE sessions s
+        SET post_login_redirect = NULL
+        FROM pending
+        WHERE s.session_id = $1
+        RETURNING pending.post_login_redirect AS "post_login_redirect?"
+        "#,
+        session_id
+    )
+    .fetch_optional(pool)
+    .await
+    .wrap_err("Failed to take post-login redirect for session")?;
+
+    Ok(row.flatten())
+}
+
+/// Drop any saved post-login path (called by the login initiator when the
+/// login was NOT started by /oauth/authorize, so stale consents can't hijack
+/// a later login).
+pub async fn clear_post_login_redirect(pool: &PgPool, session_id: Uuid) -> cja::Result<()> {
+    sqlx::query!(
+        r#"
+        UPDATE sessions
+        SET post_login_redirect = NULL
+        WHERE session_id = $1
+        "#,
+        session_id
+    )
+    .execute(pool)
+    .await
+    .wrap_err("Failed to clear post-login redirect for session")?;
+
+    Ok(())
+}
+
 /// Clear a flash message from a session
 pub async fn clear_flash_message(pool: &PgPool, session_id: Uuid) -> cja::Result<Session> {
     let session = sqlx::query_as!(
@@ -483,6 +558,7 @@ pub async fn disassociate_user_from_session(
             user_id = NULL,
             github_oauth_state = NULL,
             pending_form_data = NULL,
+            post_login_redirect = NULL,
             is_cli_auth = FALSE,
             expires_at = NOW() + INTERVAL '1 hour'
         WHERE session_id = $1

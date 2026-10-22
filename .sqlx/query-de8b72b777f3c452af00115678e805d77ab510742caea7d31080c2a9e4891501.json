@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO oauth_clients (public_client_id, secret_hash, name, logo_url, homepage_url)\n        VALUES ($1, 'never-authenticated', 'Evil Client', 'javascript:alert(1)', 'javascript:alert(1)')\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "de8b72b777f3c452af00115678e805d77ab510742caea7d31080c2a9e4891501"
+}

@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE oauth_grants\n        SET revoked_at = NOW()\n        WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL\n        RETURNING oauth_client_id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "oauth_client_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "0e03ba2ac6b6bda211908407b153bcf7d314ddaceeef777b8e9b1702b5169ac1"
+}

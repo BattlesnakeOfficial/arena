@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        WITH tok AS (\n            UPDATE api_tokens SET last_used_at = NOW()\n            WHERE token_hash = $1 AND revoked_at IS NULL\n              AND (\n                  oauth_grant_id IS NULL\n                  OR EXISTS (\n                      SELECT 1 FROM oauth_grants g\n                      JOIN oauth_clients c ON c.id = g.oauth_client_id\n                      WHERE g.id = api_tokens.oauth_grant_id\n                        AND g.revoked_at IS NULL AND c.disabled_at IS NULL\n                  )\n              )\n            RETURNING id, user_id, snake_access, oauth_grant_id\n        )\n        SELECT tok.id AS \"token_id!: Uuid\", tok.user_id AS \"user_id!: Uuid\",\n               tok.snake_access AS \"snake_access!: SnakeAccess\",\n               c.id AS \"oauth_client_id?: Uuid\",\n               ARRAY(SELECT p.permission FROM api_token_permissions p WHERE p.api_token_id = tok.id) AS \"permissions!: Vec<String>\",\n               ARRAY(SELECT s.battlesnake_id FROM api_token_snakes s WHERE s.api_token_id = tok.id) AS \"snake_ids!: Vec<Uuid>\"\n        FROM tok\n        LEFT JOIN oauth_grants g ON g.id = tok.oauth_grant_id\n        LEFT JOIN oauth_clients c ON c.id = g.oauth_client_id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "token_id!: Uuid",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "user_id!: Uuid",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "snake_access!: SnakeAccess",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "oauth_client_id?: Uuid",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 4,
+        "name": "permissions!: Vec<String>",
+        "type_info": "TextArray"
+      },
+      {
+        "ordinal": 5,
+        "name": "snake_ids!: Vec<Uuid>",
+        "type_info": "UuidArray"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      null,
+      null
+    ]
+  },
+  "hash": "fb86909aa48cae7a08b5f42c88066517ae77ad3d63cb46e8f6ca2f127f11bd97"
+}

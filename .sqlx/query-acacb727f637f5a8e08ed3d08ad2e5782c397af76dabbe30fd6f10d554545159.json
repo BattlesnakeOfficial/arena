@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO oauth_client_redirect_uris (oauth_client_id, uri) SELECT id, $2 FROM oauth_clients WHERE public_client_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "acacb727f637f5a8e08ed3d08ad2e5782c397af76dabbe30fd6f10d554545159"
+}

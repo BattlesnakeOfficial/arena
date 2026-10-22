@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE oauth_authorization_codes SET consumed_at = NOW() WHERE id = $1 AND consumed_at IS NULL AND expires_at > NOW()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "891bab2419f42ecc56e0a104558fa2f8e1261e6f95782fd0ea47e9100ad33cf9"
+}

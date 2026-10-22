@@ -212,6 +212,21 @@ pub async fn create_snake(
             })?;
     }
 
+    // A snake created through an OAuth token is stamped with that client:
+    // `snake.delete` for OAuth tokens applies only to snakes their own
+    // client created.
+    if let Some(client_id) = auth.token_scope().and_then(|scope| scope.oauth_client_id) {
+        battlesnake::set_created_by_client(&mut *tx, snake.battlesnake_id, client_id)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to stamp snake's creating client: {e:#}");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to create snake".to_string(),
+                )
+            })?;
+    }
+
     tx.commit().await.map_err(|e| {
         tracing::error!("Failed to commit snake creation: {e}");
         (
@@ -387,6 +402,29 @@ pub async fn delete_snake(
     Path(snake_id): Path<Uuid>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     auth.require_snake(snake_id, Permission::SnakeDelete)?;
+
+    // OAuth tokens may only delete snakes their own client created. A
+    // player-made snake is 403; a missing snake — or one owned by another
+    // user — falls through so the response is `delete_battlesnake`'s 404
+    // (matching personal-token behavior, and leaking no existence oracle).
+    if let Some(client_id) = auth.token_scope().and_then(|scope| scope.oauth_client_id) {
+        let creator = battlesnake::snake_creator_client(&state.db, snake_id, auth.user_id)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to load snake creator client: {e:#}");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to delete snake".to_string(),
+                )
+            })?;
+        let created_by_this_client = matches!(creator, Some(Some(c)) if c == client_id);
+        if !created_by_this_client && creator.is_some() {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "battlesnake was not created by this app".to_string(),
+            ));
+        }
+    }
 
     let outcome = battlesnake::delete_battlesnake(&state.db, snake_id, auth.user_id)
         .await

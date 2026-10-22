@@ -214,6 +214,7 @@ dependencies = [
  "rustybuzz",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "sha2 0.10.9",
  "simple_asn1",
  "simplecss",

@@ -1,0 +1,76 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT c.id,\n               c.oauth_client_id,\n               c.user_id,\n               c.redirect_uri,\n               c.code_challenge,\n               c.snake_access AS \"snake_access: SnakeAccess\",\n               c.expires_at,\n               c.consumed_at,\n               ARRAY(SELECT p.permission FROM oauth_authorization_code_permissions p\n                     WHERE p.oauth_authorization_code_id = c.id) AS \"permissions!: Vec<String>\",\n               ARRAY(SELECT s.battlesnake_id FROM oauth_authorization_code_snakes s\n                     JOIN battlesnakes b ON b.battlesnake_id = s.battlesnake_id AND b.deleted_at IS NULL\n                     WHERE s.oauth_authorization_code_id = c.id) AS \"snake_ids!: Vec<Uuid>\"\n        FROM oauth_authorization_codes c\n        WHERE c.code_hash = $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "oauth_client_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "redirect_uri",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "code_challenge",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "snake_access: SnakeAccess",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "expires_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 7,
+        "name": "consumed_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 8,
+        "name": "permissions!: Vec<String>",
+        "type_info": "TextArray"
+      },
+      {
+        "ordinal": 9,
+        "name": "snake_ids!: Vec<Uuid>",
+        "type_info": "UuidArray"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      null,
+      null
+    ]
+  },
+  "hash": "c1d4a2ca6e14a5f54b48a4f8221edadf1f777eaf8cdbdc3120a4739580be5189"
+}

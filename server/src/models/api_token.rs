@@ -23,8 +23,8 @@ pub struct ApiToken {
 }
 
 /// A token's scope, loaded at auth time: permission set + snake access.
-/// Doubles as the model's decoded scope; the OAuth task will surface a client
-/// reference here without rework.
+/// Doubles as the model's decoded scope; the OAuth client reference marks
+/// which special rules apply (OAuth `snake.delete` scope, creator stamping).
 #[derive(Debug, Clone)]
 pub struct TokenAuth {
     pub token_id: Uuid,
@@ -32,6 +32,9 @@ pub struct TokenAuth {
     pub permissions: BTreeSet<Permission>,
     pub snake_access: SnakeAccess,
     pub snake_ids: HashSet<Uuid>,
+    /// The OAuth client this token acts for (its DB `id`); `None` for
+    /// session/personal tokens.
+    pub oauth_client_id: Option<Uuid>,
 }
 
 impl TokenAuth {
@@ -78,7 +81,7 @@ pub struct TokenSummary {
 ///
 /// Fails closed: during a rolling deploy that adds a permission, an older
 /// instance treats the new one as not held rather than failing the request.
-fn decode_permissions(token_id: Uuid, names: Vec<String>) -> BTreeSet<Permission> {
+pub(crate) fn decode_permissions(token_id: Uuid, names: Vec<String>) -> BTreeSet<Permission> {
     names
         .into_iter()
         .filter_map(|name| match name.parse() {
@@ -117,19 +120,47 @@ pub async fn create_api_token(
     snake_access: SnakeAccess,
     snake_ids: &[Uuid],
 ) -> cja::Result<NewApiToken> {
-    let secret = generate_token_secret();
-    let token_hash = hash_token(&secret);
-
     let mut tx = pool
         .begin()
         .await
         .wrap_err("Failed to begin token creation transaction")?;
+    let new_token = create_api_token_on(
+        &mut tx,
+        user_id,
+        name,
+        permissions,
+        snake_access,
+        snake_ids,
+        None,
+    )
+    .await?;
+    tx.commit()
+        .await
+        .wrap_err("Failed to commit token creation")?;
+    Ok(new_token)
+}
+
+/// Connection-taking core of [`create_api_token`]: inserts the token and its
+/// scope rows on the caller's connection (usually inside their transaction)
+/// and commits nothing. The OAuth exchange calls this to mint inside the
+/// grant-rotation transaction.
+pub async fn create_api_token_on(
+    conn: &mut sqlx::PgConnection,
+    user_id: Uuid,
+    name: &str,
+    permissions: &[Permission],
+    snake_access: SnakeAccess,
+    snake_ids: &[Uuid],
+    oauth_grant_id: Option<Uuid>,
+) -> cja::Result<NewApiToken> {
+    let secret = generate_token_secret();
+    let token_hash = hash_token(&secret);
 
     let token = sqlx::query_as!(
         ApiToken,
         r#"
-        INSERT INTO api_tokens (user_id, token_hash, name, snake_access)
-        VALUES ($1, $2, $3, $4)
+        INSERT INTO api_tokens (user_id, token_hash, name, snake_access, oauth_grant_id)
+        VALUES ($1, $2, $3, $4, $5)
         RETURNING id, user_id, token_hash, name,
             snake_access as "snake_access: SnakeAccess",
             last_used_at, created_at, revoked_at
@@ -137,9 +168,10 @@ pub async fn create_api_token(
         user_id,
         token_hash,
         name,
-        snake_access as SnakeAccess
+        snake_access as SnakeAccess,
+        oauth_grant_id
     )
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut *conn)
     .await
     .wrap_err("Failed to create API token")?;
 
@@ -155,7 +187,7 @@ pub async fn create_api_token(
             token.id,
             &permission_names
         )
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await
         .wrap_err("Failed to insert token permissions")?;
     }
@@ -170,14 +202,10 @@ pub async fn create_api_token(
             token.id,
             snake_ids
         )
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await
         .wrap_err("Failed to insert token snake access")?;
     }
-
-    tx.commit()
-        .await
-        .wrap_err("Failed to commit token creation")?;
 
     Ok(NewApiToken { token, secret })
 }
@@ -272,9 +300,9 @@ pub async fn get_user_token(
 
 /// Authenticate a raw token secret: stamps `last_used_at` and loads the
 /// token's full scope in one statement. Returns `None` for unknown/revoked
-/// tokens.
-///
-/// This function hashes the token internally to prevent accidentally passing unhashed tokens.
+/// tokens — and for OAuth tokens whose grant is revoked or whose client is
+/// disabled. A rejected token never matches the UPDATE, so it also gets no
+/// `last_used_at` bump.
 pub async fn authenticate_token(
     pool: &PgPool,
     token_secret: &str,
@@ -286,13 +314,25 @@ pub async fn authenticate_token(
         WITH tok AS (
             UPDATE api_tokens SET last_used_at = NOW()
             WHERE token_hash = $1 AND revoked_at IS NULL
-            RETURNING id, user_id, snake_access
+              AND (
+                  oauth_grant_id IS NULL
+                  OR EXISTS (
+                      SELECT 1 FROM oauth_grants g
+                      JOIN oauth_clients c ON c.id = g.oauth_client_id
+                      WHERE g.id = api_tokens.oauth_grant_id
+                        AND g.revoked_at IS NULL AND c.disabled_at IS NULL
+                  )
+              )
+            RETURNING id, user_id, snake_access, oauth_grant_id
         )
         SELECT tok.id AS "token_id!: Uuid", tok.user_id AS "user_id!: Uuid",
                tok.snake_access AS "snake_access!: SnakeAccess",
+               c.id AS "oauth_client_id?: Uuid",
                ARRAY(SELECT p.permission FROM api_token_permissions p WHERE p.api_token_id = tok.id) AS "permissions!: Vec<String>",
                ARRAY(SELECT s.battlesnake_id FROM api_token_snakes s WHERE s.api_token_id = tok.id) AS "snake_ids!: Vec<Uuid>"
         FROM tok
+        LEFT JOIN oauth_grants g ON g.id = tok.oauth_grant_id
+        LEFT JOIN oauth_clients c ON c.id = g.oauth_client_id
         "#,
         token_hash
     )
@@ -306,11 +346,39 @@ pub async fn authenticate_token(
         permissions: decode_permissions(row.token_id, row.permissions),
         snake_access: row.snake_access,
         snake_ids: row.snake_ids.into_iter().collect(),
+        oauth_client_id: row.oauth_client_id,
     }))
 }
 
-/// Revoke a token by ID (must belong to the user)
+/// Revoke a token by ID (must belong to the user). When the token carries an
+/// OAuth grant, the grant is revoked in the same transaction — revoking any
+/// of a grant's tokens removes the whole consent.
 pub async fn revoke_token(pool: &PgPool, token_id: Uuid, user_id: Uuid) -> cja::Result<bool> {
+    let mut tx = pool
+        .begin()
+        .await
+        .wrap_err("Failed to begin token revocation transaction")?;
+
+    // When the token carries a grant, serialize with every other
+    // grant-affecting writer for that (user, client) BEFORE the first
+    // write (plain SELECT first, then the lock).
+    let grant_client = sqlx::query_scalar!(
+        r#"
+        SELECT g.oauth_client_id
+        FROM api_tokens t
+        JOIN oauth_grants g ON g.id = t.oauth_grant_id
+        WHERE t.id = $1 AND t.user_id = $2
+        "#,
+        token_id,
+        user_id
+    )
+    .fetch_optional(&mut *tx)
+    .await
+    .wrap_err("Failed to load token's OAuth grant client")?;
+    if let Some(client_id) = grant_client {
+        crate::models::oauth::lock_user_client(&mut tx, user_id, client_id).await?;
+    }
+
     let result = sqlx::query!(
         r#"
         UPDATE api_tokens
@@ -320,9 +388,45 @@ pub async fn revoke_token(pool: &PgPool, token_id: Uuid, user_id: Uuid) -> cja::
         token_id,
         user_id
     )
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .wrap_err("Failed to revoke API token")?;
+
+    if result.rows_affected() > 0 {
+        // The subquery still reads the row: revoking sets a column, it does
+        // not delete. Tokens without a grant (the common case) leave the
+        // subquery NULL and this UPDATE a no-op.
+        let grant_revoked = sqlx::query!(
+            r#"
+            UPDATE oauth_grants
+            SET revoked_at = NOW()
+            WHERE revoked_at IS NULL
+              AND id = (SELECT oauth_grant_id FROM api_tokens WHERE id = $1)
+            "#,
+            token_id
+        )
+        .execute(&mut *tx)
+        .await
+        .wrap_err("Failed to revoke token's OAuth grant")?;
+        if grant_revoked.rows_affected() > 0 {
+            // The grant is gone: outstanding codes for this (user, client)
+            // must not be able to re-mint it at exchange time.
+            let client = sqlx::query_scalar!(
+                "SELECT oauth_client_id FROM oauth_grants WHERE id = (SELECT oauth_grant_id FROM api_tokens WHERE id = $1)",
+                token_id
+            )
+            .fetch_optional(&mut *tx)
+            .await
+            .wrap_err("Failed to load token's OAuth client")?;
+            if let Some(client) = client {
+                crate::models::oauth::delete_outstanding_codes(&mut tx, user_id, client).await?;
+            }
+        }
+    }
+
+    tx.commit()
+        .await
+        .wrap_err("Failed to commit token revocation")?;
 
     Ok(result.rows_affected() > 0)
 }
@@ -369,6 +473,7 @@ mod tests {
             permissions: permissions.iter().copied().collect(),
             snake_access,
             snake_ids: snake_ids.iter().copied().collect(),
+            oauth_client_id: None,
         }
     }
 

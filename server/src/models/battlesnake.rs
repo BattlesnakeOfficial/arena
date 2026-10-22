@@ -435,6 +435,57 @@ pub async fn update_battlesnake(
     }
 }
 
+/// Stamp which OAuth client created this snake (same transaction as the
+/// INSERT). Only called when the creating credential is an OAuth token.
+pub async fn set_created_by_client<'e, E>(
+    executor: E,
+    snake_id: Uuid,
+    oauth_client_id: Uuid,
+) -> cja::Result<()>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query!(
+        r#"
+        UPDATE battlesnakes
+        SET created_by_oauth_client_id = $2
+        WHERE battlesnake_id = $1
+        "#,
+        snake_id,
+        oauth_client_id
+    )
+    .execute(executor)
+    .await
+    .wrap_err("Failed to stamp snake's creating OAuth client")?;
+    Ok(())
+}
+
+/// Which OAuth client created this snake, scoped to the owner: `None` =
+/// no such live snake of this user's (missing OR another user's — both
+/// fall through to the caller's 404, so the guard leaks no existence
+/// oracle); `Some(None)` = created by the player (not through a client);
+/// `Some(Some)` = created through that client's token.
+pub async fn snake_creator_client(
+    pool: &PgPool,
+    snake_id: Uuid,
+    user_id: Uuid,
+) -> cja::Result<Option<Option<Uuid>>> {
+    let row = sqlx::query_scalar!(
+        r#"
+        SELECT created_by_oauth_client_id
+        FROM battlesnakes
+        WHERE battlesnake_id = $1 AND user_id = $2 AND deleted_at IS NULL
+        "#,
+        snake_id,
+        user_id
+    )
+    .fetch_optional(pool)
+    .await
+    .wrap_err("Failed to load snake's creating OAuth client")?;
+
+    Ok(row)
+}
+
 /// `leaderboard_entries.disabled_reason` for entries of a deleted snake.
 /// Nothing re-enables these: health reactivation only touches `health`
 /// entries, and owner pause/resume refuses them.

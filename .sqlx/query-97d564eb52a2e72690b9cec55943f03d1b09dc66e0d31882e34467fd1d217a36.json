@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT COUNT(*) AS \"count!: i64\"\n           FROM oauth_authorization_codes\n           WHERE user_id = $1 AND oauth_client_id = $2 AND consumed_at IS NULL",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count!: i64",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "97d564eb52a2e72690b9cec55943f03d1b09dc66e0d31882e34467fd1d217a36"
+}

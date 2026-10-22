@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT oauth_client_id FROM oauth_grants WHERE id = (SELECT oauth_grant_id FROM api_tokens WHERE id = $1)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "oauth_client_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "ed38c75aee3b63cc5b9c7441cfad3a90abb015c38154deb345eb10969c8dd884"
+}

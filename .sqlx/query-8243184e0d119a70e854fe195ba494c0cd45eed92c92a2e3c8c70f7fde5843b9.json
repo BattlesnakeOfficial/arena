@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE oauth_authorization_codes SET expires_at = NOW() - INTERVAL '1 second' WHERE code_hash = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "8243184e0d119a70e854fe195ba494c0cd45eed92c92a2e3c8c70f7fde5843b9"
+}

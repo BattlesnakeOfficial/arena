@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO oauth_authorization_code_permissions (oauth_authorization_code_id, permission) VALUES ($1, 'profile.read')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "3f4bd45fb8bd32ee7acb505768eabc29793d97d7547354ecf41d90126806a775"
+}
