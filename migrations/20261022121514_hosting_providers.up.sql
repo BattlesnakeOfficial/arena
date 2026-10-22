@@ -11,12 +11,15 @@ ALTER TABLE oauth_clients ADD COLUMN description TEXT;
 -- equals a row here or is a subdomain of one. The CHECK keeps domains
 -- canonical (lowercase, ASCII, DNS-label shape, >=2 labels) so the
 -- matching in models::battlesnake::update_battlesnake is plain string
--- comparison. ASCII-only also means IDN homographs can never register.
+-- comparison. ASCII-only also means IDN homographs can never register,
+-- and the last label may not be all digits: no real TLD is numeric, so
+-- IP-shaped names (1.2.3.4) are rejected too.
 CREATE TABLE oauth_client_hosting_domains (
     oauth_client_id UUID NOT NULL REFERENCES oauth_clients(id) ON DELETE CASCADE,
     domain TEXT NOT NULL CHECK (
         domain = lower(domain)
         AND domain ~ '^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$'
+        AND domain !~ '\.[0-9]+$'
     ),
     PRIMARY KEY (oauth_client_id, domain)
 );

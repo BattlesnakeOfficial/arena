@@ -3141,6 +3141,47 @@ async fn admin_hosting_create_requires_and_validates_domains(pool: PgPool) {
     .unwrap_or_default();
     assert!(flash.contains("ASCII"), "flash: {flash}");
     assert!(flash.contains("xn--softmx-7nf.com"), "flash: {flash}");
+
+    // IP-shaped domain (1.2.3.4): rejected — no real TLD is numeric.
+    let response = post(vec![
+        ("name".to_string(), "IP Domain".to_string()),
+        ("kind".to_string(), "hosting_provider".to_string()),
+        ("logo_url".to_string(), "".to_string()),
+        ("homepage_url".to_string(), "".to_string()),
+        (
+            "redirect_uris".to_string(),
+            "https://ip.example/cb".to_string(),
+        ),
+        (
+            "onboarding_url".to_string(),
+            "https://ip.example/start".to_string(),
+        ),
+        ("hosting_domains".to_string(), "1.2.3.4".to_string()),
+    ])
+    .await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let count: i64 = sqlx::query_scalar!(
+        r#"SELECT COUNT(*) AS "count!: i64" FROM oauth_clients WHERE name = 'IP Domain'"#
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 0, "IP-shaped domain must be rejected");
+    let admin_session_id = sqlx::query_scalar!(
+        "SELECT session_id FROM sessions WHERE user_id = (SELECT user_id FROM users WHERE external_github_id = 9922013)"
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let flash = sqlx::query_scalar!(
+        "SELECT flash_message FROM sessions WHERE session_id = $1",
+        admin_session_id
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap()
+    .unwrap_or_default();
+    assert!(flash.contains("IP address"), "flash: {flash}");
 }
 
 #[sqlx::test(migrations = "../migrations")]

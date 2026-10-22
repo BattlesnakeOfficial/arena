@@ -48,7 +48,8 @@ clients carry three extra fields at creation:
 Domains are **ASCII only** — international domains must be entered in
 punycode (`xn--…`) form; anything non-ASCII is rejected with the punycode
 form in the error. Trailing-dot forms are **not** normalized
-(`softmax.com.` does not match a `softmax.com` registration).
+(`softmax.com.` does not match a `softmax.com` registration). Domains
+whose last label is numeric (IP addresses) are rejected.
 
 Marking a snake hosted: `PUT /api/snakes/{id}/hosting` with the client's
 token (empty body, `204 No Content`). The token must hold `snake.url.write`

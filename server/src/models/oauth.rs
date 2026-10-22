@@ -500,8 +500,11 @@ pub fn host_matches_domain(host: &str, domain: &str) -> bool {
 /// REJECTS non-ASCII input with an error naming the punycode form
 /// ("domains must be ASCII — enter the punycode (xn--) form, e.g.
 /// xn--…"); then lowercased, >=2 DNS labels, each 1-63 chars of
-/// [a-z0-9-] not starting or ending with '-'. Mirrors the table's CHECK
-/// constraint (which additionally rejects uppercase).
+/// [a-z0-9-] not starting or ending with '-', and a last label that is
+/// NOT all digits (no real TLD is numeric — IP-shaped names such as
+/// `1.2.3.4` are rejected so an IP-literal host can never be registered).
+/// Mirrors the table's CHECK constraint (which additionally rejects
+/// uppercase).
 pub fn validate_hosting_domain(domain: &str) -> Result<String, String> {
     let domain = domain.trim();
     if !domain.is_ascii() {
@@ -517,7 +520,7 @@ pub fn validate_hosting_domain(domain: &str) -> Result<String, String> {
             "hosting domain {domain:?} must have at least two dot-separated labels (e.g. softmax.com)"
         ));
     }
-    for label in labels {
+    for label in &labels {
         let valid = (1..=63).contains(&label.len())
             && !label.starts_with('-')
             && !label.ends_with('-')
@@ -529,6 +532,18 @@ pub fn validate_hosting_domain(domain: &str) -> Result<String, String> {
                 "hosting domain {domain:?} is not a valid DNS domain (lowercase letters, digits and hyphens per label)"
             ));
         }
+    }
+    // No real TLD is numeric: an all-digits last label is an IP address
+    // (1.2.3.4) or IP shorthand (0.1). `url_host` returns such hosts as
+    // literal strings, so registering one would let an IP-literal URL
+    // match — reject them; register a DNS name.
+    if labels
+        .last()
+        .is_some_and(|label| label.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return Err(format!(
+            "hosting domain {domain:?} looks like an IP address; register a DNS name"
+        ));
     }
     Ok(domain)
 }
@@ -1467,6 +1482,22 @@ mod tests {
                 "{bad} must be rejected"
             );
         }
+        // IP-shaped names are rejected: no real TLD is numeric.
+        for ip in ["1.2.3.4", "0.1", "10.0.0.1"] {
+            assert!(
+                validate_hosting_domain(ip).is_err(),
+                "{ip} must be rejected"
+            );
+        }
+        // Digits are fine except in the last label.
+        assert_eq!(
+            validate_hosting_domain("1password.com").unwrap(),
+            "1password.com"
+        );
+        assert_eq!(
+            validate_hosting_domain("api.123.example.com").unwrap(),
+            "api.123.example.com"
+        );
         // A single label longer than 63 chars (a domain whose only labels are
         // one 64-char blob and a TLD)
         let too_long = format!("{}.com", "a".repeat(64));
