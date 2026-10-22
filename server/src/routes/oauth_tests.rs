@@ -2264,6 +2264,29 @@ async fn token_endpoint_rejects_malformed_bodies(pool: PgPool) {
     assert_eq!(json["error"], "invalid_request");
 }
 
+#[sqlx::test(migrations = "../migrations")]
+async fn token_endpoint_invalid_utf8_still_returns_json_error(pool: PgPool) {
+    let fx = Fixture::new(&pool).await;
+    let response = fx
+        .app
+        .clone()
+        .oneshot(
+            Request::post("/oauth/token")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(vec![0xff]))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    let body = body_string(response).await;
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(json["error"], "invalid_request");
+}
+
 // ---------------------------------------------------------------------------
 // Admin
 // ---------------------------------------------------------------------------
