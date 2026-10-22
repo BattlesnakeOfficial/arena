@@ -434,9 +434,10 @@ pub async fn list_active_grants(pool: &PgPool, user_id: Uuid) -> cja::Result<Vec
 
 /// Delete every outstanding (unconsumed) authorization code for a (user,
 /// client), join rows cascading — run inside the same transaction as any
-/// grant-affecting change (revoke, snake edit, token revoke, exchange
-/// rotation) so a client holding an older code cannot resurrect or
-/// supersede the new state within the code lifetime.
+/// grant-affecting change (approve, revoke, snake edit, token revoke,
+/// exchange rotation) so a client holding an older code cannot resurrect
+/// or supersede the new state within the code lifetime. Callers take
+/// `lock_user_client` first.
 pub(crate) async fn delete_outstanding_codes(
     conn: &mut sqlx::PgConnection,
     user_id: Uuid,
@@ -453,6 +454,42 @@ pub(crate) async fn delete_outstanding_codes(
     Ok(())
 }
 
+/// Serialize every grant-affecting transaction per (user_id,
+/// oauth_client_id) with a transaction-scoped advisory lock, so a
+/// snake-selection edit can never race an exchange (or a revoke) into
+/// landing on a just-revoked token.
+///
+/// Callers — each takes the lock AFTER its plain SELECTs and BEFORE its
+/// first INSERT/UPDATE/DELETE:
+/// - [`create_authorization_code`] (before deleting outstanding codes)
+/// - [`exchange_authorization_code`] (after the cheap rejections, before
+///   the consume UPDATE)
+/// - [`revoke_grant`] (after the plain grant-client SELECT)
+/// - [`set_grant_snakes`] (after the plain grant-client SELECT)
+/// - [`crate::models::api_token::revoke_token`] (after its plain
+///   grant-client SELECT)
+///
+/// One lock order everywhere also removes the lock-order deadlocks the
+/// cross-table writes could otherwise introduce: exchange locks code →
+/// grant/token while the other writers lock grant/token → codes, and the
+/// advisory lock serializes them per (user, client) before either order
+/// begins.
+pub(crate) async fn lock_user_client(
+    conn: &mut sqlx::PgConnection,
+    user_id: Uuid,
+    oauth_client_id: Uuid,
+) -> cja::Result<()> {
+    sqlx::query!(
+        "SELECT pg_advisory_xact_lock(hashtextextended($1::text || ':' || $2::text, 0))",
+        user_id.to_string(),
+        oauth_client_id.to_string()
+    )
+    .execute(&mut *conn)
+    .await
+    .wrap_err("Failed to take (user, client) advisory lock")?;
+    Ok(())
+}
+
 /// Revoke a grant and its live tokens in one transaction. `false` when the
 /// grant isn't found, already revoked, or not the user's.
 pub async fn revoke_grant(pool: &PgPool, grant_id: Uuid, user_id: Uuid) -> cja::Result<bool> {
@@ -460,6 +497,24 @@ pub async fn revoke_grant(pool: &PgPool, grant_id: Uuid, user_id: Uuid) -> cja::
         .begin()
         .await
         .wrap_err("Failed to begin grant revocation transaction")?;
+
+    // Plain SELECT first (no row lock), then serialize with every other
+    // grant-affecting writer for this (user, client) before writing.
+    let grant_client = sqlx::query_scalar!(
+        "SELECT oauth_client_id FROM oauth_grants WHERE id = $1 AND user_id = $2",
+        grant_id,
+        user_id
+    )
+    .fetch_optional(&mut *tx)
+    .await
+    .wrap_err("Failed to load grant's OAuth client")?;
+    let Some(oauth_client_id) = grant_client else {
+        tx.rollback()
+            .await
+            .wrap_err("Failed to roll back grant revocation transaction")?;
+        return Ok(false);
+    };
+    lock_user_client(&mut tx, user_id, oauth_client_id).await?;
 
     let revoked_client = sqlx::query_scalar!(
         r#"
@@ -513,9 +568,29 @@ pub async fn set_grant_snakes(
         .await
         .wrap_err("Failed to begin grant snake-edit transaction")?;
 
-    let token_and_client = sqlx::query!(
+    // Plain SELECT first (no row lock), then serialize with every other
+    // grant-affecting writer for this (user, client) — a concurrent
+    // exchange cannot revoke/rotate the live token between our SELECT and
+    // our writes.
+    let grant_client = sqlx::query_scalar!(
+        "SELECT oauth_client_id FROM oauth_grants WHERE id = $1 AND user_id = $2",
+        grant_id,
+        user_id
+    )
+    .fetch_optional(&mut *tx)
+    .await
+    .wrap_err("Failed to load grant's OAuth client")?;
+    let Some(oauth_client_id) = grant_client else {
+        tx.rollback()
+            .await
+            .wrap_err("Failed to roll back grant snake-edit transaction")?;
+        return Ok(false);
+    };
+    lock_user_client(&mut tx, user_id, oauth_client_id).await?;
+
+    let token_id = sqlx::query_scalar!(
         r#"
-        SELECT t.id AS token_id, g.oauth_client_id
+        SELECT t.id
         FROM oauth_grants g
         JOIN api_tokens t ON t.oauth_grant_id = g.id AND t.revoked_at IS NULL
         WHERE g.id = $1 AND g.user_id = $2 AND g.revoked_at IS NULL
@@ -527,22 +602,31 @@ pub async fn set_grant_snakes(
     .await
     .wrap_err("Failed to find grant's live token")?;
 
-    let Some(row) = token_and_client else {
+    let Some(token_id) = token_id else {
         tx.rollback()
             .await
             .wrap_err("Failed to roll back grant snake-edit transaction")?;
         return Ok(false);
     };
-    let token_id = row.token_id;
 
-    sqlx::query!(
-        "UPDATE api_tokens SET snake_access = $2 WHERE id = $1",
+    // The `revoked_at IS NULL` guard (with the rows_affected check) makes a
+    // stale token id a no-op instead of a silent rewrite of a now-revoked
+    // token: if the token died, the edit fails loudly for the player
+    // rather than pretending to succeed on a dead row.
+    let updated = sqlx::query!(
+        "UPDATE api_tokens SET snake_access = $2 WHERE id = $1 AND revoked_at IS NULL",
         token_id,
         snake_access as SnakeAccess
     )
     .execute(&mut *tx)
     .await
     .wrap_err("Failed to update grant token snake access")?;
+    if updated.rows_affected() == 0 {
+        tx.rollback()
+            .await
+            .wrap_err("Failed to roll back grant snake-edit transaction")?;
+        return Ok(false);
+    }
 
     sqlx::query!(
         "DELETE FROM api_token_snakes WHERE api_token_id = $1",
@@ -569,7 +653,7 @@ pub async fn set_grant_snakes(
 
     // A pre-approval code still in flight would mint a token with the OLD
     // selection at exchange time, undoing this narrowing — kill it.
-    delete_outstanding_codes(&mut tx, user_id, row.oauth_client_id).await?;
+    delete_outstanding_codes(&mut tx, user_id, oauth_client_id).await?;
 
     tx.commit()
         .await
@@ -616,6 +700,14 @@ pub async fn create_authorization_code(
         .begin()
         .await
         .wrap_err("Failed to begin authorization code transaction")?;
+
+    // Latest consent wins: serialize with every other grant-affecting
+    // writer for this (user, client), then kill every earlier outstanding
+    // code — a client holding an older, broader approval must not be able
+    // to exchange it after the player approved a narrower consent. (What
+    // docs/oauth.md promises for re-authorizing.)
+    lock_user_client(&mut tx, user_id, client_db_id).await?;
+    delete_outstanding_codes(&mut tx, user_id, client_db_id).await?;
 
     let code_id = sqlx::query_scalar!(
         r#"
@@ -772,6 +864,11 @@ pub async fn exchange_authorization_code(
     if !verifier_ok {
         return Ok(Err(ExchangeError::VerifierMismatch));
     }
+
+    // Serialize with every other grant-affecting writer for this (user,
+    // client) BEFORE the first write: a concurrent snake-selection edit or
+    // re-approval must not interleave with the rotation below.
+    lock_user_client(&mut tx, row.user_id, row.oauth_client_id).await?;
 
     // Race-safe consume: exactly one concurrent exchange wins. Expiry is
     // checked against the DB clock here too, so app/DB clock skew cannot

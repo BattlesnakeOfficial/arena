@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "UPDATE api_tokens SET snake_access = $2 WHERE id = $1",
+  "query": "UPDATE api_tokens SET snake_access = $2 WHERE id = $1 AND revoked_at IS NULL",
   "describe": {
     "columns": [],
     "parameters": {
@@ -11,5 +11,5 @@
     },
     "nullable": []
   },
-  "hash": "e71d50a4991970dbc9069db839509a2a9d3cc838ba75b9680359a306410db4ef"
+  "hash": "9a53af2105be7c97f9667b3a2cb38ae21b027ccfe51a56cc3d3951a5b64b3ca4"
 }

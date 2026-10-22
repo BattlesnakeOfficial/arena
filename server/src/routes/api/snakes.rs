@@ -404,11 +404,11 @@ pub async fn delete_snake(
     auth.require_snake(snake_id, Permission::SnakeDelete)?;
 
     // OAuth tokens may only delete snakes their own client created. A
-    // player-made snake is 403; a missing snake falls through so the
-    // response is `delete_battlesnake`'s 404 (matching personal-token
-    // behavior).
+    // player-made snake is 403; a missing snake — or one owned by another
+    // user — falls through so the response is `delete_battlesnake`'s 404
+    // (matching personal-token behavior, and leaking no existence oracle).
     if let Some(client_id) = auth.token_scope().and_then(|scope| scope.oauth_client_id) {
-        let creator = battlesnake::snake_creator_client(&state.db, snake_id)
+        let creator = battlesnake::snake_creator_client(&state.db, snake_id, auth.user_id)
             .await
             .map_err(|e| {
                 tracing::error!("Failed to load snake creator client: {e:#}");

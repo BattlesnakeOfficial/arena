@@ -253,11 +253,15 @@ fn append_query_params(base: &str, params: &[(&str, &str)]) -> Option<String> {
 // Consent token (stateless HMAC over the exact displayed request)
 // ---------------------------------------------------------------------------
 
-/// The consent-token message: six fields, each percent-encoded (no
-/// delimiter can survive inside a field), joined with `\n`. `state` absent
-/// and empty encode identically — harmless, and the form round-trips
-/// uniformly.
+/// The consent-token message: seven fields — the current user and session,
+/// then the request — each percent-encoded (no delimiter can survive
+/// inside a field), joined with `\n`. Binding the `user_id` means a form
+/// rendered for user A stops verifying after A logs out and B logs in on
+/// the same browser (logout only disassociates the user; the session id
+/// survives). `state` absent and empty encode identically — harmless, and
+/// the form round-trips uniformly.
 pub(crate) fn consent_csrf_message(
+    user_id: Uuid,
     session_id: Uuid,
     client_public_id: &str,
     redirect_uri: &str,
@@ -266,6 +270,7 @@ pub(crate) fn consent_csrf_message(
     state: Option<&str>,
 ) -> String {
     [
+        urlencoding::encode(&user_id.to_string()).to_string(),
         urlencoding::encode(&session_id.to_string()).to_string(),
         urlencoding::encode(client_public_id).to_string(),
         urlencoding::encode(redirect_uri).to_string(),
@@ -372,6 +377,7 @@ pub async fn authorize(
     let csrf = mint_consent_csrf(
         &key,
         &consent_csrf_message(
+            user.user_id,
             session.session_id,
             &validated.client.public_client_id,
             &redirect_uri,
@@ -567,10 +573,12 @@ pub async fn authorize_decision(
     };
 
     // First check: the consent token, rebuilt from the form's own bound
-    // fields plus this session. A missing or forged token (including a
-    // tampered hidden `scope`, or a token minted for another session) means
-    // the no-redirect error page — no code, no redirect.
+    // fields plus this session's CURRENT user. A missing or forged token
+    // (including a tampered hidden `scope`, or a token minted for another
+    // session or another user) means the no-redirect error page — no code,
+    // no redirect.
     let message = consent_csrf_message(
+        user.user_id,
         session.session_id,
         field("client_id").unwrap_or_default(),
         field("redirect_uri").unwrap_or_default(),

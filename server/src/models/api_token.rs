@@ -359,6 +359,26 @@ pub async fn revoke_token(pool: &PgPool, token_id: Uuid, user_id: Uuid) -> cja::
         .await
         .wrap_err("Failed to begin token revocation transaction")?;
 
+    // When the token carries a grant, serialize with every other
+    // grant-affecting writer for that (user, client) BEFORE the first
+    // write (plain SELECT first, then the lock).
+    let grant_client = sqlx::query_scalar!(
+        r#"
+        SELECT g.oauth_client_id
+        FROM api_tokens t
+        JOIN oauth_grants g ON g.id = t.oauth_grant_id
+        WHERE t.id = $1 AND t.user_id = $2
+        "#,
+        token_id,
+        user_id
+    )
+    .fetch_optional(&mut *tx)
+    .await
+    .wrap_err("Failed to load token's OAuth grant client")?;
+    if let Some(client_id) = grant_client {
+        crate::models::oauth::lock_user_client(&mut tx, user_id, client_id).await?;
+    }
+
     let result = sqlx::query!(
         r#"
         UPDATE api_tokens

@@ -460,20 +460,24 @@ where
     Ok(())
 }
 
-/// Which OAuth client created this snake: `None` = no such live snake;
-/// `Some(None)` = created by the player (not through a client); `Some(Some)`
-/// = created through that client's token.
+/// Which OAuth client created this snake, scoped to the owner: `None` =
+/// no such live snake of this user's (missing OR another user's — both
+/// fall through to the caller's 404, so the guard leaks no existence
+/// oracle); `Some(None)` = created by the player (not through a client);
+/// `Some(Some)` = created through that client's token.
 pub async fn snake_creator_client(
     pool: &PgPool,
     snake_id: Uuid,
+    user_id: Uuid,
 ) -> cja::Result<Option<Option<Uuid>>> {
     let row = sqlx::query_scalar!(
         r#"
         SELECT created_by_oauth_client_id
         FROM battlesnakes
-        WHERE battlesnake_id = $1 AND deleted_at IS NULL
+        WHERE battlesnake_id = $1 AND user_id = $2 AND deleted_at IS NULL
         "#,
-        snake_id
+        snake_id,
+        user_id
     )
     .fetch_optional(pool)
     .await

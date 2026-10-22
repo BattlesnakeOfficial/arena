@@ -145,6 +145,7 @@ impl Fixture {
         mint_consent_csrf(
             &consent_csrf_key(self.state.cookie_key.master()),
             &consent_csrf_message(
+                self.user_id,
                 self.session_id,
                 &self.client.public_client_id,
                 redirect_uri,
@@ -614,6 +615,7 @@ async fn decision_rejects_missing_or_forged_csrf(pool: PgPool) {
     let other_session_csrf = mint_consent_csrf(
         &consent_csrf_key(fx.state.cookie_key.master()),
         &consent_csrf_message(
+            fx.user_id,
             Uuid::new_v4(),
             &fx.client.public_client_id,
             REDIRECT_URI,
@@ -675,6 +677,53 @@ async fn decision_rejects_missing_or_forged_csrf(pool: PgPool) {
     }
 
     // No code row was created by any variant.
+    let codes: i64 =
+        sqlx::query_scalar!(r#"SELECT COUNT(*) AS "count!: i64" FROM oauth_authorization_codes"#)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(codes, 0);
+}
+
+#[sqlx::test(migrations = "../migrations")]
+async fn decision_rejects_consent_minted_for_another_user(pool: PgPool) {
+    use crate::models::session::{associate_user_with_session, disassociate_user_from_session};
+
+    let fx = Fixture::new(&pool).await;
+    let (_verifier, challenge) = make_verifier_pair();
+    let scope = "profile.read";
+
+    // The consent token is minted (rendered) for user A on session S.
+    let csrf = fx.consent_csrf(&challenge, scope);
+
+    // A logs out and B logs in on the same browser: logout only
+    // disassociates the user, the session id survives.
+    let user_b = crate::routes::test_support::create_user(&pool, 9922021, false).await;
+    disassociate_user_from_session(&pool, fx.session_id)
+        .await
+        .unwrap();
+    associate_user_with_session(&pool, fx.session_id, user_b)
+        .await
+        .unwrap();
+
+    // B posts A's form fields and csrf: the token is bound to A's user id,
+    // so verification fails — the no-redirect error page, no code minted
+    // for B.
+    let fields = [
+        ("client_id", fx.client.public_client_id.clone()),
+        ("redirect_uri", REDIRECT_URI.to_string()),
+        ("state", "xyz".to_string()),
+        ("code_challenge", challenge.clone()),
+        ("scope", scope.to_string()),
+        ("csrf", csrf),
+        ("decision", "approve".to_string()),
+        ("snake_access", "all".to_string()),
+    ];
+    let refs: Vec<(&str, &str)> = fields.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let (status, location, body) = fx.post_decision(&refs).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(location.is_none(), "must never redirect");
+
     let codes: i64 =
         sqlx::query_scalar!(r#"SELECT COUNT(*) AS "count!: i64" FROM oauth_authorization_codes"#)
             .fetch_one(&pool)
@@ -1390,18 +1439,21 @@ async fn revoke_grant_invalidates_outstanding_codes(pool: PgPool) {
 async fn earlier_code_cannot_supersede_newer_exchange(pool: PgPool) {
     let fx = Fixture::new(&pool).await;
     let (verifier, challenge) = make_verifier_pair();
-    // Two approvals: the broader one first, the narrower one second.
+    // Approve broad → exchange, then approve narrower → exchange. (Two
+    // outstanding codes for one (user, client) can no longer coexist — a
+    // new approval deletes the older code — so this exercises the
+    // exchange-time invalidation the rotation still performs.)
     let earlier = fx
         .approve("profile.read snakes.read", &challenge, "all", &[], false)
         .await;
+    let _first_token = fx.exchange(&earlier, &verifier).await;
+
     let later = fx
         .approve("profile.read", &challenge, "all", &[], false)
         .await;
-
-    // The NEWER code is exchanged: the grant rotation invalidates the older
-    // outstanding code.
     let token = fx.exchange(&later, &verifier).await;
 
+    // The earlier (now consumed) code cannot supersede the newer exchange.
     let (status, json, _headers) = fx
         .post_token(
             &[
@@ -1428,6 +1480,66 @@ async fn earlier_code_cannot_supersede_newer_exchange(pool: PgPool) {
     .await
     .unwrap();
     assert_eq!(active, 1);
+}
+
+#[sqlx::test(migrations = "../migrations")]
+async fn newer_consent_kills_older_code(pool: PgPool) {
+    let fx = Fixture::new(&pool).await;
+    let (verifier, challenge) = make_verifier_pair();
+    // Approve broad, then approve narrower — the newer consent must win:
+    // the older code dies at approval time, not at exchange time.
+    let broad = fx
+        .approve("profile.read snakes.read", &challenge, "all", &[], false)
+        .await;
+    let narrow = fx
+        .approve("profile.read", &challenge, "all", &[], false)
+        .await;
+
+    // The broad code is gone: only one outstanding code per (user, client).
+    let outstanding: i64 = sqlx::query_scalar!(
+        r#"SELECT COUNT(*) AS "count!: i64"
+           FROM oauth_authorization_codes
+           WHERE user_id = $1 AND oauth_client_id = $2 AND consumed_at IS NULL"#,
+        fx.user_id,
+        fx.client.id
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        outstanding, 1,
+        "the newer approval must kill the older code"
+    );
+
+    // Exchanging the broad code is invalid_grant; the narrow one exchanges
+    // and mints exactly the narrower scope.
+    let (status, json, _headers) = fx
+        .post_token(
+            &[
+                ("grant_type", "authorization_code"),
+                ("code", &broad),
+                ("redirect_uri", REDIRECT_URI),
+                ("code_verifier", &verifier),
+            ],
+            Some((&fx.client.public_client_id, &fx.secret)),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert_eq!(json["error"], "invalid_grant");
+
+    let (status, json, _headers) = fx
+        .post_token(
+            &[
+                ("grant_type", "authorization_code"),
+                ("code", &narrow),
+                ("redirect_uri", REDIRECT_URI),
+                ("code_verifier", &verifier),
+            ],
+            Some((&fx.client.public_client_id, &fx.secret)),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["scope"], "profile.read");
 }
 
 #[sqlx::test(migrations = "../migrations")]
@@ -1687,6 +1799,30 @@ async fn oauth_delete_only_own_snakes(pool: PgPool) {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Another user's live snake is ALSO a 404 (never a 403 "not created by
+    // this app" — that would be an existence oracle), and the snake
+    // survives untouched.
+    let other_session = create_user_session(&pool, 9922013, false).await;
+    let other_user = session_user_id(&pool, other_session).await;
+    let foreign = make_snake(&pool, other_user, "not-yours-either").await;
+    let (status, _body) = send_api(
+        &fx.app,
+        "DELETE",
+        &format!("/api/snakes/{foreign}"),
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let owner: Uuid = sqlx::query_scalar!(
+        "SELECT user_id FROM battlesnakes WHERE battlesnake_id = $1 AND deleted_at IS NULL",
+        foreign
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(owner, other_user, "the foreign snake must survive");
 
     // Contrast: a personal token with snake.delete deletes the player-made C.
     let personal = crate::models::api_token::create_api_token(
@@ -2099,6 +2235,75 @@ async fn token_revoke_via_api_kills_grant(pool: PgPool) {
     assert!(revoked.is_some());
 }
 
+#[sqlx::test(migrations = "../migrations")]
+async fn token_revoke_invalidates_outstanding_codes(pool: PgPool) {
+    let fx = Fixture::new(&pool).await;
+    // Approve → exchange → token T.
+    let _token = fx.full_flow("profile.read", "all", &[]).await;
+    let grant = fx.active_grant(&pool).await;
+    let token_id: Uuid = sqlx::query_scalar!(
+        "SELECT id FROM api_tokens WHERE oauth_grant_id = $1 AND revoked_at IS NULL",
+        grant
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    // Approve again → C2, still outstanding.
+    let (verifier, challenge) = make_verifier_pair();
+    let code = fx
+        .approve("profile.read", &challenge, "all", &[], false)
+        .await;
+
+    // DELETE /api/tokens/{T} with a personal token holding tokens.manage
+    // (superset scope so the token-revocation guard allows it).
+    let manager = crate::models::api_token::create_api_token(
+        &pool,
+        fx.user_id,
+        "manager",
+        &[Permission::TokensManage, Permission::ProfileRead],
+        crate::models::api_token::SnakeAccess::All,
+        &[],
+    )
+    .await
+    .unwrap()
+    .secret;
+    let (status, body) = send_api(
+        &fx.app,
+        "DELETE",
+        &format!("/api/tokens/{token_id}"),
+        Some(&manager),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    // The outstanding code cannot re-mint the revoked grant.
+    let (status, json, _headers) = fx
+        .post_token(
+            &[
+                ("grant_type", "authorization_code"),
+                ("code", &code),
+                ("redirect_uri", REDIRECT_URI),
+                ("code_verifier", &verifier),
+            ],
+            Some((&fx.client.public_client_id, &fx.secret)),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert_eq!(json["error"], "invalid_grant");
+
+    let active: i64 = sqlx::query_scalar!(
+        r#"SELECT COUNT(*) AS "count!: i64" FROM oauth_grants WHERE user_id = $1 AND oauth_client_id = $2 AND revoked_at IS NULL"#,
+        fx.user_id,
+        fx.client.id
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(active, 0);
+}
+
 // ---------------------------------------------------------------------------
 // Token-endpoint client auth
 // ---------------------------------------------------------------------------
@@ -2505,11 +2710,15 @@ async fn admin_create_validates_redirect_uris(pool: PgPool) {
         }
     };
 
-    // Rejected: non-loopback http, fragment, unparseable.
+    // Rejected: non-loopback http, fragment, unparseable, and loopback
+    // lookalikes (a subdomain or userinfo trick must not pass as loopback).
     for uris in [
         "http://example.com/cb",
         "https://x.example/cb#frag",
         "not a uri at all",
+        "http://localhost.evil.com/cb",
+        "http://127.0.0.1.evil.com/cb",
+        "http://localhost@evil.com/cb",
     ] {
         let response = post_create(uris).await;
         assert_eq!(response.status(), StatusCode::SEE_OTHER, "{uris}");
