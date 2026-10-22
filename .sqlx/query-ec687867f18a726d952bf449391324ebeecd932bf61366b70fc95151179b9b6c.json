@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT snake_access AS \"snake_access: crate::models::api_token::SnakeAccess\" FROM api_tokens WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "snake_access: crate::models::api_token::SnakeAccess",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "ec687867f18a726d952bf449391324ebeecd932bf61366b70fc95151179b9b6c"
+}

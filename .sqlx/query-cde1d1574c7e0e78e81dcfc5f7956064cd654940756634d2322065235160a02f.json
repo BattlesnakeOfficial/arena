@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO oauth_authorization_codes\n            (oauth_client_id, user_id, redirect_uri, code_hash, code_challenge, snake_access, expires_at)\n        VALUES ($1, $2, $3, $4, $5, 'all', NOW() + INTERVAL '10 minutes')\n        RETURNING id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "cde1d1574c7e0e78e81dcfc5f7956064cd654940756634d2322065235160a02f"
+}

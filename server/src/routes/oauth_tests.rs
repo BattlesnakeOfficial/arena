@@ -19,6 +19,7 @@ use crate::state::AppState;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use sha2::{Digest, Sha256};
 
 const REDIRECT_URI: &str = "https://client.example/cb";
 
@@ -1439,10 +1440,14 @@ async fn revoke_grant_invalidates_outstanding_codes(pool: PgPool) {
 async fn earlier_code_cannot_supersede_newer_exchange(pool: PgPool) {
     let fx = Fixture::new(&pool).await;
     let (verifier, challenge) = make_verifier_pair();
-    // Approve broad → exchange, then approve narrower → exchange. (Two
-    // outstanding codes for one (user, client) can no longer coexist — a
-    // new approval deletes the older code — so this exercises the
-    // exchange-time invalidation the rotation still performs.)
+    // Approve broad → exchange, then approve narrower → exchange. With
+    // create-time deletion, two outstanding codes for one (user, client)
+    // can no longer coexist, so this pins the replay half of the name:
+    // replaying the old, consumed code must not touch the newer
+    // grant/token the second exchange minted. (The exchange-time kill of
+    // a coexisting outstanding code — reachable today only via direct
+    // SQL — is pinned by `exchange_deletes_coexisting_outstanding_code`
+    // below.)
     let earlier = fx
         .approve("profile.read snakes.read", &challenge, "all", &[], false)
         .await;
@@ -1480,6 +1485,87 @@ async fn earlier_code_cannot_supersede_newer_exchange(pool: PgPool) {
     .await
     .unwrap();
     assert_eq!(active, 1);
+}
+
+#[sqlx::test(migrations = "../migrations")]
+async fn exchange_deletes_coexisting_outstanding_code(pool: PgPool) {
+    let fx = Fixture::new(&pool).await;
+    let (verifier, challenge) = make_verifier_pair();
+    // A naturally approved, still-outstanding code.
+    let live = fx
+        .approve("profile.read snakes.read", &challenge, "all", &[], false)
+        .await;
+
+    // Create-time deletion means a second outstanding code can only
+    // exist via direct SQL — which is exactly the defense-in-depth line
+    // this pins: if the create-time guard ever regresses, exchanging one
+    // code must still kill the coexisting one (`delete_outstanding_codes`
+    // inside the exchange transaction). The inserted code is fully valid
+    // (own verifier/challenge, unexpired, real scope) so the only thing
+    // that can fail its redemption is deletion.
+    let (other_verifier, other_challenge) = make_verifier_pair();
+    let other_code = "0123456789abcdef".repeat(4);
+    let other_hash = hex::encode(Sha256::digest(other_code.as_bytes()));
+    let other_id: Uuid = sqlx::query_scalar!(
+        r#"
+        INSERT INTO oauth_authorization_codes
+            (oauth_client_id, user_id, redirect_uri, code_hash, code_challenge, snake_access, expires_at)
+        VALUES ($1, $2, $3, $4, $5, 'all', NOW() + INTERVAL '10 minutes')
+        RETURNING id
+        "#,
+        fx.client.id,
+        fx.user_id,
+        REDIRECT_URI,
+        other_hash,
+        other_challenge
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    sqlx::query!(
+        "INSERT INTO oauth_authorization_code_permissions (oauth_authorization_code_id, permission) VALUES ($1, 'profile.read')",
+        other_id
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Exchanging the live code must delete the coexisting one.
+    let token = fx.exchange(&live, &verifier).await;
+
+    let remaining: i64 = sqlx::query_scalar!(
+        r#"SELECT COUNT(*) AS "count!: i64" FROM oauth_authorization_codes WHERE code_hash = $1"#,
+        other_hash
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        remaining, 0,
+        "exchange must delete coexisting outstanding codes"
+    );
+
+    // The killed code no longer redeems (with its own valid verifier),
+    // and — its row being gone, unlike a consumed code — the failed
+    // redemption cannot revoke anything.
+    let (status, json, _headers) = fx
+        .post_token(
+            &[
+                ("grant_type", "authorization_code"),
+                ("code", &other_code),
+                ("redirect_uri", REDIRECT_URI),
+                ("code_verifier", &other_verifier),
+            ],
+            Some((&fx.client.public_client_id, &fx.secret)),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert_eq!(json["error"], "invalid_grant");
+
+    // The exchange's grant and token survive the killed code's failed
+    // redemption untouched.
+    let (status, _body) = send_api(&fx.app, "GET", "/api/me", Some(&token), None).await;
+    assert_eq!(status, StatusCode::OK);
 }
 
 #[sqlx::test(migrations = "../migrations")]
@@ -1730,6 +1816,108 @@ async fn grant_snake_edit_rejects_foreign_grant(pool: PgPool) {
         vec![other_snake],
         "the other user's grant must be unchanged"
     );
+}
+
+#[sqlx::test(migrations = "../migrations")]
+async fn grant_snake_edit_waits_for_lock_and_fails_on_revoked_token(pool: PgPool) {
+    let fx = Fixture::new(&pool).await;
+    // Live grant G and token T with snake_access = all.
+    let _token = fx.full_flow("snakes.read snake.url.read", "all", &[]).await;
+    let grant = fx.active_grant(&pool).await;
+    let token_id: Uuid = sqlx::query_scalar!(
+        "SELECT id FROM api_tokens WHERE oauth_grant_id = $1 AND revoked_at IS NULL",
+        grant
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    // Hold the exact (user, client) advisory lock `lock_user_client`
+    // builds on a dedicated connection, so the spawned edit must queue
+    // behind it — proving the edit takes the lock before writing.
+    let key = oauth::user_client_advisory_key(fx.user_id, fx.client.id);
+    let mut blocker = pool.begin().await.unwrap();
+    sqlx::query!(
+        "SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))",
+        key
+    )
+    .execute(&mut *blocker)
+    .await
+    .unwrap();
+
+    let user_id = fx.user_id;
+    let snake = fx.snakes[0];
+    let edit = {
+        let pool = pool.clone();
+        tokio::spawn(async move {
+            oauth::set_grant_snakes(
+                &pool,
+                grant,
+                user_id,
+                crate::models::api_token::SnakeAccess::Selected,
+                &[snake],
+            )
+            .await
+        })
+    };
+
+    // Wait (bounded) until the edit's backend is blocked on the advisory
+    // lock — same pg_stat_activity shape as the customizations and
+    // play_import deadlock tests.
+    let waiting = async {
+        loop {
+            let waiting: i64 = sqlx::query_scalar!(
+                r#"SELECT COUNT(*)::bigint AS "count!" FROM pg_stat_activity WHERE query LIKE 'SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))%' AND wait_event_type = 'Lock' AND datname = current_database()"#
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if waiting == 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(15), waiting)
+        .await
+        .expect("snake edit never queued on the advisory lock");
+
+    // On a third connection, revoke T while the edit still waits on the
+    // lock.
+    sqlx::query!(
+        "UPDATE api_tokens SET revoked_at = NOW() WHERE id = $1",
+        token_id
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Release the lock: the edit proceeds, finds no live token (the
+    // `revoked_at IS NULL` lookup), and must fail cleanly instead of
+    // writing the new selection onto the dead row.
+    blocker.commit().await.unwrap();
+    let edited = edit.await.unwrap().unwrap();
+    assert!(
+        !edited,
+        "edit must report failure when the token died while it waited"
+    );
+
+    let access = sqlx::query_scalar!(
+        r#"SELECT snake_access AS "snake_access: crate::models::api_token::SnakeAccess" FROM api_tokens WHERE id = $1"#,
+        token_id
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(access, crate::models::api_token::SnakeAccess::All);
+    let rows: i64 = sqlx::query_scalar!(
+        r#"SELECT COUNT(*) AS "count!: i64" FROM api_token_snakes WHERE api_token_id = $1"#,
+        token_id
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rows, 0, "nothing was written onto the dead token");
 }
 
 #[sqlx::test(migrations = "../migrations")]

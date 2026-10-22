@@ -468,6 +468,7 @@ pub(crate) async fn delete_outstanding_codes(
 /// - [`set_grant_snakes`] (after the plain grant-client SELECT)
 /// - [`crate::models::api_token::revoke_token`] (after its plain
 ///   grant-client SELECT)
+/// - [`revoke_token_issued_by_code`] (after the plain code-owner SELECT)
 ///
 /// One lock order everywhere also removes the lock-order deadlocks the
 /// cross-table writes could otherwise introduce: exchange locks code →
@@ -479,15 +480,26 @@ pub(crate) async fn lock_user_client(
     user_id: Uuid,
     oauth_client_id: Uuid,
 ) -> cja::Result<()> {
+    let key = user_client_advisory_key(user_id, oauth_client_id);
     sqlx::query!(
-        "SELECT pg_advisory_xact_lock(hashtextextended($1::text || ':' || $2::text, 0))",
-        user_id.to_string(),
-        oauth_client_id.to_string()
+        "SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))",
+        key
     )
     .execute(&mut *conn)
     .await
     .wrap_err("Failed to take (user, client) advisory lock")?;
     Ok(())
+}
+
+/// The advisory-lock key text for a (user, client) pair. The
+/// `oauth.user_client:` prefix keeps this lock in its own
+/// `hashtextextended(_, 0)` keyspace instead of sharing one with the
+/// other advisory-lock users (e.g. `models/email_log.rs` hashes bare
+/// lowercase text). Built in exactly one place so every taker —
+/// `lock_user_client` and the tests that hold the same lock to prove
+/// serialization — agrees on the text.
+pub(crate) fn user_client_advisory_key(user_id: Uuid, oauth_client_id: Uuid) -> String {
+    format!("oauth.user_client:{user_id}:{oauth_client_id}")
 }
 
 /// Revoke a grant and its live tokens in one transaction. `false` when the
@@ -995,18 +1007,29 @@ pub async fn revoke_token_issued_by_code(pool: &PgPool, code: &str) -> cja::Resu
         .await
         .wrap_err("Failed to begin replay revocation transaction")?;
 
-    sqlx::query!(
-        r#"
-        UPDATE api_tokens SET revoked_at = NOW()
-        WHERE revoked_at IS NULL
-          AND id = (SELECT issued_token_id FROM oauth_authorization_codes WHERE code_hash = $1)
-        "#,
+    // Plain read first (no row lock): resolve the (user, client) the code
+    // belongs to so this path serializes with every other grant-affecting
+    // writer for that pair. A code row that has vanished (nothing was
+    // issued to revoke) is a clean no-op.
+    let owner = sqlx::query!(
+        "SELECT user_id, oauth_client_id FROM oauth_authorization_codes WHERE code_hash = $1",
         code_hash
     )
-    .execute(&mut *tx)
+    .fetch_optional(&mut *tx)
     .await
-    .wrap_err("Failed to revoke replayed code's token")?;
+    .wrap_err("Failed to load replayed code's owner")?;
+    let Some(owner) = owner else {
+        tx.rollback()
+            .await
+            .wrap_err("Failed to roll back replay revocation transaction")?;
+        return Ok(());
+    };
 
+    lock_user_client(&mut tx, owner.user_id, owner.oauth_client_id).await?;
+
+    // Grant first, then token — the same row order every other
+    // grant-affecting writer uses, so a replay racing a player's Revoke
+    // (or a newer-code exchange) cannot lock-order deadlock (40P01 → 500).
     sqlx::query!(
         r#"
         UPDATE oauth_grants SET revoked_at = NOW()
@@ -1019,6 +1042,18 @@ pub async fn revoke_token_issued_by_code(pool: &PgPool, code: &str) -> cja::Resu
     .execute(&mut *tx)
     .await
     .wrap_err("Failed to revoke replayed code's grant")?;
+
+    sqlx::query!(
+        r#"
+        UPDATE api_tokens SET revoked_at = NOW()
+        WHERE revoked_at IS NULL
+          AND id = (SELECT issued_token_id FROM oauth_authorization_codes WHERE code_hash = $1)
+        "#,
+        code_hash
+    )
+    .execute(&mut *tx)
+    .await
+    .wrap_err("Failed to revoke replayed code's token")?;
 
     tx.commit()
         .await
