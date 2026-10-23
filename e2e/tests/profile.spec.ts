@@ -107,3 +107,44 @@ test.describe('Profile Page', () => {
     await authenticatedPage.screenshot({ path: 'test-results/notification-email-mobile.png', fullPage: true });
   });
 });
+
+test.describe('Country picker', () => {
+  test('combobox stores an ISO code and shows the flag on the profile', async ({ authenticatedPage, mockUser }) => {
+    await authenticatedPage.goto('/me');
+
+    // The no-JS control is a country select carrying every ISO code.
+    const select = authenticatedPage.locator('select#country');
+    await expect(select).toBeAttached();
+    await expect(select.locator('option[value="CA"]')).toHaveCount(1);
+
+    // The label was repointed at the combobox input by the enhancer.
+    const search = authenticatedPage.getByLabel('Country', { exact: true });
+    await search.click();
+    await search.fill('canad');
+    await authenticatedPage.keyboard.press('Enter');
+    // Enter commits the highlighted option but must NOT submit the form.
+    await expect(authenticatedPage).toHaveURL('/me');
+    await expect(search).toHaveValue('Canada');
+
+    await authenticatedPage.getByRole('button', { name: 'Save Changes' }).click();
+    await expect(authenticatedPage).toHaveURL('/me');
+
+    const [row] = await query<{ country: string }>(
+      'SELECT country FROM users WHERE github_login = $1',
+      [mockUser.login],
+    );
+    expect(row.country).toBe('CA');
+
+    // The saved profile shows the flag badge and the country name.
+    await expect(authenticatedPage.locator('.profile-head img.flag')).toHaveAttribute('alt', 'Canada flag');
+    await expect(authenticatedPage.locator('.profile-head .meta')).toContainText('Canada');
+  });
+
+  test('public profile shows the owner flag and country name', async ({ authenticatedPage, mockUser }) => {
+    await query("UPDATE users SET country = 'CA' WHERE github_login = $1", [mockUser.login]);
+
+    await authenticatedPage.goto(`/users/${mockUser.login}`);
+    await expect(authenticatedPage.locator('.profile-head img.flag')).toHaveAttribute('alt', 'Canada flag');
+    await expect(authenticatedPage.locator('.profile-head .meta')).toContainText('Canada');
+  });
+});
