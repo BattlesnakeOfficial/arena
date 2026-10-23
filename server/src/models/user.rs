@@ -313,7 +313,6 @@ pub async fn create_or_update_user(
 
 pub const MAX_DISPLAY_NAME_LEN: usize = 100;
 pub const MAX_PRONOUNS_LEN: usize = 50;
-pub const MAX_COUNTRY_LEN: usize = 100;
 pub const MAX_BACKSTORY_LEN: usize = 2000;
 
 /// Validate profile field lengths. Call after trimming.
@@ -334,10 +333,8 @@ pub fn validate_profile_fields(
             "Pronouns must be {MAX_PRONOUNS_LEN} characters or fewer"
         ));
     }
-    if country.chars().count() > MAX_COUNTRY_LEN {
-        return Err(format!(
-            "Country must be {MAX_COUNTRY_LEN} characters or fewer"
-        ));
+    if !crate::countries::is_valid_code(country) {
+        return Err("Country must be chosen from the list".to_string());
     }
     if backstory.chars().count() > MAX_BACKSTORY_LEN {
         return Err(format!(
@@ -704,7 +701,7 @@ mod tests {
             user_id,
             "My Name",
             "they/them",
-            "Canada",
+            "CA",
             "Snake fighter",
         )
         .await?;
@@ -712,7 +709,7 @@ mod tests {
         let user = get_user_by_id(&pool, user_id).await?.unwrap();
         assert_eq!(user.display_name.as_deref(), Some("My Name"));
         assert_eq!(user.pronouns, "they/them");
-        assert_eq!(user.country, "Canada");
+        assert_eq!(user.country, "CA");
         assert_eq!(user.backstory, "Snake fighter");
 
         // Clear by setting to empty string.
@@ -751,21 +748,57 @@ mod tests {
         Ok(())
     }
 
+    #[sqlx::test(migrations = "../migrations")]
+    async fn country_check_rejects_non_codes(pool: PgPool) -> cja::Result<()> {
+        let user_id = create_user(&pool, 9003).await?;
+
+        // The DB CHECK enforces shape ('' or ^[A-Z]{2}$), backstopping the
+        // app-level ISO membership check (validate_profile_fields).
+        // 'XX' is shape-valid: the DB accepts it, the app rejects it —
+        // that layering is the design.
+        for bad in ["ca", "Canada", "X", "XYZ", " C"] {
+            let result = sqlx::query!(
+                "UPDATE users SET country = $2 WHERE user_id = $1",
+                user_id,
+                bad
+            )
+            .execute(&pool)
+            .await;
+            assert!(result.is_err(), "country '{bad}' should violate the CHECK");
+        }
+
+        for good in ["CA", "GB", "", "XX"] {
+            sqlx::query!(
+                "UPDATE users SET country = $2 WHERE user_id = $1",
+                user_id,
+                good
+            )
+            .execute(&pool)
+            .await?;
+            let user = get_user_by_id(&pool, user_id).await?.unwrap();
+            assert_eq!(user.country, good);
+        }
+
+        Ok(())
+    }
+
     #[test]
     fn validation_rejects_over_limit() {
-        assert!(validate_profile_fields("ok", "ok", "ok", "ok").is_ok());
+        assert!(validate_profile_fields("ok", "ok", "", "ok").is_ok());
 
         let long_pronouns = "x".repeat(51);
-        assert!(validate_profile_fields("ok", &long_pronouns, "ok", "ok").is_err());
+        assert!(validate_profile_fields("ok", &long_pronouns, "", "ok").is_err());
 
-        let long_country = "x".repeat(101);
-        assert!(validate_profile_fields("ok", "ok", &long_country, "ok").is_err());
+        // Country accepts '' or known alpha-2 codes only — names and junk
+        // are both rejected at the form boundary.
+        assert!(validate_profile_fields("ok", "ok", "Canada", "ok").is_err());
+        assert!(validate_profile_fields("ok", "ok", "XX", "ok").is_err());
 
         let long_backstory = "x".repeat(2001);
-        assert!(validate_profile_fields("ok", "ok", "ok", &long_backstory).is_err());
+        assert!(validate_profile_fields("ok", "ok", "", &long_backstory).is_err());
 
         let long_display = "x".repeat(101);
-        assert!(validate_profile_fields(&long_display, "ok", "ok", "ok").is_err());
+        assert!(validate_profile_fields(&long_display, "ok", "", "ok").is_err());
     }
 
     #[test]
@@ -773,7 +806,7 @@ mod tests {
         // 40 emoji = 160 bytes but only 40 chars — under the 50-char
         // pronouns limit; byte-based validation would wrongly reject it.
         let emoji_pronouns = "\u{1F40D}".repeat(40);
-        assert!(validate_profile_fields("ok", &emoji_pronouns, "ok", "ok").is_ok());
+        assert!(validate_profile_fields("ok", &emoji_pronouns, "", "ok").is_ok());
 
         let too_many = "\u{1F40D}".repeat(51);
         assert!(validate_profile_fields("ok", &too_many, "ok", "ok").is_err());
@@ -782,11 +815,11 @@ mod tests {
     #[test]
     fn validation_accepts_at_limit() {
         let max_pronouns = "x".repeat(50);
-        let max_country = "x".repeat(100);
+        let max_country = "CA";
         let max_backstory = "x".repeat(2000);
         let max_display = "x".repeat(100);
         assert!(
-            validate_profile_fields(&max_display, &max_pronouns, &max_country, &max_backstory)
+            validate_profile_fields(&max_display, &max_pronouns, max_country, &max_backstory)
                 .is_ok()
         );
     }

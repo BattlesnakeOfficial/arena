@@ -352,6 +352,20 @@ table.data td.rating { font-family: var(--mono); font-weight: 600; font-size: 15
 }
 
 .snake-cell { display: flex; align-items: center; gap: 12px; }
+.flag { display: inline-block; width: 16px; height: 12px; object-fit: cover;
+        border-radius: 2px; vertical-align: -1px; margin-right: 3px;
+        box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .08); }
+.profile-head .flag { width: 20px; height: 15px; vertical-align: -2px; }
+.country-select-wrap { position: relative; }
+.country-select-list {
+  position: absolute; z-index: 30; left: 0; right: 0; top: calc(100% + 4px);
+  max-height: 264px; overflow-y: auto; margin: 0; padding: 0; list-style: none;
+  background: var(--card); border: 1px solid var(--hairline-dark);
+  border-radius: 8px; box-shadow: 0 8px 24px rgba(0, 0, 0, .14);
+}
+.country-select-list li { min-height: 44px; padding: 0 12px; display: flex;
+  align-items: center; font-size: 16px; cursor: pointer; }
+.country-select-list li.active { background: var(--hover); }
 .chip {
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .16), 0 0 0 1px rgba(0, 0, 0, .06);
   width: 34px;

@@ -58,6 +58,8 @@ pub struct GlobalRankingEntry {
     pub github_login: String,
     pub public_name: String,
     pub github_avatar_url: Option<String>,
+    /// ISO-3166-1 alpha-2 country ('' when unset). Display-only.
+    pub country: String,
 }
 
 struct FlatRankingEntry {
@@ -68,6 +70,7 @@ struct FlatRankingEntry {
     github_login: String,
     public_name: String,
     github_avatar_url: Option<String>,
+    country: String,
 }
 
 impl From<FlatRankingEntry> for GlobalRankingEntry {
@@ -82,6 +85,7 @@ impl From<FlatRankingEntry> for GlobalRankingEntry {
             github_login: row.github_login,
             public_name: row.public_name,
             github_avatar_url: row.github_avatar_url,
+            country: row.country,
         }
     }
 }
@@ -105,7 +109,7 @@ pub async fn get_global_players_paginated(
         FlatRankingEntry,
         r#"SELECT g.user_id AS "user_id!", g.best_scores AS "best_scores!", g.total_score AS "total_score!",
                   g.enabled_leaderboards AS "enabled_leaderboards!",
-                  u.github_login, u.github_avatar_url,
+                  u.github_login, u.github_avatar_url, u.country,
                   COALESCE(NULLIF(u.display_name, ''), u.github_login) AS "public_name!"
            FROM global_player_scores($1) g
            JOIN users u ON u.user_id = g.user_id

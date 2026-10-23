@@ -406,6 +406,7 @@ pub async fn show_leaderboard(
                                                         }
                                                         span class="owner" {
                                                             "by "
+                                                            (crate::components::flag::country_flag(&entry.owner_country))
                                                             a href={"/users/"(entry.owner_login)} { (entry.owner_name) }
                                                             @if is_you { " — you" }
                                                         }
@@ -471,6 +472,7 @@ pub async fn show_leaderboard(
                                                         }
                                                         span class="owner" {
                                                             "by "
+                                                            (crate::components::flag::country_flag(&entry.owner_country))
                                                             a href={"/users/"(entry.owner_login)} { (entry.owner_name) }
                                                         }
                                                         (snake_tag_chips(snake_tags.get(&entry.battlesnake_id).map(Vec::as_slice).unwrap_or(&[])))
@@ -583,6 +585,7 @@ pub async fn show_leaderboard(
                                             }
                                             span class="owner-inline" {
                                                 " by "
+                                                (crate::components::flag::country_flag(&eater.owner_country))
                                                 a href={"/users/"(eater.owner_login)} { (eater.owner_name) }
                                             }
                                             " · "
@@ -664,6 +667,9 @@ pub async fn show_leaderboard_entry(
         |o| (o.github_login.clone(), o.public_name().to_string()),
     );
     let owner_avatar = owner.as_ref().and_then(|o| o.github_avatar_url.clone());
+    let owner_country = owner
+        .as_ref()
+        .map_or_else(String::new, |o| o.country.clone());
 
     let per_page: i64 = 20;
 
@@ -831,6 +837,7 @@ pub async fn show_leaderboard_entry(
                     }
                     div class="sub" {
                         "by "
+                        (crate::components::flag::country_flag(&owner_country))
                         @if owner.is_some() {
                             a href={"/users/"(owner_login)} { (owner_name) }
                         } @else {

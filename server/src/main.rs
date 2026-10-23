@@ -15,6 +15,7 @@ mod activity;
 mod backup;
 mod cache;
 mod config;
+mod countries;
 mod cron;
 mod customizations;
 mod discord;
@@ -74,6 +75,7 @@ where
 /// Frontend UI components only - do not place backend logic here
 mod components {
     pub mod avatar;
+    pub mod flag;
     pub mod flash;
     pub mod latency_chart;
     pub mod live_refresh;

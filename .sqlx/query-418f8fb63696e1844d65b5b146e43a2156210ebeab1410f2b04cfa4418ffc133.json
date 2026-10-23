@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE imported_accounts SET country = $2 WHERE imported_account_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "418f8fb63696e1844d65b5b146e43a2156210ebeab1410f2b04cfa4418ffc133"
+}

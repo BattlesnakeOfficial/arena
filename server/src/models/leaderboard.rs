@@ -92,6 +92,9 @@ pub struct RankedEntry {
     pub owner_login: String,
     /// Owner's public name: `display_name` when set, else the GitHub login.
     pub owner_name: String,
+    /// Owner's ISO-3166-1 alpha-2 country ('' when unset). Display-only.
+    #[serde(skip)]
+    pub owner_country: String,
 }
 
 /// Sort order for ranked leaderboard entries.
@@ -311,7 +314,8 @@ pub async fn get_ranked_entries(
                     b.name as snake_name,
                     b.color as snake_color,
                     u.github_login as owner_login,
-                    COALESCE(NULLIF(u.display_name, ''), u.github_login) AS "owner_name!"
+                    COALESCE(NULLIF(u.display_name, ''), u.github_login) AS "owner_name!",
+                    u.country as owner_country
                  FROM leaderboard_entries le
                  JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id
                  JOIN users u ON b.user_id = u.user_id
@@ -342,7 +346,8 @@ pub async fn get_ranked_entries(
                     b.name as snake_name,
                     b.color as snake_color,
                     u.github_login as owner_login,
-                    COALESCE(NULLIF(u.display_name, ''), u.github_login) AS "owner_name!"
+                    COALESCE(NULLIF(u.display_name, ''), u.github_login) AS "owner_name!",
+                    u.country as owner_country
                  FROM leaderboard_entries le
                  JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id
                  JOIN users u ON b.user_id = u.user_id
@@ -384,7 +389,8 @@ pub async fn get_placement_entries(
             b.name as snake_name,
             b.color as snake_color,
             u.github_login as owner_login,
-            COALESCE(NULLIF(u.display_name, ''), u.github_login) AS "owner_name!"
+            COALESCE(NULLIF(u.display_name, ''), u.github_login) AS "owner_name!",
+            u.country as owner_country
          FROM leaderboard_entries le
          JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id
          JOIN users u ON b.user_id = u.user_id
@@ -729,7 +735,8 @@ pub async fn get_ranked_entries_paginated(
                     b.name as snake_name,
                     b.color as snake_color,
                     u.github_login as owner_login,
-                    COALESCE(NULLIF(u.display_name, ''), u.github_login) AS "owner_name!"
+                    COALESCE(NULLIF(u.display_name, ''), u.github_login) AS "owner_name!",
+                    u.country as owner_country
                  FROM leaderboard_entries le
                  JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id
                  JOIN users u ON b.user_id = u.user_id
@@ -762,7 +769,8 @@ pub async fn get_ranked_entries_paginated(
                     b.name as snake_name,
                     b.color as snake_color,
                     u.github_login as owner_login,
-                    COALESCE(NULLIF(u.display_name, ''), u.github_login) AS "owner_name!"
+                    COALESCE(NULLIF(u.display_name, ''), u.github_login) AS "owner_name!",
+                    u.country as owner_country
                  FROM leaderboard_entries le
                  JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id
                  JOIN users u ON b.user_id = u.user_id
@@ -1145,6 +1153,8 @@ pub struct TopEater {
     pub owner_login: String,
     /// Owner's public name: `display_name` when set, else the GitHub login.
     pub owner_name: String,
+    /// Owner's ISO-3166-1 alpha-2 country ('' when unset). Display-only.
+    pub owner_country: String,
 }
 
 /// Get the top food-eaters for a leaderboard, ordered by cumulative food eaten.
@@ -1161,7 +1171,8 @@ pub async fn get_top_eaters(
             b.name as snake_name,
             b.color as snake_color,
             u.github_login as owner_login,
-            COALESCE(NULLIF(u.display_name, ''), u.github_login) AS "owner_name!"
+            COALESCE(NULLIF(u.display_name, ''), u.github_login) AS "owner_name!",
+            u.country as owner_country
          FROM leaderboard_entries le
          JOIN food_eaten_stats fes ON le.leaderboard_entry_id = fes.leaderboard_entry_id
          JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id
@@ -1375,20 +1386,24 @@ mod tests {
         .fetch_one(&pool)
         .await?;
 
-        let owners: [(i64, &str, Option<&str>); 3] = [
-            (9920001, "gh-display", Some("Display Person")),
-            (9920002, "gh-null", None),
-            (9920003, "gh-empty", Some("")),
+        let owners: [(i64, &str, Option<&str>, &str); 3] = [
+            (9920001, "gh-display", Some("Display Person"), "CA"),
+            (9920002, "gh-null", None, ""),
+            (9920003, "gh-empty", Some(""), ""),
         ];
         // Each owner gets one ranked and one placement snake so every query
-        // sees both the display-name and the login-fallback case.
-        for (github_id, login, display_name) in owners {
+        // sees both the display-name and the login-fallback case. The first
+        // owner also carries a country so owner_country flows through the
+        // ranked/placement/top-eater queries (the activity feed doesn't
+        // select it).
+        for (github_id, login, display_name, country) in owners {
             let user_id = sqlx::query_scalar!(
-                "INSERT INTO users (external_github_id, github_login, github_access_token, display_name)
-                 VALUES ($1, $2, 'token', $3) RETURNING user_id",
+                "INSERT INTO users (external_github_id, github_login, github_access_token, display_name, country)
+                 VALUES ($1, $2, 'token', $3, $4) RETURNING user_id",
                 github_id,
                 login,
-                display_name
+                display_name,
+                country
             )
             .fetch_one(&pool)
             .await?;
@@ -1436,19 +1451,19 @@ mod tests {
             }
         }
 
-        let expected: BTreeSet<(String, String)> = [
-            ("gh-display", "Display Person"),
-            ("gh-null", "gh-null"),
-            ("gh-empty", "gh-empty"),
+        let expected: BTreeSet<(String, String, String)> = [
+            ("gh-display", "Display Person", "CA"),
+            ("gh-null", "gh-null", ""),
+            ("gh-empty", "gh-empty", ""),
         ]
         .into_iter()
-        .map(|(login, name)| (login.to_string(), name.to_string()))
+        .map(|(login, name, country)| (login.to_string(), name.to_string(), country.to_string()))
         .collect();
-        let names = |rows: Vec<(String, String)>| rows.into_iter().collect::<BTreeSet<_>>();
+        let names = |rows: Vec<(String, String, String)>| rows.into_iter().collect::<BTreeSet<_>>();
         let ranked_names = |rows: Vec<RankedEntry>| {
             names(
                 rows.into_iter()
-                    .map(|e| (e.owner_login, e.owner_name))
+                    .map(|e| (e.owner_login, e.owner_name, e.owner_country))
                     .collect(),
             )
         };
@@ -1477,21 +1492,23 @@ mod tests {
                 get_top_eaters(&pool, leaderboard_id, 10)
                     .await?
                     .into_iter()
-                    .map(|e| (e.owner_login, e.owner_name))
+                    .map(|e| (e.owner_login, e.owner_name, e.owner_country))
                     .collect()
             ),
             expected,
             "get_top_eaters"
         );
+        let feed_expected: BTreeSet<(String, String)> = expected
+            .into_iter()
+            .map(|(login, name, _)| (login, name))
+            .collect();
         assert_eq!(
-            names(
-                get_activity_feed(&pool, leaderboard_id, 10)
-                    .await?
-                    .into_iter()
-                    .map(|e| (e.owner_login, e.owner_name))
-                    .collect()
-            ),
-            expected,
+            get_activity_feed(&pool, leaderboard_id, 10)
+                .await?
+                .into_iter()
+                .map(|e| (e.owner_login, e.owner_name))
+                .collect::<BTreeSet<_>>(),
+            feed_expected,
             "get_activity_feed"
         );
         Ok(())
