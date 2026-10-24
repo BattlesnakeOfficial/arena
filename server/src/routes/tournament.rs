@@ -2800,6 +2800,7 @@ mod tests {
             snake_color: "#888888".to_string(),
             owner_login: "ranked-owner".to_string(),
             owner_name: "Ranked Owner".to_string(),
+            owner_country: String::new(),
         }
     }
 

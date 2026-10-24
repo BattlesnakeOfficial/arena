@@ -489,13 +489,19 @@ async fn claim_account_inner(
     };
 
     // Display identity: play username becomes the arena display name, but
-    // never clobber one the user already set.
+    // never clobber one the user already set. Staged country is free text
+    // from play (codes, names, or junk); normalize accepts codes and
+    // names, and junk clears to '' — which the COALESCE below leaves
+    // alone rather than clobbering an existing country.
+    let claimed_country = crate::countries::normalize(&claimed.country)
+        .unwrap_or("")
+        .to_string();
     sqlx::query!(
         r#"
         UPDATE users
         SET display_name = COALESCE(display_name, NULLIF(left($2, 100), ''), left($3, 100)),
             pronouns = COALESCE(NULLIF(pronouns, ''), left($4, 50), pronouns),
-            country = COALESCE(NULLIF(country, ''), left($5, 100), country),
+            country = COALESCE(NULLIF(country, ''), $5, country),
             backstory = COALESCE(NULLIF(backstory, ''), left($6, 2000), backstory)
         WHERE user_id = $1
         "#,
@@ -503,7 +509,7 @@ async fn claim_account_inner(
         claimed.display_name,
         claimed.username,
         claimed.pronouns,
-        claimed.country,
+        claimed_country,
         claimed.backstory,
     )
     .execute(&mut *tx)
@@ -1338,6 +1344,36 @@ mod tests {
         assert_eq!(user.pronouns, "");
         assert_eq!(user.country, "CA");
         assert_eq!(user.backstory, "hiss");
+
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn claim_normalizes_free_text_country(pool: PgPool) -> cja::Result<()> {
+        // Staged play countries are free text; claim normalizes them to
+        // ISO alpha-2 codes (names map, junk clears to '').
+        for (n, staged, expected) in [
+            (30u32, "Canada", "CA"),
+            (31u32, "United Kingdom", "GB"),
+            (32u32, "Narnia", ""),
+        ] {
+            let user_id = create_user(&pool, (4300 + n).into()).await?;
+            let account_id = stage_full_account(&pool, n).await?;
+            sqlx::query!(
+                "UPDATE imported_accounts SET country = $2 WHERE imported_account_id = $1",
+                account_id,
+                staged
+            )
+            .execute(&pool)
+            .await?;
+
+            claim_account(&pool, account_id, user_id).await?;
+
+            let user = sqlx::query!("SELECT country FROM users WHERE user_id = $1", user_id)
+                .fetch_one(&pool)
+                .await?;
+            assert_eq!(user.country, expected, "staged '{staged}'");
+        }
 
         Ok(())
     }

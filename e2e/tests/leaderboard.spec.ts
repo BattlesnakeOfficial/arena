@@ -496,3 +496,54 @@ test.describe('Leaderboard API', () => {
     expect(response.status()).toBe(404);
   });
 });
+
+test.describe('Country flags', () => {
+  test('ranked rows show the owner country flag', async ({ authenticatedPage }) => {
+    const stamp = `${Date.now()}_${Math.floor(Math.random() * 10000)}`;
+    const [board] = await query<{ leaderboard_id: string }>(
+      "SELECT leaderboard_id FROM leaderboards WHERE name = 'Standard 11x11'",
+    );
+    const users = await query<{ user_id: string }>(
+      `INSERT INTO users (external_github_id, github_login, github_access_token, display_name, country)
+       VALUES ($1::bigint, $2, 'tk', 'Flag Owner GB', 'GB'), ($3::bigint, $4, 'tk', 'No Flag Owner', '')
+       RETURNING user_id`,
+      [Date.now() * 1000 + 700_100, `flag-owner-gb-${stamp}`, Date.now() * 1000 + 700_101, `no-flag-owner-${stamp}`],
+    );
+    const [gbOwner, plainOwner] = users;
+    try {
+      const owners = [
+        { user: gbOwner, name: `Flag Snake GB ${stamp}`, score: 30 },
+        { user: plainOwner, name: `No Flag Snake ${stamp}`, score: 20 },
+      ];
+      for (const { user, name, score } of owners) {
+        const [snake] = await query<{ battlesnake_id: string }>(
+          `INSERT INTO battlesnakes (user_id, name, url, visibility)
+           VALUES ($1, $2, 'https://example.com', 'private') RETURNING battlesnake_id`,
+          [user.user_id, name],
+        );
+        await query(
+          `INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id, games_played, display_score)
+           VALUES ($1, $2, 10, $3)`,
+          [board.leaderboard_id, snake.battlesnake_id, score],
+        );
+      }
+
+      await authenticatedPage.goto(`/leaderboards/${board.leaderboard_id}`);
+
+      // Owner with a country: flag badge next to the owner link.
+      const gbRow = authenticatedPage.locator('tbody tr').filter({ hasText: 'Flag Owner GB' });
+      await expect(gbRow.getByRole('link', { name: 'Flag Owner GB' })).toBeVisible();
+      await expect(gbRow.locator('img.flag')).toHaveAttribute('alt', 'United Kingdom flag');
+
+      // Owner without a country: no flag in that row (anchored to the
+      // row's visible owner link, so an empty board can't fake a pass).
+      const plainRow = authenticatedPage.locator('tbody tr').filter({ hasText: 'No Flag Owner' });
+      await expect(plainRow.getByRole('link', { name: 'No Flag Owner' })).toBeVisible();
+      await expect(plainRow.locator('img.flag')).toHaveCount(0);
+    } finally {
+      await query('DELETE FROM users WHERE user_id = ANY($1::uuid[])', [
+        [gbOwner.user_id, plainOwner.user_id],
+      ]);
+    }
+  });
+});

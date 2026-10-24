@@ -22,6 +22,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         ))
         .entry(cja_build::Entry::new("src/share-copy.ts", "share-copy.js"))
         .entry(cja_build::Entry::new(
+            "src/country-select.ts",
+            "country-select.js",
+        ))
+        .entry(cja_build::Entry::new(
             "src/board-theme-sync.ts",
             "board-theme-sync.js",
         ))

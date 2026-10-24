@@ -135,7 +135,7 @@ async fn render_user_profile(
                     div class="meta" {
                         "@" (user.github_login)
                         @if !user.pronouns.is_empty() { " · " (user.pronouns) }
-                        @if !user.country.is_empty() { " · " (user.country) }
+                        @if !user.country.is_empty() { " · " (crate::components::flag::country_meta(&user.country)) }
                         " · joined " (user.created_at.format("%b %Y"))
                     }
                     @if !user.backstory.is_empty() {
@@ -304,6 +304,7 @@ fn render_global_rankings(
                                     td class="player" {
                                         div class="snake-cell" {
                                             (user_avatar(row.github_avatar_url.as_deref(), &row.public_name, "ranking-avatar"))
+                                            (crate::components::flag::country_flag(&row.country))
                                             a class="name" href={"/users/"(row.github_login)"/"(row.score.user_id)} { (row.public_name) }
                                         }
                                     }
@@ -541,6 +542,16 @@ mod tests {
     use super::*;
 
     fn ranking_entry(user_id: Uuid, login: &str, name: &str, boards: usize) -> GlobalRankingEntry {
+        ranking_entry_with_country(user_id, login, name, boards, "")
+    }
+
+    fn ranking_entry_with_country(
+        user_id: Uuid,
+        login: &str,
+        name: &str,
+        boards: usize,
+        country: &str,
+    ) -> GlobalRankingEntry {
         GlobalRankingEntry {
             score: GlobalPlayerScore {
                 user_id,
@@ -551,6 +562,7 @@ mod tests {
             github_login: login.to_string(),
             public_name: name.to_string(),
             github_avatar_url: None,
+            country: country.to_string(),
         }
     }
 
@@ -577,6 +589,24 @@ mod tests {
         assert!(html.contains("2<span class=\"board-suffix\"> boards</span>"));
         assert!(html.contains("/rankings?page=0"));
         assert!(html.contains("/rankings?page=2"));
+    }
+
+    #[test]
+    fn rankings_render_country_flags() {
+        let first = Uuid::from_u128(1);
+        let second = Uuid::from_u128(2);
+        let rows = vec![
+            ranking_entry_with_country(first, "twin", "First", 1, "CA"),
+            ranking_entry_with_country(second, "TWIN", "TWIN", 2, ""),
+        ];
+        let html = render_global_rankings(&rows, 1, 3, 102).into_string();
+        // The CA row shows a flag badge with the country name as alt text.
+        assert!(html.contains(r#"alt="Canada flag""#), "{html}");
+        // Exactly one flag badge: the country-less row renders none. Its
+        // name link is positively asserted so this can't pass vacuously.
+        assert!(html.contains(&format!(r#"href="/users/twin/{first}""#)));
+        assert!(html.contains(&format!(r#"href="/users/TWIN/{second}""#)));
+        assert_eq!(html.matches(r#"class="flag""#).count(), 1, "{html}");
     }
 
     #[test]

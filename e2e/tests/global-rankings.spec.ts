@@ -161,3 +161,33 @@ test('rankings pages past fifty rows', async ({ page }) => {
     await query('DELETE FROM users WHERE github_login LIKE $1 OR github_login = $2', [`${prefix}%`, longLogin]);
   }
 });
+
+test('rankings player cell shows the owner country flag', async ({ page }) => {
+  const stamp = `${Date.now()}_${Math.floor(Math.random() * 10000)}`;
+  const [owner] = await query<{ user_id: string }>(
+    `INSERT INTO users (external_github_id, github_login, github_access_token, display_name, country)
+     VALUES ($1::bigint, $2, 'tk', 'Ranking Flag GB', 'GB') RETURNING user_id`,
+    [Date.now() * 1000 + 700_200, `ranking-flag-gb-${stamp}`],
+  );
+  try {
+    const [board] = await query<{ leaderboard_id: string }>(
+      'SELECT leaderboard_id FROM leaderboards WHERE disabled_at IS NULL ORDER BY name LIMIT 1',
+    );
+    const [snake] = await query<{ battlesnake_id: string }>(
+      `INSERT INTO battlesnakes (user_id, name, url, visibility)
+       VALUES ($1, $2, 'https://example.com', 'private') RETURNING battlesnake_id`,
+      [owner.user_id, `Ranking Flag Snake ${stamp}`],
+    );
+    await query(
+      `INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id, games_played, display_score)
+       VALUES ($1, $2, 10, 15)`,
+      [board.leaderboard_id, snake.battlesnake_id],
+    );
+
+    const row = await findRankingRow(page, `/users/ranking-flag-gb-${stamp}/${owner.user_id}`);
+    await expect(row.getByRole('link', { name: 'Ranking Flag GB' })).toBeVisible();
+    await expect(row.locator('img.flag')).toHaveAttribute('alt', 'United Kingdom flag');
+  } finally {
+    await query('DELETE FROM users WHERE user_id = $1', [owner.user_id]);
+  }
+});

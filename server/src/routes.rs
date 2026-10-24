@@ -845,7 +845,7 @@ fn home_ladder_grid(
                                                 } @else {
                                                     span class="name" { (entry.snake_name) }
                                                 }
-                                                span class="owner" { "by " (entry.owner_name) }
+                                                span class="owner" { "by " (crate::components::flag::country_flag(&entry.owner_country)) (entry.owner_name) }
                                             }
                                         }
                                     }
@@ -971,7 +971,7 @@ async fn profile_page(
                     div class="meta" {
                         "@" (user.github_login)
                         @if !user.pronouns.is_empty() { " · " (user.pronouns) }
-                        @if !user.country.is_empty() { " · " (user.country) }
+                        @if !user.country.is_empty() { " · " (crate::components::flag::country_meta(&user.country)) }
                         " · joined " (user.created_at.format("%b %Y"))
                     }
                     @if !user.backstory.is_empty() {
@@ -1009,9 +1009,13 @@ async fn profile_page(
 
                         div class="field" {
                             label for="country" { "Country" }
-                            input type="text" id="country" name="country" maxlength="100"
-                                value=(user.country);
-                            p class="help" { "Max 100 characters" }
+                            select id="country" name="country" data-country-select {
+                                option value="" selected[user.country.is_empty()] { "None" }
+                                @for c in crate::countries::COUNTRIES {
+                                    option value=(c.code) selected[c.code == user.country] { (c.name) }
+                                }
+                            }
+                            p class="help" { "Shown as a flag next to your snakes on leaderboards" }
                         }
 
                         div class="field" {
@@ -1024,6 +1028,7 @@ async fn profile_page(
                             button type="submit" class="btn solid" { "Save Changes" }
                         }
                     }
+                    script src=(crate::arena_assets::asset_url("country-select.js")) {}
                 }
 
                 aside class="rail" {
@@ -1127,12 +1132,15 @@ async fn update_profile(
         return Ok(Redirect::to("/me").into_response());
     }
 
+    // Validation above guarantees '' or a known alpha-2 code.
+    let country = country.to_ascii_uppercase();
+
     crate::models::user::update_profile_fields(
         &state.db,
         user.user_id,
         display_name,
         pronouns,
-        country,
+        &country,
         backstory,
     )
     .await
