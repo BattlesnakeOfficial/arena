@@ -66,6 +66,13 @@
   let activeIndex = -1;
   let filtered: Item[] = [];
 
+  // Stable, unique option id per item (values are unique: '' plus the
+  // 249 ISO codes). Stable across re-filtering, so aria-activedescendant
+  // keeps pointing at the same country as the highlight moves.
+  function optionId(item: Item): string {
+    return `${listboxId}-opt-${item.value ? item.value.toLowerCase() : 'none'}`;
+  }
+
   function matches(item: Item, query: string): boolean {
     if (!query) return true;
     const q = query.toLowerCase();
@@ -82,6 +89,11 @@
       if (isActive) option.setAttribute('aria-selected', 'true');
       else option.removeAttribute('aria-selected');
     });
+    // Screen readers follow the highlight through this attribute; clear
+    // it when nothing is active (see closeList).
+    const item = filtered[index];
+    if (item) input.setAttribute('aria-activedescendant', optionId(item));
+    else input.removeAttribute('aria-activedescendant');
     const active = listbox.children[index];
     if (active instanceof HTMLElement) active.scrollIntoView({ block: 'nearest' });
   }
@@ -91,6 +103,7 @@
     listbox.textContent = '';
     for (const item of filtered) {
       const li = document.createElement('li');
+      li.id = optionId(item);
       li.setAttribute('role', 'option');
       li.textContent = item.value ? `${item.text} (${item.value})` : item.text;
       // pointerdown (not click) commits before the browser moves focus,
@@ -116,6 +129,7 @@
   function closeList(): void {
     open = false;
     input.setAttribute('aria-expanded', 'false');
+    input.removeAttribute('aria-activedescendant');
     listbox.hidden = true;
   }
 
@@ -162,6 +176,24 @@
   });
 
   wrapper.addEventListener('focusout', (event) => {
-    if (!wrapper.contains(event.relatedTarget as Node | null)) closeList();
+    if (wrapper.contains(event.relatedTarget as Node | null)) return;
+    closeList();
+    // Keep the visible text in sync with the value the form will submit.
+    // Text that exactly matches an option (display name or code,
+    // case-insensitive) commits; anything else restores the currently
+    // selected country's display name (empty when unset), so unmatched
+    // typing can never masquerade as a choice.
+    const typed = input.value.trim();
+    const match = items.find(
+      (item) =>
+        item.text.toLowerCase() === typed.toLowerCase() ||
+        item.value.toLowerCase() === typed.toLowerCase(),
+    );
+    if (match) {
+      commit(match);
+    } else {
+      const selected = items.find((item) => item.value === select.value);
+      input.value = selected && selected.value ? selected.text : '';
+    }
   });
 })();

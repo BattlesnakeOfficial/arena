@@ -782,6 +782,67 @@ mod tests {
         Ok(())
     }
 
+    /// The up migration's normalization is replayed against pre-migration
+    /// free-text values, loading every statement from the migration files
+    /// themselves — nothing is hand-copied, so the test cannot drift from
+    /// the SQL that actually runs in production.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn country_migration_normalization_maps_codes_names_aliases_and_junk(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        let up =
+            include_str!("../../../migrations/20261023130000_users_country_iso3166_alpha2.up.sql");
+        let down = include_str!(
+            "../../../migrations/20261023130000_users_country_iso3166_alpha2.down.sql"
+        );
+        let drop_check = down[down.find("ALTER TABLE").expect("down drops the CHECK")..].trim();
+        let alter_at = up.find("ALTER TABLE").expect("up adds the CHECK");
+        let normalize = up[up.find("WITH norm").expect("up has the norm CTE")..alter_at].trim();
+        let add_check = up[alter_at..].trim();
+
+        // The test DB is fully migrated, so the CHECK is live and blocks
+        // seeding free-text values. Drop it exactly as the down migration
+        // does, seed the pre-migration shapes, then replay the up
+        // migration's normalization UPDATE.
+        sqlx::raw_sql(drop_check).execute(&pool).await?;
+
+        // (seeded free text, expected post-normalization value)
+        let cases: &[(&str, &str)] = &[
+            ("ca", "CA"),
+            (" ca ", "CA"),
+            ("Canada", "CA"),
+            ("United Kingdom", "GB"),
+            ("England", "GB"),
+            ("Narnia", ""),
+            ("", ""),
+        ];
+        let mut seeded: Vec<(Uuid, &str, &str)> = Vec::new();
+        for (i, (raw, expected)) in cases.iter().enumerate() {
+            let user_id = create_user(&pool, 9100 + i as i64).await?;
+            sqlx::query!(
+                "UPDATE users SET country = $2 WHERE user_id = $1",
+                user_id,
+                raw,
+            )
+            .execute(&pool)
+            .await?;
+            seeded.push((user_id, raw, expected));
+        }
+
+        sqlx::raw_sql(normalize).execute(&pool).await?;
+
+        for (user_id, raw, expected) in &seeded {
+            let user = get_user_by_id(&pool, *user_id).await?.unwrap();
+            assert_eq!(user.country, *expected, "normalization of {raw:?}");
+        }
+
+        // Re-adding the CHECK succeeds only if the UPDATE left every row
+        // '' or a two-letter uppercase code — residual junk fails here.
+        sqlx::raw_sql(add_check).execute(&pool).await?;
+
+        Ok(())
+    }
+
     #[test]
     fn validation_rejects_over_limit() {
         assert!(validate_profile_fields("ok", "ok", "", "ok").is_ok());
