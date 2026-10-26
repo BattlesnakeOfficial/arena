@@ -514,6 +514,26 @@ async fn control_headers_not_forwarded_and_host_is_target() {
 }
 
 #[tokio::test]
+async fn every_connection_header_value_strips_its_named_header() {
+    let proxy = ProxyUnderTest::start().await;
+    let snake = RecordingSnake::start(reqwest::StatusCode::OK, "{}").await;
+    let response = proxied_request(&proxy, &format!("http://{}/move", snake.addr), "1000")
+        .header("Connection", "keep-alive")
+        .header("Connection", "X-Private-Hop")
+        .header("X-Private-Hop", "must-not-reach-snake")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+    let headers = snake.last_headers();
+    assert!(
+        !headers.contains_key("x-private-hop"),
+        "a header named by the second Connection value reached the snake: {headers:?}"
+    );
+}
+
+#[tokio::test]
 async fn request_uri_path_and_query_are_preserved() {
     let proxy = ProxyUnderTest::start().await;
     let snake =

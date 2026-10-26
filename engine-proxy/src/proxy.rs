@@ -876,6 +876,55 @@ impl http_body::Body for DeadlineBody {
 mod tests {
     use super::*;
 
+    /// The response-body budget is absolute: a buffered frame must not be
+    /// forwarded when the consumer first polls it after the deadline.
+    #[tokio::test]
+    async fn buffered_response_frame_after_deadline_is_rejected() {
+        use http_body_util::BodyExt as _;
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 1024];
+            stream.read(&mut request).await.unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\nx")
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        });
+
+        let stream = tokio::net::TcpStream::connect(address).await.unwrap();
+        let (mut sender, connection) =
+            hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(stream))
+                .await
+                .unwrap();
+        let driver = tokio::spawn(connection);
+        let request = hyper::Request::builder()
+            .uri("/")
+            .body(http_body_util::Empty::<Bytes>::new())
+            .unwrap();
+        let response = sender.send_request(request).await.unwrap();
+        let now = Instant::now();
+        let guard = RequestLogGuard::new(&Method::GET, now, now, CancellationToken::new());
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(10);
+        let mut body =
+            DeadlineBody::new(response.into_body(), deadline, 1024, guard, StatusCode::OK);
+        // The server has already sent its byte. Let both the byte and the
+        // deadline become ready before the first downstream body poll.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let frame = body.frame().await.expect("buffered response frame");
+        assert!(
+            frame.is_err(),
+            "body frame was forwarded after the hard deadline"
+        );
+
+        server.abort();
+        driver.abort();
+    }
+
     #[test]
     fn snake_error_display_matches_go() {
         assert_eq!(
