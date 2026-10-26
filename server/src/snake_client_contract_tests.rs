@@ -738,6 +738,11 @@ async fn user_agent_forwarded_verbatim() {
 
 /// Case 16a (arena-visible leg): a declared oversized body maps to 502+5: ->
 /// SnakeTransportFailure -> timed_out (fallback), not a truncated 200.
+///
+/// Deliberate diff vs Go (recorded in docs/engine-proxy.md): Go has no
+/// Content-Length pre-check, so it streams the body until the reader gives
+/// up — arena sees a truncated 200 -> parse failure -> errored fallback.
+/// Against the Go target that outcome is asserted as-is.
 #[tokio::test]
 async fn oversized_response_body_declared_502() {
     let snake = MockServer::start().await;
@@ -757,6 +762,18 @@ async fn oversized_response_body_declared_502() {
     };
     let endpoint = endpoint_for(snake.uri());
     let result = move_via_proxy(&clients, &endpoint, Duration::from_millis(2000), None).await;
+    let go = matches!(proxy().await, ProxyUnderTest::Docker { .. });
+    if go {
+        assert!(
+            !result.timed_out,
+            "Go streams the declared body; truncated 200 is not a timeout: {result:?}"
+        );
+        assert!(
+            result.errored,
+            "truncated body is a parse failure: {result:?}"
+        );
+        return;
+    }
     assert!(
         result.timed_out,
         "502+5: is a transport failure: {result:?}"
