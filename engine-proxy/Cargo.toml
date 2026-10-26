@@ -1,0 +1,51 @@
+[package]
+name = "engine-proxy"
+version = "0.1.0"
+edition = "2024"
+description = "Battlesnake regional engine proxy (DEV-1943): the Rust replacement for the Go proxy_server"
+
+# The binary is named `engine` with a `proxy_server` subcommand so the
+# infrastructure bootstrap line `docker run ... --entrypoint engine <image>
+# proxy_server` runs this image unchanged.
+[[bin]]
+name = "engine"
+path = "src/main.rs"
+
+[lib]
+name = "engine_proxy"
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+# default-features = false: cja's defaults only gate the jobs/cron modules,
+# which need Postgres. The server module (run_server_until/serve_until) has
+# no DB requirement.
+cja = { version = "0.0.0", git = "https://github.com/coreyja/cja", branch = "main", default-features = false }
+hyper = { version = "1", features = ["client", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "http2", "tokio", "server", "service"] }
+http-body-util = "0.1"
+http = "1"
+bytes = "1"
+futures = "0.3"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pki-types = "1"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+webpki-roots = "1"
+tower-service = "0.3"
+tokio-util = { version = "0.7", features = ["rt"] }
+http-body = "1"
+tower-http = { version = "0.6", features = ["catch-panic"] }
+# default-features = false: text encoder only; the default features pull
+# protobuf (0.13.x pulls the RUSTSEC-2024-0437 protobuf 2.x line).
+prometheus = { version = "0.14", default-features = false }
+subtle = "2"
+clap = { version = "4", features = ["derive"] }
+url = "2"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+color-eyre = "0.6"
+thiserror = "2"
+
+[dev-dependencies]
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+tokio = { version = "1", features = ["full", "test-util"] }
