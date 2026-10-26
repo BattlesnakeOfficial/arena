@@ -1217,3 +1217,52 @@ impl StallSnake {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// PR review round 1 pin: logged targets must be host[:port] only — userinfo
+// credentials in a snake URL (`http://user:pass@host/`) must never reach a
+// log line, same as `?token=` query secrets.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn userinfo_credentials_in_snake_url_are_never_logged() {
+    let proxy = ProxyUnderTest::start().await;
+    let snake = RecordingSnake::start(reqwest::StatusCode::OK, "{}").await;
+    let secret = "pinUserinfoSecret7731";
+    let target = format!("http://snakeuser:{secret}@{}/move", snake.addr);
+    let res = proxied_request(&proxy, &target, "1000")
+        .send()
+        .await
+        .unwrap();
+    let _ = res.bytes().await;
+
+    // Propagation window: wait for this request's line (keyed by the unique
+    // mock port), then assert no captured line carries the secret.
+    let port = snake.addr.port().to_string();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let lines: Vec<String> = CAPTURE
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|l| l.contains(&format!(":{port}")) && l.contains("outcome="))
+            .cloned()
+            .collect();
+        if !lines.is_empty() {
+            for line in &lines {
+                assert!(
+                    !line.contains(secret),
+                    "userinfo password leaked into the request log line: {line}"
+                );
+            }
+            break;
+        }
+        assert!(Instant::now() < deadline, "no request line observed");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let all = CAPTURE.lock().unwrap().clone();
+    assert!(
+        all.iter().all(|l| !l.contains(secret)),
+        "userinfo password leaked into an engine_proxy log line"
+    );
+}
