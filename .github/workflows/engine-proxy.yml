@@ -1,0 +1,164 @@
+name: Engine Proxy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    paths:
+      - "engine-proxy/**"
+      - "server/src/snake_client_contract_tests.rs"
+      - "server/Cargo.toml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "Dockerfile"
+      - ".github/workflows/engine-proxy.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  image:
+    name: Image build + bootstrap smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -f engine-proxy/Dockerfile -t engine-proxy:${{ github.sha }} .
+
+      - name: Record image size
+        run: docker images engine-proxy:${{ github.sha }}
+
+      # The literal infrastructure#51 bootstrap invocation (minus the env
+      # file), on the default log driver: --entrypoint engine <image>
+      # proxy_server, PORT + BATTLESNAKE_PROXY_AUTH_TOKEN from env,
+      # --network host.
+      - name: Smoke run (default log driver)
+        run: |
+          set -euo pipefail
+          PORT=18080
+          TOKEN=smoke-token
+          docker run -d --name ep-smoke --network host \
+            -e PORT=$PORT -e BATTLESNAKE_PROXY_AUTH_TOKEN=$TOKEN \
+            --entrypoint engine engine-proxy:${{ github.sha }} proxy_server
+
+          # healthy within 30s
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:$PORT/healthz/alive >/dev/null 2>&1; then break; fi
+            sleep 0.5
+          done
+          curl -fsS http://127.0.0.1:$PORT/healthz/alive | grep -qx alive
+
+          # non-root user
+          user=$(docker inspect -f '{{.Config.User}}' ep-smoke)
+          echo "container user: $user"
+          [ -n "$user" ] && [ "$user" != "root" ]
+
+          # probes: one 407 (no auth), one 502 (valid auth, refused port)
+          FREED=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
+          curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:$PORT/ \
+            -H "X-Request-URI: http://127.0.0.1:$FREED/move" \
+            -H "X-Battlesnake-Timeout-Ms: 500" | grep -qx 407
+          curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:$PORT/ \
+            -H "X-Request-URI: http://127.0.0.1:$FREED/move" \
+            -H "X-Battlesnake-Timeout-Ms: 500" \
+            -H "X-Proxy-Authorization: token $TOKEN" | grep -qx 502
+
+          # Log-shape guarantee (DD 16): exactly one engine_proxy request
+          # line per probe, and zero TraceLayer/tower_http noise.
+          sleep 1
+          LOGS=$(docker logs ep-smoke 2>&1 || true)
+          echo "$LOGS" | grep -c 'outcome=' | grep -qx 2
+          if echo "$LOGS" | grep -qE 'tower_http|cja::server::trace'; then
+            echo "::error::log noise leaked through the baked RUST_LOG filter"
+            echo "$LOGS" | grep -E 'tower_http|cja::server::trace' | head -5
+            exit 1
+          fi
+          echo "log shape OK:"
+          echo "$LOGS" | grep 'outcome='
+
+      # Mutation: with a default RUST_LOG override, the shape check above
+      # MUST fail — proving the assertion discriminates.
+      - name: Mutation run (RUST_LOG=info must fail the shape check)
+        run: |
+          set -euo pipefail
+          PORT=18081
+          TOKEN=smoke-token
+          docker run -d --name ep-mutation --network host \
+            -e PORT=$PORT -e BATTLESNAKE_PROXY_AUTH_TOKEN=$TOKEN -e RUST_LOG=info \
+            --entrypoint engine engine-proxy:${{ github.sha }} proxy_server
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:$PORT/healthz/alive >/dev/null 2>&1; then break; fi
+            sleep 0.5
+          done
+          curl -s -o /dev/null -X POST http://127.0.0.1:$PORT/ \
+            -H "X-Request-URI: http://127.0.0.1:1/move" \
+            -H "X-Battlesnake-Timeout-Ms: 500" \
+            -H "X-Proxy-Authorization: token $TOKEN"
+          sleep 1
+          LOGS=$(docker logs ep-mutation 2>&1 || true)
+          if echo "$LOGS" | grep -q 'cja::server::trace'; then
+            echo "mutation confirmed: default RUST_LOG leaks cja::server::trace lines (the smoke check would fail)"
+          else
+            echo "::error::mutation did NOT reproduce — the log-shape check may be vacuous"
+            echo "$LOGS" | head -20
+            exit 1
+          fi
+
+      # The infra module logs to journald; GH runners vary in journald
+      # availability, so this is best-effort only.
+      - name: Journald smoke (best effort)
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          PORT=18082
+          docker run -d --name ep-journald --network host --log-driver journald \
+            -e PORT=$PORT -e BATTLESNAKE_PROXY_AUTH_TOKEN=smoke-token \
+            --entrypoint engine engine-proxy:${{ github.sha }} proxy_server
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:$PORT/healthz/alive >/dev/null 2>&1; then break; fi
+            sleep 0.5
+          done
+          curl -fsS http://127.0.0.1:$PORT/healthz/ready | grep -qx ready
+
+  go-contract:
+    name: Go contract differential
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cja frontend tools
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/cja
+          key: cja-tools-${{ runner.os }}-tsc-7.0.2
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-engine-proxy-contract-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-engine-proxy-contract-
+            ${{ runner.os }}-cargo-
+
+      - name: Clone and build the Go engine image
+        run: |
+          rm -rf /tmp/engine-go
+          git clone https://github.com/BattlesnakeOfficial/engine /tmp/engine-go
+          git -C /tmp/engine-go checkout 808c248
+          docker build -t battlesnake-engine-go /tmp/engine-go
+
+      - name: Run the contract suite against the Go image
+        run: |
+          SQLX_OFFLINE=true \
+          ENGINE_PROXY_GO_TARGET=docker://battlesnake-engine-go \
+          cargo test -p arena --bin arena snake_client_contract_tests -- --nocapture

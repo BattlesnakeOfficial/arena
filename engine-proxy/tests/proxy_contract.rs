@@ -142,7 +142,12 @@ impl ProxyUnderTest {
 }
 
 fn client() -> reqwest::Client {
-    reqwest::Client::builder().no_proxy().build().unwrap()
+    // Hard 10s bound: a regression must fail, not hang the test binary.
+    reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap()
 }
 
 fn proxied_request(
@@ -729,11 +734,11 @@ async fn snake_timeout_before_headers_returns_504_with_error_header() {
         .send()
         .await
         .unwrap();
-    // Prove the trigger: the mock really accepted the connection.
-    stall
-        .accepted
-        .recv()
+    // Prove the trigger: the mock really accepted the connection. Bounded so
+    // a regression fails instead of hanging.
+    tokio::time::timeout(Duration::from_secs(10), stall.accepted.recv())
         .await
+        .expect("accept signal within 10s")
         .expect("mock snake observed the TCP accept");
     assert_eq!(res.status(), reqwest::StatusCode::GATEWAY_TIMEOUT);
     assert_eq!(
@@ -765,11 +770,13 @@ async fn stalled_body_times_out_in_body_phase() {
         .send()
         .await
         .unwrap();
-    // Prove the trigger: the snake sent headers before stalling.
-    assert!(
-        stall.headers_sent.recv().await.unwrap_or(false),
-        "mock snake wrote its response headers"
-    );
+    // Prove the trigger: the snake sent headers before stalling. Bounded so a
+    // regression fails instead of hanging.
+    let headers_sent = tokio::time::timeout(Duration::from_secs(10), stall.headers_sent.recv())
+        .await
+        .expect("headers-sent signal within 10s")
+        .unwrap_or(false);
+    assert!(headers_sent, "mock snake wrote its response headers");
     assert_eq!(res.status(), 200);
     assert!(res.headers().contains_key("x-battlesnake-latency-ms"));
     // The body read must fail: the proxy aborted the connection.
@@ -962,11 +969,11 @@ async fn client_cancel_mid_stall_logs_exactly_one_line() {
             .send()
             .await
     });
-    // Prove the trigger: the mock accepted the connection.
-    stall
-        .accepted
-        .recv()
+    // Prove the trigger: the mock accepted the connection. Bounded so a
+    // regression fails instead of hanging.
+    tokio::time::timeout(Duration::from_secs(10), stall.accepted.recv())
         .await
+        .expect("accept signal within 10s")
         .expect("mock observed the accept");
     handle.abort();
 

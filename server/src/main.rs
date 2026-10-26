@@ -41,6 +41,8 @@ mod play_import;
 mod routes;
 mod scoring;
 mod snake_client;
+#[cfg(test)]
+mod snake_client_contract_tests;
 mod snake_health;
 mod snake_health_sweeper;
 mod state;
