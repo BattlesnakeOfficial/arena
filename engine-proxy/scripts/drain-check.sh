@@ -52,9 +52,33 @@ if [ ! -x "$BIN" ]; then
     -name 'engine-*' ! -name '*.d' ! -name '*.so' | sort | tail -1)
 fi
 [ -x "$BIN" ] || { echo "engine binary not found under $BUILD_DIR/release" >&2; exit 1; }
+
+# Mutation-mode backup handling: the backup lives at a mktemp path (never a
+# fixed one another run could clobber), and the restore runs from a trap on
+# EXIT — and on INT/TERM via `exit`, which re-enters the EXIT trap — so an
+# interrupted run can never leave the mutated main.rs in the tree.
+MUTATION_BACKUP=""
+do_restore_main_rs() {
+  if [ -n "$MUTATION_BACKUP" ] && [ -f "$MUTATION_BACKUP" ]; then
+    cp "$MUTATION_BACKUP" engine-proxy/src/main.rs
+    rm -f "$MUTATION_BACKUP"
+    MUTATION_BACKUP=""
+  fi
+}
+restore_main_rs_on_exit() {
+  local status=$?
+  do_restore_main_rs
+  exit "$status"
+}
+trap restore_main_rs_on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 if [ "${DRAIN_MUTATION:-0}" = 1 ]; then
   echo "== mutation: building WITHOUT the server spawn"
-  cp engine-proxy/src/main.rs /tmp/main.rs.bak
+  _backup=$(mktemp /tmp/engine-proxy-main.XXXXXX)
+  cp engine-proxy/src/main.rs "$_backup"
+  MUTATION_BACKUP="$_backup" # armed only once the backup copy is complete
   sed -i 's/^    supervisor.spawn($/    let _ignore_supervisor = \&mut supervisor; if false { supervisor.spawn(/;' engine-proxy/src/main.rs
   # close the extra brace on the spawn call
   python3 - <<'PYEOF'
@@ -65,8 +89,9 @@ s = s.replace('''        cja::server::run_server_until(router, shutdown.cancelle
     ); }''')
 open(p, 'w').write(s)
 PYEOF
-  cargo build --release -p engine-proxy >"$OUT/mutation-build.log" 2>&1 || { cp /tmp/main.rs.bak engine-proxy/src/main.rs; echo "mutation build failed" >&2; exit 1; }
-  cp /tmp/main.rs.bak engine-proxy/src/main.rs
+  # on failure the EXIT trap restores main.rs
+  cargo build --release -p engine-proxy >"$OUT/mutation-build.log" 2>&1 || { echo "mutation build failed" >&2; exit 1; }
+  do_restore_main_rs # eager restore too: the mutated tree lives for seconds, not minutes
 else
   cargo build --release -p engine-proxy >"$OUT/build.log" 2>&1
 fi

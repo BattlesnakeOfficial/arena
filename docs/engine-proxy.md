@@ -76,9 +76,17 @@ Phase-split consequences (arena-visible):
   move, `timed_out: true`.
 - **After a 200 status line has been forwarded, no 504 can follow** — the
   body-phase abort kills the connection; arena's `read_body_capped` fails
-  inside `execute_proxy` ⇒ `ProxyCall::Fault { kind: "transport" }` →
-  fallback move with `timed_out: false`, `latency_ms: None`. Both outcomes
-  complete before arena's local guard (`timeout + 300ms` transit margin).
+  inside `execute_proxy` ⇒ `ProxyCall::Fault { kind: "transport" }`. Since
+  DEV-1946 (#276) arena treats that as a proxy fault and retries the move
+  **directly** with the snake's full fresh timeout — the turn carries the
+  direct call's real result (its move, latency, and status), never the
+  fallback. Pre-DEV-1946 the same abort produced a fallback move with
+  `timed_out: false`, `latency_ms: None`; the proxy's behavior is unchanged,
+  only arena's recovery differs. Both legs (the abort and the 504 above)
+  complete before arena's local guard (`timeout + 300ms` transit margin), so
+  the retry still gets a full budget. Contract case 17b pins this end to
+  end: the stall snake accepts exactly two connections (proxied, aborted;
+  then the direct retry) and the turn ends with the direct move.
 
 ### Response (proxy → arena)
 
@@ -257,10 +265,10 @@ deadline-aborted (and logged), not just that the process exits.
 | `client_headers`/`client_body` | body-wrapper approximation of httptrace | httptrace callbacks | accepted (near-zero for buffered JSON) |
 | metrics series | prometheus text at `/metrics` | none | ours |
 | `HEALTH_CHECK_URLS` | env | `--test-server` flag | identical runtime behavior (bootstrap passes none) |
-| panic in handler | 500 + `0:` (CatchPanicLayer), panic logged at `tower_http::catch_panic`; **no latency header** — the hook has no request context | connection closed | accepted (better signal; arena classifies both as a proxy fault → fallback) |
+| panic in handler | 500 + `0:` (CatchPanicLayer), panic logged at `tower_http::catch_panic`; **no latency header** — the hook has no request context | connection closed | accepted (better signal; arena classifies both as a proxy fault → direct retry, DEV-1946) |
 | per-request INFO line | yes (this doc) | errors only | ours — the point of the rewrite |
 | connect strategy | staggered race, no per-attempt cap, 250ms stagger | DualStack race, 300ms fallback, 30s dialer | same spirit, different mechanics |
-| body-phase deadline abort | connection killed; arena sees transport fault | same (ctx deadline) | match, not a diff |
+| body-phase deadline abort | connection killed; arena sees a proxy transport fault and (DEV-1946) retries `/move` directly | same (ctx deadline) | match, not a diff |
 | self-signed CA leaf cert | rejected (`CaUsedAsEndEntity` — webpki refuses CA certs as end entities) | accepted (Go's x509 tolerates it) | accepted — snakes needing `ENGINE_PROXY_EXTRA_CA` must present a proper CA+leaf chain, verified in the load check |
 | empty-body success labeling | `outcome=success` via eager finish (hyper never polls a CL:0 body) | n/a | fixed during the load check (was mislabeled `client_cancelled`) |
 | `getAlive` failing probes | answers as soon as every check has failed (does not wait out the 3s window) | no-op `break` in select loop | don't copy Go's bug |

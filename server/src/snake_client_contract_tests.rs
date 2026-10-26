@@ -18,6 +18,8 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use engine_proxy::config::ProxyConfig;
@@ -441,6 +443,11 @@ async fn timeout_header_parsed_and_defaulted() {
     assert!(!result.errored);
     assert_eq!(result.latency_ms, None);
     assert_eq!(result.status_code, None);
+    // DEV-1946 hardening: a proxy 504 carries X-Battlesnake-Server-Error, so
+    // arena classifies it as a *snake-side* timeout — exactly one hit on the
+    // snake, no direct retry (a retry would double the hits and burn the
+    // snake's budget a second time).
+    snake.verify().await;
 }
 
 /// Case 3/4: bad auth -> 407 without the latency header -> arena retries
@@ -634,6 +641,10 @@ async fn snake_stalls_before_headers_times_out() {
         "completes before arena's local guard: {:?}",
         started.elapsed()
     );
+    // DEV-1946 hardening: the 504 + error header is snake-side, so arena
+    // makes NO direct retry — exactly one connection to the snake.
+    let accepts = stall.accepted_count.load(Ordering::SeqCst);
+    assert_eq!(accepts, 1, "no direct retry after a snake-side 504");
 }
 
 /// Case 10: DNS failure and connect-refused both map to 502 + the matching
@@ -686,6 +697,70 @@ async fn refused_port_returns_502_connect() {
     assert_eq!(
         res.headers().get("x-battlesnake-server-error").unwrap(),
         "3:Failed to connect to Battlesnake host"
+    );
+}
+
+/// Case 10, TLS leg: an `https://` target that speaks plain HTTP fails the
+/// handshake ⇒ 502 + `4:Failed to set up a TLS connection`. This leg is also
+/// where the DEV-1946 no-retry pin for 502 + X-Battlesnake-Server-Error
+/// lives: the DNS/refused legs have no snake to count hits on, but a
+/// counting listener here observes exactly one proxied connection and zero
+/// direct retries (a retry would show up as a second accept).
+#[tokio::test]
+async fn tls_handshake_fail_returns_502_tls() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let accepted_count = Arc::new(AtomicU64::new(0));
+    let count = Arc::clone(&accepted_count);
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            count.fetch_add(1, Ordering::SeqCst);
+            let mut buf = [0u8; 4096];
+            // Read the TLS ClientHello, then answer plain HTTP — guaranteed
+            // garbage from rustls's point of view, so the handshake fails.
+            let _ = stream.read(&mut buf).await;
+            let _ = stream
+                .write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
+                .await;
+            loop {
+                match stream.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+        }
+    });
+
+    let (client, config) = arena_clients(None).await;
+    let clients = ProxyClients {
+        direct: &client,
+        east: &client,
+        europe: &client,
+        config: &config,
+    };
+    let endpoint = endpoint_for(format!("https://{addr}"));
+    let result = move_via_proxy(&clients, &endpoint, Duration::from_millis(1000), None).await;
+    assert!(result.timed_out, "transport failure: {result:?}");
+    assert!(!result.errored);
+    assert_eq!(result.latency_ms, None);
+
+    // DEV-1946 hardening: the 502 + error header is snake-side, so arena
+    // makes NO direct retry — exactly one connection, the proxied one.
+    let accepts = accepted_count.load(Ordering::SeqCst);
+    assert_eq!(accepts, 1, "no direct retry after a snake-side 502");
+
+    // raw probe asserts the header itself
+    let res = raw_proxy_request(&format!("https://{addr}/move"), "1000", true)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(
+        res.headers().get("x-battlesnake-server-error").unwrap(),
+        "4:Failed to set up a TLS connection"
     );
 }
 
@@ -949,12 +1024,19 @@ async fn oversized_response_body_falls_back() {
     assert!(result.latency_ms.is_some());
 }
 
-/// Case 17b: headers arrive, the body stalls — the proxy aborts the
-/// connection inside its budget, arena sees a *transport fault* (fallback,
-/// `timed_out: false`, no latency), completing before the local guard.
+/// Case 17b (post-DEV-1946 semantics): headers arrive, the body stalls —
+/// the proxy aborts the connection inside its budget, arena classifies the
+/// abort as a proxy *transport fault* and (DEV-1946, #276) retries the move
+/// directly with the snake's full timeout. The stall snake stalls only its
+/// FIRST connection and answers later ones, so the retry lands on a working
+/// snake: the turn must end with the snake's real direct move — never the
+/// fallback, never `timed_out`, never `errored` (a proxy fault is never the
+/// snake's error).
 #[tokio::test]
 async fn stalled_body_aborts_as_transport_fault() {
-    let mut stall = StallSnake::headers_then_partial_body_then_stall().await;
+    let proxy_budget_ms = 300u64;
+    let direct_timeout_ms = 300u64; // DEV-1946 retry uses the same fresh timeout
+    let mut stall = StallSnake::stall_first_then_answer_left().await;
     let (client, config) = arena_clients(None).await;
     let clients = ProxyClients {
         direct: &client,
@@ -967,29 +1049,85 @@ async fn stalled_body_aborts_as_transport_fault() {
     let result = move_via_proxy(
         &clients,
         &endpoint,
-        Duration::from_millis(300),
+        Duration::from_millis(proxy_budget_ms),
         Some(Direction::Up),
     )
     .await;
-    // Prove the trigger: headers were sent before the stall. Bounded so a
-    // regression fails instead of hanging (attempt 1 lost 40m to hangs).
+    // Prove the trigger: headers were sent on the stalled connection before
+    // the stall. Bounded so a regression fails instead of hanging.
     let headers_sent = tokio::time::timeout(Duration::from_secs(10), stall.headers_sent.recv())
         .await
         .expect("headers-sent signal within 10s")
         .unwrap_or(false);
     assert!(headers_sent, "stall snake wrote its response headers");
 
-    assert_eq!(result.direction, Direction::Up, "fallback move");
+    // Exactly two connections: the proxied call (stalled, aborted by the
+    // proxy inside its budget) and DEV-1946's one direct retry. A third
+    // would mean an extra retry; a single one would mean the proxy never
+    // aborted the body (or the fault was misclassified as snake-side).
+    let accepts = stall.accepted_count.load(Ordering::SeqCst);
+    assert_eq!(
+        accepts, 2,
+        "proxied call + one direct retry, no more ({accepts} accepts)"
+    );
+
+    assert_eq!(
+        result.direction,
+        Direction::Left,
+        "the direct retry's real move is used, not the fallback: {result:?}"
+    );
     assert!(
         !result.timed_out,
         "no 504 can follow forwarded headers: {result:?}"
     );
     assert!(!result.errored, "a proxy fault is never the snake's error");
-    assert_eq!(result.latency_ms, None);
     assert!(
-        started.elapsed() < Duration::from_millis(300 + 300),
-        "fault arrives before arena's local guard: {:?}",
+        result.latency_ms.is_some(),
+        "the direct retry's move is measured: {result:?}"
+    );
+    assert_eq!(result.status_code, Some(200), "the direct answer's status");
+    assert!(
+        started.elapsed() < Duration::from_millis(proxy_budget_ms + direct_timeout_ms + 400),
+        "proxy abort + direct retry fit inside both budgets + slack: {:?}",
         started.elapsed()
+    );
+
+    // Raw leg (proxy contract itself): against a snake that stalls the body
+    // on EVERY connection, the proxy must abort inside the budget — the raw
+    // client sees the 200 headers, then an error mid-body (the connection
+    // killed), never a 200 body that completes late.
+    let mut raw_stall = StallSnake::headers_then_partial_body_then_stall().await;
+    let res = tokio::time::timeout(
+        Duration::from_secs(15),
+        raw_proxy_request(
+            &format!("http://{}/move", raw_stall.addr),
+            &proxy_budget_ms.to_string(),
+            true,
+        )
+        .send(),
+    )
+    .await
+    .expect("raw request resolves within 15s")
+    .expect("raw request sends");
+    assert_eq!(
+        res.status(),
+        200,
+        "the stalled snake's headers pass through"
+    );
+    let body = tokio::time::timeout(Duration::from_secs(15), res.text()).await;
+    let body = body.expect("body read resolves within 15s (bounded)");
+    assert!(
+        body.is_err(),
+        "the proxy must abort the stalled body inside the budget, not complete it"
+    );
+    let raw_headers_sent =
+        tokio::time::timeout(Duration::from_secs(10), raw_stall.headers_sent.recv())
+            .await
+            .expect("raw-stall headers-sent signal within 10s")
+            .unwrap_or(false);
+    assert!(
+        raw_headers_sent,
+        "raw-stall snake wrote its response headers"
     );
 }
 
@@ -1147,6 +1285,10 @@ async fn contract_diff_table() {
 struct StallSnake {
     addr: SocketAddr,
     accepted: tokio::sync::mpsc::Receiver<()>,
+    /// Every TCP connection this snake ever accepted (DEV-1946 hardening:
+    /// pins that arena makes no direct retry when the failure is the
+    /// snake's own — a retry would show up as a second accept).
+    accepted_count: Arc<AtomicU64>,
     headers_sent: tokio::sync::mpsc::Receiver<bool>,
 }
 
@@ -1156,11 +1298,14 @@ impl StallSnake {
         let addr = listener.local_addr().unwrap();
         let (accepted_tx, accepted) = tokio::sync::mpsc::channel(1);
         let (_, headers_sent) = tokio::sync::mpsc::channel(1);
+        let accepted_count = Arc::new(AtomicU64::new(0));
+        let count = Arc::clone(&accepted_count);
         tokio::spawn(async move {
             loop {
                 let Ok((mut stream, _)) = listener.accept().await else {
                     return;
                 };
+                count.fetch_add(1, Ordering::SeqCst);
                 accepted_tx.send(()).await.unwrap_or(());
                 let mut buf = [0u8; 2048];
                 loop {
@@ -1174,6 +1319,78 @@ impl StallSnake {
         Self {
             addr,
             accepted,
+            accepted_count,
+            headers_sent,
+        }
+    }
+
+    /// Stalls only the FIRST connection (200 headers, partial body, then
+    /// silence — the case-17b stall) and answers 200 `{"move":"left"}` on
+    /// every later connection, so a DEV-1946 direct retry after the proxy's
+    /// body abort lands on a working snake.
+    async fn stall_first_then_answer_left() -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (_, accepted) = tokio::sync::mpsc::channel(1);
+        let (sent_tx, headers_sent) = tokio::sync::mpsc::channel(1);
+        let accepted_count = Arc::new(AtomicU64::new(0));
+        let count = Arc::clone(&accepted_count);
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let idx = count.fetch_add(1, Ordering::SeqCst);
+                let mut buf = [0u8; 4096];
+                if idx == 0 {
+                    // connection 1: the stall (headers + partial body, then
+                    // hold the connection open until the proxy aborts it)
+                    let _ = stream.read(&mut buf).await;
+                    let wrote = stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nX-Game: stall\r\n\r\n{\"move\":\"",
+                        )
+                        .await
+                        .is_ok();
+                    sent_tx.send(wrote).await.unwrap_or(());
+                    loop {
+                        match stream.read(&mut buf).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(_) => {}
+                        }
+                    }
+                } else {
+                    // later connections: a working snake. Read the request,
+                    // answer a complete move, then drain so the close is a
+                    // clean FIN (dropping with unread request bytes sends a
+                    // RST that can fail the client's response read).
+                    let _ = stream.read(&mut buf).await;
+                    let body = b"{\"move\":\"left\"}";
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    if stream.write_all(resp.as_bytes()).await.is_ok()
+                        && stream.write_all(body).await.is_ok()
+                    {
+                        let _ = stream.flush().await;
+                    }
+                    let _ = tokio::time::timeout(Duration::from_secs(2), async {
+                        loop {
+                            match stream.read(&mut buf).await {
+                                Ok(0) | Err(_) => break,
+                                Ok(_) => {}
+                            }
+                        }
+                    })
+                    .await;
+                }
+            }
+        });
+        Self {
+            addr,
+            accepted,
+            accepted_count,
             headers_sent,
         }
     }
@@ -1183,11 +1400,14 @@ impl StallSnake {
         let addr = listener.local_addr().unwrap();
         let (_, accepted) = tokio::sync::mpsc::channel(1);
         let (sent_tx, headers_sent) = tokio::sync::mpsc::channel(1);
+        let accepted_count = Arc::new(AtomicU64::new(0));
+        let count = Arc::clone(&accepted_count);
         tokio::spawn(async move {
             loop {
                 let Ok((mut stream, _)) = listener.accept().await else {
                     return;
                 };
+                count.fetch_add(1, Ordering::SeqCst);
                 let mut buf = [0u8; 4096];
                 let _ = stream.read(&mut buf).await;
                 let wrote = stream
@@ -1209,6 +1429,7 @@ impl StallSnake {
         Self {
             addr,
             accepted,
+            accepted_count,
             headers_sent,
         }
     }
