@@ -22,6 +22,9 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     /// Serve the battlesnake regional proxy server.
+    /// Named proxy_server (snake_case) to match the Go CLI's subcommand —
+    /// the infrastructure bootstrap line passes `proxy_server` verbatim.
+    #[command(name = "proxy_server")]
     ProxyServer,
 }
 

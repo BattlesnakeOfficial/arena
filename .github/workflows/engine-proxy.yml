@@ -67,17 +67,20 @@ jobs:
             -H "X-Proxy-Authorization: token $TOKEN" | grep -qx 502
 
           # Log-shape guarantee (DD 16): exactly one engine_proxy request
-          # line per probe, and zero TraceLayer/tower_http noise.
+          # line per probe, and zero TraceLayer/tower_http noise. The marker
+          # is the request line's message ("proxied request") — stable across
+          # both log formats (compact `outcome=...` and the image's baked
+          # JSON_LOGS=1 `"outcome":"..."`).
           sleep 1
           LOGS=$(docker logs ep-smoke 2>&1 || true)
-          echo "$LOGS" | grep -c 'outcome=' | grep -qx 2
+          echo "$LOGS" | grep -c 'proxied request' | grep -qx 2
           if echo "$LOGS" | grep -qE 'tower_http|cja::server::trace'; then
             echo "::error::log noise leaked through the baked RUST_LOG filter"
             echo "$LOGS" | grep -E 'tower_http|cja::server::trace' | head -5
             exit 1
           fi
           echo "log shape OK:"
-          echo "$LOGS" | grep 'outcome='
+          echo "$LOGS" | grep 'proxied request'
 
       # Mutation: with a default RUST_LOG override, the shape check above
       # MUST fail — proving the assertion discriminates.
