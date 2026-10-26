@@ -398,6 +398,39 @@ async fn snake_statuses_pass_through_with_latency_and_no_error_header() {
     }
 }
 
+/// An empty-body response (`Content-Length: 0`) must still log
+/// `outcome=success`: hyper never polls a known-empty body, so without the
+/// eager finish the drop guard's fallback mislabeled these
+/// `client_cancelled` (found live against a 405-with-empty-body target).
+#[tokio::test]
+async fn empty_body_response_logs_success() {
+    let proxy = ProxyUnderTest::start().await;
+    let snake = RecordingSnake::start(reqwest::StatusCode::OK, "").await;
+    let res = proxied_request(&proxy, &format!("http://{}/move", snake.addr), "1000")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+    assert_eq!(res.headers().get("content-length").unwrap(), "0");
+    assert_eq!(res.bytes().await.unwrap().len(), 0);
+
+    // Propagation window, then the request line must say success.
+    let port_key = snake.addr.port().to_string();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let lines = lines_for(&port_key);
+        if let Some(line) = lines.iter().find(|l| l.contains("outcome=")) {
+            assert!(line.contains("outcome=success"), "{line}");
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no request line observed: {lines:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 #[tokio::test]
 async fn user_agent_forwarded_verbatim_and_absent_means_omitted() {
     let proxy = ProxyUnderTest::start().await;

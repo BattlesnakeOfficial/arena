@@ -544,6 +544,17 @@ pub(crate) async fn proxy_handler(
     }
     parts.headers = out_headers;
 
+    // A body that is already complete (e.g. `Content-Length: 0`) is never
+    // polled by hyper, so `DeadlineBody` would never observe end-of-stream
+    // and the drop guard would mislabel the request `client_cancelled`.
+    // Finish the guard eagerly and return an empty body.
+    if <Incoming as http_body::Body>::is_end_stream(&body) {
+        guard.finish(Outcome::Success {
+            status: status.as_u16(),
+        });
+        parts.status = status;
+        return Response::from_parts(parts, Body::new(http_body_util::Empty::<Bytes>::new()));
+    }
     let deadline_body = DeadlineBody::new(body, deadline, state.cfg.body_cap_bytes, guard, status);
     parts.status = status;
     Response::from_parts(parts, Body::new(deadline_body))

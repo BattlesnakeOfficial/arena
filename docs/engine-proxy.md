@@ -249,6 +249,8 @@ deadline-aborted (and logged), not just that the process exits.
 | per-request INFO line | yes (this doc) | errors only | ours — the point of the rewrite |
 | connect strategy | staggered race, no per-attempt cap, 250ms stagger | DualStack race, 300ms fallback, 30s dialer | same spirit, different mechanics |
 | body-phase deadline abort | connection killed; arena sees transport fault | same (ctx deadline) | match, not a diff |
+| self-signed CA leaf cert | rejected (`CaUsedAsEndEntity` — webpki refuses CA certs as end entities) | accepted (Go's x509 tolerates it) | accepted — snakes needing `ENGINE_PROXY_EXTRA_CA` must present a proper CA+leaf chain, verified in the load check |
+| empty-body success labeling | `outcome=success` via eager finish (hyper never polls a CL:0 body) | n/a | fixed during the load check (was mislabeled `client_cancelled`) |
 | `getAlive` failing probes | waits the window before 503 | no-op `break` in select loop | don't copy Go's bug |
 
 The `go-contract` CI job re-runs the full contract suite against the Go image
@@ -288,10 +290,33 @@ and prints an observation table for any row that drifts.
 ## Local checks
 
 - `engine-proxy/scripts/load-check.sh` — symmetric Rust-vs-Go load check
-  (50 mock snakes, half TLS, 200 concurrency, 60s per phase): p50/p99 added
-  latency, mock-side accept counts (new-connection share), RSS.
+  (50 mock snakes, half TLS behind a generated mini-CA + leaf, 200
+  concurrency, 60s per phase): p50/p99 added latency, mock-side accept
+  counts (new-connection share), RSS.
 - `engine-proxy/scripts/drain-check.sh` — SIGTERM drain discrimination check.
 - Contract suite: `SQLX_OFFLINE=true cargo test -p arena --bin arena
   snake_client_contract_tests` (Rust in-process by default; Go with
   `ENGINE_PROXY_GO_TARGET=docker://<image>` — `--network host` is required so
   the container can reach the suite's loopback mock snakes).
+
+### Load-check results (local, 2026-10-26, Go 808c248 vs this PR)
+
+Added latency = request wall time minus the mock's own delay, 200 concurrency,
+60s per drive, run order Go → Rust → Rust-again. New-connection share is the
+mock-side TCP-accept delta over requests (authoritative for both proxies).
+
+| phase | proxy | p50 added | p99 added | new-conn share | RSS |
+|---|---|---|---|---|---|
+| http | Go | 1.6 ms | 3.8 ms | **34.5%** | 35.8 MiB |
+| http | Rust | 1.5 ms | 2.7 ms | 10.1% | 34.0 MiB |
+| http | Rust (warm) | 1.6 ms | 3.7 ms | 10.6% | — |
+| https | Go | 1.9 ms | 3.9 ms | **37.2%** | 37.6 MiB |
+| https | Rust | 1.6 ms | 3.3 ms | 11.4% | 34.7 MiB |
+| https | Rust (warm) | 1.6 ms | 6.1 ms | 11.1% | — |
+
+Zero failures across all six drives (~74k requests each). The Go column
+reproduces DEV-1499 item 2 locally — ~35% of steady-state requests land on a
+brand-new connection (`MaxIdleConnsPerHost: 2`), paying a full TCP+TLS
+handshake on the critical path in the https phase; Rust's 8-idle-per-host pool
+cuts that to ~11% (the residual is mock-side idle-timeout churn) with
+equal-or-better p50/p99 and ~3 MiB less RSS.

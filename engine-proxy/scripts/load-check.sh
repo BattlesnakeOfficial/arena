@@ -19,8 +19,17 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 OUT=./load-results
 BUILD_DIR="${CARGO_BUILD_BUILD_DIR:-target}"
-MOCK_SNAKE="$BUILD_DIR/release/examples/mock_snake"
-LOAD_CHECK="$BUILD_DIR/release/examples/load_check"
+# Example binaries can carry cargo's fingerprint suffix (mock_snake-<hash>)
+# in shared build dirs; resolve by prefix, skipping .d files.
+resolve_example() {
+  local f
+  f=$(find "$BUILD_DIR/release/examples" -maxdepth 1 -type f -perm -u+x \
+    -name "$1-*" ! -name '*.d' | sort | head -1)
+  [ -n "$f" ] || f="$BUILD_DIR/release/examples/$1"
+  echo "$f"
+}
+MOCK_SNAKE=$(resolve_example mock_snake)
+LOAD_CHECK=$(resolve_example load_check)
 DURATION="${DURATION:-60s}"
 CONCURRENCY="${CONCURRENCY:-200}"
 PORT_BASE=19100
@@ -65,6 +74,7 @@ rss() {
 }
 
 # ---------------------------------------------------------------------------
+mkdir -p "$OUT"
 echo "== building images"
 docker build -f engine-proxy/Dockerfile -t engine-proxy-load . >"$OUT/build-rust.log" 2>&1
 GO_REPO="$HOME/code/BattlesnakeOfficial/engine"
@@ -78,12 +88,21 @@ fi
   docker build -q -t battlesnake-engine-go . >"$OLDPWD/$OUT/build-go.log" 2>&1
 )
 
-echo "== TLS CA for the https phase"
-openssl req -x509 -newkey rsa:2048 -nodes -keyout "$OUT/key.pem" -out "$OUT/cert.pem" -days 2 \
-  -subj "/CN=mock-snake" -addext "subjectAltName=IP:127.0.0.1,DNS:localhost" 2>"$OUT/openssl.log"
+echo "== TLS material for the https phase: a mini CA + a server leaf"
+# A proper CA+leaf pair, NOT a self-signed server cert: openssl req -x509
+# marks its output CA:TRUE, and rustls/webpki refuses a CA cert presented
+# as the end entity (CaUsedAsEndEntity) — Go tolerates it, we must not rely
+# on that. The CA goes into the proxies' trust stores; the leaf serves TLS.
+openssl req -x509 -newkey rsa:2048 -nodes -keyout "$OUT/ca-key.pem" -out "$OUT/ca.pem" -days 2 \
+  -subj "/CN=mock-snake-ca" \
+  -addext "basicConstraints=critical,CA:TRUE" 2>"$OUT/openssl.log"
+openssl req -newkey rsa:2048 -nodes -keyout "$OUT/key.pem" -out "$OUT/csr.pem" -days 2 \
+  -subj "/CN=mock-snake" 2>>"$OUT/openssl.log"
+openssl x509 -req -in "$OUT/csr.pem" -CA "$OUT/ca.pem" -CAkey "$OUT/ca-key.pem" -CAcreateserial \
+  -out "$OUT/cert.pem" -days 2 \
+  -extfile <(printf 'subjectAltName=IP:127.0.0.1,DNS:localhost\nbasicConstraints=critical,CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n') 2>>"$OUT/openssl.log"
 
 echo "== starting $SNAKES mock snakes (0-24 http, 25-49 https)"
-mkdir -p "$OUT"
 for i in $(seq 0 $((SNAKES - 1))); do
   port=$((PORT_BASE + i))
   stats=$((STATS_BASE + i))
@@ -144,11 +163,11 @@ rss ep-load-rust | tee "$OUT/rust-http-rss.txt"
 drive "http://127.0.0.1:$RUST_PROXY_PORT" http rust2
 
 echo "== phase 2: https (TLS handshake scenario)"
-start_go -e SSL_CERT_FILE=/certs/cert.pem -v "$PWD/$OUT/cert.pem:/certs/cert.pem:ro"
+start_go -e SSL_CERT_FILE=/certs/ca.pem -v "$PWD/$OUT/ca.pem:/certs/ca.pem:ro"
 drive "http://127.0.0.1:$GO_PROXY_PORT" https go
 rss ep-load-go | tee "$OUT/go-https-rss.txt"
 
-start_rust -e ENGINE_PROXY_EXTRA_CA=/certs/cert.pem -v "$PWD/$OUT/cert.pem:/certs/cert.pem:ro"
+start_rust -e ENGINE_PROXY_EXTRA_CA=/certs/ca.pem -v "$PWD/$OUT/ca.pem:/certs/ca.pem:ro"
 drive "http://127.0.0.1:$RUST_PROXY_PORT" https rust
 rss ep-load-rust | tee "$OUT/rust-https-rss.txt"
 drive "http://127.0.0.1:$RUST_PROXY_PORT" https rust2
