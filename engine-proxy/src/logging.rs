@@ -7,7 +7,8 @@
 
 /// Reduce a snake URL (or bare `host[:port]`) to `scheme://host[:port]` /
 /// `host[:port]` — path, query and fragment are dropped so `?token=…` never
-/// survives.
+/// survives, and userinfo (`user:pass@`) is stripped so credentials never
+/// reach a log line (PR #277 round 1).
 pub fn redact_host_or_url(s: &str) -> String {
     if let Ok(u) = url::Url::parse(s)
         && let Some(host) = u.host_str().filter(|h| !h.is_empty())
@@ -17,26 +18,44 @@ pub fn redact_host_or_url(s: &str) -> String {
             None => format!("{}://{host}", u.scheme()),
         };
     }
-    // Not a parseable URL (or scheme-only garbage like `host:9?x`): treat as
-    // host[:port] and cut at the first byte that begins path/query/fragment
-    // material.
+    // Not a parseable URL with a host (a bare authority like
+    // `user:pass@host:port` parses as an opaque URL whose host is None, so
+    // it lands here): treat as host[:port], cut at the first byte that
+    // begins path/query/fragment material, then drop any userinfo up to the
+    // last `@` — the leftover must be safe on ANY input.
     let cut = s.find(['/', '?', '#']).unwrap_or(s.len());
-    s[..cut].to_string()
+    let authority = &s[..cut];
+    match authority.rfind('@') {
+        Some(at) => &authority[at + 1..],
+        None => authority,
+    }
+    .to_string()
 }
 
 /// Cut any URL-bearing token in an error string at its first `?` so query
-/// strings (which can carry `?token=`) are dropped. Non-URL tokens pass
-/// through untouched; whitespace structure is preserved (single spaces).
+/// strings (which can carry `?token=`) are dropped, and strip userinfo
+/// (`user:pass@`) from the authority. Non-URL tokens pass through
+/// untouched; whitespace structure is preserved (single spaces).
 pub fn redact_error_string(s: &str) -> String {
     if !s.contains("://") {
         return s.to_string();
     }
     s.split_whitespace()
-        .map(|tok| match tok.find("://").map(|i| &tok[i..]) {
-            Some(url_part) => match url_part.find('?') {
-                Some(q) => format!("{}{}", &tok[..tok.len() - url_part.len()], &url_part[..q]),
-                None => tok.to_string(),
-            },
+        .map(|tok| match tok.find("://") {
+            Some(i) => {
+                let (scheme, rest) = tok.split_at(i + 3);
+                // Authority runs to the first path/query byte; the remainder
+                // (path) is cut at its first `?`/`#` so query strings never
+                // survive.
+                let auth_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+                let (authority, path) = rest.split_at(auth_end);
+                let authority = match authority.rfind('@') {
+                    Some(at) => &authority[at + 1..],
+                    None => authority,
+                };
+                let path_cut = path.find(['?', '#']).unwrap_or(path.len());
+                format!("{scheme}{authority}{}", &path[..path_cut])
+            }
             None => tok.to_string(),
         })
         .collect::<Vec<_>>()
@@ -71,6 +90,24 @@ mod tests {
     }
 
     #[test]
+    fn redact_host_or_url_strips_userinfo() {
+        // A bare authority with userinfo parses as an opaque URL (host None),
+        // so the fallback path handles it — credentials must not survive.
+        assert_eq!(redact_host_or_url("user:SECRET@h.io:8080/x"), "h.io:8080");
+        assert_eq!(redact_host_or_url("user:SECRET@host:9?token=x"), "host:9");
+        assert_eq!(
+            redact_host_or_url("u:p@snake.example.com"),
+            "snake.example.com"
+        );
+        // Full URLs already go through `Url::host_str()`, which never carries
+        // userinfo — but assert it so the guarantee is pinned on both paths.
+        assert_eq!(
+            redact_host_or_url("https://user:SECRET@snake.io:9/move?token=z"),
+            "https://snake.io:9"
+        );
+    }
+
+    #[test]
     fn redact_host_or_url_ipv6() {
         assert_eq!(
             redact_host_or_url("http://[::1]:9000/move?token=z"),
@@ -96,5 +133,13 @@ mod tests {
     fn redact_error_string_handles_multiple_urls() {
         let out = redact_error_string("dial https://a.io/x?t=1 then https://b.io/y?token=q failed");
         assert_eq!(out, "dial https://a.io/x then https://b.io/y failed");
+    }
+
+    #[test]
+    fn redact_error_string_strips_userinfo_from_urls() {
+        let out = redact_error_string("error connecting to http://u:SECRET@snake.io/move failed");
+        assert_eq!(out, "error connecting to http://snake.io/move failed");
+        let out = redact_error_string("https://u:SECRET@snake.io:9/move?token=z down");
+        assert_eq!(out, "https://snake.io:9/move down");
     }
 }

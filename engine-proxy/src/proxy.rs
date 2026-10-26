@@ -214,6 +214,10 @@ pub struct RequestLog {
     outcome: Option<Outcome>,
     status: Option<u16>,
     timeout_ms: u64,
+    /// Redacted failure detail (transport error strings etc.), folded into
+    /// the single request line so failed requests stay one-line events
+    /// (PR #277 round 1) — the standalone WARNs were demoted to DEBUG.
+    error: Option<String>,
     dns_ms: f32,
     connect_ms: f32,
     tls_ms: f32,
@@ -235,6 +239,7 @@ impl RequestLog {
             outcome: None,
             status: None,
             timeout_ms: 0,
+            error: None,
             dns_ms: 0.0,
             connect_ms: 0.0,
             tls_ms: 0.0,
@@ -255,6 +260,7 @@ impl RequestLog {
 
     fn emit(&self) {
         let outcome = self.outcome.clone().unwrap_or(Outcome::Malformed);
+        let error = self.error.as_deref().unwrap_or("");
         tracing::info!(
             target: "engine_proxy",
             host = %self.host,
@@ -263,6 +269,7 @@ impl RequestLog {
             outcome = %outcome.label(),
             status = self.status.unwrap_or(0),
             timeout_ms = self.timeout_ms,
+            error = %error,
             dns_ms = self.dns_ms,
             connect_ms = self.connect_ms,
             tls_ms = self.tls_ms,
@@ -297,6 +304,46 @@ impl RequestLogGuard {
         Self {
             log: Some(RequestLog::new(method, start, boot)),
             shutdown,
+        }
+    }
+
+    /// Record the (redacted) target host and scheme. No-op once the log has
+    /// been emitted.
+    fn set_target(&mut self, host: &str, scheme: &str) {
+        if let Some(log) = self.log.as_mut() {
+            log.set_target(host, scheme);
+        }
+    }
+
+    /// Record the clamped budget. No-op once the log has been emitted.
+    fn set_timeout_ms(&mut self, ms: u64) {
+        if let Some(log) = self.log.as_mut() {
+            log.timeout_ms = ms;
+        }
+    }
+
+    /// Record the dispatch-phase measurements (headers received). No-op
+    /// once the log has been emitted.
+    fn record_dispatch(&mut self, timings: DispatchTimings) {
+        if let Some(log) = self.log.as_mut() {
+            log.dns_ms = timings.dns_ms;
+            log.connect_ms = timings.connect_ms;
+            log.tls_ms = timings.tls_ms;
+            log.first_byte_ms = timings.first_byte_ms;
+            log.total_ms = timings.first_byte_ms;
+            log.fresh_connection = timings.fresh_connection;
+            log.client_headers_ms = timings.client_headers_ms;
+            log.client_body_ms = timings.client_body_ms;
+        }
+    }
+
+    /// Record redacted failure detail for the request line. No-op once the
+    /// log has been emitted.
+    fn record_error(&mut self, error: String) {
+        if let Some(log) = self.log.as_mut()
+            && log.error.is_none()
+        {
+            log.error = Some(error);
         }
     }
 
@@ -337,6 +384,18 @@ enum BufferError {
     Read,
 }
 
+/// Dispatch-phase measurements handed to [`RequestLogGuard::record_dispatch`]
+/// once response headers arrive.
+struct DispatchTimings {
+    dns_ms: f32,
+    connect_ms: f32,
+    tls_ms: f32,
+    client_headers_ms: f32,
+    client_body_ms: f32,
+    first_byte_ms: f32,
+    fresh_connection: bool,
+}
+
 pub(crate) async fn proxy_handler(
     State(state): State<Arc<ProxyState>>,
     req: Request<Body>,
@@ -350,8 +409,10 @@ pub(crate) async fn proxy_handler(
         .get(PROXY_AUTH_ALT_HEADER)
         .or_else(|| req.headers().get(PROXY_AUTH_HEADER));
     if !auth_ok(auth_header, &state.cfg.auth_token) {
-        // Go logs the header value (the secret!) here; we do not.
-        tracing::warn!(target: "engine_proxy", "bad or missing proxy auth");
+        // Go logs the header value (the secret!) here; we do not. DEBUG so
+        // the emitted request line stays the only per-request stdout record
+        // (the baked RUST_LOG filter drops DEBUG in production).
+        tracing::debug!(target: "engine_proxy", "bad or missing proxy auth");
         guard.finish(Outcome::Auth);
         return StatusCode::PROXY_AUTHENTICATION_REQUIRED.into_response();
     }
@@ -378,19 +439,19 @@ pub(crate) async fn proxy_handler(
         guard.finish(Outcome::Malformed);
         return StatusCode::BAD_REQUEST.into_response();
     }
-    // The authority (host[:port]) is what the log wants — `Uri::host()` alone
-    // drops the port, and the port is how tests and operators tell mock
-    // snakes apart.
-    let host_for_log = target
-        .authority()
-        .map(|a| a.as_str())
-        .unwrap_or_default()
-        .to_string();
-    guard
-        .log
-        .as_mut()
-        .unwrap()
-        .set_target(&host_for_log, &scheme);
+    // Log `host[:port]` only — `authority().as_str()` would carry userinfo
+    // (`user:pass@host`), which must never reach a log line (PR #277 round 1
+    // pin: snake URLs are user-supplied). `Uri::host()` keeps IPv6 brackets
+    // and never carries credentials; the port is how tests and operators
+    // tell mock snakes apart.
+    let host_for_log = {
+        let host = target.host().unwrap_or_default();
+        match target.port_u16() {
+            Some(p) => format!("{host}:{p}"),
+            None => host.to_string(),
+        }
+    };
+    guard.set_target(&host_for_log, &scheme);
 
     // -- timeout budget --
     let timeout_raw = req
@@ -408,7 +469,7 @@ pub(crate) async fn proxy_handler(
         },
     };
     let timeout_ms = timeout_ms.clamp(0, state.cfg.max_timeout_ms);
-    guard.log.as_mut().unwrap().timeout_ms = timeout_ms.unsigned_abs();
+    guard.set_timeout_ms(timeout_ms.unsigned_abs());
     let budget = Duration::from_millis(timeout_ms.unsigned_abs());
     // The clamp makes overflow impossible; `checked_add` regardless.
     let deadline = tokio::time::Instant::now()
@@ -462,13 +523,18 @@ pub(crate) async fn proxy_handler(
         }
         Ok(Err(e)) => {
             let kind = classify_transport_error(&e);
-            tracing::warn!(
+            let redacted = logging::redact_error_string(&e.to_string());
+            // The detail rides the request line (one line per request, even
+            // on failure); the standalone WARN was demoted to DEBUG so a
+            // snake-outage burst does not double per-request log volume.
+            tracing::debug!(
                 target: "engine_proxy",
                 host = %logging::redact_host_or_url(&host_for_log),
                 kind = kind.label(),
-                error = %logging::redact_error_string(&e.to_string()),
+                error = %redacted,
                 "snake transport failure"
             );
+            guard.record_error(redacted);
             guard.finish(Outcome::Transport(kind));
             let status = match kind {
                 SnakeErrorKind::Timeout => StatusCode::GATEWAY_TIMEOUT,
@@ -500,15 +566,17 @@ pub(crate) async fn proxy_handler(
     }
 
     {
-        let log = guard.log.as_mut().unwrap();
-        log.dns_ms = dns_ms;
-        log.connect_ms = connect_ms;
-        log.tls_ms = tls_ms;
-        log.first_byte_ms = first_byte_ms;
-        log.total_ms = first_byte_ms;
-        log.fresh_connection = fresh;
-        log.client_headers_ms = body_tracker.client_headers_ms().unwrap_or(0.0);
-        log.client_body_ms = body_tracker.client_body_ms().unwrap_or(0.0);
+        let client_headers_ms = body_tracker.client_headers_ms().unwrap_or(0.0);
+        let client_body_ms = body_tracker.client_body_ms().unwrap_or(0.0);
+        guard.record_dispatch(DispatchTimings {
+            dns_ms,
+            connect_ms,
+            tls_ms,
+            client_headers_ms,
+            client_body_ms,
+            first_byte_ms,
+            fresh_connection: fresh,
+        });
     }
     metrics::get()
         .snake_status_total

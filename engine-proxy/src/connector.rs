@@ -277,7 +277,25 @@ impl Service<Uri> for TimedConnector {
 }
 
 impl TimedConnector {
+    /// The dial cap bounds the WHOLE connector call — DNS, the connect race,
+    /// and the TLS handshake. The handshake matters as much as TCP here:
+    /// hyper-util's *background* dials (spawned when its checkout-vs-dial
+    /// race loses) are unreachable by the request deadline, and a host that
+    /// accepts TCP then stalls the ClientHello would otherwise hold a task +
+    /// socket forever (PR #277 round 1). A handshake-stall maps to the same
+    /// connect class as the race cap (502 + `3:`), which arena handles as a
+    /// transport failure either way.
     async fn connect(self, uri: Uri) -> Result<TimedConn, ConnectError> {
+        match tokio::time::timeout(self.dial_timeout, self.connect_inner(uri)).await {
+            Ok(result) => result,
+            Err(_elapsed) => Err(ConnectError::Connect(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "dial (dns/connect/tls) exceeded ENGINE_PROXY_DIAL_TIMEOUT_MS",
+            ))),
+        }
+    }
+
+    async fn connect_inner(self, uri: Uri) -> Result<TimedConn, ConnectError> {
         let scheme = uri.scheme_str().unwrap_or("http").to_ascii_lowercase();
         let default_port = if scheme == "https" { 443 } else { 80 };
         let port = uri.port_u16().unwrap_or(default_port);
@@ -375,16 +393,19 @@ where
     Fut: Future<Output = io::Result<T>> + Send + 'static,
 {
     debug_assert!(!addrs.is_empty(), "connect_race needs at least one address");
+    // `far_future` fallback: a cap near Instant's platform maximum must
+    // fail the dial cleanly, not panic (config validation keeps caps sane;
+    // this is the belt under it).
     let race_deadline = tokio::time::Instant::now()
         .checked_add(cap)
-        .expect("sane dial cap");
+        .unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(3600));
 
     let mut attempts: JoinSet<io::Result<T>> = JoinSet::new();
     attempts.spawn(connect_fn(addrs[0]));
     let mut spawned = 1usize;
     let mut next_stagger = tokio::time::Instant::now()
         .checked_add(stagger)
-        .expect("sane stagger");
+        .unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(3600));
 
     let last_err = loop {
         if attempts.is_empty() {
@@ -492,12 +513,20 @@ impl Clone for OutboundBody {
 }
 
 impl BodyTracker {
+    // Mutex poison recovery: a panic in a body poll must not cascade into
+    // `unwrap` panics on every later poll of the same connection.
     pub fn client_headers_ms(&self) -> Option<f32> {
-        *self.first_poll_ms.lock().unwrap()
+        *self
+            .first_poll_ms
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     pub fn client_body_ms(&self) -> Option<f32> {
-        *self.final_poll_ms.lock().unwrap()
+        *self
+            .final_poll_ms
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 impl http_body::Body for OutboundBody {
@@ -512,10 +541,24 @@ impl http_body::Body for OutboundBody {
         let out = Pin::new(&mut this.inner).poll_frame(cx);
         if out.is_ready() {
             let now = elapsed_ms_f32(this.start);
-            if this.tracker.first_poll_ms.lock().unwrap().is_none() {
-                *this.tracker.first_poll_ms.lock().unwrap() = Some(now);
+            if this
+                .tracker
+                .first_poll_ms
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_none()
+            {
+                *this
+                    .tracker
+                    .first_poll_ms
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(now);
             }
-            *this.tracker.final_poll_ms.lock().unwrap() = Some(now);
+            *this
+                .tracker
+                .final_poll_ms
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(now);
         }
         out
     }

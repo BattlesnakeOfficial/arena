@@ -24,10 +24,13 @@ DEV-1946 (proxy-fault retry).
 ## Wire protocol
 
 Unchanged from the Go proxy; pinned on both sides by
-`server/src/snake_client_contract_tests.rs` (18 cases through arena's real
+`server/src/snake_client_contract_tests.rs` (21 cases through arena's real
 `request_move_routed` / `request_info_routed` paths) and
 `engine-proxy/tests/proxy_contract.rs`. The same arena suite runs against the
-Go image with `ENGINE_PROXY_GO_TARGET=docker://<image>` (CI job `go-contract`)
+Go image with `ENGINE_PROXY_GO_TARGET=docker://<image>` — locally, via
+`engine-proxy/scripts/go-contract.sh`; it is not a CI job because the Go
+source repo is private with no public image and CI may not gain secrets
+(coordinator decision, PR #277 round 1)
 to keep the two pinned to one contract during the canary.
 
 ### Request (arena → proxy)
@@ -118,7 +121,7 @@ Phase-split consequences (arena-visible):
 | `ENGINE_PROXY_POOL_IDLE_TIMEOUT_SECS` | 90 | matches Go's `IdleConnTimeout` |
 | `ENGINE_PROXY_BODY_CAP_BYTES` | 1048576 | request *and* response body cap |
 | `ENGINE_PROXY_MAX_TIMEOUT_MS` | 10000 | clamp for the client-supplied budget |
-| `ENGINE_PROXY_DIAL_TIMEOUT_MS` | 10000 | overall cap on one connect race (raise with MAX_TIMEOUT_MS) |
+| `ENGINE_PROXY_DIAL_TIMEOUT_MS` | 10000 | overall cap on one connector call: DNS + connect race + TLS handshake (raise with MAX_TIMEOUT_MS; 1–3600000, else boot fails) |
 | `ENGINE_PROXY_EXTRA_CA` | — | additional CA PEM path (rustls, ALPN h2+http/1.1) |
 | `RUST_LOG` | baked (below) | see the log-shape section |
 | `JSON_LOGS` | 1 (baked) | JSON stdout logs |
@@ -155,13 +158,22 @@ Every proxied request emits exactly one structured line (INFO, target
 
 ```
 host=127.0.0.1:33601 scheme=http method=POST outcome=transport:connect status=502
-timeout_ms=500 dns_ms=0.0 connect_ms=0.0 tls_ms=0.0 client_headers_ms=0.0
+timeout_ms=500 error="tcp connect error: 127.0.0.1:33601 (connection refused)"
+dns_ms=0.0 connect_ms=0.0 tls_ms=0.0 client_headers_ms=0.0
 client_body_ms=0.0 first_byte_ms=0.0 total_ms=0.2 fresh_connection=false
 process_age_secs=8
 ```
 
 (with `JSON_LOGS=1`, the same fields as JSON — `"outcome":"transport:connect"`, …)
 
+- `host` is `host[:port]` only — userinfo (`user:pass@`) and any
+  `?token=`-style query are stripped by `redact_host_or_url` before the
+  line is written (snake URLs are user-supplied; pinned by
+  `userinfo_credentials_in_snake_url_are_never_logged`).
+- `error` carries the redacted transport-failure detail on failed requests
+  (empty otherwise) — failed requests stay **one-line events**: the
+  standalone failure WARNs are DEBUG-level and dropped by the production
+  filter.
 - `outcome` ∈ `success`, `timeout:request_body|headers|body`,
   `transport:dns|connect|tls|read_body|unknown`, `auth`, `malformed`,
   `request_body_too_large`, `aborted:<reason>`, `client_cancelled`,
@@ -245,16 +257,23 @@ deadline-aborted (and logged), not just that the process exits.
 | `client_headers`/`client_body` | body-wrapper approximation of httptrace | httptrace callbacks | accepted (near-zero for buffered JSON) |
 | metrics series | prometheus text at `/metrics` | none | ours |
 | `HEALTH_CHECK_URLS` | env | `--test-server` flag | identical runtime behavior (bootstrap passes none) |
-| panic in handler | 500 + `0:` + latency (CatchPanicLayer), logged | connection closed | accepted (better signal) |
+| panic in handler | 500 + `0:` (CatchPanicLayer), panic logged at `tower_http::catch_panic`; **no latency header** — the hook has no request context | connection closed | accepted (better signal; arena classifies both as a proxy fault → fallback) |
 | per-request INFO line | yes (this doc) | errors only | ours — the point of the rewrite |
 | connect strategy | staggered race, no per-attempt cap, 250ms stagger | DualStack race, 300ms fallback, 30s dialer | same spirit, different mechanics |
 | body-phase deadline abort | connection killed; arena sees transport fault | same (ctx deadline) | match, not a diff |
 | self-signed CA leaf cert | rejected (`CaUsedAsEndEntity` — webpki refuses CA certs as end entities) | accepted (Go's x509 tolerates it) | accepted — snakes needing `ENGINE_PROXY_EXTRA_CA` must present a proper CA+leaf chain, verified in the load check |
 | empty-body success labeling | `outcome=success` via eager finish (hyper never polls a CL:0 body) | n/a | fixed during the load check (was mislabeled `client_cancelled`) |
-| `getAlive` failing probes | waits the window before 503 | no-op `break` in select loop | don't copy Go's bug |
+| `getAlive` failing probes | answers as soon as every check has failed (does not wait out the 3s window) | no-op `break` in select loop | don't copy Go's bug |
 
-The `go-contract` CI job re-runs the full contract suite against the Go image
-and prints an observation table for any row that drifts.
+The Go differential is a **local** check — `engine-proxy/scripts/go-contract.sh`
+builds the Go image from a private local checkout at the pinned commit and
+re-runs the full contract suite against it (`ENGINE_PROXY_GO_TARGET=…`,
+`--network host`), printing the observation table for any row that drifts.
+Last local run (2026-10-26, Go @ 808c248): all cases green; the single
+observed diff is the declared-oversized-response row above (documented,
+accepted). Not a CI job: the Go source repo is private, has no public image
+(Docker Hub `conflictserpent` has zero public repos), and CI may not gain
+secrets.
 
 ## Deploy / canary notes (see also memory: projects/arena/docs/engine-regions.md)
 
@@ -294,10 +313,14 @@ and prints an observation table for any row that drifts.
   concurrency, 60s per phase): p50/p99 added latency, mock-side accept
   counts (new-connection share), RSS.
 - `engine-proxy/scripts/drain-check.sh` — SIGTERM drain discrimination check.
+- `engine-proxy/scripts/go-contract.sh` — local Go differential (builds the
+  Go image from a local private checkout at the pinned commit; not CI — see
+  above).
 - Contract suite: `SQLX_OFFLINE=true cargo test -p arena --bin arena
   snake_client_contract_tests` (Rust in-process by default; Go with
   `ENGINE_PROXY_GO_TARGET=docker://<image>` — `--network host` is required so
-  the container can reach the suite's loopback mock snakes).
+  the container can reach the suite's loopback mock snakes; the harness
+  labels + reaps its containers).
 
 ### Load-check results (local, 2026-10-26, Go 808c248 vs this PR)
 

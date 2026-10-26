@@ -9,6 +9,7 @@ use axum::body::Body;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use color_eyre::eyre::WrapErr as _;
 use http_body_util::BodyExt as _;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioTimer};
@@ -36,11 +37,14 @@ impl ProxyState {
     /// exactly like Go.
     pub fn from_env(shutdown: CancellationToken) -> color_eyre::Result<Self> {
         let cfg = ProxyConfig::from_env()?;
-        Ok(Self::new(cfg, shutdown))
+        Self::new(cfg, shutdown)
     }
 
-    pub fn new(cfg: ProxyConfig, shutdown: CancellationToken) -> Self {
-        let connector = TimedConnector::new(&cfg).expect("valid TLS configuration");
+    /// A bad `ENGINE_PROXY_EXTRA_CA` (unreadable file, non-PEM contents)
+    /// surfaces as `Err` at boot — never a panic (PR #277 round 1).
+    pub fn new(cfg: ProxyConfig, shutdown: CancellationToken) -> color_eyre::Result<Self> {
+        let connector =
+            TimedConnector::new(&cfg).wrap_err("building the engine-proxy TLS configuration")?;
         // Pool sizing (DD 3): 8 idle per host (Go's MaxIdleConnsPerHost: 2 was
         // the 24-37% fresh-handshake bug from DEV-1499 item 2), 90s idle
         // timeout matching Go's IdleConnTimeout, pool_timer REQUIRED —
@@ -51,25 +55,12 @@ impl ProxyState {
             .pool_timer(TokioTimer::new())
             .timer(TokioTimer::new())
             .build(connector);
-        Self {
+        Ok(Self {
             cfg: Arc::new(cfg),
             client,
             boot: Instant::now(),
             shutdown,
-        }
-    }
-
-    /// Deterministic state for tests and the load-check example: known token,
-    /// default knobs.
-    #[doc(hidden)]
-    pub fn test() -> Self {
-        Self::new(
-            ProxyConfig {
-                auth_token: "engine-proxy-test-token".to_string(),
-                ..ProxyConfig::default()
-            },
-            CancellationToken::new(),
-        )
+        })
     }
 }
 
@@ -109,29 +100,31 @@ async fn healthz_alive(State(state): State<Arc<ProxyState>>) -> Response {
         match url.parse::<hyper::Uri>() {
             Ok(uri) => {
                 let (body, _) = OutboundBody::empty(Instant::now());
-                let req = hyper::Request::builder()
-                    .method("GET")
-                    .uri(uri)
-                    .body(body)
-                    .expect("builder with valid parts");
-                match tokio::time::timeout(CONNECTIVITY_URL_TIMEOUT, async {
-                    let res = state.client.request(req).await?;
-                    // drain the body
-                    let _ = res.into_body().collect().await;
-                    Ok::<(), hyper_util::client::legacy::Error>(())
-                })
-                .await
-                {
-                    Ok(Ok(())) => true,
-                    Ok(Err(e)) => {
-                        tracing::warn!(
-                            target: "engine_proxy",
-                            url = %crate::logging::redact_host_or_url(url),
-                            error = %crate::logging::redact_error_string(&e.to_string()),
-                            "health connectivity check failed"
-                        );
-                        false
+                match hyper::Request::builder().method("GET").uri(uri).body(body) {
+                    Ok(req) => {
+                        match tokio::time::timeout(CONNECTIVITY_URL_TIMEOUT, async {
+                            let res = state.client.request(req).await?;
+                            // drain the body
+                            let _ = res.into_body().collect().await;
+                            Ok::<(), hyper_util::client::legacy::Error>(())
+                        })
+                        .await
+                        {
+                            Ok(Ok(())) => true,
+                            Ok(Err(e)) => {
+                                tracing::warn!(
+                                    target: "engine_proxy",
+                                    url = %crate::logging::redact_host_or_url(url),
+                                    error = %crate::logging::redact_error_string(&e.to_string()),
+                                    "health connectivity check failed"
+                                );
+                                false
+                            }
+                            Err(_) => false,
+                        }
                     }
+                    // A URI that parses but cannot build a GET counts as a
+                    // failed check, not a panic (PR #277 round 1).
                     Err(_) => false,
                 }
             }

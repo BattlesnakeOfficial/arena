@@ -73,6 +73,12 @@ impl Default for ProxyConfig {
     }
 }
 
+/// Upper bound the dial cap will accept from the environment. `Instant`
+/// arithmetic on an absurd cap could overflow when deadlines are computed —
+/// validated in `from_env` so the connector never has to panic on it
+/// (PR #277 round 1).
+const MAX_DIAL_TIMEOUT_MS: u64 = 60 * 60 * 1000;
+
 impl ProxyConfig {
     /// Read configuration from the environment. Missing
     /// `BATTLESNAKE_PROXY_AUTH_TOKEN` is an error so `main` exits non-zero,
@@ -113,6 +119,11 @@ impl ProxyConfig {
             cfg.max_timeout_ms = v;
         }
         if let Some(v) = env_parse("ENGINE_PROXY_DIAL_TIMEOUT_MS")? {
+            if v == 0 || v > MAX_DIAL_TIMEOUT_MS {
+                return Err(eyre!(
+                    "Invalid ENGINE_PROXY_DIAL_TIMEOUT_MS={v}: must be between 1 and {MAX_DIAL_TIMEOUT_MS} ms"
+                ));
+            }
             cfg.dial_timeout = Duration::from_millis(v);
         }
         if let Ok(v) = std::env::var("ENGINE_PROXY_EXTRA_CA")

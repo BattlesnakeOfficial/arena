@@ -24,7 +24,7 @@ use engine_proxy::config::ProxyConfig;
 use reqwest::{Client, StatusCode};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
-use wiremock::matchers::{header, method, path, query_param};
+use wiremock::matchers::{header, header_exists, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use crate::config::EngineProxyConfig;
@@ -68,6 +68,20 @@ impl ProxyUnderTest {
         let Some(image) = target.strip_prefix("docker://") else {
             panic!("ENGINE_PROXY_GO_TARGET must be docker://<image>, got {target:?}");
         };
+        // The shared PROXY is a process-lifetime static and never dropped, so
+        // `Drop` cannot be the cleanup story (coordinator note, PR #277):
+        // reap stale labeled containers, run with --rm + a label, and arm a
+        // watchdog that removes the container when the test process exits.
+        const LABEL: &str = "dev1943.contract=go";
+        let stale = std::process::Command::new("docker")
+            .args(["ps", "-aq", "--filter", &format!("label={LABEL}")])
+            .output()
+            .expect("docker ps");
+        for id in String::from_utf8_lossy(&stale.stdout).lines() {
+            let _ = std::process::Command::new("docker")
+                .args(["rm", "-f", id])
+                .output();
+        }
         let port = free_port();
         // Random per-run token: never printed, never committed.
         let token = format!(
@@ -84,8 +98,11 @@ impl ProxyUnderTest {
             .args([
                 "run",
                 "-d",
+                "--rm",
                 "--name",
                 &container,
+                "--label",
+                LABEL,
                 "--network",
                 "host",
                 "-e",
@@ -104,6 +121,18 @@ impl ProxyUnderTest {
             "docker run failed (stderr redacted, {} bytes)",
             out.stderr.len()
         );
+        // Watchdog: when the test process exits (cleanly or killed), remove
+        // the container. Belt (Drop) + suspenders (--rm) already exist; this
+        // covers the process-lifetime-static case.
+        let _ = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "while kill -0 {pid} 2>/dev/null; do sleep 0.5; done; docker rm -f {container} >/dev/null 2>&1",
+                pid = std::process::id()
+            ))
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
         let base_url = format!("http://127.0.0.1:{port}");
         wait_alive(&base_url).await;
         Self::Docker {
@@ -177,7 +206,8 @@ fn rust_proxy_base_url() -> &'static str {
                             ..ProxyConfig::default()
                         },
                         CancellationToken::new(),
-                    );
+                    )
+                    .expect("test config (no extra CA) always builds a connector");
                     let router = engine_proxy::app::router(state);
                     let cancel = CancellationToken::new();
                     tokio::spawn(cja::server::serve_until(
@@ -734,6 +764,110 @@ async fn user_agent_forwarded_verbatim() {
     let result = move_via_proxy(&clients, &endpoint, Duration::from_millis(1000), None).await;
     assert_eq!(result.direction, Direction::Up);
     snake.verify().await;
+}
+
+/// Case 13b: when the caller sends no User-Agent, none is synthesized on the
+/// way to the snake (arena always sends one; this is the raw leg, and it runs
+/// against the Go target too in the differential).
+#[tokio::test]
+async fn absent_user_agent_omitted() {
+    proxy().await;
+    let snake = MockServer::start().await;
+    // Leak detector (mounted FIRST so it wins on match): if a UA were
+    // synthesized, this fires and the primary never matches.
+    Mock::given(method("POST"))
+        .and(path("/move"))
+        .and(header_exists("user-agent"))
+        .respond_with(ResponseTemplate::new(418).set_body_string("UA-LEAKED"))
+        .expect(0)
+        .mount(&snake)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/move"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"move":"up"}"#))
+        .expect(1)
+        .mount(&snake)
+        .await;
+
+    // raw_proxy_request sends no User-Agent (reqwest default).
+    let res = raw_proxy_request(&format!("{}/move", snake.uri()), "1000", true)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200, "no synthesized UA reached the snake");
+    snake.verify().await;
+}
+
+/// Case 14: control headers (proxy auth, request URI, timeout, forwarded-for,
+/// hop-by-hop) never reach the snake. Raw leg so the decoy headers can be
+/// attached; runs against the Go target too in the differential.
+#[tokio::test]
+async fn control_headers_not_forwarded() {
+    proxy().await;
+    let snake = MockServer::start().await;
+    const BANNED: [&str; 5] = [
+        "x-proxy-authorization",
+        "proxy-authorization",
+        "x-request-uri",
+        "x-battlesnake-timeout-ms",
+        "x-forwarded-for",
+    ];
+    for banned in BANNED {
+        // Leak detector (mounted FIRST): if the control header survives to
+        // the snake, this fires instead of the primary mock.
+        Mock::given(method("POST"))
+            .and(path("/move"))
+            .and(header_exists(banned))
+            .respond_with(ResponseTemplate::new(418).set_body_string(format!("LEAKED:{banned}")))
+            .expect(0)
+            .mount(&snake)
+            .await;
+    }
+    Mock::given(method("POST"))
+        .and(path("/move"))
+        .and(query_param("token", "abc"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"move":"up"}"#))
+        .expect(1)
+        .mount(&snake)
+        .await;
+
+    let res = raw_proxy_request(&format!("{}/move?token=abc", snake.uri()), "500", true)
+        .header("Proxy-Authorization", "token decoy")
+        .header("X-Forwarded-For", "1.2.3.4")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200, "control headers leaked to the snake");
+    snake.verify().await;
+}
+
+/// Case 15: an inbound request body over the 1 MiB cap is rejected 413.
+/// Deliberate diff vs Go (no request cap): against the Go target the body is
+/// forwarded and the snake's 200 passes through — asserted as-is.
+#[tokio::test]
+async fn oversized_request_body_rejected() {
+    proxy().await;
+    let snake = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/move"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"move":"up"}"#))
+        .mount(&snake)
+        .await;
+
+    let res = raw_proxy_request(&format!("{}/move", snake.uri()), "2000", true)
+        .body(vec![b'x'; 2 * 1024 * 1024]) // > the proxy's 1 MiB default cap
+        .send()
+        .await
+        .unwrap();
+    if matches!(proxy().await, ProxyUnderTest::Docker { .. }) {
+        assert_eq!(
+            res.status(),
+            200,
+            "Go has no request body cap: the oversized body is forwarded"
+        );
+    } else {
+        assert_eq!(res.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
 }
 
 /// Case 16a (arena-visible leg): a declared oversized body maps to 502+5: ->

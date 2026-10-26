@@ -118,7 +118,8 @@ impl ProxyUnderTest {
         install_capture();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let state = app::ProxyState::new(cfg.clone(), CancellationToken::new());
+        let state = app::ProxyState::new(cfg.clone(), CancellationToken::new())
+            .expect("test config (no extra CA) always builds a connector");
         let router = app::router(state);
         let token = CancellationToken::new();
         tokio::spawn(cja::server::serve_until(

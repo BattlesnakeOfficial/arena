@@ -1,5 +1,10 @@
 name: Engine Proxy
 
+# The Go contract differential is NOT a CI job: the Go engine source repo is
+# private and has no public image, and CI may not gain secrets (coordinator
+# decision, PR #277 review round 1). The differential runs locally via
+# engine-proxy/scripts/go-contract.sh — see docs/engine-proxy.md.
+
 on:
   push:
     branches: [main]
@@ -125,43 +130,3 @@ jobs:
             sleep 0.5
           done
           curl -fsS http://127.0.0.1:$PORT/healthz/ready | grep -qx ready
-
-  go-contract:
-    name: Go contract differential
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cja frontend tools
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/cja
-          key: cja-tools-${{ runner.os }}-tsc-7.0.2
-
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-engine-proxy-contract-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-engine-proxy-contract-
-            ${{ runner.os }}-cargo-
-
-      - name: Clone and build the Go engine image
-        run: |
-          rm -rf /tmp/engine-go
-          git clone https://github.com/BattlesnakeOfficial/engine /tmp/engine-go
-          git -C /tmp/engine-go checkout 808c248
-          docker build -t battlesnake-engine-go /tmp/engine-go
-
-      - name: Run the contract suite against the Go image
-        run: |
-          SQLX_OFFLINE=true \
-          ENGINE_PROXY_GO_TARGET=docker://battlesnake-engine-go \
-          cargo test -p arena --bin arena snake_client_contract_tests -- --nocapture
