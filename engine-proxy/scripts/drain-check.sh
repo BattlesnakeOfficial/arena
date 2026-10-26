@@ -44,7 +44,14 @@ while True:
 EOF
 SNAKE_PID=$!
 
+# cargo may place the binary under release/deps/ with a fingerprint suffix
+# (shared build dirs skip the top-level hardlink) — resolve either location.
 BIN="$BUILD_DIR/release/engine"
+if [ ! -x "$BIN" ]; then
+  BIN=$(find "$BUILD_DIR/release/deps" -maxdepth 1 -type f -perm -u=x \
+    -name 'engine-*' ! -name '*.d' ! -name '*.so' | sort | tail -1)
+fi
+[ -x "$BIN" ] || { echo "engine binary not found under $BUILD_DIR/release" >&2; exit 1; }
 if [ "${DRAIN_MUTATION:-0}" = 1 ]; then
   echo "== mutation: building WITHOUT the server spawn"
   cp engine-proxy/src/main.rs /tmp/main.rs.bak
