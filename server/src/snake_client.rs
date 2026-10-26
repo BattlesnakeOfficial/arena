@@ -286,13 +286,18 @@ pub struct MoveResult {
     pub timed_out: bool,
     pub shout: Option<String>,
     /// HTTP status the snake answered with; `None` when no response arrived
-    /// (timeout, transport error, engine-proxy fault). Surfaced in frames as
-    /// `StatusCode` like the legacy engine.
+    /// (timeout, transport error). Surfaced in frames as `StatusCode` like
+    /// the legacy engine. On `/move` an engine-proxy fault is retried
+    /// directly, so the turn carries the direct answer's status; the fault
+    /// itself still yields `None` here, as it does on the start/end/info and
+    /// health paths, which keep the fallback.
     pub status_code: Option<u16>,
     /// The snake answered but the answer was unusable: a non-2xx status, a
     /// body that isn't a move response, or an unrecognized direction. Kept
-    /// apart from `timed_out` (no answer at all), and false for engine-proxy
-    /// faults, which are never the snake's fault.
+    /// apart from `timed_out` (no answer at all). An engine-proxy fault
+    /// never sets this (it is not the snake's answer); on `/move` such
+    /// faults are retried directly, so the turn carries the direct answer's
+    /// `errored` instead.
     pub errored: bool,
 }
 
@@ -663,10 +668,10 @@ fn log_proxy_fault_retry(
         region = region.as_str(),
         call = "move",
         kind,
-        status = ?proxy_status,
+        status = proxy_status.map(|s| s.as_u16()),
         metric_type = "proxy_fault_retry",
         outcome = retry_outcome(result),
-        latency_ms = ?result.latency_ms,
+        latency_ms = result.latency_ms,
         "Engine proxy fault, retried directly"
     );
 }
@@ -1137,6 +1142,35 @@ mod tests {
                 latency_ms: 28
             }
         );
+    }
+
+    #[test]
+    fn retry_outcome_covers_all_four_outcomes_and_precedence() {
+        let result = |timed_out: bool, status_code: Option<u16>, errored: bool| MoveResult {
+            snake_id: "snake-1".to_string(),
+            direction: Direction::Right,
+            latency_ms: Some(120),
+            timed_out,
+            shout: None,
+            status_code,
+            errored,
+        };
+        // (timed_out, status_code, errored) -> expected outcome.
+        // Rows 2-3 pin the precedence: `timed_out` outranks a non-2xx
+        // status, and a non-2xx status outranks `errored`.
+        let cases = [
+            ((true, None, false), "snake_timeout"),
+            ((true, Some(504), true), "snake_timeout"),
+            ((false, Some(500), true), "snake_error"),
+            ((false, Some(200), true), "invalid_response"),
+            ((false, Some(200), false), "moved"),
+        ];
+        for ((timed_out, status_code, errored), expected) in cases {
+            assert_eq!(
+                retry_outcome(&result(timed_out, status_code, errored)),
+                expected
+            );
+        }
     }
 
     #[tokio::test]
