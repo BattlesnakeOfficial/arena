@@ -642,14 +642,17 @@ fn auth_ok(header: Option<&HeaderValue>, token: &str) -> bool {
 }
 
 fn connection_named(name: &str, headers: &HeaderMap) -> bool {
-    if let Some(connection) = headers.get("connection").and_then(|v| v.to_str().ok()) {
-        let name = name.to_ascii_lowercase();
-        return connection
-            .split(',')
-            .map(|tok| tok.trim().to_ascii_lowercase())
-            .any(|tok| tok == name);
-    }
-    false
+    // HTTP permits multiple `Connection` header values, each naming a
+    // comma-separated token list; every token in every value controls
+    // stripping (RFC 7230 §6.1).
+    let name = name.to_ascii_lowercase();
+    headers
+        .get_all("connection")
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .map(|token| token.trim().to_ascii_lowercase())
+        .any(|token| token == name)
 }
 
 fn declared_content_length(headers: &HeaderMap) -> Option<u64> {
@@ -800,7 +803,24 @@ impl http_body::Body for DeadlineBody {
         if this.closed {
             return Poll::Ready(None);
         }
-        // Inner first: ready data always wins over the deadline.
+        // The deadline is absolute: it is checked before any inner poll, so a
+        // frame that was already buffered (or becomes ready) after the
+        // deadline — e.g. under downstream backpressure or scheduling delay —
+        // is rejected instead of forwarded. Polling the sleep first also
+        // registers its waker, which keeps the stalled (inner `Pending`)
+        // case below armed.
+        if this.sleep.as_mut().poll(cx).is_ready() {
+            metrics::get()
+                .body_aborts_total
+                .with_label_values(&["deadline"])
+                .inc();
+            this.guard.finish(Outcome::Timeout(TimeoutPhase::Body));
+            this.closed = true;
+            return Poll::Ready(Some(Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "response body deadline exceeded",
+            )))));
+        }
         match Pin::new(&mut this.inner).poll_frame(cx) {
             Poll::Ready(Some(Ok(frame))) => {
                 if let Some(data) = frame.data_ref() {
@@ -838,22 +858,7 @@ impl http_body::Body for DeadlineBody {
                 this.closed = true;
                 Poll::Ready(Some(Err(err)))
             }
-            Poll::Pending => {
-                // Stalled: enforce the deadline while waiting.
-                if this.sleep.as_mut().poll(cx).is_ready() {
-                    metrics::get()
-                        .body_aborts_total
-                        .with_label_values(&["deadline"])
-                        .inc();
-                    this.guard.finish(Outcome::Timeout(TimeoutPhase::Body));
-                    this.closed = true;
-                    return Poll::Ready(Some(Err(Box::new(std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        "response body deadline exceeded",
-                    )))));
-                }
-                Poll::Pending
-            }
+            Poll::Pending => Poll::Pending,
         }
     }
 
@@ -888,7 +893,7 @@ mod tests {
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut request = [0u8; 1024];
-            stream.read(&mut request).await.unwrap();
+            let _ = stream.read(&mut request).await.unwrap();
             stream
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\nx")
                 .await
