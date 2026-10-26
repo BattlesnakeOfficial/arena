@@ -1,5 +1,5 @@
 [workspace]
-members = ["server", "mock-github-oauth", "rules"]
+members = ["server", "mock-github-oauth", "rules", "engine-proxy"]
 resolver = "3"
 
 [workspace.package]

@@ -139,6 +139,9 @@ proptest = "1"
 wiremock = "0.6"
 tokio-tungstenite = "0.28"
 tower-cookies = { version = "0.11", features = ["private"] }
+# DEV-1943: in-process Rust engine proxy for the snake_client contract
+# suite (the suite is the shared definition of the proxy wire contract).
+engine-proxy = { path = "../engine-proxy" }
 # design_kit tests: independent SVG renderer (test oracle only, never at runtime)
 # and a JPEG encoder for JPEG round-trip fixtures.
 resvg = { version = "=0.48.1", default-features = false }

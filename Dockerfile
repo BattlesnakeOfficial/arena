@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y \
 
 # Copy manifests and build.rs (needed for dependency build)
 # Note: mock-github-oauth and rules Cargo.toml are needed because they're workspace members
+# engine-proxy Cargo.toml is needed for the same reason (DEV-1943)
 COPY Cargo.toml Cargo.lock ./
 COPY server/Cargo.toml ./server/
 COPY server/build.rs ./server/
@@ -19,11 +20,12 @@ COPY server/frontend ./server/frontend
 COPY server/static ./server/static
 COPY mock-github-oauth/Cargo.toml ./mock-github-oauth/
 COPY rules/Cargo.toml ./rules/
+COPY engine-proxy/Cargo.toml ./engine-proxy/
 
 # Create dummy files for dependency caching
 # Note: arena has both lib.rs and main.rs, plus bin/arena-cli.rs and bin/stress_test.rs
 # The dummy lib.rs needs cli::config module stub since arena-cli imports it
-RUN mkdir -p server/src/bin server/src/cli mock-github-oauth/src rules/src && \
+RUN mkdir -p server/src/bin server/src/cli mock-github-oauth/src rules/src engine-proxy/src && \
     echo "fn main() {}" > server/src/main.rs && \
     echo "pub mod cli;" > server/src/lib.rs && \
     echo "pub mod config;" > server/src/cli/mod.rs && \
@@ -32,7 +34,9 @@ RUN mkdir -p server/src/bin server/src/cli mock-github-oauth/src rules/src && \
     echo "fn main() {}" > server/src/bin/stress_test.rs && \
     echo "fn main() {}" > mock-github-oauth/src/main.rs && \
     echo "" > mock-github-oauth/src/lib.rs && \
-    echo "" > rules/src/lib.rs
+    echo "" > rules/src/lib.rs && \
+    echo "fn main() {}" > engine-proxy/src/main.rs && \
+    echo "" > engine-proxy/src/lib.rs
 
 # Build dependencies only (for caching)
 # VERGEN_IDEMPOTENT allows build without .git directory (uses placeholder values)
