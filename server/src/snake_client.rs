@@ -286,13 +286,18 @@ pub struct MoveResult {
     pub timed_out: bool,
     pub shout: Option<String>,
     /// HTTP status the snake answered with; `None` when no response arrived
-    /// (timeout, transport error, engine-proxy fault). Surfaced in frames as
-    /// `StatusCode` like the legacy engine.
+    /// (timeout, transport error). Surfaced in frames as `StatusCode` like
+    /// the legacy engine. On `/move` an engine-proxy fault is retried
+    /// directly, so the turn carries the direct answer's status; the fault
+    /// itself still yields `None` here, as it does on the start/end/info and
+    /// health paths, which keep the fallback.
     pub status_code: Option<u16>,
     /// The snake answered but the answer was unusable: a non-2xx status, a
     /// body that isn't a move response, or an unrecognized direction. Kept
-    /// apart from `timed_out` (no answer at all), and false for engine-proxy
-    /// faults, which are never the snake's fault.
+    /// apart from `timed_out` (no answer at all). An engine-proxy fault
+    /// never sets this (it is not the snake's answer); on `/move` such
+    /// faults are retried directly, so the turn carries the direct answer's
+    /// `errored` instead.
     pub errored: bool,
 }
 
@@ -605,6 +610,72 @@ pub async fn request_info(
     }
 }
 
+/// One direct /move retry after an engine-proxy fault, with the snake's
+/// full timeout. Byte-for-byte the same call the bare-407 arm makes: the
+/// unchanged `request_move` on `clients.direct`. If this also fails,
+/// `request_move`'s own fallback semantics apply.
+async fn retry_move_direct(
+    clients: &ProxyClients<'_>,
+    endpoint: &SnakeEndpoint,
+    game: &EngineGame,
+    timeout: Duration,
+    last_direction: Option<Direction>,
+    snake_contexts: &HashMap<String, wire::SnakeContext>,
+    customizations: &HashMap<String, SnakeCustomizations>,
+) -> MoveResult {
+    request_move(
+        clients.direct,
+        &endpoint.url,
+        game,
+        &endpoint.snake_id,
+        timeout,
+        last_direction,
+        snake_contexts,
+        customizations,
+    )
+    .await
+}
+
+/// How a proxy-fault direct retry ended, for the `proxy_fault_retry` WARN.
+/// `snake_timeout` covers both a direct timeout and a direct network error
+/// (no answer arrived in budget); `snake_error` is a non-2xx answer;
+/// `invalid_response` is a 2xx answer whose body/direction was unusable.
+fn retry_outcome(result: &MoveResult) -> &'static str {
+    if result.timed_out {
+        "snake_timeout"
+    } else if result.status_code.is_some_and(|s| !(200..300).contains(&s)) {
+        "snake_error"
+    } else if result.errored {
+        "invalid_response"
+    } else {
+        "moved"
+    }
+}
+
+/// WARN for a /move proxy fault that was retried directly. Logged once per
+/// retry, after the direct call returns, so the outcome is the real one.
+/// `kind` is "transport" | "local guard" | "response"; `proxy_status` is
+/// the proxy's HTTP status when it answered (None for Fault kinds).
+fn log_proxy_fault_retry(
+    snake_id: &str,
+    region: EngineRegion,
+    kind: &str,
+    proxy_status: Option<StatusCode>,
+    result: &MoveResult,
+) {
+    tracing::warn!(
+        snake_id,
+        region = region.as_str(),
+        call = "move",
+        kind,
+        status = proxy_status.map(|s| s.as_u16()),
+        metric_type = "proxy_fault_retry",
+        outcome = retry_outcome(result),
+        latency_ms = result.latency_ms,
+        "Engine proxy fault, retried directly"
+    );
+}
+
 pub async fn request_move_routed(
     clients: &ProxyClients<'_>,
     endpoint: &SnakeEndpoint,
@@ -699,11 +770,10 @@ pub async fn request_move_routed(
             ..
         } if status == StatusCode::PROXY_AUTHENTICATION_REQUIRED => {
             log_proxy_auth_failure(endpoint.engine_region);
-            request_move(
-                clients.direct,
-                &endpoint.url,
+            retry_move_direct(
+                clients,
+                endpoint,
                 game,
-                &endpoint.snake_id,
                 timeout,
                 last_direction,
                 snake_contexts,
@@ -716,24 +786,44 @@ pub async fn request_move_routed(
             status,
             ..
         } => {
-            log_proxy_fault(
+            let result = retry_move_direct(
+                clients,
+                endpoint,
+                game,
+                timeout,
+                last_direction,
+                snake_contexts,
+                customizations,
+            )
+            .await;
+            log_proxy_fault_retry(
                 &endpoint.snake_id,
                 endpoint.engine_region,
-                "move",
                 "response",
                 Some(status),
+                &result,
             );
-            fallback(None, false)
+            result
         }
         ProxyCall::Fault { kind } => {
-            log_proxy_fault(
+            let result = retry_move_direct(
+                clients,
+                endpoint,
+                game,
+                timeout,
+                last_direction,
+                snake_contexts,
+                customizations,
+            )
+            .await;
+            log_proxy_fault_retry(
                 &endpoint.snake_id,
                 endpoint.engine_region,
-                "move",
                 kind,
                 None,
+                &result,
             );
-            fallback(None, false)
+            result
         }
     }
 }
@@ -1054,6 +1144,35 @@ mod tests {
         );
     }
 
+    #[test]
+    fn retry_outcome_covers_all_four_outcomes_and_precedence() {
+        let result = |timed_out: bool, status_code: Option<u16>, errored: bool| MoveResult {
+            snake_id: "snake-1".to_string(),
+            direction: Direction::Right,
+            latency_ms: Some(120),
+            timed_out,
+            shout: None,
+            status_code,
+            errored,
+        };
+        // (timed_out, status_code, errored) -> expected outcome.
+        // Rows 2-3 pin the precedence: `timed_out` outranks a non-2xx
+        // status, and a non-2xx status outranks `errored`.
+        let cases = [
+            ((true, None, false), "snake_timeout"),
+            ((true, Some(504), true), "snake_timeout"),
+            ((false, Some(500), true), "snake_error"),
+            ((false, Some(200), true), "invalid_response"),
+            ((false, Some(200), false), "moved"),
+        ];
+        for ((timed_out, status_code, errored), expected) in cases {
+            assert_eq!(
+                retry_outcome(&result(timed_out, status_code, errored)),
+                expected
+            );
+        }
+    }
+
     #[tokio::test]
     async fn routed_move_uses_proxy_headers_and_measured_latency() {
         let snake = MockServer::start().await;
@@ -1109,9 +1228,13 @@ mod tests {
     #[tokio::test]
     async fn proxy_failure_classes_and_auth_retry() {
         let snake = MockServer::start().await;
+        // Only the 407 iteration retries direct (504/502 are snake-side and
+        // keep the fallback): .expect(1) pins exactly one direct call across
+        // the whole loop.
         Mock::given(method("POST"))
             .and(path("/move"))
             .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"move":"up"}"#))
+            .expect(1)
             .mount(&snake)
             .await;
         let game = create_test_engine_game_with_snakes(vec!["snake-1"]);
@@ -1268,7 +1391,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hanging_proxy_hits_local_guard_without_marking_snake_timed_out() {
+    async fn hanging_proxy_retries_direct_with_fresh_full_timeout() {
+        // A proxy that never answers trips the local guard at timeout+300ms
+        // (500ms here). The /move retry must get the snake's full timeout
+        // again, not the budget left after the guard: the snake's 120ms reply
+        // cannot fit in a zero-or-negative leftover, so a leftover-budget bug
+        // times the direct call out and falls back to Left.
+        let snake = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/move"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(r#"{"move":"right"}"#)
+                    .set_delay(Duration::from_millis(120)),
+            )
+            .expect(1)
+            .mount(&snake)
+            .await;
         let proxy = MockServer::start().await;
         Mock::given(method("POST"))
             .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(2)))
@@ -1288,7 +1427,7 @@ mod tests {
         };
         let endpoint = SnakeEndpoint {
             snake_id: "snake-1".to_string(),
-            url: "https://snake.example".to_string(),
+            url: snake.uri(),
             engine_region: EngineRegion::UsEast4,
         };
         let game = create_test_engine_game_with_snakes(vec!["snake-1"]);
@@ -1297,16 +1436,29 @@ mod tests {
             &clients,
             &endpoint,
             &game,
-            Duration::from_millis(100),
-            None,
+            Duration::from_millis(200),
+            Some(Direction::Left),
             &HashMap::new(),
             &HashMap::new(),
         )
         .await;
-        assert!(start.elapsed() < Duration::from_secs(1));
+        // Worst case is the 500ms guard plus the 200ms fresh timeout; the
+        // assert is ~3x that budget for slow hosts.
+        assert!(start.elapsed() < Duration::from_secs(2));
+        assert_eq!(result.direction, Direction::Right);
         assert!(!result.timed_out);
         assert!(!result.errored, "a proxy fault is never the snake's error");
-        assert!(result.latency_ms.is_none());
+        // The latency is measured on the direct call (wiremock's delay is a
+        // floor, so the reply cannot arrive before 120ms); the proxy never
+        // sent one. A lower bound also proves the fresh-timeout retry: a
+        // leftover-budget retry would time out and report None.
+        let latency = result
+            .latency_ms
+            .expect("direct retry reports measured latency");
+        assert!(
+            latency >= 100,
+            "direct latency {latency}ms should cover the 120ms snake delay"
+        );
     }
 
     #[tokio::test]
@@ -1385,6 +1537,21 @@ mod tests {
 
     #[tokio::test]
     async fn stalled_proxy_body_is_caught_by_local_guard() {
+        // Headers arrive (with a stale proxy-measured 20ms) but the body
+        // never does; the guard fires at timeout+300ms and the /move
+        // retries directly. The turn's recorded latency must be the direct
+        // call's (~50ms), not the stale proxy header value.
+        let snake = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/move"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(r#"{"move":"right"}"#)
+                    .set_delay(Duration::from_millis(50)),
+            )
+            .expect(1)
+            .mount(&snake)
+            .await;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         tokio::spawn(async move {
@@ -1410,7 +1577,7 @@ mod tests {
         };
         let endpoint = SnakeEndpoint {
             snake_id: "snake-1".to_string(),
-            url: "https://snake.example".to_string(),
+            url: snake.uri(),
             engine_region: EngineRegion::UsEast4,
         };
         let game = create_test_engine_game_with_snakes(vec!["snake-1"]);
@@ -1420,14 +1587,24 @@ mod tests {
             &endpoint,
             &game,
             Duration::from_millis(100),
-            None,
+            Some(Direction::Left),
             &HashMap::new(),
             &HashMap::new(),
         )
         .await;
-        assert!(started.elapsed() < Duration::from_secs(1));
-        assert!(result.latency_ms.is_none());
+        // Worst case is the 400ms guard plus the 100ms fresh timeout; the
+        // assert is ~3x that budget for slow hosts.
+        assert!(started.elapsed() < Duration::from_millis(1500));
+        assert_eq!(result.direction, Direction::Right);
         assert!(!result.timed_out);
+        assert!(!result.errored, "a proxy fault is never the snake's error");
+        let latency = result
+            .latency_ms
+            .expect("direct retry reports measured latency");
+        assert!(
+            latency >= 40,
+            "direct latency {latency}ms should cover the 50ms snake delay, not the stale 20ms proxy header"
+        );
     }
 
     #[tokio::test]
@@ -1485,6 +1662,172 @@ mod tests {
         .await;
         assert!(started.elapsed() < Duration::from_millis(500));
         assert_eq!(result.direction, Direction::Right);
+    }
+
+    #[tokio::test]
+    async fn proxy_reset_retries_direct_once() {
+        // A proxy that accepts the connection then drops it without writing
+        // anything is a transport fault: exactly one direct retry, and the
+        // snake's real move (Right, not the Left fallback) is used.
+        let snake = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/move"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"move":"right"}"#))
+            .expect(1)
+            .mount(&snake)
+            .await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            drop(stream);
+        });
+        let config = EngineProxyConfig {
+            token: Some("secret".to_string()),
+            us_east4_url: format!("http://{address}"),
+            europe_west4_url: format!("http://{address}"),
+        };
+        let client = Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
+        let clients = ProxyClients {
+            direct: &client,
+            east: &client,
+            europe: &client,
+            config: &config,
+        };
+        let endpoint = SnakeEndpoint {
+            snake_id: "snake-1".to_string(),
+            url: snake.uri(),
+            engine_region: EngineRegion::UsEast4,
+        };
+        let game = create_test_engine_game_with_snakes(vec!["snake-1"]);
+        let result = request_move_routed(
+            &clients,
+            &endpoint,
+            &game,
+            Duration::from_millis(500),
+            Some(Direction::Left),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .await;
+        assert_eq!(result.direction, Direction::Right);
+        assert!(!result.timed_out);
+        assert!(!result.errored);
+        assert!(result.latency_ms.is_some());
+    }
+
+    #[tokio::test]
+    async fn bare_proxy_500_retries_direct_once() {
+        // A bare non-407 status with no latency header is a proxy fault
+        // (kind=response): exactly one direct retry, and the snake's real
+        // move is used.
+        let snake = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/move"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"move":"right"}"#))
+            .expect(1)
+            .mount(&snake)
+            .await;
+        let proxy = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(1)
+            .mount(&proxy)
+            .await;
+        let config = EngineProxyConfig {
+            token: Some("secret".to_string()),
+            us_east4_url: proxy.uri(),
+            europe_west4_url: proxy.uri(),
+        };
+        let client = Client::new();
+        let clients = ProxyClients {
+            direct: &client,
+            east: &client,
+            europe: &client,
+            config: &config,
+        };
+        let endpoint = SnakeEndpoint {
+            snake_id: "snake-1".to_string(),
+            url: snake.uri(),
+            engine_region: EngineRegion::UsEast4,
+        };
+        let game = create_test_engine_game_with_snakes(vec!["snake-1"]);
+        let result = request_move_routed(
+            &clients,
+            &endpoint,
+            &game,
+            Duration::from_millis(500),
+            Some(Direction::Left),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .await;
+        assert_eq!(result.direction, Direction::Right);
+        assert!(!result.timed_out);
+        assert!(!result.errored);
+        assert!(result.latency_ms.is_some());
+    }
+
+    #[tokio::test]
+    async fn snake_transport_failures_do_not_retry_direct() {
+        // 504/502 with latency + X-Battlesnake-Server-Error are real snake
+        // timeouts/errors carried by the proxy: never retried, today's
+        // fallback. (The arm hardcodes timed_out=true for both statuses —
+        // 502 classifies as timed_out:false but is treated the same.)
+        for status in [504, 502] {
+            let snake = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/move"))
+                .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"move":"right"}"#))
+                .expect(0)
+                .mount(&snake)
+                .await;
+            let proxy = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(
+                    ResponseTemplate::new(status)
+                        .insert_header(LATENCY_HEADER, "35")
+                        .insert_header(SERVER_ERROR_HEADER, "true"),
+                )
+                .expect(1)
+                .mount(&proxy)
+                .await;
+            let config = EngineProxyConfig {
+                token: Some("secret".to_string()),
+                us_east4_url: proxy.uri(),
+                europe_west4_url: proxy.uri(),
+            };
+            let client = Client::new();
+            let clients = ProxyClients {
+                direct: &client,
+                east: &client,
+                europe: &client,
+                config: &config,
+            };
+            let endpoint = SnakeEndpoint {
+                snake_id: "snake-1".to_string(),
+                url: snake.uri(),
+                engine_region: EngineRegion::UsEast4,
+            };
+            let game = create_test_engine_game_with_snakes(vec!["snake-1"]);
+            let result = request_move_routed(
+                &clients,
+                &endpoint,
+                &game,
+                Duration::from_millis(500),
+                Some(Direction::Left),
+                &HashMap::new(),
+                &HashMap::new(),
+            )
+            .await;
+            assert_eq!(result.direction, Direction::Left, "status {status}");
+            assert!(result.timed_out, "status {status}");
+            assert_eq!(result.latency_ms, None, "status {status}");
+            assert!(!result.errored, "status {status}");
+        }
     }
     use wiremock::{Mock, MockServer, ResponseTemplate};
 

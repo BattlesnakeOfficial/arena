@@ -141,8 +141,10 @@ pub struct SnakeContext {
 /// The `latency` a snake sees for its previous move, matching the official
 /// engine (`convertBoardStatetoGameFrame` in BattlesnakeOfficial/engine):
 /// measured milliseconds clamped to `[1, timeout]`, so a timed-out move
-/// reports the full timeout rather than "0". `None` (no measurement, e.g. an
-/// engine-proxy fault that was not the snake's doing) serializes as "0".
+/// reports the full timeout rather than "0". `None` (no measurement — e.g.
+/// a direct-path network error on `/move`, or a proxy-fault fallback on the
+/// start/end/info and health paths) serializes as "0"; `/move` proxy faults
+/// are retried directly, so they carry a real measurement or a timeout.
 pub fn reported_latency_ms(
     latency_ms: Option<i64>,
     timed_out: bool,
