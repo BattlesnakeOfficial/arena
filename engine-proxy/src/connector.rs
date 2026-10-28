@@ -250,9 +250,16 @@ impl TimedConnector {
             }
             tracing::info!(path = %path.display(), "Loaded extra CA bundle");
         }
-        let mut tls_cfg = rustls::ClientConfig::builder()
-            .with_root_certificates(roots)
-            .with_no_client_auth();
+        // Name the provider: when another crate in the build also enables
+        // rustls' aws-lc-rs backend (arena's cja-tailnet does), rustls can't
+        // pick a process default and `ClientConfig::builder()` panics.
+        let mut tls_cfg = rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .map_err(|e| io::Error::other(format!("TLS protocol versions: {e}")))?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
         tls_cfg.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
         Ok(Self {
             tls: TlsConnector::from(Arc::new(tls_cfg)),

@@ -103,10 +103,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .unwrap_or_else(|e| panic!("bad certs in {cert_path:?}: {e:?}"));
             let key = rustls_pki_types::PrivateKeyDer::from_pem_file(key_path.clone())
                 .unwrap_or_else(|e| panic!("no key in {key_path:?}: {e:?}"));
-            let cfg = rustls::ServerConfig::builder()
-                .with_no_client_auth()
-                .with_single_cert(certs, key)
-                .map_err(|e| format!("bad TLS material: {e:?}"))?;
+            let cfg = rustls::ServerConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_safe_default_protocol_versions()
+            .map_err(|e| format!("TLS protocol versions: {e:?}"))?
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .map_err(|e| format!("bad TLS material: {e:?}"))?;
             Some(tokio_rustls::TlsAcceptor::from(Arc::new(cfg)))
         }
     };
