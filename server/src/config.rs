@@ -210,7 +210,6 @@ pub struct AppConfig {
     pub gcs_bucket: Option<String>,
     pub github: Option<GitHubOAuthConfig>,
     pub mailgun: Option<MailgunConfig>,
-    pub discord_webhook_url: Option<String>,
     /// Content moderation (Jev). Always present; inert without a key.
     pub moderation: ModerationConfig,
     pub engine_proxy: EngineProxyConfig,
@@ -348,7 +347,6 @@ impl AppConfig {
             gcs_bucket: optional_env("GCS_BUCKET"),
             github: github_config_from_env(),
             mailgun: mailgun_config_from_env(),
-            discord_webhook_url: optional_env("DISCORD_WEBHOOK_URL"),
             moderation: moderation_config_from_env(),
             engine_proxy: proxy_config_from_env()?,
 
@@ -402,7 +400,6 @@ impl AppConfig {
             gcs_bucket: None,
             github: None,
             mailgun: None,
-            discord_webhook_url: None,
             moderation: ModerationConfig::default(),
             engine_proxy: EngineProxyConfig::default(),
             game_creation_rate_limit: 40,
@@ -632,7 +629,6 @@ mod tests {
         let c = AppConfig::test_default();
         assert!(c.github.is_none());
         assert!(c.mailgun.is_none());
-        assert!(c.discord_webhook_url.is_none());
         assert!(c.engine_database_url.is_none());
         assert!(c.gcs_bucket.is_none());
         assert!(c.gcp_project_id.is_none());

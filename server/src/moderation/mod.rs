@@ -1614,7 +1614,7 @@ mod moderation_tests {
 
         // Flagged: created, but no Discord post.
         mount_matching(&jev, "FlaggedName", flag_response(), 1).await;
-        let state = discord_state(&pool, &jev.uri(), &discord.uri());
+        let state = discord_state(&pool, &jev.uri(), &discord.uri()).await;
         let response = crate::routes::api::snakes::create_snake(
             axum::extract::State(state),
             crate::routes::auth::ApiUser(crate::routes::auth::ApiAuth::session(user.clone())),
@@ -1645,7 +1645,7 @@ mod moderation_tests {
 
         // Positive control: allowed public name relays exactly once.
         mount_matching(&jev, "RelayMe", allow_response(), 1).await;
-        let state = discord_state(&pool, &jev.uri(), &discord.uri());
+        let state = discord_state(&pool, &jev.uri(), &discord.uri()).await;
         let response = crate::routes::api::snakes::create_snake(
             axum::extract::State(state),
             crate::routes::auth::ApiUser(crate::routes::auth::ApiAuth::session(user.clone())),
@@ -1680,10 +1680,14 @@ mod moderation_tests {
         Ok(())
     }
 
-    fn discord_state(pool: &PgPool, jev_uri: &str, discord_uri: &str) -> crate::state::AppState {
+    async fn discord_state(
+        pool: &PgPool,
+        jev_uri: &str,
+        discord_uri: &str,
+    ) -> crate::state::AppState {
         let mut state = test_state(pool, jev_uri);
         state.discord = crate::discord::DiscordNotifier::new(
-            Some(discord_uri.to_string()),
+            Some(crate::discord::test_webhook_url(discord_uri).await),
             reqwest::Client::new(),
         );
         state

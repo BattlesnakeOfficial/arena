@@ -845,7 +845,7 @@ mod tests {
     use super::*;
     use crate::models::battlesnake::Visibility;
     use reqwest::Client;
-    use tokio::io::AsyncWriteExt as _;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
@@ -1410,6 +1410,10 @@ mod tests {
         let address = listener.local_addr().unwrap();
         tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
+            // Read the request first: hyper-util >= 0.1.12 cancels a request
+            // when the response arrives before the request was written.
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request).await.unwrap();
             stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nX-Battlesnake-Latency-Ms: 28\r\n\r\n")
                 .await.unwrap();
             tokio::time::sleep(Duration::from_secs(7)).await;

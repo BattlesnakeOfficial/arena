@@ -32,6 +32,8 @@ reqwest = { version = "0.12.12", features = [
 ], default-features = false }
 
 cja = { version = "0.0.0", git = "https://github.com/coreyja/cja", branch = "main" }
+# Secrets from setec over an in-process tailnet node (DEV-1919).
+cja-secret = { git = "https://github.com/coreyja/cja", branch = "main", features = ["tailnet"] }
 sqlx = "0.8"
 uuid = { version = "1.6.1", features = ["v4"] }
 time = "0.3.9"
@@ -134,6 +136,7 @@ vergen = { version = "8.3.1", features = [
 ] }
 
 [dev-dependencies]
+cja-secret = { git = "https://github.com/coreyja/cja", branch = "main", features = ["testing"] }
 tower = { version = "0.4.13", features = ["util"] }
 proptest = "1"
 wiremock = "0.6"
