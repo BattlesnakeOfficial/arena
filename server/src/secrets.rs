@@ -27,11 +27,24 @@ pub async fn load_from_env() -> cja::Result<Option<(AppSecrets, Refresher)>> {
         return Ok(None);
     }
     let config = SetecConfig::from_env().wrap_err("Invalid setec config")?;
-    let loaded = SecretStore::connect(config)
+    let (secrets, refresher) = SecretStore::connect(config)
         .await
         .wrap_err("Failed to connect to setec")?
         .load::<AppSecrets>()
         .await
         .wrap_err("Failed to load secrets from setec")?;
-    Ok(Some(loaded))
+    tracing::info!(
+        discord_webhook_url = presence(secrets.discord_webhook_url.as_ref()),
+        "Arena secrets loaded from setec"
+    );
+    Ok(Some((secrets, refresher)))
+}
+
+/// `present`/`missing` for an optional secret, for logs. Never the value.
+fn presence<T>(secret: Option<&Secret<T>>) -> &'static str {
+    if secret.is_some() {
+        "present"
+    } else {
+        "missing"
+    }
 }
