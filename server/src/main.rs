@@ -40,6 +40,7 @@ mod placement;
 mod play_import;
 mod routes;
 mod scoring;
+mod secrets;
 mod snake_client;
 #[cfg(test)]
 mod snake_client_contract_tests;
@@ -216,11 +217,15 @@ async fn run_instrumented_application(
     config: config::AppConfig,
     identity: eyes_subscriber::ProcessIdentity,
 ) -> cja::Result<()> {
-    let app_state = AppState::from_config(config).await?;
+    let secrets = secrets::load_from_env().await?;
+    let app_state = AppState::from_config(config, secrets.as_ref().map(|(s, _)| s)).await?;
     let mut supervisor = Supervisor::new(ShutdownBudget {
         job_drain: Duration::from_secs(app_state.config.job.shutdown_drain_secs),
         exit_grace: SHUTDOWN_EXIT_GRACE,
     })?;
+    if let Some((_, refresher)) = secrets {
+        supervisor.spawn("secret-refresh", refresher.run(supervisor.shutdown_token()));
+    }
     let heartbeat = spawn_application_tasks(app_state, identity, &mut supervisor).await?;
     let result = supervisor.run().await;
     if let Some(handle) = heartbeat

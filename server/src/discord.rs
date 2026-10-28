@@ -1,7 +1,7 @@
 //! Discord webhook notifications for community events.
 //!
 //! [`DiscordNotifier`] is a no-op when no webhook URL is configured
-//! (`DISCORD_WEBHOOK_URL` unset/empty), mirroring the Mailer convention:
+//! (`arena/discord/webhook-url` absent from setec), mirroring the Mailer convention:
 //! the code compiles and runs everywhere, and sending only becomes real
 //! once the URL is set. Callers treat a send as best-effort — a failed
 //! notification must never break the operation that triggered it.
@@ -11,6 +11,7 @@
 //! injection from user-controlled identifiers (snake names, play
 //! usernames) that appear in message content.
 
+use cja_secret::Secret;
 use color_eyre::eyre::Context as _;
 
 /// Posts community events to a Discord webhook, or silently drops them
@@ -18,12 +19,13 @@ use color_eyre::eyre::Context as _;
 /// clone) so it can live in `AppState` and be moved into spawned sends.
 #[derive(Clone)]
 pub struct DiscordNotifier {
-    webhook_url: Option<String>,
+    /// Read at send time, so a rotation in setec takes effect without a restart.
+    webhook_url: Option<Secret<String>>,
     http: reqwest::Client,
 }
 
 impl DiscordNotifier {
-    pub fn new(webhook_url: Option<String>, http: reqwest::Client) -> Self {
+    pub fn new(webhook_url: Option<Secret<String>>, http: reqwest::Client) -> Self {
         Self { webhook_url, http }
     }
 
@@ -49,7 +51,7 @@ impl DiscordNotifier {
     /// all mention parsing — prevents `@everyone`/`@here` injection from
     /// user-controlled content like snake names.
     pub async fn send(&self, content: &str) -> cja::Result<()> {
-        let Some(url) = &self.webhook_url else {
+        let Some(url) = self.webhook_url.as_ref().map(Secret::current) else {
             tracing::info!(
                 content = content,
                 "Discord disabled (no webhook URL); not sending"
@@ -59,7 +61,7 @@ impl DiscordNotifier {
 
         let response = self
             .http
-            .post(url)
+            .post(url.as_str())
             .json(&serde_json::json!({
                 "content": content,
                 "allowed_mentions": { "parse": [] }
@@ -152,13 +154,68 @@ fn snake_registered_message(snake_name: &str, github_login: &str) -> String {
 }
 
 #[cfg(test)]
+const WEBHOOK_SECRET: &str = "arena/discord/webhook-url";
+
+/// A webhook secret handle holding `url`, for tests that need an enabled
+/// notifier.
+#[cfg(test)]
+pub async fn test_webhook_url(url: &str) -> Secret<String> {
+    cja_secret::FakeSetec::new([(WEBHOOK_SECRET, url.as_bytes())])
+        .store()
+        .declare::<String>(WEBHOOK_SECRET)
+        .await
+        .expect("fake webhook secret")
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use wiremock::matchers::{body_string_contains, method};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    fn configured_notifier(base_url: String) -> DiscordNotifier {
-        DiscordNotifier::new(Some(base_url), reqwest::Client::new())
+    async fn configured_notifier(base_url: String) -> DiscordNotifier {
+        DiscordNotifier::new(
+            Some(test_webhook_url(&base_url).await),
+            reqwest::Client::new(),
+        )
+    }
+
+    #[tokio::test]
+    async fn send_uses_the_current_webhook_after_rotation() {
+        let old = MockServer::start().await;
+        let new = MockServer::start().await;
+        for (server, hits) in [(&old, 1), (&new, 1)] {
+            Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(204))
+                .expect(hits)
+                .mount(server)
+                .await;
+        }
+
+        let fake = cja_secret::FakeSetec::new([(WEBHOOK_SECRET, old.uri().as_bytes())]);
+        let (secrets, refresher) = fake
+            .store()
+            .load::<crate::secrets::AppSecrets>()
+            .await
+            .unwrap();
+        let notifier = DiscordNotifier::new(secrets.discord_webhook_url, reqwest::Client::new());
+        notifier.send("before").await.unwrap();
+
+        fake.rotate(WEBHOOK_SECRET, new.uri().as_bytes());
+        refresher.refresh().await.unwrap();
+        notifier.send("after").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn absent_secret_leaves_the_notifier_disabled() {
+        let (secrets, _refresher) = cja_secret::FakeSetec::default()
+            .store()
+            .load::<crate::secrets::AppSecrets>()
+            .await
+            .unwrap();
+        let notifier = DiscordNotifier::new(secrets.discord_webhook_url, reqwest::Client::new());
+        assert!(!notifier.is_enabled());
+        notifier.send("test").await.unwrap();
     }
 
     #[tokio::test]
@@ -180,7 +237,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let notifier = configured_notifier(server.uri());
+        let notifier = configured_notifier(server.uri()).await;
         notifier.send("test message").await.unwrap();
     }
 
@@ -195,7 +252,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let notifier = configured_notifier(server.uri());
+        let notifier = configured_notifier(server.uri()).await;
         notifier.send("test message").await.unwrap();
     }
 
@@ -207,7 +264,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let notifier = configured_notifier(server.uri());
+        let notifier = configured_notifier(server.uri()).await;
         let err = notifier.send("test").await.unwrap_err();
         assert!(err.to_string().contains("429"));
     }

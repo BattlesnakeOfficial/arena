@@ -30,7 +30,7 @@ pub struct AppState {
     pub proxy_europe_health_client: reqwest::Client,
     /// Transactional email sender (no-op until Mailgun is configured)
     pub mailer: Mailer,
-    /// Discord webhook notifier (no-op until DISCORD_WEBHOOK_URL is configured)
+    /// Discord webhook notifier (no-op until `arena/discord/webhook-url` is in setec)
     pub discord: DiscordNotifier,
     /// Jev content-moderation judge (inert until TYPESAFE_API_KEY is
     /// configured; the offline hard-block list always runs)
@@ -50,7 +50,10 @@ pub struct AppState {
 impl AppState {
     /// Turn resolved [`AppConfig`] into live resources (pools, clients).
     /// All environment reading already happened in [`AppConfig::from_env`].
-    pub async fn from_config(config: AppConfig) -> cja::Result<Self> {
+    pub async fn from_config(
+        config: AppConfig,
+        secrets: Option<&crate::secrets::AppSecrets>,
+    ) -> cja::Result<Self> {
         async fn setup_db_pool(database_url: &str, max_connections: u32) -> cja::Result<PgPool> {
             const MIGRATION_LOCK_ID: i64 = 0xDB_DB_DB_DB_DB_DB_DB;
 
@@ -163,7 +166,7 @@ impl AppState {
         // Uses its own client like the mailer — the snake client's 600ms timeout
         // is too tight for an external webhook API.
         let discord = DiscordNotifier::new(
-            config.discord_webhook_url.clone(),
+            secrets.and_then(|s| s.discord_webhook_url.clone()),
             reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(10))
                 .build()
@@ -172,7 +175,7 @@ impl AppState {
         if discord.is_enabled() {
             tracing::info!("Discord webhook configured for community notifications");
         } else {
-            tracing::info!("DISCORD_WEBHOOK_URL not set, Discord notifications disabled");
+            tracing::info!("No Discord webhook in setec, Discord notifications disabled");
         }
 
         // Optional: Jev content moderation (disabled until configured).
