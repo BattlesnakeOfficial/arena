@@ -592,10 +592,13 @@ mod tests {
             recorded.iter().map(|(_, path, _)| path).collect::<Vec<_>>()
         );
         for (_, path, authorization) in recorded.iter() {
-            assert_eq!(
-                authorization.as_deref(),
-                Some("Bearer eyes_test_token"),
-                "request to {path} carried {authorization:?}"
+            // Presence-only failure message: an ambient `EYES_TOKEN` leaking in
+            // is exactly the regression this test guards against, so the
+            // header value must never be printed.
+            assert!(
+                authorization.as_deref() == Some("Bearer eyes_test_token"),
+                "request to {path} did not carry the expected test bearer (header present: {})",
+                authorization.is_some()
             );
         }
     }
@@ -623,9 +626,11 @@ mod tests {
             recorded.iter().map(|(_, path, _)| path).collect::<Vec<_>>()
         );
         for (_, path, authorization) in recorded.iter() {
-            assert_eq!(
-                authorization, &None,
-                "request to {path} carried {authorization:?}"
+            // Presence-only failure message: never print a captured header
+            // value (ambient `EYES_TOKEN` could have leaked in).
+            assert!(
+                authorization.is_none(),
+                "request to {path} carried an Authorization header"
             );
         }
     }

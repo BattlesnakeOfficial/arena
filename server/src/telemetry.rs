@@ -463,11 +463,16 @@ mod tests {
 
         let captured = captured.lock().unwrap();
         assert!(!captured.is_empty(), "no events reached the fake server");
+        // Count-only failure message: never print captured header values
+        // (an ambient `EYES_TOKEN` could have leaked in).
+        let mismatches = captured
+            .iter()
+            .filter(|header| header.as_str() != "Bearer eyes_test_wire")
+            .count();
         assert!(
-            captured
-                .iter()
-                .all(|header| header == "Bearer eyes_test_wire"),
-            "unexpected Authorization headers: {captured:?}"
+            mismatches == 0,
+            "{mismatches} of {} captured Authorization headers were not the test bearer",
+            captured.len()
         );
     }
 }

@@ -198,8 +198,10 @@ async fn run_application(config: config::AppConfig) -> cja::Result<()> {
 
 /// `secrets::load_from_env` under a temporary stdout subscriber, so boot logs
 /// emitted before telemetry init ("Joined tailnet", "Arena secrets loaded")
-/// still reach stdout / Cloud Logging. Fail-fast unchanged: on error the full
-/// chain goes to stderr and the process exits non-zero.
+/// still reach stdout / Cloud Logging. Logs from tasks spawned inside the
+/// boot window (tailscale-rs/setec internals) go to the no-op global
+/// dispatcher until the real subscriber is installed. Fail-fast unchanged: on
+/// error the full chain goes to stderr and the process exits non-zero.
 async fn load_secrets_before_telemetry(
     config: &config::AppConfig,
 ) -> cja::Result<Option<(secrets::AppSecrets, cja_secret::Refresher)>> {
