@@ -294,29 +294,44 @@ fn dashboard() -> Result<NamedDashboard, String> {
 
 /// Publishing and heartbeats are best effort: Eyes must not prevent Arena
 /// from serving traffic. Wait for manifest acceptance before the first beat.
-pub async fn start(config: &AppConfig, manifest: &AppManifest) -> Option<ProcessHeartbeatHandle> {
+pub async fn start(
+    config: &AppConfig,
+    manifest: &AppManifest,
+    token: Option<&str>,
+) -> Option<ProcessHeartbeatHandle> {
     let eyes = config.eyes.as_ref()?;
-    let result = async {
-        tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            eyes_subscriber::send_manifest_from_env(manifest),
-        )
-        .await??;
-        let base = std::env::var("EYES_URL")
-            .unwrap_or_else(|_| "https://eyes.coreyja.com".to_owned())
-            .parse()?;
-        let config =
-            ProcessHeartbeatConfig::from_manifest(base, eyes.org_id, eyes.app_id, manifest)?;
-        Ok::<_, color_eyre::Report>(ProcessHeartbeat::spawn(config)?)
-    }
-    .await;
-    match result {
+    let base_url =
+        std::env::var("EYES_URL").unwrap_or_else(|_| "https://eyes.coreyja.com".to_owned());
+    match register(&base_url, eyes.org_id, eyes.app_id, manifest, token).await {
         Ok(handle) => Some(handle),
         Err(error) => {
             tracing::warn!(error = %format!("{error:#}"), "Eyes process registration failed");
             None
         }
     }
+}
+
+/// Publish the boot manifest and start the process heartbeat against one Eyes
+/// server. `token` is the resolved ingest token (setec first, then
+/// `EYES_TOKEN`); `None` sends no Authorization header. The token is
+/// force-assigned onto the heartbeat config — `from_manifest` seeds it from
+/// ambient `EYES_TOKEN`, which must not resurface a resolved `None`.
+async fn register(
+    base_url: &str,
+    org_id: uuid::Uuid,
+    app_id: uuid::Uuid,
+    manifest: &AppManifest,
+    token: Option<&str>,
+) -> color_eyre::Result<ProcessHeartbeatHandle> {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        eyes_subscriber::send_manifest(base_url, org_id, app_id, manifest, token),
+    )
+    .await??;
+    let mut heartbeat =
+        ProcessHeartbeatConfig::from_manifest(base_url.parse()?, org_id, app_id, manifest)?;
+    heartbeat.token = token.map(str::to_owned);
+    Ok(ProcessHeartbeat::spawn(heartbeat)?)
 }
 
 #[cfg(test)]
@@ -472,6 +487,151 @@ mod tests {
         // actual subscriber wire format rather than a second serializer.
         if let Ok(path) = std::env::var("EYES_MANIFEST_FIXTURE_PATH") {
             std::fs::write(path, serde_json::to_vec_pretty(&body).unwrap()).unwrap();
+        }
+    }
+
+    /// `(method, path, Authorization)` for one recorded request.
+    type Recorded = (String, String, Option<String>);
+
+    /// Shared log of recorded requests.
+    type RecordedLog = std::sync::Arc<std::sync::Mutex<Vec<Recorded>>>;
+
+    /// A fake Eyes server recording `(method, path, Authorization)` for every
+    /// request. Hermetic: tokens are always passed explicitly to `register`,
+    /// never resolved from ambient `EYES_TOKEN` (which every dev shell on
+    /// byte-vm carries).
+    async fn recording_server() -> (String, RecordedLog, tokio::task::JoinHandle<()>) {
+        use std::sync::{Arc, Mutex};
+
+        let recorded: RecordedLog = Arc::new(Mutex::new(Vec::new()));
+        let router = {
+            let recorded = recorded.clone();
+            axum::Router::new().fallback(
+                move |method: axum::http::Method,
+                      uri: axum::http::Uri,
+                      headers: axum::http::HeaderMap| {
+                    let recorded = recorded.clone();
+                    async move {
+                        let authorization = headers
+                            .get(axum::http::header::AUTHORIZATION)
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_owned);
+                        recorded.lock().unwrap().push((
+                            method.to_string(),
+                            uri.path().to_owned(),
+                            authorization,
+                        ));
+                        axum::http::StatusCode::OK
+                    }
+                },
+            )
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        (format!("http://{addr}"), recorded, server)
+    }
+
+    async fn test_manifest() -> AppManifest {
+        manifest(
+            &crate::cron::cron_registry(&AppConfig::test_default()),
+            ProcessIdentity::new(ROLE),
+            FeatureFlags {
+                server: true,
+                jobs: true,
+                cron: true,
+            },
+        )
+        .unwrap()
+    }
+
+    /// Wait for the first heartbeat POST before shutting down: on a
+    /// current-thread runtime the spawned heartbeat task must get polled
+    /// first, or `shutdown`'s `abort` wins and the POST never happens.
+    async fn await_first_heartbeat(recorded: &std::sync::Mutex<Vec<Recorded>>) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if recorded
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|(method, path, _)| method == "POST" && path.ends_with("/heartbeat"))
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("first heartbeat POST");
+    }
+
+    #[tokio::test]
+    async fn register_sends_bearer_on_every_request_when_a_token_is_set() {
+        let manifest = test_manifest().await;
+        let (base_url, recorded, server) = recording_server().await;
+        let (org_id, app_id) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+
+        let handle = register(
+            &base_url,
+            org_id,
+            app_id,
+            &manifest,
+            Some("eyes_test_token"),
+        )
+        .await
+        .expect("registration succeeds");
+        await_first_heartbeat(&recorded).await;
+        handle.shutdown().await.unwrap();
+        server.abort();
+
+        let recorded = recorded.lock().unwrap();
+        assert!(
+            recorded.len() >= 2,
+            "expected manifest + heartbeat POSTs, saw paths {:?}",
+            recorded.iter().map(|(_, path, _)| path).collect::<Vec<_>>()
+        );
+        for (_, path, authorization) in recorded.iter() {
+            // Presence-only failure message: an ambient `EYES_TOKEN` leaking in
+            // is exactly the regression this test guards against, so the
+            // header value must never be printed.
+            assert!(
+                authorization.as_deref() == Some("Bearer eyes_test_token"),
+                "request to {path} did not carry the expected test bearer (header present: {})",
+                authorization.is_some()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn register_boots_tokenless_when_no_token_is_set() {
+        let manifest = test_manifest().await;
+        let (base_url, recorded, server) = recording_server().await;
+        let (org_id, app_id) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+
+        // `None` must stay `None` even with an ambient `EYES_TOKEN` (set on
+        // every byte-vm dev shell): `register` force-assigns the heartbeat
+        // config's token, and `send_manifest` takes it as an explicit argument.
+        let handle = register(&base_url, org_id, app_id, &manifest, None)
+            .await
+            .expect("unset token still boots");
+        await_first_heartbeat(&recorded).await;
+        handle.shutdown().await.unwrap();
+        server.abort();
+
+        let recorded = recorded.lock().unwrap();
+        assert!(
+            recorded.len() >= 2,
+            "expected manifest + heartbeat POSTs, saw paths {:?}",
+            recorded.iter().map(|(_, path, _)| path).collect::<Vec<_>>()
+        );
+        for (_, path, authorization) in recorded.iter() {
+            // Presence-only failure message: never print a captured header
+            // value (ambient `EYES_TOKEN` could have leaked in).
+            assert!(
+                authorization.is_none(),
+                "request to {path} carried an Authorization header"
+            );
         }
     }
 }

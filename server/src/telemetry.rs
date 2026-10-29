@@ -164,6 +164,7 @@ pub fn setup_gcp_tracing(
     stdout_log: Option<&str>,
     eyes: Option<&crate::config::EyesConfig>,
     identity: &eyes_subscriber::ProcessIdentity,
+    eyes_token: Option<&str>,
 ) -> color_eyre::Result<Option<EyesShutdownHandle>> {
     use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -173,20 +174,8 @@ pub fn setup_gcp_tracing(
 
     let (eyes_layer, eyes_shutdown_handle) = match eyes {
         Some(eyes) => {
-            // The server URL and transport come from EYES_URL / EYES_TRANSPORT,
-            // read inside the eyes-subscriber library itself — identical
-            // behavior to the `cja::setup::setup_tracing` path.
-            let (builder, transport) =
-                eyes_subscriber::EyesSubscriberBuilder::from_env_with_transport(
-                    eyes.org_id,
-                    eyes.app_id,
-                )
-                .map_err(|error| {
-                    color_eyre::eyre::eyre!("Failed to build Eyes subscriber: {error}")
-                })?;
-            let (layer, handle) = builder
-                .with_process_instance_id(identity.instance_id())
-                .build_with_transport(transport);
+            let (builder, transport) = eyes_subscriber_builder(eyes, identity, eyes_token)?;
+            let (layer, handle) = builder.build_with_transport(transport);
             println!(
                 "Eyes layer configured (org: {}, app: {})",
                 eyes.org_id, eyes.app_id
@@ -206,6 +195,27 @@ pub fn setup_gcp_tracing(
         .try_init()?;
 
     Ok(eyes_shutdown_handle)
+}
+
+/// Env-derived URL/transport (`EYES_URL`/`EYES_TRANSPORT`, read by the
+/// library), boot identity, and the resolved ingest token. An explicit token
+/// wins over the library's `EYES_TOKEN` fallback; `None` keeps that fallback.
+fn eyes_subscriber_builder(
+    eyes: &crate::config::EyesConfig,
+    identity: &eyes_subscriber::ProcessIdentity,
+    token: Option<&str>,
+) -> color_eyre::Result<(
+    eyes_subscriber::EyesSubscriberBuilder,
+    eyes_subscriber::TransportType,
+)> {
+    let (mut builder, transport) =
+        eyes_subscriber::EyesSubscriberBuilder::from_env_with_transport(eyes.org_id, eyes.app_id)
+            .map_err(|error| color_eyre::eyre::eyre!("Failed to build Eyes subscriber: {error}"))?;
+    builder = builder.with_process_instance_id(identity.instance_id());
+    if let Some(token) = token {
+        builder = builder.with_auth_token(token);
+    }
+    Ok((builder, transport))
 }
 
 /// Parse the `X-Cloud-Trace-Context` header value and return a GCP trace path.
@@ -360,5 +370,109 @@ mod tests {
         // No configured project id → no trace path, regardless of header.
         let result = extract_trace_context("105445aa7843bc8bf206b12000100000/1;o=1", None);
         assert_eq!(result, None);
+    }
+
+    fn test_eyes_config() -> crate::config::EyesConfig {
+        crate::config::EyesConfig {
+            org_id: uuid::Uuid::new_v4(),
+            app_id: uuid::Uuid::new_v4(),
+            token: None,
+        }
+    }
+
+    /// eyes-subscriber's hand-written builder `Debug` redacts the token to
+    /// its first 12 chars + `…`, so asserting on that prefix never prints a
+    /// full (real) token.
+    #[test]
+    fn token_is_applied_to_the_builder() {
+        let identity = eyes_subscriber::ProcessIdentity::new("arena-test");
+        let (builder, _transport) =
+            eyes_subscriber_builder(&test_eyes_config(), &identity, Some("eyes_test_token"))
+                .unwrap();
+        let debug = format!("{builder:?}");
+        assert!(debug.contains("auth_token: Some(\"eyes_test_to"), "{debug}");
+        // The boot identity round-trips onto the builder.
+        assert!(debug.contains(&format!(
+            "process_instance_id: Some({}",
+            identity.instance_id()
+        )));
+    }
+
+    #[test]
+    fn no_token_leaves_the_builder_explicit() {
+        let identity = eyes_subscriber::ProcessIdentity::new("arena-test");
+        let (builder, _transport) =
+            eyes_subscriber_builder(&test_eyes_config(), &identity, None).unwrap();
+        let debug = format!("{builder:?}");
+        // The builder field stays `None` regardless of ambient `EYES_TOKEN`:
+        // the env read happens later inside `build_with_transport`.
+        assert!(debug.contains("auth_token: None"), "{debug}");
+    }
+
+    #[tokio::test]
+    async fn layer_sends_bearer_to_the_events_endpoint() {
+        use std::sync::{Arc, Mutex};
+
+        use eyes_subscriber::TransportType;
+
+        let org_id = uuid::Uuid::new_v4();
+        let app_id = uuid::Uuid::new_v4();
+        let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let router = {
+            let captured = captured.clone();
+            axum::Router::new().route(
+                "/api/orgs/{org}/apps/{app}/events",
+                axum::routing::post(
+                    move |headers: axum::http::HeaderMap,
+                          axum::extract::Path((org, app)): axum::extract::Path<(
+                        String,
+                        String,
+                    )>| {
+                        let captured = captured.clone();
+                        async move {
+                            assert_eq!(org, org_id.to_string());
+                            assert_eq!(app, app_id.to_string());
+                            let value = headers
+                                .get(axum::http::header::AUTHORIZATION)
+                                .map(|value| value.to_str().unwrap().to_owned());
+                            captured.lock().unwrap().push(value.unwrap_or_default());
+                            axum::http::StatusCode::OK
+                        }
+                    },
+                ),
+            )
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        let identity = eyes_subscriber::ProcessIdentity::new("arena-test");
+        let (layer, handle) =
+            eyes_subscriber::EyesSubscriberBuilder::new(format!("http://{addr}"), org_id, app_id)
+                .expect("valid base url")
+                .with_process_instance_id(identity.instance_id())
+                .with_auth_token("eyes_test_wire")
+                .build_with_transport(TransportType::Http);
+
+        tracing::subscriber::with_default(tracing_subscriber::registry().with(layer), || {
+            tracing::info!(target: "arena::eyes_token_wire_test", "eyes token wire test");
+        });
+
+        handle.shutdown().await.unwrap();
+        server.abort();
+
+        let captured = captured.lock().unwrap();
+        assert!(!captured.is_empty(), "no events reached the fake server");
+        // Count-only failure message: never print captured header values
+        // (an ambient `EYES_TOKEN` could have leaked in).
+        let mismatches = captured
+            .iter()
+            .filter(|header| header.as_str() != "Bearer eyes_test_wire")
+            .count();
+        assert!(
+            mismatches == 0,
+            "{mismatches} of {} captured Authorization headers were not the test bearer",
+            captured.len()
+        );
     }
 }
