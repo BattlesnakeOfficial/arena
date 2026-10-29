@@ -161,19 +161,29 @@ fn main() -> color_eyre::Result<()> {
 
 async fn run_application(config: config::AppConfig) -> cja::Result<()> {
     let identity = eyes_subscriber::ProcessIdentity::new(observability::ROLE);
+
+    // Secrets load BEFORE telemetry init: the Eyes layer reads its token at
+    // build time, and the token lives in setec (DEV-1966).
+    let secrets = load_secrets_before_telemetry(&config).await?;
+    let eyes_token = secrets::resolve_eyes_token(
+        secrets.as_ref().and_then(|(s, _)| s.eyes_token.as_ref()),
+        config.eyes.as_ref().and_then(|eyes| eyes.token.clone()),
+    );
+
     let eyes_shutdown_handle = if config.gcp_logging {
         telemetry::setup_gcp_tracing(
             &config.rust_log,
             config.stdout_log.as_deref(),
             config.eyes.as_ref(),
             &identity,
+            eyes_token.as_deref(),
         )?
     } else {
         TracingConfig::new("arena")
             .process(identity.clone())
             .init()?
     };
-    let result = run_instrumented_application(config, identity).await;
+    let result = run_instrumented_application(config, identity, secrets, eyes_token).await;
     // Preserve the final error before flushing, including startup failures.
     if let Err(error) = &result {
         tracing::error!(error = %format!("{error:#}"), "Arena process exiting after failure");
@@ -184,6 +194,36 @@ async fn run_application(config: config::AppConfig) -> cja::Result<()> {
         tracing::warn!(%error, "Error shutting down Eyes");
     }
     result
+}
+
+/// `secrets::load_from_env` under a temporary stdout subscriber, so boot logs
+/// emitted before telemetry init ("Joined tailnet", "Arena secrets loaded")
+/// still reach stdout / Cloud Logging. Fail-fast unchanged: on error the full
+/// chain goes to stderr and the process exits non-zero.
+async fn load_secrets_before_telemetry(
+    config: &config::AppConfig,
+) -> cja::Result<Option<(secrets::AppSecrets, cja_secret::Refresher)>> {
+    use tracing::instrument::WithSubscriber as _;
+
+    // `.with_ansi(false)`: the `ansi` feature is a default feature of
+    // tracing-subscriber 0.3, so the builder colourizes by default — Cloud
+    // Logging would ingest the escape codes verbatim as textPayload. The
+    // real stdout layer makes the same choice (telemetry.rs).
+    let boot_subscriber = tracing_subscriber::fmt::Subscriber::builder()
+        .with_env_filter(tracing_subscriber::EnvFilter::new(&config.rust_log))
+        .with_ansi(false)
+        .finish();
+
+    match secrets::load_from_env()
+        .with_subscriber(boot_subscriber)
+        .await
+    {
+        Ok(secrets) => Ok(secrets),
+        Err(error) => {
+            eprintln!("Failed to load arena secrets from setec: {error:#}");
+            Err(error)
+        }
+    }
 }
 
 /// Time tasks get to exit after the job drain ends: job workers release
@@ -216,8 +256,9 @@ fn scheduled_tasks(features: config::FeatureFlags, job_workers: usize) -> Vec<Pr
 async fn run_instrumented_application(
     config: config::AppConfig,
     identity: eyes_subscriber::ProcessIdentity,
+    secrets: Option<(secrets::AppSecrets, cja_secret::Refresher)>,
+    eyes_token: Option<String>,
 ) -> cja::Result<()> {
-    let secrets = secrets::load_from_env().await?;
     let app_state = AppState::from_config(config, secrets.as_ref().map(|(s, _)| s)).await?;
     let mut supervisor = Supervisor::new(ShutdownBudget {
         job_drain: Duration::from_secs(app_state.config.job.shutdown_drain_secs),
@@ -226,7 +267,9 @@ async fn run_instrumented_application(
     if let Some((_, refresher)) = secrets {
         supervisor.spawn("secret-refresh", refresher.run(supervisor.shutdown_token()));
     }
-    let heartbeat = spawn_application_tasks(app_state, identity, &mut supervisor).await?;
+    let heartbeat =
+        spawn_application_tasks(app_state, identity, &mut supervisor, eyes_token.as_deref())
+            .await?;
     let result = supervisor.run().await;
     if let Some(handle) = heartbeat
         && let Err(error) = handle.shutdown().await
@@ -241,6 +284,7 @@ async fn spawn_application_tasks(
     app_state: AppState,
     identity: eyes_subscriber::ProcessIdentity,
     supervisor: &mut Supervisor,
+    eyes_token: Option<&str>,
 ) -> cja::Result<Option<eyes_subscriber::ProcessHeartbeatHandle>> {
     let shutdown = supervisor.shutdown_token();
     let features = app_state.config.features;
@@ -330,7 +374,7 @@ async fn spawn_application_tasks(
 
     info!("All application tasks spawned successfully");
     // Workers are already serving while the bounded registration runs.
-    Ok(observability::start(&app_state.config, &manifest).await)
+    Ok(observability::start(&app_state.config, &manifest, eyes_token).await)
 }
 
 #[cfg(test)]

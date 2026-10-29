@@ -87,10 +87,27 @@ fn validate_job_lease(job: &JobConfig) -> cja::Result<()> {
 
 /// Eyes telemetry (<https://eyes.coreyja.com>) identifiers. Present only
 /// when both `EYES_ORG_ID` and `EYES_APP_ID` are set to valid UUIDs.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone)]
 pub struct EyesConfig {
     pub org_id: uuid::Uuid,
     pub app_id: uuid::Uuid,
+    /// `EYES_TOKEN`, the fallback when setec has no `arena/eyes/token`.
+    /// Never printed — see the hand-written `Debug` below.
+    pub token: Option<String>,
+}
+
+/// Hand-written so the env token is never printed. `AppConfig` derives
+/// `Debug`, so a derived impl here would land the live ingest token in any
+/// `{config:?}` — and this app's logs flow into Eyes' own event store.
+/// Mirrors `EngineProxyConfig`'s `Debug` exactly.
+impl std::fmt::Debug for EyesConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EyesConfig")
+            .field("org_id", &self.org_id)
+            .field("app_id", &self.app_id)
+            .field("token", &self.token.as_ref().map(|_| "[redacted]"))
+            .finish()
+    }
 }
 
 /// Content moderation via the TypeSafe (Jev) judgment API. Unset
@@ -466,7 +483,11 @@ fn eyes_config_from_env() -> cja::Result<Option<EyesConfig>> {
                 .map_err(|e| cja::color_eyre::eyre::eyre!("Invalid EYES_ORG_ID {org_id:?}: {e}"))?;
             let app_id = uuid::Uuid::parse_str(&app_id)
                 .map_err(|e| cja::color_eyre::eyre::eyre!("Invalid EYES_APP_ID {app_id:?}: {e}"))?;
-            Ok(Some(EyesConfig { org_id, app_id }))
+            Ok(Some(EyesConfig {
+                org_id,
+                app_id,
+                token: optional_env("EYES_TOKEN"),
+            }))
         }
         (None, None) => Ok(None),
         (Some(_), None) => {
@@ -663,6 +684,19 @@ mod tests {
         config.engine_proxy.token = Some("sample-engine-proxy-secret".to_string());
         let debug = format!("{config:?}");
         assert!(!debug.contains("sample-engine-proxy-secret"));
+        assert!(debug.contains("[redacted]"));
+    }
+
+    #[test]
+    fn eyes_token_is_redacted_from_config_debug() {
+        let mut config = AppConfig::test_default();
+        config.eyes = Some(EyesConfig {
+            org_id: uuid::Uuid::new_v4(),
+            app_id: uuid::Uuid::new_v4(),
+            token: Some("sample-eyes-secret".to_string()),
+        });
+        let debug = format!("{config:?}");
+        assert!(!debug.contains("sample-eyes-secret"));
         assert!(debug.contains("[redacted]"));
     }
 }
