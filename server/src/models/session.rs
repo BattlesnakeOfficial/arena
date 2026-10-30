@@ -203,8 +203,8 @@ pub async fn take_pending_form_data(
 }
 
 /// Remember where to send the user after a successful GitHub login.
-/// Only "/oauth/authorize" paths may be stored (validated by the caller both
-/// here-adjacent and before redirecting).
+/// Only "/oauth/authorize" paths and "/welcome-back" may be stored; the
+/// callback checks the same allowlist before redirecting.
 pub async fn set_post_login_redirect(
     pool: &PgPool,
     session_id: Uuid,

@@ -3431,7 +3431,7 @@ mod resume {
         async fn login_round_trip(&self, with_marker: bool) -> Option<String> {
             // The initiator (with or without the resume marker).
             let initiate = if with_marker {
-                "/auth/github?resume_oauth=true"
+                "/auth/github?resume=true"
             } else {
                 "/auth/github"
             };
@@ -3516,7 +3516,7 @@ mod resume {
             .to_str()
             .unwrap()
             .to_string();
-        assert_eq!(location, "/auth/github?resume_oauth=true");
+        assert_eq!(location, "/auth/github?resume=true");
         let stored: Option<String> = sqlx::query_scalar!(
             "SELECT post_login_redirect FROM sessions WHERE session_id = $1",
             fx.session_id
@@ -3569,5 +3569,49 @@ mod resume {
         .await
         .unwrap();
         assert!(cleared.is_none());
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn welcome_back_login_returns_to_welcome_back(pool: PgPool) {
+        let github = github_mocks().await;
+        let fx = ResumeFixture::new(pool.clone(), &github).await;
+
+        // A signed-out visit parks /welcome-back on the session…
+        let response = fx
+            .app
+            .clone()
+            .oneshot(
+                Request::get(crate::routes::welcome_back::PATH)
+                    .header(header::COOKIE, fx.cookie())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // …and its sign-in button (which carries the marker) comes back to it.
+        let final_location = fx.login_round_trip(true).await.expect("303 callback");
+        assert_eq!(final_location, crate::routes::welcome_back::PATH);
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn saved_paths_outside_the_allowlist_are_not_resumed(pool: PgPool) {
+        let github = github_mocks().await;
+        let fx = ResumeFixture::new(pool.clone(), &github).await;
+
+        for path in [
+            "/me",
+            "/welcome-back/../admin",
+            "/welcome-backdoor",
+            "//evil.example/oauth/authorize",
+            "https://evil.example/welcome-back",
+        ] {
+            session::set_post_login_redirect(&pool, fx.session_id, path.to_string())
+                .await
+                .unwrap();
+            let final_location = fx.login_round_trip(true).await.expect("303 callback");
+            assert_eq!(final_location, "/", "resumed to {path}");
+        }
     }
 }

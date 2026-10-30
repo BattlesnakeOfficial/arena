@@ -66,6 +66,7 @@ pub mod studio;
 pub(crate) mod test_support;
 pub mod tournament;
 pub mod users;
+pub mod welcome_back;
 
 pub fn routes(app_state: AppState) -> cja::Result<axum::Router> {
     // CORS layer for API routes - allows board.battlesnake.com to access our API
@@ -228,6 +229,8 @@ pub fn routes(app_state: AppState) -> cja::Result<axum::Router> {
             "/customizations/studio/process",
             studio::process_route(app_state.clone()),
         )
+        // Landing page for the play.battlesnake.com shutdown banner
+        .route(welcome_back::PATH, get(welcome_back::welcome_back_page))
         .route("/claim", get(claim::claim_page))
         .route("/claim", post(claim::submit_claim))
         .route("/claim/dismiss-prompt", post(claim::dismiss_claim_prompt))

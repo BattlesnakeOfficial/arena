@@ -114,27 +114,35 @@ pub fn claim_prompt() -> Markup {
                 "Bring your old snakes, profile, and customization unlocks with you. "
                 "How depends on how you signed in to play:"
             }
-            ul {
-                li {
-                    strong { "With GitHub: " }
-                    "it links automatically when you sign in here with the same GitHub "
-                    "account. Nothing came over? "
-                    a href="/auth/github" { "Sign in with GitHub again" }
-                    "."
-                }
-                li {
-                    strong { "With email and password: " }
-                    a href="/claim" { "enter your old play login" }
-                    " once to bring it over."
-                }
-                li {
-                    strong { "Forgot your password, or used a different GitHub account? " }
-                    a href="/claim/email" { "Get a one-time claim link" }
-                    " sent to your old play email."
-                }
-            }
+            (claim_options())
             p class="fine" {
                 "New to Battlesnake? There's nothing to claim. Dismiss this and it won't come back."
+            }
+        }
+    }
+}
+
+/// The ways to claim a play account, one per way people signed in to play.
+/// Shared by the /me prompt and /welcome-back.
+pub fn claim_options() -> Markup {
+    html! {
+        ul class="claim-options" {
+            li {
+                strong { "With GitHub: " }
+                "it links automatically when you sign in here with the same GitHub "
+                "account. Nothing came over? "
+                a href="/auth/github" { "Sign in with GitHub again" }
+                "."
+            }
+            li {
+                strong { "With email and password: " }
+                a href="/claim" { "enter your old play login" }
+                " once to bring it over."
+            }
+            li {
+                strong { "Forgot your password, or used a different GitHub account? " }
+                a href="/claim/email" { "Get a one-time claim link" }
+                " sent to your old play email."
             }
         }
     }

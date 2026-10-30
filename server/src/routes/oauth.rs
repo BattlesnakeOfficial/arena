@@ -366,7 +366,7 @@ pub async fn authorize(
         session::set_post_login_redirect(&state.db, session.session_id, path_and_query)
             .await
             .wrap_err("Failed to store post-login redirect")?;
-        return Ok(Redirect::to("/auth/github?resume_oauth=true").into_response());
+        return Ok(Redirect::to("/auth/github?resume=true").into_response());
     };
 
     let snakes = battlesnake::get_battlesnakes_by_user_id(&state.db, user.user_id)
