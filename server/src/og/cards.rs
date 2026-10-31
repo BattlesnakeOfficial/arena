@@ -44,26 +44,22 @@ fn backdrop(c: &mut Canvas) {
     c.glow(PAD + 80.0, 40.0, 560.0, with_alpha(palette::pink(), 0.09));
 }
 
-/// The four-tile logo from the site nav, `size` px square.
-fn glyph(c: &mut Canvas, x: f32, y: f32, size: f32) {
-    let u = size / 24.0;
-    let tile = |c: &mut Canvas, tx: f32, ty: f32, color: Color| {
-        c.round_rect(x + tx * u, y + ty * u, 9.0 * u, 9.0 * u, 2.5 * u, color);
-    };
-    tile(c, 2.0, 2.0, palette::pink());
-    tile(c, 13.0, 2.0, with_alpha(palette::ink(), 0.2));
-    tile(c, 2.0, 13.0, with_alpha(palette::ink(), 0.2));
-    tile(c, 13.0, 13.0, with_alpha(palette::pink(), 0.45));
-}
-
-fn footer(c: &mut Canvas) {
-    let style = TextStyle::new(Font::Display, 26.0, palette::ink()).tracking(-0.01);
+fn footer(c: &mut Canvas) -> cja::Result<()> {
+    let wordmark = crate::brand::Wordmark::get()?;
     let cap = c.cap_height(Font::Display, 26.0);
-    let size = 34.0;
-    glyph(c, PAD - 3.0, FOOTER_BASELINE - cap / 2.0 - size / 2.0, size);
-    c.text("Battlesnake", style, PAD + 38.0, FOOTER_BASELINE);
+    // 44px ink height (≥ the 40px legibility bar), centred on the old brand
+    // slot's optical middle; ≈124px wide, clear of the URL text.
+    wordmark.draw_on_canvas(
+        c,
+        PAD,
+        FOOTER_BASELINE - cap / 2.0,
+        44.0,
+        palette::ink(),
+        palette::pink(),
+    );
     let url = TextStyle::new(Font::Mono, 17.0, palette::muted());
     c.text_right(SITE_HOST, url, COLUMN_RIGHT, FOOTER_BASELINE);
+    Ok(())
 }
 
 /// A small uppercase label in a pill; returns the pill's width.
@@ -180,7 +176,7 @@ pub fn default_card(tagline: &str) -> cja::Result<Vec<u8>> {
     let lines = c.fit_lines(tagline, body, COLUMN_WIDTH, 3, 22.0);
     draw_lines(&mut c, &lines, PAD, first + 140.0, 36.0);
 
-    footer(&mut c);
+    footer(&mut c)?;
     c.into_png()
 }
 
@@ -490,7 +486,7 @@ pub fn game_card(card: &GameCard) -> cja::Result<Vec<u8>> {
         }
     }
 
-    footer(&mut c);
+    footer(&mut c)?;
     c.into_png()
 }
 
@@ -653,7 +649,7 @@ pub fn profile_card(card: &ProfileCard) -> cja::Result<Vec<u8>> {
     }
     stats_row(&mut c, &card.stats);
 
-    footer(&mut c);
+    footer(&mut c)?;
     c.into_png()
 }
 
@@ -769,7 +765,7 @@ pub fn leaderboard_card(card: &LeaderboardCard) -> cja::Result<Vec<u8>> {
         top += row_height;
     }
 
-    footer(&mut c);
+    footer(&mut c)?;
     c.into_png()
 }
 
@@ -894,7 +890,7 @@ pub fn tournament_card(card: &TournamentCard) -> cja::Result<Vec<u8>> {
     c.panel(BOARD_X, PAD, BOARD_SIDE);
     entrant_grid(&mut c, &card.entrants);
 
-    footer(&mut c);
+    footer(&mut c)?;
     c.into_png()
 }
 
@@ -1122,6 +1118,40 @@ mod tests {
         let png =
             default_card("A competitive game where your code battles other Battlesnakes.").unwrap();
         assert_eq!(decode(&png), (WIDTH, HEIGHT));
+    }
+
+    #[test]
+    fn footer_draws_the_official_wordmark() {
+        let png =
+            default_card("A competitive game where your code battles other Battlesnakes.").unwrap();
+        let mut reader = png::Decoder::new(std::io::Cursor::new(png))
+            .read_info()
+            .unwrap();
+        let info = reader.info().clone();
+        let mut rgba = vec![0; reader.output_buffer_size().expect("PNG buffer size")];
+        reader.next_frame(&mut rgba).unwrap();
+        // The footer glow tints the entire band (centre (144, 40), radius 560
+        // reaches the farthest corner), so count only exact ink/pink fills —
+        // the wordmark's opaque paint sits on top of the tint.
+        let exact = |color: [u8; 3], x0: u32, x1: u32| {
+            (x0..x1)
+                .flat_map(|x| (530..587).map(move |y| (x, y)))
+                .filter(|&(x, y)| {
+                    let i = (y * info.width + x) as usize * 3;
+                    rgba[i..i + 3] == color
+                })
+                .count()
+        };
+        let ink = [0xF4, 0xEF, 0xEA]; // palette::ink() — the BATTLE lettering
+        let pink = [0xFF, 0x3D, 0x8A]; // palette::pink() — the brush SNAKE
+        // Brand slot: the wordmark's ink box (≈44px tall from x=64) is
+        // covered by this band.
+        assert!(exact(ink, 60, 200) > 200, "wordmark ink missing");
+        assert!(exact(pink, 60, 200) > 50, "wordmark pink missing");
+        // No clipping into the URL text: nothing between the wordmark and
+        // the right-aligned host text paints either colour.
+        assert_eq!(exact(ink, 200, 350), 0, "ink bleeds into the URL gap");
+        assert_eq!(exact(pink, 200, 350), 0, "pink bleeds into the URL gap");
     }
 
     #[test]

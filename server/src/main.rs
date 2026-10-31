@@ -14,6 +14,7 @@ use tracing::info;
 mod activity;
 mod archive;
 mod backup;
+mod brand;
 mod cache;
 mod config;
 mod countries;
