@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE highlight_digests SET discord_status = 'skipped' WHERE digest_id = $1 AND discord_status = 'pending'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b2ad6eafd5009d46f0775d6a31442138825d600f1aa7c786cbff7d359508fd2a"
+}

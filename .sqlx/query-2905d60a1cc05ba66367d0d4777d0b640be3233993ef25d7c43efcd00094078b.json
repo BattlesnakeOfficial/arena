@@ -1,0 +1,70 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT s.kind, l.name AS \"ladder_name?\", s.position, s.summary,\n               i.position AS \"item_position?\", i.game_id AS \"item_game_id?\",\n               i.subject AS \"item_subject?\", i.value AS \"item_value?\", i.text AS \"item_text?\"\n        FROM highlight_sections s\n        LEFT JOIN leaderboards l ON l.leaderboard_id = s.ladder_id\n        LEFT JOIN highlight_items i USING (section_id)\n        WHERE s.digest_id = $1\n        ORDER BY s.position, i.position\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "kind",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "ladder_name?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "position",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 3,
+        "name": "summary",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "item_position?",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 5,
+        "name": "item_game_id?",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 6,
+        "name": "item_subject?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "item_value?",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 8,
+        "name": "item_text?",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "2905d60a1cc05ba66367d0d4777d0b640be3233993ef25d7c43efcd00094078b"
+}

@@ -43,6 +43,7 @@ pub mod github_auth;
 #[cfg(test)]
 mod github_auth_tests;
 pub mod health;
+pub mod highlights;
 pub mod leaderboard;
 #[cfg(test)]
 mod notification_tests;
@@ -405,6 +406,10 @@ pub fn routes(app_state: AppState) -> cja::Result<axum::Router> {
             post(play_notices::send_test),
         )
         .route("/stats", get(stats::stats_page))
+        .route("/admin/highlights", get(highlights::list))
+        .route("/admin/highlights/preview", get(highlights::preview))
+        .route("/admin/highlights/backfill", post(highlights::backfill))
+        .route("/admin/highlights/{id}", get(highlights::detail))
         .route("/admin/moderation", get(admin::moderation_queue))
         .route(
             "/admin/oauth-clients",

@@ -1,0 +1,66 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT lg.game_id, t.turn_number AS final_turn,\n                   s->>'ID' AS game_battlesnake_id,\n                   jsonb_array_length(s->'Body') AS \"length\",\n                   (s->>'Health')::int4 AS \"health\",\n                   s->'Death'->>'Cause' AS death_cause,\n                   (s->'Death'->>'Turn')::int4 AS \"death_turn\",\n                   s->'Death'->>'EliminatedBy' AS eliminated_by\n            FROM leaderboard_games lg\n            JOIN leaderboards l USING (leaderboard_id)\n            CROSS JOIN LATERAL (\n                SELECT turn_number, frame_data FROM turns t\n                WHERE t.game_id = lg.game_id ORDER BY t.turn_number DESC LIMIT 1\n            ) t\n            CROSS JOIN LATERAL jsonb_array_elements(t.frame_data->'Snakes') s\n            WHERE l.leaderboard_id = $1 AND lg.created_at >= $2 AND lg.created_at < $3\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "game_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "final_turn",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 2,
+        "name": "game_battlesnake_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "length",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 4,
+        "name": "health",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 5,
+        "name": "death_cause",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "death_turn",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 7,
+        "name": "eliminated_by",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Timestamptz",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "a363fd45d281fc95344f2856081cd694927e967b10e2318d1ae9ce695b77b601"
+}

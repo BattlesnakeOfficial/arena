@@ -36,6 +36,12 @@ pub const CUSTOMIZATION_ACTIVE_WEEK_BACKFILL_INTERVAL_SECS: u64 = 60 * 60;
 pub const ACHIEVEMENT_BACKFILL_INTERVAL_SECS: u64 = 5 * 60;
 pub const ACHIEVEMENT_RECONCILE_INTERVAL_SECS: u64 = 60 * 60;
 
+/// Weekly highlights digest: hourly tick computes the latest completed
+/// Saturday-noon week if missing, then retries pending Discord posts
+/// (DEV-1993). The digest itself lands within ~1 h of the window end —
+/// well inside the 2-hour SLA.
+pub const HIGHLIGHTS_CRON_INTERVAL_SECS: u64 = 60 * 60;
+
 pub(crate) fn cron_registry(config: &AppConfig) -> CronRegistry<AppState> {
     let mut registry = CronRegistry::new();
 
@@ -126,6 +132,14 @@ pub(crate) fn cron_registry(config: &AppConfig) -> CronRegistry<AppState> {
         StuckGameSweeperJob,
         Some("Fail non-tournament games stuck in waiting/running"),
         Duration::from_secs(STUCK_GAME_SWEEP_INTERVAL_SECS),
+    );
+
+    // Weekly highlights digest: hourly tick computes the latest completed
+    // Saturday-noon week if missing, then retries pending Discord posts.
+    registry.register_job(
+        crate::highlights::WeeklyHighlightsJob,
+        Some("Compute and announce the weekly highlights digest"),
+        Duration::from_secs(HIGHLIGHTS_CRON_INTERVAL_SECS),
     );
 
     registry
@@ -243,6 +257,26 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn highlights_job_registered_hourly() {
+        let registry = cron_registry(&AppConfig::test_default());
+        let job = registry
+            .get("WeeklyHighlightsJob")
+            .expect("highlights registered");
+        assert_eq!(
+            job.description,
+            Some("Compute and announce the weekly highlights digest")
+        );
+        let cja::cron::Schedule::Interval(interval) = &job.schedule else {
+            panic!("highlights must use an interval");
+        };
+        assert_eq!(
+            interval.0,
+            Duration::from_secs(HIGHLIGHTS_CRON_INTERVAL_SECS)
+        );
+        assert_eq!(HIGHLIGHTS_CRON_INTERVAL_SECS, 60 * 60);
+    }
+
     #[test]
     fn native_backup_cadence() {
         let registry = cron_registry(&AppConfig::test_default());

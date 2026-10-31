@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT DISTINCT ON (r.leaderboard_entry_id)\n               r.leaderboard_entry_id, r.mu_after, r.sigma_after\n        FROM leaderboard_game_results r\n        WHERE r.created_at < $1\n        ORDER BY r.leaderboard_entry_id, r.created_at DESC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "leaderboard_entry_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "mu_after",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 2,
+        "name": "sigma_after",
+        "type_info": "Float8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "f0db85bcc6b94968e481bac792df79c69b4c4cd0662dde51add16e2b472479b9"
+}

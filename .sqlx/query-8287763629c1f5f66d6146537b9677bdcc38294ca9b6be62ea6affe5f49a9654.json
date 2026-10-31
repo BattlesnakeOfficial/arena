@@ -1,0 +1,83 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT lg.game_id, lg.leaderboard_id, lg.created_at,\n               r.leaderboard_entry_id, r.placement,\n               r.mu_before, r.sigma_before, r.mu_after, r.sigma_after,\n               b.name AS snake_name, u.github_login AS \"owner_login?\"\n        FROM leaderboard_games lg\n        JOIN leaderboards l USING (leaderboard_id)\n        JOIN leaderboard_game_results r USING (leaderboard_game_id)\n        JOIN leaderboard_entries e USING (leaderboard_entry_id)\n        JOIN battlesnakes b USING (battlesnake_id)\n        LEFT JOIN users u ON u.user_id = b.user_id\n        WHERE lg.created_at >= $1 AND lg.created_at < $2\n          AND l.visibility = 'public'\n        ORDER BY lg.created_at, lg.game_id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "game_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "leaderboard_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 3,
+        "name": "leaderboard_entry_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 4,
+        "name": "placement",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 5,
+        "name": "mu_before",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 6,
+        "name": "sigma_before",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 7,
+        "name": "mu_after",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 8,
+        "name": "sigma_after",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 9,
+        "name": "snake_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 10,
+        "name": "owner_login?",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "8287763629c1f5f66d6146537b9677bdcc38294ca9b6be62ea6affe5f49a9654"
+}

@@ -641,7 +641,8 @@ cja::impl_job_registry!(
     SnakeHealthSweeperJob,
     StuckGameSweeperJob,
     ScreenShoutsJob,
-    PlayShutdownNoticeJob
+    PlayShutdownNoticeJob,
+    crate::highlights::WeeklyHighlightsJob
 );
 
 #[cfg(test)]

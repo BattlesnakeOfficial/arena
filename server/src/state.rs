@@ -32,6 +32,11 @@ pub struct AppState {
     pub mailer: Mailer,
     /// Discord webhook notifier (no-op until `arena/discord/webhook-url` is in setec)
     pub discord: DiscordNotifier,
+    /// Discord webhook notifier for the private weekly highlights digest
+    /// (no-op until `arena/discord/highlights-webhook-url` is in setec;
+    /// DEV-1993). Separate from `discord`, which posts to the community
+    /// channel — highlights must never go there.
+    pub discord_highlights: DiscordNotifier,
     /// Jev content-moderation judge (inert until TYPESAFE_API_KEY is
     /// configured; the offline hard-block list always runs)
     pub moderation: crate::moderation::ModerationJudge,
@@ -170,17 +175,34 @@ impl AppState {
         // Optional: Discord webhook notifications (disabled until configured).
         // Uses its own client like the mailer — the snake client's 600ms timeout
         // is too tight for an external webhook API.
+        // One webhook client shared by both notifiers (the snake client's
+        // 600ms timeout is too tight for an external webhook API).
+        let discord_client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .wrap_err("Failed to create Discord HTTP client")?;
         let discord = DiscordNotifier::new(
             secrets.and_then(|s| s.discord_webhook_url.clone()),
-            reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(10))
-                .build()
-                .wrap_err("Failed to create Discord HTTP client")?,
+            discord_client.clone(),
         );
         if discord.is_enabled() {
             tracing::info!("Discord webhook configured for community notifications");
         } else {
             tracing::info!("No Discord webhook in setec, Discord notifications disabled");
+        }
+
+        // Second notifier for the private highlights webhook (DEV-1993);
+        // absent means the weekly post is skipped and logged.
+        let discord_highlights = DiscordNotifier::new(
+            secrets.and_then(|s| s.discord_highlights_webhook_url.clone()),
+            discord_client,
+        );
+        if discord_highlights.is_enabled() {
+            tracing::info!("Discord highlights webhook configured for weekly digests");
+        } else {
+            tracing::info!(
+                "No highlights webhook in setec, weekly highlights posts will be skipped"
+            );
         }
 
         // Optional: Jev content moderation (disabled until configured).
@@ -234,6 +256,7 @@ impl AppState {
             proxy_europe_health_client,
             mailer,
             discord,
+            discord_highlights,
             moderation,
             scoring: std::sync::Arc::new(scoring_registry),
             home_feed_cache,
@@ -274,6 +297,7 @@ impl AppState {
             proxy_europe_health_client: reqwest::Client::new(),
             mailer: crate::email::Mailer::disabled(),
             discord: crate::discord::DiscordNotifier::disabled(),
+            discord_highlights: crate::discord::DiscordNotifier::disabled(),
             moderation: crate::moderation::ModerationJudge::disabled(),
             scoring: std::sync::Arc::new(crate::scoring::ScoringRegistry::new()),
             home_feed_cache: Arc::new(crate::cache::TtlCell::new(std::time::Duration::ZERO)),

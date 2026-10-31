@@ -492,7 +492,7 @@ fn append_show_spoilers(url: String, show_spoilers: bool) -> String {
 /// fetches frame history from `{base_url}/api/games/{game_id}/frames`, so the
 /// `/api` suffix is load-bearing: dropping it silently sends the exporter to
 /// its default engine, which contains no Arena games.
-fn export_gif_url(base_url: &str, game_id: Uuid) -> String {
+pub(crate) fn export_gif_url(base_url: &str, game_id: Uuid) -> String {
     format!("https://exporter.battlesnake.com/games/{game_id}/gif?engine_url={base_url}/api")
 }
 
