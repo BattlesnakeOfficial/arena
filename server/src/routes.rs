@@ -147,6 +147,12 @@ pub fn routes(app_state: AppState) -> cja::Result<axum::Router> {
         .route("/og/leaderboards/{id}", get(og::leaderboard_card))
         .route("/og/leaderboards/{id}/entries/{file}", get(og::entry_card))
         .route("/og/tournaments/{file}", get(og::tournament_card))
+        // The permanent wordmark PNGs embedded in outgoing email headers
+        .route(crate::brand::WORDMARK_PNG_PATH, get(brand_wordmark_png))
+        .route(
+            crate::brand::WORDMARK_DARK_PNG_PATH,
+            get(brand_wordmark_dark_png),
+        )
         // Policy pages
         .route("/conduct", get(policy::conduct_page))
         .route("/privacy", get(policy::privacy_page))
@@ -572,6 +578,39 @@ impl axum::extract::FromRequestParts<AppState> for UuidPath2 {
             }
         }
     }
+}
+
+/// GET /brand/wordmark.png — the official light wordmark on an opaque
+/// card-colour plate. Embedded in every outgoing email; the URL is permanent.
+async fn brand_wordmark_png() -> ServerResult<impl IntoResponse, StatusCode> {
+    render_brand_png(crate::brand::wordmark_png())
+}
+
+/// GET /brand/wordmark-dark.png — the official dark wordmark, transparent.
+/// Embedded in every outgoing email's dark-mode header; equally permanent.
+async fn brand_wordmark_dark_png() -> ServerResult<impl IntoResponse, StatusCode> {
+    render_brand_png(crate::brand::wordmark_dark_png())
+}
+
+/// Shared body for the two brand PNG handlers — a plain fn, NOT a handler
+/// (axum requires every handler argument to be an extractor, and these
+/// handlers must stay extractor-free): email clients and Gmail/Outlook image
+/// proxies hit these URLs anonymously, and session machinery would write a
+/// `sessions` row per cookieless fetch.
+fn render_brand_png(
+    bytes: cja::Result<&'static [u8]>,
+) -> ServerResult<impl IntoResponse, StatusCode> {
+    let bytes = bytes.wrap_err("Failed to render the wordmark PNG")?;
+    Ok((
+        [
+            (axum::http::header::CONTENT_TYPE, "image/png".to_string()),
+            (
+                axum::http::header::CACHE_CONTROL,
+                "public, max-age=2592000".to_string(),
+            ),
+        ],
+        bytes,
+    ))
 }
 
 /// Crawlers are welcome on the public pages; keep them out of auth flows,
