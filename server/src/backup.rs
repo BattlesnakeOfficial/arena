@@ -10,7 +10,7 @@ use google_cloud_storage::{
 };
 use sqlx::{FromRow, PgPool};
 
-use crate::engine_models::{EngineGame, EngineGameFrame, GameExport};
+use crate::engine_models::{ARCHIVE_VERSION, EngineGame, EngineGameFrame, GameExport};
 use crate::jobs::{BackupSingleGameJob, HistoricalBackupDiscoveryJob};
 use crate::state::AppState;
 use cja::jobs::Job;
@@ -32,6 +32,12 @@ static BACKUP_SLOT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1
 /// queued behind the burst waited 15-111s to start. Lower, the next freed worker
 /// takes the game.
 pub(crate) const BACKUP_JOB_PRIORITY: i32 = -10;
+
+/// zstd level for archive objects. 9 vs the old 3 is 1.5-1.8x smaller for
+/// ~1ms/game and faster to decompress (bench 2026-10-30,
+/// learning arena-game-archive-format-bench-2026-10). 19 is rejected: it
+/// takes 50-90ms/game and stalled live games on the shared vCPU (DEV-1498).
+const ZSTD_COMPRESSION_LEVEL: i32 = 9;
 
 /// Enqueue one game's backup at [`BACKUP_JOB_PRIORITY`].
 async fn enqueue_backup_job(
@@ -175,19 +181,36 @@ fn gcs_path(game: &EngineGame) -> String {
     )
 }
 
+/// Blank the engine-only snake fields that must never be archived: real
+/// snake URLs can embed secrets and no archive consumer needs them. Mirrors
+/// what `engine::frame::normalize_public_frame` blanks at serve time.
+fn strip_secret_snake_fields(frames: &mut [EngineGameFrame]) {
+    for frame in frames.iter_mut() {
+        for snake in frame.snakes.iter_mut() {
+            snake.url = None;
+            snake.proxy_url = None;
+            snake.api_version = None;
+        }
+    }
+}
+
 /// Parse frames, build the export, and zstd-compress its JSON. Pure CPU
 /// work: callers run it on the blocking pool, never on an async worker.
 fn build_compressed_export(
     game: EngineGame,
     frame_values: Vec<serde_json::Value>,
 ) -> cja::Result<Vec<u8>> {
-    let frames: Vec<EngineGameFrame> = frame_values
+    let mut frames: Vec<EngineGameFrame> = frame_values
         .into_iter()
         .map(serde_json::from_value)
         .collect::<Result<Vec<_>, _>>()
         .wrap_err("Failed to deserialize game frames")?;
 
+    strip_secret_snake_fields(&mut frames);
+
     let export = GameExport {
+        archive_version: ARCHIVE_VERSION,
+        game_id: game.id.clone(),
         game,
         frames,
         exported_at: Utc::now(),
@@ -196,9 +219,8 @@ fn build_compressed_export(
     // Serialize to JSON
     let json = serde_json::to_vec(&export).wrap_err("Failed to serialize game export")?;
 
-    // Compress with zstd (level 3 is a good balance of speed/compression)
-    let mut encoder =
-        zstd::Encoder::new(Vec::new(), 3).wrap_err("Failed to create zstd encoder")?;
+    let mut encoder = zstd::Encoder::new(Vec::new(), ZSTD_COMPRESSION_LEVEL)
+        .wrap_err("Failed to create zstd encoder")?;
     encoder
         .write_all(&json)
         .wrap_err("Failed to write to zstd encoder")?;
@@ -239,9 +261,6 @@ async fn upload_to_gcs(
 
     Ok(())
 }
-
-/// Current archive format version. Increment when changing the export format.
-const ARCHIVE_VERSION: i32 = 1;
 
 /// Insert or update a game record in the local database after archiving.
 ///
@@ -749,6 +768,8 @@ mod tests {
 
         let json = zstd::decode_all(compressed.as_slice()).unwrap();
         let export: serde_json::Value = serde_json::from_slice(&json).unwrap();
+        assert_eq!(export["archive_version"], 2);
+        assert_eq!(export["game_id"], "g1");
         assert_eq!(export["game"]["ID"], "g1");
         let turns: Vec<i64> = export["frames"]
             .as_array()
@@ -758,6 +779,250 @@ mod tests {
             .collect();
         assert_eq!(turns, vec![0, 1, 2]);
         assert_eq!(export["frames"][2]["Food"][0]["Y"], 2);
+    }
+
+    #[test]
+    fn v2_export_is_self_describing_and_strips_snake_urls() {
+        let game: EngineGame = serde_json::from_value(serde_json::json!({
+            "ID": "g-v2",
+            "Status": "complete",
+            "Width": 11,
+            "Height": 11,
+            "Source": null,
+            "RulesetName": "standard",
+            "RulesStages": null,
+            "Map": "standard",
+        }))
+        .unwrap();
+
+        // Frame 0: MUST list every one of EngineSnake's 20 fields in canonical
+        // serialized form — ID, Name, URL, Body, Health, Death, Color, HeadType,
+        // TailType, Latency (string), Shout, Squad, APIVersion (string), Author,
+        // StatusCode, Error, TimingMicros, IsBot, IsEnvironment, ProxyURL — plus
+        // every EngineGameFrame field (Turn, Snakes, Food, Hazards, GameState,
+        // PointState). Only a complete canonical fixture survives the typed
+        // round-trip unchanged, so "input minus the three stripped keys == output"
+        // is an exact Value equality below. The equality doubles as a canary: if a
+        // field is later added to EngineSnake without updating this fixture, the
+        // round-trip materializes it (null/default) and the assert fails loudly.
+        // Note GameState values MUST be strings — the field is a
+        // HashMap<String, String> (engine_models.rs) and non-string values fail
+        // deserialization.
+        let frame_full = serde_json::json!({
+            "Turn": 0,
+            "Snakes": [
+                {
+                    "ID": "s1",
+                    "Name": "Snek",
+                    "URL": "https://snake.example.com/move?token=sekrit",
+                    "Body": [{"X": 5, "Y": 5}, {"X": 5, "Y": 4}],
+                    "Health": 100,
+                    "Death": {"Cause": "head-to-head", "Turn": 15, "EliminatedBy": "s2"},
+                    "Color": "#ff0000",
+                    "HeadType": "silly",
+                    "TailType": "round",
+                    "Latency": "12",
+                    "Shout": "hello",
+                    "Squad": "alpha",
+                    "APIVersion": "1",
+                    "Author": "coreyja",
+                    "StatusCode": 200,
+                    "Error": null,
+                    "TimingMicros": {
+                        "Connect": 1200, "DNS": 340, "FirstByte": 9800,
+                        "Latency": 11340, "TLS": 2000
+                    },
+                    "IsBot": false,
+                    "IsEnvironment": false,
+                    "ProxyURL": "https://proxy.example.com/s1"
+                }
+            ],
+            "Food": [{"X": 1, "Y": 2}],
+            "Hazards": [{"X": 3, "Y": 4}],
+            "GameState": {"phase": "start"},
+            "PointState": [{"X": 3, "Y": 4, "Value": 1}]
+        });
+        // Frame 1: older-engine shape (int Latency/APIVersion). The typed model
+        // normalizes ints to strings, so this frame is spot-checked only.
+        let frame_older = serde_json::json!({
+            "Turn": 1,
+            "Snakes": [
+                {
+                    "ID": "s2",
+                    "Name": "Older",
+                    "URL": "https://snake2.example.com",
+                    "ProxyURL": "https://proxy2.example.com",
+                    "APIVersion": 1,
+                    "Body": [{"X": 0, "Y": 0}],
+                    "Health": 99,
+                    "Latency": 15
+                }
+            ],
+            "Food": []
+        });
+
+        let compressed =
+            build_compressed_export(game, vec![frame_full.clone(), frame_older]).unwrap();
+
+        let json = zstd::decode_all(compressed.as_slice()).unwrap();
+
+        // Self-describing, and the identifying fields come FIRST: serde emits
+        // struct fields in declaration order and serde_json::to_vec is compact,
+        // so the decompressed bytes must open with exactly this prefix.
+        assert!(
+            json.starts_with(br#"{"archive_version":2,"game_id":"g-v2","#),
+            "archive_version and game_id must be the first serialized fields"
+        );
+
+        let export: serde_json::Value = serde_json::from_slice(&json).unwrap();
+        assert_eq!(export["archive_version"], 2);
+        assert_eq!(export["game_id"], "g-v2");
+        assert_eq!(export["game"]["ID"], "g-v2");
+
+        // Frame 0: everything except the three stripped fields is preserved.
+        // Value equality is order-insensitive but shape- and value-exact, so
+        // any field the typed round-trip dropped, renamed, or altered fails.
+        let mut expected = frame_full;
+        for snake in expected["Snakes"].as_array_mut().unwrap() {
+            let obj = snake.as_object_mut().unwrap();
+            obj.remove("URL");
+            obj.remove("ProxyURL");
+            obj.remove("APIVersion");
+        }
+        assert_eq!(export["frames"][0], expected);
+
+        // Frame 1 (older-engine shape): the three keys are absent here too...
+        let older = &export["frames"][1]["Snakes"][0];
+        assert!(older.get("URL").is_none());
+        assert!(older.get("ProxyURL").is_none());
+        assert!(older.get("APIVersion").is_none());
+        // ...and int inputs normalize to strings exactly like v1 did.
+        assert_eq!(older["Latency"], "15");
+    }
+
+    /// SC: new objects are compressed with zstd level 9. Byte-equality with a
+    /// re-encode of the same JSON at a LITERAL 9 pins the level exactly; the
+    /// `assert_ne!` against a literal 3 keeps the check from passing vacuously
+    /// on input where the levels agree (measured: they agree byte-for-byte on
+    /// low-entropy fixtures) and doubles as the fixture-richness canary.
+    #[test]
+    fn export_is_compressed_at_zstd_level_9() {
+        let game: EngineGame = serde_json::from_value(serde_json::json!({
+            "ID": "g-level",
+            "Status": "complete",
+            "Width": 11,
+            "Height": 11,
+            "Source": null,
+            "RulesetName": "standard",
+            "RulesStages": null,
+            "Map": "standard",
+        }))
+        .unwrap();
+
+        // Varied multi-frame fixture (~60 turns x 4 snakes, ~110 KB JSON): all
+        // values derive from (turn, snake, body-index) arithmetic so content is
+        // deterministic but non-repetitive — required for levels 3 and 9 to
+        // actually differ (12,340 B vs 10,140 B on this generator).
+        let frames: Vec<serde_json::Value> = (0..60)
+            .map(|turn| {
+                let snakes: Vec<serde_json::Value> = (0..4)
+                    .map(|s| {
+                        serde_json::json!({
+                            "ID": format!("snake-{s}"),
+                            "Name": format!("Snake {s} variant {turn}"),
+                            "URL": format!("https://snake{s}.example{turn}.io/move?token=t{s}{turn}"),
+                            "Body": (0..(8 + ((turn * 3 + s) % 17)))
+                                .map(|b| serde_json::json!({
+                                    "X": (b * 7 + turn + s * 11) % 21,
+                                    "Y": (b * 5 + turn * 3 + s) % 21,
+                                }))
+                                .collect::<Vec<_>>(),
+                            "Health": 100 - ((turn + s * 13) % 40),
+                            "Latency": 90 + (turn * 7 + s * 31) % 800,
+                            "TimingMicros": {
+                                "Connect": 800 + (turn * 11 + s * 17) % 2000,
+                                "DNS": 100 + (turn * 5 + s * 3) % 400,
+                                "FirstByte": 5000 + (turn * 13 + s * 7) % 9000,
+                                "TLS": 1500 + (turn * 3 + s) % 900,
+                            },
+                        })
+                    })
+                    .collect();
+                serde_json::json!({
+                    "Turn": turn,
+                    "Snakes": snakes,
+                    "Food": (0..(turn % 5))
+                        .map(|f| serde_json::json!({ "X": (f * 3 + turn) % 21, "Y": (f * 7 + turn * 2) % 21 }))
+                        .collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+
+        let compressed = build_compressed_export(game, frames).unwrap();
+        let json = zstd::decode_all(compressed.as_slice()).unwrap();
+
+        // zstd is deterministic and chunking-independent for identical input,
+        // level, and library (verified: single write_all + finish ==
+        // zstd::stream::encode_all == 8 KiB-chunked writes, byte-identical).
+        let reencoded_9 = zstd::stream::encode_all(json.as_slice(), 9).unwrap();
+        assert_eq!(compressed, reencoded_9, "archive must be zstd level 9");
+
+        let reencoded_3 = zstd::stream::encode_all(json.as_slice(), 3).unwrap();
+        assert_ne!(compressed, reencoded_3);
+    }
+
+    /// SC: `games.archive_version` is 2 for every game archived after deploy —
+    /// on both the fresh-INSERT path and the ON CONFLICT (engine_game_id)
+    /// re-archive path. Runtime queries (not the query! macro) so the .sqlx
+    /// offline cache stays valid without `cargo sqlx prepare`.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn upsert_game_record_sets_archive_version_2(pool: sqlx::PgPool) -> cja::Result<()> {
+        fn fixture_game(id: &str) -> EngineGame {
+            serde_json::from_value(serde_json::json!({
+                "ID": id,
+                "Status": "complete",
+                "Width": 11,
+                "Height": 11,
+                "Source": null,
+                "RulesetName": "standard",
+                "RulesStages": null,
+                "Map": "standard",
+            }))
+            .unwrap()
+        }
+
+        // Fresh insert: no pre-existing row, INSERT branch of the upsert.
+        let fresh = fixture_game("g-upsert-fresh");
+        upsert_game_record(&pool, &fresh, "games/2026/10/31/g-upsert-fresh.json.zst").await?;
+        let version = sqlx::query_scalar::<_, i32>(
+            "SELECT archive_version FROM games WHERE engine_game_id = $1",
+        )
+        .bind(&fresh.id)
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(version, 2);
+
+        // ON CONFLICT branch: a v1-era row (archive_version = 1) is bumped to 2
+        // when the game is re-archived.
+        let conflicted = fixture_game("g-upsert-v1");
+        sqlx::query(
+            r#"
+            INSERT INTO games (board_size, game_type, engine_game_id, archived_at, gcs_path, archive_version)
+            VALUES ('11x11', 'Standard', 'g-upsert-v1', NOW(), 'games/2026/01/01/g-upsert-v1.json.zst', 1)
+            "#,
+        )
+        .execute(&pool)
+        .await?;
+        upsert_game_record(&pool, &conflicted, "games/2026/10/31/g-upsert-v1.json.zst").await?;
+        let version = sqlx::query_scalar::<_, i32>(
+            "SELECT archive_version FROM games WHERE engine_game_id = $1",
+        )
+        .bind(&conflicted.id)
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(version, 2);
+
+        Ok(())
     }
 
     #[test]

@@ -158,7 +158,7 @@ pub struct EngineSnake {
     pub id: String,
     #[serde(rename = "Name")]
     pub name: String,
-    #[serde(rename = "URL")]
+    #[serde(rename = "URL", skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     #[serde(rename = "Body", default)]
     pub body: Vec<Point>,
@@ -185,7 +185,8 @@ pub struct EngineSnake {
     #[serde(
         rename = "APIVersion",
         default,
-        deserialize_with = "deserialize_string_or_int"
+        deserialize_with = "deserialize_string_or_int",
+        skip_serializing_if = "Option::is_none"
     )]
     pub api_version: Option<String>,
     #[serde(rename = "Author")]
@@ -200,7 +201,7 @@ pub struct EngineSnake {
     pub is_bot: Option<bool>,
     #[serde(rename = "IsEnvironment")]
     pub is_environment: Option<bool>,
-    #[serde(rename = "ProxyURL")]
+    #[serde(rename = "ProxyURL", skip_serializing_if = "Option::is_none")]
     pub proxy_url: Option<String>,
 }
 
@@ -246,9 +247,23 @@ pub struct PointState {
     pub value: i32,
 }
 
+/// Current archive object format version, written as the first field of every
+/// new object and into `games.archive_version`. Increment when the export
+/// format changes.
+///
+/// v2 (DEV-1978): top-level `archive_version` + `game_id`, zstd level 9,
+/// snake `URL`/`ProxyURL`/`APIVersion` omitted.
+pub const ARCHIVE_VERSION: i32 = 2;
+
 /// Combined export format for archiving a complete game to GCS.
+///
+/// `archive_version` and `game_id` are declared first so they serialize
+/// first: a reader that has only decompressed the object can identify the
+/// format and the game before interpreting anything else.
 #[derive(Debug, Clone, Serialize)]
 pub struct GameExport {
+    pub archive_version: i32,
+    pub game_id: String,
     pub game: EngineGame,
     pub frames: Vec<EngineGameFrame>,
     pub exported_at: DateTime<Utc>,
