@@ -99,21 +99,21 @@ pub fn render_markdown(digest: &ComputedDigest, base_url: &str) -> String {
 /// markdown-flavored (`**name**`, for the Discord snapshot and the CLI
 /// digest); the HTML view converts those bold pairs to `<strong>` while
 /// maud-escaping every segment (snake names are user-controlled). An
-/// unmatched trailing `**` renders literally.
+/// unmatched trailing `**` renders literally, in place (before the
+/// segment it preceded in the source text).
 fn text_html(text: &str) -> Markup {
     let parts: Vec<&str> = text.split("**").collect();
-    // Odd marker count: the final marker is unpaired — its segment renders
-    // plain, with a literal `**`.
+    // Odd marker count: the final marker is unpaired — it renders as a
+    // literal `**` before the final segment, preserving its position.
     let unpaired = parts.len().is_multiple_of(2);
     html! {
         @for (i, part) in parts.iter().enumerate() {
-            @if i % 2 == 1 && (!unpaired || i + 1 < parts.len()) {
+            @if i % 2 == 1 && i + 1 < parts.len() {
                 strong { (part) }
+            } @else if i % 2 == 1 && unpaired {
+                "**" (part)
             } @else {
                 (part)
-                @if i % 2 == 1 {
-                    "**"
-                }
             }
         }
     }
@@ -442,5 +442,35 @@ mod tests {
         // An empty section says "none this week" exactly once (its summary
         // already carries the marker; no duplicate em line).
         assert_eq!(markup.matches("none this week").count(), 1);
+    }
+
+    #[test]
+    fn text_html_preserves_unmatched_marker_position() {
+        // Unmatched trailing marker stays in place: `foo**bar` renders with
+        // the `**` before `bar`, never reordered to the end of the text.
+        let html = text_html("foo**bar").into_string();
+        let foo = html.find("foo").expect("foo rendered");
+        let marker = html.find("**").expect("literal marker rendered");
+        let bar = html.find("bar").expect("bar rendered");
+        assert!(
+            foo < marker && marker < bar,
+            "marker must sit between foo and bar: {html}"
+        );
+        assert!(
+            !html.contains("<strong>"),
+            "unpaired marker must not bold anything"
+        );
+
+        // Paired markers still bold; an unmatched trailing marker stays
+        // literal before its own segment.
+        let html = text_html("**a**b**c").into_string();
+        assert!(html.contains("<strong>a</strong>b**c"), "{html}");
+
+        // Fully paired text has no literal marker.
+        assert!(
+            text_html("**bold**")
+                .into_string()
+                .contains("<strong>bold</strong>")
+        );
     }
 }

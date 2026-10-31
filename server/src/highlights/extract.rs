@@ -252,14 +252,23 @@ async fn extract_window(
     // 5. Final frames: one sequential query per ladder (each statement
     // stays small against Neon; ~9 s each on the week in the prototype).
     for ladder in &ladders {
+        // Frame fields are extracted with guards (jsonb_typeof / digit
+        // regex) so a malformed field yields NULL instead of failing the
+        // statement; the Rust side then warns and skips that field/frame.
+        // `s->'Body'` stays server-side via jsonb_array_length (never
+        // transferred), and `Snakes` is only unnested when it is an array
+        // (jsonb_array_elements errors on scalars/objects).
         let frame_rows = sqlx::query!(
             r#"
             SELECT lg.game_id, t.turn_number AS final_turn,
                    s->>'ID' AS game_battlesnake_id,
-                   jsonb_array_length(s->'Body') AS "length",
-                   (s->>'Health')::int4 AS "health",
+                   CASE WHEN jsonb_typeof(s->'Body') = 'array'
+                        THEN jsonb_array_length(s->'Body') END AS "length",
+                   CASE WHEN (s->>'Health') ~ '^[0-9]{1,9}$'
+                        THEN (s->>'Health')::int4 END AS "health",
                    s->'Death'->>'Cause' AS death_cause,
-                   (s->'Death'->>'Turn')::int4 AS "death_turn",
+                   CASE WHEN (s->'Death'->>'Turn') ~ '^[0-9]{1,9}$'
+                        THEN (s->'Death'->>'Turn')::int4 END AS "death_turn",
                    s->'Death'->>'EliminatedBy' AS eliminated_by
             FROM leaderboard_games lg
             JOIN leaderboards l USING (leaderboard_id)
@@ -267,7 +276,10 @@ async fn extract_window(
                 SELECT turn_number, frame_data FROM turns t
                 WHERE t.game_id = lg.game_id ORDER BY t.turn_number DESC LIMIT 1
             ) t
-            CROSS JOIN LATERAL jsonb_array_elements(t.frame_data->'Snakes') s
+            CROSS JOIN LATERAL jsonb_array_elements(
+                CASE WHEN jsonb_typeof(t.frame_data->'Snakes') = 'array'
+                     THEN t.frame_data->'Snakes' END
+            ) s
             WHERE l.leaderboard_id = $1 AND lg.created_at >= $2 AND lg.created_at < $3
             "#,
             ladder.leaderboard_id,
