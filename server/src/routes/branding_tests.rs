@@ -40,7 +40,12 @@ fn assert_no_arena(html: &str, path: &str) {
 fn assert_brand(html: &str) {
     assert!(html.contains(r#"<meta property="og:site_name" content="Battlesnake">"#));
     assert!(html.contains(r#"aria-label="Battlesnake — home""#));
-    assert!(html.contains(r#"<span class="wordmark-text">Battlesnake</span>"#));
+    // The header carries the official wordmark artwork, not the old glyph
+    // + text wordmark.
+    assert!(html.contains(r#"class="wordmark-word""#));
+    assert!(html.contains(r#"viewBox="0 0 710 260""#));
+    assert!(!html.contains(r#"class="glyph""#));
+    assert!(!html.contains("wordmark-text"));
 }
 
 async fn request(

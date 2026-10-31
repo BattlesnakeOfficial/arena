@@ -122,8 +122,9 @@ fn draw_lines(c: &mut Canvas, lines: &[Line], x: f32, top: f32, leading: f32) ->
 
 // --- Default -----------------------------------------------------------------
 
-/// The home page's decorative board, with real heads and tails.
-fn home_board() -> BoardArt {
+/// The home page's decorative board, with real heads and tails. Shared scene
+/// with the hero board in `routes::home_board` (a test there keeps them in sync).
+pub(crate) fn home_board() -> BoardArt {
     BoardArt {
         width: 11,
         height: 11,
