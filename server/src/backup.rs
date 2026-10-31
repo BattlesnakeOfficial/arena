@@ -18,7 +18,13 @@ const HISTORICAL_BATCH_SIZE: i32 = 500;
 /// jobs every hour, and prod has a single vCPU shared with live games: a
 /// burst of concurrent frame parsing + zstd stalled every running game for
 /// ~300ms, long enough to time out snakes mid-turn.
-static BACKUP_SLOT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+///
+/// Shared by Play (backup.rs) and native (native_backup.rs) archive jobs —
+/// one backup at a time process-wide. Held as an `Arc` so native jobs can
+/// take owned permits into `spawn_blocking` (a borrowed permit would be
+/// freed early if a deploy drains the job future mid-compress).
+pub(crate) static BACKUP_SLOT: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
+    std::sync::LazyLock::new(|| std::sync::Arc::new(tokio::sync::Semaphore::new(1)));
 
 /// Job priority for [`BackupSingleGameJob`], below the default 0 that game
 /// runners use. cja claims `ORDER BY priority DESC, run_at, created_at`, and a
@@ -33,7 +39,7 @@ pub(crate) const BACKUP_JOB_PRIORITY: i32 = -10;
 /// ~1ms/game and faster to decompress (bench 2026-10-30,
 /// learning arena-game-archive-format-bench-2026-10). 19 is rejected: it
 /// takes 50-90ms/game and stalled live games on the shared vCPU (DEV-1498).
-const ZSTD_COMPRESSION_LEVEL: i32 = 9;
+pub(crate) const ZSTD_COMPRESSION_LEVEL: i32 = 9;
 
 /// Enqueue one game's backup at [`BACKUP_JOB_PRIORITY`].
 async fn enqueue_backup_job(

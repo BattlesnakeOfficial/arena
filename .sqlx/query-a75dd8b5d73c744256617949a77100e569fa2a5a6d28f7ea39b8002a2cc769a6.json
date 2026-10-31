@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE games\n           SET status = $2, finished_at = $3,\n               archived_at = NULL, gcs_path = NULL, archive_version = NULL\n           WHERE game_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a75dd8b5d73c744256617949a77100e569fa2a5a6d28f7ea39b8002a2cc769a6"
+}
