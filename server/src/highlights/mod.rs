@@ -1057,4 +1057,37 @@ mod tests {
         let sent = server.received_requests().await.unwrap_or_default().len();
         assert_eq!(sent, 1, "the week's announcement was POSTed {sent} times");
     }
+
+    /// A corrupt final-frame field must not prevent the entire weekly digest.
+    /// The extraction contract says malformed snake frames are skipped.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn malformed_final_frame_death_turn_does_not_abort_digest(pool: PgPool) {
+        let (game_id, _) = seed_duel(
+            &pool,
+            "Duels 11x11",
+            "malformed-frame-owner",
+            ["Malformed Winner", "Malformed Loser"],
+            w0() + chrono::Duration::hours(1),
+            0,
+            [25.0, 25.0],
+            10,
+        )
+        .await;
+        sqlx::query(
+            "UPDATE turns SET frame_data = jsonb_set(frame_data, \
+             '{Snakes,1,Death,Turn}', to_jsonb('not-an-integer'::text)) \
+             WHERE game_id = $1",
+        )
+        .bind(game_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let digest = compute_digest(&pool, &HouseSnakeConfig::default(), w0(), w1()).await;
+        assert!(
+            digest.is_ok(),
+            "one malformed snake frame aborted the digest: {digest:?}"
+        );
+        assert_eq!(digest.unwrap().games_count, 1);
+    }
 }
