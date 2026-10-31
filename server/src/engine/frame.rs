@@ -99,17 +99,27 @@ pub fn normalize_public_frame(frame: &mut serde_json::Value, timeout_ms: i64) {
     let Some(frame) = frame.as_object_mut() else {
         return;
     };
-    frame.entry("GameState").or_insert_with(|| json!({}));
-    frame.entry("PointState").or_insert_with(|| json!([]));
+    // Present-but-null counts as missing: archived v1/v2 Play objects
+    // serialize typed `Option`s as JSON null in these keys, and the fill
+    // below makes their public shape match the DB path's `0`/`""`/`false`/
+    // `{}`/`[]`. DB frames never carry null there (non-optional types), so
+    // DB output is unchanged.
+    let fill = |frame: &mut serde_json::Map<String, Value>, key: &str, value: Value| {
+        if frame.get(key).is_none_or(Value::is_null) {
+            frame.insert(key.to_string(), value);
+        }
+    };
+    fill(frame, "GameState", json!({}));
+    fill(frame, "PointState", json!([]));
     let Some(snakes) = frame.get_mut("Snakes").and_then(Value::as_array_mut) else {
         return;
     };
     for snake in snakes.iter_mut().filter_map(Value::as_object_mut) {
-        snake.entry("StatusCode").or_insert_with(|| json!(0));
-        snake.entry("Error").or_insert_with(|| json!(""));
-        snake.entry("TimingMicros").or_insert_with(|| json!({}));
-        snake.entry("IsBot").or_insert_with(|| json!(false));
-        snake.entry("IsEnvironment").or_insert_with(|| json!(false));
+        fill(snake, "StatusCode", json!(0));
+        fill(snake, "Error", json!(""));
+        fill(snake, "TimingMicros", json!({}));
+        fill(snake, "IsBot", json!(false));
+        fill(snake, "IsEnvironment", json!(false));
         for key in ["URL", "ProxyURL", "APIVersion"] {
             snake.insert(key.to_string(), json!(""));
         }
@@ -732,9 +742,15 @@ mod tests {
     fn test_normalize_public_frame_upgrades_legacy_frames() {
         let mut frame = serde_json::json!({
             "Turn": 3,
+            "GameState": null,
+            "PointState": null,
             "Snakes": [
                 {"ID": "a", "Latency": "timeout", "APIVersion": "1"},
-                {"ID": "b", "Latency": "42", "APIVersion": "1", "StatusCode": 200}
+                {"ID": "b", "Latency": "42", "APIVersion": "1", "StatusCode": 200},
+                // Archived v1/v2 Play objects serialize typed Options as
+                // null: present-but-null counts as missing and is filled.
+                {"ID": "c", "StatusCode": null, "Error": null, "IsBot": null,
+                 "IsEnvironment": null, "TimingMicros": null}
             ],
             "Food": [],
             "Hazards": []
@@ -759,6 +775,18 @@ mod tests {
         assert_eq!(b["Error"], "");
         assert_eq!(b["StatusCode"], 200);
         assert_eq!(b["TimingMicros"], serde_json::json!({}));
+        let c = &frame["Snakes"][2];
+        assert_eq!(c["StatusCode"], 0);
+        assert_eq!(c["Error"], "");
+        assert_eq!(c["IsBot"], false);
+        assert_eq!(c["IsEnvironment"], false);
+        assert_eq!(c["TimingMicros"], serde_json::json!({}));
+
+        // A DB-shaped frame (no nulls in the filled keys) is unchanged by
+        // the null-tolerance: byte-identical before and after a second pass.
+        let mut db_shaped = once.clone();
+        normalize_public_frame(&mut db_shaped, 500);
+        assert_eq!(db_shaped, once);
     }
 
     #[test]

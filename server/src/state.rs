@@ -45,6 +45,11 @@ pub struct AppState {
     /// Head & Tail Studio guards (upload and processing slots, rate limit) and the
     /// upload processor (an `arena studio-worker` child process per upload).
     pub studio: crate::routes::studio::StudioState,
+    /// The one object-storage seam: backups write through it, the archive
+    /// reader reads through it (constructed from a clone of this same Arc).
+    pub object_store: std::sync::Arc<dyn crate::object_store::ObjectStore>,
+    /// Read side of the game archive (see `archive.rs`).
+    pub archive: crate::archive::ArchiveReader,
 }
 
 impl AppState {
@@ -201,6 +206,18 @@ impl AppState {
         let studio = crate::routes::studio::StudioState::subprocess()
             .wrap_err("Failed to find this executable for the studio worker")?;
 
+        let object_store: std::sync::Arc<dyn crate::object_store::ObjectStore> = match config
+            .gcs_bucket
+            .clone()
+        {
+            Some(bucket) => std::sync::Arc::new(crate::object_store::GcsObjectStore::new(bucket)),
+            None => std::sync::Arc::new(crate::object_store::DisabledObjectStore),
+        };
+        let archive = crate::archive::ArchiveReader::new(
+            object_store.clone(),
+            config.archive_cache_max_bytes,
+        );
+
         Ok(Self {
             idle_poll_gate: IdlePollGate::new(
                 NonZeroUsize::new(config.job.idle_pollers).unwrap_or(NonZeroUsize::MIN),
@@ -224,6 +241,8 @@ impl AppState {
             stats_refresh: Arc::new(tokio::sync::Mutex::new(())),
             activity_recorder: Arc::new(crate::activity::ActivityRecorder::default()),
             studio,
+            object_store,
+            archive,
         })
     }
 }
@@ -234,6 +253,12 @@ impl AppState {
     /// else (no OAuth, no engine DB, an empty scoring registry).
     pub fn test_from_pool(db: sqlx::PgPool) -> Self {
         let config = AppConfig::test_default();
+        let object_store: std::sync::Arc<dyn crate::object_store::ObjectStore> =
+            std::sync::Arc::new(crate::object_store::InMemoryObjectStore::default());
+        let archive = crate::archive::ArchiveReader::new(
+            object_store.clone(),
+            crate::archive::DEFAULT_ARCHIVE_CACHE_MAX_BYTES,
+        );
         Self {
             idle_poll_gate: IdlePollGate::new(NonZeroUsize::MIN),
             config: Arc::new(config),
@@ -257,6 +282,8 @@ impl AppState {
             activity_recorder: Arc::new(crate::activity::ActivityRecorder::default()),
             // The test binary has no `studio-worker` subcommand: process in-process.
             studio: crate::routes::studio::StudioState::in_process(),
+            object_store,
+            archive,
         }
     }
 }

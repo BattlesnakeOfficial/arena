@@ -102,6 +102,24 @@ pub async fn get_latest_frame(
     Ok(frame)
 }
 
+/// Whether any renderable frame exists for a game in `turns`. An
+/// existence probe: fetches no `frame_data` JSONB, stops at the first
+/// matching row (index-backed by `turns_game_id_idx`).
+pub async fn has_frames(pool: &PgPool, game_id: Uuid) -> cja::Result<bool> {
+    let exists = sqlx::query_scalar!(
+        r#"
+        SELECT EXISTS(
+            SELECT 1 FROM turns WHERE game_id = $1 AND frame_data IS NOT NULL
+        ) AS "exists!"
+        "#,
+        game_id
+    )
+    .fetch_one(pool)
+    .await
+    .wrap_err("Failed to probe turns for frames")?;
+    Ok(exists)
+}
+
 /// The persisted frame for one turn of a game, or `None` if that turn has no
 /// frame (not played yet, or rolled back by a retry).
 pub async fn get_turn_frame(
@@ -551,6 +569,32 @@ mod tests {
 
         let stats = get_solo_game_stats(&pool, game_id).await?;
         assert_eq!(stats, None);
+        Ok(())
+    }
+
+    // --- has_frames (archive serving decision, DEV-1979) ---
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn has_frames_false_without_turns(pool: sqlx::PgPool) -> cja::Result<()> {
+        let game_id = fixture_solo_game(&pool).await?;
+        assert!(!has_frames(&pool, game_id).await?);
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn has_frames_true_with_frame_data(pool: sqlx::PgPool) -> cja::Result<()> {
+        let game_id = fixture_solo_game(&pool).await?;
+        fixture_turn(&pool, game_id, 0, Some(frame(0, None))).await?;
+        assert!(has_frames(&pool, game_id).await?);
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn has_frames_false_when_only_null_frame_data(pool: sqlx::PgPool) -> cja::Result<()> {
+        // Rolled-back retry shape: a turns row with no renderable frame.
+        let game_id = fixture_solo_game(&pool).await?;
+        fixture_turn(&pool, game_id, 0, None).await?;
+        assert!(!has_frames(&pool, game_id).await?);
         Ok(())
     }
 }

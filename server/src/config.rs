@@ -263,6 +263,10 @@ pub struct AppConfig {
     pub home_feed_cache_secs: u64,
     /// TTL for public aggregate stats, in seconds. Zero disables caching.
     pub stats_cache_secs: u64,
+    /// Soft cap on cached archive bytes (raw JSON text) the archive cache
+    /// retains for serving archived games. Env `ARCHIVE_CACHE_MAX_BYTES`;
+    /// 0 disables caching.
+    pub archive_cache_max_bytes: usize,
     pub gcp_logging: bool,
     pub gcp_project_id: Option<String>,
     pub rust_log: String,
@@ -388,6 +392,10 @@ impl AppConfig {
             tokio_worker_multiplier: parse_env("ARENA_TOKIO_WORKER_MULTIPLIER", 2),
             home_feed_cache_secs: parse_env("HOME_FEED_CACHE_SECS", 30),
             stats_cache_secs: parse_env("STATS_CACHE_SECS", 900),
+            archive_cache_max_bytes: parse_env(
+                "ARCHIVE_CACHE_MAX_BYTES",
+                crate::archive::DEFAULT_ARCHIVE_CACHE_MAX_BYTES,
+            ),
             gcp_logging,
             gcp_project_id: optional_env("GCP_PROJECT_ID"),
             rust_log: std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
@@ -428,6 +436,7 @@ impl AppConfig {
             email_per_recipient_hourly_limit: 5,
             home_feed_cache_secs: 0,
             stats_cache_secs: 0,
+            archive_cache_max_bytes: crate::archive::DEFAULT_ARCHIVE_CACHE_MAX_BYTES,
             tokio_worker_multiplier: 2,
             gcp_logging: false,
             gcp_project_id: None,
@@ -659,6 +668,10 @@ mod tests {
         assert_eq!(c.ladder_start_deadline_secs, 480);
         assert_eq!(c.job.poll_interval_ms, 60_000);
         assert_eq!(c.pg_max_connections, 5);
+        assert_eq!(
+            c.archive_cache_max_bytes,
+            crate::archive::DEFAULT_ARCHIVE_CACHE_MAX_BYTES
+        );
         assert!(c.features.server && c.features.jobs && c.features.cron);
     }
 

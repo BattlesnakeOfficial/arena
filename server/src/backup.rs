@@ -4,10 +4,6 @@ use std::io::Write;
 
 use chrono::{Duration, Utc};
 use color_eyre::eyre::{Context as _, eyre};
-use google_cloud_storage::{
-    client::{Client as GcsClient, ClientConfig},
-    http::objects::upload::{Media, UploadObjectRequest, UploadType},
-};
 use sqlx::{FromRow, PgPool};
 
 use crate::engine_models::{ARCHIVE_VERSION, EngineGame, EngineGameFrame, GameExport};
@@ -57,22 +53,6 @@ async fn enqueue_backup_job(
     .await
     .wrap_err_with(|| format!("Failed to enqueue backup job for game {engine_game_id}"))?;
     Ok(())
-}
-
-/// Shared GCS client. Building one per job re-ran TLS setup and a metadata
-/// token fetch for every archived game; the client refreshes its own token.
-static GCS_CLIENT: tokio::sync::OnceCell<GcsClient> = tokio::sync::OnceCell::const_new();
-
-async fn gcs_client() -> cja::Result<&'static GcsClient> {
-    GCS_CLIENT
-        .get_or_try_init(|| async {
-            let config = ClientConfig::default()
-                .with_auth()
-                .await
-                .wrap_err("Failed to configure GCS client")?;
-            Ok(GcsClient::new(config))
-        })
-        .await
 }
 
 /// Row from Engine's games table
@@ -196,7 +176,7 @@ fn strip_secret_snake_fields(frames: &mut [EngineGameFrame]) {
 
 /// Parse frames, build the export, and zstd-compress its JSON. Pure CPU
 /// work: callers run it on the blocking pool, never on an async worker.
-fn build_compressed_export(
+pub(crate) fn build_compressed_export(
     game: EngineGame,
     frame_values: Vec<serde_json::Value>,
 ) -> cja::Result<Vec<u8>> {
@@ -237,29 +217,6 @@ fn build_compressed_export(
     );
 
     Ok(compressed)
-}
-
-/// Upload an already-compressed export to GCS.
-async fn upload_to_gcs(
-    client: &GcsClient,
-    bucket: &str,
-    path: &str,
-    compressed: Vec<u8>,
-) -> cja::Result<()> {
-    let upload_type = UploadType::Simple(Media::new(path.to_string()));
-    client
-        .upload_object(
-            &UploadObjectRequest {
-                bucket: bucket.to_string(),
-                ..Default::default()
-            },
-            compressed,
-            &upload_type,
-        )
-        .await
-        .wrap_err("Failed to upload to GCS")?;
-
-    Ok(())
 }
 
 /// Insert or update a game record in the local database after archiving.
@@ -392,12 +349,9 @@ pub async fn backup_single_game(
         }
     };
 
-    let bucket = match &app_state.config.gcs_bucket {
-        Some(b) => b.clone(),
-        None => {
-            return Err(eyre!("GCS bucket not configured").into());
-        }
-    };
+    if !app_state.object_store.is_configured() {
+        return Err(eyre!("GCS bucket not configured").into());
+    }
 
     // One backup at a time: the parse/compress below competes with live
     // games for the CPU (see BACKUP_SLOT).
@@ -427,7 +381,11 @@ pub async fn backup_single_game(
 
     // Generate path and upload
     let path = gcs_path(&game);
-    upload_to_gcs(gcs_client().await?, &bucket, &path, compressed).await?;
+    app_state
+        .object_store
+        .put(&path, compressed)
+        .await
+        .wrap_err_with(|| format!("Failed to upload archive for {engine_game_id}"))?;
 
     // Record in local database
     upsert_game_record(&app_state.db, &game, &path).await?;
