@@ -680,17 +680,11 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
 }
 .home .board .cell { background: #241C23; border-radius: 4px; position: relative; }
 .home .board .seg { border-radius: 4px; }
-.home .board .seg.head { border-radius: 7px; }
-.home .board .seg.head::after {
-  content: "";
-  position: absolute;
-  width: 18%;
-  height: 18%;
-  background: #161115;
-  border-radius: 50%;
-  top: 24%;
-  right: 24%;
-}
+/* Head and tail art fills its cell; the dark cell behind it shows through
+   the art's cut-out eyes and teeth. `.cell` is position: relative (line
+   above), so the absolutely-positioned art exactly overlays the cell and
+   never takes part in grid-track sizing. */
+.home .board .cell > svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
 .home .board .food::after {
   content: "";
   position: absolute;
