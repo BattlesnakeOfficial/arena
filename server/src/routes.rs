@@ -11,9 +11,12 @@ use maud::{Markup, html};
 use serde::Deserialize;
 use tower_http::cors::{Any, CorsLayer};
 
-use crate::components::snake_board::{Direction, snake_geometry};
 use crate::{
-    components::{avatar::user_avatar, page_factory::PageFactory},
+    components::{
+        avatar::user_avatar,
+        page_factory::PageFactory,
+        snake_board::{Direction, snake_geometry},
+    },
     customizations::chip_color,
     errors::ServerResult,
     models::{
