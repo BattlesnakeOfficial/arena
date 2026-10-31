@@ -52,6 +52,7 @@ pub mod oauth;
 mod oauth_tests;
 pub mod og;
 pub mod pagination;
+pub mod play_notices;
 pub mod policy;
 #[cfg(test)]
 mod private_leaderboard_tests;
@@ -184,6 +185,10 @@ pub fn routes(app_state: AppState) -> cja::Result<axum::Router> {
         .route(
             "/notifications/unsubscribe/{token}",
             get(settings::unsubscribe_get).post(settings::unsubscribe_post),
+        )
+        .route(
+            "/play-notices/unsubscribe/{token}",
+            get(play_notices::unsubscribe_get).post(play_notices::unsubscribe_post),
         )
         // Appearance (theme) preference - requires authentication
         .route("/settings/appearance", post(settings::update_appearance))
@@ -393,6 +398,11 @@ pub fn routes(app_state: AppState) -> cja::Result<axum::Router> {
         .route(
             "/admin/emails/{kind}/send-test",
             post(admin::send_test_email),
+        )
+        .route("/admin/play-notices", get(play_notices::admin_page))
+        .route(
+            "/admin/play-notices/{wave}/send-test",
+            post(play_notices::send_test),
         )
         .route("/stats", get(stats::stats_page))
         .route("/admin/moderation", get(admin::moderation_queue))

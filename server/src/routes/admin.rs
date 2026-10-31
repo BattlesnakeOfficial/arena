@@ -238,6 +238,7 @@ pub async fn dashboard(
                     a href="/admin/leaderboards" style="display:inline-flex;align-items:center;min-height:44px;box-sizing:border-box;padding: 8px 16px; background: #666; color: white; text-decoration: none; border-radius: 4px;" { "Leaderboards" }
                     a href="/admin/moderation" style="display:inline-flex;align-items:center;min-height:44px;box-sizing:border-box;padding: 8px 16px; background: #666; color: white; text-decoration: none; border-radius: 4px;" { "Moderation queue" }
                     a href="/admin/emails" style="display:inline-flex;align-items:center;min-height:44px;padding:8px 16px;background:#666;color:white;text-decoration:none;border-radius:4px;box-sizing:border-box;" { "Emails" }
+                    a href="/admin/play-notices" style="display:inline-flex;align-items:center;min-height:44px;padding:8px 16px;background:#666;color:white;text-decoration:none;border-radius:4px;box-sizing:border-box;" { "Play shutdown notices" }
                     a href="/admin/oauth-clients" style="display:inline-flex;align-items:center;min-height:44px;box-sizing:border-box;padding: 8px 16px; background: #666; color: white; text-decoration: none; border-radius: 4px;" { "OAuth clients" }
                     a href="/stats" style="display:inline-flex;align-items:center;min-height:44px;box-sizing:border-box;padding: 8px 16px; background: #666; color: white; text-decoration: none; border-radius: 4px;" { "Stats" }
                 }

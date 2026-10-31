@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE play_shutdown_notices SET status = $3, updated_at = NOW()\n                 WHERE imported_account_id = $1 AND wave = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int2",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "34e604c3293c2048393a11f36f0c7a3dc374aceb109e22453593b3902b016737"
+}

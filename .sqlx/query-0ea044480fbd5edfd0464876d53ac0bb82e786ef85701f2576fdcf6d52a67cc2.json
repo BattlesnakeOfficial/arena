@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM play_shutdown_notices WHERE imported_account_id = $1 AND wave = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int2"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "0ea044480fbd5edfd0464876d53ac0bb82e786ef85701f2576fdcf6d52a67cc2"
+}

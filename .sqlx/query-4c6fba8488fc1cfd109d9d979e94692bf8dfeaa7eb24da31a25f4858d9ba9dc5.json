@@ -1,0 +1,42 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT ia.imported_account_id, ia.play_account_id, ia.email, ia.username\n        FROM imported_accounts ia\n        WHERE ia.play_account_id = ANY($1)\n          AND ia.claimed_by_user_id IS NULL\n          AND ia.shutdown_notices_unsubscribed_at IS NULL\n          AND ia.email <> ''\n          AND NOT EXISTS (\n              SELECT 1 FROM play_shutdown_notices n\n              WHERE n.imported_account_id = ia.imported_account_id AND n.wave = $2\n          )\n        ORDER BY ia.imported_account_id\n        LIMIT $3\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "imported_account_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "play_account_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "email",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "username",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "TextArray",
+        "Int2",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "4c6fba8488fc1cfd109d9d979e94692bf8dfeaa7eb24da31a25f4858d9ba9dc5"
+}

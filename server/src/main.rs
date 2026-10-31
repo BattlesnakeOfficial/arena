@@ -41,6 +41,7 @@ mod observability;
 mod og;
 mod placement;
 mod play_import;
+mod play_shutdown_notices;
 mod routes;
 mod scoring;
 mod secrets;

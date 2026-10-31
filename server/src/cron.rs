@@ -76,6 +76,11 @@ pub(crate) fn cron_registry(config: &AppConfig) -> CronRegistry<AppState> {
         Some("Reconcile play customization grants"),
         Duration::from_secs(config.play_grant_reconcile_interval_secs),
     );
+    registry.register_job(
+        crate::play_shutdown_notices::PlayShutdownNoticeJob,
+        Some("Send a batch of play.battlesnake.com shutdown notices (no-op unless armed)"),
+        Duration::from_secs(crate::play_shutdown_notices::CRON_INTERVAL_SECS),
+    );
 
     // Leaderboard matchmaker: one round per derived interval, subject to worker delay.
     registry.register_job(
