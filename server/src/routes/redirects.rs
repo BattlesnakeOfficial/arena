@@ -29,6 +29,8 @@ pub const REDIRECTS: &[(&str, &str)] = &[
     // Blog
     ("/blog", "https://docs.battlesnake.com/blog"),
     // Socials
+    ("/bluesky", "https://bsky.app/profile/battlesnake.com"),
+    ("/bsky", "https://bsky.app/profile/battlesnake.com"),
     ("/discord", "https://discord.gg/BYubeHQ"),
     ("/facebook", "https://www.facebook.com/playbattlesnake/"),
     ("/github", "https://github.com/battlesnakeofficial"),
