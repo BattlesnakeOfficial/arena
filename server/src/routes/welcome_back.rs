@@ -23,7 +23,8 @@ use crate::{
 
 pub const PATH: &str = "/welcome-back";
 
-/// The day play.battlesnake.com stops serving and redirects here.
+/// The day play.battlesnake.com starts redirecting here. Claiming works
+/// before and after it, so copy states it as information, not a deadline.
 const PLAY_SHUTDOWN_DATE: &str = "November 30";
 
 /// GET /welcome-back
@@ -55,7 +56,8 @@ fn signed_out() -> Markup {
                 h1 { "Battlesnake has a new home" }
                 p class="lede" {
                     "Played on play.battlesnake.com? Your snakes, profile, and customization "
-                    "unlocks come with you. play.battlesnake.com closes on " (PLAY_SHUTDOWN_DATE) "."
+                    "unlocks come with you, whenever you're ready. play.battlesnake.com will "
+                    "redirect here on " (PLAY_SHUTDOWN_DATE) "."
                 }
                 div class="cta-row" {
                     a class="btn solid" href="/auth/github?resume=true" {
@@ -96,8 +98,7 @@ fn unclaimed() -> Markup {
                 h1 { "Bring your account over" }
                 p class="lede" {
                     "Your snakes, profile, and customization unlocks from play.battlesnake.com "
-                    "can come with you before it closes on " (PLAY_SHUTDOWN_DATE) ". "
-                    "How depends on how you signed in to play:"
+                    "can come with you any time. How depends on how you signed in to play:"
                 }
                 div class="claim-prompt" {
                     (claim::claim_options())
