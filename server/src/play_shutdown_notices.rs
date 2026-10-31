@@ -2,8 +2,9 @@
 //! home (DEV-1983).
 //!
 //! Three dated waves go to every imported play account that hasn't been
-//! claimed and either signed in to play within the last year or still has a
-//! snake on an active play leaderboard. Each email lists those leaderboard
+//! claimed, doesn't match an arena user (by GitHub id or email: they're
+//! already here), and either signed in to play within the last year or
+//! still has a snake on an active play leaderboard. Each email lists those leaderboard
 //! snakes and links to `/welcome-back`.
 //!
 //! [`PlayShutdownNoticeJob`] runs from cron every few minutes and sends one
@@ -333,16 +334,22 @@ pub fn notice_message(
 }
 
 /// How many accounts a wave would reach right now: eligible on play,
-/// unclaimed, subscribed, with an email.
+/// unclaimed, subscribed, with an email, and not already an arena user.
 pub async fn eligible_recipient_count(db: &PgPool, eligible: &[String]) -> cja::Result<i64> {
     sqlx::query_scalar!(
         r#"
         SELECT COUNT(*) AS "count!"
-        FROM imported_accounts
-        WHERE play_account_id = ANY($1)
-          AND claimed_by_user_id IS NULL
-          AND shutdown_notices_unsubscribed_at IS NULL
-          AND email <> ''
+        FROM imported_accounts ia
+        WHERE ia.play_account_id = ANY($1)
+          AND ia.claimed_by_user_id IS NULL
+          AND ia.shutdown_notices_unsubscribed_at IS NULL
+          AND ia.email <> ''
+          AND NOT EXISTS (
+              SELECT 1 FROM users u
+              WHERE u.external_github_id = ia.github_uid
+                 OR lower(u.github_email) = lower(ia.email)
+                 OR lower(u.notification_email) = lower(ia.email)
+          )
         "#,
         eligible,
     )
@@ -401,7 +408,7 @@ struct Recipient {
 }
 
 /// The next unclaimed, subscribed, eligible accounts this wave hasn't
-/// reached yet.
+/// reached yet, skipping anyone who already has an arena user.
 async fn next_recipients(
     db: &PgPool,
     wave: Wave,
@@ -417,6 +424,12 @@ async fn next_recipients(
           AND ia.claimed_by_user_id IS NULL
           AND ia.shutdown_notices_unsubscribed_at IS NULL
           AND ia.email <> ''
+          AND NOT EXISTS (
+              SELECT 1 FROM users u
+              WHERE u.external_github_id = ia.github_uid
+                 OR lower(u.github_email) = lower(ia.email)
+                 OR lower(u.notification_email) = lower(ia.email)
+          )
           AND NOT EXISTS (
               SELECT 1 FROM play_shutdown_notices n
               WHERE n.imported_account_id = ia.imported_account_id AND n.wave = $2
@@ -464,11 +477,17 @@ async fn send_notice(
     let reserved = sqlx::query!(
         r#"
         INSERT INTO play_shutdown_notices (imported_account_id, wave, status)
-        SELECT imported_account_id, $2, 'sending'
-        FROM imported_accounts
-        WHERE imported_account_id = $1
-          AND claimed_by_user_id IS NULL
-          AND shutdown_notices_unsubscribed_at IS NULL
+        SELECT ia.imported_account_id, $2, 'sending'
+        FROM imported_accounts ia
+        WHERE ia.imported_account_id = $1
+          AND ia.claimed_by_user_id IS NULL
+          AND ia.shutdown_notices_unsubscribed_at IS NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM users u
+              WHERE u.external_github_id = ia.github_uid
+                 OR lower(u.github_email) = lower(ia.email)
+                 OR lower(u.notification_email) = lower(ia.email)
+          )
         ON CONFLICT DO NOTHING
         "#,
         recipient.imported_account_id,
@@ -903,7 +922,9 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "../migrations")]
-    async fn batches_send_once_per_wave_and_skip_claimed_and_unsubscribed(pool: PgPool) {
+    async fn batches_send_once_per_wave_and_skip_claimed_unsubscribed_and_arena_users(
+        pool: PgPool,
+    ) {
         create_play_tables(&pool).await;
         for account in ["fresh", "claimed", "unsubscribed", "stale"] {
             play_account(
@@ -927,6 +948,30 @@ mod tests {
             .unwrap();
         assert!(unsubscribe(&pool, unsubscribed).await.unwrap());
 
+        // Already on arena without having claimed: matched by GitHub id, or
+        // by email in any case. They don't need a "come over" email.
+        for account in ["arena-by-github", "arena-by-email"] {
+            play_account(&pool, account, Some(10)).await;
+        }
+        let arena_by_github = imported(&pool, "arena-by-github").await;
+        let arena_by_email = imported(&pool, "arena-by-email").await;
+        crate::routes::test_support::create_user(&pool, 77002, false).await;
+        sqlx::query(
+            "UPDATE imported_accounts SET github_uid = 77002 WHERE imported_account_id = $1",
+        )
+        .bind(arena_by_github)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let by_email = crate::routes::test_support::create_user(&pool, 77003, false).await;
+        sqlx::query(
+            "UPDATE users SET github_email = 'ARENA-BY-EMAIL@example.com' WHERE user_id = $1",
+        )
+        .bind(by_email)
+        .execute(&pool)
+        .await
+        .unwrap();
+
         let server = mailgun().await;
         let state = mailgun_state(&pool, &server, 5).await;
 
@@ -936,7 +981,13 @@ mod tests {
             status(&pool, fresh, Wave::First).await.as_deref(),
             Some("sent")
         );
-        for skipped in [claimed, unsubscribed, stale] {
+        for skipped in [
+            claimed,
+            unsubscribed,
+            stale,
+            arena_by_github,
+            arena_by_email,
+        ] {
             assert_eq!(status(&pool, skipped, Wave::First).await, None);
         }
         let bodies = sent_bodies(&server).await;

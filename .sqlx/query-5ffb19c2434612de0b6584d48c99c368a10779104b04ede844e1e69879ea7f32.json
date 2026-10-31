@@ -1,0 +1,42 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT ia.imported_account_id, ia.play_account_id, ia.email, ia.username\n        FROM imported_accounts ia\n        WHERE ia.play_account_id = ANY($1)\n          AND ia.claimed_by_user_id IS NULL\n          AND ia.shutdown_notices_unsubscribed_at IS NULL\n          AND ia.email <> ''\n          AND NOT EXISTS (\n              SELECT 1 FROM users u\n              WHERE u.external_github_id = ia.github_uid\n                 OR lower(u.github_email) = lower(ia.email)\n                 OR lower(u.notification_email) = lower(ia.email)\n          )\n          AND NOT EXISTS (\n              SELECT 1 FROM play_shutdown_notices n\n              WHERE n.imported_account_id = ia.imported_account_id AND n.wave = $2\n          )\n        ORDER BY ia.imported_account_id\n        LIMIT $3\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "imported_account_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "play_account_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "email",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "username",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "TextArray",
+        "Int2",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "5ffb19c2434612de0b6584d48c99c368a10779104b04ede844e1e69879ea7f32"
+}
