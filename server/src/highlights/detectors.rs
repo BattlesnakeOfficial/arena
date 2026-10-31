@@ -35,14 +35,13 @@ pub fn fit_k(games: &[&WindowGame], duels: bool) -> f64 {
             let k = i as f64 / 100.0;
             let ll: f64 = candidates
                 .iter()
-                .map(|game| {
-                    let winner = game.unique_winner().expect("filtered above");
+                .filter_map(|game| {
+                    let winner = game.unique_winner()?;
                     let index = game
                         .snakes
                         .iter()
-                        .position(|s| s.entry_id == winner.entry_id)
-                        .expect("winner is a participant");
-                    game.win_probs(k)[index].ln()
+                        .position(|s| s.entry_id == winner.entry_id)?;
+                    Some(game.win_probs(k)[index].ln())
                 })
                 .sum();
             (ll, k)
@@ -158,12 +157,10 @@ fn ladder_short(ladder: &Ladder) -> &str {
 }
 
 fn winner_index(game: &WindowGame) -> Option<usize> {
-    game.unique_winner().map(|w| {
-        game.snakes
-            .iter()
-            .position(|s| s.entry_id == w.entry_id)
-            .expect("winner is a participant")
-    })
+    let winner = game.unique_winner()?;
+    game.snakes
+        .iter()
+        .position(|s| s.entry_id == winner.entry_id)
 }
 
 // ---------------------------------------------------------------- upsets
@@ -220,7 +217,7 @@ pub fn upset_rows(games: &[&WindowGame], k: f64, top_n: usize) -> Vec<UpsetRow> 
             winner_index: w_index,
         });
     }
-    rows.sort_by(|a, b| a.calibrated_p.partial_cmp(&b.calibrated_p).unwrap());
+    rows.sort_by(|a, b| a.calibrated_p.total_cmp(&b.calibrated_p));
     rows.truncate(top_n);
     rows
 }
@@ -346,7 +343,7 @@ pub fn replay_ladder(
                 .copied()
                 .filter(|entry| score.contains_key(entry) && active(*entry, at))
                 .collect();
-            alive.sort_by(|a, b| score[b].partial_cmp(&score[a]).unwrap());
+            alive.sort_by(|a, b| score[b].total_cmp(&score[a]));
             alive
                 .into_iter()
                 .enumerate()
@@ -413,7 +410,7 @@ pub fn replay_ladder(
                 )
             })
             .collect();
-        v.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap());
+        v.sort_by(|a, b| b.2.total_cmp(&a.2));
         v
     };
     let name_of = |entry: Uuid| names.get(&entry).cloned().unwrap_or_else(|| "?".into());
@@ -569,7 +566,11 @@ fn newcomers_section(data: &WindowData, thrones: &[ThroneOutcome]) -> Section {
                         first_win_at: None,
                         first_win_game: None,
                     });
-                    stats_list.last_mut().expect("just pushed")
+                    match stats_list.last_mut() {
+                        Some(stats) => stats,
+                        // Unreachable: pushed directly above.
+                        None => continue,
+                    }
                 }
             };
             stats.games += 1;
@@ -590,9 +591,9 @@ fn newcomers_section(data: &WindowData, thrones: &[ThroneOutcome]) -> Section {
     type NewcomerRow<'a> = (DateTime<Utc>, &'a (String, String), &'a Vec<Stats>);
     let mut rows: Vec<NewcomerRow> = per
         .iter()
-        .map(|(key, stats)| {
-            let debut = stats.iter().map(|s| s.debut).min().expect("non-empty");
-            (debut, key, stats)
+        .filter_map(|(key, stats)| {
+            let debut = stats.iter().map(|s| s.debut).min()?;
+            Some((debut, key, stats))
         })
         .collect();
     rows.sort_by_key(|row| row.0);
@@ -1038,7 +1039,7 @@ fn streaks_section(ladder: &Ladder, games: &[&WindowGame], throne: &ThroneOutcom
                         let scalp = mus
                             .iter()
                             .zip(labels.iter())
-                            .max_by(|(a, _), (b, _)| a.partial_cmp(b).unwrap())
+                            .max_by(|(a, _), (b, _)| a.total_cmp(b))
                             .map(|(_, label)| (*label).clone())
                             .unwrap_or_else(|| "?".to_string());
                         best.insert(snake.entry_id, (length, game.created_at, scalp));
@@ -1132,8 +1133,7 @@ fn rivalries_section(ladder: &Ladder, games: &[&WindowGame], throne: &ThroneOutc
         }
     }
     rows.sort_by(|x, y| {
-        x.0.partial_cmp(&y.0)
-            .unwrap()
+        x.0.total_cmp(&y.0)
             .then_with(|| x.1.cmp(&y.1))
             .then_with(|| x.2.cmp(&y.2))
             .then_with(|| x.3.cmp(&y.3))
@@ -1154,8 +1154,7 @@ fn rivalries_section(ladder: &Ladder, games: &[&WindowGame], throne: &ThroneOutc
         }
     }
     kryptonite.sort_by(|x, y| {
-        y.0.partial_cmp(&x.0)
-            .unwrap()
+        y.0.total_cmp(&x.0)
             .then_with(|| x.1.cmp(&y.1))
             .then_with(|| x.2.cmp(&y.2))
     });
@@ -1173,8 +1172,7 @@ fn rivalries_section(ladder: &Ladder, games: &[&WindowGame], throne: &ThroneOutc
     }
     let mut lopsided = rows.clone();
     lopsided.sort_by(|x, y| {
-        y.0.partial_cmp(&x.0)
-            .unwrap()
+        y.0.total_cmp(&x.0)
             .then_with(|| x.1.cmp(&y.1))
             .then_with(|| x.2.cmp(&y.2))
     });

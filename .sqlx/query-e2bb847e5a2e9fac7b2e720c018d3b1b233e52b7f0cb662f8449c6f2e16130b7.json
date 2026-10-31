@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE highlight_digests SET discord_status = 'posted', discord_posted_at = NOW() WHERE digest_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e2bb847e5a2e9fac7b2e720c018d3b1b233e52b7f0cb662f8449c6f2e16130b7"
+}

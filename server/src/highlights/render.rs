@@ -95,6 +95,30 @@ pub fn render_markdown(digest: &ComputedDigest, base_url: &str) -> String {
     out
 }
 
+/// Render stored snapshot text for the admin pages. Item/summary text is
+/// markdown-flavored (`**name**`, for the Discord snapshot and the CLI
+/// digest); the HTML view converts those bold pairs to `<strong>` while
+/// maud-escaping every segment (snake names are user-controlled). An
+/// unmatched trailing `**` renders literally.
+fn text_html(text: &str) -> Markup {
+    let parts: Vec<&str> = text.split("**").collect();
+    // Odd marker count: the final marker is unpaired — its segment renders
+    // plain, with a literal `**`.
+    let unpaired = parts.len().is_multiple_of(2);
+    html! {
+        @for (i, part) in parts.iter().enumerate() {
+            @if i % 2 == 1 && (!unpaired || i + 1 < parts.len()) {
+                strong { (part) }
+            } @else {
+                (part)
+                @if i % 2 == 1 {
+                    "**"
+                }
+            }
+        }
+    }
+}
+
 /// The shared section renderer for the admin detail and preview pages.
 /// Snake names are user-controlled, so all text goes through maud's
 /// escaping. Mobile: 44px/16px links, `max-width:100%` images, and the
@@ -110,14 +134,17 @@ pub fn sections_html(sections: &[super::StoredSection], base_url: &str) -> Marku
                         " — " (ladder)
                     }
                 }
-                p { (section.summary) }
-                @if section.items.is_empty() {
+                p { (text_html(&section.summary)) }
+                @if section.items.is_empty() && section.summary != "none this week" {
+                    // Empty section whose summary is something else (e.g. a
+                    // zero count): still say so — but never repeat the marker
+                    // the summary already carries.
                     p { em { "none this week" } }
                 } @else {
                     ul style="padding-left:1.25rem" {
                         @for item in &section.items {
                             li style="margin-bottom:1rem" {
-                                (item.text)
+                                (text_html(&item.text))
                                 @if let Some(game_id) = item.game_id {
                                     div style="margin:0.5rem 0;display:flex;flex-wrap:wrap;gap:0.75rem" {
                                         a href=(format!("{base}/games/{game_id}"))
@@ -379,19 +406,28 @@ mod tests {
     fn sections_html_contains_card_links_and_escaping() {
         use crate::highlights::{StoredItem, StoredSection};
         let game_id = Uuid::new_v4();
-        let sections = vec![StoredSection {
-            kind: SectionKind::Upsets,
-            ladder_name: Some("Duels 11x11".to_string()),
-            position: 0,
-            summary: "1 upsets".to_string(),
-            items: vec![StoredItem {
+        let sections = vec![
+            StoredSection {
+                kind: SectionKind::Upsets,
+                ladder_name: Some("Duels 11x11".to_string()),
                 position: 0,
-                game_id: Some(game_id),
-                subject: Some("<script>alert(1)</script>".to_string()),
-                value: Some(0.01),
-                text: "**<b>Bold & Brave</b>** won".to_string(),
-            }],
-        }];
+                summary: "1 upsets".to_string(),
+                items: vec![StoredItem {
+                    position: 0,
+                    game_id: Some(game_id),
+                    subject: Some("<script>alert(1)</script>".to_string()),
+                    value: Some(0.01),
+                    text: "**<b>Bold & Brave</b>** won".to_string(),
+                }],
+            },
+            StoredSection {
+                kind: SectionKind::Marathons,
+                ladder_name: Some("Duels 11x11".to_string()),
+                position: 1,
+                summary: "none this week".to_string(),
+                items: vec![],
+            },
+        ];
         let markup = sections_html(&sections, "https://arena.battlesnake.com").into_string();
         assert!(markup.contains(&format!("/og/games/{game_id}.png?showSpoilers=true")));
         assert!(markup.contains("exporter.battlesnake.com"));
@@ -399,6 +435,12 @@ mod tests {
         // the raw subject never reaches the page.
         assert!(!markup.contains("<script>"));
         assert!(markup.contains("&lt;b&gt;Bold &amp; Brave&lt;/b&gt;"));
+        // Markdown bold converts to <strong> — no literal `**` in HTML.
+        assert!(markup.contains("<strong>&lt;b&gt;Bold &amp; Brave&lt;/b&gt;</strong>"));
+        assert!(!markup.contains("**"));
         assert!(markup.contains("min-height:44px"));
+        // An empty section says "none this week" exactly once (its summary
+        // already carries the marker; no duplicate em line).
+        assert_eq!(markup.matches("none this week").count(), 1);
     }
 }

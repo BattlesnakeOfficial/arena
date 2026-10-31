@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use chrono::{DateTime, Datelike, NaiveDate, TimeZone, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
 use uuid::Uuid;
 
 /// skillratings-style beta used by the arena rating system.
@@ -23,6 +23,15 @@ pub const LADDER_ORDER: [&str; 4] = [
 /// Length of a digest window. Invariant-checked by the schema as well.
 const WEEK_SECS: i64 = 7 * 24 * 60 * 60;
 
+/// 12:00:00 UTC on `date`. Built without any panicking constructor: noon
+/// is always a valid time of day (`from_hms_opt(12, 0, 0)` is always
+/// `Some`; the `NaiveTime::MIN` fallback is inert), and a plain
+/// `NaiveDateTime::new` cannot fail.
+fn noon_utc(date: NaiveDate) -> DateTime<Utc> {
+    let noon = NaiveTime::from_hms_opt(12, 0, 0).unwrap_or(NaiveTime::MIN);
+    Utc.from_utc_datetime(&NaiveDateTime::new(date, noon))
+}
+
 /// A stored digest's window: 7 days ending Saturday 12:00:00 UTC.
 ///
 /// Construct only via [`Week::latest_completed`] / [`Week::ending`]; both
@@ -38,11 +47,7 @@ impl Week {
     /// `now`.
     pub fn latest_completed(now: DateTime<Utc>) -> Week {
         // Snap to the most recent 12:00 UTC boundary at or before `now`...
-        let noon = now
-            .date_naive()
-            .and_hms_opt(12, 0, 0)
-            .expect("noon is a valid time");
-        let noon = Utc.from_utc_datetime(&noon);
+        let noon = noon_utc(now.date_naive());
         let mut end = if now >= noon {
             noon
         } else {
@@ -64,10 +69,7 @@ impl Week {
         if saturday.weekday() != chrono::Weekday::Sat {
             return None;
         }
-        let noon = saturday
-            .and_hms_opt(12, 0, 0)
-            .expect("noon is a valid time");
-        let end = Utc.from_utc_datetime(&noon);
+        let end = noon_utc(saturday);
         if end > now {
             return None;
         }

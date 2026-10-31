@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE highlight_digests SET discord_status = 'abandoned' WHERE digest_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c46618a176e936f06c02fe145148efc3f84d0eb7c9e3d0e00981274ef51df3d0"
+}

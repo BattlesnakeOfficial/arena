@@ -191,7 +191,6 @@ fn row_to_summary(row: DigestRow) -> DigestSummary {
     }
 }
 
-#[derive(sqlx::FromRow)]
 struct DigestRow {
     digest_id: Uuid,
     window_start: DateTime<Utc>,
@@ -204,26 +203,38 @@ struct DigestRow {
     computed_at: DateTime<Utc>,
 }
 
-const DIGEST_COLUMNS: &str = "digest_id, window_start, window_end, games_count, \
-     duel_calibration_k, four_snake_calibration_k, discord_status, \
-     discord_posted_at, computed_at";
-
 pub async fn digest_for_week(db: &PgPool, week: &Week) -> cja::Result<Option<DigestSummary>> {
-    let sql = format!("SELECT {DIGEST_COLUMNS} FROM highlight_digests WHERE window_end = $1");
-    let row = sqlx::query_as::<_, DigestRow>(&sql)
-        .bind(week.end)
-        .fetch_optional(db)
-        .await
-        .wrap_err("highlights: failed to load digest for week")?;
+    let row = sqlx::query_as!(
+        DigestRow,
+        r#"
+        SELECT digest_id, window_start, window_end, games_count,
+               duel_calibration_k, four_snake_calibration_k, discord_status,
+               discord_posted_at, computed_at
+        FROM highlight_digests
+        WHERE window_end = $1
+        "#,
+        week.end
+    )
+    .fetch_optional(db)
+    .await
+    .wrap_err("highlights: failed to load digest for week")?;
     Ok(row.map(row_to_summary))
 }
 
 pub async fn list_digests(db: &PgPool) -> cja::Result<Vec<DigestSummary>> {
-    let sql = format!("SELECT {DIGEST_COLUMNS} FROM highlight_digests ORDER BY window_end DESC");
-    let rows = sqlx::query_as::<_, DigestRow>(&sql)
-        .fetch_all(db)
-        .await
-        .wrap_err("highlights: failed to list digests")?;
+    let rows = sqlx::query_as!(
+        DigestRow,
+        r#"
+        SELECT digest_id, window_start, window_end, games_count,
+               duel_calibration_k, four_snake_calibration_k, discord_status,
+               discord_posted_at, computed_at
+        FROM highlight_digests
+        ORDER BY window_end DESC
+        "#
+    )
+    .fetch_all(db)
+    .await
+    .wrap_err("highlights: failed to list digests")?;
     Ok(rows.into_iter().map(row_to_summary).collect())
 }
 
@@ -233,13 +244,21 @@ pub async fn load_digest(
     db: &PgPool,
     digest_id: Uuid,
 ) -> cja::Result<Option<(DigestSummary, Vec<StoredSection>)>> {
-    let sql = format!("SELECT {DIGEST_COLUMNS} FROM highlight_digests WHERE digest_id = $1");
-    let Some(row) = sqlx::query_as::<_, DigestRow>(&sql)
-        .bind(digest_id)
-        .fetch_optional(db)
-        .await
-        .wrap_err("highlights: failed to load digest")?
-    else {
+    let row = sqlx::query_as!(
+        DigestRow,
+        r#"
+        SELECT digest_id, window_start, window_end, games_count,
+               duel_calibration_k, four_snake_calibration_k, discord_status,
+               discord_posted_at, computed_at
+        FROM highlight_digests
+        WHERE digest_id = $1
+        "#,
+        digest_id
+    )
+    .fetch_optional(db)
+    .await
+    .wrap_err("highlights: failed to load digest")?;
+    let Some(row) = row else {
         return Ok(None);
     };
     let summary = row_to_summary(row);
@@ -280,7 +299,11 @@ pub async fn load_digest(
                     summary: row.summary.clone(),
                     items: Vec::new(),
                 });
-                sections.last_mut().expect("just pushed")
+                match sections.last_mut() {
+                    Some(section) => section,
+                    // Unreachable: pushed directly above.
+                    None => continue,
+                }
             }
         };
         if let (Some(position), Some(text)) = (row.item_position, row.item_text) {
@@ -296,35 +319,69 @@ pub async fn load_digest(
     Ok(Some((summary, sections)))
 }
 
-/// Send pending Discord announcements. Each pending digest: past its
-/// announcement deadline → abandoned; no webhook → skipped (terminal at
-/// first evaluation); otherwise send the stored snapshot — success posts,
-/// any failure stays pending for the hourly retry.
+/// Send pending Discord announcements. Each pending digest is claimed
+/// with `FOR UPDATE SKIP LOCKED` inside its own transaction **before** the
+/// webhook call, so two overlapping passes (duplicate cron enqueues are
+/// routine with cja) never both send the same week's announcement: the
+/// second pass skips the locked row instead of posting it. The lock is
+/// held across the send, bounded by the webhook client's 10 s timeout.
+/// Claimed rows: past the announcement deadline → abandoned; no webhook
+/// → skipped (terminal at first evaluation); otherwise send the stored
+/// snapshot — success posts, any failure rolls back and stays pending for
+/// the hourly retry.
+///
+/// Residual double-send window, inherent to a webhook with no idempotency
+/// key: if the send succeeds but the commit fails, the row stays pending
+/// and the next tick re-sends. This is the only remaining path and it
+/// requires the Neon commit to fail after a successful HTTP POST.
 pub async fn process_discord_posts(app_state: &AppState) -> cja::Result<()> {
-    let pending = sqlx::query!(
-        r#"
-        SELECT digest_id, window_start, window_end, discord_message
-        FROM highlight_digests
-        WHERE discord_status = 'pending'
-        ORDER BY window_end
-        "#
+    let pending_ids: Vec<Uuid> = sqlx::query_scalar!(
+        "SELECT digest_id FROM highlight_digests WHERE discord_status = 'pending' ORDER BY window_end"
     )
     .fetch_all(&app_state.db)
     .await
     .wrap_err("highlights: failed to load pending digests")?;
 
-    for row in pending {
+    for digest_id in pending_ids {
+        // Claim the row: a concurrent pass holding it sees SKIP LOCKED
+        // return nothing here and moves on. Both passes process digests
+        // in the same `window_end` order, so lock acquisition is
+        // deadlock-free.
+        let mut tx = app_state
+            .db
+            .begin()
+            .await
+            .wrap_err("highlights: failed to begin post claim")?;
+        let Some(row) = sqlx::query!(
+            "SELECT window_end, discord_message FROM highlight_digests \
+             WHERE digest_id = $1 AND discord_status = 'pending' \
+             FOR UPDATE SKIP LOCKED",
+            digest_id
+        )
+        .fetch_optional(&mut *tx)
+        .await
+        .wrap_err("highlights: failed to claim pending digest")?
+        else {
+            // Claimed by a concurrent pass, or no longer pending.
+            continue;
+        };
+
+        // The row is locked: the plain UPDATE below cannot race another
+        // status flip, so no predicate guard is needed.
         let deadline = row.window_end + chrono::Duration::days(7);
         if Utc::now() >= deadline {
             sqlx::query!(
-                "UPDATE highlight_digests SET discord_status = 'abandoned' \
-                 WHERE digest_id = $1 AND discord_status = 'pending'",
-                row.digest_id
+                "UPDATE highlight_digests SET discord_status = 'abandoned' WHERE digest_id = $1",
+                digest_id
             )
-            .execute(&app_state.db)
-            .await?;
+            .execute(&mut *tx)
+            .await
+            .wrap_err("highlights: failed to abandon digest post")?;
+            tx.commit()
+                .await
+                .wrap_err("highlights: failed to commit digest abandonment")?;
             tracing::error!(
-                digest_id = %row.digest_id,
+                digest_id = %digest_id,
                 window_end = %row.window_end,
                 "Highlights Discord post abandoned: announcement deadline passed"
             );
@@ -332,14 +389,17 @@ pub async fn process_discord_posts(app_state: &AppState) -> cja::Result<()> {
         }
         if !app_state.discord_highlights.is_enabled() {
             sqlx::query!(
-                "UPDATE highlight_digests SET discord_status = 'skipped' \
-                 WHERE digest_id = $1 AND discord_status = 'pending'",
-                row.digest_id
+                "UPDATE highlight_digests SET discord_status = 'skipped' WHERE digest_id = $1",
+                digest_id
             )
-            .execute(&app_state.db)
-            .await?;
+            .execute(&mut *tx)
+            .await
+            .wrap_err("highlights: failed to skip digest post")?;
+            tx.commit()
+                .await
+                .wrap_err("highlights: failed to commit digest skip")?;
             tracing::info!(
-                digest_id = %row.digest_id,
+                digest_id = %digest_id,
                 window_end = %row.window_end,
                 "No highlights webhook configured; weekly post skipped"
             );
@@ -353,17 +413,21 @@ pub async fn process_discord_posts(app_state: &AppState) -> cja::Result<()> {
             Ok(()) => {
                 sqlx::query!(
                     "UPDATE highlight_digests SET discord_status = 'posted', \
-                     discord_posted_at = NOW() \
-                     WHERE digest_id = $1 AND discord_status = 'pending'",
-                    row.digest_id
+                     discord_posted_at = NOW() WHERE digest_id = $1",
+                    digest_id
                 )
-                .execute(&app_state.db)
-                .await?;
-                tracing::info!(digest_id = %row.digest_id, "Highlights Discord post sent");
+                .execute(&mut *tx)
+                .await
+                .wrap_err("highlights: failed to mark digest posted")?;
+                tx.commit()
+                    .await
+                    .wrap_err("highlights: failed to commit digest post")?;
+                tracing::info!(digest_id = %digest_id, "Highlights Discord post sent");
             }
             Err(error) => {
+                tx.rollback().await.ok();
                 tracing::warn!(
-                    digest_id = %row.digest_id,
+                    digest_id = %digest_id,
                     error = %format!("{error:#}"),
                     "Highlights Discord post failed; will retry next tick"
                 );
