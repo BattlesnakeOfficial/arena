@@ -512,17 +512,12 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
                 })?;
             }
 
-            crate::models::game::update_game_status_tx(&mut tx, game_id, GameStatus::Finished)
-                .await?;
+            // Status flip + finished_at + archive-field invalidation in one
+            // UPDATE: a game the sweeper failed mid-run may already carry a
+            // failed-era archive; finishing invalidates it so native backup
+            // discovery re-archives the complete game (DEV-1980).
             let finished_at = chrono::Utc::now();
-            sqlx::query!(
-                "UPDATE games SET finished_at = $2 WHERE game_id = $1",
-                game_id,
-                finished_at,
-            )
-            .execute(&mut *tx)
-            .await
-            .wrap_err("Failed to persist game finish instant")?;
+            crate::models::game::mark_game_finished_tx(&mut tx, game_id, finished_at).await?;
 
             if let Some(resolved) = &resolved_match_game {
                 crate::models::tournament::set_match_game_winner(

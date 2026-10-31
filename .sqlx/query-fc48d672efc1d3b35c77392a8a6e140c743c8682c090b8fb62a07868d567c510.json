@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT frame_data::text AS \"frame_data!\"\n        FROM turns\n        WHERE game_id = $1 AND frame_data IS NOT NULL\n        ORDER BY turn_number ASC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "frame_data!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "fc48d672efc1d3b35c77392a8a6e140c743c8682c090b8fb62a07868d567c510"
+}

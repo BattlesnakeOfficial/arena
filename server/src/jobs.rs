@@ -380,6 +380,39 @@ impl Job<AppState> for BackupSingleGameJob {
     }
 }
 
+/// Cron job: hourly discovery of arena-native games needing GCS archive —
+/// fresh terminal flips (recent tier) plus the unarchived backlog, oldest
+/// first. See [`crate::native_backup`].
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct NativeGameBackupJob;
+
+#[async_trait::async_trait]
+impl Job<AppState> for NativeGameBackupJob {
+    const NAME: &'static str = "NativeGameBackupJob";
+
+    async fn run(&self, app_state: AppState) -> cja::Result<()> {
+        crate::native_backup::run_native_backup_discovery(&app_state).await?;
+        Ok(())
+    }
+}
+
+/// Archive one arena-native game to GCS. Enqueued by NativeGameBackupJob;
+/// idempotent (re-checks archived_at under the backup slot before any work).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct NativeBackupSingleGameJob {
+    pub game_id: Uuid,
+}
+
+#[async_trait::async_trait]
+impl Job<AppState> for NativeBackupSingleGameJob {
+    const NAME: &'static str = "NativeBackupSingleGameJob";
+
+    async fn run(&self, app_state: AppState) -> cja::Result<()> {
+        crate::native_backup::archive_native_game(&app_state, self.game_id).await?;
+        Ok(())
+    }
+}
+
 /// Job to discover historical games and enqueue backup jobs in batches.
 /// Uses fork-join pattern: enqueues a batch, waits for completion, then enqueues next batch.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -595,6 +628,8 @@ cja::impl_job_registry!(
     ReconcileRecentAchievementsJob,
     BackupSingleGameJob,
     HistoricalBackupDiscoveryJob,
+    NativeGameBackupJob,
+    NativeBackupSingleGameJob,
     LeaderboardMatchmakerJob,
     LeaderboardRatingUpdateJob,
     RunTournamentRoundJob,

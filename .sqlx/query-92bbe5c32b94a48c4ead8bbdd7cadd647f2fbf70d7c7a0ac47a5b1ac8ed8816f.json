@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE games\n        SET archived_at = NOW(), gcs_path = $2, archive_version = $3\n        WHERE game_id = $1 AND status = $4\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Int4",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "92bbe5c32b94a48c4ead8bbdd7cadd647f2fbf70d7c7a0ac47a5b1ac8ed8816f"
+}

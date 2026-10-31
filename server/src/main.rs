@@ -34,6 +34,7 @@ mod leaderboard_matchmaker;
 mod leaderboard_ratings;
 mod models;
 mod moderation;
+mod native_backup;
 mod notifications;
 mod object_store;
 mod observability;

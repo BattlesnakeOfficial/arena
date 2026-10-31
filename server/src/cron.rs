@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 use crate::config::AppConfig;
 use crate::jobs::{
     BackfillAchievementsJob, CustomizationActiveWeekBackfillJob, GameBackupJob,
-    LeaderboardMatchmakerJob, PlayGrantReconcileJob, RateLimitPruneJob,
+    LeaderboardMatchmakerJob, NativeGameBackupJob, PlayGrantReconcileJob, RateLimitPruneJob,
     ReconcileRecentAchievementsJob, SnakeHealthSweeperJob, StuckGameSweeperJob,
     StuckMatchSweeperJob,
 };
@@ -43,6 +43,13 @@ pub(crate) fn cron_registry(config: &AppConfig) -> CronRegistry<AppState> {
     registry.register_job(
         GameBackupJob,
         Some("Enqueue backup jobs for games from the last 4 hours"),
+        Duration::from_secs(60 * 60),
+    );
+    // Native game archive discovery: hourly, covers fresh terminal flips
+    // (2h SLA) and drains the unarchived backlog oldest-first (DEV-1980)
+    registry.register_job(
+        NativeGameBackupJob,
+        Some("Discover arena-native games needing GCS archive"),
         Duration::from_secs(60 * 60),
     );
     registry.register_job(
@@ -231,6 +238,22 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn native_backup_cadence() {
+        let registry = cron_registry(&AppConfig::test_default());
+        let job = registry
+            .get("NativeGameBackupJob")
+            .expect("native backup registered");
+        assert_eq!(
+            job.description,
+            Some("Discover arena-native games needing GCS archive")
+        );
+        let cja::cron::Schedule::Interval(interval) = &job.schedule else {
+            panic!("native backup must use an interval");
+        };
+        assert_eq!(interval.0, Duration::from_secs(60 * 60));
+    }
+
     #[test]
     fn every_cron_job_is_dispatchable_by_the_worker() {
         let dispatchable =

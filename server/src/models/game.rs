@@ -1046,23 +1046,32 @@ pub async fn update_game_status(
     })
 }
 
-/// Update a game's status inside an existing transaction. Used by the game
-/// runner's atomic finish sequence, where the status flip must commit together
-/// with the placements and the tournament match result.
-pub async fn update_game_status_tx(
+/// Flip a game to `finished` inside an existing transaction, stamping
+/// `finished_at` and clearing any archive bookkeeping — one atomic UPDATE.
+///
+/// A game the stuck-game sweeper failed mid-run may already carry a
+/// failed-era (partial-frames) archive; finishing it must invalidate that
+/// archive so native backup discovery re-archives the complete game to the
+/// same key (DEV-1980). For never-archived games the clears are no-ops.
+/// The `update_games_updated_at` trigger bumps `updated_at`, which is what
+/// makes the row discoverable again (recent tier watermark).
+pub async fn mark_game_finished_tx(
     conn: &mut sqlx::PgConnection,
     game_id: Uuid,
-    status: GameStatus,
+    finished_at: chrono::DateTime<chrono::Utc>,
 ) -> cja::Result<()> {
     sqlx::query!(
-        "UPDATE games SET status = $2 WHERE game_id = $1",
+        r#"UPDATE games
+           SET status = $2, finished_at = $3,
+               archived_at = NULL, gcs_path = NULL, archive_version = NULL
+           WHERE game_id = $1"#,
         game_id,
-        status.as_str(),
+        GameStatus::Finished.as_str(),
+        finished_at,
     )
     .execute(&mut *conn)
     .await
-    .wrap_err_with(|| format!("Failed to update status for game {game_id}"))?;
-
+    .wrap_err_with(|| format!("Failed to finish game {game_id}"))?;
     Ok(())
 }
 
