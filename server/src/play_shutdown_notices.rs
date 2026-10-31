@@ -62,12 +62,12 @@ impl Wave {
         Wave::ALL.into_iter().find(|wave| wave.number() == number)
     }
 
-    /// 10:00 ET on Nov 15, 23 and 29, 2026 (15:00 UTC; ET is UTC-5 after
+    /// 10:00 ET on Mon Nov 2, Mon Nov 16 and Sun Nov 29, 2026 (15:00 UTC; ET is UTC-5 after
     /// Nov 1).
     pub fn starts_at(self) -> DateTime<Utc> {
         at_unix(match self {
-            Wave::First => 1_794_754_800,  // 2026-11-15T15:00:00Z
-            Wave::Second => 1_795_446_000, // 2026-11-23T15:00:00Z
+            Wave::First => 1_793_631_600,  // 2026-11-02T15:00:00Z
+            Wave::Second => 1_794_841_200, // 2026-11-16T15:00:00Z
             Wave::Final => 1_795_964_400,  // 2026-11-29T15:00:00Z
         })
     }
@@ -642,13 +642,13 @@ mod tests {
     }
 
     #[test]
-    fn waves_run_from_nov_15_until_the_redirect() {
+    fn waves_run_from_nov_2_until_the_redirect() {
         let at = |s: &str| s.parse::<DateTime<Utc>>().unwrap();
-        assert_eq!(Wave::current(at("2026-11-15T14:59:59Z")), None);
-        assert_eq!(Wave::current(at("2026-11-15T15:00:00Z")), Some(Wave::First));
-        assert_eq!(Wave::current(at("2026-11-23T14:59:59Z")), Some(Wave::First));
+        assert_eq!(Wave::current(at("2026-11-02T14:59:59Z")), None);
+        assert_eq!(Wave::current(at("2026-11-02T15:00:00Z")), Some(Wave::First));
+        assert_eq!(Wave::current(at("2026-11-16T14:59:59Z")), Some(Wave::First));
         assert_eq!(
-            Wave::current(at("2026-11-23T15:00:00Z")),
+            Wave::current(at("2026-11-16T15:00:00Z")),
             Some(Wave::Second)
         );
         assert_eq!(Wave::current(at("2026-11-29T15:00:00Z")), Some(Wave::Final));
