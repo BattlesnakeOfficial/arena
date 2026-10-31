@@ -1044,6 +1044,15 @@ mod tests {
         let held = BACKUP_SLOT.acquire().await.unwrap();
         assert!(BACKUP_SLOT.try_acquire().is_err());
         drop(held);
-        assert!(BACKUP_SLOT.try_acquire().is_ok());
+        // Race-free re-admission: the slot is shared process-wide with
+        // native_backup's tests, which may hold a permit at this instant —
+        // so await one under a timeout instead of asserting try_acquire
+        // (which flakes when another test holds the slot right after drop).
+        let readmitted =
+            tokio::time::timeout(std::time::Duration::from_secs(10), BACKUP_SLOT.acquire())
+                .await
+                .expect("backup slot stayed busy for 10s")
+                .unwrap();
+        drop(readmitted);
     }
 }

@@ -445,7 +445,8 @@ mod tests {
     /// Configured env: a fresh InMemoryObjectStore on AppState.object_store
     /// (is_configured() == true; discovery and enqueueing never contact GCS).
     fn configured_state(state: &mut AppState) {
-        state.object_store = std::sync::Arc::new(crate::object_store::InMemoryObjectStore::default());
+        state.object_store =
+            std::sync::Arc::new(crate::object_store::InMemoryObjectStore::default());
     }
 
     /// A modern full frame: every serialized EngineGameFrame/FrameSnake key
@@ -998,6 +999,72 @@ mod tests {
             .collect();
         assert_eq!(runner, vec![0], "game runners keep the default priority");
         assert!(runner[0] > BACKUP_JOB_PRIORITY);
+        Ok(())
+    }
+
+    /// End to end through the real job path: `archive_native_game` writes the
+    /// object through AppState's store and marks the row; the same store then
+    /// feeds the real read side — DEV-1979's `ArchiveReader` decodes the real
+    /// writer's object (its own tests only ever read hand-built objects).
+    #[sqlx::test(migrations = "../migrations")]
+    async fn archive_native_game_end_to_end_via_in_memory_store(
+        pool: sqlx::PgPool,
+    ) -> cja::Result<()> {
+        let mut state = AppState::test_from_pool(pool.clone());
+        configured_state(&mut state);
+        let created_at = Utc::now() - chrono::Duration::days(5);
+        let game_id = fixture_game(&pool, "finished", created_at, Utc::now(), false, None).await?;
+        fixture_turn(&pool, game_id, 0, modern_frame(0)).await?;
+        fixture_turn(&pool, game_id, 1, legacy_frame(1)).await?;
+
+        archive_native_game(&state, game_id).await?;
+
+        // The row: archived as of this terminal state.
+        let (archived_at, gcs_path, archive_version): (
+            Option<chrono::DateTime<Utc>>,
+            Option<String>,
+            Option<i32>,
+        ) = sqlx::query_as(
+            "SELECT archived_at, gcs_path, archive_version FROM games WHERE game_id = $1",
+        )
+        .bind(game_id)
+        .fetch_one(&pool)
+        .await?;
+        assert!(archived_at.is_some());
+        let expected_path = native_gcs_path(game_id, created_at);
+        assert_eq!(gcs_path.as_deref(), Some(expected_path.as_str()));
+        assert_eq!(archive_version, Some(2));
+
+        // The object: present at the row's gcs_path, frames exactly the DB's.
+        let bytes = state
+            .object_store
+            .get(&expected_path)
+            .await?
+            .expect("archived object exists at its gcs_path");
+        let json = zstd::decode_all(bytes.as_slice())?;
+        let export: serde_json::Value = serde_json::from_slice(&json)?;
+        let db_frames = db_frames_as_values(&pool, game_id).await?;
+        let archived_frames = export["frames"].as_array().expect("frames array");
+        assert_eq!(archived_frames.len(), db_frames.len());
+        for (archived, db) in archived_frames.iter().zip(db_frames.iter()) {
+            assert_eq!(archived, db);
+        }
+
+        // The read side (DEV-1979): the real ArchiveReader over the same
+        // store the writer used. Cache disabled (0) so `load` exercises
+        // fetch + decode, not a cache hit; the reader's raw frames must be
+        // the DB values verbatim.
+        let reader = crate::archive::ArchiveReader::new(state.object_store.clone(), 0);
+        let gcs_path = gcs_path.expect("row records gcs_path");
+        let archived = reader
+            .load(game_id, &gcs_path, crate::archive::ArchiveRowKind::Native)
+            .await
+            .map_err(|e| eyre!("ArchiveReader failed on the native writer's object: {e:?}"))?;
+        assert_eq!(archived.frame_count(), db_frames.len());
+        for (i, raw) in archived.frames().iter().enumerate() {
+            let frame: serde_json::Value = serde_json::from_str(raw.get())?;
+            assert_eq!(&frame, &db_frames[i]);
+        }
         Ok(())
     }
 }
