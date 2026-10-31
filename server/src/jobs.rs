@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::notifications::{NotificationChannel, NotificationKind};
+use crate::play_shutdown_notices::PlayShutdownNoticeJob;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SendNotificationEmailJob {
@@ -639,7 +640,8 @@ cja::impl_job_registry!(
     RateLimitPruneJob,
     SnakeHealthSweeperJob,
     StuckGameSweeperJob,
-    ScreenShoutsJob
+    ScreenShoutsJob,
+    PlayShutdownNoticeJob
 );
 
 #[cfg(test)]

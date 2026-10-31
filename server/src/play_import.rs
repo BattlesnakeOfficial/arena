@@ -822,24 +822,34 @@ pub async fn reconcile_grants(play: &PgPool, arena: &PgPool) -> cja::Result<Gran
     Ok(counts)
 }
 
+/// A small pool on play's database: arena's own credentials with the
+/// database name swapped to `database_name`. `None` when that database
+/// doesn't exist (local dev, tests, e2e). Close it when done.
+pub async fn connect_play(database_url: &str, database_name: &str) -> cja::Result<Option<PgPool>> {
+    let options = PgConnectOptions::from_str(database_url)
+        .wrap_err("Failed to parse arena database options for play")?
+        .database(database_name);
+    match PgPoolOptions::new()
+        .max_connections(2)
+        .connect_with(options)
+        .await
+    {
+        Ok(play) => Ok(Some(play)),
+        Err(sqlx::Error::Database(error)) if error.code().as_deref() == Some("3D000") => Ok(None),
+        Err(error) => Err(error).wrap_err("Failed to connect to play"),
+    }
+}
+
 pub async fn run_grant_reconcile(
     database_url: &str,
     database_name: &str,
     arena: &PgPool,
 ) -> cja::Result<Option<GrantReconcileCounts>> {
-    let options = PgConnectOptions::from_str(database_url)
-        .wrap_err("Failed to parse arena database options for play grant reconcile")?
-        .database(database_name);
-    let play = match PgPoolOptions::new()
-        .max_connections(2)
-        .connect_with(options)
+    let Some(play) = connect_play(database_url, database_name)
         .await
-    {
-        Ok(play) => play,
-        Err(sqlx::Error::Database(error)) if error.code().as_deref() == Some("3D000") => {
-            return Ok(None);
-        }
-        Err(error) => return Err(error).wrap_err("Failed to connect to play for grant reconcile"),
+        .wrap_err("Failed to connect to play for grant reconcile")?
+    else {
+        return Ok(None);
     };
     let result = reconcile_grants(&play, arena).await;
     play.close().await;

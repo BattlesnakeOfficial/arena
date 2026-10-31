@@ -1,0 +1,2 @@
+DROP TABLE play_shutdown_notices;
+ALTER TABLE imported_accounts DROP COLUMN shutdown_notices_unsubscribed_at;

@@ -97,7 +97,7 @@ fn escaped_text(text: &str) -> Markup {
     }
 }
 
-fn action_button(label: &str, url: &str) -> Markup {
+pub(crate) fn action_button(label: &str, url: &str) -> Markup {
     html! {
         table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:24px 0 10px" {
             tr { td bgcolor="#C11655" style="background:#C11655;border-radius:6px" {
@@ -401,13 +401,18 @@ pub fn finish(
     if let Some(url) = unsubscribe_url {
         text.push_str(&format!("Unsubscribe from {} emails: {url}\n", kind.name()));
     }
+    let footer = html! {
+        p style="margin:0 0 12px" { "Why you got this email: " (reason) }
+        p style="margin:0 0 12px" { a class="email-link" href=(settings_url) style="color:#C11655;text-decoration:underline" { "Notification settings" } }
+        @if let Some(url) = unsubscribe_url {
+            p style="margin:0" { a class="email-link" href=(url) style="color:#C11655;text-decoration:underline" { "Unsubscribe from " (kind.name()) " emails" } }
+        }
+    };
     let html = render_layout(
         &content.subject,
+        notification_preheader(kind),
         &content.html_body,
-        reason,
-        &settings_url,
-        kind,
-        unsubscribe_url,
+        footer,
     );
     Ok(EmailMessage {
         to,
@@ -418,15 +423,8 @@ pub fn finish(
     })
 }
 
-fn render_layout(
-    subject: &str,
-    body: &str,
-    reason: &str,
-    settings_url: &str,
-    kind: NotificationKind,
-    unsubscribe_url: Option<&str>,
-) -> String {
-    let preheader = match kind {
+fn notification_preheader(kind: NotificationKind) -> &'static str {
+    match kind {
         NotificationKind::SnakeMatchmakingPaused => {
             "Your snake was paused while we check its server."
         }
@@ -435,7 +433,12 @@ fn render_layout(
         NotificationKind::ClaimVerification => "Finish your play account claim within 30 minutes.",
         NotificationKind::NotificationEmailConfirmation => "Confirm this address within 24 hours.",
         NotificationKind::AchievementEarned => "You unlocked new snake cosmetics.",
-    };
+    }
+}
+
+/// The branded shell shared by every email: header, `subject` as the title,
+/// the body, and a footer that says why the reader got it.
+pub(crate) fn render_layout(subject: &str, preheader: &str, body: &str, footer: Markup) -> String {
     html! {
         (maud::DOCTYPE)
         html lang="en" {
@@ -458,11 +461,7 @@ fn render_layout(
                                 (PreEscaped(body))
                             } }
                             tr { td class="email-copy" style="border-top:1px solid #E7DFE3;padding:20px 24px 28px;color:#17141A;font-size:14px;line-height:1.5" {
-                                p style="margin:0 0 12px" { "Why you got this email: " (reason) }
-                                p style="margin:0 0 12px" { a class="email-link" href=(settings_url) style="color:#C11655;text-decoration:underline" { "Notification settings" } }
-                                @if let Some(url) = unsubscribe_url {
-                                    p style="margin:0" { a class="email-link" href=(url) style="color:#C11655;text-decoration:underline" { "Unsubscribe from " (kind.name()) " emails" } }
-                                }
+                                (footer)
                             } }
                         }
                     } }

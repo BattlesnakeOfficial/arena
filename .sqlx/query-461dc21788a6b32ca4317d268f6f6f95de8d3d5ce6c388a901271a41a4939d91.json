@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO play_shutdown_notices (imported_account_id, wave, status)\n        SELECT ia.imported_account_id, $2, 'sending'\n        FROM imported_accounts ia\n        WHERE ia.imported_account_id = $1\n          AND ia.claimed_by_user_id IS NULL\n          AND ia.shutdown_notices_unsubscribed_at IS NULL\n          AND NOT EXISTS (\n              SELECT 1 FROM users u\n              WHERE u.external_github_id = ia.github_uid\n                 OR lower(u.github_email) = lower(ia.email)\n                 OR lower(u.notification_email) = lower(ia.email)\n          )\n        ON CONFLICT DO NOTHING\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int2"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "461dc21788a6b32ca4317d268f6f6f95de8d3d5ce6c388a901271a41a4939d91"
+}

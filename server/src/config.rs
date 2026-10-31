@@ -219,6 +219,11 @@ pub struct AppConfig {
     pub database_url: String,
     pub pg_max_connections: u32,
     pub play_grant_reconcile_interval_secs: u64,
+    /// Arms the play.battlesnake.com shutdown notice emails
+    /// (`PLAY_SHUTDOWN_NOTICES_ENABLED=true`). Off by default: deploying the
+    /// code sends nothing, and setting it back to false stops sending at
+    /// the next batch.
+    pub play_shutdown_notices_enabled: bool,
     /// Public base URL, used to build the board-viewer iframe `engine=` param.
     pub base_url: String,
 
@@ -362,6 +367,7 @@ impl AppConfig {
                 3600,
             )
             .max(1),
+            play_shutdown_notices_enabled: parse_env("PLAY_SHUTDOWN_NOTICES_ENABLED", false),
             base_url: resolve_base_url(optional_env("BASE_URL"), gcp_logging),
 
             engine_database_url: optional_env("ENGINE_DATABASE_URL"),
@@ -420,6 +426,7 @@ impl AppConfig {
             database_url: String::new(),
             pg_max_connections: 5,
             play_grant_reconcile_interval_secs: 3600,
+            play_shutdown_notices_enabled: false,
             base_url: LOCAL_BASE_URL.to_string(),
             engine_database_url: None,
             gcs_bucket: None,

@@ -1,0 +1,32 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT wave, status, COUNT(*) AS \"count!\"\n        FROM play_shutdown_notices\n        GROUP BY wave, status\n        ORDER BY wave, status\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "wave",
+        "type_info": "Int2"
+      },
+      {
+        "ordinal": 1,
+        "name": "status",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "count!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "c06f7b2b3bac2614f5c77e133eafe07eb925519f179d0684d04cf6599d6cad1b"
+}

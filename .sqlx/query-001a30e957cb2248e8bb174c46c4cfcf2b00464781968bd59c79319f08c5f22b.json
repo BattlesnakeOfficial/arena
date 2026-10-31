@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE imported_accounts\n        SET shutdown_notices_unsubscribed_at = COALESCE(shutdown_notices_unsubscribed_at, NOW())\n        WHERE imported_account_id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "001a30e957cb2248e8bb174c46c4cfcf2b00464781968bd59c79319f08c5f22b"
+}
