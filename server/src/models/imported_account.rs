@@ -731,6 +731,17 @@ pub async fn should_show_claim_prompt(pool: &PgPool, user_id: Uuid) -> cja::Resu
     Ok(show.unwrap_or(false))
 }
 
+/// The play username this user claimed, if they claimed one.
+pub async fn claimed_username(pool: &PgPool, user_id: Uuid) -> cja::Result<Option<String>> {
+    sqlx::query_scalar!(
+        "SELECT username FROM imported_accounts WHERE claimed_by_user_id = $1 LIMIT 1",
+        user_id,
+    )
+    .fetch_optional(pool)
+    .await
+    .wrap_err("Failed to look up claimed play account")
+}
+
 /// Hide the claim prompt for good. Idempotent: re-dismissing keeps the
 /// original timestamp.
 pub async fn dismiss_claim_prompt(pool: &PgPool, user_id: Uuid) -> cja::Result<()> {

@@ -860,6 +860,12 @@ p.empty { color: var(--muted); font-size: 14.5px; margin: 18px 0; }
 .claim-prompt a { color: var(--pink); text-decoration: underline; text-underline-offset: 2px; }
 .claim-prompt .fine { color: var(--muted); font-size: 13.5px; }
 
+/* /welcome-back (where the play.battlesnake.com shutdown banner lands) */
+.welcome-back .section { max-width: 72ch; }
+.welcome-back .lede { font-size: 17px; margin: 12px 0 20px; }
+.welcome-back .fine { color: var(--muted); font-size: 13.5px; margin-top: 14px; }
+.welcome-back .claim-prompt { margin-top: 4px; }
+
 /* snakes list table (/battlesnakes) */
 .head-actions { margin-left: auto; padding-bottom: 6px; display: flex; gap: 10px; flex-wrap: wrap; }
 .url-cell { font-family: var(--mono); font-size: 13px; color: var(--muted); max-width: 340px; }

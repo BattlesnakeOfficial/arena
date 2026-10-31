@@ -33,10 +33,10 @@ pub struct GitHubAuthQuery {
     /// If true, this is a CLI authentication request
     #[serde(default)]
     pub cli: bool,
-    /// If true, this login was started by /oauth/authorize: keep (rather
-    /// than clear) any saved post-login redirect.
+    /// If true, this login was started by a page that saved a post-login
+    /// redirect (/oauth/authorize, /welcome-back): keep it rather than clear it.
     #[serde(default)]
-    pub resume_oauth: bool,
+    pub resume: bool,
 }
 
 // Route handler for initiating GitHub OAuth flow
@@ -66,9 +66,9 @@ pub async fn github_auth(
     .await
     .wrap_err("Failed to store OAuth state in session")?;
 
-    // Unless this login resumes an OAuth consent flow, drop any saved
-    // post-login redirect so an abandoned consent can't hijack this login.
-    if !query.resume_oauth
+    // Unless this login resumes a saved page, drop any saved post-login
+    // redirect so an abandoned consent can't hijack this login.
+    if !query.resume
         && let Err(e) =
             clear_post_login_redirect(&state.db, current_session.session.session_id).await
     {
@@ -321,20 +321,24 @@ pub async fn github_auth_callback(
             .await?;
     }
 
-    // Resume an OAuth consent flow: if /oauth/authorize parked its request
-    // on this session (and it still looks like one — second half of the
-    // open-redirect guard), send the user back to the same authorize URL.
-    // CLI logins never get here (they returned above).
+    // Resume a saved page: an OAuth consent flow parked by /oauth/authorize,
+    // or /welcome-back. The allowlist is the second half of the open-redirect
+    // guard. CLI logins never get here (they returned above).
     let resume = take_post_login_redirect(&state.db, current_session.session.session_id)
         .await
         .wrap_err("Failed to take post-login redirect")?;
     if let Some(path) = resume
-        && path.starts_with("/oauth/authorize")
+        && is_resumable_post_login_path(&path)
     {
         return Ok(Redirect::to(&path).into_response());
     }
 
     Ok(Redirect::to("/").into_response())
+}
+
+/// Paths a login may return to from the session's saved post-login redirect.
+fn is_resumable_post_login_path(path: &str) -> bool {
+    path.starts_with("/oauth/authorize") || path == crate::routes::welcome_back::PATH
 }
 
 // Route handler for logging out
