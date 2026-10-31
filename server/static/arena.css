@@ -14,9 +14,9 @@
   --muted: #6F6876;
   --hairline: #E8E3DB;
   --hairline-dark: #D8D2C8;
-  --pink: #E8256D;
-  --pink-deep: #C11655;
-  --pink-wash: #FDF0F5;
+  --pink: #E70A77;
+  --pink-deep: #C1156B;
+  --pink-wash: #FDF2F7;
   --card: #FFFFFF;
   --hover: #FAF7F1;
   --pill: #F1EDE5;
@@ -76,17 +76,9 @@ h3 { font-weight: 700; font-size: 16px; }
   margin: 0 auto;
   padding: 22px 32px;
 }
-.wordmark {
-  font-family: var(--display);
-  font-weight: 800;
-  font-size: 19px;
-  letter-spacing: -.02em;
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  white-space: nowrap;
-}
-.wordmark .glyph { width: 22px; height: 22px; flex-shrink: 0; }
+.wordmark { display: flex; align-items: center; flex-shrink: 0; }
+.wordmark .wordmark-word { display: block; width: 93px; height: 34px; } /* 710x260 viewBox */
+.wordmark .wordmark-badge { display: none; width: 28px; height: 28px; }
 .site-nav .links { display: flex; gap: 26px; font-size: 14.5px; font-weight: 500; color: var(--muted); }
 .site-nav .links a { white-space: nowrap; }
 .site-nav .links a:hover { color: var(--ink); }
@@ -1083,7 +1075,7 @@ table.data.test-results pre { margin-top: 8px; font-family: var(--mono); font-si
 
 .bracket .match.live {
   border-color: var(--pink);
-  box-shadow: 0 0 0 3px var(--pink-wash), 0 12px 30px -18px rgba(232, 37, 109, .5);
+  box-shadow: 0 0 0 3px var(--pink-wash), 0 12px 30px -18px rgba(231, 10, 119, .5);
 }
 .bracket .match.live .tag { color: var(--pink); font-weight: 600; }
 .bracket .match.live .tag .live-dot { width: 5px; height: 5px; }
@@ -1242,16 +1234,27 @@ table.data.test-results pre { margin-top: 8px; font-family: var(--mono); font-si
   .table-scroll th, .table-scroll td { white-space: nowrap; }
   .site-footer .inner { padding: 24px 20px; }
 }
-/* Narrow phones: the signed-in nav (glyph + 2 theme buttons + menu + bell +
-   avatar) sums past 375px with the wordmark text and the avatar clips, so
-   hide the text there only. Logged-out pages keep the brand visible. */
-@media (max-width: 420px) {
-  [data-authed] .wordmark-text { display: none; }
+/* Narrow phones: the signed-in nav chrome is 300px (padding 40 + 5 gaps 40
+   + theme-ctl 98 + menu 44 + bell 44 + avatar 34), so the 93px wordmark only
+   fits from 393px up — compact it to 28px (76px) here. */
+@media (max-width: 392px) {
+  [data-authed] .wordmark .wordmark-word { width: 76px; height: 28px; }
 }
-/* Sub-360px phones: even the logged-out nav (~350px with the text) would
-   overflow, so fall back to the glyph there. */
+/* Sub-377px signed-in: even the compact wordmark (376.5px natural row)
+   overflows; circle badge (300 + 28 = 328px). */
+@media (max-width: 376px) {
+  [data-authed] .wordmark .wordmark-word { display: none; }
+  [data-authed] .wordmark .wordmark-badge { display: block; }
+}
+/* Sub-360px phones: every page falls back to the circle badge. */
 @media (max-width: 359px) {
-  .wordmark-text { display: none; }
+  .wordmark .wordmark-word { display: none; }
+  .wordmark .wordmark-badge { display: block; }
+}
+/* Sub-328px signed-in: the fixed chrome alone is 300px, so shrink the badge
+   to 20px to keep the row from squishing the 44px tap targets. */
+@media (max-width: 327px) {
+  [data-authed] .wordmark .wordmark-badge { width: 20px; height: 20px; }
 }
 
 /* --- page: create game --------------------------------------------------- */

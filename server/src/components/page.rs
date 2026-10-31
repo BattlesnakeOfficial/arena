@@ -1,3 +1,5 @@
+use std::sync::LazyLock;
+
 use maud::{DOCTYPE, Markup, PreEscaped, Render, html};
 
 use crate::{
@@ -102,6 +104,63 @@ pub struct SocialImage {
 /// Alt text for the default card.
 const DEFAULT_IMAGE_ALT: &str = "Battlesnake";
 
+/// Official "BATTLE SNAKE" wordmark (brand/logo-light.svg), inlined so its
+/// class fills can follow the theme variables. The vendored file is kept
+/// byte-identical to upstream; the runtime swap only rewrites the two
+/// `.cls-2`/`.cls-3` fills to `var(--ink)`/`var(--pink)` and adds the
+/// class/aria attributes on the root — path data is never touched.
+///
+/// Panics if the vendored file no longer matches the official fills: a
+/// silent miss renders a mis-colored trademark on every page.
+static WORDMARK_LOGO: LazyLock<PreEscaped<&'static str>> = LazyLock::new(|| {
+    let source = include_str!("../../static/brand/logo-light.svg");
+    // Drop the `<?xml …?>` prolog (parses as a bogus comment in HTML).
+    let source = &source[source.find("<svg").expect("wordmark root element")..];
+    for official_fill in ["fill:#1c1e21", "fill:#e70b77"] {
+        assert_eq!(
+            source.matches(official_fill).count(),
+            1,
+            "official fill {official_fill} must appear exactly once"
+        );
+    }
+    let themed = source
+        .replace("fill:#1c1e21", "fill:var(--ink)")
+        .replace("fill:#e70b77", "fill:var(--pink)");
+    assert!(!themed.contains("#1c1e21") && !themed.contains("#e70b77"));
+    let marked = themed.replacen(
+        "<svg ",
+        "<svg class=\"wordmark-word\" aria-hidden=\"true\" focusable=\"false\" ",
+        1,
+    );
+    PreEscaped(String::leak(marked))
+});
+
+/// Circle snake-head badge (brand/icon.svg) for narrow viewports. The
+/// official `.cls-1` style block is stripped into `fill="var(--pink)"`
+/// presentation attributes so its `.cls-1` rule can never collide with the
+/// wordmark's `.cls-1` (the two official files use different fills).
+static WORDMARK_BADGE: LazyLock<PreEscaped<&'static str>> = LazyLock::new(|| {
+    let source = include_str!("../../static/brand/icon.svg");
+    let defs = "<defs><style>.cls-1{fill:#e02878;}</style></defs>";
+    assert_eq!(
+        source.matches(defs).count(),
+        1,
+        "official badge style block"
+    );
+    let stripped = source
+        .replace(defs, "")
+        .replace(" class=\"cls-1\"", " fill=\"var(--pink)\"");
+    assert_eq!(stripped.matches("fill=\"var(--pink)\"").count(), 2);
+    assert!(stripped.contains("M8,0A8,8"));
+    assert!(!stripped.contains("cls-1"));
+    let marked = stripped.replacen(
+        "<svg ",
+        "<svg class=\"wordmark-badge\" aria-hidden=\"true\" focusable=\"false\" ",
+        1,
+    );
+    PreEscaped(String::leak(marked))
+});
+
 impl Page {
     pub fn new(title: String, content: Box<dyn Render>, flash: Option<String>) -> Self {
         Self {
@@ -195,13 +254,8 @@ impl Page {
     fn wordmark(&self) -> Markup {
         html! {
             a class="wordmark" href="/" aria-label="Battlesnake — home" {
-                svg class="glyph" viewBox="0 0 24 24" fill="none" aria-hidden="true" {
-                    rect x="2" y="2" width="9" height="9" rx="2.5" fill="var(--pink)" {}
-                    rect x="13" y="2" width="9" height="9" rx="2.5" fill="currentColor" opacity=".2" {}
-                    rect x="2" y="13" width="9" height="9" rx="2.5" fill="currentColor" opacity=".2" {}
-                    rect x="13" y="13" width="9" height="9" rx="2.5" fill="var(--pink)" opacity=".45" {}
-                }
-                span class="wordmark-text" { "Battlesnake" }
+                (PreEscaped(WORDMARK_LOGO.0))
+                (PreEscaped(WORDMARK_BADGE.0))
             }
         }
     }
@@ -362,7 +416,9 @@ impl Render for Page {
                     link rel="preconnect" href="https://fonts.gstatic.com" crossorigin;
                     link href=(GOOGLE_FONTS_HREF) rel="stylesheet";
                     link rel="stylesheet" href=(asset_url("arena.css"));
+                    link rel="icon" href=(asset_url("favicon.ico")) sizes="32x32";
                     link rel="icon" href=(asset_url("favicon.svg")) type="image/svg+xml";
+                    link rel="apple-touch-icon" href=(asset_url("apple-touch-icon.png"));
                     script { (inline_bundle("theme-bootstrap.js")) }
                     script src=(asset_url("viewTransition.js")) {}
                     script src=(asset_url("ui-actions.js")) {}
@@ -540,6 +596,42 @@ mod tests {
             r#"<meta property="og:description" content="Standard game on an 11x11 board — watch the replay">"#
         ));
         assert!(!html.contains(DEFAULT_DESCRIPTION));
+    }
+
+    #[test]
+    fn wordmark_is_official_artwork_with_theme_fills() {
+        let html = test_page().render().into_string();
+        // Official wordmark artwork, inlined with theme-following fills.
+        assert!(html.contains(r#"aria-label="Battlesnake — home""#));
+        assert!(html.contains("class=\"wordmark-word\""));
+        assert!(html.contains("viewBox=\"0 0 710 260\""));
+        assert!(html.contains("fill:var(--ink)"));
+        assert!(html.contains("fill:var(--pink)"));
+        // Circle snake-head fallback badge.
+        assert!(html.contains("class=\"wordmark-badge\""));
+        assert!(html.contains("M8,0A8,8"));
+        // The old four-square glyph and text wordmark are gone, and no
+        // un-themed official fill leaks through.
+        assert!(!html.contains("wordmark-text"));
+        assert!(!html.contains("class=\"glyph\""));
+        assert!(!html.contains("#1c1e21"));
+        assert!(!html.contains("#e70b77"));
+        assert!(!html.contains("#e02878"));
+        // The inlined artwork passes through maud verbatim: maud's trailing
+        // `;` shorthand would render a BARE start tag, and in HTML foreign
+        // content an unclosed SVG shape swallows every following sibling.
+        // The official artwork self-closes its shapes, so prove the wordmark
+        // svg substring still carries exactly the official 13 self-closing
+        // paths (+1 polygon) and no unclosed `</path>`-style mismatches.
+        let start = html
+            .find(r#"<svg class="wordmark-word""#)
+            .expect("wordmark svg");
+        let end = start + html[start..].find("</svg>").expect("wordmark close");
+        let wordmark_svg = &html[start..=end];
+        assert_eq!(wordmark_svg.matches("<path").count(), 13);
+        assert_eq!(wordmark_svg.matches("</path>").count(), 0);
+        assert_eq!(wordmark_svg.matches("/>").count(), 14);
+        assert!(html.matches("<path").count() > 0);
     }
 
     #[test]
