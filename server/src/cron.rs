@@ -38,8 +38,11 @@ pub const ACHIEVEMENT_RECONCILE_INTERVAL_SECS: u64 = 60 * 60;
 
 /// Weekly highlights digest: hourly tick computes the latest completed
 /// Saturday-noon week if missing, then retries pending Discord posts
-/// (DEV-1993). The digest itself lands within ~1 h of the window end —
-/// well inside the 2-hour SLA.
+/// (DEV-1993). The tick resolves the new week only after a 30-minute
+/// settle (straggler results; a stored digest is never recomputed), so a
+/// tick landing inside the settle window no-ops on the previous week and
+/// the digest computes on the next hourly tick — worst case ~1.5 h after
+/// the window end, still inside the 2-hour SLA.
 pub const HIGHLIGHTS_CRON_INTERVAL_SECS: u64 = 60 * 60;
 
 pub(crate) fn cron_registry(config: &AppConfig) -> CronRegistry<AppState> {

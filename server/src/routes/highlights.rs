@@ -60,15 +60,15 @@ pub async fn list(
         .map(|digest| {
             html! {
                 tr style="white-space:nowrap" {
-                    td {
+                    td style="padding:0.5rem" {
                         a href=(format!("/admin/highlights/{}", digest.digest_id))
                           style="min-height:44px;display:inline-flex;align-items:center;font-size:16px" {
                             (fmt_window(digest.window_start, digest.window_end))
                         }
                     }
-                    td { (digest.games_count) }
-                    td { (status_badge(&digest.discord_status)) }
-                    td { (digest.computed_at.format("%Y-%m-%d %H:%MZ")) }
+                    td style="text-align:right;padding:0.5rem" { (digest.games_count) }
+                    td style="padding:0.5rem" { (status_badge(&digest.discord_status)) }
+                    td style="padding:0.5rem" { (digest.computed_at.format("%Y-%m-%d %H:%MZ")) }
                 }
             }
         })

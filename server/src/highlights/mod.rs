@@ -60,10 +60,24 @@ pub struct StoredItem {
     pub text: String,
 }
 
+/// How long a cron tick waits after a window ends before resolving the
+/// new week: games still running at window close land their results for
+/// several minutes after 12:00Z (prod landed 12:07:20Z for the
+/// 2026-10-31 week), and a stored digest is never recomputed.
+pub const HIGHLIGHTS_SETTLE: chrono::Duration = chrono::Duration::minutes(30);
+
+/// The week a cron tick at `tick` resolves: the latest completed week,
+/// held back [`HIGHLIGHTS_SETTLE`] so straggler results are in.
+pub fn week_for_tick(tick: DateTime<Utc>) -> Week {
+    Week::latest_completed(tick - HIGHLIGHTS_SETTLE)
+}
+
 /// The hourly cron tick: ensure the latest completed week's digest exists,
-/// then run the Discord post pass. A stored digest is never recomputed.
+/// then run the Discord post pass. A stored digest is never recomputed, so
+/// the week resolves only after [`HIGHLIGHTS_SETTLE`] lets results for games
+/// still running at window close land.
 pub async fn run_weekly(app_state: &AppState) -> cja::Result<()> {
-    let week = Week::latest_completed(Utc::now());
+    let week = week_for_tick(Utc::now());
     if digest_for_week(&app_state.db, &week).await?.is_none() {
         let started = std::time::Instant::now();
         let house = app_state.config.highlights_house();
@@ -517,6 +531,33 @@ mod tests {
 
     fn w1() -> DateTime<Utc> {
         Week::latest_completed(Utc::now()).end
+    }
+
+    fn at(y: i32, m: u32, d: u32, h: u32, min: u32) -> DateTime<Utc> {
+        use chrono::TimeZone;
+        Utc.with_ymd_and_hms(y, m, d, h, min, 0).unwrap()
+    }
+
+    // ------------------------------------------ week-resolution (settle)
+
+    #[test]
+    fn tick_inside_settle_resolves_previous_week() {
+        // Sat 2026-10-31 12:10Z: only 10 min after the window ended, still
+        // inside the 30-min settle — resolving the new week now would lose
+        // games whose results had not landed yet (a stored digest is never
+        // recomputed), so the tick must resolve the previous week.
+        let week = week_for_tick(at(2026, 10, 31, 12, 10));
+        assert_eq!(week.end, at(2026, 10, 24, 12, 0));
+        assert_eq!(week.start, at(2026, 10, 17, 12, 0));
+    }
+
+    #[test]
+    fn tick_after_settle_resolves_new_week() {
+        // 12:31Z is past the settle: results that landed at 12:07:20Z are
+        // in, so the tick resolves the newly completed week.
+        let week = week_for_tick(at(2026, 10, 31, 12, 31));
+        assert_eq!(week.start, at(2026, 10, 24, 12, 0));
+        assert_eq!(week.end, at(2026, 10, 31, 12, 0));
     }
 
     async fn ladder_id(pool: &PgPool, name: &str) -> Uuid {
