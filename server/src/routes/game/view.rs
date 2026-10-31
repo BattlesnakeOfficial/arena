@@ -68,12 +68,16 @@ pub async fn view_game(
     Query(params): Query<ViewGameParams>,
     page_factory: PageFactory,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
-    let Some(game) = crate::models::game::get_game_by_id(&state.db, game_id)
+    let Some(record) = crate::models::game::get_game_row_by_any_id(&state.db, game_id)
         .await
         .wrap_err("Failed to get game")?
     else {
         return Ok(crate::routes::render_not_found(page_factory));
     };
+    let game = record.game;
+    // Canonical arena id: iframe, share/save/rematch forms, solo stats, and
+    // the OG card all use it from here, whichever id kind the link carried.
+    let game_id = game.game_id;
     let battlesnakes = game_battlesnake::get_battlesnakes_by_game_id(&state.db, game_id)
         .await
         .wrap_err("Failed to get game battlesnakes")?;
@@ -345,7 +349,7 @@ pub async fn view_game(
 
                     script src=(asset_url("share-copy.js")) {}
 
-                    @if game.status != GameStatus::Waiting {
+                    @if game.status != GameStatus::Waiting && !battlesnakes.is_empty() {
                         div class="gmeta" {
                             h3 { "Turn JSON" }
                             p class="gmeta-note" {

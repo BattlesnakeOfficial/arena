@@ -686,6 +686,73 @@ pub async fn get_game_by_id(pool: &PgPool, game_id: Uuid) -> cja::Result<Option<
     Ok(game)
 }
 
+/// A `games` row resolved for public serving: the game plus the archive
+/// pointer columns the serving decision needs. `engine_game_id` doubles
+/// as the Play/native discriminator (`GameRowKind` in `archive.rs`).
+#[derive(Debug)]
+pub struct GameRow {
+    pub game: Game,
+    pub engine_game_id: Option<String>,
+    pub gcs_path: Option<String>,
+}
+
+/// Resolve a game by arena `game_id` OR legacy Play id
+/// (`engine_game_id`). Both id kinds are UUIDs, so callers pass one `Uuid`
+/// and both columns are matched; on the (unlikely) collision where one
+/// row's `game_id` equals another's `engine_game_id`, the arena row wins.
+pub async fn get_game_row_by_any_id(pool: &PgPool, id: Uuid) -> cja::Result<Option<GameRow>> {
+    let id_str = id.to_string();
+    let row = sqlx::query!(
+        r#"
+        SELECT
+            game_id,
+            board_size,
+            game_type,
+            status,
+            enqueued_at,
+            created_at,
+            updated_at,
+            engine_game_id,
+            gcs_path
+        FROM games
+        WHERE game_id = $1 OR engine_game_id = $2
+        ORDER BY (game_id = $1) DESC
+        LIMIT 1
+        "#,
+        id,
+        id_str
+    )
+    .fetch_optional(pool)
+    .await
+    .wrap_err("Failed to fetch game from database")?;
+
+    let row = match row {
+        Some(row) => row,
+        None => return Ok(None),
+    };
+
+    let board_size = GameBoardSize::from_str(&row.board_size)
+        .wrap_err_with(|| format!("Invalid board size: {}", row.board_size))?;
+    let game_type = GameType::from_str(&row.game_type)
+        .wrap_err_with(|| format!("Invalid game type: {}", row.game_type))?;
+    let status = GameStatus::from_str(&row.status)
+        .wrap_err_with(|| format!("Invalid game status: {}", row.status))?;
+
+    Ok(Some(GameRow {
+        game: Game {
+            game_id: row.game_id,
+            board_size,
+            game_type,
+            status,
+            enqueued_at: row.enqueued_at,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+        },
+        engine_game_id: row.engine_game_id,
+        gcs_path: row.gcs_path,
+    }))
+}
+
 pub async fn get_game_rematch_metadata(
     pool: &PgPool,
     game_id: Uuid,

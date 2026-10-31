@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use crate::archive::{ArchiveReader, ArchiveRowKind, ArchivedGame, LoadArchiveError};
 use crate::watched_games::{Readiness, WatchedGameUpdate};
 use axum::{
     Json,
@@ -18,9 +19,11 @@ use uuid::Uuid;
 
 use crate::{
     errors::ServerResult,
-    models::game::{GameStatus, GameType, get_game_by_id, get_game_source},
+    models::game::{
+        GameRow, GameStatus, GameType, get_game_by_id, get_game_row_by_any_id, get_game_source,
+    },
     models::game_battlesnake::get_battlesnakes_by_game_id,
-    models::turn::{get_latest_frame, get_turn_frames_page, get_turns_by_game_id},
+    models::turn::{get_latest_frame, get_turn_frames_page, get_turns_by_game_id, has_frames},
     state::AppState,
 };
 
@@ -81,7 +84,7 @@ fn fill_frame_authors(
 /// Everything a persisted frame needs before it is served publicly: owner
 /// names filled in, moderated shouts stripped, and the legacy engine's public
 /// frame shape (see `normalize_public_frame`).
-fn prepare_public_frame(
+pub(crate) fn prepare_public_frame(
     frame: &mut serde_json::Value,
     authors: &std::collections::HashMap<String, String>,
     suppressed: &std::collections::HashMap<String, std::collections::HashSet<String>>,
@@ -206,13 +209,139 @@ fn engine_status(status: GameStatus) -> &'static str {
     }
 }
 
+fn archive_row_kind(record: &GameRow) -> ArchiveRowKind {
+    if record.engine_game_id.is_some() {
+        ArchiveRowKind::Play
+    } else {
+        ArchiveRowKind::Native
+    }
+}
+
+/// True when this game's frames must come from the archive: the row has an
+/// archive pointer, is terminal, and has no renderable frame in `turns`
+/// (imported Play stubs, or pruned native games — DEV-1981). The status
+/// guard keeps live games (waiting/running) on the DB path and the live
+/// websocket even if they carry a stale `gcs_path`. The `turns` probe runs
+/// only for archived-looking rows, so live games pay nothing.
+async fn serves_from_archive(db: &sqlx::PgPool, record: &GameRow) -> cja::Result<bool> {
+    if record.gcs_path.is_none()
+        || !matches!(
+            record.game.status,
+            GameStatus::Finished | GameStatus::Failed
+        )
+    {
+        return Ok(false);
+    }
+    Ok(!has_frames(db, record.game.game_id).await?)
+}
+
+/// Load the archived game for an HTTP endpoint: missing object → 404
+/// (ERROR log happens inside the reader), storage/decode failure → 500.
+async fn load_archived_for_http(
+    state: &AppState,
+    record: &GameRow,
+) -> ServerResult<std::sync::Arc<ArchivedGame>, StatusCode> {
+    let path = record.gcs_path.clone().unwrap_or_default();
+    match state
+        .archive
+        .load(record.game.game_id, &path, archive_row_kind(record))
+        .await
+    {
+        Ok(archived) => Ok(archived),
+        Err(LoadArchiveError::ObjectMissing { .. }) => Err(crate::errors::ServerError(
+            color_eyre::eyre::eyre!(
+                "Archive object missing for game {}: {path}",
+                record.game.game_id
+            ),
+            StatusCode::NOT_FOUND,
+        )),
+        Err(LoadArchiveError::Failed(e)) => Err(e.into()), // → 500
+    }
+}
+
+/// Engine-API game info built from the arena `games` row — the DB path's
+/// construction (extracted verbatim from `get_game_info`). Both the DB
+/// path and the native archive path (DEV-1980 objects + DEV-1981 pruning)
+/// call this, so a native game's `Game` cannot drift across the prune.
+/// `source` is fetched by the caller (it is a DB round trip).
+fn board_viewer_game_from_record(
+    game: &crate::models::game::Game,
+    source: &crate::engine::GameSource,
+) -> BoardViewerGame {
+    let (width, height) = game.board_size.dimensions();
+    let (ruleset, ruleset_name, map, rules_stages) =
+        engine_rules(game.game_type.clone(), game.game_id);
+    BoardViewerGame {
+        id: game.game_id.to_string(),
+        status: engine_status(game.status).to_string(),
+        arena_status: game.status.as_str().to_string(),
+        width,
+        height,
+        ruleset,
+        ruleset_name,
+        rules_stages,
+        map,
+        source: source.as_str().to_string(),
+        snake_timeout: crate::engine::MOVE_TIMEOUT_MS,
+        max_turns: crate::engine::MAX_TURNS,
+        food_spawns: Vec::new(),
+        hazard_spawns: Vec::new(),
+        created: game.created_at.timestamp_micros().to_string(),
+    }
+}
+
+/// Engine-API game info built from the archived engine game — Play rows
+/// only (`engine_game_id IS NOT NULL`): its real
+/// Width/Height/Ruleset/RulesetName/Map/Source/Created/SnakeTimeout/
+/// MaxTurns, NOT arena's mode-rule defaults. Native rows use
+/// [`board_viewer_game_from_record`] instead and ignore this header.
+/// Status comes from the arena row (never the archived engine's own status
+/// string — a stray archived `running` would put the board into live mode).
+fn board_viewer_game_from_archived(
+    record_game_id: Uuid,
+    arena_status: GameStatus,
+    archived: &crate::engine_models::EngineGame,
+) -> BoardViewerGame {
+    BoardViewerGame {
+        id: record_game_id.to_string(),
+        status: engine_status(arena_status).to_string(),
+        arena_status: arena_status.as_str().to_string(),
+        width: archived.width.max(0) as u32,
+        height: archived.height.max(0) as u32,
+        ruleset: archived
+            .ruleset
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+        ruleset_name: archived.ruleset_name.clone().unwrap_or_default(),
+        rules_stages: archived.rules_stages.clone().unwrap_or_default(),
+        map: archived.map.clone().unwrap_or_default(),
+        source: archived.source.clone().unwrap_or_default(),
+        snake_timeout: archived.snake_timeout as i64,
+        max_turns: archived.max_turns,
+        food_spawns: archived
+            .food_spawns
+            .iter()
+            .map(|p| serde_json::to_value(p).unwrap_or_default())
+            .collect(),
+        hazard_spawns: archived
+            .hazard_spawns
+            .iter()
+            .map(|p| serde_json::to_value(p).unwrap_or_default())
+            .collect(),
+        // Unix microseconds as a string, like the engine (and like the DB
+        // path's created_at.timestamp_micros()).
+        created: archived.created.to_string(),
+    }
+}
+
 /// GET /api/games/{id}
 /// Returns game info for the Battlesnake board viewer and the GIF exporter
 pub async fn get_game_info(
     State(state): State<AppState>,
     Path(game_id): Path<Uuid>,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
-    let game = get_game_by_id(&state.db, game_id)
+    let record = get_game_row_by_any_id(&state.db, game_id)
         .await
         .wrap_err("Failed to fetch game")?
         .ok_or_else(|| {
@@ -221,9 +350,37 @@ pub async fn get_game_info(
                 StatusCode::NOT_FOUND,
             )
         })?;
+    let game_id = record.game.game_id;
 
-    let (width, height) = game.board_size.dimensions();
-    let (ruleset, ruleset_name, map, rules_stages) = engine_rules(game.game_type, game_id);
+    if serves_from_archive(&state.db, &record).await? {
+        let archived = load_archived_for_http(&state, &record).await?;
+        let authors = frame_author_map(&state.db, game_id).await;
+        let suppressed =
+            crate::moderation::shouts::load_suppressed_set(&state.db, game_id, &record.game.status)
+                .await;
+        // One frame parsed + prepped inline: µs-scale.
+        let last_frame = archived
+            .last_frame()
+            .map(|raw| ArchiveReader::prepare_frame(raw, &authors, &suppressed))
+            .transpose()
+            .wrap_err("Failed to prepare archived last frame")?;
+        // Game's source is the ROW, not the object: Play rows serve the
+        // archived engine game; native rows serve the arena row through
+        // the same constructor the DB path uses.
+        let game = if record.engine_game_id.is_some() {
+            let engine_game = archived
+                .parse_game()
+                .wrap_err("Failed to parse archived game header")?;
+            board_viewer_game_from_archived(game_id, record.game.status, &engine_game)
+        } else {
+            let source = get_game_source(&state.db, game_id)
+                .await
+                .wrap_err("Failed to load game source")?;
+            board_viewer_game_from_record(&record.game, &source)
+        };
+        return Ok(Json(BoardViewerGameResponse { game, last_frame }));
+    }
+
     let source = get_game_source(&state.db, game_id)
         .await
         .wrap_err("Failed to load game source")?;
@@ -234,9 +391,12 @@ pub async fn get_game_info(
     {
         Some(mut frame) => {
             let authors = frame_author_map(&state.db, game_id).await;
-            let suppressed =
-                crate::moderation::shouts::load_suppressed_set(&state.db, game_id, &game.status)
-                    .await;
+            let suppressed = crate::moderation::shouts::load_suppressed_set(
+                &state.db,
+                game_id,
+                &record.game.status,
+            )
+            .await;
             prepare_public_frame(&mut frame, &authors, &suppressed);
             Some(frame)
         }
@@ -244,23 +404,7 @@ pub async fn get_game_info(
     };
 
     Ok(Json(BoardViewerGameResponse {
-        game: BoardViewerGame {
-            id: game.game_id.to_string(),
-            status: engine_status(game.status).to_string(),
-            arena_status: game.status.as_str().to_string(),
-            width,
-            height,
-            ruleset,
-            ruleset_name,
-            rules_stages,
-            map,
-            source: source.as_str().to_string(),
-            snake_timeout: crate::engine::MOVE_TIMEOUT_MS,
-            max_turns: crate::engine::MAX_TURNS,
-            food_spawns: Vec::new(),
-            hazard_spawns: Vec::new(),
-            created: game.created_at.timestamp_micros().to_string(),
-        },
+        game: board_viewer_game_from_record(&record.game, &source),
         last_frame,
     }))
 }
@@ -312,7 +456,7 @@ pub async fn get_game_frames(
 ) -> ServerResult<impl IntoResponse, StatusCode> {
     // 404 for unknown games, like the legacy engine (the exporter maps this
     // through to its own 404).
-    let game = get_game_by_id(&state.db, game_id)
+    let record = get_game_row_by_any_id(&state.db, game_id)
         .await
         .wrap_err("Failed to fetch game")?
         .ok_or_else(|| {
@@ -321,6 +465,31 @@ pub async fn get_game_frames(
                 StatusCode::NOT_FOUND,
             )
         })?;
+    let game_id = record.game.game_id;
+
+    if serves_from_archive(&state.db, &record).await? {
+        let archived = load_archived_for_http(&state, &record).await?;
+        let (offset, limit) = clamp_frames_pagination(query.offset, query.limit);
+        let authors = frame_author_map(&state.db, game_id).await;
+        let suppressed =
+            crate::moderation::shouts::load_suppressed_set(&state.db, game_id, &record.game.status)
+                .await;
+        // `clamp_frames_pagination` returns non-negative `(i64, i64)`, so
+        // the `as usize` casts cannot wrap.
+        let frames = state
+            .archive
+            .prepare_frame_page(
+                archived.clone(),
+                offset as usize,
+                limit as usize,
+                authors,
+                suppressed,
+            )
+            .await
+            .wrap_err("Failed to prepare archived frames page")?;
+        let count = frames.len();
+        return Ok(Json(GameFramesResponse { count, frames }));
+    }
 
     let (offset, limit) = clamp_frames_pagination(query.offset, query.limit);
 
@@ -330,7 +499,8 @@ pub async fn get_game_frames(
 
     let authors = frame_author_map(&state.db, game_id).await;
     let suppressed =
-        crate::moderation::shouts::load_suppressed_set(&state.db, game_id, &game.status).await;
+        crate::moderation::shouts::load_suppressed_set(&state.db, game_id, &record.game.status)
+            .await;
     let mut frames: Vec<serde_json::Value> =
         turns.into_iter().filter_map(|t| t.frame_data).collect();
     for frame in &mut frames {
@@ -478,10 +648,73 @@ async fn send_terminal(
     graceful_close(sender, receiver).await;
 }
 
+/// Replay an archived game over the websocket: every frame as a `frame`
+/// event, then `game_end`, then a graceful close — the same terminal
+/// sequence a finished DB game produces. Storage failures use the same
+/// error-event-then-close behavior the DB path has today. Frames-only: no
+/// Game is served here, so Play and native objects need no branching
+/// beyond passing the row kind into `load`.
+async fn handle_archived_websocket(
+    sender: &mut WsSender,
+    receiver: &mut WsReceiver,
+    state: &AppState,
+    record: &GameRow,
+) {
+    let game_id = record.game.game_id;
+    let path = record.gcs_path.clone().unwrap_or_default();
+    let archived = match state
+        .archive
+        .load(game_id, &path, archive_row_kind(record))
+        .await
+    {
+        Ok(archived) => archived,
+        Err(LoadArchiveError::ObjectMissing { .. }) => {
+            send_error_and_close(sender, receiver, "Game not found").await;
+            return;
+        }
+        Err(LoadArchiveError::Failed(error)) => {
+            tracing::error!(%game_id, error = %format_args!("{error:#}"),
+                "Failed to load archived game for WebSocket");
+            send_error_and_close(sender, receiver, "Internal server error").await;
+            return;
+        }
+    };
+    let authors = frame_author_map(&state.db, game_id).await;
+    let suppressed =
+        crate::moderation::shouts::load_suppressed_set(&state.db, game_id, &record.game.status)
+            .await;
+    // Full-accessor iteration (&Box<RawValue> deref-coerces to &RawValue).
+    for raw in archived.frames() {
+        // Single-frame parse, µs-scale, inline.
+        let frame = match ArchiveReader::prepare_frame(raw, &authors, &suppressed) {
+            Ok(frame) => frame,
+            Err(error) => {
+                tracing::error!(%game_id, error = %format_args!("{error:#}"),
+                    "Failed to prepare archived frame for WebSocket");
+                send_error_and_close(sender, receiver, "Internal server error").await;
+                return;
+            }
+        };
+        if !send_message(sender, "frame", frame).await {
+            return;
+        }
+    }
+    if matches!(record.game.status, GameStatus::Failed) {
+        let _ = send_message(
+            sender,
+            "error",
+            serde_json::json!({"message": "Game failed"}),
+        )
+        .await;
+    }
+    let _ = send_message(sender, "game_end", serde_json::json!({})).await;
+    graceful_close(sender, receiver).await;
+}
+
 async fn handle_game_websocket(socket: WebSocket, state: AppState, game_id: Uuid) {
     let (mut sender, mut receiver) = socket.split();
-    let game = match get_game_by_id(&state.db, game_id).await {
-        Ok(Some(game)) => game,
+    let record = match get_game_row_by_any_id(&state.db, game_id).await {
+        Ok(Some(record)) => record,
         Ok(None) => {
             send_error_and_close(&mut sender, &mut receiver, "Game not found").await;
             return;
@@ -492,6 +725,22 @@ async fn handle_game_websocket(socket: WebSocket, state: AppState, game_id: Uuid
             return;
         }
     };
+    // Canonical arena id from here on: subscribe, turns, and terminal
+    // rereads all key on it, whichever id kind the client connected with.
+    let game_id = record.game.game_id;
+    match serves_from_archive(&state.db, &record).await {
+        Ok(true) => {
+            handle_archived_websocket(&mut sender, &mut receiver, &state, &record).await;
+            return;
+        }
+        Ok(false) => {}
+        Err(error) => {
+            tracing::error!(%game_id, error = %format_args!("{error:#}"),
+                "Failed archive check for WebSocket");
+            send_error_and_close(&mut sender, &mut receiver, "Internal server error").await;
+            return;
+        }
+    }
     let mut subscription = state.watched_games.subscribe(game_id).await;
     let mut retired_before_history = false;
     if !subscription.created {
@@ -536,7 +785,8 @@ async fn handle_game_websocket(socket: WebSocket, state: AppState, game_id: Uuid
     }
     let authors = frame_author_map(&state.db, game_id).await;
     let suppressed =
-        crate::moderation::shouts::load_suppressed_set(&state.db, game_id, &game.status).await;
+        crate::moderation::shouts::load_suppressed_set(&state.db, game_id, &record.game.status)
+            .await;
     let context = FrameContext {
         authors: &authors,
         suppressed: &suppressed,
@@ -611,6 +861,254 @@ async fn handle_game_websocket(socket: WebSocket, state: AppState, game_id: Uuid
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod fixtures {
+    use super::*;
+    use sqlx::PgPool;
+
+    pub(crate) fn zstd_json(value: &serde_json::Value, level: i32) -> Vec<u8> {
+        zstd::stream::encode_all(serde_json::to_vec(value).unwrap().as_slice(), level).unwrap()
+    }
+
+    /// Engine game JSON with deliberately NON-arena-default values, so the
+    /// asserts prove the archive won over arena's mode rules.
+    pub(crate) fn archived_engine_game_json(play_id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "ID": play_id,
+            "Status": "complete",
+            "Width": 15,
+            "Height": 9,
+            "Ruleset": {"name": "royale", "damagePerTurn": "14"},
+            "SnakeTimeout": 600,
+            "MaxTurns": 2500,
+            "FoodSpawns": [],
+            "HazardSpawns": [],
+            "Source": "ladder",
+            "RulesetName": "royale",
+            "RulesStages": null,
+            "Map": "royale",
+            "Created": 1735689600000000i64,
+        })
+    }
+
+    /// One snake frame in the archived-engine shape. The typed-Option keys
+    /// (`StatusCode`, `Error`, `IsBot`, `IsEnvironment`, `TimingMicros`)
+    /// carry JSON null exactly as v1/v2 objects serialize them, so the
+    /// null-tolerant fill in `normalize_public_frame` gets exercised.
+    pub(crate) fn frame_json(turn: i32, with_private_fields: bool) -> serde_json::Value {
+        let mut snake = serde_json::json!({
+            "ID": "s1",
+            "Name": "Snek",
+            "URL": "https://snake.example.com/move?token=sekrit",
+            "ProxyURL": "https://proxy.example.com/s1",
+            "APIVersion": "1",
+            "Body": [{"X": 5, "Y": 5}],
+            "Health": 100,
+            "Latency": "12",
+            "Author": "playuser",
+            "Death": null,
+            "StatusCode": null,
+            "Error": null,
+            "IsBot": null,
+            "IsEnvironment": null,
+        });
+        if !with_private_fields {
+            let obj = snake.as_object_mut().unwrap();
+            obj.remove("URL");
+            obj.remove("ProxyURL");
+            obj.remove("APIVersion");
+        }
+        serde_json::json!({
+            "Turn": turn,
+            "Snakes": [snake],
+            "Food": [],
+            "Hazards": [],
+        })
+    }
+
+    /// v1 object: hand-built (no v1 writer exists any more) — keeps its
+    /// non-empty URL/ProxyURL/APIVersion and zstd-3, like every existing
+    /// Play object in the bucket.
+    pub(crate) fn v1_archive(play_id: &str) -> Vec<u8> {
+        let object = serde_json::json!({
+            "game": archived_engine_game_json(play_id),
+            "frames": [frame_json(0, true), frame_json(1, true)],
+            "exported_at": "2026-01-01T00:00:00Z",
+        });
+        zstd_json(&object, 3)
+    }
+
+    /// v2 object: built with the REAL writer — `crate::backup::
+    /// build_compressed_export(engine_game, frames)` — so drift between
+    /// the v2 writer's member names/version/stripping and the reader fails
+    /// the tests using this fixture. Frames are passed WITH private fields:
+    /// the writer strips URL/ProxyURL/APIVersion, which the served-blank
+    /// asserts then pin end-to-end.
+    pub(crate) fn v2_archive(play_id: &str) -> Vec<u8> {
+        let game: crate::engine_models::EngineGame =
+            serde_json::from_value(archived_engine_game_json(play_id)).unwrap();
+        crate::backup::build_compressed_export(game, vec![frame_json(0, true), frame_json(1, true)])
+            .unwrap()
+    }
+
+    /// A native frame (raw `turns.frame_data` shape): engine::frame
+    /// PascalCase keys, URL already blank (native frames persist blanks),
+    /// EMPTY Author whose snake ID is the `game_battlesnake_id` — the key
+    /// `fill_frame_authors` matches.
+    fn native_frame_json(turn: i32, snake_id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "Turn": turn,
+            "Snakes": [{
+                "ID": snake_id,
+                "Name": "Native Snake",
+                "URL": "",
+                "ProxyURL": "",
+                "APIVersion": "",
+                "Author": "",
+                "Body": [{"X": 1, "Y": 1}],
+                "Health": 100,
+                "Latency": "10",
+                "Death": null,
+            }],
+            "Food": [],
+            "Hazards": [],
+        })
+    }
+
+    /// DEV-1980-shaped native object (`NativeGameExport`). The `game`
+    /// member is deliberately NOT EngineGame-shaped (no ID/Status — a
+    /// `NativeGameHeader`), so this fixture fails Play-kind header
+    /// validation and pins that native rows never run it.
+    pub(crate) fn native_archive(game_id: &str, snake_id: &str) -> Vec<u8> {
+        let object = serde_json::json!({
+            "archive_version": 2,
+            "game_id": game_id,
+            "game": {
+                "game_type": "Standard",
+                "board_size": "11x11",
+                "status": "finished",
+            },
+            "frames": [native_frame_json(0, snake_id), native_frame_json(1, snake_id)],
+            "exported_at": "2026-01-01T00:00:00Z",
+        });
+        zstd_json(&object, 9)
+    }
+
+    pub(crate) fn native_frame_value(turn: i32, snake_id: &str) -> serde_json::Value {
+        native_frame_json(turn, snake_id)
+    }
+
+    /// Imported Play stub row: `engine_game_id` + `gcs_path` + terminal
+    /// status, no `turns`. Returns the arena game id.
+    pub(crate) async fn fixture_archived_game(
+        pool: &PgPool,
+        engine_id: &str,
+        gcs_path: &str,
+    ) -> cja::Result<Uuid> {
+        let game_id: Uuid = sqlx::query_scalar(
+            r#"
+            INSERT INTO games
+                (board_size, game_type, status, engine_game_id, archived_at, gcs_path, archive_version)
+            VALUES ('11x11', 'Standard', 'finished', $1, NOW(), $2, 1)
+            RETURNING game_id
+            "#,
+        )
+        .bind(engine_id)
+        .bind(gcs_path)
+        .fetch_one(pool)
+        .await?;
+        Ok(game_id)
+    }
+
+    /// Native row: `engine_game_id` NULL, terminal status, `gcs_path`
+    /// `native/YYYY/MM/DD/<id>.json.zst`, archive_version 2, archived_at —
+    /// plus one battlesnakes + game_battlesnakes pair so author fill has a
+    /// row to read. Returns `(game_id, game_battlesnake_id)`.
+    pub(crate) async fn fixture_native_game(pool: &PgPool) -> cja::Result<(Uuid, Uuid)> {
+        let game_id: Uuid = sqlx::query_scalar(
+            r#"
+            INSERT INTO games (board_size, game_type, status)
+            VALUES ('11x11', 'Standard', 'finished')
+            RETURNING game_id
+            "#,
+        )
+        .fetch_one(pool)
+        .await?;
+        let gcs_path = format!("native/2026/10/31/{game_id}.json.zst");
+        sqlx::query(
+            "UPDATE games SET archived_at = NOW(), gcs_path = $1, archive_version = 2 WHERE game_id = $2",
+        )
+        .bind(&gcs_path)
+        .bind(game_id)
+        .execute(pool)
+        .await?;
+        let user_id = crate::routes::test_support::create_user(pool, 424242, false).await;
+        let battlesnake_id: Uuid = sqlx::query_scalar(
+            r#"
+            INSERT INTO battlesnakes (user_id, name, url, visibility)
+            VALUES ($1, 'Native Snake', 'http://snake', 'public')
+            RETURNING battlesnake_id
+            "#,
+        )
+        .bind(user_id)
+        .fetch_one(pool)
+        .await?;
+        let game_battlesnake_id: Uuid = sqlx::query_scalar(
+            r#"
+            INSERT INTO game_battlesnakes (game_id, battlesnake_id)
+            VALUES ($1, $2)
+            RETURNING game_battlesnake_id
+            "#,
+        )
+        .bind(game_id)
+        .bind(battlesnake_id)
+        .fetch_one(pool)
+        .await?;
+        Ok((game_id, game_battlesnake_id))
+    }
+
+    /// A row with an explicit status (and optional archive pointers) — used
+    /// by the guard test that pins non-terminal rows to the DB path.
+    pub(crate) async fn fixture_game_with_status(
+        pool: &PgPool,
+        status: &str,
+        engine_id: Option<&str>,
+        gcs_path: Option<&str>,
+    ) -> cja::Result<Uuid> {
+        let game_id: Uuid = sqlx::query_scalar(
+            r#"
+            INSERT INTO games
+                (board_size, game_type, status, engine_game_id, gcs_path, archived_at, archive_version)
+            VALUES ('11x11', 'Standard', $1, $2, $3,
+                    CASE WHEN $3::text IS NULL THEN NULL ELSE NOW() END,
+                    CASE WHEN $3::text IS NULL THEN NULL ELSE 2 END)
+            RETURNING game_id
+            "#,
+        )
+        .bind(status)
+        .bind(engine_id)
+        .bind(gcs_path)
+        .fetch_one(pool)
+        .await?;
+        Ok(game_id)
+    }
+
+    /// Test state whose archive reader and object store are the SAME
+    /// in-memory store, so tests can seed objects and count fetches.
+    pub(crate) fn archived_state(
+        pool: sqlx::PgPool,
+        store: std::sync::Arc<crate::object_store::InMemoryObjectStore>,
+    ) -> AppState {
+        let mut state = AppState::test_from_pool(pool);
+        state.object_store = store.clone();
+        state.archive = crate::archive::ArchiveReader::new(
+            store,
+            crate::archive::DEFAULT_ARCHIVE_CACHE_MAX_BYTES,
+        );
+        state
     }
 }
 
@@ -1228,6 +1726,347 @@ mod tests {
         fill_frame_authors(&mut frame, &std::collections::HashMap::new());
         assert_eq!(frame, serde_json::json!({"Snakes": [{"ID": "gb-1"}]}));
     }
+
+    // --- Archived-game serving (DEV-1979) ---
+
+    use crate::object_store::InMemoryObjectStore;
+    use crate::object_store::ObjectStore as _;
+    use fixtures as fx;
+    use std::sync::Arc;
+
+    /// Seed an archived-Play row + store and return (state, arena_id,
+    /// play_id, store). The object is built by `build_object` from the
+    /// engine id, so its contents carry the same play id as the row.
+    async fn archived_play_fixture(
+        pool: &PgPool,
+        build_object: impl FnOnce(&str) -> Vec<u8>,
+    ) -> cja::Result<(AppState, Uuid, Uuid, Arc<InMemoryObjectStore>)> {
+        let store = Arc::new(InMemoryObjectStore::default());
+        let engine_id = Uuid::new_v4().to_string();
+        let gcs_path = format!("games/2026/01/01/{engine_id}.json.zst");
+        store
+            .put(&gcs_path, build_object(&engine_id))
+            .await
+            .unwrap();
+        let game_id = fx::fixture_archived_game(pool, &engine_id, &gcs_path).await?;
+        let state = fx::archived_state(pool.clone(), store.clone());
+        Ok((state, game_id, Uuid::parse_str(&engine_id).unwrap(), store))
+    }
+
+    fn assert_archived_game_shape(game: &serde_json::Value, arena_id: Uuid) {
+        // The archive won over arena's mode-rule defaults.
+        assert_eq!(game["Width"], 15);
+        assert_eq!(game["Height"], 9);
+        assert_eq!(game["Map"], "royale");
+        assert_eq!(game["RulesetName"], "royale");
+        assert_eq!(game["Ruleset"]["damagePerTurn"], "14");
+        assert_eq!(game["Source"], "ladder");
+        assert_eq!(game["SnakeTimeout"], 600);
+        assert_eq!(game["MaxTurns"], 2500);
+        assert_eq!(game["Created"], "1735689600000000");
+        // The arena id is the served id; status comes from the ROW.
+        assert_eq!(game["ID"], arena_id.to_string());
+        assert_eq!(game["Status"], "complete");
+        assert_eq!(game["ArenaStatus"], "finished");
+    }
+
+    fn assert_snake_public_shape(snake: &serde_json::Value) {
+        assert_eq!(snake["URL"], "");
+        assert_eq!(snake["ProxyURL"], "");
+        assert_eq!(snake["APIVersion"], "");
+        // The null-tolerance pins: typed-Option nulls filled to the DB path's
+        // public shape.
+        assert_eq!(snake["StatusCode"], 0);
+        assert_eq!(snake["Error"], "");
+        assert_eq!(snake["IsBot"], false);
+        assert_eq!(snake["IsEnvironment"], false);
+        assert_eq!(snake["TimingMicros"], serde_json::json!({}));
+    }
+
+    /// v1 archive: both id kinds serve the archived engine game and its
+    /// last frame through the DB path's exact response shape.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn archived_game_info_serves_engine_game_and_last_frame(pool: PgPool) -> cja::Result<()> {
+        let (state, game_id, play_id, _store) =
+            archived_play_fixture(&pool, fx::v1_archive).await?;
+
+        for id in [play_id, game_id] {
+            let response = get_game_info(State(state.clone()), Path(id))
+                .await
+                .unwrap()
+                .into_response();
+            assert_eq!(response.status(), StatusCode::OK);
+            let json = response_json(response).await;
+            assert_archived_game_shape(&json["Game"], game_id);
+            assert_eq!(json["LastFrame"]["Turn"], 1);
+            let snake = &json["LastFrame"]["Snakes"][0];
+            assert_snake_public_shape(snake);
+            // The engine's own author survives; the empty author map is a no-op.
+            assert_eq!(snake["Author"], "playuser");
+        }
+        Ok(())
+    }
+
+    /// Every endpoint blanks the archived snake's private fields — the v1
+    /// object's real URL never leaks, and the typed-Option nulls are filled.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn archived_snake_private_fields_blank_in_every_endpoint(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        let (state, _game_id, play_id, _store) =
+            archived_play_fixture(&pool, fx::v1_archive).await?;
+
+        let info = response_json(
+            get_game_info(State(state.clone()), Path(play_id))
+                .await
+                .unwrap()
+                .into_response(),
+        )
+        .await;
+        assert_snake_public_shape(&info["LastFrame"]["Snakes"][0]);
+
+        for (offset, limit) in [(0, 1), (1, 100)] {
+            let page = response_json(
+                get_game_frames(
+                    State(state.clone()),
+                    Path(play_id),
+                    Query(FramesQuery {
+                        offset: Some(offset),
+                        limit: Some(limit),
+                    }),
+                )
+                .await
+                .unwrap()
+                .into_response(),
+            )
+            .await;
+            for frame in page["Frames"].as_array().unwrap() {
+                assert_snake_public_shape(&frame["Snakes"][0]);
+            }
+        }
+        Ok(())
+    }
+
+    /// The frames endpoint keeps the engine envelope over archived frames,
+    /// including the short-page "no more frames" signal past the end.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn archived_frames_page_serves_engine_envelope(pool: PgPool) -> cja::Result<()> {
+        let (state, _game_id, play_id, _store) =
+            archived_play_fixture(&pool, fx::v1_archive).await?;
+
+        let frames_page = |offset: Option<i64>, limit: Option<i64>| {
+            get_game_frames(
+                State(state.clone()),
+                Path(play_id),
+                Query(FramesQuery { offset, limit }),
+            )
+        };
+
+        let page1 = response_json(
+            frames_page(Some(0), Some(100))
+                .await
+                .unwrap()
+                .into_response(),
+        )
+        .await;
+        assert_eq!(page1["Count"], 2);
+        assert_eq!(page1["Frames"][0]["Turn"], 0);
+        assert_eq!(page1["Frames"][1]["Turn"], 1);
+
+        let page2 = response_json(
+            frames_page(Some(1), Some(100))
+                .await
+                .unwrap()
+                .into_response(),
+        )
+        .await;
+        assert_eq!(page2["Count"], 1);
+        assert_eq!(page2["Frames"][0]["Turn"], 1);
+
+        let past_end = response_json(
+            frames_page(Some(2), Some(100))
+                .await
+                .unwrap()
+                .into_response(),
+        )
+        .await;
+        assert_eq!(past_end["Count"], 0);
+        assert_eq!(past_end["Frames"].as_array().unwrap().len(), 0);
+        Ok(())
+    }
+
+    /// A v2 object built by the REAL writer serves exactly like v1 — pins
+    /// the writer↔reader contract end-to-end, including URL keys that the
+    /// writer omits and `normalize_public_frame` inserts as "".
+    #[sqlx::test(migrations = "../migrations")]
+    async fn v2_archive_object_serves_like_v1(pool: PgPool) -> cja::Result<()> {
+        let (state, game_id, play_id, _store) =
+            archived_play_fixture(&pool, fx::v2_archive).await?;
+        sqlx::query("UPDATE games SET archive_version = 2 WHERE game_id = $1")
+            .bind(game_id)
+            .execute(&pool)
+            .await?;
+
+        let response = get_game_info(State(state), Path(play_id))
+            .await
+            .unwrap()
+            .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
+        assert_archived_game_shape(&json["Game"], game_id);
+        assert_eq!(json["LastFrame"]["Turn"], 1);
+        assert_snake_public_shape(&json["LastFrame"]["Snakes"][0]);
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn archived_object_missing_is_404(pool: PgPool) -> cja::Result<()> {
+        let (state, _game_id, play_id, _store) =
+            archived_play_fixture(&pool, fx::v1_archive).await?;
+        // Overwrite the row's path with one that was never seeded.
+        sqlx::query("UPDATE games SET gcs_path = 'games/2026/01/01/missing.json.zst' WHERE engine_game_id = $1")
+            .bind(play_id.to_string())
+            .execute(&pool)
+            .await?;
+
+        let info = get_game_info(State(state.clone()), Path(play_id))
+            .await
+            .err()
+            .expect("expected error")
+            .into_response();
+        assert_eq!(info.status(), StatusCode::NOT_FOUND);
+
+        let frames = get_game_frames(
+            State(state),
+            Path(play_id),
+            Query(FramesQuery {
+                offset: None,
+                limit: None,
+            }),
+        )
+        .await
+        .err()
+        .expect("expected error")
+        .into_response();
+        assert_eq!(frames.status(), StatusCode::NOT_FOUND);
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn archived_lookup_unknown_id_is_404(pool: PgPool) -> cja::Result<()> {
+        let state = crate::state::AppState::test_from_pool(pool);
+        let info = get_game_info(State(state.clone()), Path(Uuid::new_v4()))
+            .await
+            .err()
+            .expect("expected error")
+            .into_response();
+        assert_eq!(info.status(), StatusCode::NOT_FOUND);
+
+        let frames = get_game_frames(
+            State(state),
+            Path(Uuid::new_v4()),
+            Query(FramesQuery {
+                offset: None,
+                limit: None,
+            }),
+        )
+        .await
+        .err()
+        .expect("expected error")
+        .into_response();
+        assert_eq!(frames.status(), StatusCode::NOT_FOUND);
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn archived_object_corrupt_is_500_then_recovers(pool: PgPool) -> cja::Result<()> {
+        let (state, _game_id, play_id, store) =
+            archived_play_fixture(&pool, fx::v1_archive).await?;
+        let path = format!("games/2026/01/01/{play_id}.json.zst");
+        store
+            .put(&path, vec![0xde, 0xad, 0xbe, 0xef])
+            .await
+            .unwrap();
+
+        let corrupt = get_game_info(State(state.clone()), Path(play_id))
+            .await
+            .err()
+            .expect("expected error")
+            .into_response();
+        assert_eq!(corrupt.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        // Nothing partial was cached: the good object serves after repair.
+        store
+            .put(&path, fx::v1_archive(&play_id.to_string()))
+            .await
+            .unwrap();
+        let ok = get_game_info(State(state), Path(play_id))
+            .await
+            .unwrap()
+            .into_response();
+        assert_eq!(ok.status(), StatusCode::OK);
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn archived_storage_error_is_500_then_recovers(pool: PgPool) -> cja::Result<()> {
+        let (state, _game_id, play_id, store) =
+            archived_play_fixture(&pool, fx::v1_archive).await?;
+
+        store.fail_next_get();
+        let failed = get_game_info(State(state.clone()), Path(play_id))
+            .await
+            .err()
+            .expect("expected error")
+            .into_response();
+        assert_eq!(failed.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        // The knob is one-shot: the next request succeeds.
+        let ok = get_game_info(State(state), Path(play_id))
+            .await
+            .unwrap()
+            .into_response();
+        assert_eq!(ok.status(), StatusCode::OK);
+        Ok(())
+    }
+
+    /// The status guard: a live row with a stale `gcs_path` never touches
+    /// storage and serves the DB path's arena defaults.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn nonterminal_row_with_gcs_path_takes_db_path(pool: PgPool) -> cja::Result<()> {
+        let store = Arc::new(InMemoryObjectStore::default());
+        let engine_id = Uuid::new_v4().to_string();
+        let gcs_path = format!("games/2026/01/01/{engine_id}.json.zst");
+        store
+            .put(&gcs_path, fx::v1_archive(&engine_id))
+            .await
+            .unwrap();
+        let game_id =
+            fx::fixture_game_with_status(&pool, "running", Some(&engine_id), Some(&gcs_path))
+                .await?;
+        let state = fx::archived_state(pool, store.clone());
+
+        let response = get_game_info(State(state), Path(Uuid::parse_str(&engine_id).unwrap()))
+            .await
+            .unwrap()
+            .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
+        assert_eq!(json["Game"]["Status"], "running");
+        assert!(json.get("LastFrame").is_none());
+        assert_eq!(
+            json["Game"]["Width"], 11,
+            "arena defaults, not the archive's"
+        );
+        assert_eq!(json["Game"]["Height"], 11);
+        assert_eq!(json["Game"]["ID"], game_id.to_string());
+        assert_eq!(
+            store.get_count(),
+            0,
+            "the guard short-circuits before any storage touch"
+        );
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1804,6 +2643,270 @@ mod live_tests {
         shutdown.cancel();
         web_shutdown.cancel();
         listener.await.unwrap().unwrap();
+        web.await.unwrap();
+    }
+
+    // --- Archived-game websocket serving (DEV-1979) ---
+
+    use super::fixtures as fx;
+    use crate::object_store::InMemoryObjectStore;
+    use crate::object_store::ObjectStore as _;
+    use std::sync::Arc;
+
+    fn ws_snake_public_shape(snake: &serde_json::Value) {
+        assert_eq!(snake["URL"], "");
+        assert_eq!(snake["ProxyURL"], "");
+        assert_eq!(snake["APIVersion"], "");
+        assert_eq!(snake["StatusCode"], 0);
+        assert_eq!(snake["Error"], "");
+        assert_eq!(snake["IsBot"], false);
+        assert_eq!(snake["IsEnvironment"], false);
+    }
+
+    async fn body_json(response: axum::response::Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn archived_game_websocket_streams_frames_then_game_end(pool: PgPool) {
+        let store = Arc::new(InMemoryObjectStore::default());
+        let engine_id = Uuid::new_v4().to_string();
+        let gcs_path = format!("games/2026/01/01/{engine_id}.json.zst");
+        store
+            .put(&gcs_path, fx::v1_archive(&engine_id))
+            .await
+            .unwrap();
+        let game_id = fx::fixture_archived_game(&pool, &engine_id, &gcs_path)
+            .await
+            .unwrap();
+        let state = fx::archived_state(pool, store);
+        let play_id = Uuid::parse_str(&engine_id).unwrap();
+
+        let (base, web_shutdown, web) = start(state).await;
+        for id in [play_id, game_id] {
+            let mut client = connect(&base, id).await;
+            for turn in 0..2 {
+                let message = next(&mut client).await;
+                assert_eq!(message["Type"], "frame");
+                assert_eq!(message["Data"]["Turn"], turn);
+                ws_snake_public_shape(&message["Data"]["Snakes"][0]);
+            }
+            assert_eq!(
+                next(&mut client).await,
+                serde_json::json!({"Type":"game_end","Data":{}})
+            );
+            close(&mut client).await;
+        }
+        web_shutdown.cancel();
+        web.await.unwrap();
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn archived_game_websocket_missing_object_closes_socket(pool: PgPool) {
+        let store = Arc::new(InMemoryObjectStore::default());
+        let engine_id = Uuid::new_v4().to_string();
+        let gcs_path = format!("games/2026/01/01/{engine_id}.json.zst");
+        let game_id = fx::fixture_archived_game(&pool, &engine_id, &gcs_path)
+            .await
+            .unwrap();
+        let state = fx::archived_state(pool, store);
+
+        let (base, web_shutdown, web) = start(state).await;
+        let mut client = connect(&base, game_id).await;
+        assert_eq!(
+            next(&mut client).await,
+            serde_json::json!({"Type":"error","Data":{"message":"Game not found"}})
+        );
+        close(&mut client).await;
+        web_shutdown.cancel();
+        web.await.unwrap();
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn archived_game_websocket_storage_error_closes_socket(pool: PgPool) {
+        let store = Arc::new(InMemoryObjectStore::default());
+        let engine_id = Uuid::new_v4().to_string();
+        let gcs_path = format!("games/2026/01/01/{engine_id}.json.zst");
+        store
+            .put(&gcs_path, fx::v1_archive(&engine_id))
+            .await
+            .unwrap();
+        let game_id = fx::fixture_archived_game(&pool, &engine_id, &gcs_path)
+            .await
+            .unwrap();
+        store.fail_next_get();
+        let state = fx::archived_state(pool, store);
+
+        let (base, web_shutdown, web) = start(state).await;
+        let mut client = connect(&base, game_id).await;
+        assert_eq!(
+            next(&mut client).await,
+            serde_json::json!({"Type":"error","Data":{"message":"Internal server error"}})
+        );
+        close(&mut client).await;
+        web_shutdown.cancel();
+        web.await.unwrap();
+    }
+
+    /// One viewer load — info, two frames pages, one websocket — triggers
+    /// exactly one object fetch while the game stays cached.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn archive_is_fetched_once_while_cached(pool: PgPool) {
+        let store = Arc::new(InMemoryObjectStore::default());
+        let engine_id = Uuid::new_v4().to_string();
+        let gcs_path = format!("games/2026/01/01/{engine_id}.json.zst");
+        store
+            .put(&gcs_path, fx::v1_archive(&engine_id))
+            .await
+            .unwrap();
+        let game_id = fx::fixture_archived_game(&pool, &engine_id, &gcs_path)
+            .await
+            .unwrap();
+        let state = fx::archived_state(pool, store.clone());
+        let play_id = Uuid::parse_str(&engine_id).unwrap();
+
+        get_game_info(State(state.clone()), Path(play_id))
+            .await
+            .unwrap();
+        for (offset, limit) in [(0, 1), (1, 100)] {
+            get_game_frames(
+                State(state.clone()),
+                Path(play_id),
+                Query(FramesQuery {
+                    offset: Some(offset),
+                    limit: Some(limit),
+                }),
+            )
+            .await
+            .unwrap();
+        }
+
+        let (base, web_shutdown, web) = start(state).await;
+        let mut client = connect(&base, game_id).await;
+        for _ in 0..2 {
+            assert_eq!(next(&mut client).await["Type"], "frame");
+        }
+        assert_eq!(next(&mut client).await["Type"], "game_end");
+        close(&mut client).await;
+        web_shutdown.cancel();
+        web.await.unwrap();
+
+        assert_eq!(store.get_count(), 1);
+    }
+
+    /// A native game serves byte-identically before and after its `turns`
+    /// rows are pruned (DEV-1981): `Game` from the arena row both times,
+    /// frames from the archive after pruning, authors filled from
+    /// `game_battlesnakes`.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn pruned_native_game_serves_from_archive_like_db(pool: PgPool) {
+        let store = Arc::new(InMemoryObjectStore::default());
+        let (game_id, snake_id) = fx::fixture_native_game(&pool).await.unwrap();
+        let native_path = format!("native/2026/10/31/{game_id}.json.zst");
+        store
+            .put(
+                &native_path,
+                fx::native_archive(&game_id.to_string(), &snake_id.to_string()),
+            )
+            .await
+            .unwrap();
+        let state = fx::archived_state(pool.clone(), store);
+
+        // (a) DB path: turns present, archive ignored.
+        for turn in 0..2 {
+            crate::models::turn::create_turn(
+                &pool,
+                game_id,
+                turn,
+                Some(fx::native_frame_value(turn, &snake_id.to_string())),
+            )
+            .await
+            .unwrap();
+        }
+        let db_info = body_json(
+            get_game_info(State(state.clone()), Path(game_id))
+                .await
+                .unwrap()
+                .into_response(),
+        )
+        .await;
+
+        // (b) Archive path: prune turns, serve again, `Game` is byte-identical.
+        sqlx::query("DELETE FROM turns WHERE game_id = $1")
+            .bind(game_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let archive_info = body_json(
+            get_game_info(State(state.clone()), Path(game_id))
+                .await
+                .unwrap()
+                .into_response(),
+        )
+        .await;
+        assert_eq!(db_info["Game"], archive_info["Game"]);
+
+        // (c) The archive path's last frame: author filled from
+        // `game_battlesnakes`, private fields blank.
+        let last = &archive_info["LastFrame"];
+        assert_eq!(last["Turn"], 1);
+        assert_eq!(last["Snakes"][0]["Author"], "test-user-424242");
+        assert_eq!(last["Snakes"][0]["ID"], snake_id.to_string());
+        ws_snake_public_shape(&last["Snakes"][0]);
+
+        // (d) Frames pages.
+        let page = body_json(
+            get_game_frames(
+                State(state.clone()),
+                Path(game_id),
+                Query(FramesQuery {
+                    offset: Some(0),
+                    limit: Some(100),
+                }),
+            )
+            .await
+            .unwrap()
+            .into_response(),
+        )
+        .await;
+        assert_eq!(page["Count"], 2);
+        assert_eq!(page["Frames"][0]["Turn"], 0);
+        assert_eq!(page["Frames"][1]["Turn"], 1);
+        let past_end = body_json(
+            get_game_frames(
+                State(state.clone()),
+                Path(game_id),
+                Query(FramesQuery {
+                    offset: Some(2),
+                    limit: Some(100),
+                }),
+            )
+            .await
+            .unwrap()
+            .into_response(),
+        )
+        .await;
+        assert_eq!(past_end["Count"], 0);
+
+        // (e) The websocket replays every frame, then game_end, then close.
+        let (base, web_shutdown, web) = start(state).await;
+        let mut client = connect(&base, game_id).await;
+        for turn in 0..2 {
+            let message = next(&mut client).await;
+            assert_eq!(message["Type"], "frame");
+            assert_eq!(message["Data"]["Turn"], turn);
+            assert_eq!(message["Data"]["Snakes"][0]["Author"], "test-user-424242");
+            ws_snake_public_shape(&message["Data"]["Snakes"][0]);
+        }
+        assert_eq!(
+            next(&mut client).await,
+            serde_json::json!({"Type":"game_end","Data":{}})
+        );
+        close(&mut client).await;
+        web_shutdown.cancel();
         web.await.unwrap();
     }
 

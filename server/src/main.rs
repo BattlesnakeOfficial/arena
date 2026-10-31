@@ -12,6 +12,7 @@ use state::AppState;
 use tracing::info;
 
 mod activity;
+mod archive;
 mod backup;
 mod cache;
 mod config;
@@ -34,6 +35,7 @@ mod leaderboard_ratings;
 mod models;
 mod moderation;
 mod notifications;
+mod object_store;
 mod observability;
 mod og;
 mod placement;
