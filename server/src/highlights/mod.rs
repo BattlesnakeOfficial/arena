@@ -965,4 +965,32 @@ mod tests {
             .expect("stored");
         assert_eq!(status_of(&pool, id).await, "abandoned");
     }
+
+    /// PR review round 1 pin: two concurrent post passes (duplicate cron
+    /// enqueue with ARENA_JOB_WORKERS > 1) must not both send the same
+    /// week's announcement — the task requires "at most once, ever".
+    #[sqlx::test(migrations = "../migrations")]
+    async fn concurrent_post_passes_send_at_most_once(pool: PgPool) {
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+        let server = MockServer::start().await;
+        server
+            .register(Mock::given(method("POST")).respond_with(
+                ResponseTemplate::new(204).set_delay(std::time::Duration::from_millis(500)),
+            ))
+            .await;
+        let mut state = crate::state::AppState::test_from_pool(pool.clone());
+        state.discord_highlights = crate::discord::DiscordNotifier::new(
+            Some(crate::discord::test_webhook_url(&server.uri()).await),
+            reqwest::Client::new(),
+        );
+
+        let digest_id = insert_pending_digest(&pool, w1(), "snapshot text").await;
+        let (a, b) = tokio::join!(process_discord_posts(&state), process_discord_posts(&state));
+        a.unwrap();
+        b.unwrap();
+        assert_eq!(status_of(&pool, digest_id).await, "posted");
+        let sent = server.received_requests().await.unwrap_or_default().len();
+        assert_eq!(sent, 1, "the week's announcement was POSTed {sent} times");
+    }
 }
