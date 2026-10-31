@@ -173,8 +173,6 @@ impl AppState {
         };
 
         // Optional: Discord webhook notifications (disabled until configured).
-        // Uses its own client like the mailer — the snake client's 600ms timeout
-        // is too tight for an external webhook API.
         // One webhook client shared by both notifiers (the snake client's
         // 600ms timeout is too tight for an external webhook API).
         let discord_client = reqwest::Client::builder()
