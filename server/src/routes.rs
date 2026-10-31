@@ -1,3 +1,4 @@
+use arena::design_kit::{AssetKind, catalog_shapes::CatalogShape};
 use axum::{
     Form,
     extract::State,
@@ -11,7 +12,11 @@ use serde::Deserialize;
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::{
-    components::{avatar::user_avatar, page_factory::PageFactory},
+    components::{
+        avatar::user_avatar,
+        page_factory::PageFactory,
+        snake_board::{Direction, snake_geometry},
+    },
     customizations::chip_color,
     errors::ServerResult,
     models::{
@@ -753,44 +758,111 @@ async fn root_page(
     ))
 }
 
+/// The hero board's scene, in game-API cells (head first, `(0, 0)` bottom-left):
+/// the same two snakes and food the default OG card draws
+/// (`crate::og::cards::home_board`); a test keeps the two in sync.
+const HERO_PINK_BODY: &[(i32, i32)] = &[
+    (3, 8),
+    (3, 7),
+    (4, 7),
+    (4, 6),
+    (4, 5),
+    (5, 5),
+    (5, 4),
+    (5, 3),
+];
+const HERO_CREAM_BODY: &[(i32, i32)] = &[(8, 3), (8, 4), (7, 4), (7, 5), (7, 6), (8, 6), (9, 6)];
+const HERO_FOOD: &[(i32, i32)] = &[(1, 9), (6, 8), (9, 1), (2, 2)];
+/// `og::canvas::palette::pink()` / `palette::ink()` as CSS hex.
+const HERO_PINK: &str = "#FF3D8A";
+const HERO_CREAM: &str = "#F4EFEA";
+
 /// Decorative 11×11 board for the logged-out hero. Intentionally dark-framed
 /// in both themes (hardcoded colors match the mockup's board panel).
+///
+/// The heads and tails are the real catalog art — `smile`/`curled` for the
+/// pink snake, `fang`/`sharp` for the cream one, as on the default OG card —
+/// drawn as inline SVG from the embedded shape table (`og::board::shape`), so
+/// nothing requests media.battlesnake.com. Each art cell keeps the plain dark
+/// `.cell` background: it shows through the art's cut-out eyes and teeth.
 fn home_board() -> Markup {
     const N: usize = 11;
-    let pink: &[(usize, usize)] = &[
-        (3, 2),
-        (3, 3),
-        (4, 3),
-        (4, 4),
-        (4, 5),
-        (5, 5),
-        (5, 6),
-        (5, 7),
-    ];
-    let cream: &[(usize, usize)] = &[(8, 7), (8, 6), (7, 6), (7, 5), (7, 4), (8, 4), (9, 4)];
-    let food: &[(usize, usize)] = &[(1, 1), (6, 2), (9, 9), (2, 8)];
+    let pink_head = crate::og::board::shape(AssetKind::Head, "smile");
+    let pink_tail = crate::og::board::shape(AssetKind::Tail, "curled");
+    let cream_head = crate::og::board::shape(AssetKind::Head, "fang");
+    let cream_tail = crate::og::board::shape(AssetKind::Tail, "sharp");
 
-    let mut cells: Vec<(&'static str, Option<String>)> = vec![("cell", None); N * N];
-    let mut draw_snake = |coords: &[(usize, usize)], color: &str| {
-        for (i, &(x, y)) in coords.iter().enumerate() {
-            let class = if i == 0 { "cell seg head" } else { "cell seg" };
-            let mut style = format!("background:{color}");
-            if i == coords.len() - 1 {
-                style.push_str(";opacity:.55");
+    // (class, inline style, head/tail art) per grid cell.
+    let mut cells: Vec<(&'static str, Option<String>, Markup)> =
+        vec![("cell", None, html! {}); N * N];
+    let mut draw_snake = |body: &[(i32, i32)],
+                          color: &str,
+                          head: Option<&'static CatalogShape>,
+                          tail: Option<&'static CatalogShape>| {
+        let geometry = snake_geometry(N as i32, N as i32, body);
+        let last = body.len() - 1;
+        for (i, &(x, y)) in body.iter().enumerate() {
+            // Game-API y grows up; CSS grid rows grow down.
+            let at = (N as i32 - 1 - y) as usize * N + x as usize;
+            match geometry.as_ref() {
+                Some(g) if i == 0 => {
+                    cells[at] = (
+                        "cell",
+                        None,
+                        hero_art(AssetKind::Head, head, g.head.dir, color, false),
+                    );
+                }
+                Some(g) if i == last => {
+                    let dir = g.tail.map_or(Direction::Right, |t| t.dir);
+                    cells[at] = (
+                        "cell",
+                        None,
+                        hero_art(AssetKind::Tail, tail, dir, color, true),
+                    );
+                }
+                _ => cells[at] = ("cell seg", Some(format!("background:{color}")), html! {}),
             }
-            cells[y * N + x] = (class, Some(style));
         }
     };
-    draw_snake(pink, "#FF3D8A");
-    draw_snake(cream, "#F4EFEA");
-    for &(x, y) in food {
-        cells[y * N + x] = ("cell food", None);
+    draw_snake(HERO_PINK_BODY, HERO_PINK, pink_head, pink_tail);
+    draw_snake(HERO_CREAM_BODY, HERO_CREAM, cream_head, cream_tail);
+    for &(x, y) in HERO_FOOD {
+        cells[(N as i32 - 1 - y) as usize * N + x as usize] = ("cell food", None, html! {});
     }
 
     html! {
         div class="board" aria-hidden="true" {
-            @for (class, style) in &cells {
-                div class=(class) style=[style.as_deref()] {}
+            @for (class, style, art) in &cells {
+                div class=(class) style=[style.as_deref()] { (art) }
+            }
+        }
+    }
+}
+
+/// One catalog shape as inline SVG filling its hero-board cell: the shape's
+/// `d` path verbatim in its 100×100 box, turned by the direction's transform
+/// (head art faces right, tail art joins the body on its left edge — the
+/// studio board's transforms), filled with the snake's colour. `faded` keeps
+/// the old tail square's .55 opacity.
+fn hero_art(
+    kind: AssetKind,
+    shape: Option<&'static CatalogShape>,
+    dir: Direction,
+    color: &str,
+    faded: bool,
+) -> Markup {
+    let Some(shape) = shape else {
+        return html! {};
+    };
+    let (class, transform) = match kind {
+        AssetKind::Head => ("head", dir.head_transform()),
+        AssetKind::Tail => ("tail", dir.tail_transform()),
+    };
+    html! {
+        svg class=(format!("{class} {}", dir.as_str())) viewBox="0 0 100 100"
+            opacity=[faded.then_some("0.55")] {
+            g transform=[(!transform.is_empty()).then_some(transform)] {
+                path d=(shape.d) fill-rule=(shape.fill_rule.as_svg()) fill=(color) {}
             }
         }
     }
@@ -1234,6 +1306,80 @@ mod home_delta_tests {
         assert_eq!(home_delta(1.26), (true, "+1.3".to_string()));
         assert_eq!(home_delta(-0.05), (false, "-0.1".to_string()));
         assert_eq!(home_delta(-2.34), (false, "-2.3".to_string()));
+    }
+}
+
+#[cfg(test)]
+mod home_board_tests {
+    use super::{HERO_CREAM, HERO_CREAM_BODY, HERO_FOOD, HERO_PINK, HERO_PINK_BODY, home_board};
+    use crate::og::board::shape;
+    use arena::design_kit::AssetKind;
+
+    #[test]
+    fn hero_board_draws_real_heads_and_tails() {
+        let out = home_board().into_string();
+
+        // Both snakes' head and tail art, straight from the embedded catalog —
+        // the same shapes the default OG card draws.
+        for (kind, slug) in [
+            (AssetKind::Head, "smile"),
+            (AssetKind::Tail, "curled"),
+            (AssetKind::Head, "fang"),
+            (AssetKind::Tail, "sharp"),
+        ] {
+            let s = shape(kind, slug).unwrap_or_else(|| panic!("{slug} is in the catalog"));
+            assert!(
+                out.contains(&format!("d=\"{}\"", s.d)),
+                "{kind:?} {slug} art missing from the hero board"
+            );
+        }
+
+        // Heads point away from the neck, tails away from the body: pink
+        // (3,8) heads up over its neck (3,7) and its tail (5,3) points down
+        // below (5,4); cream (8,3) heads down from (8,4), tail (9,6) points right of (8,6).
+        assert!(out.contains("class=\"head up\""));
+        assert!(out.contains("class=\"head down\""));
+        assert!(out.contains("class=\"tail down\""));
+        assert!(out.contains("class=\"tail right\""));
+
+        // Body squares, food and colours unchanged; still decorative and
+        // self-contained (no external art requests).
+        assert_eq!(out.matches("class=\"cell seg\"").count(), 11);
+        assert_eq!(out.matches("class=\"cell food\"").count(), 4);
+        assert!(out.contains("background:#FF3D8A"));
+        assert!(out.contains("background:#F4EFEA"));
+        assert!(out.contains("fill=\"#FF3D8A\""));
+        assert!(out.contains("fill=\"#F4EFEA\""));
+        assert!(out.contains("aria-hidden=\"true\""));
+        assert!(!out.contains("media.battlesnake.com"));
+        assert!(!out.contains("<img"));
+
+        // maud renders a `;`-terminated SVG element as an unclosed start tag;
+        // unclosed shapes then nest and collapse to 0×0 in the browser.
+        // Guard: exactly four svg/path pairs, all closed.
+        assert_eq!(out.matches("<svg").count(), 4);
+        assert_eq!(out.matches("</svg>").count(), 4);
+        assert_eq!(out.matches("<path").count(), 4);
+        assert_eq!(out.matches("</path>").count(), 4);
+    }
+
+    #[test]
+    fn hero_scene_matches_the_default_og_card() {
+        let card = crate::og::cards::home_board();
+        let hex = |c: tiny_skia::Color| {
+            let c = c.to_color_u8();
+            format!("#{:02X}{:02X}{:02X}", c.red(), c.green(), c.blue())
+        };
+        assert_eq!((card.width, card.height), (11, 11));
+        assert_eq!(card.snakes[0].body, HERO_PINK_BODY);
+        assert_eq!(card.snakes[1].body, HERO_CREAM_BODY);
+        assert_eq!(card.food, HERO_FOOD);
+        assert_eq!(hex(card.snakes[0].color), HERO_PINK);
+        assert_eq!(hex(card.snakes[1].color), HERO_CREAM);
+        assert_eq!(card.snakes[0].head.map(|s| s.file), Some("smile"));
+        assert_eq!(card.snakes[0].tail.map(|s| s.file), Some("curled"));
+        assert_eq!(card.snakes[1].head.map(|s| s.file), Some("fang"));
+        assert_eq!(card.snakes[1].tail.map(|s| s.file), Some("sharp"));
     }
 }
 
