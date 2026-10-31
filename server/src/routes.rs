@@ -129,7 +129,6 @@ pub fn routes(app_state: AppState) -> cja::Result<axum::Router> {
         .route("/", get(root_page))
         .route("/robots.txt", get(robots_txt))
         .route("/health", get(health::health))
-        .route("/favicon.ico", get(serve_favicon))
         // Social cards (og:image)
         .route(og::DEFAULT_CARD_PATH, get(og::default_card))
         .route(
@@ -438,29 +437,6 @@ pub fn routes(app_state: AppState) -> cja::Result<axum::Router> {
             inject_trace_context,
         ))
         .with_state(app_state))
-}
-
-async fn serve_favicon() -> impl IntoResponse {
-    favicon_response(&crate::arena_assets::MANIFEST)
-}
-
-fn favicon_response(manifest: &cja::assets::Manifest) -> axum::response::Response {
-    use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
-    match manifest
-        .entries
-        .iter()
-        .find(|asset| asset.logical_name == "favicon.svg")
-    {
-        Some(asset) => (
-            [
-                (CONTENT_TYPE, "image/svg+xml"),
-                (CACHE_CONTROL, "public, max-age=3600"),
-            ],
-            asset.bytes,
-        )
-            .into_response(),
-        None => StatusCode::NOT_FOUND.into_response(),
-    }
 }
 
 async fn not_found_page(page_factory: PageFactory) -> impl IntoResponse {
@@ -1263,7 +1239,6 @@ mod home_delta_tests {
 
 #[cfg(test)]
 mod asset_tests {
-    use axum::response::IntoResponse as _;
     use axum::{
         body::{Body, to_bytes},
         http::{Request, StatusCode, header},
@@ -1279,6 +1254,11 @@ mod asset_tests {
             ("theme.js.map", "application/json"),
             ("arena.css", "text/css"),
             ("favicon.svg", "image/svg+xml"),
+            ("favicon.ico", "image/x-icon"),
+            ("apple-touch-icon.png", "image/png"),
+            ("brand/icon.svg", "image/svg+xml"),
+            ("brand/logo-light.svg", "image/svg+xml"),
+            ("brand/logo-dark.svg", "image/svg+xml"),
             ("design-kit/example-drawing.png", "image/png"),
             (
                 "design-kit/battlesnake-head-template.psd",
@@ -1313,6 +1293,11 @@ mod asset_tests {
                 logical,
                 "arena.css"
                     | "favicon.svg"
+                    | "favicon.ico"
+                    | "apple-touch-icon.png"
+                    | "brand/icon.svg"
+                    | "brand/logo-light.svg"
+                    | "brand/logo-dark.svg"
                     | "design-kit/example-drawing.png"
                     | "design-kit/battlesnake-head-template.psd"
             ) {
@@ -1336,31 +1321,30 @@ mod asset_tests {
     }
 
     #[tokio::test]
-    async fn stable_favicon_is_svg_with_short_cache() {
-        let response = super::serve_favicon().await.into_response();
+    async fn stable_favicon_ico_served_at_root() {
+        let app = cja::assets::router::<()>(&[&crate::arena_assets::MANIFEST])
+            .expect("unique asset paths");
+        let response = app
+            .oneshot(
+                Request::get("/favicon.ico")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(response.headers()[header::CONTENT_TYPE], "image/svg+xml");
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "image/x-icon");
         assert_eq!(
             response.headers()[header::CACHE_CONTROL],
             "public, max-age=3600"
         );
-        let expected = crate::arena_assets::MANIFEST
-            .entries
-            .iter()
-            .find(|asset| asset.logical_name == "favicon.svg")
-            .expect("favicon");
         let bytes = to_bytes(response.into_body(), usize::MAX)
             .await
             .expect("body");
-        assert_eq!(bytes.as_ref(), expected.bytes);
-    }
-
-    #[test]
-    fn missing_favicon_is_404() {
-        static EMPTY: cja::assets::Manifest = cja::assets::Manifest::new("test", &[]);
-        assert_eq!(
-            super::favicon_response(&EMPTY).status(),
-            StatusCode::NOT_FOUND
-        );
+        let source = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("static/favicon.ico"),
+        )
+        .expect("committed static favicon.ico");
+        assert_eq!(bytes.as_ref(), source);
     }
 }
