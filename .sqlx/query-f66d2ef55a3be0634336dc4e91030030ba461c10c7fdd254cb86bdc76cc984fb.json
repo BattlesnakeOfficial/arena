@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT section_id FROM highlight_sections WHERE digest_id = $1 AND kind = 'marathons' AND position = 999",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "section_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "f66d2ef55a3be0634336dc4e91030030ba461c10c7fdd254cb86bdc76cc984fb"
+}

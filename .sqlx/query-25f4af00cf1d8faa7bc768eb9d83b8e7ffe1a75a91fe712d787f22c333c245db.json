@@ -1,0 +1,44 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT e.leaderboard_entry_id, e.leaderboard_id, e.disabled_at,\n               b.name AS snake_name, u.github_login AS \"owner_login?\"\n        FROM leaderboard_entries e\n        JOIN leaderboards l USING (leaderboard_id)\n        JOIN battlesnakes b USING (battlesnake_id)\n        LEFT JOIN users u ON u.user_id = b.user_id\n        WHERE l.visibility = 'public'\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "leaderboard_entry_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "leaderboard_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "disabled_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 3,
+        "name": "snake_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "owner_login?",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "25f4af00cf1d8faa7bc768eb9d83b8e7ffe1a75a91fe712d787f22c333c245db"
+}

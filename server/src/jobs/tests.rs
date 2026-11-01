@@ -917,7 +917,8 @@ async fn achievement_email_uses_confirmed_player_address_and_one_layout(
         .collect();
     assert_eq!(form["to"], "confirmed@example.com");
     assert_eq!(form["html"].matches("<html ").count(), 1);
-    assert_eq!(form["html"].matches("<img ").count(), 3);
+    // 3 customization images + the 2 wordmark header images.
+    assert_eq!(form["html"].matches("<img ").count(), 5);
     assert_eq!(
         form["html"]
             .matches("Unsubscribe from Achievement earned emails")

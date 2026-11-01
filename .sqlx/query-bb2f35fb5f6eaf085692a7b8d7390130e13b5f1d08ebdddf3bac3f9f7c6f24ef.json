@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT gb.game_battlesnake_id, t.turn_number\n        FROM game_battlesnakes gb\n        JOIN snake_turns st USING (game_battlesnake_id)\n        JOIN turns t USING (turn_id)\n        WHERE gb.game_id = ANY($1) AND (st.timed_out OR st.errored)\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "game_battlesnake_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "turn_number",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "bb2f35fb5f6eaf085692a7b8d7390130e13b5f1d08ebdddf3bac3f9f7c6f24ef"
+}

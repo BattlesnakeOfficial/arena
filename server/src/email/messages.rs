@@ -446,7 +446,7 @@ pub(crate) fn render_layout(subject: &str, preheader: &str, body: &str, footer: 
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width, initial-scale=1";
                 meta name="color-scheme" content="light dark";
-                style { "@media (prefers-color-scheme: dark) {.email-bg{background:#171117!important}.email-card{background:#171117!important}.email-copy{color:#F4EFEA!important}.email-link{color:#FF5C9E!important}}" }
+                style { "@media (prefers-color-scheme: dark) {.email-bg{background:#171117!important}.email-card{background:#171117!important}.email-copy{color:#F4EFEA!important}.email-link{color:#FF5C9E!important}.email-logo-light{display:none!important}.email-logo-dark{display:block!important;max-height:none!important}}" }
             }
             body class="email-bg" style="margin:0;padding:0;background:#FCFBF8;color:#17141A;font-family:'Instrument Sans',Arial,Helvetica,sans-serif" {
                 div style="display:none;font-size:1px;line-height:1px;max-height:0;max-width:0;opacity:0;overflow:hidden" { (preheader) }
@@ -454,7 +454,18 @@ pub(crate) fn render_layout(subject: &str, preheader: &str, body: &str, footer: 
                     tr { td align="center" style="padding:20px 12px" {
                         table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" class="email-card" style="max-width:600px;background:#FCFBF8;border:1px solid #E7DFE3" {
                             tr { td style="padding:24px 24px 18px;border-top:6px solid #C11655" {
-                                div class="email-copy" style="font-family:'Bricolage Grotesque',Arial,Helvetica,sans-serif;font-size:20px;font-weight:800;letter-spacing:-.5px;color:#17141A" { "Battlesnake" }
+                                img src=(crate::brand::wordmark_png_url()) alt="Battlesnake"
+                                    width=(crate::brand::EMAIL_IMG_WIDTH) height=(crate::brand::EMAIL_IMG_HEIGHT)
+                                    class="email-logo-light"
+                                    style=(format!("display:block;width:{}px;height:{}px;border:0",
+                                        crate::brand::EMAIL_IMG_WIDTH,
+                                        crate::brand::EMAIL_IMG_HEIGHT));
+                                (PreEscaped("<!--[if !mso]><!-->"))
+                                img src=(crate::brand::wordmark_dark_png_url()) alt="Battlesnake"
+                                    width=(crate::brand::EMAIL_DARK_IMG_WIDTH) height=(crate::brand::EMAIL_DARK_IMG_HEIGHT)
+                                    class="email-logo-dark"
+                                    style="display:none;mso-hide:all;max-height:0;overflow:hidden";
+                                (PreEscaped("<!--<![endif]-->"))
                             } }
                             tr { td class="email-copy" style="padding:4px 24px 28px;color:#17141A;font-size:16px;line-height:1.55" {
                                 h1 class="email-copy" style="font-family:'Bricolage Grotesque',Arial,Helvetica,sans-serif;font-size:27px;line-height:1.2;margin:0 0 24px;color:#17141A" { (subject) }
@@ -554,6 +565,11 @@ mod tests {
             let url = url::Url::parse(src).expect("image URL must be absolute");
             assert_eq!(url.scheme(), "https");
             let parts: Vec<_> = url.path_segments().unwrap().collect();
+            if src == crate::brand::wordmark_png_url()
+                || src == crate::brand::wordmark_dark_png_url()
+            {
+                continue;
+            }
             assert_eq!(parts.len(), 4);
             assert_eq!(parts[0], "og");
             assert_eq!(parts[1], "customizations");
@@ -594,6 +610,30 @@ mod tests {
                 !header.contains("<a "),
                 "wordmark header must not contain a link"
             );
+            // The header shows the official wordmark as PNGs served from the
+            // two permanent brand routes; the dark variant is MSO-guarded and
+            // swapped in by the dark-mode media query above.
+            assert!(header.contains(
+                r#"<img src="https://arena.battlesnake.com/brand/wordmark.png" alt="Battlesnake" width="121" height="48""#
+            ));
+            assert!(header.contains(
+                r#"<img src="https://arena.battlesnake.com/brand/wordmark-dark.png" alt="Battlesnake" width="113" height="40""#
+            ));
+            assert!(header.contains(
+                r#"<!--[if !mso]><!--><img src="https://arena.battlesnake.com/brand/wordmark-dark.png""#
+            ));
+            assert!(header.contains("<!--<![endif]-->"));
+            assert!(
+                header
+                    .contains(r#"style="display:none;mso-hide:all;max-height:0;overflow:hidden""#)
+            );
+            assert!(header.contains(".email-logo-light{display:none!important}"));
+            assert!(
+                header.contains(
+                    ".email-logo-dark{display:block!important;max-height:none!important}"
+                )
+            );
+            assert!(!message.text.contains("/brand/"));
             for url in hrefs(&message.html) {
                 assert!(message.text.contains(&url), "missing {url} in text");
             }

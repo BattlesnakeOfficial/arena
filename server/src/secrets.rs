@@ -24,6 +24,15 @@ pub struct AppSecrets {
     /// it in setec needs an arena restart (DEV-1966).
     #[secret("arena/eyes/token")]
     pub eyes_token: Option<Secret<String>>,
+
+    /// Discord webhook for the private weekly highlights digest. Must never
+    /// be the community webhook (`arena/discord/webhook-url`) — highlights
+    /// go to a private channel only. Absent means the weekly post is
+    /// skipped (logged once per week; DEV-1993). Creating the secret later
+    /// needs an arena restart: the refresher only tracks names present at
+    /// boot.
+    #[secret("arena/discord/highlights-webhook-url")]
+    pub discord_highlights_webhook_url: Option<Secret<String>>,
 }
 
 /// Loads [`AppSecrets`] from setec when `SETEC_SERVER` is set; `None` otherwise.
@@ -42,6 +51,7 @@ pub async fn load_from_env() -> cja::Result<Option<(AppSecrets, Refresher)>> {
     tracing::info!(
         discord_webhook_url = presence(secrets.discord_webhook_url.as_ref()),
         eyes_token = presence(secrets.eyes_token.as_ref()),
+        discord_highlights_webhook_url = presence(secrets.discord_highlights_webhook_url.as_ref()),
         "Arena secrets loaded from setec"
     );
     Ok(Some((secrets, refresher)))
@@ -127,5 +137,10 @@ mod tests {
             .await
             .unwrap();
         assert!(secrets.eyes_token.is_none());
+
+        // The highlights webhook follows the same optional pattern: absent
+        // boots fine with the field None, like eyes_token (the weekly post
+        // is skipped and logged once per week).
+        assert!(secrets.discord_highlights_webhook_url.is_none());
     }
 }
