@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT window_end, discord_message FROM highlight_digests WHERE digest_id = $1 AND discord_status = 'pending' FOR UPDATE SKIP LOCKED",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "window_end",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 1,
+        "name": "discord_message",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "a6926f62de56e947d0d1cda5e38ddf86a6a600605e9b925b32d0046f0a75866e"
+}

@@ -1,0 +1,70 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT digest_id, window_start, window_end, games_count,\n               duel_calibration_k, four_snake_calibration_k, discord_status,\n               discord_posted_at, computed_at\n        FROM highlight_digests\n        WHERE digest_id = $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "digest_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "window_start",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 2,
+        "name": "window_end",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 3,
+        "name": "games_count",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 4,
+        "name": "duel_calibration_k",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 5,
+        "name": "four_snake_calibration_k",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 6,
+        "name": "discord_status",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "discord_posted_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 8,
+        "name": "computed_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "b048a1ee4d3d46d395ba66360903aae1045369f6f7e81f92610eb95012bf209c"
+}

@@ -30,6 +30,7 @@ mod flasher;
 mod game_progress;
 mod game_runner;
 mod github;
+mod highlights;
 mod jobs;
 mod leaderboard_matchmaker;
 mod leaderboard_ratings;
@@ -111,6 +112,15 @@ fn main() -> color_eyre::Result<()> {
             .enable_all()
             .build()?
             .block_on(async { play_import::run_import().await });
+    }
+
+    // One-shot subcommand: compute a highlights digest for an arbitrary
+    // window (read-only) and print it as markdown. Never stores or posts.
+    if std::env::args().nth(1).as_deref() == Some("highlights-preview") {
+        return tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?
+            .block_on(async { highlights::preview_main().await });
     }
 
     if std::env::args().nth(1).as_deref() == Some("convert-play-points") {

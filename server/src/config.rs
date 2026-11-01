@@ -282,8 +282,26 @@ pub struct AppConfig {
     /// Eyes telemetry, enabled when `EYES_ORG_ID` + `EYES_APP_ID` are set.
     pub eyes: Option<EyesConfig>,
 
+    /// House snakes for the weekly highlights digest (DEV-1993): whose
+    /// snakes are never headlined. Env `HIGHLIGHTS_HOUSE_OWNERS`,
+    /// comma-separated `users.github_login`; default `byte-the-bot`.
+    pub highlights_house_owners: Vec<String>,
+    /// Env `HIGHLIGHTS_HOUSE_SNAKE_NAMES`, comma-separated
+    /// `battlesnakes.name`; default `Bombastic Bob`.
+    pub highlights_house_snake_names: Vec<String>,
+
     pub job: JobConfig,
     pub features: FeatureFlags,
+}
+
+impl AppConfig {
+    /// House-snake config for the weekly highlights digest (DEV-1993).
+    pub fn highlights_house(&self) -> crate::highlights::types::HouseSnakeConfig {
+        crate::highlights::types::HouseSnakeConfig {
+            owners: self.highlights_house_owners.clone(),
+            snake_names: self.highlights_house_snake_names.clone(),
+        }
+    }
 }
 
 fn parse_env<T: std::str::FromStr>(name: &str, default: T) -> T {
@@ -291,6 +309,19 @@ fn parse_env<T: std::str::FromStr>(name: &str, default: T) -> T {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(default)
+}
+
+/// Comma-separated env list; empty entries ignored. Falls back to
+/// `default` when unset or entirely empty.
+fn csv_env(name: &str, default: Vec<String>) -> Vec<String> {
+    let parsed: Vec<String> = std::env::var(name)
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(str::to_string)
+        .collect();
+    if parsed.is_empty() { default } else { parsed }
 }
 
 fn ladder_start_deadline(value: Option<&str>) -> i64 {
@@ -407,6 +438,14 @@ impl AppConfig {
             rust_log: std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
             stdout_log: optional_env("ARENA_STDOUT_LOG"),
             eyes: eyes_config_from_env()?,
+            highlights_house_owners: csv_env(
+                "HIGHLIGHTS_HOUSE_OWNERS",
+                vec!["byte-the-bot".to_string()],
+            ),
+            highlights_house_snake_names: csv_env(
+                "HIGHLIGHTS_HOUSE_SNAKE_NAMES",
+                vec!["Bombastic Bob".to_string()],
+            ),
 
             job,
             features: FeatureFlags {
@@ -450,6 +489,8 @@ impl AppConfig {
             rust_log: "info".to_string(),
             stdout_log: None,
             eyes: None,
+            highlights_house_owners: vec!["byte-the-bot".to_string()],
+            highlights_house_snake_names: vec!["Bombastic Bob".to_string()],
             job: JobConfig {
                 poll_interval_ms: 60_000,
                 heartbeat_interval_secs: DEFAULT_HEARTBEAT_INTERVAL.as_secs(),

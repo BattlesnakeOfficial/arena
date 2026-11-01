@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO highlight_items\n             VALUES (DEFAULT, $1, 0, $2, 'subject', 1.0, '10 turns')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "1de2581a5fe370a992e9234297f5a2fcb19c0c380f5f1add1eb2ee867dd1d0cd"
+}

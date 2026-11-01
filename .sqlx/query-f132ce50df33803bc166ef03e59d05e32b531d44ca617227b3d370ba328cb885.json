@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO highlight_sections\n             VALUES (DEFAULT, $1, 'marathons', NULL, 999, 'the longest game this week')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f132ce50df33803bc166ef03e59d05e32b531d44ca617227b3d370ba328cb885"
+}
