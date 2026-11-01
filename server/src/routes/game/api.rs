@@ -2407,6 +2407,7 @@ mod tests {
 #[cfg(test)]
 mod live_tests {
     use super::*;
+    use crate::routes::test_support::assert_game_end;
     use crate::watched_games::run_watched_games;
     use futures::StreamExt;
     use sqlx::PgPool;
@@ -2487,54 +2488,6 @@ mod live_tests {
             ) if f.code == tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Normal
         ));
         let _ = client.close(None).await;
-    }
-
-    /// `game_end` `Data` is the engine's 10-field game-object projection:
-    /// field-for-field equal to the same game's `GET /games/{id}` `Game`,
-    /// with `ID` the arena id and exactly those keys (no `ArenaStatus`).
-    fn assert_game_end(message: &serde_json::Value, id: Uuid, game_info_game: &serde_json::Value) {
-        assert_eq!(message["Type"], "game_end");
-        let data = &message["Data"];
-        for key in [
-            "ID",
-            "Status",
-            "Width",
-            "Height",
-            "Ruleset",
-            "SnakeTimeout",
-            "Source",
-            "RulesetName",
-            "RulesStages",
-            "Map",
-        ] {
-            assert_eq!(
-                data[key], game_info_game[key],
-                "game_end Data[{key}] must equal Game[{key}]"
-            );
-        }
-        assert_eq!(data["ID"], id.to_string());
-        let mut expected: Vec<&str> = [
-            "ID",
-            "Status",
-            "Width",
-            "Height",
-            "Ruleset",
-            "SnakeTimeout",
-            "Source",
-            "RulesetName",
-            "RulesStages",
-            "Map",
-        ]
-        .into();
-        expected.sort_unstable();
-        let mut keys: Vec<&str> = data
-            .as_object()
-            .unwrap()
-            .keys()
-            .map(String::as_str)
-            .collect();
-        keys.sort_unstable();
-        assert_eq!(keys, expected);
     }
 
     async fn game(pool: &PgPool) -> Uuid {

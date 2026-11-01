@@ -12,7 +12,7 @@ use std::time::Duration;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::routes::test_support::send_with_host;
+use crate::routes::test_support::{assert_game_end, send_with_host};
 use crate::state::AppState;
 
 const ENGINE_HOST: &str = "engine.battlesnake.com";
@@ -605,7 +605,8 @@ async fn engine_host_websocket_answers_101_directly(pool: PgPool) {
 }
 
 /// The engine-host websocket for a NATIVE game: frames ascending, exactly
-/// one game_end, close 1000.
+/// one game_end whose `Data` equals the engine-host `GET /games/{id}`
+/// `Game`'s 10-field projection, close 1000.
 #[sqlx::test(migrations = "../migrations")]
 async fn engine_host_websocket_native_game_streams_to_game_end(pool: PgPool) {
     let game_id = seed_game_with_turn(&pool).await;
@@ -617,12 +618,27 @@ async fn engine_host_websocket_native_game_streams_to_game_end(pool: PgPool) {
         .unwrap();
     let state = AppState::test_from_pool(pool);
 
+    let game_info: serde_json::Value = serde_json::from_str(
+        &body_string(
+            send_with_host(
+                &app(&state),
+                "GET",
+                &format!("/games/{game_id}"),
+                ENGINE_HOST,
+                &[],
+            )
+            .await,
+        )
+        .await,
+    )
+    .unwrap();
+
     let (base, web_shutdown, web) = start(state).await;
     let mut client = connect_host(&base, &format!("/games/{game_id}/events"), ENGINE_HOST).await;
     assert_eq!(next(&mut client).await["Data"]["Turn"], 0);
     assert_eq!(next(&mut client).await["Data"]["Turn"], 1);
     let message = next(&mut client).await;
-    assert_eq!(message["Type"], "game_end");
+    assert_game_end(&message, game_id, &game_info["Game"]);
     close(&mut client).await;
 
     web_shutdown.cancel();
