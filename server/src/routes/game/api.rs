@@ -3393,6 +3393,13 @@ mod live_tests {
         assert_game_end(&message, id, &game_info_game);
         close(&mut client).await;
 
+        // Go's strconv.Atoi accepts this value on the engine's 64-bit host.
+        // It is past every frame, so it must not replay from turn 0.
+        let mut client = connect_query(&base, id, "startFrame=2147483648").await;
+        let message = next(&mut client).await;
+        assert_game_end(&message, id, &game_info_game);
+        close(&mut client).await;
+
         web_shutdown.cancel();
         web.await.unwrap();
     }
