@@ -132,7 +132,7 @@ mod tests {
     async fn get_page(state: &AppState, session_id: Uuid) -> (StatusCode, String) {
         let app = crate::routes::routes(state.clone())
             .expect("asset router")
-            .layer(tower_cookies::CookieManagerLayer::new());
+            .into_router();
         let response = app
             .oneshot(
                 Request::get(super::PATH)

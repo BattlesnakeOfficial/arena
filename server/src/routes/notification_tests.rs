@@ -53,7 +53,7 @@ impl Fixture {
         }
         crate::routes::routes(self.state.clone())
             .expect("asset router")
-            .layer(tower_cookies::CookieManagerLayer::new())
+            .into_router()
             .oneshot(builder.body(Body::from(body.to_string())).unwrap())
             .await
             .unwrap()

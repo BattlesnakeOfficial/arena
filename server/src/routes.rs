@@ -43,6 +43,9 @@ pub mod battlesnake;
 mod branding_tests;
 pub mod claim;
 pub mod customizations;
+pub mod engine_host;
+#[cfg(test)]
+mod engine_host_tests;
 pub mod game;
 pub mod github_auth;
 #[cfg(test)]
@@ -74,7 +77,7 @@ pub mod tournament;
 pub mod users;
 pub mod welcome_back;
 
-pub fn routes(app_state: AppState) -> cja::Result<axum::Router> {
+pub fn routes(app_state: AppState) -> cja::Result<cja::server::App> {
     // CORS layer for API routes - allows board.battlesnake.com to access our API
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -126,7 +129,7 @@ pub fn routes(app_state: AppState) -> cja::Result<axum::Router> {
             "/leaderboards/{id}/entries/{battlesnake_id}",
             delete(api::leaderboards::delete_entry),
         )
-        .layer(cors);
+        .layer(cors.clone());
     // API-ROUTES-END
 
     let router = axum::Router::new()
@@ -436,12 +439,24 @@ pub fn routes(app_state: AppState) -> cja::Result<axum::Router> {
     // Community short links (/docs, /discord, ...) carried over from play
     let assets = cja::assets::router::<AppState>(&[&crate::arena_assets::MANIFEST])
         .wrap_err("asset router collision")?;
-    Ok(redirects::register(router.merge(assets))
+    let site = redirects::register(router.merge(assets))
         .layer(axum::middleware::from_fn_with_state(
             app_state.clone(),
             inject_trace_context,
         ))
-        .with_state(app_state))
+        .with_state(app_state.clone());
+
+    // Engine hosts (default engine.battlesnake.com) get the legacy
+    // engine's read API at the engine's paths — host dispatch happens in
+    // `cja::server::App`, BEFORE route matching. An empty host list
+    // (`disabled.invalid`, or `" , "`) leaves the site-only behavior.
+    let engine_hosts = app_state.config.engine_api_hosts.clone();
+    let mut app = cja::server::App::new(site);
+    if !engine_hosts.is_empty() {
+        let engine = engine_host::engine_router(app_state.clone(), cors);
+        app = app.host(engine_hosts, engine);
+    }
+    Ok(app)
 }
 
 async fn not_found_page(page_factory: PageFactory) -> impl IntoResponse {
@@ -1221,7 +1236,9 @@ async fn update_profile(
 
 /// Middleware to extract GCP trace context from the `X-Cloud-Trace-Context` header
 /// and store it in the current span's extensions for the GCP JSON formatter.
-async fn inject_trace_context(
+/// Layered on the engine router too, so engine-host request logs keep
+/// Cloud Logging trace links (extractor-free: State + Request + Next only).
+pub(crate) async fn inject_trace_context(
     State(state): State<AppState>,
     request: axum::extract::Request,
     next: axum::middleware::Next,

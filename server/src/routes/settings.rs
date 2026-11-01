@@ -572,7 +572,7 @@ mod tests {
         let cookie = signed_session_cookie(&state, session_id);
         let app = crate::routes::routes(state.clone())
             .expect("asset router")
-            .layer(tower_cookies::CookieManagerLayer::new());
+            .into_router();
         let response = app
             .clone()
             .oneshot(
@@ -781,7 +781,7 @@ mod tests {
         );
         let app = crate::routes::routes(state)
             .expect("asset router")
-            .layer(tower_cookies::CookieManagerLayer::new());
+            .into_router();
         let response = request(
             &app,
             None,

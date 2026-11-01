@@ -64,7 +64,7 @@ impl Fixture {
     ) -> (StatusCode, String) {
         let app = crate::routes::routes(self.state.clone())
             .expect("asset router")
-            .layer(tower_cookies::CookieManagerLayer::new());
+            .into_router();
         let mut builder = Request::builder().method(method).uri(path);
         if path.starts_with("/api/") {
             builder = builder.header(header::ORIGIN, "https://example.com");

@@ -783,7 +783,7 @@ dependencies = [
 [[package]]
 name = "cja"
 version = "0.0.0"
-source = "git+https://github.com/coreyja/cja?branch=main#3c8374a663edd4c0309f4c0ebfd9ff069986a4d7"
+source = "git+https://github.com/coreyja/cja?branch=main#3b6bb20bfa8ec0e8d61d142deabb4eaf16564799"
 dependencies = [
  "async-trait",
  "axum",
@@ -815,7 +815,7 @@ dependencies = [
 [[package]]
 name = "cja-build"
 version = "0.0.0"
-source = "git+https://github.com/coreyja/cja?branch=main#3c8374a663edd4c0309f4c0ebfd9ff069986a4d7"
+source = "git+https://github.com/coreyja/cja?branch=main#3b6bb20bfa8ec0e8d61d142deabb4eaf16564799"
 dependencies = [
  "anyhow",
  "flate2",
@@ -836,7 +836,7 @@ dependencies = [
 [[package]]
 name = "cja-secret"
 version = "0.0.0"
-source = "git+https://github.com/coreyja/cja?branch=main#3c8374a663edd4c0309f4c0ebfd9ff069986a4d7"
+source = "git+https://github.com/coreyja/cja?branch=main#3b6bb20bfa8ec0e8d61d142deabb4eaf16564799"
 dependencies = [
  "cja",
  "cja-secret-macros",
@@ -851,7 +851,7 @@ dependencies = [
 [[package]]
 name = "cja-secret-macros"
 version = "0.0.0"
-source = "git+https://github.com/coreyja/cja?branch=main#3c8374a663edd4c0309f4c0ebfd9ff069986a4d7"
+source = "git+https://github.com/coreyja/cja?branch=main#3b6bb20bfa8ec0e8d61d142deabb4eaf16564799"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -861,7 +861,7 @@ dependencies = [
 [[package]]
 name = "cja-tailnet"
 version = "0.0.0"
-source = "git+https://github.com/coreyja/cja?branch=main#3c8374a663edd4c0309f4c0ebfd9ff069986a4d7"
+source = "git+https://github.com/coreyja/cja?branch=main#3b6bb20bfa8ec0e8d61d142deabb4eaf16564799"
 dependencies = [
  "reqwest 0.13.5",
  "rustls",
@@ -3368,7 +3368,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6210,7 +6210,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6278,7 +6278,7 @@ dependencies = [
  "security-framework 3.7.0",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6576,7 +6576,7 @@ dependencies = [
 [[package]]
 name = "setec"
 version = "0.0.0"
-source = "git+https://github.com/coreyja/cja?branch=main#3c8374a663edd4c0309f4c0ebfd9ff069986a4d7"
+source = "git+https://github.com/coreyja/cja?branch=main#3b6bb20bfa8ec0e8d61d142deabb4eaf16564799"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -7283,7 +7283,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.5",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

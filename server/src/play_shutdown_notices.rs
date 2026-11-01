@@ -1034,7 +1034,7 @@ mod tests {
         let state = AppState::test_from_pool(pool.clone());
         let app = crate::routes::routes(state.clone())
             .expect("asset router")
-            .layer(tower_cookies::CookieManagerLayer::new());
+            .into_router();
         let id = imported(&pool, "leaving").await;
         let token = unsubscribe_token(&state.cookie_key, id);
 

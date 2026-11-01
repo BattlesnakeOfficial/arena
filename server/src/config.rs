@@ -23,6 +23,10 @@ use crate::moderation::Thresholds;
 pub const LOCAL_BASE_URL: &str = "http://localhost:3000";
 pub const ARENA_PUBLIC_BASE_URL: &str = "https://arena.battlesnake.com";
 
+/// Default hosts routed to the legacy-engine read API
+/// ([`AppConfig::engine_api_hosts`]).
+pub const DEFAULT_ENGINE_API_HOSTS: &[&str] = &["engine.battlesnake.com"];
+
 /// Default for [`JobConfig::shutdown_drain_secs`].
 pub const DEFAULT_JOB_SHUTDOWN_DRAIN_SECS: u64 = 5;
 /// Default for `ARENA_JOB_RECLAIM_WINDOW_SECS`: 240 seconds tolerates roughly 30-second
@@ -226,6 +230,9 @@ pub struct AppConfig {
     pub play_shutdown_notices_enabled: bool,
     /// Public base URL, used to build the board-viewer iframe `engine=` param.
     pub base_url: String,
+    /// Host values routed to the legacy-engine read API (env `ENGINE_API_HOSTS`,
+    /// comma-separated; unset/empty = default; set `disabled.invalid` to disable).
+    pub engine_api_hosts: Vec<String>,
 
     // Optional services
     pub engine_database_url: Option<String>,
@@ -330,6 +337,22 @@ fn resolve_base_url(configured: Option<String>, gcp_logging: bool) -> String {
     })
 }
 
+/// Pure parser for `ENGINE_API_HOSTS`: `None`/empty → default list; split,
+/// trim, lowercase, drop empty segments (`" , "` → routing disabled, an
+/// acceptable kill switch alongside `disabled.invalid`).
+fn parse_engine_api_hosts(raw: Option<String>) -> Vec<String> {
+    non_empty(raw)
+        .unwrap_or_else(|| DEFAULT_ENGINE_API_HOSTS.join(","))
+        .split(',')
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+fn engine_api_hosts_from_env() -> Vec<String> {
+    parse_engine_api_hosts(std::env::var("ENGINE_API_HOSTS").ok())
+}
+
 impl AppConfig {
     /// Read all configuration from the environment. `DATABASE_URL` is the
     /// only hard requirement; everything else has a default or is optional.
@@ -369,6 +392,7 @@ impl AppConfig {
             .max(1),
             play_shutdown_notices_enabled: parse_env("PLAY_SHUTDOWN_NOTICES_ENABLED", false),
             base_url: resolve_base_url(optional_env("BASE_URL"), gcp_logging),
+            engine_api_hosts: engine_api_hosts_from_env(),
 
             engine_database_url: optional_env("ENGINE_DATABASE_URL"),
             gcs_bucket: optional_env("GCS_BUCKET"),
@@ -428,6 +452,10 @@ impl AppConfig {
             play_grant_reconcile_interval_secs: 3600,
             play_shutdown_notices_enabled: false,
             base_url: LOCAL_BASE_URL.to_string(),
+            engine_api_hosts: DEFAULT_ENGINE_API_HOSTS
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
             engine_database_url: None,
             gcs_bucket: None,
             github: None,
@@ -679,7 +707,36 @@ mod tests {
             c.archive_cache_max_bytes,
             crate::archive::DEFAULT_ARCHIVE_CACHE_MAX_BYTES
         );
+        assert_eq!(c.engine_api_hosts, vec!["engine.battlesnake.com"]);
         assert!(c.features.server && c.features.jobs && c.features.cron);
+    }
+
+    #[test]
+    fn parse_engine_api_hosts_semantics() {
+        let default = vec!["engine.battlesnake.com".to_string()];
+        // Unset or empty → the default list.
+        assert_eq!(parse_engine_api_hosts(None), default);
+        assert_eq!(parse_engine_api_hosts(Some(String::new())), default);
+        // All-separator garbage → empty list → host routing disabled.
+        assert_eq!(
+            parse_engine_api_hosts(Some(" , ".to_string())),
+            Vec::<String>::new()
+        );
+        // Trim + lowercase, multiple hosts, empty segments dropped.
+        assert_eq!(
+            parse_engine_api_hosts(Some(
+                " Engine.Battlesnake.COM , engine2.example ".to_string()
+            )),
+            vec![
+                "engine.battlesnake.com".to_string(),
+                "engine2.example".to_string()
+            ]
+        );
+        // Kill switch: a reserved TLD that can never arrive as a real Host.
+        assert_eq!(
+            parse_engine_api_hosts(Some("disabled.invalid".to_string())),
+            vec!["disabled.invalid".to_string()]
+        );
     }
 
     #[test]

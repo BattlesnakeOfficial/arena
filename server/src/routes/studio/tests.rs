@@ -42,7 +42,9 @@ fn db_free_state(studio: StudioState) -> AppState {
 }
 
 fn app(state: &AppState) -> Router {
-    crate::routes::routes(state.clone()).expect("asset router")
+    crate::routes::routes(state.clone())
+        .expect("asset router")
+        .into_router()
 }
 
 struct Reply {
@@ -611,7 +613,7 @@ async fn the_page_renders_every_board_with_placeholders(db: sqlx::PgPool) {
     let state = AppState::test_from_pool(db);
     let app = crate::routes::routes(state)
         .expect("asset router")
-        .layer(tower_cookies::CookieManagerLayer::new());
+        .into_router();
     let response = app
         .oneshot(
             Request::get("/customizations/studio")
@@ -813,7 +815,7 @@ fn page_app(db: sqlx::PgPool) -> Router {
     let state = AppState::test_from_pool(db);
     crate::routes::routes(state)
         .expect("asset router")
-        .layer(tower_cookies::CookieManagerLayer::new())
+        .into_router()
 }
 
 #[sqlx::test(migrations = "../migrations")]
