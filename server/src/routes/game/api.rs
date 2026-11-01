@@ -598,17 +598,19 @@ pub struct WebSocketMessage {
 
 /// `?startFrame=N`: replay starts at turn N. Parsed from the raw query
 /// string — first occurrence wins, like Go's `r.URL.Query().Get`;
-/// `strconv.Atoi` semantics: missing/unparseable/empty → 0. Not a
-/// `Query` extractor: `serde_urlencoded` rejects duplicate fields with
+/// `strconv.Atoi` semantics on the engine's 64-bit host: any valid 64-bit
+/// integer keeps its value (even past every frame), and
+/// missing/unparseable/empty/64-bit-overflow → 0. Not a `Query`
+/// extractor: `serde_urlencoded` rejects duplicate fields with
 /// a 400, which the engine never does.
-fn start_frame_from_query(query: Option<&str>) -> i32 {
+fn start_frame_from_query(query: Option<&str>) -> i64 {
     query
         .and_then(|q| {
             url::form_urlencoded::parse(q.as_bytes())
                 .find(|(k, _)| k == "startFrame")
                 .map(|(_, v)| v)
         })
-        .and_then(|v| v.parse::<i32>().ok())
+        .and_then(|v| v.parse::<i64>().ok())
         .unwrap_or(0)
 }
 
@@ -769,7 +771,7 @@ async fn handle_archived_websocket(
     receiver: &mut WsReceiver,
     state: &AppState,
     record: &GameRow,
-    start_frame: i32,
+    start_frame: i64,
 ) {
     let game_id = record.game.game_id;
     let path = record.gcs_path.clone().unwrap_or_default();
@@ -810,7 +812,7 @@ async fn handle_archived_websocket(
             .get("Turn")
             .and_then(serde_json::Value::as_i64)
             .unwrap_or(0)
-            < i64::from(start_frame)
+            < start_frame
         {
             continue;
         }
@@ -834,7 +836,7 @@ async fn handle_game_websocket(
     socket: WebSocket,
     state: AppState,
     game_id: Uuid,
-    start_frame: i32,
+    start_frame: i64,
 ) {
     let (mut sender, mut receiver) = socket.split();
     let record = match get_game_row_by_any_id(&state.db, game_id).await {
@@ -917,10 +919,15 @@ async fn handle_game_websocket(
         suppressed: &suppressed,
     };
     // `?startFrame=N`: 0/missing → -1 (replay from turn 0, today's
-    // behavior); negative N → sends everything, like the engine. The
-    // subscription cursor (`seed_with_turn_id`) is independent of this —
-    // `send_frames`' `turn <= last_sent_turn` skip does the filtering.
-    let mut last_sent_turn = start_frame.saturating_sub(1);
+    // behavior); negative N → sends everything, like the engine. N past
+    // `i32::MAX` (valid for Go's 64-bit `Atoi`) clamps to `i32::MAX` so
+    // every representable turn is skipped — straight to `game_end`.
+    // The subscription cursor (`seed_with_turn_id`) is independent of
+    // this — `send_frames`' `turn <= last_sent_turn` skip does the
+    // filtering.
+    let mut last_sent_turn = start_frame
+        .saturating_sub(1)
+        .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
     if !send_frames(&mut sender, &existing_turns, &mut last_sent_turn, &context).await {
         return;
     }
@@ -1547,6 +1554,38 @@ mod tests {
     #[test]
     fn test_clamp_frames_pagination_passes_through_valid_values() {
         assert_eq!(clamp_frames_pagination(Some(300), Some(50)), (300, 50));
+    }
+
+    #[test]
+    fn test_start_frame_from_query_go_atoi_semantics() {
+        // Valid 64-bit integers keep their value — including values past
+        // every frame and past i32::MAX, which Go's 64-bit `strconv.Atoi`
+        // accepts on the engine host.
+        assert_eq!(start_frame_from_query(Some("startFrame=2")), 2);
+        assert_eq!(
+            start_frame_from_query(Some("startFrame=2147483648")),
+            2147483648
+        );
+        assert_eq!(
+            start_frame_from_query(Some("startFrame=9223372036854775807")),
+            i64::MAX
+        );
+        assert_eq!(start_frame_from_query(Some("startFrame=-5")), -5);
+        assert_eq!(
+            start_frame_from_query(Some("startFrame=-9223372036854775808")),
+            i64::MIN
+        );
+        // First occurrence wins, like Go's `r.URL.Query().Get`.
+        assert_eq!(start_frame_from_query(Some("startFrame=2&startFrame=0")), 2);
+        // Missing, empty, unparseable, and 64-bit overflow → 0 (`Atoi` error).
+        assert_eq!(start_frame_from_query(None), 0);
+        assert_eq!(start_frame_from_query(Some("")), 0);
+        assert_eq!(start_frame_from_query(Some("startFrame=")), 0);
+        assert_eq!(start_frame_from_query(Some("startFrame=banana")), 0);
+        assert_eq!(
+            start_frame_from_query(Some("startFrame=9223372036854775808")),
+            0
+        );
     }
 
     #[test]
