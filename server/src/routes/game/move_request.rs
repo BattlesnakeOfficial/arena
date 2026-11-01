@@ -519,6 +519,7 @@ mod tests {
     async fn get(pool: &PgPool, path: &str) -> (StatusCode, axum::http::HeaderMap, String) {
         let response = crate::routes::routes(AppState::test_from_pool(pool.clone()))
             .expect("asset router")
+            .into_router()
             .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
             .await
             .unwrap();
@@ -732,7 +733,7 @@ mod tests {
                 );
                 let response = crate::routes::routes(state)
                     .expect("asset router")
-                    .layer(tower_cookies::CookieManagerLayer::new())
+                    .into_router()
                     .oneshot(
                         Request::builder()
                             .uri(path)

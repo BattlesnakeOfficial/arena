@@ -1,0 +1,65 @@
+{
+ "count": 79,
+ "types": {
+  "frame": 78,
+  "game_end": 1
+ },
+ "firstTurn": 0,
+ "lastTurn": 77,
+ "frameKeys": [
+  "Food",
+  "Hazards",
+  "Snakes",
+  "Turn"
+ ],
+ "snakeKeys": [
+  "Author",
+  "Body",
+  "Color",
+  "Death",
+  "Error",
+  "HeadType",
+  "Health",
+  "ID",
+  "IsBot",
+  "IsEnvironment",
+  "Latency",
+  "Name",
+  "Shout",
+  "Squad",
+  "StatusCode",
+  "TailType"
+ ],
+ "nonFrame": [
+  {
+   "Type": "game_end",
+   "Data": {
+    "ID": "addedb91-93ef-4889-a936-d0caef728a8c",
+    "Status": "complete",
+    "Width": 11,
+    "Height": 11,
+    "Ruleset": {
+     "foodSpawnChance": "15",
+     "minimumFood": "1",
+     "name": "standard"
+    },
+    "SnakeTimeout": 500,
+    "Source": "ladder",
+    "RulesetName": "standard",
+    "RulesStages": [
+     "game_over.standard",
+     "movement.standard",
+     "starvation.standard",
+     "hazard_damage.standard",
+     "feed_snakes.standard",
+     "elimination.standard"
+    ],
+    "Map": "standard"
+   }
+  }
+ ],
+ "closeCode": 1000,
+ "closeReason": "",
+ "closeAfterLastMsgMs": 5004,
+ "totalMs": 5497
+}

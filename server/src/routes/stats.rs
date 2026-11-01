@@ -315,7 +315,7 @@ mod tests {
         let state = AppState::test_from_pool(db.clone());
         let app = crate::routes::routes(state.clone())
             .expect("asset router")
-            .layer(tower_cookies::CookieManagerLayer::new());
+            .into_router();
 
         let admin_session = create_user_session(&db, 14623, true).await;
         let admin_id = session_user_id(&db, admin_session).await;
@@ -395,7 +395,7 @@ mod tests {
         let state = AppState::test_from_pool(db.clone());
         let app = crate::routes::routes(state.clone())
             .expect("asset router")
-            .layer(tower_cookies::CookieManagerLayer::new());
+            .into_router();
         for (stats_path, admin_path) in [("/stats", "/admin"), ("/api/stats", "/api/admin/stats")] {
             let stats = route_response(&app, stats_path, None, None).await;
             let admin = route_response(&app, admin_path, None, None).await;

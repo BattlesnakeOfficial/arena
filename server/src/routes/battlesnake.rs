@@ -2119,7 +2119,7 @@ mod deleted_snake_route_tests {
     fn app(pool: &PgPool) -> axum::Router {
         crate::routes::routes(AppState::test_from_pool(pool.clone()))
             .expect("asset router")
-            .layer(tower_cookies::CookieManagerLayer::new())
+            .into_router()
     }
 
     async fn send(
@@ -2287,7 +2287,7 @@ mod profile_page_tests {
             let state = AppState::test_from_pool(db.clone());
             let app = crate::routes::routes(state.clone())
                 .expect("asset router")
-                .layer(tower_cookies::CookieManagerLayer::new());
+                .into_router();
             let owner_session = create_user_session(&db, 51001, false).await;
             let visitor_session = create_user_session(&db, 51002, false).await;
             let owner_id = session_user_id(&db, owner_session).await;
@@ -2742,7 +2742,7 @@ mod hosting_route_tests {
     fn app(state: &AppState) -> axum::Router {
         crate::routes::routes(state.clone())
             .expect("asset router")
-            .layer(tower_cookies::CookieManagerLayer::new())
+            .into_router()
     }
 
     async fn send(

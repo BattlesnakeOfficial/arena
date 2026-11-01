@@ -375,7 +375,7 @@ mod tests {
         ) -> (StatusCode, String, Option<String>) {
             let app = crate::routes::routes(self.state.clone())
                 .expect("asset router")
-                .layer(tower_cookies::CookieManagerLayer::new());
+                .into_router();
             let mut builder = Request::builder().method(method).uri(path);
             if let Some(session_id) = session {
                 builder = builder.header(

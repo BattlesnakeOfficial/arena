@@ -484,7 +484,7 @@ mod tests {
     async fn guest_achievement_ladder_and_catalog_tabs(db: sqlx::PgPool) {
         let app = crate::routes::routes(AppState::test_from_pool(db))
             .expect("asset router")
-            .layer(tower_cookies::CookieManagerLayer::new());
+            .into_router();
         let response =
             request_at(&app, Method::GET, "/customizations/achievements", None, "").await;
         assert_eq!(response.status(), StatusCode::OK);
@@ -554,7 +554,7 @@ mod tests {
         let state = AppState::test_from_pool(db.clone());
         let app = crate::routes::routes(state.clone())
             .expect("asset router")
-            .layer(tower_cookies::CookieManagerLayer::new());
+            .into_router();
         let frog_session = create_user_session(&db, 169201, false).await;
         let frog_user = session_user_id(&db, frog_session).await;
         let frog_cookie = signed_session_cookie(&state, frog_session);
@@ -612,7 +612,7 @@ mod tests {
         let state = AppState::test_from_pool(db.clone());
         let app = crate::routes::routes(state.clone())
             .expect("asset router")
-            .layer(tower_cookies::CookieManagerLayer::new());
+            .into_router();
         let guest = html(request(&app, Method::GET, None, "").await).await;
         assert!(!guest.contains("tokens from your play points"));
         let session = create_user_session(&db, 164699, false).await;
@@ -660,7 +660,7 @@ mod tests {
         let state = AppState::test_from_pool(db.clone());
         let app = crate::routes::routes(state.clone())
             .expect("asset router")
-            .layer(tower_cookies::CookieManagerLayer::new());
+            .into_router();
         let guest = html(request_at(&app, Method::GET, "/customizations", None, "").await).await;
         assert!(!guest.contains("action=\"/customizations/redeem\""));
         assert!(!guest.contains("head: hydra"));
@@ -889,7 +889,7 @@ mod tests {
         let state = AppState::test_from_pool(db.clone());
         let app = crate::routes::routes(state.clone())
             .expect("asset router")
-            .layer(tower_cookies::CookieManagerLayer::new());
+            .into_router();
         let guest = html(request(&app, Method::GET, None, "").await).await;
         assert!(guest.contains("sign in"));
         assert!(!guest.contains("action=\"/customizations/unlock\""));

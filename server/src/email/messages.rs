@@ -904,7 +904,7 @@ mod tests {
         use tower::ServiceExt as _;
         let app = crate::routes::routes(crate::state::AppState::test_from_pool(pool))
             .expect("asset router")
-            .layer(tower_cookies::CookieManagerLayer::new());
+            .into_router();
         let head = crate::routes::og::customization_png_url(AssetKind::Head, "default").unwrap();
         let tail = crate::routes::og::customization_png_url(AssetKind::Tail, "default").unwrap();
         let fixture =

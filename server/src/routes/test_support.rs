@@ -17,12 +17,13 @@ pub async fn create_user(db: &sqlx::PgPool, github_id: i64, is_admin: bool) -> U
     .unwrap()
 }
 
-/// The real router plus the cookie layer — the minimum an `/api` request
-/// needs in tests (session-cookie auth and JSON bodies both work).
+/// The real app router — cja's full stack (TraceLayer + CookieManagerLayer)
+/// applied to each host branch by `into_router()`, so tests exercise
+/// exactly what production serves.
 pub fn api_app(state: &AppState) -> axum::Router {
     crate::routes::routes(state.clone())
         .expect("asset router")
-        .layer(tower_cookies::CookieManagerLayer::new())
+        .into_router()
 }
 
 /// Send a JSON (or empty) request to the API app. `bearer` sets the
@@ -35,6 +36,30 @@ pub async fn send_api(
     body: Option<serde_json::Value>,
 ) -> (axum::http::StatusCode, String) {
     send_api_request(app, method, path, bearer, None, body).await
+}
+
+/// Send a request with an explicit Host header through the full app
+/// router (cja stack + host dispatch) via tower oneshot. `headers` are
+/// extra request headers (Origin, preflight headers, ...). Returns the
+/// raw response so tests can assert status, body, and response headers.
+pub async fn send_with_host(
+    app: &axum::Router,
+    method: &str,
+    path: &str,
+    host: &str,
+    headers: &[(&'static str, &str)],
+) -> axum::response::Response {
+    use tower::ServiceExt as _;
+
+    let mut builder = axum::http::Request::builder()
+        .method(method)
+        .uri(path)
+        .header(axum::http::header::HOST, host);
+    for (name, value) in headers {
+        builder = builder.header(*name, *value);
+    }
+    let request = builder.body(axum::body::Body::empty()).unwrap();
+    app.clone().oneshot(request).await.unwrap()
 }
 
 /// Like [`send_api`] but authenticates with a signed session cookie instead
@@ -126,4 +151,52 @@ pub async fn session_user_id(db: &sqlx::PgPool, session_id: Uuid) -> Uuid {
         .fetch_one(db)
         .await
         .unwrap()
+}
+
+/// `game_end` `Data` is the engine's 10-field game-object projection:
+/// field-for-field equal to the same game's `GET /games/{id}` `Game`,
+/// with `ID` the arena id and exactly those keys (no `ArenaStatus`).
+pub fn assert_game_end(message: &serde_json::Value, id: Uuid, game_info_game: &serde_json::Value) {
+    assert_eq!(message["Type"], "game_end");
+    let data = &message["Data"];
+    for key in [
+        "ID",
+        "Status",
+        "Width",
+        "Height",
+        "Ruleset",
+        "SnakeTimeout",
+        "Source",
+        "RulesetName",
+        "RulesStages",
+        "Map",
+    ] {
+        assert_eq!(
+            data[key], game_info_game[key],
+            "game_end Data[{key}] must equal Game[{key}]"
+        );
+    }
+    assert_eq!(data["ID"], id.to_string());
+    let mut expected: Vec<&str> = [
+        "ID",
+        "Status",
+        "Width",
+        "Height",
+        "Ruleset",
+        "SnakeTimeout",
+        "Source",
+        "RulesetName",
+        "RulesStages",
+        "Map",
+    ]
+    .into();
+    expected.sort_unstable();
+    let mut keys: Vec<&str> = data
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(keys, expected);
 }

@@ -82,7 +82,7 @@ mod tests {
     fn app(state: &AppState) -> axum::Router {
         crate::routes::routes(state.clone())
             .expect("asset router")
-            .layer(tower_cookies::CookieManagerLayer::new())
+            .into_router()
     }
 
     async fn send(

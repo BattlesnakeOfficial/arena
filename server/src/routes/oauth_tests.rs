@@ -3411,7 +3411,7 @@ mod resume {
             let session = session::create_session(&pool).await.unwrap();
             let app = crate::routes::routes(state.clone())
                 .expect("asset router")
-                .layer(tower_cookies::CookieManagerLayer::new());
+                .into_router();
             Self {
                 app,
                 state,

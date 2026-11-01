@@ -5,7 +5,7 @@ use crate::watched_games::{Readiness, WatchedGameUpdate};
 use axum::{
     Json,
     extract::{
-        Path, Query, State, WebSocketUpgrade,
+        Path, Query, RawQuery, State, WebSocketUpgrade,
         ws::{Message, WebSocket},
     },
     http::StatusCode,
@@ -114,7 +114,8 @@ pub struct BoardViewerGame {
     /// the frames requests it makes.
     #[serde(rename = "ID")]
     pub id: String,
-    /// Legacy-engine status string ("pending" | "running" | "complete").
+    /// Legacy-engine status string ("stopped" | "running" | "complete" |
+    /// "error" — the engine's four values; see [`engine_status`]).
     pub status: String,
     /// Lossless Arena status, additive to the legacy engine contract.
     pub arena_status: String,
@@ -197,15 +198,54 @@ fn engine_rules(
     )
 }
 
-/// Map arena's game status to the legacy engine's status strings
-/// ("pending", "running", "complete") that engine API consumers expect.
+/// Map arena's game status to the legacy engine's status strings. The
+/// engine has exactly four values: `stopped` (created, not running),
+/// `running`, `complete`, and `error` (failed). These strings are
+/// serve-time only — never written to SQL or stored anywhere.
 fn engine_status(status: GameStatus) -> &'static str {
     match status {
-        GameStatus::Waiting => "pending",
+        GameStatus::Waiting => "stopped",
         GameStatus::Running => "running",
-        // "complete" for failed games too: the board's only concern is
-        // whether more frames are coming, and they never are.
-        GameStatus::Finished | GameStatus::Failed => "complete",
+        GameStatus::Finished => "complete",
+        GameStatus::Failed => "error",
+    }
+}
+
+/// The engine's `game_end` websocket payload: the terminal game object
+/// (live capture 2026-10-31, `engine_ws_summary.json`). Field-for-field
+/// the same values as `GET /games/{id}`'s `Game` — hence built from
+/// [`BoardViewerGame`], never independently. No `ArenaStatus` here:
+/// the engine's `Data` carries exactly these 10 keys.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "PascalCase")]
+struct GameEndGame {
+    #[serde(rename = "ID")]
+    id: String,
+    status: String,
+    width: u32,
+    height: u32,
+    ruleset: BTreeMap<String, String>,
+    snake_timeout: i64,
+    source: String,
+    ruleset_name: String,
+    rules_stages: Vec<String>,
+    map: String,
+}
+
+impl From<&BoardViewerGame> for GameEndGame {
+    fn from(game: &BoardViewerGame) -> Self {
+        GameEndGame {
+            id: game.id.clone(),
+            status: game.status.clone(),
+            width: game.width,
+            height: game.height,
+            ruleset: game.ruleset.clone(),
+            snake_timeout: game.snake_timeout,
+            source: game.source.clone(),
+            ruleset_name: game.ruleset_name.clone(),
+            rules_stages: game.rules_stages.clone(),
+            map: game.map.clone(),
+        }
     }
 }
 
@@ -335,6 +375,48 @@ fn board_viewer_game_from_archived(
     }
 }
 
+/// The engine-API `Game` object for a resolved row: the archived engine
+/// header for archived Play rows, the arena row (plus its source)
+/// otherwise — native pruned games included. Single construction site
+/// shared by `get_game_info` and the `game_end` websocket payload, so the
+/// two can never drift apart.
+async fn board_viewer_game_for_record(
+    state: &AppState,
+    record: &GameRow,
+) -> ServerResult<BoardViewerGame, StatusCode> {
+    if serves_from_archive(&state.db, record).await? && record.engine_game_id.is_some() {
+        let archived = load_archived_for_http(state, record).await?;
+        let engine_game = archived
+            .parse_game()
+            .wrap_err("Failed to parse archived game header")?;
+        Ok(board_viewer_game_from_archived(
+            record.game.game_id,
+            record.game.status,
+            &engine_game,
+        ))
+    } else {
+        let source = get_game_source(&state.db, record.game.game_id)
+            .await
+            .wrap_err("Failed to load game source")?;
+        Ok(board_viewer_game_from_record(&record.game, &source))
+    }
+}
+
+/// `game_end` `Data`: the engine game object. On failure, log and send
+/// `{}` — the terminal close sequence must never wedge on the payload.
+async fn game_end_payload(state: &AppState, record: &GameRow) -> serde_json::Value {
+    match board_viewer_game_for_record(state, record).await {
+        Ok(game) => {
+            serde_json::to_value(GameEndGame::from(&game)).unwrap_or_else(|_| serde_json::json!({}))
+        }
+        Err(error) => {
+            tracing::error!(game_id = %record.game.game_id,
+                error = %format_args!("{error:#}"), "Failed to build game_end payload");
+            serde_json::json!({})
+        }
+    }
+}
+
 /// GET /api/games/{id}
 /// Returns game info for the Battlesnake board viewer and the GIF exporter
 pub async fn get_game_info(
@@ -366,18 +448,9 @@ pub async fn get_game_info(
             .wrap_err("Failed to prepare archived last frame")?;
         // Game's source is the ROW, not the object: Play rows serve the
         // archived engine game; native rows serve the arena row through
-        // the same constructor the DB path uses.
-        let game = if record.engine_game_id.is_some() {
-            let engine_game = archived
-                .parse_game()
-                .wrap_err("Failed to parse archived game header")?;
-            board_viewer_game_from_archived(game_id, record.game.status, &engine_game)
-        } else {
-            let source = get_game_source(&state.db, game_id)
-                .await
-                .wrap_err("Failed to load game source")?;
-            board_viewer_game_from_record(&record.game, &source)
-        };
+        // the same constructor the DB path uses. (The second archive load
+        // inside is an `ArchiveCache` hit.)
+        let game = board_viewer_game_for_record(&state, &record).await?;
         return Ok(Json(BoardViewerGameResponse { game, last_frame }));
     }
 
@@ -523,14 +596,34 @@ pub struct WebSocketMessage {
     pub data: serde_json::Value,
 }
 
+/// `?startFrame=N`: replay starts at turn N. Parsed from the raw query
+/// string — first occurrence wins, like Go's `r.URL.Query().Get`;
+/// `strconv.Atoi` semantics on the engine's 64-bit host: any valid 64-bit
+/// integer keeps its value (even past every frame), and
+/// missing/unparseable/empty/64-bit-overflow → 0. Not a `Query`
+/// extractor: `serde_urlencoded` rejects duplicate fields with
+/// a 400, which the engine never does.
+fn start_frame_from_query(query: Option<&str>) -> i64 {
+    query
+        .and_then(|q| {
+            url::form_urlencoded::parse(q.as_bytes())
+                .find(|(k, _)| k == "startFrame")
+                .map(|(_, v)| v)
+        })
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(0)
+}
+
 /// GET /api/games/{id}/events
 /// WebSocket endpoint for streaming game frames
 pub async fn game_events_websocket(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
     Path(game_id): Path<Uuid>,
+    RawQuery(query): RawQuery,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_game_websocket(socket, state, game_id))
+    let start_frame = start_frame_from_query(query.as_deref());
+    ws.on_upgrade(move |socket| handle_game_websocket(socket, state, game_id, start_frame))
 }
 
 /// Send a WebSocket close frame and wait for the client to acknowledge.
@@ -544,7 +637,12 @@ async fn graceful_close(
     sender: &mut futures::stream::SplitSink<WebSocket, Message>,
     receiver: &mut futures::stream::SplitStream<WebSocket>,
 ) {
-    let _ = sender.send(Message::Close(None)).await;
+    let _ = sender
+        .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+            code: 1000, // NORMAL, like the engine (close frame absent → clients see 1005)
+            reason: "".into(),
+        })))
+        .await;
     // Drain until the client sends Close back or the connection drops
     while let Some(msg) = receiver.next().await {
         if matches!(msg, Ok(Message::Close(_)) | Err(_)) {
@@ -627,18 +725,32 @@ async fn send_terminal(
         return;
     }
     match status {
-        GameStatus::Finished => {
-            let _ = send_message(sender, "game_end", serde_json::json!({})).await;
-        }
-        GameStatus::Failed => {
-            let _ = send_message(
-                sender,
-                "error",
-                serde_json::json!({"message":"Game failed"}),
-            )
-            .await;
-            // The board stops its reconnecting socket only on game_end.
-            let _ = send_message(sender, "game_end", serde_json::json!({})).await;
+        GameStatus::Finished | GameStatus::Failed => {
+            if matches!(status, GameStatus::Failed) {
+                let _ = send_message(
+                    sender,
+                    "error",
+                    serde_json::json!({"message":"Game failed"}),
+                )
+                .await;
+            }
+            // The engine's game_end carries the game object. One row read
+            // at terminal only; any failure sends `{}` (logged inside) so
+            // the close sequence can never wedge on the payload.
+            let payload = match get_game_row_by_any_id(&state.db, game_id).await {
+                Ok(Some(record)) => game_end_payload(state, &record).await,
+                Ok(None) => {
+                    tracing::error!(%game_id,
+                        "Failed to build game_end payload: game row vanished");
+                    serde_json::json!({})
+                }
+                Err(error) => {
+                    tracing::error!(%game_id, error = %format_args!("{error:#}"),
+                        "Failed to build game_end payload");
+                    serde_json::json!({})
+                }
+            };
+            let _ = send_message(sender, "game_end", payload).await;
         }
         _ => {
             send_error_and_close(sender, receiver, "Game changed, please reconnect").await;
@@ -659,6 +771,7 @@ async fn handle_archived_websocket(
     receiver: &mut WsReceiver,
     state: &AppState,
     record: &GameRow,
+    start_frame: i64,
 ) {
     let game_id = record.game.game_id;
     let path = record.gcs_path.clone().unwrap_or_default();
@@ -695,6 +808,14 @@ async fn handle_archived_websocket(
                 return;
             }
         };
+        if frame
+            .get("Turn")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0)
+            < start_frame
+        {
+            continue;
+        }
         if !send_message(sender, "frame", frame).await {
             return;
         }
@@ -707,11 +828,16 @@ async fn handle_archived_websocket(
         )
         .await;
     }
-    let _ = send_message(sender, "game_end", serde_json::json!({})).await;
+    let _ = send_message(sender, "game_end", game_end_payload(state, record).await).await;
     graceful_close(sender, receiver).await;
 }
 
-async fn handle_game_websocket(socket: WebSocket, state: AppState, game_id: Uuid) {
+async fn handle_game_websocket(
+    socket: WebSocket,
+    state: AppState,
+    game_id: Uuid,
+    start_frame: i64,
+) {
     let (mut sender, mut receiver) = socket.split();
     let record = match get_game_row_by_any_id(&state.db, game_id).await {
         Ok(Some(record)) => record,
@@ -730,7 +856,8 @@ async fn handle_game_websocket(socket: WebSocket, state: AppState, game_id: Uuid
     let game_id = record.game.game_id;
     match serves_from_archive(&state.db, &record).await {
         Ok(true) => {
-            handle_archived_websocket(&mut sender, &mut receiver, &state, &record).await;
+            handle_archived_websocket(&mut sender, &mut receiver, &state, &record, start_frame)
+                .await;
             return;
         }
         Ok(false) => {}
@@ -791,7 +918,16 @@ async fn handle_game_websocket(socket: WebSocket, state: AppState, game_id: Uuid
         authors: &authors,
         suppressed: &suppressed,
     };
-    let mut last_sent_turn = -1;
+    // `?startFrame=N`: 0/missing → -1 (replay from turn 0, today's
+    // behavior); negative N → sends everything, like the engine. N past
+    // `i32::MAX` (valid for Go's 64-bit `Atoi`) clamps to `i32::MAX` so
+    // every representable turn is skipped — straight to `game_end`.
+    // The subscription cursor (`seed_with_turn_id`) is independent of
+    // this — `send_frames`' `turn <= last_sent_turn` skip does the
+    // filtering.
+    let mut last_sent_turn = start_frame
+        .saturating_sub(1)
+        .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
     if !send_frames(&mut sender, &existing_turns, &mut last_sent_turn, &context).await {
         return;
     }
@@ -1110,6 +1246,103 @@ pub(crate) mod fixtures {
         );
         state
     }
+
+    // --- Live engine capture: Play game addedb91 (DEV-1988) ---
+
+    /// Play game addedb91-93ef-4889-a936-d0caef728a8c, captured live from
+    /// engine.battlesnake.com 2026-10-30/31 (Go engine v1.0.139):
+    /// `server/tests/fixtures/engine-capture-addedb91/`.
+    pub(crate) const CAPTURE_ADDEDB91: &str = "addedb91-93ef-4889-a936-d0caef728a8c";
+
+    pub(crate) fn capture_game() -> serde_json::Value {
+        serde_json::from_str(include_str!(
+            "../../../tests/fixtures/engine-capture-addedb91/engine_game.json"
+        ))
+        .unwrap()
+    }
+
+    pub(crate) fn capture_frames() -> serde_json::Value {
+        serde_json::from_str(include_str!(
+            "../../../tests/fixtures/engine-capture-addedb91/engine_frames_offset0_limit100.json"
+        ))
+        .unwrap()
+    }
+
+    pub(crate) fn capture_ws_summary() -> serde_json::Value {
+        serde_json::from_str(include_str!(
+            "../../../tests/fixtures/engine-capture-addedb91/engine_ws_summary.json"
+        ))
+        .unwrap()
+    }
+
+    /// Emulate the engine-DB→backup shape that produced real v1 objects:
+    /// every proto3-omittable empty (""/0/false/{}, and "" inside Death)
+    /// was written as an explicit JSON null. This is exactly the null
+    /// pattern `normalize_public_frame` must invert at serve time. Takes
+    /// the frames ARRAY (`capture_frames()["Frames"]`).
+    fn null_proto3_empties(frames: &mut serde_json::Value) {
+        for frame in frames.as_array_mut().expect("capture frames is an array") {
+            for snake in frame["Snakes"].as_array_mut().unwrap() {
+                let obj = snake.as_object_mut().unwrap();
+                let null_if = |obj: &mut serde_json::Map<String, serde_json::Value>,
+                               key: &str,
+                               empty: serde_json::Value| {
+                    if obj.get(key) == Some(&empty) {
+                        obj.insert(key.to_string(), serde_json::Value::Null);
+                    }
+                };
+                for key in ["Shout", "Squad", "Latency", "Author", "Error"] {
+                    null_if(obj, key, serde_json::json!(""));
+                }
+                null_if(obj, "StatusCode", serde_json::json!(0));
+                for key in ["IsBot", "IsEnvironment"] {
+                    null_if(obj, key, serde_json::json!(false));
+                }
+                null_if(obj, "TimingMicros", serde_json::json!({}));
+                if let Some(death) = obj.get_mut("Death").and_then(|d| d.as_object_mut()) {
+                    for key in ["EliminatedBy", "Cause"] {
+                        null_if(death, key, serde_json::json!(""));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Seed the addedb91 capture as a v1 archive object (nulled engine-DB
+    /// shape) + archived Play row. Returns (state, arena_id).
+    pub(crate) async fn capture_fixture(pool: &PgPool) -> cja::Result<(AppState, Uuid)> {
+        // Sanity: the raw capture frames are well-formed engine frames.
+        let frames = capture_frames()["Frames"].clone();
+        for frame in frames.as_array().unwrap() {
+            serde_json::from_value::<crate::engine_models::EngineGameFrame>(frame.clone())
+                .expect("capture frame must deserialize as EngineGameFrame");
+        }
+
+        let store = std::sync::Arc::new(crate::object_store::InMemoryObjectStore::default());
+        let gcs_path = format!("games/2026/01/01/{CAPTURE_ADDEDB91}.json.zst");
+        let mut nulled_frames = frames.clone();
+        null_proto3_empties(&mut nulled_frames);
+        // `Created` rides as a NUMBER in v1 objects (the engine's int64 DB
+        // column); the engine's API jsonpb layer is what stringifies it.
+        let mut game = capture_game()["Game"].clone();
+        game["Created"] = serde_json::json!(
+            capture_game()["Game"]["Created"]
+                .as_str()
+                .unwrap()
+                .parse::<i64>()
+                .unwrap()
+        );
+        let object = serde_json::json!({
+            "game": game,
+            "frames": nulled_frames,
+            "exported_at": "2026-01-01T00:00:00Z",
+        });
+        use crate::object_store::ObjectStore as _;
+        store.put(&gcs_path, zstd_json(&object, 3)).await.unwrap();
+        let game_id = fixture_archived_game(pool, CAPTURE_ADDEDB91, &gcs_path).await?;
+        let state = archived_state(pool.clone(), store);
+        Ok((state, game_id))
+    }
 }
 
 #[cfg(test)]
@@ -1255,10 +1488,10 @@ mod tests {
 
     #[test]
     fn test_engine_status_mapping() {
-        assert_eq!(engine_status(GameStatus::Waiting), "pending");
+        assert_eq!(engine_status(GameStatus::Waiting), "stopped");
         assert_eq!(engine_status(GameStatus::Running), "running");
         assert_eq!(engine_status(GameStatus::Finished), "complete");
-        assert_eq!(engine_status(GameStatus::Failed), "complete");
+        assert_eq!(engine_status(GameStatus::Failed), "error");
     }
 
     #[test]
@@ -1275,14 +1508,7 @@ mod tests {
             };
             let value = serde_json::to_value(response).unwrap();
             assert_eq!(value["Game"]["ArenaStatus"], expected);
-            assert_eq!(
-                value["Game"]["Status"],
-                if matches!(status, GameStatus::Finished | GameStatus::Failed) {
-                    "complete"
-                } else {
-                    engine_status(status)
-                }
-            );
+            assert_eq!(value["Game"]["Status"], engine_status(status));
         }
     }
 
@@ -1328,6 +1554,38 @@ mod tests {
     #[test]
     fn test_clamp_frames_pagination_passes_through_valid_values() {
         assert_eq!(clamp_frames_pagination(Some(300), Some(50)), (300, 50));
+    }
+
+    #[test]
+    fn test_start_frame_from_query_go_atoi_semantics() {
+        // Valid 64-bit integers keep their value — including values past
+        // every frame and past i32::MAX, which Go's 64-bit `strconv.Atoi`
+        // accepts on the engine host.
+        assert_eq!(start_frame_from_query(Some("startFrame=2")), 2);
+        assert_eq!(
+            start_frame_from_query(Some("startFrame=2147483648")),
+            2147483648
+        );
+        assert_eq!(
+            start_frame_from_query(Some("startFrame=9223372036854775807")),
+            i64::MAX
+        );
+        assert_eq!(start_frame_from_query(Some("startFrame=-5")), -5);
+        assert_eq!(
+            start_frame_from_query(Some("startFrame=-9223372036854775808")),
+            i64::MIN
+        );
+        // First occurrence wins, like Go's `r.URL.Query().Get`.
+        assert_eq!(start_frame_from_query(Some("startFrame=2&startFrame=0")), 2);
+        // Missing, empty, unparseable, and 64-bit overflow → 0 (`Atoi` error).
+        assert_eq!(start_frame_from_query(None), 0);
+        assert_eq!(start_frame_from_query(Some("")), 0);
+        assert_eq!(start_frame_from_query(Some("startFrame=")), 0);
+        assert_eq!(start_frame_from_query(Some("startFrame=banana")), 0);
+        assert_eq!(
+            start_frame_from_query(Some("startFrame=9223372036854775808")),
+            0
+        );
     }
 
     #[test]
@@ -1458,7 +1716,7 @@ mod tests {
             .into_response();
         let json = response_json(response).await;
 
-        assert_eq!(json["Game"]["Status"], "pending");
+        assert_eq!(json["Game"]["Status"], "stopped");
         assert_eq!(json["Game"]["Source"], "custom");
         assert!(json.get("LastFrame").is_none());
 
@@ -1781,6 +2039,10 @@ mod tests {
         assert_eq!(snake["IsBot"], false);
         assert_eq!(snake["IsEnvironment"], false);
         assert_eq!(snake["TimingMicros"], serde_json::json!({}));
+        // The engine jsonpb EmitDefaults pins: string fields always present,
+        // `""` when empty (the fixture omits these keys, so they're filled).
+        assert_eq!(snake["Shout"], "");
+        assert_eq!(snake["Squad"], "");
     }
 
     /// v1 archive: both id kinds serve the archived engine game and its
@@ -2067,11 +2329,124 @@ mod tests {
         );
         Ok(())
     }
+
+    // --- Live engine-capture parity (DEV-1988) ---
+
+    /// Delete the fields the capture comparison must exempt: the
+    /// privacy-blanked URL fields (arena blanks them unconditionally, the
+    /// capture carries "" — equal in practice, but the exemption keeps the
+    /// comparison about content) and arena's additive snake-level
+    /// `EliminatedBy`/`EliminatedCause` if present. `Death.EliminatedBy`
+    /// STAYS — it is one of the null fixes under test.
+    fn strip_comparison_exemptions(frame: &mut serde_json::Value) {
+        for snake in frame["Snakes"].as_array_mut().unwrap() {
+            let obj = snake.as_object_mut().unwrap();
+            for key in [
+                "URL",
+                "ProxyURL",
+                "APIVersion",
+                "EliminatedBy",
+                "EliminatedCause",
+            ] {
+                obj.remove(key);
+            }
+        }
+    }
+
+    /// The archived Play game's `/frames?offset=0&limit=100` has ZERO JSON
+    /// differences from the saved engine capture: the v1 object's explicit
+    /// nulls (Shout/Squad/Latency/Death.EliminatedBy/…) come back as the
+    /// engine's `""` (jsonpb EmitDefaults). This fails before the null
+    /// fills and passes after.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn archived_play_frames_match_engine_capture(pool: PgPool) -> cja::Result<()> {
+        let (state, _arena_id) = fx::capture_fixture(&pool).await?;
+        let play_id = Uuid::parse_str(fx::CAPTURE_ADDEDB91).unwrap();
+
+        let served = response_json(
+            get_game_frames(
+                State(state),
+                Path(play_id),
+                Query(FramesQuery {
+                    offset: Some(0),
+                    limit: Some(100),
+                }),
+            )
+            .await
+            .unwrap()
+            .into_response(),
+        )
+        .await;
+
+        let capture = fx::capture_frames();
+        assert_eq!(served["Count"], 78);
+        let served_frames = served["Frames"].as_array().unwrap();
+        let capture_frames = capture["Frames"].as_array().unwrap();
+        assert_eq!(served_frames.len(), capture_frames.len());
+        for (i, capture_frame) in capture_frames.iter().enumerate() {
+            let mut expected = capture_frame.clone();
+            let mut actual = served_frames[i].clone();
+            strip_comparison_exemptions(&mut expected);
+            strip_comparison_exemptions(&mut actual);
+            assert_eq!(actual, expected, "frame {i} must match the engine capture");
+        }
+        Ok(())
+    }
+
+    /// `GET /games/{id}` by the PLAY id serves the capture's `Game`
+    /// field-for-field (ID excepted — DEV-1979 canonicalizes to the arena
+    /// id), with `ArenaStatus: "finished"` and the capture's `LastFrame`.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn game_info_matches_engine_capture(pool: PgPool) -> cja::Result<()> {
+        let (state, arena_id) = fx::capture_fixture(&pool).await?;
+        let play_id = Uuid::parse_str(fx::CAPTURE_ADDEDB91).unwrap();
+
+        let served = response_json(
+            get_game_info(State(state), Path(play_id))
+                .await
+                .unwrap()
+                .into_response(),
+        )
+        .await;
+
+        let capture_game = &fx::capture_game()["Game"];
+        let game = &served["Game"];
+        assert_eq!(game["ID"], arena_id.to_string());
+        assert_eq!(game["ArenaStatus"], "finished");
+        for key in [
+            "Status",
+            "Width",
+            "Height",
+            "Ruleset",
+            "SnakeTimeout",
+            "MaxTurns",
+            "FoodSpawns",
+            "HazardSpawns",
+            "Source",
+            "RulesetName",
+            "RulesStages",
+            "Map",
+            "Created",
+        ] {
+            assert_eq!(
+                game[key], capture_game[key],
+                "Game[{key}] must match the capture"
+            );
+        }
+
+        let mut expected_last = fx::capture_game()["LastFrame"].clone();
+        let mut actual_last = served["LastFrame"].clone();
+        strip_comparison_exemptions(&mut expected_last);
+        strip_comparison_exemptions(&mut actual_last);
+        assert_eq!(actual_last, expected_last);
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod live_tests {
     use super::*;
+    use crate::routes::test_support::assert_game_end;
     use crate::watched_games::run_watched_games;
     use futures::StreamExt;
     use sqlx::PgPool;
@@ -2090,7 +2465,9 @@ mod live_tests {
         let web = tokio::spawn(async move {
             axum::serve(
                 listener,
-                crate::routes::routes(state.clone()).expect("asset router"),
+                crate::routes::routes(state.clone())
+                    .expect("asset router")
+                    .into_router(),
             )
             .with_graceful_shutdown(web_shutdown.cancelled_owned())
             .await
@@ -2103,6 +2480,19 @@ mod live_tests {
         tokio::time::timeout(
             Duration::from_secs(5),
             tokio_tungstenite::connect_async(format!("{base}/api/games/{id}/events")),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .0
+    }
+
+    /// Connect with an explicit query string (e.g. `?startFrame=2`),
+    /// first-occurrence forms included.
+    async fn connect_query(base: &str, id: Uuid, query: &str) -> Client {
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio_tungstenite::connect_async(format!("{base}/api/games/{id}/events?{query}")),
         )
         .await
         .unwrap()
@@ -2128,9 +2518,13 @@ mod live_tests {
             .unwrap()
             .unwrap()
             .unwrap();
+        // The engine closes with 1000 NORMAL; a frame-absent close would
+        // surface to clients as 1005 and must fail here.
         assert!(matches!(
             message,
-            tokio_tungstenite::tungstenite::Message::Close(_)
+            tokio_tungstenite::tungstenite::Message::Close(
+                Some(ref f)
+            ) if f.code == tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Normal
         ));
         let _ = client.close(None).await;
     }
@@ -2207,10 +2601,16 @@ mod live_tests {
         .execute(&pool)
         .await
         .unwrap();
-        assert_eq!(
-            next(&mut client).await,
-            serde_json::json!({"Type":"game_end","Data":{}})
-        );
+        let game_info_game = body_json(
+            get_game_info(State(reader.clone()), Path(id))
+                .await
+                .unwrap()
+                .into_response(),
+        )
+        .await["Game"]
+            .clone();
+        let message = next(&mut client).await;
+        assert_game_end(&message, id, &game_info_game);
         close(&mut client).await;
         poll_shutdown.cancel();
         web_shutdown.cancel();
@@ -2243,15 +2643,22 @@ mod live_tests {
             next(&mut client).await,
             serde_json::json!({"Type":"error","Data":{"message":"Game failed"}})
         );
-        assert_eq!(
-            next(&mut client).await,
-            serde_json::json!({"Type":"game_end","Data":{}})
-        );
+        let game_info_game = body_json(
+            get_game_info(State(reader.clone()), Path(id))
+                .await
+                .unwrap()
+                .into_response(),
+        )
+        .await["Game"]
+            .clone();
+        let message = next(&mut client).await;
+        assert_game_end(&message, id, &game_info_game);
         close(&mut client).await;
         let mut replay = connect(&base, id).await;
         assert_eq!(next(&mut replay).await["Data"]["Turn"], 0);
         assert_eq!(next(&mut replay).await["Data"]["message"], "Game failed");
-        assert_eq!(next(&mut replay).await["Type"], "game_end");
+        let message = next(&mut replay).await;
+        assert_game_end(&message, id, &game_info_game);
         close(&mut replay).await;
         shutdown.cancel();
         web_shutdown.cancel();
@@ -2685,6 +3092,14 @@ mod live_tests {
         let state = fx::archived_state(pool, store);
         let play_id = Uuid::parse_str(&engine_id).unwrap();
 
+        let game_info_game = body_json(
+            get_game_info(State(state.clone()), Path(play_id))
+                .await
+                .unwrap()
+                .into_response(),
+        )
+        .await["Game"]
+            .clone();
         let (base, web_shutdown, web) = start(state).await;
         for id in [play_id, game_id] {
             let mut client = connect(&base, id).await;
@@ -2694,10 +3109,8 @@ mod live_tests {
                 assert_eq!(message["Data"]["Turn"], turn);
                 ws_snake_public_shape(&message["Data"]["Snakes"][0]);
             }
-            assert_eq!(
-                next(&mut client).await,
-                serde_json::json!({"Type":"game_end","Data":{}})
-            );
+            let message = next(&mut client).await;
+            assert_game_end(&message, game_id, &game_info_game);
             close(&mut client).await;
         }
         web_shutdown.cancel();
@@ -2892,7 +3305,7 @@ mod live_tests {
         assert_eq!(past_end["Count"], 0);
 
         // (e) The websocket replays every frame, then game_end, then close.
-        let (base, web_shutdown, web) = start(state).await;
+        let (base, web_shutdown, web) = start(state.clone()).await;
         let mut client = connect(&base, game_id).await;
         for turn in 0..2 {
             let message = next(&mut client).await;
@@ -2901,10 +3314,166 @@ mod live_tests {
             assert_eq!(message["Data"]["Snakes"][0]["Author"], "test-user-424242");
             ws_snake_public_shape(&message["Data"]["Snakes"][0]);
         }
-        assert_eq!(
-            next(&mut client).await,
-            serde_json::json!({"Type":"game_end","Data":{}})
-        );
+        let message = next(&mut client).await;
+        assert_game_end(&message, game_id, &archive_info["Game"]);
+        close(&mut client).await;
+        web_shutdown.cancel();
+        web.await.unwrap();
+    }
+
+    /// The archived capture's websocket: 78 frames ascending (no dupes),
+    /// then `game_end` whose `Data` matches the capture's
+    /// `nonFrame[0]["Data"]` on the nine non-ID fields (ID is the arena
+    /// id, DEV-1979), then a close with code 1000 like the engine.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn archived_game_websocket_game_end_matches_engine(pool: PgPool) {
+        let (state, arena_id) = fx::capture_fixture(&pool).await.unwrap();
+        let play_id = Uuid::parse_str(fx::CAPTURE_ADDEDB91).unwrap();
+
+        let (base, web_shutdown, web) = start(state).await;
+        let mut client = connect(&base, play_id).await;
+        for turn in 0..78 {
+            let message = next(&mut client).await;
+            assert_eq!(message["Type"], "frame");
+            assert_eq!(message["Data"]["Turn"], turn, "frames ascending, no dupes");
+        }
+        let engine_data = &fx::capture_ws_summary()["nonFrame"][0]["Data"];
+        let message = next(&mut client).await;
+        assert_eq!(message["Type"], "game_end");
+        let data = &message["Data"];
+        for key in [
+            "Status",
+            "Width",
+            "Height",
+            "Ruleset",
+            "SnakeTimeout",
+            "Source",
+            "RulesetName",
+            "RulesStages",
+            "Map",
+        ] {
+            assert_eq!(data[key], engine_data[key], "game_end Data[{key}]");
+        }
+        assert_eq!(data["ID"], arena_id.to_string());
+        close(&mut client).await;
+        web_shutdown.cancel();
+        web.await.unwrap();
+    }
+
+    /// `?startFrame=N`: starts at turn N; missing/unparseable/empty → 0;
+    /// N past the end → no frames, straight to game_end; repeated param
+    /// → first wins (raw-query parse, never a serde 400).
+    #[sqlx::test(migrations = "../migrations")]
+    async fn websocket_startframe_skips_earlier_turns(pool: PgPool) {
+        let id = game(&pool).await;
+        let state = AppState::test_from_pool(pool.clone());
+        for number in 0..=3 {
+            turn(&pool, &state, id, number).await;
+        }
+        sqlx::query!(
+            "UPDATE games SET status = 'finished' WHERE game_id = $1",
+            id
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let game_info_game = body_json(
+            get_game_info(State(state.clone()), Path(id))
+                .await
+                .unwrap()
+                .into_response(),
+        )
+        .await["Game"]
+            .clone();
+        let (base, web_shutdown, web) = start(state).await;
+
+        // startFrame=2 → turns 2,3 then game_end.
+        let mut client = connect_query(&base, id, "startFrame=2").await;
+        for turn in [2, 3] {
+            let message = next(&mut client).await;
+            assert_eq!(message["Type"], "frame");
+            assert_eq!(message["Data"]["Turn"], turn);
+        }
+        let message = next(&mut client).await;
+        assert_game_end(&message, id, &game_info_game);
+        close(&mut client).await;
+
+        // Unparseable, empty, and missing → start at turn 0.
+        for query in ["startFrame=banana", "startFrame="] {
+            let mut client = connect_query(&base, id, query).await;
+            for turn in 0..=3 {
+                assert_eq!(next(&mut client).await["Data"]["Turn"], turn, "{query}");
+            }
+            let message = next(&mut client).await;
+            assert_game_end(&message, id, &game_info_game);
+            close(&mut client).await;
+        }
+        let mut client = connect(&base, id).await;
+        for turn in 0..=3 {
+            assert_eq!(next(&mut client).await["Data"]["Turn"], turn, "no param");
+        }
+        let message = next(&mut client).await;
+        assert_game_end(&message, id, &game_info_game);
+        close(&mut client).await;
+
+        // startFrame=99 → no frames, straight to game_end.
+        let mut client = connect_query(&base, id, "startFrame=99").await;
+        let message = next(&mut client).await;
+        assert_game_end(&message, id, &game_info_game);
+        close(&mut client).await;
+
+        // First occurrence wins: starts at 2 despite the trailing 0
+        // (a `Query` extractor would have 400'd on the duplicate).
+        let mut client = connect_query(&base, id, "startFrame=2&startFrame=0").await;
+        for turn in [2, 3] {
+            assert_eq!(next(&mut client).await["Data"]["Turn"], turn);
+        }
+        let message = next(&mut client).await;
+        assert_game_end(&message, id, &game_info_game);
+        close(&mut client).await;
+
+        // Go's strconv.Atoi accepts this value on the engine's 64-bit host.
+        // It is past every frame, so it must not replay from turn 0.
+        let mut client = connect_query(&base, id, "startFrame=2147483648").await;
+        let message = next(&mut client).await;
+        assert_game_end(&message, id, &game_info_game);
+        close(&mut client).await;
+
+        web_shutdown.cancel();
+        web.await.unwrap();
+    }
+
+    /// The archived websocket honors `?startFrame` too: a two-frame v1
+    /// archive with `startFrame=1` replays only turn 1, then game_end.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn archived_websocket_startframe_skips_earlier_turns(pool: PgPool) {
+        let store = Arc::new(InMemoryObjectStore::default());
+        let engine_id = Uuid::new_v4().to_string();
+        let gcs_path = format!("games/2026/01/01/{engine_id}.json.zst");
+        store
+            .put(&gcs_path, fx::v1_archive(&engine_id))
+            .await
+            .unwrap();
+        let game_id = fx::fixture_archived_game(&pool, &engine_id, &gcs_path)
+            .await
+            .unwrap();
+        let state = fx::archived_state(pool, store);
+
+        let game_info_game = body_json(
+            get_game_info(State(state.clone()), Path(game_id))
+                .await
+                .unwrap()
+                .into_response(),
+        )
+        .await["Game"]
+            .clone();
+        let (base, web_shutdown, web) = start(state).await;
+        let mut client = connect_query(&base, game_id, "startFrame=1").await;
+        let message = next(&mut client).await;
+        assert_eq!(message["Type"], "frame");
+        assert_eq!(message["Data"]["Turn"], 1);
+        let message = next(&mut client).await;
+        assert_game_end(&message, game_id, &game_info_game);
         close(&mut client).await;
         web_shutdown.cancel();
         web.await.unwrap();

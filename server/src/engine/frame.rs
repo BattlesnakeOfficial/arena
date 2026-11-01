@@ -92,7 +92,10 @@ fn move_error(result: &MoveResult) -> String {
 /// serve time. Frames written before DEV-1502 lack the engine-only fields and
 /// recorded a timeout as `Latency: "timeout"`; the engine reported the timeout
 /// in ms plus an `Error`. Snake URLs and API versions are blanked like the
-/// engine's public API did. Idempotent.
+/// engine's public API did. The engine's jsonpb `EmitDefaults` contract is
+/// "always present, `""` when empty" — required fields must always be
+/// present for strict clients — so every engine string field is filled to
+/// `""` when missing or null, inside `Death` too. Idempotent.
 pub fn normalize_public_frame(frame: &mut serde_json::Value, timeout_ms: i64) {
     use serde_json::{Value, json};
 
@@ -120,6 +123,23 @@ pub fn normalize_public_frame(frame: &mut serde_json::Value, timeout_ms: i64) {
         fill(snake, "TimingMicros", json!({}));
         fill(snake, "IsBot", json!(false));
         fill(snake, "IsEnvironment", json!(false));
+        // Engine jsonpb EmitDefaults: string fields are always present, `""`
+        // when empty. Archived v1/v2 objects serialize `EngineSnake`'s
+        // `Option<String>`s as null here; present values are never touched
+        // (a `"0"` Latency or the "timeout" sentinel is only ever missing
+        // or null, and the sentinel check below matches the exact string).
+        for key in [
+            "Shout", "Squad", "Author", "Color", "HeadType", "TailType", "Latency",
+        ] {
+            fill(snake, key, json!(""));
+        }
+        // Same contract inside a non-null Death: only fields *inside* the
+        // object are filled; a snake with `"Death": null` stays null (the
+        // engine serves null for alive snakes).
+        if let Some(death) = snake.get_mut("Death").and_then(Value::as_object_mut) {
+            fill(death, "EliminatedBy", json!(""));
+            fill(death, "Cause", json!(""));
+        }
         for key in ["URL", "ProxyURL", "APIVersion"] {
             snake.insert(key.to_string(), json!(""));
         }
@@ -787,6 +807,56 @@ mod tests {
         let mut db_shaped = once.clone();
         normalize_public_frame(&mut db_shaped, 500);
         assert_eq!(db_shaped, once);
+    }
+
+    /// Archived v1/v2 objects carry explicit nulls in every proto3-omittable
+    /// engine string field; the fill makes them `""` like the engine's
+    /// jsonpb `EmitDefaults` output, including inside `Death`. A null Death
+    /// (alive snake) stays null, and present values are never rewritten.
+    #[test]
+    fn test_normalize_public_frame_fills_null_strings() {
+        let mut frame = serde_json::json!({
+            "Turn": 5,
+            "Snakes": [
+                {
+                    "ID": "a",
+                    "Shout": null, "Squad": null, "Author": null, "Color": null,
+                    "HeadType": null, "TailType": null, "Latency": null,
+                    "Death": {"Cause": null, "Turn": 5, "EliminatedBy": null}
+                },
+                {"ID": "b", "Shout": null, "Squad": null, "Latency": null, "Death": null},
+                {"ID": "c", "Latency": "0", "Shout": "hi", "Color": "#ff0000"}
+            ]
+        });
+
+        normalize_public_frame(&mut frame, 500);
+        let once = frame.clone();
+        normalize_public_frame(&mut frame, 500);
+        assert_eq!(frame, once, "normalization is idempotent");
+
+        let a = &frame["Snakes"][0];
+        for key in [
+            "Shout", "Squad", "Author", "Color", "HeadType", "TailType", "Latency",
+        ] {
+            assert_eq!(a[key], "", "{key} null → \"\"");
+        }
+        assert_eq!(a["Death"]["Cause"], "", "Death.Cause null → \"\"");
+        assert_eq!(
+            a["Death"]["EliminatedBy"], "",
+            "Death.EliminatedBy null → \"\""
+        );
+        assert_eq!(a["Death"]["Turn"], 5, "non-string Death fields untouched");
+
+        let b = &frame["Snakes"][1];
+        assert_eq!(b["Shout"], "");
+        assert_eq!(b["Squad"], "");
+        assert_eq!(b["Latency"], "");
+        assert!(b["Death"].is_null(), "null Death (alive snake) stays null");
+
+        let c = &frame["Snakes"][2];
+        assert_eq!(c["Latency"], "0", "present Latency never rewritten");
+        assert_eq!(c["Shout"], "hi", "present Shout never rewritten");
+        assert_eq!(c["Color"], "#ff0000", "present Color never rewritten");
     }
 
     #[test]

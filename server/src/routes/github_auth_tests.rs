@@ -85,7 +85,7 @@ impl Fixture {
 
         let app = crate::routes::routes(state.clone())
             .expect("asset router")
-            .layer(tower_cookies::CookieManagerLayer::new());
+            .into_router();
         Self {
             state,
             session_id,

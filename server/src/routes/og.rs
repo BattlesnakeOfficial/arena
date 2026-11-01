@@ -829,7 +829,7 @@ mod tests {
     async fn get(state: &AppState, uri: &str) -> Reply {
         let response = crate::routes::routes(state.clone())
             .expect("asset router")
-            .layer(tower_cookies::CookieManagerLayer::new())
+            .into_router()
             .oneshot(Request::get(uri).body(Body::empty()).unwrap())
             .await
             .unwrap();
@@ -1237,7 +1237,7 @@ mod tests {
         );
         let response = crate::routes::routes(state.clone())
             .expect("asset router")
-            .layer(tower_cookies::CookieManagerLayer::new())
+            .into_router()
             .oneshot(
                 Request::get(format!("/tournaments/{}", w.tournament_id))
                     .header(header::COOKIE, cookie)
