@@ -988,13 +988,10 @@ pub async fn show_leaderboard_entry(
                                             }
                                         }
                                         td class="r" {
-                                            @match game.placement {
-                                                1 => span class="badge ok" { "🥇 1st" },
-                                                2 => span class="badge" { "🥈 2nd" },
-                                                3 => span class="badge" { "🥉 3rd" },
-                                                // 4+ (max 4 snakes/game) — "th" is always right
-                                                p => span class="badge" { (p) "th" },
-                                            }
+                                            (history_placement_badge(
+                                                game.placement,
+                                                opponents_map.get(&game.game_id).map(Vec::as_slice),
+                                            ))
                                         }
                                         td class="r num" {
                                             (render_score_delta(game.display_score_change, "rating-positive", "rating-negative"))
@@ -1225,22 +1222,49 @@ fn ordinal(n: i32) -> String {
     }
 }
 
-/// Rating delta chip: one decimal when the change is meaningful (|Δ| >= 0.05),
-/// a directional glyph with the exact value in the hover title when the change
-/// is sub-threshold, and nothing at all for an exact zero. Class names are
-/// caller-supplied because the rail and the history table style deltas
-/// differently ("delta up"/"delta down" vs "rating-positive"/"rating-negative").
-fn render_score_delta(delta: f64, up_class: &str, down_class: &str) -> Markup {
+/// Rating delta chip. Veteran snakes move by hundredths or thousandths of a
+/// point per game, so the number keeps enough decimals to stay readable: two
+/// from 0.01 up, three below that. A change too small for three decimals gets
+/// a directional glyph with the value in its hover title, and an exact zero
+/// renders nothing. Class names are caller-supplied because each surface styles
+/// deltas differently ("delta up"/"delta down" vs "rating-positive"/"rating-negative").
+pub(crate) fn render_score_delta(delta: f64, up_class: &str, down_class: &str) -> Markup {
     if delta == 0.0 {
         return html! {};
     }
     let class = if delta > 0.0 { up_class } else { down_class };
+    let magnitude = delta.abs();
     html! {
-        @if delta.abs() >= 0.05 {
-            span class=(class) { (format!("{delta:+.1}")) }
+        @if magnitude >= 0.01 {
+            span class=(class) { (format!("{delta:+.2}")) }
+        } @else if magnitude >= 0.001 {
+            span class=(class) { (format!("{delta:+.3}")) }
         } @else {
-            span class=(class) title=(format!("{delta:+.3}")) {
+            span class=(class) title=(format!("{delta:+.4}")) {
                 @if delta > 0.0 { "▲" } @else { "▼" }
+            }
+        }
+    }
+}
+
+/// A game's placement in a snake's history. Sharing first place is a draw, not
+/// a win, so it never gets the gold medal.
+fn history_placement_badge(
+    placement: i32,
+    opponents: Option<&[leaderboard::GameOpponent]>,
+) -> Markup {
+    let shared_first = placement == 1
+        && opponents.is_some_and(|opps| opps.iter().any(|opp| opp.placement == Some(1)));
+    html! {
+        @if shared_first {
+            span class="badge" { "🤝 Draw" }
+        } @else {
+            @match placement {
+                1 => span class="badge ok" { "🥇 1st" },
+                2 => span class="badge" { "🥈 2nd" },
+                3 => span class="badge" { "🥉 3rd" },
+                // 4+ (max 4 snakes/game) — "th" is always right
+                p => span class="badge" { (p) "th" },
             }
         }
     }
@@ -1248,29 +1272,47 @@ fn render_score_delta(delta: f64, up_class: &str, down_class: &str) -> Markup {
 
 #[cfg(test)]
 mod tests {
-    use super::render_score_delta;
+    use super::{history_placement_badge, render_score_delta};
+    use crate::models::leaderboard::GameOpponent;
+    use uuid::Uuid;
 
     #[test]
-    fn meaningful_delta_keeps_one_decimal() {
+    fn deltas_from_a_hundredth_up_show_two_decimals() {
         assert_eq!(
             render_score_delta(1.26, "delta up", "delta down").into_string(),
-            r#"<span class="delta up">+1.3</span>"#
+            r#"<span class="delta up">+1.26</span>"#
         );
         assert_eq!(
-            render_score_delta(-1.26, "delta up", "delta down").into_string(),
-            r#"<span class="delta down">-1.3</span>"#
+            render_score_delta(-0.033, "rating-positive", "rating-negative").into_string(),
+            r#"<span class="rating-negative">-0.03</span>"#
+        );
+        assert_eq!(
+            render_score_delta(0.01, "delta up", "delta down").into_string(),
+            r#"<span class="delta up">+0.01</span>"#
         );
     }
 
     #[test]
-    fn tiny_delta_renders_glyph_with_exact_title() {
+    fn deltas_under_a_hundredth_show_three_decimals() {
         assert_eq!(
-            render_score_delta(0.004, "delta up", "delta down").into_string(),
-            r#"<span class="delta up" title="+0.004">▲</span>"#
+            render_score_delta(-0.002, "rating-positive", "rating-negative").into_string(),
+            r#"<span class="rating-negative">-0.002</span>"#
         );
         assert_eq!(
-            render_score_delta(-0.004, "rating-positive", "rating-negative").into_string(),
-            r#"<span class="rating-negative" title="-0.004">▼</span>"#
+            render_score_delta(0.001, "delta up", "delta down").into_string(),
+            r#"<span class="delta up">+0.001</span>"#
+        );
+    }
+
+    #[test]
+    fn deltas_under_a_thousandth_render_glyph_with_exact_title() {
+        assert_eq!(
+            render_score_delta(0.0004, "delta up", "delta down").into_string(),
+            r#"<span class="delta up" title="+0.0004">▲</span>"#
+        );
+        assert_eq!(
+            render_score_delta(-0.0004, "rating-positive", "rating-negative").into_string(),
+            r#"<span class="rating-negative" title="-0.0004">▼</span>"#
         );
     }
 
@@ -1287,21 +1329,46 @@ mod tests {
         );
     }
 
+    fn opponent(placement: Option<i32>) -> GameOpponent {
+        GameOpponent {
+            game_id: Uuid::nil(),
+            snake_name: "opponent".to_string(),
+            placement,
+            leaderboard_entry_id: None,
+        }
+    }
+
     #[test]
-    fn threshold_boundary_uses_one_decimal() {
+    fn shared_first_place_is_a_draw() {
+        let opponents = [opponent(Some(1))];
         assert_eq!(
-            render_score_delta(0.05, "delta up", "delta down").into_string(),
-            r#"<span class="delta up">+0.1</span>"#
+            history_placement_badge(1, Some(&opponents)).into_string(),
+            r#"<span class="badge">🤝 Draw</span>"#
         );
+    }
+
+    #[test]
+    fn outright_first_place_keeps_the_medal() {
+        let opponents = [opponent(Some(2))];
+        let medal = r#"<span class="badge ok">🥇 1st</span>"#;
         assert_eq!(
-            render_score_delta(-0.05, "rating-positive", "rating-negative").into_string(),
-            r#"<span class="rating-negative">-0.1</span>"#
+            history_placement_badge(1, Some(&opponents)).into_string(),
+            medal
         );
-        // Just below the threshold takes the glyph path.
-        assert!(
-            render_score_delta(0.049, "delta up", "delta down")
-                .into_string()
-                .contains(r#"title="+0.049""#)
+        // Opponents with no recorded placement or none at all prove no tie.
+        assert_eq!(
+            history_placement_badge(1, Some(&[opponent(None)])).into_string(),
+            medal
+        );
+        assert_eq!(history_placement_badge(1, None).into_string(), medal);
+    }
+
+    #[test]
+    fn losing_to_tied_winners_is_not_a_draw() {
+        let opponents = [opponent(Some(1)), opponent(Some(1))];
+        assert_eq!(
+            history_placement_badge(3, Some(&opponents)).into_string(),
+            r#"<span class="badge">🥉 3rd</span>"#
         );
     }
 }
@@ -1389,6 +1456,97 @@ mod owner_name_route_tests {
         .await
         .unwrap();
         entry_id
+    }
+
+    /// Records one finished two-snake leaderboard game for both entries.
+    async fn finished_duel(
+        pool: &PgPool,
+        leaderboard_id: Uuid,
+        results: [(Uuid, i32, f64); 2],
+    ) -> Uuid {
+        let game = crate::models::game::create_game(
+            pool,
+            crate::models::game::CreateGame {
+                board_size: crate::models::game::GameBoardSize::Medium,
+                game_type: crate::models::game::GameType::Standard,
+            },
+        )
+        .await
+        .unwrap();
+        let lb_game = leaderboard::create_leaderboard_game(pool, leaderboard_id, game.game_id)
+            .await
+            .unwrap();
+        for (entry_id, placement, display_score_change) in results {
+            sqlx::query(
+                "INSERT INTO game_battlesnakes (game_id, leaderboard_entry_id, placement)
+                 VALUES ($1, $2, $3)",
+            )
+            .bind(game.game_id)
+            .bind(entry_id)
+            .bind(placement)
+            .execute(pool)
+            .await
+            .unwrap();
+            leaderboard::create_game_result(
+                pool,
+                leaderboard::CreateGameResult {
+                    leaderboard_game_id: lb_game.leaderboard_game_id,
+                    leaderboard_entry_id: entry_id,
+                    placement,
+                    mu_before: 50.0,
+                    mu_after: 50.0,
+                    sigma_before: 0.6,
+                    sigma_after: 0.6,
+                    display_score_change,
+                },
+            )
+            .await
+            .unwrap();
+        }
+        game.game_id
+    }
+
+    /// A veteran's history shows real numbers for tiny rating changes, and a
+    /// shared first place reads as a draw while an outright win keeps the medal.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn entry_history_shows_small_deltas_and_draws(pool: PgPool) {
+        let leaderboard_id = leaderboard::get_active_leaderboards(&pool)
+            .await
+            .unwrap()
+            .first()
+            .expect("migrations seed an active leaderboard")
+            .leaderboard_id;
+        let user = owner(&pool, 9930101, "gh-veteran", None).await;
+        let veteran = entry(&pool, leaderboard_id, user, "Veteran", 3000, 0).await;
+        let rival = entry(&pool, leaderboard_id, user, "Rival", 3000, 0).await;
+
+        finished_duel(
+            &pool,
+            leaderboard_id,
+            [(veteran, 1, -0.013), (rival, 1, 0.013)],
+        )
+        .await;
+        let path = format!("/leaderboards/{leaderboard_id}/entries/{veteran}");
+
+        let (status, body) = get(&pool, &path).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("🤝 Draw"), "shared first place is a draw");
+        assert!(!body.contains("🥇 1st"), "a draw never gets the medal");
+        assert!(
+            body.contains(r#"<span class="rating-negative">-0.01</span>"#),
+            "tiny loss shows its number"
+        );
+
+        finished_duel(
+            &pool,
+            leaderboard_id,
+            [(veteran, 1, 0.033), (rival, 2, -0.033)],
+        )
+        .await;
+
+        let (_, body) = get(&pool, &path).await;
+        assert!(body.contains("🥇 1st"), "an outright win keeps the medal");
+        assert!(body.contains(r#"<span class="rating-positive">+0.03</span>"#));
     }
 
     /// Leaderboard surfaces show the owner's display name as link text while
