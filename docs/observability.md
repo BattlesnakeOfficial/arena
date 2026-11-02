@@ -105,11 +105,12 @@ attempt, process instance heartbeat, deployment, and Cloud Run logs.
 
 Phases are a closed set (`game_progress::Phase`). Per-turn phases
 (`request_moves`, `persist_turn`, and the `persist_turn.*` stages) emit their
-start span and `completed` event at DEBUG, which Eyes keeps for 7 days.
-Once-per-game phases (`load_game`, `reset_game`, `prepare_snakes`,
-`start_snakes`, `end_snakes`, `finish_game`, `post_completion`) stay at INFO
-for 30 days. `failed` is ERROR and `cancelled` is WARN for every phase, so a
-failure never ages out early. The per-turn `db_write_latency` and
+start span and `completed` event at DEBUG, which Eyes keeps in Postgres for 2
+days and in its lake after that. Once-per-game phases (`load_game`,
+`reset_game`, `prepare_snakes`, `start_snakes`, `end_snakes`, `finish_game`,
+`post_completion`) stay at INFO, which Postgres keeps for longer. `failed` is
+ERROR and `cancelled` is WARN for every phase, so a failure never ages out
+early. The per-turn `db_write_latency` and
 `scheduler_jitter` metric events stay at INFO because named metrics and
 thresholds read them over 24-hour and 7-day windows.
 
@@ -140,10 +141,11 @@ in Eyes after rollout, alongside the source Cloud Logging records.
 
 ## Retention
 
-The boot manifest declares DEBUG retention of 7 days
+The boot manifest declares DEBUG retention of 2 days
 (`observability::DEBUG_RETENTION_DAYS`). Every other level keeps Eyes' server
-default of 30 days. Eyes routes each row into a per-level retention class and
-drops expired DEBUG data a day at a time, instead of deleting rows.
+default. Eyes routes each row into a per-level retention class and drops expired
+DEBUG data from Postgres a day at a time, instead of deleting rows. Eyes' lake
+keeps a copy of every row, and queries over older windows read from it.
 
 Routing starts only when `eyes --app <arena app id> retention` reports
 `routing_active: true`. That requires the classes to be ready and today's

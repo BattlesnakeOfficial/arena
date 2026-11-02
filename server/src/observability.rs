@@ -14,9 +14,9 @@ use eyes_subscriber::{
 
 pub const ROLE: &str = "arena";
 
-/// Days Eyes keeps arena's DEBUG telemetry. Every other level keeps Eyes'
-/// server default (30 days).
-pub const DEBUG_RETENTION_DAYS: u32 = 7;
+/// Days Eyes keeps arena's DEBUG telemetry in Postgres; its lake keeps it after
+/// that. Every other level keeps Eyes' server default.
+pub const DEBUG_RETENTION_DAYS: u32 = 2;
 
 pub fn manifest(
     registry: &cja::cron::CronRegistry<AppState>,
