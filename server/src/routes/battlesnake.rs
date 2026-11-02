@@ -1356,6 +1356,7 @@ fn render_battlesnake_profile(view: &ProfileView<'_>) -> Markup {
                     @if stats.finished_games > 0 {
                         div class="stat-detail" title="Finishes by placement" {
                             span { "🥇 " (stats.wins) }
+                            span { "🤝 " (stats.draws) }
                             span { "🥈 " (stats.second_places) }
                             span { "🥉 " (stats.third_places) }
                             span { "4th " (stats.fourth_places) }

@@ -1221,26 +1221,25 @@ fn ordinal(n: i32) -> String {
 
 /// Rating delta chip. Veteran snakes move by hundredths or thousandths of a
 /// point per game, so the number keeps enough decimals to stay readable: two
-/// from 0.01 up, three below that. A change too small for three decimals gets
-/// a directional glyph with the value in its hover title, and an exact zero
-/// renders nothing. Class names are caller-supplied because each surface styles
-/// deltas differently ("delta up"/"delta down" vs "rating-positive"/"rating-negative").
+/// from 0.01 up, three from 0.001, four below that. A change that would still
+/// print as zero renders nothing, like an exact zero. Class names are
+/// caller-supplied because each surface styles deltas differently
+/// ("delta up"/"delta down" vs "rating-positive"/"rating-negative").
 pub(crate) fn render_score_delta(delta: f64, up_class: &str, down_class: &str) -> Markup {
-    if delta == 0.0 {
+    let magnitude = delta.abs();
+    if magnitude < 0.00005 {
         return html! {};
     }
     let class = if delta > 0.0 { up_class } else { down_class };
-    let magnitude = delta.abs();
+    let decimals = if magnitude >= 0.01 {
+        2
+    } else if magnitude >= 0.001 {
+        3
+    } else {
+        4
+    };
     html! {
-        @if magnitude >= 0.01 {
-            span class=(class) { (format!("{delta:+.2}")) }
-        } @else if magnitude >= 0.001 {
-            span class=(class) { (format!("{delta:+.3}")) }
-        } @else {
-            span class=(class) title=(format!("{delta:+.4}")) {
-                @if delta > 0.0 { "▲" } @else { "▼" }
-            }
-        }
+        span class=(class) { (format!("{delta:+.decimals$}")) }
     }
 }
 
@@ -1306,28 +1305,26 @@ mod tests {
     }
 
     #[test]
-    fn deltas_under_a_thousandth_render_glyph_with_exact_title() {
+    fn deltas_under_a_thousandth_show_four_decimals() {
         assert_eq!(
             render_score_delta(0.0004, "delta up", "delta down").into_string(),
-            r#"<span class="delta up" title="+0.0004">▲</span>"#
+            r#"<span class="delta up">+0.0004</span>"#
         );
         assert_eq!(
-            render_score_delta(-0.0004, "rating-positive", "rating-negative").into_string(),
-            r#"<span class="rating-negative" title="-0.0004">▼</span>"#
+            render_score_delta(-0.00005, "rating-positive", "rating-negative").into_string(),
+            r#"<span class="rating-negative">-0.0001</span>"#
         );
     }
 
     #[test]
-    fn zero_delta_renders_nothing() {
-        assert_eq!(
-            render_score_delta(0.0, "delta up", "delta down").into_string(),
-            ""
-        );
-        // IEEE: -0.0 == 0.0, so negative zero also renders nothing.
-        assert_eq!(
-            render_score_delta(-0.0, "delta up", "delta down").into_string(),
-            ""
-        );
+    fn deltas_that_would_print_as_zero_render_nothing() {
+        for delta in [0.0, -0.0, 0.00004, -0.00004] {
+            assert_eq!(
+                render_score_delta(delta, "delta up", "delta down").into_string(),
+                "",
+                "{delta}"
+            );
+        }
     }
 
     #[test]
