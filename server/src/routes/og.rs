@@ -1437,4 +1437,115 @@ mod tests {
         assert!(empty.snakes.is_empty());
         assert_eq!((empty.width, empty.height), (7, 7));
     }
+
+    /// DEV-1981 review pin: the social card reads `turns` through
+    /// `get_latest_frame`/`get_turn_frames_page`, so pruning a game must not
+    /// change what its card shows (task: every reader of `models/turn.rs`
+    /// must handle pruned games or touch only games inside retention; this
+    /// endpoint takes any game id). The spoiler-free card loses its opening
+    /// board and the spoiler card loses its final board and turn count.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn game_card_identical_before_and_after_prune(pool: PgPool) {
+        let state = AppState::test_from_pool(pool.clone());
+        let old = chrono::Utc::now() - chrono::Duration::days(40);
+        let game_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO games (board_size, game_type, status, created_at, updated_at)
+             VALUES ('11x11', 'Solo', 'finished', $1, $1) RETURNING game_id",
+        )
+        .bind(old)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let user_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO users (external_github_id, github_login, github_access_token)
+             VALUES (888901, 'og-prune', '') RETURNING user_id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let snake_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO battlesnakes (user_id, name, url, visibility)
+             VALUES ($1, 'OG Prune', 'http://snake', 'public') RETURNING battlesnake_id",
+        )
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let gb_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO game_battlesnakes (game_id, battlesnake_id, created_at)
+             VALUES ($1, $2, $3) RETURNING game_battlesnake_id",
+        )
+        .bind(game_id)
+        .bind(snake_id)
+        .bind(old)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        for turn in 0..3 {
+            let frame = serde_json::json!({
+                "Turn": turn,
+                "Snakes": [{
+                    "ID": gb_id.to_string(), "Name": "OG Prune", "Health": 90,
+                    "Body": [{"X": 5, "Y": 5}, {"X": 5, "Y": 4}],
+                    "Color": "#123456", "HeadType": "beluga", "TailType": "curled",
+                    "Latency": "42", "Shout": "", "Death": null
+                }],
+                "Food": [{"X": 9, "Y": 9}],
+                "Hazards": []
+            });
+            sqlx::query("INSERT INTO turns (game_id, turn_number, frame_data) VALUES ($1, $2, $3)")
+                .bind(game_id)
+                .bind(turn)
+                .bind(frame)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        crate::native_backup::archive_native_game(&state, game_id)
+            .await
+            .unwrap();
+
+        let opening_before = load_game_card(&state, game_id, false)
+            .await
+            .unwrap()
+            .unwrap();
+        let final_before = load_game_card(&state, game_id, true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            !opening_before.board.snakes.is_empty(),
+            "fixture draws a board"
+        );
+        assert_eq!(final_before.turns, Some(2), "fixture shows the final turn");
+
+        crate::turn_retention::prune_game_turns(&state, game_id)
+            .await
+            .unwrap();
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE game_id = $1")
+            .bind(game_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(remaining, 0, "fixture was actually pruned");
+
+        let opening_after = load_game_card(&state, game_id, false)
+            .await
+            .unwrap()
+            .unwrap();
+        let final_after = load_game_card(&state, game_id, true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            format!("{opening_after:?}"),
+            format!("{opening_before:?}"),
+            "spoiler-free card changed after pruning"
+        );
+        assert_eq!(
+            format!("{final_after:?}"),
+            format!("{final_before:?}"),
+            "spoiler card changed after pruning"
+        );
+    }
 }
