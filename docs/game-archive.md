@@ -66,3 +66,64 @@ The `games` row — never the object — decides how `Game` is served:
 - Storage error, timeout (10 s fetch cap), or corrupt/oversized object
   (64 MiB caps before and after decompression): 500; nothing partial is
   cached. The websocket uses its usual error-event-then-close behavior.
+
+## Turn retention (pruning, DEV-1981)
+
+`turns`/`snake_turns` rows for archived native games are deleted after a
+retention window, once the archive object's CONTENT is confirmed. Env
+`ARENA_TURN_RETENTION_DAYS` (default 30, clamped ≥ 1; large values
+effectively disable pruning).
+
+**Prune predicate** (hourly discovery, oldest-first, `LIMIT 2000`/run):
+native (`engine_game_id IS NULL`), terminal (`finished`/`failed`),
+`archived_at` set with `archive_version = 2` and a `gcs_path`, older than
+retention, not yet pruned (`turns_pruned_at IS NULL`), and no
+`game_battlesnakes` link inside the active-week backfill's rescan window
+(the cursor minus 1 day — the backfill rescans from
+`scanned_through - 1 day` and its `legacy_finishes` reads turns, so a
+prune inside that window could re-credit a WRONG week). The predicate's
+partial index is `games_turns_prunable_idx`; rows leave it when
+`turns_pruned_at` is set, which is also the idempotency marker.
+
+**Content confirmation before delete**: GET the object, decode it, and
+require `archive_version = 2`, `game_id` matching the row, and frames
+equal one-for-one (as `serde_json::Value`) to what the archiver would
+write now (`native_backup::fetch_native_frame_texts` — the same selection
+on both sides). Rows are NEVER deleted for a game whose object is missing,
+undecodable, wrong-version, wrong-id, or content/frame-count mismatched:
+those are retained (fail-closed — the turns are the only complete copy),
+logged at ERROR, re-enqueued hourly. Remedy for permanently stuck games:
+clear `archived_at`/`gcs_path`/`archive_version` so DEV-1980 discovery
+re-archives (the path is deterministic, so the re-archive overwrites the
+bad object). Enough stuck games (≥ the 2000/run cap) stall pruning
+entirely — visible as discovery candidates that never shrink.
+
+**Concurrency**: per-game prune jobs (`PruneGameTurnsJob`, priority −20,
+below backup jobs' −10) serialize on the shared 1-permit `BACKUP_SLOT`
+(one heavy archive-family op per instance; never concurrent with a
+backup). The slot is acquired BEFORE the eligibility re-check, so
+duplicate jobs are silent no-ops. The DELETE + `turns_pruned_at` mark
+commit in one transaction with `lock_timeout` (5s) and
+`statement_timeout` (60s, per statement); `snake_turns` cascade via the
+FK. Each DELETE fires `watched_game_turn_delete` once: one
+`reset:<game_id>` NOTIFY at commit (watched-game viewers get a clean
+reload signal; unwatched games are a no-op) plus a transient
+transition-table materialization of the deleted rows.
+
+**Known side effects**:
+
+- The `turns_pruned_at` UPDATE bumps `games.updated_at` (trigger), so a
+  pruned month-old game reports `updated_at` ≈ prune time in public
+  list/detail APIs (same as `archived_at` marks; accepted).
+- NULL-`frame_data` turns (an incomplete last turn) and their
+  `snake_turns` are deleted unarchived — the writer never archived them
+  and no reader renders them.
+- Archive fallbacks keep `/api/games/{id}/move-request` and shout
+  moderation's distinct-shout extraction correct for pruned games
+  (native rows only; imported Play rows keep today's behavior).
+- Accepted degradations: the snake latency chart only covers games inside
+  retention (empty state otherwise); Solo stats rows and the token-authed
+  `/api/games/{id}/details` frames are empty for pruned games (same
+  shape DEV-1979 accepted for the public frames endpoint); highlights
+  admin previews of windows older than retention lose frame sections and
+  faults.

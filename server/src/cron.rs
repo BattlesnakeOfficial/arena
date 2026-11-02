@@ -11,7 +11,7 @@ use crate::jobs::{
     BackfillAchievementsJob, CustomizationActiveWeekBackfillJob, GameBackupJob,
     LeaderboardMatchmakerJob, NativeGameBackupJob, PlayGrantReconcileJob, RateLimitPruneJob,
     ReconcileRecentAchievementsJob, SnakeHealthSweeperJob, StuckGameSweeperJob,
-    StuckMatchSweeperJob,
+    StuckMatchSweeperJob, TurnRetentionJob,
 };
 use crate::state::AppState;
 
@@ -59,6 +59,13 @@ pub(crate) fn cron_registry(config: &AppConfig) -> CronRegistry<AppState> {
     registry.register_job(
         NativeGameBackupJob,
         Some("Discover arena-native games needing GCS archive"),
+        Duration::from_secs(60 * 60),
+    );
+    // Turn retention: hourly, prunes archived native games' turns past
+    // retention (DEV-1981), oldest-first
+    registry.register_job(
+        TurnRetentionJob,
+        Some("Prune archived native games' turns past retention"),
         Duration::from_secs(60 * 60),
     );
     registry.register_job(
@@ -292,6 +299,22 @@ mod tests {
         );
         let cja::cron::Schedule::Interval(interval) = &job.schedule else {
             panic!("native backup must use an interval");
+        };
+        assert_eq!(interval.0, Duration::from_secs(60 * 60));
+    }
+
+    #[test]
+    fn turn_retention_cadence() {
+        let registry = cron_registry(&AppConfig::test_default());
+        let job = registry
+            .get("TurnRetentionJob")
+            .expect("turn retention registered");
+        assert_eq!(
+            job.description,
+            Some("Prune archived native games' turns past retention")
+        );
+        let cja::cron::Schedule::Interval(interval) = &job.schedule else {
+            panic!("turn retention must use an interval");
         };
         assert_eq!(interval.0, Duration::from_secs(60 * 60));
     }

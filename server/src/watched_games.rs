@@ -675,4 +675,146 @@ mod tests {
         shutdown.cancel();
         task.await.unwrap().unwrap();
     }
+    /// SC (DEV-1981): each prune fires one `reset:<game_id>` NOTIFY at
+    /// commit. A watched game's subscriber receives `Reset` through the
+    /// real listener; an unwatched game's prune is a healthy no-op for
+    /// it. The probe game proves LISTEN was live before the prunes.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn prune_notify_resets_watched_game_and_listener_survives_unwatched(pool: sqlx::PgPool) {
+        let state = crate::state::AppState::test_from_pool(pool.clone());
+        let now = chrono::Utc::now();
+
+        async fn archived_old_native_game(
+            state: &crate::state::AppState,
+            pool: &sqlx::PgPool,
+            old: chrono::DateTime<chrono::Utc>,
+        ) -> Uuid {
+            let game_id: Uuid = sqlx::query_scalar(
+                "INSERT INTO games (board_size, game_type, status, created_at, updated_at)
+                 VALUES ('11x11', 'Standard', 'finished', $1, $1) RETURNING game_id",
+            )
+            .bind(old)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+            let login = format!("prune-notify-{}", Uuid::new_v4().simple());
+            let user_id: Uuid = sqlx::query_scalar(
+                "INSERT INTO users (external_github_id, github_login, github_access_token)
+                 VALUES ($1, $2, '') RETURNING user_id",
+            )
+            .bind(Uuid::new_v4().as_u128() as i64)
+            .bind(&login)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+            let snake_id: Uuid = sqlx::query_scalar(
+                "INSERT INTO battlesnakes (user_id, name, url, visibility)
+                 VALUES ($1, $2, 'http://snake', 'public') RETURNING battlesnake_id",
+            )
+            .bind(user_id)
+            .bind(format!("Notify Snek {game_id}"))
+            .fetch_one(pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO game_battlesnakes (game_id, battlesnake_id, created_at)
+                 VALUES ($1, $2, $3)",
+            )
+            .bind(game_id)
+            .bind(snake_id)
+            .bind(old)
+            .execute(pool)
+            .await
+            .unwrap();
+            for turn in 0..2 {
+                sqlx::query(
+                    "INSERT INTO turns (game_id, turn_number, frame_data)
+                     VALUES ($1, $2, $3)",
+                )
+                .bind(game_id)
+                .bind(turn)
+                .bind(serde_json::json!({"Turn": turn, "Snakes": []}))
+                .execute(pool)
+                .await
+                .unwrap();
+            }
+            crate::native_backup::archive_native_game(state, game_id)
+                .await
+                .unwrap();
+            game_id
+        }
+
+        let old = now - chrono::Duration::days(40);
+        let game_a = archived_old_native_game(&state, &pool, old).await; // watched
+        let game_b = archived_old_native_game(&state, &pool, old).await; // unwatched
+
+        // Probe: a live game whose turn insert proves the listener's
+        // LISTEN is registered before any prune commits.
+        let probe: Uuid = sqlx::query_scalar!(
+            "INSERT INTO games (board_size, game_type, status) VALUES ('11x11', 'Standard', 'running') RETURNING game_id"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let mut probe_sub = state.watched_games.subscribe(probe).await;
+        let mut a_sub = state.watched_games.subscribe(game_a).await;
+        // Pending entries are never polled — seed the probe so catch-up /
+        // notifications reach it (mirrors the real /events subscribe path).
+        state.watched_games.seed_if_current(probe, &mut probe_sub, -1).await;
+
+        let shutdown = CancellationToken::new();
+        let task = tokio::spawn(crate::watched_games::run_watched_games(
+            pool.clone(),
+            pool.connect_options().as_ref().clone(),
+            state.watched_games.clone(),
+            shutdown.clone(),
+        ));
+
+        // Wait for LISTEN: the probe's turn insert must reach us.
+        sqlx::query("INSERT INTO turns (game_id, turn_number, frame_data) VALUES ($1, 0, $2)")
+            .bind(probe)
+            .bind(serde_json::json!({"Turn": 0, "Snakes": []}))
+            .execute(&pool)
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !matches!(
+                probe_sub.updates.try_recv(),
+                Ok(WatchedGameUpdate::Frames(_))
+            ) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("listener live before prunes");
+
+        // Prune the UNWATCHED game first: no Reset for it, and the
+        // listener stays healthy for the next prune.
+        crate::turn_retention::prune_game_turns(&state, game_b)
+            .await
+            .unwrap();
+
+        // Prune the watched game: exactly one Reset.
+        crate::turn_retention::prune_game_turns(&state, game_a)
+            .await
+            .unwrap();
+        let mut reset_seen = false;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match a_sub.updates.recv().await.unwrap() {
+                    WatchedGameUpdate::Reset => {
+                        reset_seen = true;
+                        break;
+                    }
+                    _ => continue, // catch-up/status noise for a terminal game
+                }
+            }
+        })
+        .await
+        .expect("Reset arrives for the watched pruned game");
+        assert!(reset_seen);
+
+        shutdown.cancel();
+        task.await.unwrap().unwrap();
+    }
 }

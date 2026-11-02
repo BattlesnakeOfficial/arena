@@ -50,6 +50,10 @@ pub enum ArchiveRowKind {
 /// never stores them; serve-time parsing works from this raw text.
 #[derive(Debug)]
 pub struct ArchivedGame {
+    /// The object's self-declared format version, if any (v2-family only).
+    archive_version: Option<i32>,
+    /// The object's self-declared game id, if any (v2-family only).
+    game_id: Option<String>,
     game: Box<serde_json::value::RawValue>,
     frames: Vec<Box<serde_json::value::RawValue>>,
     /// Sum of stored raw text lengths + per-entry overhead; the cache weight.
@@ -57,6 +61,16 @@ pub struct ArchivedGame {
 }
 
 impl ArchivedGame {
+    /// The object's self-declared format version, if any (v2-family only).
+    pub(crate) fn archive_version(&self) -> Option<i32> {
+        self.archive_version
+    }
+
+    /// The object's self-declared game id, if any (v2-family only).
+    pub(crate) fn archive_game_id(&self) -> Option<&str> {
+        self.game_id.as_deref()
+    }
+
     /// Parse the engine game header — Play rows only (native rows never
     /// call this; their `Game` comes from the arena row).
     pub fn parse_game(&self) -> cja::Result<crate::engine_models::EngineGame> {
@@ -102,11 +116,16 @@ pub enum LoadArchiveError {
 }
 
 /// Decode target. Unknown top-level fields (v1's `exported_at`; v2's
-/// `archive_version`, `game_id`, `exported_at`) are ignored by serde's
-/// default tolerance, and `game` is captured as raw text whatever shape it
-/// carries — that IS the v1/v2/native compatibility.
+/// `exported_at`) are ignored by serde's default tolerance, and `game` is
+/// captured as raw text whatever shape it carries — that IS the
+/// v1/v2/native compatibility. v2-family objects (Play v2 and native)
+/// self-describe with `archive_version` and `game_id`; v1 Play objects
+/// carry neither (None). Surfaced for DEV-1981's prune confirm; not
+/// counted in `cached_bytes` (two scalars).
 #[derive(serde::Deserialize)]
 struct ArchivedExport {
+    archive_version: Option<i32>,
+    game_id: Option<String>,
     game: Box<serde_json::value::RawValue>,
     frames: Vec<Box<serde_json::value::RawValue>>,
 }
@@ -116,7 +135,10 @@ struct ArchivedExport {
 /// validated only for Play rows (native headers are not EngineGame-shaped
 /// and are ignored on read). Pure CPU — callers run it on the blocking
 /// pool under [`ARCHIVE_DECODE_SLOT`], never an async worker.
-fn decode_archive_object(compressed: &[u8], kind: ArchiveRowKind) -> cja::Result<ArchivedGame> {
+pub(crate) fn decode_archive_object(
+    compressed: &[u8],
+    kind: ArchiveRowKind,
+) -> cja::Result<ArchivedGame> {
     if compressed.len() > MAX_ARCHIVE_COMPRESSED_BYTES {
         return Err(cja::color_eyre::eyre::eyre!(
             "Archive object exceeds the compressed-size cap ({} > {} bytes)",
@@ -150,6 +172,8 @@ fn decode_archive_object(compressed: &[u8], kind: ArchiveRowKind) -> cja::Result
             .map(|f| f.get().len() + RAW_ENTRY_OVERHEAD)
             .sum::<usize>();
     Ok(ArchivedGame {
+        archive_version: export.archive_version,
+        game_id: export.game_id,
         game: export.game,
         frames: export.frames,
         cached_bytes,
@@ -410,6 +434,13 @@ impl ArchiveReader {
         Ok(frame)
     }
 
+    /// Tests only: whether a decoded object for this game sits in the cache
+    /// (DEV-1981 asserts the prune confirm never populates it).
+    #[cfg(test)]
+    pub(crate) fn cached(&self, game_id: Uuid) -> bool {
+        self.cache.peek(game_id).is_some()
+    }
+
     /// Parse + prep a page of frames (<= 100, up to a few hundred KB of
     /// text) off the async workers, under [`ARCHIVE_DECODE_SLOT`].
     pub async fn prepare_frame_page(
@@ -435,6 +466,37 @@ impl ArchiveReader {
         .await
         .wrap_err("Archive page parse task panicked")?
     }
+
+    /// Find the archived frame whose `Turn` field equals `turn`, parsed as a
+    /// `Value` (DEV-1981: move-request fallback for pruned games). Frames are
+    /// in ascending turn order, so the scan stops past `turn`. Parsing runs
+    /// on the blocking pool under [`ARCHIVE_DECODE_SLOT`]. The permit moves
+    /// into the closure so it outlives the blocking task.
+    pub async fn frame_for_turn(
+        &self,
+        archived: Arc<ArchivedGame>,
+        turn: i32,
+    ) -> cja::Result<Option<serde_json::Value>> {
+        let permit = ARCHIVE_DECODE_SLOT
+            .acquire()
+            .await
+            .wrap_err("Archive decode slot closed")?;
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            for raw in archived.frames() {
+                let frame: serde_json::Value =
+                    serde_json::from_str(raw.get()).wrap_err("Failed to parse archived frame")?;
+                match frame.get("Turn").and_then(serde_json::Value::as_i64) {
+                    Some(t) if t == i64::from(turn) => return Ok(Some(frame)),
+                    Some(t) if t > i64::from(turn) => break,
+                    _ => continue, // missing/non-numeric Turn: skip defensively
+                }
+            }
+            Ok(None)
+        })
+        .await
+        .wrap_err("Archive turn-lookup task panicked")?
+    }
 }
 
 #[cfg(test)]
@@ -457,6 +519,10 @@ mod tests {
         // Blanking happens at prep, not decode: the raw text still carries
         // the secret URL.
         assert!(archived.frames()[0].get().contains("snake.example.com"));
+        // v1 Play objects carry no self-describing header: both accessors
+        // are None (surfaced for DEV-1981's prune confirm).
+        assert_eq!(archived.archive_version(), None);
+        assert_eq!(archived.archive_game_id(), None);
     }
 
     #[test]
@@ -467,6 +533,12 @@ mod tests {
         assert!(archived.cached_bytes() > 0);
         let game = archived.parse_game().unwrap();
         assert_eq!(game.width, 15);
+        // v2 objects self-describe: version + play id (DEV-1981 confirm).
+        assert_eq!(archived.archive_version(), Some(2));
+        assert_eq!(
+            archived.archive_game_id(),
+            Some("22222222-2222-2222-2222-222222222222")
+        );
     }
 
     #[test]
@@ -478,6 +550,11 @@ mod tests {
         let archived = decode_archive_object(&compressed, ArchiveRowKind::Native).unwrap();
         assert_eq!(archived.frame_count(), 2);
         assert!(archived.cached_bytes() > 0);
+        assert_eq!(archived.archive_version(), Some(2));
+        assert_eq!(
+            archived.archive_game_id(),
+            Some("33333333-3333-3333-3333-333333333333")
+        );
     }
 
     #[test]

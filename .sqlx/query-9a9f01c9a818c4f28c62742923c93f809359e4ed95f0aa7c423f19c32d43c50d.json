@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT game_id FROM games\n        WHERE engine_game_id IS NULL\n          AND status IN ('finished', 'failed')\n          AND archived_at IS NOT NULL\n          AND archive_version = 2\n          AND turns_pruned_at IS NULL\n          AND gcs_path IS NOT NULL\n          AND created_at < NOW() - make_interval(days => $1)\n          AND NOT EXISTS (\n              SELECT 1 FROM game_battlesnakes gb\n              WHERE gb.game_id = games.game_id\n                AND gb.created_at >= (SELECT scanned_through - INTERVAL '1 day'\n                                      FROM customization_active_week_backfill_cursor\n                                      WHERE singleton)\n          )\n        ORDER BY created_at ASC, game_id ASC\n        LIMIT $2\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "game_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "9a9f01c9a818c4f28c62742923c93f809359e4ed95f0aa7c423f19c32d43c50d"
+}

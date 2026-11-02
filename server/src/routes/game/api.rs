@@ -263,7 +263,7 @@ fn archive_row_kind(record: &GameRow) -> ArchiveRowKind {
 /// guard keeps live games (waiting/running) on the DB path and the live
 /// websocket even if they carry a stale `gcs_path`. The `turns` probe runs
 /// only for archived-looking rows, so live games pay nothing.
-async fn serves_from_archive(db: &sqlx::PgPool, record: &GameRow) -> cja::Result<bool> {
+pub(crate) async fn serves_from_archive(db: &sqlx::PgPool, record: &GameRow) -> cja::Result<bool> {
     if record.gcs_path.is_none()
         || !matches!(
             record.game.status,
@@ -277,7 +277,7 @@ async fn serves_from_archive(db: &sqlx::PgPool, record: &GameRow) -> cja::Result
 
 /// Load the archived game for an HTTP endpoint: missing object → 404
 /// (ERROR log happens inside the reader), storage/decode failure → 500.
-async fn load_archived_for_http(
+pub(crate) async fn load_archived_for_http(
     state: &AppState,
     record: &GameRow,
 ) -> ServerResult<std::sync::Arc<ArchivedGame>, StatusCode> {
@@ -3585,5 +3585,224 @@ mod live_tests {
         poller.await.unwrap().unwrap();
         web.await.unwrap();
         job_worker.await.unwrap().unwrap();
+    }
+    /// SC (DEV-1981): every public replay surface is byte-identical
+    /// before and after the real pruner deletes the game's `turns`: the
+    /// `/api/games/{id}` body, every `/frames` page, the `/events`
+    /// websocket sequence (all frames, exactly one `game_end`, close), and
+    /// the `/games/{id}` page. The fixture's persisted frames carry
+    /// NON-empty URL/ProxyURL/APIVersion so the blanking is proven on both
+    /// paths (both must serve them blank).
+    #[sqlx::test(migrations = "../migrations")]
+    async fn replays_identical_before_and_after_prune(pool: PgPool) {
+        use tower::ServiceExt as _;
+
+        let state = AppState::test_from_pool(pool.clone());
+        let old = chrono::Utc::now() - chrono::Duration::days(40);
+
+        let game_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO games (board_size, game_type, status, created_at, updated_at)
+             VALUES ('11x11', 'Standard', 'finished', $1, $1) RETURNING game_id",
+        )
+        .bind(old)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        // Two snakes (distinct names), links 40 days old.
+        let mut gb_ids = Vec::new();
+        for (github, name) in [(9_980_001, "Replay One"), (9_980_002, "Replay Two")] {
+            let login = format!("replay-{github}");
+            let user_id: Uuid = sqlx::query_scalar(
+                "INSERT INTO users (external_github_id, github_login, github_access_token)
+                 VALUES ($1, $2, '') RETURNING user_id",
+            )
+            .bind(github)
+            .bind(&login)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            let snake_id: Uuid = sqlx::query_scalar(
+                "INSERT INTO battlesnakes (user_id, name, url, visibility)
+                 VALUES ($1, $2, 'http://snake', 'public') RETURNING battlesnake_id",
+            )
+            .bind(user_id)
+            .bind(name)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            let gb: Uuid = sqlx::query_scalar(
+                "INSERT INTO game_battlesnakes (game_id, battlesnake_id, created_at)
+                 VALUES ($1, $2, $3) RETURNING game_battlesnake_id",
+            )
+            .bind(game_id)
+            .bind(snake_id)
+            .bind(old)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            gb_ids.push((gb, name));
+        }
+
+        // Three frames, two snakes each, with NON-empty private fields —
+        // both serve paths must blank them.
+        let frame = |turn: i32| {
+            let snakes: Vec<serde_json::Value> = gb_ids
+                .iter()
+                .enumerate()
+                .map(|(i, (gb, name))| {
+                    serde_json::json!({
+                        "ID": gb.to_string(),
+                        "Name": name,
+                        "Body": [{"X": 1 + i, "Y": 1 + turn}],
+                        "Health": 100 - turn,
+                        "Color": "#123456",
+                        "HeadType": "beluga",
+                        "TailType": "curled",
+                        "Latency": "42",
+                        "Shout": if turn == 1 { "hello" } else { "" },
+                        "Death": null,
+                        "URL": "https://snake.example.com/move?token=sekrit",
+                        "ProxyURL": "https://proxy.example.com/s",
+                        "APIVersion": "1",
+                        "Author": "",
+                    })
+                })
+                .collect();
+            serde_json::json!({
+                "Turn": turn,
+                "Snakes": snakes,
+                "Food": [{"X": 9, "Y": 9}],
+                "Hazards": [],
+            })
+        };
+        for turn in 0..3 {
+            crate::models::turn::create_turn(&pool, game_id, turn, Some(frame(turn)))
+                .await
+                .unwrap();
+        }
+
+        // The REAL writer, then capture before pruning.
+        crate::native_backup::archive_native_game(&state, game_id)
+            .await
+            .unwrap();
+
+        let capture = |state: AppState| async move {
+            let info = axum::body::to_bytes(
+                get_game_info(State(state.clone()), Path(game_id))
+                    .await
+                    .unwrap()
+                    .into_response()
+                    .into_body(),
+                usize::MAX,
+            )
+            .await
+            .unwrap()
+            .to_vec();
+            let mut frames_pages = Vec::new();
+            for (offset, limit) in [(0, 2), (2, 2), (4, 2)] {
+                frames_pages.push(
+                    axum::body::to_bytes(
+                        get_game_frames(
+                            State(state.clone()),
+                            Path(game_id),
+                            Query(FramesQuery {
+                                offset: Some(offset),
+                                limit: Some(limit),
+                            }),
+                        )
+                        .await
+                        .unwrap()
+                        .into_response()
+                        .into_body(),
+                        usize::MAX,
+                    )
+                    .await
+                    .unwrap()
+                    .to_vec(),
+                );
+            }
+            (info, frames_pages)
+        };
+        let (info_before, pages_before) = capture(state.clone()).await;
+
+        // The websocket sequence, and the game page status.
+        let ws_sequence = |state: AppState| async move {
+            let (base, shutdown, web) = start(state).await;
+            let mut client = connect(&base, game_id).await;
+            let mut messages = Vec::new();
+            for _ in 0..3 {
+                messages.push(next(&mut client).await);
+            }
+            messages.push(next(&mut client).await); // game_end
+            close(&mut client).await;
+            shutdown.cancel();
+            web.await.unwrap();
+            messages
+        };
+        let ws_before = ws_sequence(state.clone()).await;
+
+        let page_status = |state: AppState| async move {
+            let response = crate::routes::routes(state)
+                .expect("asset router")
+                .into_router()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(format!("/games/{game_id}"))
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            response.status()
+        };
+        let page_before = page_status(state.clone()).await;
+
+        // The REAL pruner.
+        crate::turn_retention::prune_game_turns(&state, game_id)
+            .await
+            .unwrap();
+
+        let (info_after, pages_after) = capture(state.clone()).await;
+        let ws_after = ws_sequence(state.clone()).await;
+        let page_after = page_status(state.clone()).await;
+
+        assert_eq!(info_before, info_after, "game info byte-identical");
+        assert_eq!(
+            pages_before, pages_after,
+            "every frames page byte-identical"
+        );
+        assert_eq!(ws_before, ws_after, "websocket sequence identical");
+        assert_eq!(page_before, axum::http::StatusCode::OK);
+        assert_eq!(page_after, axum::http::StatusCode::OK);
+
+        // Exactly one game_end in each sequence.
+        for (label, ws) in [("before", &ws_before), ("after", &ws_after)] {
+            let ends = ws.iter().filter(|m| m["Type"] == "game_end").count();
+            assert_eq!(ends, 1, "{label}: exactly one game_end");
+        }
+
+        // Private fields blank on every snake on every endpoint, both
+        // passes — against a fixture that persisted them non-empty.
+        let check_blanks = |label: &str, ws: &[serde_json::Value], pages: &[Vec<u8>]| {
+            for message in ws {
+                if message["Type"] == "frame" {
+                    for snake in message["Data"]["Snakes"].as_array().unwrap() {
+                        ws_snake_public_shape(snake);
+                    }
+                }
+            }
+            for page in pages {
+                let value: serde_json::Value = serde_json::from_slice(page).unwrap();
+                for frame in value["Frames"].as_array().unwrap() {
+                    for snake in frame["Snakes"].as_array().unwrap() {
+                        ws_snake_public_shape(snake);
+                    }
+                }
+            }
+            let _ = label;
+        };
+        check_blanks("before", &ws_before, &pages_before);
+        check_blanks("after", &ws_after, &pages_after);
     }
 }

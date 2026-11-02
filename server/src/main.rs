@@ -58,6 +58,7 @@ mod stuck_game_sweeper;
 mod telemetry;
 mod tournament_bracket;
 mod tournament_match;
+mod turn_retention;
 mod watched_games;
 mod wire;
 

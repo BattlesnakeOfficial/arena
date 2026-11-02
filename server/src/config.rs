@@ -259,6 +259,10 @@ pub struct AppConfig {
     /// `waiting`/`running` before the stuck-game sweeper marks it `failed`.
     /// Env `STUCK_GAME_MAX_AGE_HOURS`, default 2h, clamped to >= 1.
     pub stuck_game_max_age_hours: i32,
+    /// Days to retain `turns`/`snake_turns` rows for archived native games
+    /// before pruning (DEV-1981). Env `ARENA_TURN_RETENTION_DAYS`, default
+    /// 30, clamped to >= 1. Large values effectively disable pruning.
+    pub turn_retention_days: i32,
     /// Maximum wait before a ladder game may overlap other game sources.
     pub ladder_start_deadline_secs: i64,
 
@@ -444,6 +448,7 @@ impl AppConfig {
             snake_health_failure_threshold: parse_env("SNAKE_HEALTH_FAILURE_THRESHOLD", 3).max(1),
             snake_health_recovery_threshold: parse_env("SNAKE_HEALTH_RECOVERY_THRESHOLD", 2).max(1),
             stuck_game_max_age_hours: parse_env("STUCK_GAME_MAX_AGE_HOURS", 2).max(1),
+            turn_retention_days: parse_env("ARENA_TURN_RETENTION_DAYS", 30).max(1),
             ladder_start_deadline_secs: ladder_start_deadline(
                 std::env::var("LADDER_START_DEADLINE_SECS").ok().as_deref(),
             ),
@@ -506,6 +511,7 @@ impl AppConfig {
             snake_health_failure_threshold: 3,
             snake_health_recovery_threshold: 2,
             stuck_game_max_age_hours: 2,
+            turn_retention_days: 30,
             ladder_start_deadline_secs: 480,
             email_per_recipient_hourly_limit: 5,
             home_feed_cache_secs: 0,
@@ -635,6 +641,11 @@ mod tests {
         assert_eq!(job.heartbeat_interval_secs, 30);
         assert_eq!(job.reclaim_window_secs, 240);
         validate_job_lease(&job).unwrap();
+    }
+
+    #[test]
+    fn turn_retention_defaults_to_30_days() {
+        assert_eq!(AppConfig::test_default().turn_retention_days, 30);
     }
 
     #[test]

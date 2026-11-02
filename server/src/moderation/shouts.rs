@@ -21,10 +21,69 @@
 //! - **Never log shout text** at INFO — it is attacker-controlled.
 
 use std::collections::{HashMap, HashSet};
+
+use color_eyre::eyre::Context as _;
 use uuid::Uuid;
 
 use crate::models::shout_moderation::DistinctShout;
 use crate::state::AppState;
+
+/// DEV-1981: a pruned native game has no `turns` rows, so its distinct
+/// shouts come from the archive. Native rows only (`engine_game_id IS
+/// NULL`) — imported Play rows have never had shouts read from `turns`
+/// and must keep today's empty result. `Ok(None)` when the game is not
+/// archive-served (missing row, live, unarchived, or Play); storage
+/// failures propagate like DB failures (job retry is safe — nothing was
+/// half-written except idempotent rows). Cost on the finish path (the
+/// common no-shout case): one `get_game_row_by_any_id` fetch — the
+/// native guard and `serves_from_archive`'s `gcs_path.is_none()` check
+/// both short-circuit before any `has_frames` probe or GCS work, because
+/// a just-finished game has no `gcs_path` yet.
+///
+/// This runs one game at a time from a finish-time job, so it
+/// deliberately does NOT take `ARCHIVE_DECODE_SLOT` (that's for discovery
+/// bursts). If the moderation path ever fans out, route it through the
+/// same slot.
+async fn distinct_shouts_from_archive(
+    state: &AppState,
+    game_id: Uuid,
+) -> cja::Result<Option<Vec<DistinctShout>>> {
+    let Some(record) = crate::models::game::get_game_row_by_any_id(&state.db, game_id).await?
+    else {
+        return Ok(None);
+    };
+    if record.engine_game_id.is_some() {
+        return Ok(None);
+    }
+    if !crate::routes::game::api::serves_from_archive(&state.db, &record).await? {
+        return Ok(None);
+    }
+    let path = record.gcs_path.clone().unwrap_or_default();
+    let archived = match state
+        .archive
+        .load(game_id, &path, crate::archive::ArchiveRowKind::Native)
+        .await
+    {
+        Ok(archived) => archived,
+        Err(crate::archive::LoadArchiveError::ObjectMissing { path }) => {
+            // Archive data loss (the object was content-confirmed at
+            // prune time). Never write a terminal "no_shouts" marker
+            // over unreadable shouts — Err so the job retries loudly.
+            return Err(color_eyre::eyre::eyre!(
+                "Archive object missing for game {game_id}: {path}"
+            ));
+        }
+        Err(crate::archive::LoadArchiveError::Failed(e)) => return Err(e),
+    };
+    let rows = tokio::task::spawn_blocking(move || {
+        // `archived` (Arc<ArchivedGame>) is owned by the closure; the
+        // extractor borrows its frames — no Vec copy on the async worker.
+        crate::models::shout_moderation::distinct_game_shouts_from_raw_frames(archived.frames())
+    })
+    .await
+    .wrap_err("Archived shout extraction task panicked")??;
+    Ok(Some(rows))
+}
 
 /// The noul proposition asked for every distinct shout, referencing the
 /// record's key so the judgment binds to that specific text: a bare
@@ -97,7 +156,18 @@ pub async fn screen_game_shouts_with(
     }
 
     // 3. Collect distinct shouts; none → terminal "no_shouts", no Jev call.
-    let rows = crate::models::shout_moderation::distinct_game_shouts(pool, game_id).await?;
+    //    DEV-1981: a pruned native game has no `turns` rows, so its shouts
+    //    come from the archive. Reachability: ScreenShoutsJob is enqueued
+    //    at game finish (game_runner.rs) and short-circuits on an existing
+    //    shout_screenings row, so the fallback only fires for old games
+    //    manually re-enqueued for screening (backfills/re-screens) — but
+    //    the task requires it to be correct for exactly those.
+    let mut rows = crate::models::shout_moderation::distinct_game_shouts(pool, game_id).await?;
+    if rows.is_empty()
+        && let Some(archived_rows) = distinct_shouts_from_archive(state, game_id).await?
+    {
+        rows = archived_rows;
+    }
     if rows.is_empty() {
         crate::models::shout_moderation::insert_shout_screening(
             pool,
@@ -1245,11 +1315,87 @@ mod tests {
         assert!(map["s1"].contains("bad"));
         Ok(())
     }
+    /// SC (DEV-1981): after the real writer + real pruner, a pruned native
+    /// game's distinct shouts come from the archive and equal the
+    /// pre-prune DB extraction; live games and imported Play rows keep
+    /// `Ok(None)`.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn distinct_shouts_from_archive_after_prune(pool: PgPool) -> cja::Result<()> {
+        let state = AppState::test_from_pool(pool.clone());
+        let old = chrono::Utc::now() - chrono::Duration::days(40);
+
+        // Prunable native fixture with shouts.
+        let game_id = fixture_game(&pool, "finished").await?;
+        sqlx::query("UPDATE games SET created_at = $1, updated_at = $1 WHERE game_id = $2")
+            .bind(old)
+            .bind(game_id)
+            .execute(&pool)
+            .await?;
+        let (user_id, snake_id, gb_id) = fixture_owned_snake(&pool, game_id).await?;
+        let _ = user_id;
+        let _ = snake_id;
+        sqlx::query("UPDATE game_battlesnakes SET created_at = $1 WHERE game_id = $2")
+            .bind(old)
+            .bind(game_id)
+            .execute(&pool)
+            .await?;
+        for turn in 0..2 {
+            fixture_turn(
+                &pool,
+                game_id,
+                turn,
+                serde_json::json!({"Turn": turn, "Snakes": [{
+                    "ID": gb_id.to_string(), "Name": "Snek", "Shout": "get rekt"
+                }]}),
+            )
+            .await?;
+        }
+
+        // Live game and imported Play row: both Ok(None).
+        let live = fixture_game(&pool, "running").await?;
+        let engine_id = "88888888-8888-8888-8888-888888888888";
+        let imported: Uuid = sqlx::query_scalar(
+            "INSERT INTO games (board_size, game_type, status, engine_game_id, archived_at, gcs_path, archive_version)
+             VALUES ('11x11', 'Standard', 'finished', $1, NOW(), 'games/2026/01/01/x.json.zst', 1)
+             RETURNING game_id",
+        )
+        .bind(engine_id)
+        .fetch_one(&pool)
+        .await?;
+        assert!(distinct_shouts_from_archive(&state, live).await?.is_none());
+        assert!(
+            distinct_shouts_from_archive(&state, imported)
+                .await?
+                .is_none()
+        );
+        // And before pruning, the native game is on the DB path: None too.
+        assert!(
+            distinct_shouts_from_archive(&state, game_id)
+                .await?
+                .is_none()
+        );
+
+        let db_rows = crate::models::shout_moderation::distinct_game_shouts(&pool, game_id).await?;
+        assert_eq!(db_rows.len(), 1);
+
+        // Real writer + real pruner.
+        crate::native_backup::archive_native_game(&state, game_id).await?;
+        crate::turn_retention::prune_game_turns(&state, game_id).await?;
+
+        let archived_rows = distinct_shouts_from_archive(&state, game_id)
+            .await?
+            .expect("Some after pruning");
+        assert_eq!(archived_rows, db_rows);
+        // And the DB extraction is now empty — the fallback is load-bearing.
+        assert!(
+            crate::models::shout_moderation::distinct_game_shouts(&pool, game_id)
+                .await?
+                .is_empty()
+        );
+        Ok(())
+    }
 }
 
-/// Manual threshold eval: needs TYPESAFE_API_KEY + network, writes no DB.
-/// Run with:
-///   TYPESAFE_API_KEY=... cargo test -p arena --bin arena shout_eval_manual -- --ignored --nocapture
 #[cfg(test)]
 mod eval {
     use super::*;

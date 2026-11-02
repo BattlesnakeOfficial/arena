@@ -21,7 +21,7 @@ use crate::{
     engine_models::{EngineGameFrame, EngineSnake},
     errors::{ServerError, ServerResult},
     models::{
-        game::{get_game_by_id, get_game_source},
+        game::{GameStatus, get_game_by_id, get_game_source},
         turn::get_turn_frame,
     },
     state::AppState,
@@ -172,6 +172,40 @@ fn download_filename(game_id: Uuid, turn: i32, snake_name: &str) -> String {
     format!("{game_id}-turn-{turn}-{slug}.json")
 }
 
+/// DEV-1981: a pruned native game has no `turns` rows, so its
+/// move-request frame comes from the archive. Native rows only, resolved
+/// by their arena `game_id`: imported Play stubs carry `gcs_path` but
+/// Play-shaped frames (never raw-parsed into `EngineGameFrame`), and
+/// legacy Play ids resolve a different row — both keep today's 404.
+/// Caller has already established the game is terminal.
+async fn archived_turn_frame(
+    state: &AppState,
+    game_id: Uuid,
+    turn: i32,
+) -> ServerResult<Option<serde_json::Value>, StatusCode> {
+    let Some(record) = crate::models::game::get_game_row_by_any_id(&state.db, game_id)
+        .await
+        .wrap_err("Failed to fetch game row for archive fallback")?
+    else {
+        return Ok(None);
+    };
+    // Native stub-by-arena-id gate, then Play-id-resolution gate (the
+    // arena row wins get_game_row_by_any_id's ORDER BY, so the second
+    // check only trips if the arena row vanished mid-request → 404 anyway).
+    if record.engine_game_id.is_some() || record.game.game_id != game_id {
+        return Ok(None);
+    }
+    if !crate::routes::game::api::serves_from_archive(&state.db, &record).await? {
+        return Ok(None);
+    }
+    let archived = crate::routes::game::api::load_archived_for_http(state, &record).await?;
+    Ok(state
+        .archive
+        .frame_for_turn(archived, turn)
+        .await
+        .wrap_err("Failed to look up archived turn frame")?)
+}
+
 /// GET /api/games/{id}/move-request?turn=&you=
 ///
 /// Public, like the frames it's built from. Served as a pretty-printed JSON
@@ -187,15 +221,33 @@ pub async fn get_move_request(
         .wrap_err("Failed to fetch game")?
         .ok_or_else(|| ServerError(eyre!("Game not found"), StatusCode::NOT_FOUND))?;
 
-    let Some(mut frame) = get_turn_frame(&state.db, game_id, query.turn)
+    let mut frame = match get_turn_frame(&state.db, game_id, query.turn)
         .await
         .wrap_err("Failed to fetch turn frame")?
-    else {
-        return Ok((
-            StatusCode::NOT_FOUND,
-            format!("Turn {} of this game hasn't been played.", query.turn),
-        )
-            .into_response());
+    {
+        Some(frame) => frame,
+        // DEV-1981: a pruned terminal native game's frame comes from the
+        // archive; a live game's turn miss is just a turn that hasn't
+        // happened yet.
+        None if matches!(game.status, GameStatus::Finished | GameStatus::Failed) => {
+            match archived_turn_frame(&state, game_id, query.turn).await? {
+                Some(frame) => frame,
+                None => {
+                    return Ok((
+                        StatusCode::NOT_FOUND,
+                        format!("Turn {} of this game hasn't been played.", query.turn),
+                    )
+                        .into_response());
+                }
+            }
+        }
+        None => {
+            return Ok((
+                StatusCode::NOT_FOUND,
+                format!("Turn {} of this game hasn't been played.", query.turn),
+            )
+                .into_response());
+        }
     };
 
     // The same public treatment the frames API gives: moderated shouts stay
@@ -816,5 +868,177 @@ mod tests {
             !body.contains(&format!("/api/games/{game_id}/move-request")),
             "{body}"
         );
+    }
+    // --- DEV-1981: archive fallback ---
+
+    /// GET through the full router with an explicit state (the shared
+    /// object store matters before/after pruning).
+    async fn get_with_state(state: &AppState, path: &str) -> (StatusCode, String) {
+        let response = crate::routes::routes(state.clone())
+            .expect("asset router")
+            .into_router()
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        (status, String::from_utf8(body.to_vec()).unwrap())
+    }
+
+    /// A pruned native fixture: 40-day-old finished Standard game, two
+    /// linked snakes, one framed turn with both snakes and shouts, and a
+    /// genuine v2 archive written by the real archiver. Returns
+    /// (state, game_id, gb_a).
+    async fn prunable_game(pool: &PgPool) -> (AppState, Uuid, Uuid) {
+        let state = AppState::test_from_pool(pool.clone());
+        let old = chrono::Utc::now() - chrono::Duration::days(40);
+        let game_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO games (board_size, game_type, status, created_at, updated_at)
+             VALUES ('11x11', 'Standard', 'finished', $1, $1) RETURNING game_id",
+        )
+        .bind(old)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        let gb_a = join(pool, game_id, user(pool, 9_970_001).await, "Prune Alpha").await;
+        let gb_b = join(pool, game_id, user(pool, 9_970_002).await, "Prune Beta").await;
+        sqlx::query("UPDATE game_battlesnakes SET created_at = $1 WHERE game_id = $2")
+            .bind(old)
+            .bind(game_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        let frame = json!({
+            "Turn": 3,
+            "Snakes": [
+                {
+                    "ID": gb_a.to_string(), "Name": "Prune Alpha", "Health": 97,
+                    "Body": [{"X": 5, "Y": 5}, {"X": 5, "Y": 4}],
+                    "Color": "#123456", "HeadType": "beluga", "TailType": "curled",
+                    "Latency": "42", "Shout": "hi alpha", "Death": null
+                },
+                {
+                    "ID": gb_b.to_string(), "Name": "Prune Beta", "Health": 88,
+                    "Body": [{"X": 1, "Y": 1}, {"X": 1, "Y": 2}],
+                    "Color": "#654321", "HeadType": "default", "TailType": "default",
+                    "Latency": "12", "Shout": "hi beta", "Death": null
+                }
+            ],
+            "Food": [{"X": 9, "Y": 9}],
+            "Hazards": []
+        });
+        sqlx::query("INSERT INTO turns (game_id, turn_number, frame_data) VALUES ($1, 3, $2)")
+            .bind(game_id)
+            .bind(frame)
+            .execute(pool)
+            .await
+            .unwrap();
+        crate::native_backup::archive_native_game(&state, game_id)
+            .await
+            .unwrap();
+        (state, game_id, gb_a)
+    }
+
+    async fn user(pool: &PgPool, github_id: i64) -> Uuid {
+        sqlx::query_scalar(
+            "INSERT INTO users (external_github_id, github_login, github_access_token)
+             VALUES ($1, $2, '') RETURNING user_id",
+        )
+        .bind(github_id)
+        .bind(format!("move-req-{github_id}"))
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    /// SC: the move-request body is byte-identical before and after the
+    /// game's turns are pruned (same status, same download bytes); a turn
+    /// beyond the archive 404s identically; a live game's missing turn
+    /// 404s without ever consulting the archive (terminal gate).
+    #[sqlx::test(migrations = "../migrations")]
+    async fn move_request_body_identical_before_and_after_prune(pool: PgPool) {
+        let (state, game_id, gb_a) = prunable_game(&pool).await;
+        let path = |turn: i32| format!("/api/games/{game_id}/move-request?turn={turn}&you={gb_a}");
+
+        let (before_status, before_body) = get_with_state(&state, &path(3)).await;
+        assert_eq!(before_status, StatusCode::OK, "{before_body}");
+        let (miss_status, miss_body) = get_with_state(&state, &path(4)).await;
+        assert_eq!(miss_status, StatusCode::NOT_FOUND);
+        assert_eq!(miss_body, "Turn 4 of this game hasn't been played.");
+
+        crate::turn_retention::prune_game_turns(&state, game_id)
+            .await
+            .unwrap();
+
+        let (after_status, after_body) = get_with_state(&state, &path(3)).await;
+        assert_eq!(after_status, before_status);
+        assert_eq!(after_body, before_body, "byte-identical across the prune");
+
+        let (miss_status2, miss_body2) = get_with_state(&state, &path(4)).await;
+        assert_eq!(miss_status2, StatusCode::NOT_FOUND);
+        assert_eq!(miss_body2, miss_body);
+
+        // Terminal gate: a live game with no frame for the requested turn
+        // 404s identically and never fetches a game row for the archive.
+        let live: Uuid = sqlx::query_scalar(
+            "INSERT INTO games (board_size, game_type, status)
+             VALUES ('11x11', 'Standard', 'running') RETURNING game_id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let (status, body) = get_with_state(
+            &state,
+            &format!("/api/games/{live}/move-request?turn=7&you=anyone"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body, "Turn 7 of this game hasn't been played.");
+    }
+
+    /// SC: the fallback is native-only. An imported Play row (engine id,
+    /// gcs_path, terminal, no turns, a real Play-shaped object at its
+    /// path) 404s by its arena id — no 500 from parsing Play frames — and
+    /// 404s "Game not found" by its engine id.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn move_request_fallback_is_native_only(pool: PgPool) {
+        use crate::routes::game::api::fixtures as fx;
+
+        let state = AppState::test_from_pool(pool.clone());
+        let engine_id = "77777777-7777-7777-7777-777777777777";
+        let gcs_path = format!("games/2026/01/01/{engine_id}.json.zst");
+        state
+            .object_store
+            .put(&gcs_path, fx::v1_archive(engine_id))
+            .await
+            .unwrap();
+        let arena_id = fx::fixture_archived_game(&pool, engine_id, &gcs_path)
+            .await
+            .unwrap();
+
+        // (a) By arena id: exactly today's turn 404 — the native gate
+        // refused before any archive fetch or EngineGameFrame parse.
+        let (status, body) = get_with_state(
+            &state,
+            &format!("/api/games/{arena_id}/move-request?turn=0&you=s1"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body, "Turn 0 of this game hasn't been played.");
+
+        // (b) By engine id: unchanged `get_game_by_id` refusal — the
+        // same 404 (status + body) as any unknown game id.
+        let (control_status, control_body) = get_with_state(
+            &state,
+            &format!("/api/games/{}/move-request?turn=0&you=s1", Uuid::new_v4()),
+        )
+        .await;
+        let (status, body) = get_with_state(
+            &state,
+            &format!("/api/games/{engine_id}/move-request?turn=0&you=s1"),
+        )
+        .await;
+        assert_eq!(status, control_status);
+        assert_eq!(body, control_body);
     }
 }

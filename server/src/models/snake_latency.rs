@@ -470,4 +470,29 @@ mod tests {
 
         Ok(())
     }
+    /// SC (DEV-1981, accepted degradation): a snake whose only finished
+    /// game is pruned gets the chart's existing empty state — default
+    /// `RecentLatency`, no games, zero stats.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn latency_chart_empty_after_prune(pool: PgPool) -> cja::Result<()> {
+        let seed = Seed::new(pool.clone()).await?;
+        let state = crate::state::AppState::test_from_pool(pool.clone());
+
+        let game = seed.game("finished", 40 * 24 * 60).await?;
+        let gb = seed.join_direct(game, seed.battlesnake_id).await?;
+        seed.moves(game, gb, &[Some(10), Some(20), None]).await?;
+
+        // Sanity: the game is in the window before pruning.
+        assert!(!seed.fetch(RECENT_GAMES_LIMIT).await?.games.is_empty());
+
+        // Real writer + real pruner.
+        crate::native_backup::archive_native_game(&state, game).await?;
+        crate::turn_retention::prune_game_turns(&state, game).await?;
+
+        assert_eq!(
+            seed.fetch(RECENT_GAMES_LIMIT).await?,
+            RecentLatency::default()
+        );
+        Ok(())
+    }
 }
