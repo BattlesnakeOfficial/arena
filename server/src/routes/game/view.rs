@@ -280,7 +280,7 @@ pub async fn view_game(
                     }
                     div class="snakes" {
                         @for battlesnake in &battlesnakes {
-                            div .scard .p1[finished && battlesnake.placement == Some(1)] {
+                            div .scard .p1[finished && winner.is_some() && battlesnake.placement == Some(1)] {
                                 div class="top" {
                                     span class="chip" style={"background:"(chip_color(&battlesnake.color))} {}
                                     div {
@@ -298,7 +298,11 @@ pub async fn view_game(
                                         @if game.status == GameStatus::Failed {
                                             "No result"
                                         } @else if let Some(placement) = battlesnake.placement {
-                                            (ordinal_place(placement))
+                                            @if placement == 1 && winner.is_none() {
+                                                "Draw"
+                                            } @else {
+                                                (ordinal_place(placement))
+                                            }
                                         } @else if finished {
                                             "—"
                                         } @else {

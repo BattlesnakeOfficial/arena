@@ -999,7 +999,7 @@ fn home_ladder_grid(
                                             b { (event.snake_name) }
                                         }
                                         " "
-                                        span class={"place p"(event.placement)} { (home_ordinal(event.placement)) }
+                                        (leaderboard::render_feed_place(event.placement, event.is_draw))
                                         " "
                                         (leaderboard::render_score_delta(event.display_score_change, "delta up", "delta down"))
                                     }
@@ -1022,17 +1022,6 @@ fn home_fmt_ago(t: chrono::DateTime<chrono::Utc>) -> String {
         3600..=86399 => format!("{}h ago", secs / 3600),
         _ => format!("{}d ago", secs / 86400),
     }
-}
-
-fn home_ordinal(n: i32) -> String {
-    let suffix = match (n % 10, n % 100) {
-        (_, 11..=13) => "th",
-        (1, _) => "st",
-        (2, _) => "nd",
-        (3, _) => "rd",
-        _ => "th",
-    };
-    format!("{n}{suffix}")
 }
 
 /// Profile page that requires authentication

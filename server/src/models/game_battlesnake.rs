@@ -325,6 +325,13 @@ pub struct GameHistoryEntry {
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
+impl GameHistoryEntry {
+    /// First place with no outright winner means it was shared.
+    pub fn is_draw(&self) -> bool {
+        self.placement == Some(1) && self.winner_name.is_none()
+    }
+}
+
 /// Return one page of profile history. Direct and per-leaderboard-entry paths
 /// walk their own `(link_id, created_at DESC)` indexes, each bounded by
 /// `offset + limit`. Participant creation time is the recency key; the row ID

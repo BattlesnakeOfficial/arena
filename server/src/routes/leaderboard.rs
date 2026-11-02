@@ -502,7 +502,7 @@ pub async fn show_leaderboard(
                                                 b { (event.snake_name) }
                                             }
                                             " "
-                                            span class={"place p"(event.placement)} { (ordinal(event.placement)) }
+                                            (render_feed_place(event.placement, event.is_draw))
                                             " "
                                             (render_score_delta(event.display_score_change, "delta up", "delta down"))
                                         }
@@ -787,7 +787,6 @@ pub async fn show_leaderboard_entry(
     let recent_games = leaderboard::get_game_history_for_entry(&state.db, entry_id, 0, 5)
         .await
         .wrap_err("Failed to fetch recent form")?;
-    let recent_form: Vec<i32> = recent_games.iter().map(|h| h.placement).collect();
 
     let game_type: GameType = lb
         .game_type
@@ -870,13 +869,14 @@ pub async fn show_leaderboard_entry(
                         (entry.games_played)
                         small { (entry.first_place_finishes) " won" }
                     }
-                    @if !recent_form.is_empty() {
+                    @if !recent_games.is_empty() {
                         div class="formrow" title="Recent form, newest first" {
-                            @for p in &recent_form {
-                                @match *p {
-                                    1 => span { "🥇" },
-                                    2 => span { "🥈" },
-                                    3 => span { "🥉" },
+                            @for game in &recent_games {
+                                @match (game.is_draw, game.placement) {
+                                    (true, _) => span { "🤝" },
+                                    (_, 1) => span { "🥇" },
+                                    (_, 2) => span { "🥈" },
+                                    (_, 3) => span { "🥉" },
                                     _ => span { "▪️" },
                                 }
                             }
@@ -988,10 +988,7 @@ pub async fn show_leaderboard_entry(
                                             }
                                         }
                                         td class="r" {
-                                            (history_placement_badge(
-                                                game.placement,
-                                                opponents_map.get(&game.game_id).map(Vec::as_slice),
-                                            ))
+                                            (placement_badge(game.placement, game.is_draw))
                                         }
                                         td class="r num" {
                                             (render_score_delta(game.display_score_change, "rating-positive", "rating-negative"))
@@ -1247,16 +1244,11 @@ pub(crate) fn render_score_delta(delta: f64, up_class: &str, down_class: &str) -
     }
 }
 
-/// A game's placement in a snake's history. Sharing first place is a draw, not
-/// a win, so it never gets the gold medal.
-fn history_placement_badge(
-    placement: i32,
-    opponents: Option<&[leaderboard::GameOpponent]>,
-) -> Markup {
-    let shared_first = placement == 1
-        && opponents.is_some_and(|opps| opps.iter().any(|opp| opp.placement == Some(1)));
+/// A game's placement as a badge. Sharing first place is a draw, not a win, so
+/// it never gets the gold medal.
+pub(crate) fn placement_badge(placement: i32, is_draw: bool) -> Markup {
     html! {
-        @if shared_first {
+        @if is_draw {
             span class="badge" { "🤝 Draw" }
         } @else {
             @match placement {
@@ -1270,11 +1262,20 @@ fn history_placement_badge(
     }
 }
 
+/// A game's placement in an activity feed.
+pub(crate) fn render_feed_place(placement: i32, is_draw: bool) -> Markup {
+    html! {
+        @if is_draw {
+            span class="place" { "Draw" }
+        } @else {
+            span class={"place p"(placement)} { (ordinal(placement)) }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{history_placement_badge, render_score_delta};
-    use crate::models::leaderboard::GameOpponent;
-    use uuid::Uuid;
+    use super::{placement_badge, render_feed_place, render_score_delta};
 
     #[test]
     fn deltas_from_a_hundredth_up_show_two_decimals() {
@@ -1329,46 +1330,31 @@ mod tests {
         );
     }
 
-    fn opponent(placement: Option<i32>) -> GameOpponent {
-        GameOpponent {
-            game_id: Uuid::nil(),
-            snake_name: "opponent".to_string(),
-            placement,
-            leaderboard_entry_id: None,
-        }
-    }
-
     #[test]
-    fn shared_first_place_is_a_draw() {
-        let opponents = [opponent(Some(1))];
+    fn draws_never_show_a_medal() {
         assert_eq!(
-            history_placement_badge(1, Some(&opponents)).into_string(),
+            placement_badge(1, true).into_string(),
             r#"<span class="badge">🤝 Draw</span>"#
         );
+        assert_eq!(
+            render_feed_place(1, true).into_string(),
+            r#"<span class="place">Draw</span>"#
+        );
     }
 
     #[test]
-    fn outright_first_place_keeps_the_medal() {
-        let opponents = [opponent(Some(2))];
-        let medal = r#"<span class="badge ok">🥇 1st</span>"#;
+    fn outright_placements_keep_their_labels() {
         assert_eq!(
-            history_placement_badge(1, Some(&opponents)).into_string(),
-            medal
+            placement_badge(1, false).into_string(),
+            r#"<span class="badge ok">🥇 1st</span>"#
         );
-        // Opponents with no recorded placement or none at all prove no tie.
         assert_eq!(
-            history_placement_badge(1, Some(&[opponent(None)])).into_string(),
-            medal
-        );
-        assert_eq!(history_placement_badge(1, None).into_string(), medal);
-    }
-
-    #[test]
-    fn losing_to_tied_winners_is_not_a_draw() {
-        let opponents = [opponent(Some(1)), opponent(Some(1))];
-        assert_eq!(
-            history_placement_badge(3, Some(&opponents)).into_string(),
+            placement_badge(3, false).into_string(),
             r#"<span class="badge">🥉 3rd</span>"#
+        );
+        assert_eq!(
+            render_feed_place(1, false).into_string(),
+            r#"<span class="place p1">1st</span>"#
         );
     }
 }
@@ -1520,7 +1506,7 @@ mod owner_name_route_tests {
         let veteran = entry(&pool, leaderboard_id, user, "Veteran", 3000, 0).await;
         let rival = entry(&pool, leaderboard_id, user, "Rival", 3000, 0).await;
 
-        finished_duel(
+        let draw_game = finished_duel(
             &pool,
             leaderboard_id,
             [(veteran, 1, -0.013), (rival, 1, 0.013)],
@@ -1533,9 +1519,49 @@ mod owner_name_route_tests {
         assert!(body.contains("🤝 Draw"), "shared first place is a draw");
         assert!(!body.contains("🥇 1st"), "a draw never gets the medal");
         assert!(
+            body.contains("<span>🤝</span>"),
+            "recent form shows the draw"
+        );
+        assert!(
             body.contains(r#"<span class="rating-negative">-0.01</span>"#),
             "tiny loss shows its number"
         );
+
+        for feed_path in ["/".to_string(), format!("/leaderboards/{leaderboard_id}")] {
+            let (status, body) = get(&pool, &feed_path).await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(
+                body.contains(r#"<span class="place">Draw</span>"#),
+                "{feed_path} feed shows the draw"
+            );
+            assert!(!body.contains(r#"class="place p1""#), "{feed_path} no 1st");
+        }
+
+        let battlesnake_id: Uuid = sqlx::query_scalar(
+            "SELECT battlesnake_id FROM leaderboard_entries WHERE leaderboard_entry_id = $1",
+        )
+        .bind(veteran)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let (status, body) = get(&pool, &format!("/battlesnakes/{battlesnake_id}/profile")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("🤝 Draw"), "profile history shows the draw");
+        assert!(!body.contains("🥇 1st"), "profile history has no medal");
+
+        sqlx::query("UPDATE games SET status = 'finished' WHERE game_id = $1")
+            .bind(draw_game)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let (status, body) = get(&pool, &format!("/games/{draw_game}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body.contains(r#"<div class="place">Draw</div>"#),
+            "game page shows the draw"
+        );
+        assert!(!body.contains("1st Place"), "game page has no first place");
+        assert!(!body.contains("scard p1"), "game page highlights no winner");
 
         finished_duel(
             &pool,
@@ -1547,6 +1573,9 @@ mod owner_name_route_tests {
         let (_, body) = get(&pool, &path).await;
         assert!(body.contains("🥇 1st"), "an outright win keeps the medal");
         assert!(body.contains(r#"<span class="rating-positive">+0.03</span>"#));
+
+        let (_, body) = get(&pool, &format!("/leaderboards/{leaderboard_id}")).await;
+        assert!(body.contains(r#"<span class="place p1">1st</span>"#));
     }
 
     /// Leaderboard surfaces show the owner's display name as link text while

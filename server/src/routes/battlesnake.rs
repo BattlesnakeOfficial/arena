@@ -1175,17 +1175,6 @@ struct ProfileView<'a> {
     host: Option<oauth::HostingProviderDisplay>,
 }
 
-fn placement_badge(placement: i32) -> Markup {
-    html! {
-        @match placement {
-            1 => span class="badge ok" { "🥇 1st" },
-            2 => span class="badge" { "🥈 2nd" },
-            3 => span class="badge" { "🥉 3rd" },
-            p => span class="badge" { (p) "th" },
-        }
-    }
-}
-
 #[allow(clippy::too_many_lines)]
 fn render_battlesnake_profile(view: &ProfileView<'_>) -> Markup {
     let snake = view.snake;
@@ -1482,7 +1471,7 @@ fn render_battlesnake_profile(view: &ProfileView<'_>) -> Markup {
                                         td class="r num" { (entry.snake_count) }
                                         td {
                                             @if let Some(placement) = entry.placement {
-                                                (placement_badge(placement))
+                                                (super::leaderboard::placement_badge(placement, entry.is_draw()))
                                             } @else if finished {
                                                 span class="badge" { "—" }
                                             } @else {
