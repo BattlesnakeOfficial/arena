@@ -1,10 +1,10 @@
 //! Evidence for a game's last active phase. A closed span alone is not a
 //! completion receipt: cancelled futures also close their tracing spans.
 //!
-//! Per-turn phases are emitted at DEBUG, and Eyes keeps arena's DEBUG
-//! telemetry for 7 days. Once-per-game phases stay at INFO (30 days). Failed
-//! and cancelled phases are ERROR and WARN whatever their cadence, so a
-//! failure never ages out early.
+//! Per-turn phases are emitted at DEBUG, which Eyes keeps in Postgres for 2
+//! days and in its lake after that. Once-per-game phases stay at INFO, which
+//! Postgres keeps for longer. Failed and cancelled phases are ERROR and WARN
+//! whatever their cadence, so a failure never ages out early.
 
 use std::{future::Future, time::Instant};
 
