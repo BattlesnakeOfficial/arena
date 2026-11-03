@@ -26,9 +26,15 @@ HTTP duration metrics are microseconds; game timings are milliseconds.
 The `arena-product` dashboard defaults to a 30-day range and reads events only
 (fields present at emission). Per-source and new-user series start at deploy:
 pre-deploy events carry no `source` or `new_user` fields, so those charts and
-the filtered tiles cover post-deploy data only. Values recorded on
-`server.request` after the span opens, such as `user_id`, are not queryable yet
-(tracked in DEV-2064). Until the first post-deploy events reach the lake, the
+the filtered tiles cover post-deploy data only. `user_id` and `auth_type`
+(`session` or `token`) for authenticated requests are queryable: auth code
+records them through `cja::server::trace::record_request_user`, and they
+ride the `finished processing request` event — filter `target ==
+"cja::server::trace"` and read `fields.user_id` / `fields.auth_type`. That
+series starts at deploy. `fields.user_id` alone is not a request filter:
+`snake.lifecycle` spans and product events such as `user_authenticated` and
+`battlesnake_created` also carry `user_id`, so a metric or chart must also
+filter on the target or the message. Until the first post-deploy events reach the lake, the
 `source` and `new_user` items show `unknown_field` errors. A cold 30-day lake
 query can return 503 at about 50 s; a retry then succeeds.
 
