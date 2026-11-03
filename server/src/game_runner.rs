@@ -145,6 +145,8 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
                     snake_id: bs.game_battlesnake_id.to_string(),
                     url: bs.url.clone(),
                     engine_region: bs.engine_region,
+                    battlesnake_id: bs.battlesnake_id,
+                    user_id: bs.user_id,
                 })
                 .collect();
 
@@ -231,8 +233,12 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
         .await?;
 
     // Create the initial game state
-    let mut engine_game =
-        crate::engine::create_initial_game(game_id, game.board_size, game.game_type, &battlesnakes);
+    let mut engine_game = crate::engine::create_initial_game(
+        game_id,
+        game.board_size.clone(),
+        game.game_type.clone(),
+        &battlesnakes,
+    );
     engine_game.meta.source = game_source;
 
     // Get timeout from game settings
@@ -555,6 +561,10 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
         final_turn = engine_game.board.turn,
         total_ms = total_time_ms,
         winner_battlesnake_id = ?winner_snake_id,
+        source = game_source.analytics_label(),
+        game_type = game.game_type.as_str(),
+        board_size = game.board_size.as_str(),
+        snake_count = battlesnakes.len(),
         "game completed"
     );
 
