@@ -801,7 +801,7 @@ mod tests {
         // cookie for a user-less session (`Some((session, None))` — the arm
         // the record code must skip). Both must record nothing; both add a
         // group each, so groups.len() >= 2 guards against vacuity.
-        let _ = app
+        let response = app
             .clone()
             .oneshot(
                 Request::builder()
@@ -811,10 +811,15 @@ mod tests {
             )
             .await
             .unwrap();
+        assert!(
+            response.status().is_success(),
+            "anonymous /privacy probe failed: {}",
+            response.status()
+        );
         let userless_session = crate::models::session::create_session(&db).await.unwrap();
         let userless_cookie =
             crate::routes::test_support::signed_session_cookie(&state, userless_session.session_id);
-        let _ = app
+        let response = app
             .clone()
             .oneshot(
                 Request::builder()
@@ -828,6 +833,11 @@ mod tests {
             )
             .await
             .unwrap();
+        assert!(
+            response.status().is_success(),
+            "user-less-session /privacy probe failed: {}",
+            response.status()
+        );
         let groups = capture.server_request_record_groups("/privacy");
         assert!(
             groups.len() >= 2,
