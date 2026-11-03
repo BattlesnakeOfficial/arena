@@ -28,15 +28,15 @@ The `arena-product` dashboard defaults to a 30-day range and reads events only
 pre-deploy events carry no `source` or `new_user` fields, so those charts and
 the filtered tiles cover post-deploy data only. `user_id` and `auth_type`
 (`session` or `token`) for authenticated requests are queryable: auth code
-records them through `cja::server::trace::record_request_user`, and they
-ride the `finished processing request` event — filter `target ==
+records them through `cja::server::trace::record_request_user`, and they ride
+the `finished processing request` event — filter `target ==
 "cja::server::trace"` and read `fields.user_id` / `fields.auth_type`. That
 series starts at deploy. `fields.user_id` alone is not a request filter:
 `snake.lifecycle` spans and product events such as `user_authenticated` and
 `battlesnake_created` also carry `user_id`, so a metric or chart must also
-filter on the target or the message. Until the first post-deploy events reach the lake, the
-`source` and `new_user` items show `unknown_field` errors. A cold 30-day lake
-query can return 503 at about 50 s; a retry then succeeds.
+filter on the target or the message. Until the first post-deploy events reach
+the lake, the `source` and `new_user` items show `unknown_field` errors. A
+cold 30-day lake query can return 503 at about 50 s; a retry then succeeds.
 
 Processing overhead measures elapsed turn-loop time minus elapsed time awaiting
 parallel move requests, including persistence and scheduling. The old event
