@@ -142,13 +142,56 @@ pub async fn distinct_game_shouts(pool: &PgPool, game_id: Uuid) -> cja::Result<V
 }
 
 /// `v.get(key) ->>` semantics: string → itself; missing/JSON-null →
-/// `None`; any other value → its JSON text (Postgres `->>` stringifies
-/// numbers, booleans, objects and arrays).
+/// `None`; any other value → its text the way Postgres `->>` renders it —
+/// scalars stringify, and objects/arrays go through [`pg_jsonb_text`]
+/// (spaced, canonical-key-order jsonb text).
 fn json_text(v: &serde_json::Value, key: &str) -> Option<String> {
     match v.get(key) {
         None | Some(serde_json::Value::Null) => None,
         Some(serde_json::Value::String(s)) => Some(s.clone()),
-        Some(other) => Some(other.to_string()),
+        Some(other) => Some(pg_jsonb_text(other)),
+    }
+}
+
+/// Render a JSON value exactly as PostgreSQL renders `jsonb` to text —
+/// the format `->>` returns for composite values: a space after every
+/// `:` and `,`, and object keys in jsonb's canonical order (length first,
+/// then bytewise — `jsonb` stores them that way, so `{"aa": 2, "b": 1}`
+/// comes back `{"b": 1, "aa": 2}`). Strings stay JSON-quoted inside
+/// composites; scalars match serde_json's rendering for the integer and
+/// plain-decimal literals arena's serializers emit (a JSON float literal
+/// in exponent notation would render expanded by Postgres `numeric` —
+/// arena never writes those into frames).
+fn pg_jsonb_text(v: &serde_json::Value) -> String {
+    fn quoted(s: &str) -> String {
+        serde_json::Value::String(s.to_string()).to_string()
+    }
+    match v {
+        serde_json::Value::Null => "null".to_string(),
+        serde_json::Value::Bool(_) | serde_json::Value::Number(_) => v.to_string(),
+        serde_json::Value::String(s) => quoted(s),
+        serde_json::Value::Array(items) => {
+            let body = items
+                .iter()
+                .map(pg_jsonb_text)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("[{body}]")
+        }
+        serde_json::Value::Object(map) => {
+            let mut entries: Vec<(&String, &serde_json::Value)> = map.iter().collect();
+            entries.sort_by(|(a, _), (b, _)| {
+                a.len()
+                    .cmp(&b.len())
+                    .then_with(|| a.as_str().cmp(b.as_str()))
+            });
+            let body = entries
+                .iter()
+                .map(|(k, val)| format!("{}: {}", quoted(k), pg_jsonb_text(val)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{{{body}}}")
+        }
     }
 }
 
@@ -158,10 +201,13 @@ fn json_text(v: &serde_json::Value, key: &str) -> Option<String> {
 /// snake_name = MIN(COALESCE(Name, '')) and frequency = frame count;
 /// frames without a `Snakes` array and empty/null shouts excluded; order
 /// snake_id ASC, frequency DESC, shout ASC. Field extraction mirrors
-/// Postgres `->>` via [`json_text`] (a JSON string yields itself, a
+/// Postgres `->>` via [`json_text`]: a JSON string yields itself, a
 /// missing key or JSON null yields None, and any other value yields its
-/// JSON text). Name is constant per snake within a game, so Rust `str` min
-/// matches SQL MIN.
+/// text as Postgres renders it — [`pg_jsonb_text`] reproduces `jsonb
+/// ->>`'s spaced, canonical-key-order rendering for objects and arrays
+/// (parity with the SQL extraction; pinned by
+/// `archived_shout_extraction_matches_sql`). Name is constant per snake
+/// within a game, so Rust `str` min matches SQL MIN.
 pub fn distinct_game_shouts_from_raw_frames(
     frames: &[Box<serde_json::value::RawValue>],
 ) -> cja::Result<Vec<DistinctShout>> {
@@ -302,6 +348,35 @@ pub async fn suppressed_shout_pairs(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// `pg_jsonb_text` must match PostgreSQL `jsonb ->>` byte-for-byte
+    /// (verified against psql: jsonb renders spaced text and sorts object
+    /// keys by length then bytewise).
+    #[test]
+    fn pg_jsonb_text_matches_postgres_rendering() {
+        // Spaces after `:` and `,` (serde_json's to_string gives `{"a":1}`).
+        assert_eq!(pg_jsonb_text(&json!({"a": 1})), "{\"a\": 1}");
+        assert_eq!(pg_jsonb_text(&json!([1, 2])), "[1, 2]");
+        // Canonical key order: length first, then bytewise — `"b"` before
+        // `"aa"`, and `""`/`"B"` before `"a"`.
+        assert_eq!(
+            pg_jsonb_text(&json!({"aa": 2, "b": 1})),
+            "{\"b\": 1, \"aa\": 2}"
+        );
+        assert_eq!(
+            pg_jsonb_text(&json!({"a": 1, "B": 2, "": 3})),
+            "{\"\": 3, \"B\": 2, \"a\": 1}"
+        );
+        // Nesting, scalars, strings inside composites.
+        assert_eq!(
+            pg_jsonb_text(&json!({"a": {"x": [true, null, "q", 1.5, -3]}})),
+            "{\"a\": {\"x\": [true, null, \"q\", 1.5, -3]}}"
+        );
+        assert_eq!(pg_jsonb_text(&json!({})), "{}");
+        assert_eq!(pg_jsonb_text(&json!([])), "[]");
+        // Scalars stringify like `->>` inside composites.
+        assert_eq!(pg_jsonb_text(&json!([42, false])), "[42, false]");
+    }
 
     async fn fixture_game(pool: &PgPool, status: &str) -> cja::Result<Uuid> {
         let game_id: Uuid = sqlx::query_scalar(

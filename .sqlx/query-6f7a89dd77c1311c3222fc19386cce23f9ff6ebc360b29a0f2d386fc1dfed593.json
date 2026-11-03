@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT turns_pruned_at AS \"pruned!\" FROM games\n                       WHERE game_id = $1 AND turns_pruned_at IS NOT NULL",
+  "query": "SELECT turns_pruned_at AS \"pruned!\" FROM games\n           WHERE game_id = $1 AND turns_pruned_at IS NOT NULL",
   "describe": {
     "columns": [
       {
@@ -18,5 +18,5 @@
       true
     ]
   },
-  "hash": "f9cfd070a441a5bfa079eaeac193acc77dcf8bb23764e112b5173de271345f35"
+  "hash": "6f7a89dd77c1311c3222fc19386cce23f9ff6ebc360b29a0f2d386fc1dfed593"
 }
