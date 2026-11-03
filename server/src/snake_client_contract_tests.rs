@@ -33,6 +33,7 @@ use crate::config::EngineProxyConfig;
 use crate::models::battlesnake::EngineRegion;
 use crate::snake_client::{ProxyClients, SnakeEndpoint};
 use rules::Direction;
+use uuid::Uuid;
 
 const TOKEN: &str = "contract-suite-token";
 
@@ -362,6 +363,8 @@ fn endpoint_for(url: String) -> SnakeEndpoint {
         snake_id: "snake-1".to_string(),
         url,
         engine_region: EngineRegion::UsEast4,
+        battlesnake_id: Uuid::new_v4(),
+        user_id: Uuid::new_v4(),
     }
 }
 

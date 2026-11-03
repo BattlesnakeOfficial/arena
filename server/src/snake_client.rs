@@ -15,6 +15,7 @@ use crate::engine::EngineGame;
 use crate::engine::frame::SnakeCustomizations;
 use crate::models::battlesnake::EngineRegion;
 use crate::wire;
+use uuid::Uuid;
 
 pub(crate) const BODY_READ_CAP_BYTES: usize = 64 * 1024;
 
@@ -35,6 +36,11 @@ pub struct SnakeEndpoint {
     pub snake_id: String,
     pub url: String,
     pub engine_region: EngineRegion,
+    /// The real `battlesnakes` row behind this endpoint (resolved through
+    /// `leaderboard_entries` for ladder games).
+    pub battlesnake_id: Uuid,
+    /// The snake's owner.
+    pub user_id: Uuid,
 }
 
 pub struct ProxyClients<'a> {
@@ -828,6 +834,17 @@ pub async fn request_move_routed(
     }
 }
 
+#[tracing::instrument(
+    name = "snake.lifecycle",
+    skip_all,
+    fields(
+        endpoint = path,
+        game_id = %game.meta.game_id,
+        battlesnake_id = %endpoint.battlesnake_id,
+        user_id = %endpoint.user_id,
+        source = game.meta.source.analytics_label(),
+    )
+)]
 async fn request_lifecycle_routed(
     clients: &ProxyClients<'_>,
     endpoint: &SnakeEndpoint,
@@ -1207,6 +1224,8 @@ mod tests {
             snake_id: "snake-1".to_string(),
             url: snake.uri(),
             engine_region: EngineRegion::UsEast4,
+            battlesnake_id: uuid::Uuid::new_v4(),
+            user_id: uuid::Uuid::new_v4(),
         };
         let game = create_test_engine_game_with_snakes(vec!["snake-1"]);
         let result = request_move_routed(
@@ -1272,6 +1291,8 @@ mod tests {
                 snake_id: "snake-1".to_string(),
                 url: snake.uri(),
                 engine_region: EngineRegion::UsEast4,
+            battlesnake_id: uuid::Uuid::new_v4(),
+            user_id: uuid::Uuid::new_v4(),
             };
             let result = request_move_routed(
                 &clients,
@@ -1324,6 +1345,8 @@ mod tests {
                 snake_id: "snake-1".to_string(),
                 url: "https://unreachable.example".to_string(),
                 engine_region: EngineRegion::UsEast4,
+            battlesnake_id: uuid::Uuid::new_v4(),
+            user_id: uuid::Uuid::new_v4(),
             };
             let result = request_move_routed(
                 &clients,
@@ -1374,6 +1397,8 @@ mod tests {
                 snake_id: "snake-1".to_string(),
                 url: snake.uri(),
                 engine_region: region,
+            battlesnake_id: uuid::Uuid::new_v4(),
+            user_id: uuid::Uuid::new_v4(),
             };
             let result = request_move_routed(
                 &clients,
@@ -1429,6 +1454,8 @@ mod tests {
             snake_id: "snake-1".to_string(),
             url: snake.uri(),
             engine_region: EngineRegion::UsEast4,
+            battlesnake_id: uuid::Uuid::new_v4(),
+            user_id: uuid::Uuid::new_v4(),
         };
         let game = create_test_engine_game_with_snakes(vec!["snake-1"]);
         let start = Instant::now();
@@ -1492,6 +1519,8 @@ mod tests {
             snake_id: "snake-1".to_string(),
             url: "https://snake.example".to_string(),
             engine_region: EngineRegion::EuropeWest4,
+            battlesnake_id: uuid::Uuid::new_v4(),
+            user_id: uuid::Uuid::new_v4(),
         };
         let game = create_test_engine_game_with_snakes(vec!["snake-1"]);
         let result = request_move_routed(
@@ -1579,6 +1608,8 @@ mod tests {
             snake_id: "snake-1".to_string(),
             url: snake.uri(),
             engine_region: EngineRegion::UsEast4,
+            battlesnake_id: uuid::Uuid::new_v4(),
+            user_id: uuid::Uuid::new_v4(),
         };
         let game = create_test_engine_game_with_snakes(vec!["snake-1"]);
         let started = Instant::now();
@@ -1647,6 +1678,8 @@ mod tests {
             snake_id: "snake-1".to_string(),
             url: snake.uri(),
             engine_region: EngineRegion::UsEast4,
+            battlesnake_id: uuid::Uuid::new_v4(),
+            user_id: uuid::Uuid::new_v4(),
         };
         let game = create_test_engine_game_with_snakes(vec!["snake-1"]);
         let started = Instant::now();
@@ -1701,6 +1734,8 @@ mod tests {
             snake_id: "snake-1".to_string(),
             url: snake.uri(),
             engine_region: EngineRegion::UsEast4,
+            battlesnake_id: uuid::Uuid::new_v4(),
+            user_id: uuid::Uuid::new_v4(),
         };
         let game = create_test_engine_game_with_snakes(vec!["snake-1"]);
         let result = request_move_routed(
@@ -1753,6 +1788,8 @@ mod tests {
             snake_id: "snake-1".to_string(),
             url: snake.uri(),
             engine_region: EngineRegion::UsEast4,
+            battlesnake_id: uuid::Uuid::new_v4(),
+            user_id: uuid::Uuid::new_v4(),
         };
         let game = create_test_engine_game_with_snakes(vec!["snake-1"]);
         let result = request_move_routed(
@@ -1811,6 +1848,8 @@ mod tests {
                 snake_id: "snake-1".to_string(),
                 url: snake.uri(),
                 engine_region: EngineRegion::UsEast4,
+            battlesnake_id: uuid::Uuid::new_v4(),
+            user_id: uuid::Uuid::new_v4(),
             };
             let game = create_test_engine_game_with_snakes(vec!["snake-1"]);
             let result = request_move_routed(
