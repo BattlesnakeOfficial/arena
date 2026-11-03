@@ -816,6 +816,8 @@ pub struct LeaderboardGameHistoryEntry {
     pub leaderboard_game_id: Uuid,
     pub game_id: Uuid,
     pub placement: i32,
+    /// First place shared with another snake: nobody won.
+    pub is_draw: bool,
     pub display_score_change: f64,
     pub mu_before: f64,
     pub mu_after: f64,
@@ -839,6 +841,12 @@ pub async fn get_game_history_for_entry(
             lgr.leaderboard_game_id,
             lg.game_id,
             lgr.placement,
+            lgr.placement = 1 AND EXISTS (
+                SELECT 1 FROM leaderboard_game_results tied
+                WHERE tied.leaderboard_game_id = lgr.leaderboard_game_id
+                  AND tied.placement = 1
+                  AND tied.leaderboard_entry_id <> lgr.leaderboard_entry_id
+            ) AS "is_draw!",
             lgr.display_score_change,
             lgr.mu_before,
             lgr.mu_after,
@@ -1018,6 +1026,8 @@ pub struct ActivityFeedEntry {
     pub owner_name: String,
     pub leaderboard_entry_id: Uuid,
     pub placement: i32,
+    /// First place shared with another snake: nobody won.
+    pub is_draw: bool,
     pub display_score_change: f64,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
@@ -1037,6 +1047,12 @@ pub async fn get_activity_feed(
             COALESCE(NULLIF(u.display_name, ''), u.github_login) AS "owner_name!",
             lgr.leaderboard_entry_id,
             lgr.placement,
+            lgr.placement = 1 AND EXISTS (
+                SELECT 1 FROM leaderboard_game_results tied
+                WHERE tied.leaderboard_game_id = lgr.leaderboard_game_id
+                  AND tied.placement = 1
+                  AND tied.leaderboard_entry_id <> lgr.leaderboard_entry_id
+            ) AS "is_draw!",
             lgr.display_score_change,
             lgr.created_at
          FROM leaderboard_game_results lgr

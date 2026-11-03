@@ -199,6 +199,8 @@ pub struct RosterSnake {
     pub head: Option<&'static CatalogShape>,
     /// Shown only on spoiler cards.
     pub placement: Option<i32>,
+    /// First place shared with another snake: nobody won.
+    pub draw: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -215,6 +217,20 @@ pub struct GameCard {
     pub spoilers: bool,
     /// Solo games: the final turn, shown on spoiler cards.
     pub turns: Option<i32>,
+}
+
+fn is_winner(snake: &RosterSnake) -> bool {
+    snake.placement == Some(1) && !snake.draw
+}
+
+fn placement_text(snake: &RosterSnake) -> String {
+    if snake.draw {
+        return "DRAW".to_string();
+    }
+    snake
+        .placement
+        .map_or_else(|| "—".to_string(), ordinal)
+        .to_uppercase()
 }
 
 fn ordinal(n: i32) -> String {
@@ -291,11 +307,8 @@ fn placement_label(
     if !spoilers || solo {
         return None;
     }
-    let winner = snake.placement == Some(1);
-    let text = snake
-        .placement
-        .map_or_else(|| "—".to_string(), ordinal)
-        .to_uppercase();
+    let winner = is_winner(snake);
+    let text = placement_text(snake);
     let size = if spec.owner.is_some() { 20.0 } else { 18.0 };
     let color = if winner {
         palette::pink()
@@ -377,8 +390,8 @@ fn roster_row(
     spoilers: bool,
     solo: bool,
 ) {
-    let winner = spoilers && !solo && snake.placement == Some(1);
-    let dim = spoilers && !solo && !winner;
+    let winner = spoilers && !solo && is_winner(snake);
+    let dim = spoilers && !solo && !winner && !snake.draw;
     c.head_tile(snake.head, snake.color, PAD, top, spec.tile);
     if winner {
         ring(c, PAD, top, spec.tile);
@@ -913,7 +926,22 @@ mod tests {
             color,
             head: shape(AssetKind::Head, "default"),
             placement,
+            draw: false,
         }
+    }
+
+    #[test]
+    fn shared_first_reads_as_a_draw_with_no_winner() {
+        let drawn = RosterSnake {
+            draw: true,
+            ..snake("Drawn", palette::pink(), Some(1))
+        };
+        assert_eq!(placement_text(&drawn), "DRAW");
+        assert!(!is_winner(&drawn));
+
+        let won = snake("Won", palette::pink(), Some(1));
+        assert_eq!(placement_text(&won), "1ST");
+        assert!(is_winner(&won));
     }
 
     pub(crate) fn sample_game(count: usize, spoilers: bool) -> GameCard {
