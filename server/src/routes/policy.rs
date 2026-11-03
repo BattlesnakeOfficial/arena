@@ -5,7 +5,7 @@ use maud::{Markup, html};
 use crate::{components::page_factory::PageFactory, errors::ServerResult};
 
 const EFFECTIVE_DATE: &str = "July 2026";
-const PRIVACY_EFFECTIVE_DATE: &str = "September 2026";
+const PRIVACY_EFFECTIVE_DATE: &str = "November 2026";
 
 pub async fn conduct_page(
     page_factory: PageFactory,
@@ -96,8 +96,19 @@ fn privacy_content() -> Markup {
             }
             p {
                 "For signed-in web and API-token requests, we store your account ID "
-                "and the UTC date of activity. The activity record contains no request "
-                "path, IP address, or browser identifier."
+                "and the UTC date of activity."
+            }
+            p {
+                "Battlesnake also keeps technical logs in an observability system "
+                "we run ourselves. For every request, those logs store the full "
+                "request URL (including any query string), the referring page, "
+                "the IP address, and the browser user agent. For signed-in "
+                "requests, they also store your account ID. Gameplay telemetry "
+                "in the same system ties account IDs and snake IDs to the games "
+                "they took part in. Sign-in events include your GitHub username, "
+                "and Play account claim events include your Play username. This "
+                "data has no fixed deletion date, and deleting your account does "
+                "not remove what was already recorded there."
             }
 
             h3 { "Play.battlesnake.com Migration Data" }
@@ -127,6 +138,7 @@ fn privacy_content() -> Markup {
                     "accounts, to operate and improve Battlesnake. We may publish these statistics in "
                     "aggregate form; published statistics never identify individual accounts."
                 }
+                li { "Operate, debug, and improve Battlesnake using the technical logs described above." }
                 li { "Send transactional email (via Mailgun) when your play account is claimed, as a security notice." }
                 li { "Notify you by email if your snake is removed from leaderboard matchmaking because its server keeps failing." }
             }
@@ -134,14 +146,22 @@ fn privacy_content() -> Markup {
                 "We do not send marketing emails. We do not show "
                 "advertisements. We do not sell your data. We share it only "
                 "with the service providers that run Battlesnake on our behalf — "
-                "Mailgun for transactional email and Google Cloud for hosting "
-                "and storage."
+                "Mailgun for transactional email, Google Cloud for hosting and "
+                "storage, TypeSafe for automated moderation of snake names, "
+                "tournament names and descriptions, saved game titles, and snake "
+                "shouts, and the providers that host our observability system. "
+                "We also post new sign-ups, Play account claims, and newly "
+                "registered snakes to the Battlesnake community Discord, and "
+                "those posts include GitHub usernames, Play usernames, and snake "
+                "names."
             }
 
             h2 { "Data Storage" }
             p {
                 "Battlesnake is hosted on Google Cloud. Game data from the legacy "
-                "Battlesnake Engine may be archived to Google Cloud Storage."
+                "Battlesnake Engine may be archived to Google Cloud Storage. "
+                "Technical logs are stored separately, with the providers that "
+                "host our observability system."
             }
 
             h2 { "Cookies" }

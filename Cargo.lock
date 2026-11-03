@@ -783,7 +783,7 @@ dependencies = [
 [[package]]
 name = "cja"
 version = "0.0.0"
-source = "git+https://github.com/coreyja/cja?branch=main#3b6bb20bfa8ec0e8d61d142deabb4eaf16564799"
+source = "git+https://github.com/coreyja/cja?branch=main#1235605d20ad86598f132e29d8bb51403a0f8eb0"
 dependencies = [
  "async-trait",
  "axum",
@@ -815,7 +815,7 @@ dependencies = [
 [[package]]
 name = "cja-build"
 version = "0.0.0"
-source = "git+https://github.com/coreyja/cja?branch=main#3b6bb20bfa8ec0e8d61d142deabb4eaf16564799"
+source = "git+https://github.com/coreyja/cja?branch=main#1235605d20ad86598f132e29d8bb51403a0f8eb0"
 dependencies = [
  "anyhow",
  "flate2",
@@ -836,7 +836,7 @@ dependencies = [
 [[package]]
 name = "cja-secret"
 version = "0.0.0"
-source = "git+https://github.com/coreyja/cja?branch=main#3b6bb20bfa8ec0e8d61d142deabb4eaf16564799"
+source = "git+https://github.com/coreyja/cja?branch=main#1235605d20ad86598f132e29d8bb51403a0f8eb0"
 dependencies = [
  "cja",
  "cja-secret-macros",
@@ -851,7 +851,7 @@ dependencies = [
 [[package]]
 name = "cja-secret-macros"
 version = "0.0.0"
-source = "git+https://github.com/coreyja/cja?branch=main#3b6bb20bfa8ec0e8d61d142deabb4eaf16564799"
+source = "git+https://github.com/coreyja/cja?branch=main#1235605d20ad86598f132e29d8bb51403a0f8eb0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -861,7 +861,7 @@ dependencies = [
 [[package]]
 name = "cja-tailnet"
 version = "0.0.0"
-source = "git+https://github.com/coreyja/cja?branch=main#3b6bb20bfa8ec0e8d61d142deabb4eaf16564799"
+source = "git+https://github.com/coreyja/cja?branch=main#1235605d20ad86598f132e29d8bb51403a0f8eb0"
 dependencies = [
  "reqwest 0.13.5",
  "rustls",
@@ -6576,7 +6576,7 @@ dependencies = [
 [[package]]
 name = "setec"
 version = "0.0.0"
-source = "git+https://github.com/coreyja/cja?branch=main#3b6bb20bfa8ec0e8d61d142deabb4eaf16564799"
+source = "git+https://github.com/coreyja/cja?branch=main#1235605d20ad86598f132e29d8bb51403a0f8eb0"
 dependencies = [
  "base64 0.23.1",
  "bytes",
