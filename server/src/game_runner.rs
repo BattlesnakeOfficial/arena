@@ -1124,6 +1124,12 @@ mod tests {
     async fn ladder_game_lifecycle_spans_resolve_snakes_and_owners(
         pool: PgPool,
     ) -> cja::Result<()> {
+        // A live global dispatcher keeps tracing-core off its
+        // `Rebuilder::JustOne` path (`callsite.rs`, `has_just_one`,
+        // `get_default`), which otherwise lets an unscoped test on another
+        // thread cache `Interest::never()` for `snake.lifecycle` while the
+        // scoped dispatcher below is the only one alive.
+        let _ = crate::test_capture::Capture::shared();
         let app_state = AppState::test_from_pool(pool.clone());
         let snake_server = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::any())
@@ -1186,6 +1192,7 @@ mod tests {
     /// or may not also get an /end).
     #[sqlx::test(migrations = "../migrations")]
     async fn lifecycle_spans_close_when_snake_does_not_answer(pool: PgPool) -> cja::Result<()> {
+        let _ = crate::test_capture::Capture::shared();
         let app_state = AppState::test_from_pool(pool.clone());
         let (_owner, _battlesnake_id, game_id) =
             ladder_fixture(&pool, "http://127.0.0.1:9").await?;
@@ -1206,6 +1213,7 @@ mod tests {
     /// link) reports `source == "custom"` plus the new descriptive fields.
     #[sqlx::test(migrations = "../migrations")]
     async fn custom_game_completed_carries_source_fields(pool: PgPool) -> cja::Result<()> {
+        let _ = crate::test_capture::Capture::shared();
         let app_state = AppState::test_from_pool(pool.clone());
         let game_id = fixture_game(&pool, "waiting").await?;
         let snake_server = wiremock::MockServer::start().await;
