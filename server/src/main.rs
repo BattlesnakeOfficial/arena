@@ -55,6 +55,8 @@ mod snake_health_sweeper;
 mod state;
 cja::include_assets!(arena_assets);
 mod stuck_game_sweeper;
+#[cfg(test)]
+mod test_capture;
 mod telemetry;
 mod tournament_bracket;
 mod tournament_match;
