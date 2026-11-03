@@ -107,19 +107,25 @@ pub struct DistinctShout {
 
 /// Distinct (snake_id, snake_name, shout, frequency) from a game's
 /// persisted frames, deterministic order: snake_id ASC, frequency DESC,
-/// shout ASC. Extracted in SQL so a 5000-turn game never loads all frames
-/// into memory. Frames whose `Snakes` is missing or not an array are
-/// tolerated (the `CASE` guard yields an empty array); empty-string
-/// shouts are excluded — `FrameSnake.shout` serializes `""` for "no
-/// shout".
+/// shout ASC — all text comparisons pinned to byte order via
+/// `COLLATE "C"` so the result is identical on every database
+/// collation (an `en_US.utf8` cluster otherwise ignores punctuation at
+/// the primary level and orders `{...}`/`[...]` shouts before plain
+/// text; the Rust twin in
+/// [`distinct_game_shouts_from_raw_frames`] compares bytewise). Prod is
+/// C.UTF-8, so its order is unchanged. Extracted in SQL so a 5000-turn
+/// game never loads all frames into memory. Frames whose `Snakes` is
+/// missing or not an array are tolerated (the `CASE` guard yields an
+/// empty array); empty-string shouts are excluded — `FrameSnake.shout`
+/// serializes `""` for "no shout".
 pub async fn distinct_game_shouts(pool: &PgPool, game_id: Uuid) -> cja::Result<Vec<DistinctShout>> {
     sqlx::query_as!(
         DistinctShout,
         r#"
         SELECT
-            s->>'ID'    AS "snake_id!",
-            MIN(COALESCE(s->>'Name', '')) AS "snake_name!",
-            s->>'Shout' AS "text!",
+            (s->>'ID') COLLATE "C"    AS "snake_id!",
+            MIN(COALESCE(s->>'Name', '') COLLATE "C") AS "snake_name!",
+            (s->>'Shout') COLLATE "C" AS "text!",
             COUNT(*)::BIGINT AS "frequency!"
         FROM turns t
         CROSS JOIN LATERAL jsonb_array_elements(
@@ -131,8 +137,8 @@ pub async fn distinct_game_shouts(pool: &PgPool, game_id: Uuid) -> cja::Result<V
           AND s->>'ID' IS NOT NULL
           AND s->>'Shout' IS NOT NULL
           AND s->>'Shout' <> ''
-        GROUP BY s->>'ID', s->>'Shout'
-        ORDER BY s->>'ID' ASC, COUNT(*) DESC, s->>'Shout' ASC
+        GROUP BY (s->>'ID') COLLATE "C", (s->>'Shout') COLLATE "C"
+        ORDER BY (s->>'ID') COLLATE "C" ASC, COUNT(*) DESC, (s->>'Shout') COLLATE "C" ASC
         "#,
         game_id
     )
@@ -206,8 +212,9 @@ fn pg_jsonb_text(v: &serde_json::Value) -> String {
 /// text as Postgres renders it — [`pg_jsonb_text`] reproduces `jsonb
 /// ->>`'s spaced, canonical-key-order rendering for objects and arrays
 /// (parity with the SQL extraction; pinned by
-/// `archived_shout_extraction_matches_sql`). Name is constant per snake
-/// within a game, so Rust `str` min matches SQL MIN.
+/// `archived_shout_extraction_matches_sql`). Both sides compare
+/// bytewise — Rust `str` ordering, and the SQL pinned via `COLLATE "C"`
+/// — so the twin matches on every database collation.
 pub fn distinct_game_shouts_from_raw_frames(
     frames: &[Box<serde_json::value::RawValue>],
 ) -> cja::Result<Vec<DistinctShout>> {
