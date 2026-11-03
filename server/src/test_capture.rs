@@ -9,7 +9,10 @@
 
 use std::{
     collections::{BTreeMap, HashMap},
-    sync::{Arc, Mutex, OnceLock, atomic::{AtomicU64, Ordering}},
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 use tracing::field::Visit;
 use tracing_subscriber::prelude::*;
@@ -93,7 +96,11 @@ where
         // records (http.response.status_code, content_type) land here too;
         // harmless, the test assertions look at user_id/auth_type only.
         let Some(span) = ctx.span(id) else { return };
-        let Some(seq) = span.extensions().get::<RequestSeq>().map(|RequestSeq(s)| *s) else {
+        let Some(seq) = span
+            .extensions()
+            .get::<RequestSeq>()
+            .map(|RequestSeq(s)| *s)
+        else {
             return;
         };
         let mut fields = Fields::default();
@@ -104,11 +111,7 @@ where
         }
     }
 
-    fn on_event(
-        &self,
-        event: &tracing::Event<'_>,
-        _: tracing_subscriber::layer::Context<'_, S>,
-    ) {
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
         let mut fields = Fields::default();
         event.record(&mut fields);
         if fields.0.get("event_type").map(String::as_str) == Some("game_phase") {
@@ -168,10 +171,7 @@ impl Capture {
     /// one Vec<(field, value)> per matching span — including spans that
     /// recorded nothing (empty vec). Grouping keys on the capture sequence,
     /// never the (reused) tracing span id. Never clear the buffers.
-    pub(crate) fn server_request_record_groups(
-        &self,
-        path: &str,
-    ) -> Vec<Vec<(String, String)>> {
+    pub(crate) fn server_request_record_groups(&self, path: &str) -> Vec<Vec<(String, String)>> {
         let seqs: Vec<u64> = {
             let paths = self.request_paths.lock().unwrap();
             paths

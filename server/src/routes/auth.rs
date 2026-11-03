@@ -806,8 +806,7 @@ mod tests {
             .oneshot(Request::builder().uri("/privacy").body(()).unwrap())
             .await
             .unwrap();
-        let userless_session =
-            crate::models::session::create_session(&db).await.unwrap();
+        let userless_session = crate::models::session::create_session(&db).await.unwrap();
         let userless_cookie =
             crate::routes::test_support::signed_session_cookie(&state, userless_session.session_id);
         let _ = app

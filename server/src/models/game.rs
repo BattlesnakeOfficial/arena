@@ -1869,6 +1869,11 @@ mod tests {
         assert_eq!(
             (started, running),
             (1, 1),
+            "same-ladder overlap on snake a: y={ry:?} o={ro:?}"
+        );
+        Ok(())
+    }
+
     /// DEV-2061: `get_game_source` resolves tournament-first (pinning the
     /// precedence flip), and `analytics_label` maps to product vocabulary
     /// (`ladder`, not the wire value `arena`).

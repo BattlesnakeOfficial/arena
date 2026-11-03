@@ -1291,8 +1291,8 @@ mod tests {
                 snake_id: "snake-1".to_string(),
                 url: snake.uri(),
                 engine_region: EngineRegion::UsEast4,
-            battlesnake_id: uuid::Uuid::new_v4(),
-            user_id: uuid::Uuid::new_v4(),
+                battlesnake_id: uuid::Uuid::new_v4(),
+                user_id: uuid::Uuid::new_v4(),
             };
             let result = request_move_routed(
                 &clients,
@@ -1345,8 +1345,8 @@ mod tests {
                 snake_id: "snake-1".to_string(),
                 url: "https://unreachable.example".to_string(),
                 engine_region: EngineRegion::UsEast4,
-            battlesnake_id: uuid::Uuid::new_v4(),
-            user_id: uuid::Uuid::new_v4(),
+                battlesnake_id: uuid::Uuid::new_v4(),
+                user_id: uuid::Uuid::new_v4(),
             };
             let result = request_move_routed(
                 &clients,
@@ -1397,8 +1397,8 @@ mod tests {
                 snake_id: "snake-1".to_string(),
                 url: snake.uri(),
                 engine_region: region,
-            battlesnake_id: uuid::Uuid::new_v4(),
-            user_id: uuid::Uuid::new_v4(),
+                battlesnake_id: uuid::Uuid::new_v4(),
+                user_id: uuid::Uuid::new_v4(),
             };
             let result = request_move_routed(
                 &clients,
@@ -1848,8 +1848,8 @@ mod tests {
                 snake_id: "snake-1".to_string(),
                 url: snake.uri(),
                 engine_region: EngineRegion::UsEast4,
-            battlesnake_id: uuid::Uuid::new_v4(),
-            user_id: uuid::Uuid::new_v4(),
+                battlesnake_id: uuid::Uuid::new_v4(),
+                user_id: uuid::Uuid::new_v4(),
             };
             let game = create_test_engine_game_with_snakes(vec!["snake-1"]);
             let result = request_move_routed(

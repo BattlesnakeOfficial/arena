@@ -1133,8 +1133,7 @@ mod tests {
             )
             .mount(&snake_server)
             .await;
-        let (owner, battlesnake_id, game_id) =
-            ladder_fixture(&pool, &snake_server.uri()).await?;
+        let (owner, battlesnake_id, game_id) = ladder_fixture(&pool, &snake_server.uri()).await?;
 
         let events = EventCapture::default();
         let spans = SpanCapture::default();
@@ -1186,9 +1185,7 @@ mod tests {
     /// paths must run without pinning exact counts (a start-only snake may
     /// or may not also get an /end).
     #[sqlx::test(migrations = "../migrations")]
-    async fn lifecycle_spans_close_when_snake_does_not_answer(
-        pool: PgPool,
-    ) -> cja::Result<()> {
+    async fn lifecycle_spans_close_when_snake_does_not_answer(pool: PgPool) -> cja::Result<()> {
         let app_state = AppState::test_from_pool(pool.clone());
         let (_owner, _battlesnake_id, game_id) =
             ladder_fixture(&pool, "http://127.0.0.1:9").await?;
@@ -1201,10 +1198,7 @@ mod tests {
         let opened = spans.lifecycle.lock().unwrap().len();
         let closed = *spans.closed.lock().unwrap();
         assert!(opened >= 1, "expected at least one lifecycle span");
-        assert_eq!(
-            opened, closed,
-            "every opened lifecycle span must close"
-        );
+        assert_eq!(opened, closed, "every opened lifecycle span must close");
         Ok(())
     }
 
