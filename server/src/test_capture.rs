@@ -36,6 +36,10 @@ pub(crate) struct Capture {
     /// the span, so a repeated id would stitch a closed span's path onto
     /// another span's records.
     request_seq: Arc<AtomicU64>,
+    /// Fields of `battlesnake_created` / `user_authenticated` events — the
+    /// product-event buffer for the creation-path and sign-in tests.
+    /// Never cleared.
+    events: Arc<Mutex<Vec<BTreeMap<String, String>>>>,
 }
 
 /// Extension payload tying a `server.request` span to its capture sequence.
@@ -114,8 +118,12 @@ where
     fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
         let mut fields = Fields::default();
         event.record(&mut fields);
-        if fields.0.get("event_type").map(String::as_str) == Some("game_phase") {
-            self.phases.lock().unwrap().push((false, fields.0));
+        match fields.0.get("event_type").map(String::as_str) {
+            Some("game_phase") => self.phases.lock().unwrap().push((false, fields.0)),
+            Some("battlesnake_created") | Some("user_authenticated") => {
+                self.events.lock().unwrap().push(fields.0);
+            }
+            _ => {}
         }
     }
 }
@@ -189,6 +197,22 @@ impl Capture {
                     .map(|(_, f, v)| (f.clone(), v.clone()))
                     .collect()
             })
+            .collect()
+    }
+
+    /// Fields of `event_type` events whose `user_id` field equals `user_id`,
+    /// in emission order. Never clear the buffer — each test filters on its
+    /// own unique user id instead.
+    pub(crate) fn events(&self, event_type: &str, user_id: Uuid) -> Vec<BTreeMap<String, String>> {
+        self.events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|fields| {
+                fields.get("event_type").map(String::as_str) == Some(event_type)
+                    && fields.get("user_id").map(String::as_str) == Some(&user_id.to_string())
+            })
+            .cloned()
             .collect()
     }
 }

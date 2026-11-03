@@ -963,6 +963,43 @@ mod tests {
         Ok(())
     }
 
+    /// DEV-2061: claiming a staged play account emits exactly one
+    /// `battlesnake_created` event per materialized snake — with the
+    /// created snake's id, the claiming owner, and `source = "play_claim"`
+    /// — via the shared global capture.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn play_claim_emits_battlesnake_created_per_snake(pool: PgPool) -> cja::Result<()> {
+        let capture = crate::test_capture::Capture::shared();
+        let user_id = create_user(&pool, 1648).await?;
+        let account_id = stage_full_account(&pool, 1648).await?;
+
+        let summary = claim_account(&pool, account_id, user_id)
+            .await?
+            .expect("claim should succeed");
+        assert_eq!(summary.snakes_created, 1);
+
+        let snake_id: Uuid = sqlx::query_scalar(
+            "SELECT battlesnake_id FROM battlesnakes WHERE user_id = $1 AND name = 'Hissy'",
+        )
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await?;
+
+        let events = capture.events("battlesnake_created", user_id);
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(
+            events[0].get("battlesnake_id").map(String::as_str),
+            Some(snake_id.to_string().as_str()),
+            "{events:?}"
+        );
+        assert_eq!(
+            events[0].get("source").map(String::as_str),
+            Some("play_claim"),
+            "{events:?}"
+        );
+        Ok(())
+    }
+
     #[sqlx::test(migrations = "../migrations")]
     async fn legacy_tokens_follow_claim_once_and_credit_existing_owner(
         pool: PgPool,
