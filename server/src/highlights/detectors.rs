@@ -998,7 +998,12 @@ fn marathons_section(ladder: &Ladder, games: &[&WindowGame]) -> Section {
             subject: None,
             value: Some(final_turn as f64),
             text: format!(
-                "{final_turn} turns, won by {}{}",
+                "{final_turn} turns, {} {}{}",
+                if winners.len() > 1 {
+                    "a draw between"
+                } else {
+                    "won by"
+                },
                 winners.join(" & "),
                 if also_ran.is_empty() {
                     String::new()
@@ -1991,6 +1996,24 @@ mod tests {
         let section = marathons_section(&data.ladders[0], &refs);
         assert_eq!(section.items.len(), 1);
         assert!(section.items[0].text.contains("1155"));
+    }
+
+    #[test]
+    fn marathons_longest_game_can_be_a_draw() {
+        let mut won = game(0, 0, vec![snake(1, "A", 1, 25.0), snake(2, "B", 2, 25.0)]);
+        won.final_turn = Some(10);
+        let mut drawn = game(0, 1, vec![snake(3, "C", 1, 25.0), snake(4, "D", 1, 25.0)]);
+        drawn.final_turn = Some(1155);
+        let data = fixture_data(vec![duels_ladder()], vec![won.clone(), drawn]);
+        let refs = data.games_on_ladder(0);
+        let section = marathons_section(&data.ladders[0], &refs);
+        assert!(section.items[0].text.contains("a draw between"));
+        assert!(!section.items[0].text.contains("won by"));
+
+        let data = fixture_data(vec![duels_ladder()], vec![won]);
+        let refs = data.games_on_ladder(0);
+        let section = marathons_section(&data.ladders[0], &refs);
+        assert!(section.items[0].text.contains("won by"));
     }
 
     #[test]

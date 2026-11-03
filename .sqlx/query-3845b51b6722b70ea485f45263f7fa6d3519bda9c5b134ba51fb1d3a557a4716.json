@@ -1,0 +1,84 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n            lgr.leaderboard_game_id,\n            lg.game_id,\n            lgr.placement,\n            lgr.placement = 1 AND EXISTS (\n                SELECT 1 FROM leaderboard_game_results tied\n                WHERE tied.leaderboard_game_id = lgr.leaderboard_game_id\n                  AND tied.placement = 1\n                  AND tied.leaderboard_entry_id <> lgr.leaderboard_entry_id\n            ) AS \"is_draw!\",\n            lgr.display_score_change,\n            lgr.mu_before,\n            lgr.mu_after,\n            lgr.sigma_before,\n            lgr.sigma_after,\n            lgr.food_eaten,\n            lg.created_at as game_created_at\n         FROM leaderboard_game_results lgr\n         JOIN leaderboard_games lg ON lgr.leaderboard_game_id = lg.leaderboard_game_id\n         WHERE lgr.leaderboard_entry_id = $1\n         ORDER BY lg.created_at DESC\n         LIMIT $2 OFFSET $3",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "leaderboard_game_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "game_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "placement",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 3,
+        "name": "is_draw!",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 4,
+        "name": "display_score_change",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 5,
+        "name": "mu_before",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 6,
+        "name": "mu_after",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 7,
+        "name": "sigma_before",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 8,
+        "name": "sigma_after",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 9,
+        "name": "food_eaten",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 10,
+        "name": "game_created_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      null,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "3845b51b6722b70ea485f45263f7fa6d3519bda9c5b134ba51fb1d3a557a4716"
+}

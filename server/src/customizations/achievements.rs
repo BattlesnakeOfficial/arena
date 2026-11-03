@@ -104,12 +104,14 @@ impl WinFlags {
     fn include(
         &mut self,
         placement: Option<i32>,
+        first_places: i64,
         participants: i64,
         game_type: &str,
         ladder: bool,
     ) {
         self.ladder |= ladder;
-        if placement == Some(1) && participants >= 2 {
+        // A shared first place is a draw, not a win.
+        if placement == Some(1) && first_places == 1 && participants >= 2 {
             self.first = true;
             self.constrictor |= game_type == GameType::Constrictor.as_str();
             self.crowd |= participants >= 4;
@@ -192,7 +194,9 @@ async fn historical_win(
             JOIN games g ON g.game_id = owned.game_id
             WHERE g.status = 'finished'
               AND (NOT $3::bool OR g.game_type = $4)
-              AND (SELECT COUNT(*) FROM game_battlesnakes peer WHERE peer.game_id = owned.game_id) >= $2
+              -- A shared first place is a draw, not a win.
+              AND (SELECT COUNT(*) >= $2 AND COUNT(*) FILTER (WHERE peer.placement = 1) = 1
+                   FROM game_battlesnakes peer WHERE peer.game_id = owned.game_id)
             LIMIT 1
         ) AS "exists!"
         "#,
@@ -201,7 +205,9 @@ async fn historical_win(
         constrictor,
         GameType::Constrictor.as_str(),
     )
-    .fetch_one(conn).await.wrap_err("Failed to check historical achievement win")?;
+    .fetch_one(conn)
+    .await
+    .wrap_err("Failed to check historical achievement win")?;
     Ok(value)
 }
 
@@ -280,8 +286,9 @@ async fn distinct_finished_count(
             SELECT 1 FROM finished_games fg
             -- The materialized finished set keeps Judge's peer probe after
             -- the status check; see the DEV-1663 production EXPLAIN.
-            WHERE NOT $3::bool OR (SELECT COUNT(*) FROM game_battlesnakes peer
-                WHERE peer.game_id = fg.game_id) >= 2
+            -- A shared first place is a draw, not a win.
+            WHERE NOT $3::bool OR (SELECT COUNT(*) >= 2 AND COUNT(*) FILTER (WHERE peer.placement = 1) = 1
+                FROM game_battlesnakes peer WHERE peer.game_id = fg.game_id)
             LIMIT $2
         ) qualifying
         "#,
@@ -414,10 +421,12 @@ pub async fn award_for_game(pool: &PgPool, game_id: Uuid, base_url: &str) -> cja
     .await
     .wrap_err("Failed to read achievement participants")?;
     let participants = rows.len() as i64;
+    let first_places = rows.iter().filter(|row| row.placement == Some(1)).count() as i64;
     let mut owners = BTreeMap::<Uuid, WinFlags>::new();
     for row in rows {
         owners.entry(row.user_id).or_default().include(
             row.placement,
+            first_places,
             participants,
             &game.game_type,
             row.leaderboard_entry_id.is_some(),
@@ -566,7 +575,8 @@ pub async fn reconcile_recent_achievements(pool: &PgPool) -> cja::Result<u64> {
         .wrap_err("Failed to begin achievement reconciliation")?;
     let rows = sqlx::query!(
         r#"SELECT g.game_id, g.game_type, bs.user_id, gb.placement, gb.leaderboard_entry_id,
-            (SELECT COUNT(*) FROM game_battlesnakes peer WHERE peer.game_id = g.game_id) AS "participants!"
+            (SELECT COUNT(*) FROM game_battlesnakes peer WHERE peer.game_id = g.game_id) AS "participants!",
+            (SELECT COUNT(*) FROM game_battlesnakes peer WHERE peer.game_id = g.game_id AND peer.placement = 1) AS "first_places!"
         FROM games g
         JOIN game_battlesnakes gb ON gb.game_id = g.game_id
         LEFT JOIN leaderboard_entries le ON le.leaderboard_entry_id = gb.leaderboard_entry_id
@@ -579,6 +589,7 @@ pub async fn reconcile_recent_achievements(pool: &PgPool) -> cja::Result<u64> {
     for row in rows {
         owners.entry(row.user_id).or_default().include(
             row.placement,
+            row.first_places,
             row.participants,
             &row.game_type,
             row.leaderboard_entry_id.is_some(),
@@ -1236,6 +1247,55 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "../migrations")]
+    async fn draws_never_count_as_wins(pool: PgPool) {
+        let owner = user(&pool, 2035011).await;
+        let opponent = user(&pool, 2035012).await;
+        let a = snake(&pool, owner, "drawer").await;
+        let b = snake(&pool, opponent, "opponent").await;
+
+        let draw = game(&pool, "Constrictor", "finished", Some(0)).await;
+        participant(&pool, draw, a, 1, None).await;
+        participant(&pool, draw, b, 1, None).await;
+
+        // Live award and the reconciler both read the recent draw.
+        assert_eq!(
+            award_for_game(&pool, draw, "https://arena.example")
+                .await
+                .unwrap(),
+            0
+        );
+        reconcile_recent_achievements(&pool).await.unwrap();
+        assert!(grants(&pool, owner).await.is_empty());
+
+        // Backfill reads history, including the ladder-win count.
+        let mut conn = pool.acquire().await.unwrap();
+        assert!(!historical_win(&mut conn, owner, 2, false).await.unwrap());
+        assert!(!historical_win(&mut conn, owner, 2, true).await.unwrap());
+        let a_entry = entry(&pool, a).await;
+        let ladder_draw = game(&pool, "Standard", "finished", None).await;
+        participant(&pool, ladder_draw, a, 1, Some(a_entry)).await;
+        participant(&pool, ladder_draw, b, 1, None).await;
+        assert_eq!(
+            distinct_finished_count(&mut conn, owner, 10, true)
+                .await
+                .unwrap(),
+            0
+        );
+
+        // An outright win still counts everywhere.
+        let win = game(&pool, "Constrictor", "finished", None).await;
+        participant(&pool, win, a, 1, Some(a_entry)).await;
+        participant(&pool, win, b, 2, None).await;
+        assert!(historical_win(&mut conn, owner, 2, true).await.unwrap());
+        assert_eq!(
+            distinct_finished_count(&mut conn, owner, 10, true)
+                .await
+                .unwrap(),
+            1
+        );
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
     async fn ladder_wins_require_owned_winning_row_and_peers(pool: PgPool) {
         let owner = user(&pool, 1663011).await;
         let opponent = user(&pool, 1663012).await;
@@ -1372,15 +1432,19 @@ mod tests {
         let before: Vec<(Uuid, Uuid, String, String, String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
             "SELECT customization_grant_id, user_id, customization_type, slug, source, created_at FROM customization_grants WHERE user_id IN ($1, $2) ORDER BY user_id, customization_type, slug"
         ).bind(full).bind(partial).fetch_all(&pool).await.unwrap();
-        let id = game(&pool, "Standard", "finished", Some(3)).await;
-        participant(&pool, id, full_snake, 1, Some(full_entry)).await;
-        participant(&pool, id, partial_snake, 1, Some(partial_entry)).await;
-        assert_eq!(
-            award_for_game(&pool, id, "https://arena.example")
+        let full_win = game(&pool, "Standard", "finished", Some(3)).await;
+        participant(&pool, full_win, full_snake, 1, Some(full_entry)).await;
+        participant(&pool, full_win, partial_snake, 2, Some(partial_entry)).await;
+        let partial_win = game(&pool, "Standard", "finished", Some(3)).await;
+        participant(&pool, partial_win, partial_snake, 1, Some(partial_entry)).await;
+        participant(&pool, partial_win, full_snake, 2, Some(full_entry)).await;
+        let mut inserted = 0;
+        for id in [full_win, partial_win] {
+            inserted += award_for_game(&pool, id, "https://arena.example")
                 .await
-                .unwrap(),
-            2
-        );
+                .unwrap();
+        }
+        assert_eq!(inserted, 2);
         let after_live: Vec<(Uuid, Uuid, String, String, String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
             "SELECT customization_grant_id, user_id, customization_type, slug, source, created_at FROM customization_grants WHERE user_id IN ($1, $2) AND slug IN ('turtle', 'judge') ORDER BY user_id, customization_type, slug"
         ).bind(full).bind(partial).fetch_all(&pool).await.unwrap();

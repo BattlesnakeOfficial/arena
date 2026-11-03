@@ -322,6 +322,7 @@ fn roster(
     let in_frame: HashMap<&str, &EngineSnake> = frame
         .map(|f| f.snakes.iter().map(|s| (s.id.as_str(), s)).collect())
         .unwrap_or_default();
+    let no_winner = crate::placement::outright_winner(snakes, |s| s.placement).is_none();
     snakes
         .iter()
         .map(|snake| {
@@ -339,6 +340,7 @@ fn roster(
                 color: snake_color(color),
                 head: shape(AssetKind::Head, head),
                 placement: snake.placement.filter(|_| spoilers),
+                draw: no_winner && snake.placement == Some(1),
             }
         })
         .collect()
@@ -676,6 +678,7 @@ async fn load_leaderboard_card(
                     name: entry.snake_name,
                     owner: entry.owner_name,
                     placement: None,
+                    draw: false,
                 },
             })
             .collect(),
@@ -767,6 +770,7 @@ async fn load_tournament_card(
                 color: snake_color(&r.snake_color),
                 head: head(&r.battlesnake_id),
                 placement: Some(1),
+                draw: false,
             }),
         entrants: registrations
             .iter()

@@ -325,6 +325,13 @@ pub struct GameHistoryEntry {
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
+impl GameHistoryEntry {
+    /// First place with no outright winner means it was shared.
+    pub fn is_draw(&self) -> bool {
+        self.placement == Some(1) && self.winner_name.is_none()
+    }
+}
+
 /// Return one page of profile history. Direct and per-leaderboard-entry paths
 /// walk their own `(link_id, created_at DESC)` indexes, each bounded by
 /// `offset + limit`. Participant creation time is the recency key; the row ID
@@ -424,6 +431,7 @@ pub struct GameHistoryStats {
     pub finished_games: i64,
     pub placement_count: i64,
     pub wins: i64,
+    pub draws: i64,
     pub second_places: i64,
     pub third_places: i64,
     pub fourth_places: i64,
@@ -473,6 +481,11 @@ pub async fn get_game_stats_for_battlesnake(
                    WHERE tied.game_id = classified.game_id AND tied.placement = 1
                      AND tied.game_battlesnake_id <> classified.game_battlesnake_id
                )) AS "wins!",
+               COUNT(*) FILTER (WHERE competitive AND placement = 1 AND EXISTS (
+                   SELECT 1 FROM game_battlesnakes tied
+                   WHERE tied.game_id = classified.game_id AND tied.placement = 1
+                     AND tied.game_battlesnake_id <> classified.game_battlesnake_id
+               )) AS "draws!",
                COUNT(*) FILTER (WHERE competitive AND placement = 2) AS "second_places!",
                COUNT(*) FILTER (WHERE competitive AND placement = 3) AS "third_places!",
                COUNT(*) FILTER (WHERE competitive AND placement = 4) AS "fourth_places!",
@@ -491,6 +504,7 @@ pub async fn get_game_stats_for_battlesnake(
         finished_games: row.finished_games,
         placement_count: row.placement_count,
         wins: row.wins,
+        draws: row.draws,
         second_places: row.second_places,
         third_places: row.third_places,
         fourth_places: row.fourth_places,
@@ -789,7 +803,7 @@ mod tests {
         assert_eq!(winner(win), Some("Drawer"));
 
         let stats = get_game_stats_for_battlesnake(&pool, drawer).await?;
-        assert_eq!((stats.finished_games, stats.wins), (2, 1));
+        assert_eq!((stats.finished_games, stats.wins, stats.draws), (2, 1, 1));
         assert!((stats.win_rate - 50.0).abs() < 1e-9);
         assert!((stats.average_placement - 1.0).abs() < 1e-9);
         Ok(())
