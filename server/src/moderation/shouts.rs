@@ -1401,6 +1401,9 @@ mod tests {
     }
 }
 
+/// Manual threshold eval: needs TYPESAFE_API_KEY + network, writes no DB.
+/// Run with:
+///   TYPESAFE_API_KEY=... cargo test -p arena --bin arena shout_eval_manual -- --ignored --nocapture
 #[cfg(test)]
 mod eval {
     use super::*;
