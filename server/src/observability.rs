@@ -88,7 +88,7 @@ pub fn manifest(
     Ok(manifest
         .metrics(metrics)
         .metric_thresholds(thresholds)
-        .dashboards(vec![dashboard()?]))
+        .dashboards(vec![dashboard()?, product_dashboard()?]))
 }
 
 fn count(id: &str, title: &str, path: &str, value: &str) -> Result<Metric, String> {
@@ -245,6 +245,90 @@ fn metrics() -> Result<Vec<NamedMetric>, String> {
             .display_name("Game processing overhead · p95")
             .unit("ms")
             .build()?,
+        count(
+            "product.games.played",
+            "Games played",
+            "fields.event_type",
+            "game_completed",
+        )?
+        .unit("games")
+        .build()?,
+        count(
+            "product.games.daily",
+            "Games played",
+            "fields.event_type",
+            "game_completed",
+        )?
+        .unit("games")
+        .time_bucket(86_400)
+        .build()?,
+        count(
+            "product.games.ladder.daily",
+            "Games played (ladder)",
+            "fields.event_type",
+            "game_completed",
+        )?
+        .filter_eq("fields.source", "ladder")?
+        .unit("games")
+        .time_bucket(86_400)
+        .build()?,
+        count(
+            "product.games.custom.daily",
+            "Games played (custom)",
+            "fields.event_type",
+            "game_completed",
+        )?
+        .filter_eq("fields.source", "custom")?
+        .unit("games")
+        .time_bucket(86_400)
+        .build()?,
+        count(
+            "product.games.tournament.daily",
+            "Games played (tournament)",
+            "fields.event_type",
+            "game_completed",
+        )?
+        .filter_eq("fields.source", "tournament")?
+        .unit("games")
+        .time_bucket(86_400)
+        .build()?,
+        count(
+            "product.games.user_created",
+            "User-created games",
+            "fields.event_type",
+            "game_completed",
+        )?
+        .filter_eq("fields.source", "custom")?
+        .unit("games")
+        .build()?,
+        count(
+            "product.play_claims.daily",
+            "Play claims",
+            "fields.event_type",
+            "play_claim_succeeded",
+        )?
+        .unit("claims")
+        .time_bucket(86_400)
+        .build()?,
+        count(
+            "product.new_users.daily",
+            "New users",
+            "fields.event_type",
+            "user_authenticated",
+        )?
+        .filter_eq("fields.new_user", true)?
+        .unit("users")
+        .time_bucket(86_400)
+        .build()?,
+        count(
+            "product.new_snakes.daily",
+            "New snakes",
+            "fields.event_type",
+            "battlesnake_created",
+        )?
+        .unit("snakes")
+        .time_bucket(86_400)
+        .build()?,
     ])
 }
 
@@ -289,6 +373,33 @@ fn dashboard() -> Result<NamedDashboard, String> {
                 .item(Item::health_summary())
                 .item(Item::table("jobs.runs"))
                 .item(Item::stat("jobs.failures")),
+        ))
+}
+
+fn product_dashboard() -> Result<NamedDashboard, String> {
+    Ok(NamedDashboard::new("arena-product", "Arena product")?
+        .description("Games played, play claims, signups, and new snakes.")
+        .default_range_seconds(30 * 24 * 60 * 60)
+        .section(
+            Section::new()
+                .title("At a glance")
+                .item(Item::stat("product.games.played"))
+                .item(Item::stat("product.games.user_created")),
+        )
+        .section(
+            Section::new()
+                .title("Games played")
+                .item(Item::time_series("product.games.daily"))
+                .item(Item::time_series("product.games.ladder.daily"))
+                .item(Item::time_series("product.games.custom.daily"))
+                .item(Item::time_series("product.games.tournament.daily")),
+        )
+        .section(
+            Section::new()
+                .title("Growth")
+                .item(Item::time_series("product.play_claims.daily"))
+                .item(Item::time_series("product.new_users.daily"))
+                .item(Item::time_series("product.new_snakes.daily")),
         ))
 }
 
@@ -359,6 +470,14 @@ mod tests {
             .iter()
             .map(|metric| (metric.id.as_str(), metric))
             .collect();
+        let ids: Vec<_> = manifest
+            .dashboards
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|d| d.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["arena-operations", "arena-product"]);
         for dashboard in manifest.dashboards.as_ref().unwrap() {
             for section in &dashboard.sections {
                 for item in &section.items {
