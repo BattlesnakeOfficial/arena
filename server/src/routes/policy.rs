@@ -5,7 +5,7 @@ use maud::{Markup, html};
 use crate::{components::page_factory::PageFactory, errors::ServerResult};
 
 const EFFECTIVE_DATE: &str = "July 2026";
-const PRIVACY_EFFECTIVE_DATE: &str = "September 2026";
+const PRIVACY_EFFECTIVE_DATE: &str = "November 2026";
 
 pub async fn conduct_page(
     page_factory: PageFactory,
@@ -96,8 +96,17 @@ fn privacy_content() -> Markup {
             }
             p {
                 "For signed-in web and API-token requests, we store your account ID "
-                "and the UTC date of activity. The activity record contains no request "
-                "path, IP address, or browser identifier."
+                "and the UTC date of activity."
+            }
+            p {
+                "Battlesnake also keeps technical logs in a self-hosted "
+                "observability system. For signed-in requests, those logs store "
+                "your account ID together with the request path, IP address, "
+                "and browser user agent. Gameplay telemetry in the same system "
+                "ties account IDs and snake IDs to the games they took part "
+                "in, and sign-in events include your GitHub username. This "
+                "data has no fixed deletion date, and deleting your account "
+                "does not remove what was already recorded there."
             }
 
             h3 { "Play.battlesnake.com Migration Data" }
@@ -134,8 +143,9 @@ fn privacy_content() -> Markup {
                 "We do not send marketing emails. We do not show "
                 "advertisements. We do not sell your data. We share it only "
                 "with the service providers that run Battlesnake on our behalf — "
-                "Mailgun for transactional email and Google Cloud for hosting "
-                "and storage."
+                "Mailgun for transactional email, Google Cloud for hosting and "
+                "storage, and the providers that host our self-hosted "
+                "observability system."
             }
 
             h2 { "Data Storage" }
