@@ -544,6 +544,7 @@ async fn claim_account_inner(
     .wrap_err("Failed to fetch staged snakes")?;
 
     let mut snakes_created = 0;
+    let mut created_snake_ids: Vec<Uuid> = Vec::new();
     for snake in staged_snakes {
         let mut name = snake.name.clone();
         let mut suffix = 2;
@@ -585,6 +586,7 @@ async fn claim_account_inner(
 
         existing_names.push(name);
         snakes_created += 1;
+        created_snake_ids.push(battlesnake_id);
     }
 
     // Materialize grants. The catalog is code-defined, so staged (type,
@@ -680,6 +682,16 @@ async fn claim_account_inner(
     .await?;
     tx.commit().await.wrap_err("Failed to commit claim tx")?;
     receipt.log_enqueued();
+
+    for battlesnake_id in created_snake_ids {
+        tracing::info!(
+            event_type = "battlesnake_created",
+            battlesnake_id = %battlesnake_id,
+            user_id = %user_id,
+            source = "play_claim",
+            "battlesnake created via play claim"
+        );
+    }
 
     Ok(Some(summary))
 }

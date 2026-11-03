@@ -236,6 +236,14 @@ pub async fn create_snake(
         )
     })?;
 
+    tracing::info!(
+        event_type = "battlesnake_created",
+        battlesnake_id = %snake.battlesnake_id,
+        user_id = %auth.user_id,
+        source = "api",
+        "battlesnake created"
+    );
+
     // The scope was loaded at auth time; mirror the row just committed so
     // the response below sees the freshly created snake.
     auth.record_selected_snake(snake.battlesnake_id);
