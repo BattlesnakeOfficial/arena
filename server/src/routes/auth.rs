@@ -757,7 +757,7 @@ mod tests {
                         axum::http::header::COOKIE,
                         format!("{SESSION_COOKIE_NAME}={cookie}"),
                     )
-                    .body(())
+                    .body(axum::body::Body::empty())
                     .unwrap(),
             )
             .await
@@ -782,7 +782,7 @@ mod tests {
                 Request::builder()
                     .uri("/api/me")
                     .header(AUTHORIZATION, format!("Bearer {}", token.secret))
-                    .body(())
+                    .body(axum::body::Body::empty())
                     .unwrap(),
             )
             .await
@@ -803,7 +803,12 @@ mod tests {
         // group each, so groups.len() >= 2 guards against vacuity.
         let _ = app
             .clone()
-            .oneshot(Request::builder().uri("/privacy").body(()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/privacy")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         let userless_session = crate::models::session::create_session(&db).await.unwrap();
@@ -818,7 +823,7 @@ mod tests {
                         axum::http::header::COOKIE,
                         format!("{SESSION_COOKIE_NAME}={userless_cookie}"),
                     )
-                    .body(())
+                    .body(axum::body::Body::empty())
                     .unwrap(),
             )
             .await
