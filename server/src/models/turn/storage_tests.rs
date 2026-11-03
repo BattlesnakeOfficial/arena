@@ -1,9 +1,98 @@
 use super::*;
-use std::time::Duration;
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex, OnceLock},
+    time::Duration,
+};
+use tracing::{field::Visit, span::Attributes};
+use tracing_subscriber::{Layer, prelude::*};
 
-// The shared capture and its single global subscriber live in
-// `crate::test_capture` so the auth span test can share them.
-use crate::test_capture::Capture;
+#[derive(Clone, Default)]
+struct Capture(Arc<Mutex<Vec<Record>>>);
+
+type Record = (bool, BTreeMap<String, String>);
+
+#[derive(Default)]
+struct Fields(BTreeMap<String, String>);
+
+impl Visit for Fields {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        self.0.insert(field.name().into(), format!("{value:?}"));
+    }
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        self.0.insert(field.name().into(), value.into());
+    }
+}
+
+impl<S: tracing::Subscriber> Layer<S> for Capture {
+    fn on_new_span(
+        &self,
+        attrs: &Attributes<'_>,
+        _: &tracing::Id,
+        _: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        if attrs.metadata().name() == "arena.game.phase" {
+            let mut fields = Fields::default();
+            attrs.record(&mut fields);
+            self.0.lock().unwrap().push((true, fields.0));
+        }
+    }
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        let mut fields = Fields::default();
+        event.record(&mut fields);
+        if fields.0.get("event_type").map(String::as_str) == Some("game_phase") {
+            self.0.lock().unwrap().push((false, fields.0));
+        }
+    }
+}
+
+impl Capture {
+    fn shared() -> &'static Self {
+        static CAPTURE: OnceLock<Capture> = OnceLock::new();
+        CAPTURE.get_or_init(|| {
+            let capture = Capture::default();
+            // Keep callsite interest stable for concurrent database tests. Each
+            // assertion selects its own game UUID from the shared capture.
+            tracing::subscriber::set_global_default(
+                tracing_subscriber::registry().with(capture.clone()),
+            )
+            .unwrap();
+            capture
+        })
+    }
+
+    fn records(&self, game_id: Uuid, spans: bool) -> Vec<BTreeMap<String, String>> {
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(span, fields)| {
+                *span == spans && fields.get("game_id") == Some(&game_id.to_string())
+            })
+            .map(|(_, fields)| fields.clone())
+            .collect()
+    }
+
+    /// Lifecycle states in emission order: `started` comes from the phase
+    /// span's creation, terminal states from events.
+    fn states(&self, game_id: Uuid) -> Vec<(String, String)> {
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, fields)| fields)
+            .filter(|fields| fields.get("game_id") == Some(&game_id.to_string()))
+            .map(|fields| {
+                (
+                    fields["phase"]
+                        .trim_start_matches("persist_turn.")
+                        .to_owned(),
+                    fields["state"].clone(),
+                )
+            })
+            .collect()
+    }
+}
 
 async fn game(pool: &PgPool) -> Uuid {
     sqlx::query_scalar!("INSERT INTO games (board_size, game_type, status) VALUES ('11x11', 'Solo', 'running') RETURNING game_id")

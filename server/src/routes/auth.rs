@@ -96,8 +96,6 @@ impl FromRequestParts<AppState> for CurrentSession {
         match result {
             Some((session, user)) => {
                 if let Some(user) = &user {
-                    tracing::Span::current().record("user_id", user.user_id.to_string());
-                    tracing::Span::current().record("auth_type", "session");
                     app_state
                         .activity_recorder
                         .record(&app_state.db, user.user_id)
@@ -443,8 +441,6 @@ async fn try_bearer_auth(parts: &Parts, state: &AppState) -> BearerAuthResult {
 
     match get_user_by_id(&state.db, token_auth.user_id).await {
         Ok(Some(user)) => {
-            tracing::Span::current().record("user_id", user.user_id.to_string());
-            tracing::Span::current().record("auth_type", "token");
             state
                 .activity_recorder
                 .record(&state.db, user.user_id)
@@ -707,148 +703,5 @@ mod tests {
                 .is_some()
         );
         assert!(!state.activity_recorder.record(&db, user_id).await);
-    }
-
-    /// DEV-2061: the real `server.request` span records `user_id` and
-    /// `auth_type` from both auth paths, through cja's TraceLayer. This is
-    /// the DEV-2066 contract test — it fails without the Cargo.lock bump
-    /// (records on undeclared fields are silently dropped).
-    #[sqlx::test(migrations = "../migrations")]
-    async fn server_request_span_records_user_and_auth_type(db: sqlx::PgPool) {
-        use tower::ServiceExt as _;
-
-        let capture = crate::test_capture::Capture::shared();
-        let user_id = sqlx::query_scalar!(
-            "INSERT INTO users(external_github_id, github_login, github_access_token) VALUES (1, 'span-record', '') RETURNING user_id"
-        )
-        .fetch_one(&db)
-        .await
-        .unwrap();
-        let session_id = sqlx::query_scalar!(
-            "INSERT INTO sessions(user_id) VALUES ($1) RETURNING session_id",
-            user_id
-        )
-        .fetch_one(&db)
-        .await
-        .unwrap();
-        let token = create_api_token(
-            &db,
-            user_id,
-            "span-record",
-            Permission::ALL.as_slice(),
-            crate::models::api_token::SnakeAccess::All,
-            &[],
-        )
-        .await
-        .unwrap();
-        let state = AppState::test_from_pool(db.clone());
-        let app = crate::routes::test_support::api_app(&state);
-
-        // Signed session probe on `/` (root_page takes PageFactory +
-        // OptionalUser, so CurrentSession runs at least twice — duplicate
-        // records are expected, so assertions are value-based, not counts).
-        let cookie = crate::routes::test_support::signed_session_cookie(&state, session_id);
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/")
-                    .header(
-                        axum::http::header::COOKIE,
-                        format!("{SESSION_COOKIE_NAME}={cookie}"),
-                    )
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert!(response.status().is_success());
-        let groups = capture.server_request_record_groups("/");
-        assert!(
-            groups.iter().any(|g| {
-                g.contains(&("user_id".to_string(), user_id.to_string()))
-                    && g.contains(&("auth_type".to_string(), "session".to_string()))
-                    && g.iter()
-                        .filter(|(f, _)| f == "user_id")
-                        .all(|(_, v)| v == &user_id.to_string())
-            }),
-            "no `/` span recorded user_id={user_id} + auth_type=session; groups: {groups:?}"
-        );
-
-        // Bearer probe on /api/me.
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/api/me")
-                    .header(AUTHORIZATION, format!("Bearer {}", token.secret))
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let groups = capture.server_request_record_groups("/api/me");
-        assert!(
-            groups.iter().any(|g| {
-                g.contains(&("user_id".to_string(), user_id.to_string()))
-                    && g.contains(&("auth_type".to_string(), "token".to_string()))
-            }),
-            "no `/api/me` span recorded user_id={user_id} + auth_type=token; groups: {groups:?}"
-        );
-
-        // Anonymous probes on /privacy: no cookie at all, then a signed
-        // cookie for a user-less session (`Some((session, None))` — the arm
-        // the record code must skip). Both must record nothing; both add a
-        // group each, so groups.len() >= 2 guards against vacuity.
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/privacy")
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert!(
-            response.status().is_success(),
-            "anonymous /privacy probe failed: {}",
-            response.status()
-        );
-        let userless_session = crate::models::session::create_session(&db).await.unwrap();
-        let userless_cookie =
-            crate::routes::test_support::signed_session_cookie(&state, userless_session.session_id);
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/privacy")
-                    .header(
-                        axum::http::header::COOKIE,
-                        format!("{SESSION_COOKIE_NAME}={userless_cookie}"),
-                    )
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert!(
-            response.status().is_success(),
-            "user-less-session /privacy probe failed: {}",
-            response.status()
-        );
-        let groups = capture.server_request_record_groups("/privacy");
-        assert!(
-            groups.len() >= 2,
-            "expected at least the two probe spans, got {groups:?}"
-        );
-        assert!(
-            groups
-                .iter()
-                .flatten()
-                .all(|(f, _)| f != "user_id" && f != "auth_type"),
-            "anonymous /privacy spans must record neither field; groups: {groups:?}"
-        );
     }
 }

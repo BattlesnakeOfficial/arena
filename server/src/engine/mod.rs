@@ -62,19 +62,6 @@ impl GameSource {
             GameSource::Custom => "custom",
         }
     }
-
-    /// Analytics label for Eyes product events. Matches
-    /// `StatsSnapshot::fetch`'s precedence (tournament before ladder) but uses
-    /// product vocabulary: `ladder`, not the stats page's `leaderboard` column
-    /// label. Distinct from [`Self::as_str`], the documented engine wire value
-    /// (`arena`), which must not change.
-    pub fn analytics_label(self) -> &'static str {
-        match self {
-            GameSource::Ladder => "ladder",
-            GameSource::Tournament => "tournament",
-            GameSource::Custom => "custom",
-        }
-    }
 }
 
 /// Full engine game state: board + metadata.

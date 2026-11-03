@@ -236,7 +236,6 @@ pub async fn github_auth_callback(
         user_id = %user.user_id,
         github_login = %user.github_login,
         auth_type = if is_cli_auth { "cli" } else { "web" },
-        new_user = is_new_user,
         "user authenticated via GitHub OAuth"
     );
 

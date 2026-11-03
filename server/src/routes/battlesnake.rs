@@ -732,13 +732,6 @@ pub async fn create_battlesnake(
 
     match battlesnake_result {
         Ok(snake) => {
-            tracing::info!(
-                event_type = "battlesnake_created",
-                battlesnake_id = %snake.battlesnake_id,
-                user_id = %user.user_id,
-                source = "web",
-                "battlesnake created"
-            );
             tag::set_tags_for_battlesnake(&state.db, snake.battlesnake_id, &form.tag_ids)
                 .await
                 .wrap_err("Failed to set battlesnake tags")?;
@@ -2995,86 +2988,5 @@ mod hosting_route_tests {
         .await;
         assert_eq!(status, StatusCode::SEE_OTHER);
         assert_eq!(hosted_mark(&pool, snake).await, Some(client));
-    }
-}
-
-#[cfg(test)]
-mod creation_event_tests {
-    use axum::{
-        body::{Body, to_bytes},
-        http::{Method, Request, StatusCode, header},
-    };
-    use sqlx::PgPool;
-    use tower::ServiceExt as _;
-    use uuid::Uuid;
-
-    use crate::routes::test_support::{
-        create_user_session, session_user_id, signed_session_cookie,
-    };
-    use crate::state::AppState;
-
-    /// DEV-2061: creating a snake through the web form emits exactly one
-    /// `battlesnake_created` event carrying the snake, its owner, and
-    /// `source = "web"`. Asserted through the shared global capture (events
-    /// dispatch to the global subscriber; no scoped `with_subscriber`).
-    #[sqlx::test(migrations = "../migrations")]
-    async fn web_create_emits_battlesnake_created_event(db: PgPool) {
-        let capture = crate::test_capture::Capture::shared();
-        let state = AppState::test_from_pool(db.clone());
-        let app = crate::routes::routes(state.clone())
-            .expect("asset router")
-            .into_router();
-        let session = create_user_session(&db, 61001, false).await;
-        let user_id = session_user_id(&db, session).await;
-        let cookie = format!(
-            "{}={}",
-            crate::models::session::SESSION_COOKIE_NAME,
-            signed_session_cookie(&state, session)
-        );
-
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri("/battlesnakes")
-                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                    .header(header::COOKIE, cookie)
-                    .body(Body::from(
-                        "name=Web+Event+Snake&url=https%3A%2F%2Fweb-event.example%2Fapi&visibility=public&engine_region=us-west1",
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let status = response.status();
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        assert_eq!(
-            status,
-            StatusCode::SEE_OTHER,
-            "{}",
-            String::from_utf8_lossy(&body)
-        );
-
-        let snake_id: Uuid = sqlx::query_scalar(
-            "SELECT battlesnake_id FROM battlesnakes WHERE user_id = $1 AND name = 'Web Event Snake'",
-        )
-        .bind(user_id)
-        .fetch_one(&db)
-        .await
-        .unwrap();
-
-        let events = capture.events("battlesnake_created", user_id);
-        assert_eq!(events.len(), 1, "{events:?}");
-        assert_eq!(
-            events[0].get("battlesnake_id").map(String::as_str),
-            Some(snake_id.to_string().as_str()),
-            "{events:?}"
-        );
-        assert_eq!(
-            events[0].get("source").map(String::as_str),
-            Some("web"),
-            "{events:?}"
-        );
     }
 }

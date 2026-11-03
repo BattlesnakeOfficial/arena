@@ -631,10 +631,10 @@ pub async fn get_game_source(
     .await
     .wrap_err("Failed to look up game source")?;
 
-    Ok(if row.tournament {
-        crate::engine::GameSource::Tournament
-    } else if row.ladder {
+    Ok(if row.ladder {
         crate::engine::GameSource::Ladder
+    } else if row.tournament {
+        crate::engine::GameSource::Tournament
     } else {
         crate::engine::GameSource::Custom
     })
@@ -1871,101 +1871,6 @@ mod tests {
             (1, 1),
             "same-ladder overlap on snake a: y={ry:?} o={ro:?}"
         );
-        Ok(())
-    }
-
-    /// DEV-2061: `get_game_source` resolves tournament-first (pinning the
-    /// precedence flip), and `analytics_label` maps to product vocabulary
-    /// (`ladder`, not the wire value `arena`).
-    #[sqlx::test(migrations = "../migrations")]
-    async fn get_game_source_precedence_and_labels(pool: sqlx::PgPool) -> cja::Result<()> {
-        use crate::engine::GameSource;
-
-        let user_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (7303, 'source-user', 'test-token') RETURNING user_id",
-        )
-        .fetch_one(&pool)
-        .await?;
-        let tournament_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO tournaments (name, user_id) VALUES ('source-test', $1) RETURNING tournament_id",
-        )
-        .bind(user_id)
-        .fetch_one(&pool)
-        .await?;
-        let match_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO tournament_matches (tournament_id, round, position, visual_column, visual_row)
-             VALUES ($1, 1, 0, 0, 0) RETURNING match_id",
-        )
-        .bind(tournament_id)
-        .fetch_one(&pool)
-        .await?;
-        let leaderboard = sqlx::query_scalar!(
-            "SELECT leaderboard_id FROM leaderboards WHERE name = 'Standard 11x11'"
-        )
-        .fetch_one(&pool)
-        .await?;
-
-        let bare_game = async |pool: &sqlx::PgPool| {
-            sqlx::query_scalar::<_, Uuid>(
-                "INSERT INTO games (board_size, game_type, status)
-                 VALUES ('11x11', 'Standard', 'waiting') RETURNING game_id",
-            )
-            .fetch_one(pool)
-            .await
-        };
-
-        // Ladder only.
-        let ladder_game = bare_game(&pool).await?;
-        sqlx::query!(
-            "INSERT INTO leaderboard_games (leaderboard_id, game_id) VALUES ($1, $2)",
-            leaderboard,
-            ladder_game
-        )
-        .execute(&pool)
-        .await?;
-
-        // Tournament only.
-        let tournament_game = bare_game(&pool).await?;
-        sqlx::query!(
-            "INSERT INTO match_games (match_id, game_id, game_number) VALUES ($1, $2, 1)",
-            match_id,
-            tournament_game
-        )
-        .execute(&pool)
-        .await?;
-
-        // Both rows: tournament wins (the flip this test pins).
-        let both_game = bare_game(&pool).await?;
-        sqlx::query!(
-            "INSERT INTO leaderboard_games (leaderboard_id, game_id) VALUES ($1, $2)",
-            leaderboard,
-            both_game
-        )
-        .execute(&pool)
-        .await?;
-        sqlx::query!(
-            "INSERT INTO match_games (match_id, game_id, game_number) VALUES ($1, $2, 2)",
-            match_id,
-            both_game
-        )
-        .execute(&pool)
-        .await?;
-
-        // Neither row.
-        let custom_game = bare_game(&pool).await?;
-
-        let cases = [
-            (ladder_game, GameSource::Ladder, "ladder"),
-            (tournament_game, GameSource::Tournament, "tournament"),
-            (both_game, GameSource::Tournament, "tournament"),
-            (custom_game, GameSource::Custom, "custom"),
-        ];
-        for (game_id, expected, label) in cases {
-            let source = get_game_source(&pool, game_id).await?;
-            assert_eq!(source, expected, "game {game_id}");
-            assert_eq!(source.analytics_label(), label, "game {game_id}");
-        }
         Ok(())
     }
 }

@@ -145,8 +145,6 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
                     snake_id: bs.game_battlesnake_id.to_string(),
                     url: bs.url.clone(),
                     engine_region: bs.engine_region,
-                    battlesnake_id: bs.battlesnake_id,
-                    user_id: bs.user_id,
                 })
                 .collect();
 
@@ -233,12 +231,8 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
         .await?;
 
     // Create the initial game state
-    let mut engine_game = crate::engine::create_initial_game(
-        game_id,
-        game.board_size.clone(),
-        game.game_type.clone(),
-        &battlesnakes,
-    );
+    let mut engine_game =
+        crate::engine::create_initial_game(game_id, game.board_size, game.game_type, &battlesnakes);
     engine_game.meta.source = game_source;
 
     // Get timeout from game settings
@@ -561,10 +555,6 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
         final_turn = engine_game.board.turn,
         total_ms = total_time_ms,
         winner_battlesnake_id = ?winner_snake_id,
-        source = game_source.analytics_label(),
-        game_type = game.game_type.as_str(),
-        board_size = game.board_size.as_str(),
-        snake_count = battlesnakes.len(),
         "game completed"
     );
 
@@ -724,41 +714,6 @@ mod tests {
             let mut fields = EventFields::default();
             event.record(&mut fields);
             self.0.lock().unwrap().push(fields.0);
-        }
-    }
-
-    /// Captures `snake.lifecycle` spans: creation fields plus a close count.
-    /// `on_close` needs the span name, so the impl is `LookupSpan`-bound.
-    #[derive(Clone, Default)]
-    struct SpanCapture {
-        lifecycle: Arc<Mutex<Vec<std::collections::HashMap<String, String>>>>,
-        closed: Arc<Mutex<usize>>,
-    }
-
-    impl<S> tracing_subscriber::Layer<S> for SpanCapture
-    where
-        S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
-    {
-        fn on_new_span(
-            &self,
-            attrs: &tracing::span::Attributes<'_>,
-            _: &tracing::Id,
-            _: tracing_subscriber::layer::Context<'_, S>,
-        ) {
-            if attrs.metadata().name() == "snake.lifecycle" {
-                let mut fields = EventFields::default();
-                attrs.record(&mut fields);
-                self.lifecycle.lock().unwrap().push(fields.0);
-            }
-        }
-
-        fn on_close(&self, id: tracing::Id, ctx: tracing_subscriber::layer::Context<'_, S>) {
-            if ctx
-                .span(&id)
-                .is_some_and(|span| span.name() == "snake.lifecycle")
-            {
-                *self.closed.lock().unwrap() += 1;
-            }
         }
     }
 
@@ -1056,208 +1011,6 @@ mod tests {
                 .unwrap_or(0),
             0
         );
-        Ok(())
-    }
-
-    /// Ladder-shaped fixture: user → battlesnake → `leaderboards` row
-    /// 'Standard 11x11' (seeded by migrations) → `leaderboard_entries` →
-    /// game_battlesnakes referencing ONLY the entry (battlesnake_id NULL —
-    /// the ladder shape) → `leaderboard_games` link. Returns
-    /// (owner, battlesnake_id, game_id).
-    async fn ladder_fixture(pool: &PgPool, snake_url: &str) -> cja::Result<(Uuid, Uuid, Uuid)> {
-        let owner = sqlx::query_scalar!(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (1731, 'lifecycle-owner', 'test') RETURNING user_id"
-        )
-        .fetch_one(pool)
-        .await?;
-        let battlesnake_id = sqlx::query_scalar!(
-            "INSERT INTO battlesnakes (user_id, name, url)
-             VALUES ($1, 'lifecycle-snake', $2) RETURNING battlesnake_id",
-            owner,
-            snake_url
-        )
-        .fetch_one(pool)
-        .await?;
-        let leaderboard = sqlx::query_scalar!(
-            "SELECT leaderboard_id FROM leaderboards WHERE name = 'Standard 11x11'"
-        )
-        .fetch_one(pool)
-        .await?;
-        let entry = sqlx::query_scalar!(
-            "INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id)
-             VALUES ($1, $2) RETURNING leaderboard_entry_id",
-            leaderboard,
-            battlesnake_id
-        )
-        .fetch_one(pool)
-        .await?;
-        let game_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO games (board_size, game_type, status)
-             VALUES ('11x11', 'Standard', 'waiting') RETURNING game_id",
-        )
-        .fetch_one(pool)
-        .await?;
-        sqlx::query!(
-            "INSERT INTO game_battlesnakes (game_id, leaderboard_entry_id) VALUES ($1, $2)",
-            game_id,
-            entry
-        )
-        .execute(pool)
-        .await?;
-        sqlx::query!(
-            "INSERT INTO leaderboard_games (leaderboard_id, game_id) VALUES ($1, $2)",
-            leaderboard,
-            game_id
-        )
-        .execute(pool)
-        .await?;
-        Ok((owner, battlesnake_id, game_id))
-    }
-
-    /// DEV-2061: the `snake.lifecycle` span exists around each real /start
-    /// and /end call and resolves the real snake and owner even for a
-    /// ladder game, whose `game_battlesnakes` rows hold only
-    /// `leaderboard_entry_id`. One snake finishes the game at turn 0
-    /// (`is_game_over` is `alive <= 1`) with both lifecycle calls made.
-    #[sqlx::test(migrations = "../migrations")]
-    async fn ladder_game_lifecycle_spans_resolve_snakes_and_owners(
-        pool: PgPool,
-    ) -> cja::Result<()> {
-        // A live global dispatcher keeps tracing-core off its
-        // `Rebuilder::JustOne` path (`callsite.rs`, `has_just_one`,
-        // `get_default`), which otherwise lets an unscoped test on another
-        // thread cache `Interest::never()` for `snake.lifecycle` while the
-        // scoped dispatcher below is the only one alive.
-        let _ = crate::test_capture::Capture::shared();
-        let app_state = AppState::test_from_pool(pool.clone());
-        let snake_server = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::any())
-            .respond_with(
-                wiremock::ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({ "apiversion": "1" })),
-            )
-            .mount(&snake_server)
-            .await;
-        let (owner, battlesnake_id, game_id) = ladder_fixture(&pool, &snake_server.uri()).await?;
-
-        let events = EventCapture::default();
-        let spans = SpanCapture::default();
-        run_game(&app_state, game_id)
-            .with_subscriber(
-                tracing_subscriber::registry()
-                    .with(events.clone())
-                    .with(spans.clone()),
-            )
-            .await?;
-
-        let status: String = sqlx::query_scalar("SELECT status FROM games WHERE game_id = $1")
-            .bind(game_id)
-            .fetch_one(&pool)
-            .await?;
-        assert_eq!(status, "finished");
-
-        let lifecycle = spans.lifecycle.lock().unwrap().clone();
-        assert_eq!(lifecycle.len(), 2, "{lifecycle:?}");
-        let endpoints: Vec<_> = lifecycle.iter().map(|f| f["endpoint"].clone()).collect();
-        assert!(endpoints.contains(&"start".to_owned()), "{lifecycle:?}");
-        assert!(endpoints.contains(&"end".to_owned()), "{lifecycle:?}");
-        for fields in &lifecycle {
-            assert_eq!(fields["game_id"], game_id.to_string(), "{lifecycle:?}");
-            assert_eq!(
-                fields["battlesnake_id"],
-                battlesnake_id.to_string(),
-                "{lifecycle:?}"
-            );
-            assert_eq!(fields["user_id"], owner.to_string(), "{lifecycle:?}");
-            assert_eq!(fields["source"], "ladder", "{lifecycle:?}");
-        }
-        assert_eq!(*spans.closed.lock().unwrap(), 2);
-
-        let events = events.0.lock().unwrap();
-        let completed = events
-            .iter()
-            .find(|e| e.get("event_type").map(String::as_str) == Some("game_completed"))
-            .expect("game_completed event");
-        assert_eq!(completed["source"], "ladder");
-        assert_eq!(completed["game_type"], "Standard");
-        assert_eq!(completed["board_size"], "11x11");
-        assert_eq!(completed["snake_count"], "1");
-        Ok(())
-    }
-
-    /// The `snake.lifecycle` span closes whether or not the snake answers:
-    /// a refused port keeps serving nothing, so both the open and close
-    /// paths must run without pinning exact counts (a start-only snake may
-    /// or may not also get an /end).
-    #[sqlx::test(migrations = "../migrations")]
-    async fn lifecycle_spans_close_when_snake_does_not_answer(pool: PgPool) -> cja::Result<()> {
-        let _ = crate::test_capture::Capture::shared();
-        let app_state = AppState::test_from_pool(pool.clone());
-        let (_owner, _battlesnake_id, game_id) =
-            ladder_fixture(&pool, "http://127.0.0.1:9").await?;
-
-        let spans = SpanCapture::default();
-        run_game(&app_state, game_id)
-            .with_subscriber(tracing_subscriber::registry().with(spans.clone()))
-            .await?;
-
-        let opened = spans.lifecycle.lock().unwrap().len();
-        let closed = *spans.closed.lock().unwrap();
-        assert!(opened >= 1, "expected at least one lifecycle span");
-        assert_eq!(opened, closed, "every opened lifecycle span must close");
-        Ok(())
-    }
-
-    /// A custom game (direct `game_battlesnakes` rows, no ladder/tournament
-    /// link) reports `source == "custom"` plus the new descriptive fields.
-    #[sqlx::test(migrations = "../migrations")]
-    async fn custom_game_completed_carries_source_fields(pool: PgPool) -> cja::Result<()> {
-        let _ = crate::test_capture::Capture::shared();
-        let app_state = AppState::test_from_pool(pool.clone());
-        let game_id = fixture_game(&pool, "waiting").await?;
-        let snake_server = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::any())
-            .respond_with(
-                wiremock::ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({ "apiversion": "1" })),
-            )
-            .mount(&snake_server)
-            .await;
-        let user_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (1627, 'custom-source-test', 'test-token') RETURNING user_id",
-        )
-        .fetch_one(&pool)
-        .await?;
-        let battlesnake_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO battlesnakes (user_id, name, url)
-             VALUES ($1, 'custom-source-snake', $2) RETURNING battlesnake_id",
-        )
-        .bind(user_id)
-        .bind(snake_server.uri())
-        .fetch_one(&pool)
-        .await?;
-        sqlx::query("INSERT INTO game_battlesnakes (game_id, battlesnake_id) VALUES ($1, $2)")
-            .bind(game_id)
-            .bind(battlesnake_id)
-            .execute(&pool)
-            .await?;
-
-        let capture = EventCapture::default();
-        async { run_game(&app_state, game_id).await }
-            .with_subscriber(tracing_subscriber::registry().with(capture.clone()))
-            .await?;
-
-        let events = capture.0.lock().unwrap();
-        let completed = events
-            .iter()
-            .find(|e| e.get("event_type").map(String::as_str) == Some("game_completed"))
-            .expect("game_completed event");
-        assert_eq!(completed["source"], "custom");
-        assert_eq!(completed["game_type"], "Standard");
-        assert_eq!(completed["board_size"], "11x11");
-        assert_eq!(completed["snake_count"], "1");
         Ok(())
     }
 
