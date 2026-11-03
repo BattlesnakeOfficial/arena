@@ -206,7 +206,7 @@ async fn load_game_card(
     state: &AppState,
     game_id: Uuid,
     show_spoilers: bool,
-) -> cja::Result<Option<GameCard>> {
+) -> ServerResult<Option<GameCard>, StatusCode> {
     let Some(game) = get_game_by_id(&state.db, game_id)
         .await
         .wrap_err("Failed to get game for social card")?
@@ -218,7 +218,7 @@ async fn load_game_card(
         .wrap_err("Failed to get game battlesnakes for social card")?;
 
     let spoilers = game.status == GameStatus::Finished && show_spoilers;
-    let frame = if spoilers {
+    let mut frame = if spoilers {
         get_latest_frame(&state.db, game_id)
             .await
             .wrap_err("Failed to get final frame for social card")?
@@ -231,6 +231,12 @@ async fn load_game_card(
             .rev()
             .find_map(|turn| turn.frame_data)
     };
+    // DEV-1981: a pruned terminal native game has no `turns` rows, so its
+    // card's frame comes from the archive. Terminal-gated: a live game's
+    // empty frame is just a game that hasn't produced turns yet.
+    if frame.is_none() && matches!(game.status, GameStatus::Finished | GameStatus::Failed) {
+        frame = archived_card_frame(state, game_id, spoilers).await?;
+    }
     // A frame that doesn't parse (an old import) just means an empty board.
     let frame = frame.and_then(|f| serde_json::from_value::<EngineGameFrame>(f).ok());
 
@@ -260,6 +266,49 @@ async fn load_game_card(
         spoilers,
         turns: frame.as_ref().filter(|_| spoilers).map(|f| f.turn),
     }))
+}
+
+/// DEV-1981: a pruned native game has no `turns` rows, so the social
+/// card's frame comes from the archive — the final frame for spoiler
+/// cards, else the last of the first `UNFURLED_TURN + 1` frames (the
+/// exact selection the DB path performs). Native rows only, resolved by
+/// their arena `game_id`: imported Play stubs carry `gcs_path` but
+/// Play-shaped frames and keep today's empty board, and legacy Play ids
+/// resolve a different row and keep it too. A missing archive object 404s
+/// the card (the frames endpoints' mapping — the object was
+/// content-confirmed at prune time, so its absence is data loss).
+/// Caller has already established the game is terminal.
+async fn archived_card_frame(
+    state: &AppState,
+    game_id: Uuid,
+    spoilers: bool,
+) -> ServerResult<Option<serde_json::Value>, StatusCode> {
+    let Some(record) = crate::models::game::get_game_row_by_any_id(&state.db, game_id)
+        .await
+        .wrap_err("Failed to fetch game row for social card archive fallback")?
+    else {
+        return Ok(None);
+    };
+    // Native stub-by-arena-id gate, then Play-id-resolution gate (the
+    // arena row wins get_game_row_by_any_id's ORDER BY, so the second
+    // check only trips if the arena row vanished mid-request → 404 anyway).
+    if record.engine_game_id.is_some() || record.game.game_id != game_id {
+        return Ok(None);
+    }
+    if !crate::routes::game::api::serves_from_archive(&state.db, &record).await? {
+        return Ok(None);
+    }
+    let archived = crate::routes::game::api::load_archived_for_http(state, &record).await?;
+    let limit = if spoilers {
+        usize::MAX
+    } else {
+        usize::try_from(UNFURLED_TURN + 1).unwrap_or(usize::MAX)
+    };
+    Ok(state
+        .archive
+        .last_frame_within(archived, limit)
+        .await
+        .wrap_err("Failed to look up archived card frame")?)
 }
 
 /// Roster entries in `snakes` order. Colour and head come from the frame

@@ -969,6 +969,15 @@ mod tests {
         crate::turn_retention::prune_game_turns(&state, game_id)
             .await
             .unwrap();
+        // The prune actually removed the turns (the wrapper maps Skipped
+        // and Retained to Ok, so without this the captures below could
+        // compare the DB path against itself).
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE game_id = $1")
+            .bind(game_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(remaining, 0, "fixture was actually pruned");
 
         let (after_status, after_body) = get_with_state(&state, &path(3)).await;
         assert_eq!(after_status, before_status);

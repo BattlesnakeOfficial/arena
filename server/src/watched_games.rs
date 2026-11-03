@@ -760,7 +760,10 @@ mod tests {
         let mut a_sub = state.watched_games.subscribe(game_a).await;
         // Pending entries are never polled — seed the probe so catch-up /
         // notifications reach it (mirrors the real /events subscribe path).
-        state.watched_games.seed_if_current(probe, &mut probe_sub, -1).await;
+        state
+            .watched_games
+            .seed_if_current(probe, &mut probe_sub, -1)
+            .await;
 
         let shutdown = CancellationToken::new();
         let task = tokio::spawn(crate::watched_games::run_watched_games(

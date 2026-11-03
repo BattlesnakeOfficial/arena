@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT turns_pruned_at AS \"pruned!\" FROM games\n                       WHERE game_id = $1 AND turns_pruned_at IS NOT NULL",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "pruned!",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "f9cfd070a441a5bfa079eaeac193acc77dcf8bb23764e112b5173de271345f35"
+}

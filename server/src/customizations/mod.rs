@@ -1491,6 +1491,11 @@ mod tests {
 
         // The real pruner: turns gone, updated_at bumped to ~now.
         crate::turn_retention::prune_game_turns(&state, game).await?;
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE game_id = $1")
+            .bind(game)
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(remaining, 0, "fixture was actually pruned");
         let rows: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM customization_active_weeks WHERE user_id = $1",
         )

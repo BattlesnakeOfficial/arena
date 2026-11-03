@@ -497,6 +497,36 @@ impl ArchiveReader {
         .await
         .wrap_err("Archive turn-lookup task panicked")?
     }
+
+    /// The last of the first `limit` frames — `usize::MAX` for the final
+    /// frame overall — parsed as a `Value` (DEV-1981: the social card's
+    /// fallback for pruned games; `usize::MAX` mirrors `get_latest_frame`,
+    /// a small limit mirrors `get_turn_frames_page(0, N)`-then-last, whose
+    /// offset indexes the renderable frames exactly as the archive stores
+    /// them). Parsing runs on the blocking pool under
+    /// [`ARCHIVE_DECODE_SLOT`]. The permit moves into the closure so it
+    /// outlives the blocking task. `Ok(None)` for a frameless object.
+    pub async fn last_frame_within(
+        &self,
+        archived: Arc<ArchivedGame>,
+        limit: usize,
+    ) -> cja::Result<Option<serde_json::Value>> {
+        let permit = ARCHIVE_DECODE_SLOT
+            .acquire()
+            .await
+            .wrap_err("Archive decode slot closed")?;
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            archived
+                .frame_slice(0, limit)
+                .last()
+                .map(|raw| serde_json::from_str(raw.get()))
+                .transpose()
+                .wrap_err("Failed to parse archived frame")
+        })
+        .await
+        .wrap_err("Archive frame-lookup task panicked")?
+    }
 }
 
 #[cfg(test)]

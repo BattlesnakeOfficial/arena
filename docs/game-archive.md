@@ -102,7 +102,11 @@ entirely — visible as discovery candidates that never shrink.
 below backup jobs' −10) serialize on the shared 1-permit `BACKUP_SLOT`
 (one heavy archive-family op per instance; never concurrent with a
 backup). The slot is acquired BEFORE the eligibility re-check, so
-duplicate jobs are silent no-ops. The DELETE + `turns_pruned_at` mark
+duplicate jobs on one instance are silent no-ops; the slot is
+per-process, so a duplicate racing another INSTANCE's prune is caught
+after the content confirm instead (a 0-frame count mismatch re-reads
+`turns_pruned_at` and skips silently when the other instance already
+committed). The DELETE + `turns_pruned_at` mark
 commit in one transaction with `lock_timeout` (5s) and
 `statement_timeout` (60s, per statement); `snake_turns` cascade via the
 FK. Each DELETE fires `watched_game_turn_delete` once: one
@@ -118,9 +122,13 @@ transition-table materialization of the deleted rows.
 - NULL-`frame_data` turns (an incomplete last turn) and their
   `snake_turns` are deleted unarchived — the writer never archived them
   and no reader renders them.
-- Archive fallbacks keep `/api/games/{id}/move-request` and shout
-  moderation's distinct-shout extraction correct for pruned games
-  (native rows only; imported Play rows keep today's behavior).
+- Archive fallbacks keep `/api/games/{id}/move-request`, shout
+  moderation's distinct-shout extraction, and the `/og/games/{id}.png`
+  social card (final/opening board, turn count, worn cosmetics —
+  `routes/og.rs` reads `get_latest_frame`/`get_turn_frames_page`, both
+  now archived for pruned native games) correct for pruned games
+  (native rows only; imported Play rows keep today's behavior — empty
+  board).
 - Accepted degradations: the snake latency chart only covers games inside
   retention (empty state otherwise); Solo stats rows and the token-authed
   `/api/games/{id}/details` frames are empty for pruned games (same

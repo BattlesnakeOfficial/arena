@@ -286,17 +286,39 @@ fn confirm_archive_content(game_id: Uuid, compressed: &[u8], db_texts: &[String]
     PruneConfirm::Confirmed
 }
 
+/// Whether `turns_pruned_at` is already set for this game — the
+/// cross-instance duplicate signal. `BACKUP_SLOT` is per-process, so
+/// another instance's prune can commit between this job's under-slot
+/// re-check and its frame fetch, leaving 0 DB frames against the object's
+/// N. Called only for a 0-frame count mismatch: a single-SELECT snapshot
+/// means rows vanish all-or-nothing, so that count is exactly the
+/// signature; the winner's committed marker settles it.
+async fn pruned_elsewhere(db: &sqlx::PgPool, game_id: Uuid) -> cja::Result<bool> {
+    let marker = sqlx::query_scalar!(
+        r#"SELECT turns_pruned_at AS "pruned!" FROM games
+           WHERE game_id = $1 AND turns_pruned_at IS NOT NULL"#,
+        game_id
+    )
+    .fetch_optional(db)
+    .await
+    .wrap_err("Failed to re-check turns_pruned_at after count mismatch")?;
+    Ok(marker.is_some())
+}
+
 /// Prune one archived native game's `turns` rows (its `snake_turns`
 /// cascade via the FK) after confirming the archive object's content.
 ///
 /// Ordering is `archive_native_game`'s (`native_backup.rs`): slot FIRST,
 /// predicate re-check UNDER the slot. The under-slot re-check is the
-/// dedup — a duplicate job serializes on the slot, sees the winner's
-/// committed `turns_pruned_at`, and returns `Skipped` before any GET,
-/// instead of comparing 0 DB frames against the object's N frames and
-/// logging a false data-loss ERROR. The permit rides into the confirm's
-/// `spawn_blocking` and back out, so a dropped future cannot free the
-/// slot while the CPU work runs.
+/// in-instance dedup — a duplicate job serializes on the slot, sees the
+/// winner's committed `turns_pruned_at`, and returns `Skipped` before any
+/// GET, instead of comparing 0 DB frames against the object's N frames
+/// and logging a false data-loss ERROR. The slot is per-process, so a
+/// duplicate racing a DIFFERENT instance's prune is caught after the
+/// confirm instead: a 0-frame count mismatch re-reads `turns_pruned_at`
+/// and skips silently when the other instance already committed. The
+/// permit rides into the confirm's `spawn_blocking` and back out, so a
+/// dropped future cannot free the slot while the CPU work runs.
 ///
 /// Never deletes without a content-confirmed object (fail-closed: the
 /// turns are the only complete copy otherwise). The delete and the
@@ -388,6 +410,25 @@ async fn prune_game_turns_with_lock_timeout(
             archived_frames,
             db_frames,
         } => {
+            // Cross-instance duplicate (PR review r1): `BACKUP_SLOT` is
+            // per-process, so another instance's prune can commit between
+            // this job's under-slot re-check and its frame fetch — this job
+            // then compares 0 DB frames against the object's N and would
+            // log the false data-loss ERROR. `fetch_native_frame_texts`
+            // is a single SELECT (one snapshot), so rows vanish
+            // all-or-nothing and a 0-frame count mismatch is exactly that
+            // signature; the winner's committed marker settles it. A game
+            // with a genuinely stale object still has a NULL marker here
+            // and falls through to the ERROR below.
+            if reason == RetainReason::FrameCountMismatch
+                && db_frames == 0
+                && pruned_elsewhere(&app_state.db, game_id).await?
+            {
+                tracing::debug!(%game_id,
+                    "Prune skipped: another instance pruned this game between \
+                     the re-check and the frame fetch");
+                return Ok(PruneOutcome::Skipped);
+            }
             tracing::error!(
                 %game_id, path = %gcs_path, reason = ?reason, detail = %detail,
                 archived_frames, db_frames,
@@ -1201,6 +1242,30 @@ mod tests {
         );
         assert_eq!(turn_count(&pool, game_id).await?, 0);
         assert!(turns_pruned_at(&pool, game_id).await?.is_some());
+        Ok(())
+    }
+
+    /// PR review r1: `BACKUP_SLOT` is per-process, so a duplicate racing
+    /// ANOTHER instance's prune slips past the under-slot re-check and
+    /// surfaces as a 0-frame count mismatch; the `pruned_elsewhere`
+    /// marker re-read is what keeps that case a silent Skipped. The full
+    /// interleaving needs two processes — this pins the re-read itself:
+    /// marker set ⇒ true (skip), marker NULL ⇒ false (fail-closed ERROR
+    /// path still runs).
+    #[sqlx::test(migrations = "../migrations")]
+    async fn count_mismatch_recheck_distinguishes_cross_instance_prune(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        let old = chrono::Utc::now() - chrono::Duration::days(40);
+        let winner = fixture_game(&pool, "finished", old, None).await?;
+        sqlx::query("UPDATE games SET turns_pruned_at = NOW() WHERE game_id = $1")
+            .bind(winner)
+            .execute(&pool)
+            .await?;
+        let stale = fixture_game(&pool, "finished", old, None).await?;
+
+        assert!(pruned_elsewhere(&pool, winner).await?);
+        assert!(!pruned_elsewhere(&pool, stale).await?);
         Ok(())
     }
 }

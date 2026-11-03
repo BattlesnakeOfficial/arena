@@ -1381,6 +1381,11 @@ mod tests {
         // Real writer + real pruner.
         crate::native_backup::archive_native_game(&state, game_id).await?;
         crate::turn_retention::prune_game_turns(&state, game_id).await?;
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE game_id = $1")
+            .bind(game_id)
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(remaining, 0, "fixture was actually pruned");
 
         let archived_rows = distinct_shouts_from_archive(&state, game_id)
             .await?

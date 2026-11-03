@@ -488,6 +488,11 @@ mod tests {
         // Real writer + real pruner.
         crate::native_backup::archive_native_game(&state, game).await?;
         crate::turn_retention::prune_game_turns(&state, game).await?;
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE game_id = $1")
+            .bind(game)
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(remaining, 0, "fixture was actually pruned");
 
         assert_eq!(
             seed.fetch(RECENT_GAMES_LIMIT).await?,
