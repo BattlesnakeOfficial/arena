@@ -631,10 +631,10 @@ pub async fn get_game_source(
     .await
     .wrap_err("Failed to look up game source")?;
 
-    Ok(if row.ladder {
-        crate::engine::GameSource::Ladder
-    } else if row.tournament {
+    Ok(if row.tournament {
         crate::engine::GameSource::Tournament
+    } else if row.ladder {
+        crate::engine::GameSource::Ladder
     } else {
         crate::engine::GameSource::Custom
     })
