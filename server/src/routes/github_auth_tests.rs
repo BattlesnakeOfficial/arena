@@ -236,3 +236,53 @@ async fn web_callback_still_redirects_home(pool: PgPool) {
         .unwrap();
     assert_eq!(tokens, Some(0));
 }
+
+/// DEV-2061: the `user_authenticated` event carries `new_user` — `true` on
+/// the first callback for a GitHub identity (INSERT path: created_at ==
+/// updated_at), `false` on the second (the UPDATE trigger has since moved
+/// updated_at). Asserted through the shared global capture, filtered by
+/// the user's id.
+#[sqlx::test(migrations = "../migrations")]
+async fn user_authenticated_event_carries_new_user(pool: PgPool) {
+    let capture = crate::test_capture::Capture::shared();
+    let github = github_mocks().await;
+
+    // First callback: fresh user.
+    let fx = Fixture::new(pool.clone(), &github, false).await;
+    let response = fx.app.clone().oneshot(fx.callback_request()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let user_id: Uuid = sqlx::query_scalar!(
+        "SELECT user_id FROM users WHERE external_github_id = $1",
+        MOCK_GITHUB_ID
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let events = capture.events("user_authenticated", user_id);
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(
+        events[0].get("new_user").map(String::as_str),
+        Some("true"),
+        "{events:?}"
+    );
+
+    // Second callback for the same GitHub identity: a fresh session+state,
+    // but an existing user.
+    let fx2 = Fixture::new(pool.clone(), &github, false).await;
+    let response = fx2
+        .app
+        .clone()
+        .oneshot(fx2.callback_request())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+
+    let events = capture.events("user_authenticated", user_id);
+    assert_eq!(events.len(), 2, "{events:?}");
+    assert_eq!(
+        events[1].get("new_user").map(String::as_str),
+        Some("false"),
+        "{events:?}"
+    );
+}
