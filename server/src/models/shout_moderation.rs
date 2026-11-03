@@ -571,8 +571,14 @@ mod tests {
                 {"ID": a, "Name": "Snek A0", "Shout": "hello"},
                 {"ID": b, "Name": "Snek B", "Shout": ""},
             ]}),
+            // PostgreSQL jsonb ->> renders composite values with spaces;
+            // the archive extractor must preserve the same shout text.
+            json!({"Turn": 3, "Snakes": [
+                {"ID": a, "Name": "Snek A", "Shout": {"a": 1}},
+                {"ID": b, "Name": "Snek B", "Shout": [1, 2]},
+            ]}),
             // Frame without a Snakes array: tolerated.
-            json!({"Turn": 3, "Food": []}),
+            json!({"Turn": 4, "Food": []}),
         ];
         let mut raw_frames = Vec::with_capacity(frames.len());
         for (i, frame) in frames.into_iter().enumerate() {
