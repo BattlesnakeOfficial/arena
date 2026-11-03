@@ -23,6 +23,15 @@ attempts/failures. It uses existing tracing fields. Request counts include
 `/health` checks; failure-event counts include retry attempts, not unique jobs.
 HTTP duration metrics are microseconds; game timings are milliseconds.
 
+The `arena-product` dashboard defaults to a 30-day range and reads events only
+(fields present at emission). Per-source and new-user series start at deploy:
+pre-deploy events carry no `source` or `new_user` fields, so those charts and
+the filtered tiles cover post-deploy data only. Values recorded on
+`server.request` after the span opens, such as `user_id`, are not queryable yet
+(tracked in DEV-2064). Until the first post-deploy events reach the lake, the
+`source` and `new_user` items show `unknown_field` errors. A cold 30-day lake
+query can return 503 at about 50 s; a retry then succeeds.
+
 Processing overhead measures elapsed turn-loop time minus elapsed time awaiting
 parallel move requests, including persistence and scheduling. The old event
 subtracted summed snake latencies, double-counting overlapping requests and
@@ -54,7 +63,7 @@ under query budgets; Eyes exposes that state instead of claiming an exact result
 3. Update Arena's lockfile to that cja commit and published subscriber. Confirm
    only one subscriber version with `cargo tree -i eyes-subscriber`.
 4. Deploy Arena, then verify its process role, heartbeat, run-health declarations,
-   all 14 named metrics, both thresholds, and dashboard in production Eyes.
+   all 28 named metrics, both thresholds, and both dashboards in production Eyes.
 
 Local validation before publication uses an uncommitted Cargo patch file for
 cja, eyes-query, and eyes-subscriber. Those path overrides must not ship. Live

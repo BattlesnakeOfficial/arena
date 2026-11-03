@@ -236,6 +236,14 @@ pub async fn create_snake(
         )
     })?;
 
+    tracing::info!(
+        event_type = "battlesnake_created",
+        battlesnake_id = %snake.battlesnake_id,
+        user_id = %auth.user_id,
+        source = "api",
+        "battlesnake created"
+    );
+
     // The scope was loaded at auth time; mirror the row just committed so
     // the response below sees the freshly created snake.
     auth.record_selected_snake(snake.battlesnake_id);
@@ -1661,5 +1669,51 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(hosted_mark(&db, snake.battlesnake_id).await, None);
+    }
+
+    /// DEV-2061: creating a snake through the API emits exactly one
+    /// `battlesnake_created` event carrying the snake, its owner, and
+    /// `source = "api"`, via the shared global capture.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn api_create_emits_battlesnake_created_event(db: PgPool) {
+        let capture = crate::test_capture::Capture::shared();
+        let state = AppState::test_from_pool(db.clone());
+        let app = api_app(&state);
+        let user = create_user(&db, 9921921, false).await;
+        let token = mint(
+            &db,
+            user,
+            &[Permission::SnakesCreate],
+            SnakeAccess::All,
+            &[],
+        )
+        .await;
+
+        let (status, json) = request(
+            &app,
+            "POST",
+            "/api/snakes",
+            &token,
+            Some(serde_json::json!({
+                "name": "api-event-snake",
+                "url": "https://api-event.example",
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{json}");
+        let created: Uuid = json["id"].as_str().unwrap().parse().unwrap();
+
+        let events = capture.events("battlesnake_created", user);
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(
+            events[0].get("battlesnake_id").map(String::as_str),
+            Some(created.to_string().as_str()),
+            "{events:?}"
+        );
+        assert_eq!(
+            events[0].get("source").map(String::as_str),
+            Some("api"),
+            "{events:?}"
+        );
     }
 }

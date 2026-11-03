@@ -544,6 +544,7 @@ async fn claim_account_inner(
     .wrap_err("Failed to fetch staged snakes")?;
 
     let mut snakes_created = 0;
+    let mut created_snake_ids: Vec<Uuid> = Vec::new();
     for snake in staged_snakes {
         let mut name = snake.name.clone();
         let mut suffix = 2;
@@ -585,6 +586,7 @@ async fn claim_account_inner(
 
         existing_names.push(name);
         snakes_created += 1;
+        created_snake_ids.push(battlesnake_id);
     }
 
     // Materialize grants. The catalog is code-defined, so staged (type,
@@ -680,6 +682,16 @@ async fn claim_account_inner(
     .await?;
     tx.commit().await.wrap_err("Failed to commit claim tx")?;
     receipt.log_enqueued();
+
+    for battlesnake_id in created_snake_ids {
+        tracing::info!(
+            event_type = "battlesnake_created",
+            battlesnake_id = %battlesnake_id,
+            user_id = %user_id,
+            source = "play_claim",
+            "battlesnake created via play claim"
+        );
+    }
 
     Ok(Some(summary))
 }
@@ -947,6 +959,43 @@ mod tests {
         assert_eq!(
             crate::customizations::token_balance(&pool, user_id).await?,
             1
+        );
+        Ok(())
+    }
+
+    /// DEV-2061: claiming a staged play account emits exactly one
+    /// `battlesnake_created` event per materialized snake — with the
+    /// created snake's id, the claiming owner, and `source = "play_claim"`
+    /// — via the shared global capture.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn play_claim_emits_battlesnake_created_per_snake(pool: PgPool) -> cja::Result<()> {
+        let capture = crate::test_capture::Capture::shared();
+        let user_id = create_user(&pool, 1648).await?;
+        let account_id = stage_full_account(&pool, 1648).await?;
+
+        let summary = claim_account(&pool, account_id, user_id)
+            .await?
+            .expect("claim should succeed");
+        assert_eq!(summary.snakes_created, 1);
+
+        let snake_id: Uuid = sqlx::query_scalar(
+            "SELECT battlesnake_id FROM battlesnakes WHERE user_id = $1 AND name = 'Hissy'",
+        )
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await?;
+
+        let events = capture.events("battlesnake_created", user_id);
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(
+            events[0].get("battlesnake_id").map(String::as_str),
+            Some(snake_id.to_string().as_str()),
+            "{events:?}"
+        );
+        assert_eq!(
+            events[0].get("source").map(String::as_str),
+            Some("play_claim"),
+            "{events:?}"
         );
         Ok(())
     }
