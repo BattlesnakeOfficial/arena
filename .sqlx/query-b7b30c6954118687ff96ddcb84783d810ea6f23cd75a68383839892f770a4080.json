@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT achievement, earned_at FROM achievement_earns WHERE user_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "achievement",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "earned_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "b7b30c6954118687ff96ddcb84783d810ea6f23cd75a68383839892f770a4080"
+}

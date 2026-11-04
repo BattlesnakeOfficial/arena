@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT live, game_id, turn_number FROM achievement_earns WHERE user_id = $1 AND achievement = 'first_win'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "live",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 1,
+        "name": "game_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "turn_number",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "562057d61ce136ed5b22154dd299e8c7af4da6fb47c6ba58dec0b328c56d2ee0"
+}

@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT battlesnake_id, game_id, live FROM achievement_earns WHERE user_id = $1 AND achievement = 'slow_and_steady'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "battlesnake_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "game_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "live",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "a5be4d0473f8a97252e0e6c41ffa54b85f9aeb775c2ea84387a7c8aec66a61fb"
+}

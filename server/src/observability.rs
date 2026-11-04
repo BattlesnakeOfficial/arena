@@ -329,6 +329,42 @@ fn metrics() -> Result<Vec<NamedMetric>, String> {
         .unit("snakes")
         .time_bucket(86_400)
         .build()?,
+        count(
+            "product.achievements.earned",
+            "Achievements earned",
+            "fields.event_type",
+            "achievement_earned",
+        )?
+        .unit("earns")
+        .build()?,
+        count(
+            "product.achievements.earned.daily",
+            "Achievements earned",
+            "fields.event_type",
+            "achievement_earned",
+        )?
+        .unit("earns")
+        .time_bucket(86_400)
+        .build()?,
+        count(
+            "product.achievements.firsts.daily",
+            "First achievement earns",
+            "fields.event_type",
+            "achievement_earned",
+        )?
+        .filter_eq("fields.first", true)?
+        .unit("earns")
+        .time_bucket(86_400)
+        .build()?,
+        count(
+            "product.achievements.by_slug",
+            "Achievements earned by achievement",
+            "fields.event_type",
+            "achievement_earned",
+        )?
+        .group_by("fields[\"slug\"]")?
+        .unit("earns")
+        .build()?,
     ])
 }
 
@@ -378,7 +414,7 @@ fn dashboard() -> Result<NamedDashboard, String> {
 
 fn product_dashboard() -> Result<NamedDashboard, String> {
     Ok(NamedDashboard::new("arena-product", "Arena product")?
-        .description("Games played, play claims, signups, and new snakes.")
+        .description("Games played, play claims, signups, new snakes, and achievements earned.")
         .default_range_seconds(30 * 24 * 60 * 60)
         .section(
             Section::new()
@@ -400,6 +436,14 @@ fn product_dashboard() -> Result<NamedDashboard, String> {
                 .item(Item::time_series("product.play_claims.daily"))
                 .item(Item::time_series("product.new_users.daily"))
                 .item(Item::time_series("product.new_snakes.daily")),
+        )
+        .section(
+            Section::new()
+                .title("Achievements")
+                .item(Item::stat("product.achievements.earned"))
+                .item(Item::time_series("product.achievements.earned.daily"))
+                .item(Item::time_series("product.achievements.firsts.daily"))
+                .item(Item::table("product.achievements.by_slug")),
         ))
 }
 

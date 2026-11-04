@@ -300,6 +300,13 @@ impl Job<AppState> for BackfillAchievementsJob {
     const NAME: &'static str = "BackfillAchievementsJob";
 
     async fn run(&self, app_state: AppState) -> cja::Result<()> {
+        match crate::customizations::achievements::backfill_earns_from_grants(&app_state.db).await {
+            Ok(earns) => tracing::info!(earns, "Achievement earns backfilled from grants"),
+            Err(error) => tracing::error!(
+                error = %format!("{error:#}"),
+                "Failed to backfill achievement earns from grants"
+            ),
+        }
         let started = std::time::Instant::now();
         while started.elapsed() < std::time::Duration::from_secs(30) {
             let page =

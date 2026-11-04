@@ -40,9 +40,9 @@ pub(crate) struct Capture {
     /// the span, so a repeated id would stitch a closed span's URI onto
     /// another span's close events.
     request_seq: Arc<AtomicU64>,
-    /// Fields of `battlesnake_created` / `user_authenticated` events — the
-    /// product-event buffer for the creation-path and sign-in tests.
-    /// Never cleared.
+    /// Fields of `battlesnake_created` / `user_authenticated` / `achievement_earned`
+    /// events — the product-event buffers for the creation-path, sign-in, and
+    /// achievement-earn tests. Never cleared.
     events: Arc<Mutex<Vec<BTreeMap<String, String>>>>,
 }
 
@@ -100,7 +100,9 @@ where
         event.record(&mut fields);
         match fields.0.get("event_type").map(String::as_str) {
             Some("game_phase") => self.phases.lock().unwrap().push((false, fields.0)),
-            Some("battlesnake_created") | Some("user_authenticated") => {
+            Some("battlesnake_created")
+            | Some("user_authenticated")
+            | Some("achievement_earned") => {
                 self.events.lock().unwrap().push(fields.0);
             }
             _ => {

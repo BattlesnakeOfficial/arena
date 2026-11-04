@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT NOT EXISTS (\n               SELECT 1 FROM achievement_earns\n               WHERE achievement = $1 AND achievement_earn_id <> $2\n           ) AS \"first!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "first!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "8cf4c721b9377ad626bd27f4fd3800169daad4531e3e6f32331ea38638c36c25"
+}
