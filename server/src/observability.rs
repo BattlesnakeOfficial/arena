@@ -365,6 +365,50 @@ fn metrics() -> Result<Vec<NamedMetric>, String> {
         .group_by("fields[\"slug\"]")?
         .unit("earns")
         .build()?,
+        count(
+            "product.shares.page_views",
+            "Achievement share page views",
+            "fields.event_type",
+            "share_page_view",
+        )?
+        .unit("views")
+        .build()?,
+        count(
+            "product.shares.page_views.daily",
+            "Achievement share page views",
+            "fields.event_type",
+            "share_page_view",
+        )?
+        .unit("views")
+        .time_bucket(86_400)
+        .build()?,
+        count(
+            "product.shares.page_views.by_referrer",
+            "Achievement share page views by referrer",
+            "fields.event_type",
+            "share_page_view",
+        )?
+        .group_by("fields[\"referrer\"]")?
+        .unit("views")
+        .build()?,
+        count(
+            "product.shares.actions",
+            "Achievement share actions",
+            "fields.event_type",
+            "share_action",
+        )?
+        .group_by("fields[\"channel\"]")?
+        .unit("actions")
+        .build()?,
+        count(
+            "product.shares.cta_clicks",
+            "Achievement share CTA clicks",
+            "fields.event_type",
+            "share_cta_click",
+        )?
+        .group_by("fields[\"cta\"]")?
+        .unit("clicks")
+        .build()?,
     ])
 }
 
@@ -414,7 +458,7 @@ fn dashboard() -> Result<NamedDashboard, String> {
 
 fn product_dashboard() -> Result<NamedDashboard, String> {
     Ok(NamedDashboard::new("arena-product", "Arena product")?
-        .description("Games played, play claims, signups, new snakes, and achievements earned.")
+        .description("Games played, play claims, signups, new snakes, achievements earned, and achievement shares.")
         .default_range_seconds(30 * 24 * 60 * 60)
         .section(
             Section::new()
@@ -444,6 +488,15 @@ fn product_dashboard() -> Result<NamedDashboard, String> {
                 .item(Item::time_series("product.achievements.earned.daily"))
                 .item(Item::time_series("product.achievements.firsts.daily"))
                 .item(Item::table("product.achievements.by_slug")),
+        )
+        .section(
+            Section::new()
+                .title("Sharing")
+                .item(Item::stat("product.shares.page_views"))
+                .item(Item::time_series("product.shares.page_views.daily"))
+                .item(Item::table("product.shares.page_views.by_referrer"))
+                .item(Item::table("product.shares.actions"))
+                .item(Item::table("product.shares.cta_clicks")),
         ))
 }
 

@@ -84,6 +84,7 @@ fn ladder_step(
     index: usize,
     granted: &HashSet<(String, String)>,
     next_up: bool,
+    share_href: Option<&str>,
 ) -> Markup {
     let def = achievement.def();
     let unlocked = achievement_unlocked(achievement, granted);
@@ -98,6 +99,9 @@ fn ladder_step(
                     h3 { (def.name) }
                     span class=(if unlocked { "cz-step-state badge ok" } else { "cz-step-state badge" }) {
                         @if unlocked { "Unlocked" } @else { "Locked" }
+                    }
+                    @if let Some(href) = share_href {
+                        a class="cz-share-link" href=(href) { "Share" }
                     }
                 }
                 @if next_up { span class="cz-next-up" { "Next up" } }
@@ -174,6 +178,14 @@ pub async fn achievements_page(
             .wrap_err("Failed to fetch customization grants")?,
         None => HashSet::new(),
     };
+    // Share links key off earn rows, not grants: a token or code holder can
+    // own the items without a shareable earned achievement.
+    let earned: HashSet<String> = match &user {
+        Some(user) => achievements::earned_slugs(&state.db, user.user_id)
+            .await
+            .wrap_err("Failed to fetch earned achievements")?,
+        None => HashSet::new(),
+    };
     let next_up = user.as_ref().and_then(|_| {
         Achievement::GETTING_STARTED
             .iter()
@@ -189,7 +201,12 @@ pub async fn achievements_page(
                 h2 { "Getting Started" }
                 ol class="cz-ladder" {
                     @for (index, achievement) in Achievement::GETTING_STARTED.into_iter().enumerate() {
-                        (ladder_step(achievement, index, &granted, next_up == Some(index)))
+                        @let share_href = user.as_ref().and_then(|u| {
+                            earned.contains(achievement.slug()).then(|| {
+                                format!("/achievements/{}/{}", achievement.slug(), u.user_id)
+                            })
+                        });
+                        (ladder_step(achievement, index, &granted, next_up == Some(index), share_href.as_deref()))
                     }
                 }
                 div class="cz-ladder-foot" {

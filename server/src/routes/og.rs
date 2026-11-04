@@ -15,7 +15,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 use tokio::sync::{OnceCell, Semaphore};
 use uuid::Uuid;
 
-use crate::customizations::{Head, Tail};
+use crate::customizations::{Head, Tail, achievements::Achievement};
 use arena::design_kit::AssetKind;
 
 use crate::{
@@ -37,7 +37,7 @@ use crate::{
     },
     og::{
         board::{BoardArt, BoardSnake, shape},
-        canvas::snake_color,
+        canvas::{palette, snake_color},
         cards::{
             self, Entrant, GameCard, LadderRow, LeaderboardCard, ProfileCard, RosterSnake, Stat,
             TournamentCard, lineup_board, portrait_board,
@@ -397,6 +397,10 @@ pub fn tournament_card_path(tournament_id: Uuid) -> String {
     format!("/og/tournaments/{tournament_id}.png")
 }
 
+pub fn achievement_card_path(slug: &str, user_id: Uuid) -> String {
+    format!("/og/achievements/{slug}/{user_id}.png")
+}
+
 /// Ratings, records and ladders move every game; an hour is plenty fresh
 /// for a link preview.
 const HOUR: u32 = 60 * 60;
@@ -605,6 +609,58 @@ async fn load_player_card(state: &AppState, user_id: Uuid) -> cja::Result<Option
         highlight: None,
         board: lineup_board(&lineup),
     }))
+}
+
+/// GET /og/achievements/{slug}/{user_id}.png — the share card for one
+/// earned achievement. It shows current owner and snake names, so it caches
+/// for an hour like the player and snake cards.
+/// The card never carries game or opponent data, so a hidden game is
+/// indistinguishable from a public one here.
+pub async fn achievement_card(
+    State(state): State<AppState>,
+    Path((slug, file)): Path<(String, String)>,
+) -> ServerResult<Response, StatusCode> {
+    let user_id = png_id(&file)?;
+    let Some(achievement) = Achievement::from_slug(&slug) else {
+        return Err(not_found());
+    };
+    let earn = crate::routes::achievements::load_earn(&state.db, user_id, achievement)
+        .await
+        .wrap_err("Failed to load achievement for social card")?
+        .ok_or_else(not_found)?;
+    let card = achievement_profile_card(&earn);
+    let bytes = render(move || cards::profile_card(&card)).await?;
+    Ok(png(bytes, HOUR))
+}
+
+/// The card's entire input is the earn's core: achievement, owner, date,
+/// snake. EarnView carries no replay or opponent data, so none can render.
+fn achievement_profile_card(earn: &crate::routes::achievements::EarnView) -> ProfileCard {
+    let def = earn.achievement.def();
+    let color = earn
+        .snake
+        .as_ref()
+        .map_or_else(palette::pink, |snake| snake_color(&snake.color));
+    let subtitle = match &earn.snake {
+        Some(snake) => format!("{} · {}", earn.owner.public_name(), snake.name),
+        None => format!("Unlocked by {}", earn.owner.public_name()),
+    };
+    ProfileCard {
+        kicker: "Achievement".to_string(),
+        title: def.name.to_string(),
+        subtitle,
+        avatar: Some((shape(AssetKind::Head, def.head.slug()), color)),
+        stats: vec![
+            Stat::new("Unlocked", earn.earned_at.format("%b %-d, %Y").to_string()),
+            Stat::new("Reward", def.head.def().display_name.to_string()),
+        ],
+        highlight: None,
+        board: portrait_board(
+            color,
+            def.head.slug(),
+            def.tail.map_or("default", |tail| tail.slug()),
+        ),
+    }
 }
 
 /// GET /og/leaderboards/{id}.png
@@ -1599,6 +1655,212 @@ mod tests {
             format!("{final_after:?}"),
             format!("{final_before:?}"),
             "spoiler card changed after pruning"
+        );
+    }
+
+    async fn share_user(pool: &PgPool, github_id: i64) -> Uuid {
+        sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO users (external_github_id, github_login, github_access_token) VALUES ($1, $2, '') RETURNING user_id",
+        )
+        .bind(github_id)
+        .bind(format!("og-earn-{github_id}"))
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn share_snake(pool: &PgPool, owner: Uuid, name: &str) -> Uuid {
+        sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO battlesnakes (user_id, name, url) VALUES ($1, $2, 'https://example.com') RETURNING battlesnake_id",
+        )
+        .bind(owner)
+        .bind(name)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn share_earn(
+        pool: &PgPool,
+        user_id: Uuid,
+        slug: &str,
+        snake: Option<Uuid>,
+        game: Option<Uuid>,
+        live: bool,
+    ) {
+        sqlx::query(
+            "INSERT INTO achievement_earns (user_id, achievement, battlesnake_id, game_id, live, earned_at)
+             VALUES ($1, $2, $3, $4, $5, TIMESTAMPTZ '2026-10-31 12:00:00+00')",
+        )
+        .bind(user_id)
+        .bind(slug)
+        .bind(snake)
+        .bind(game)
+        .bind(live)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn achievement_card_serves_pngs_and_404s(pool: PgPool) {
+        let state = AppState::test_from_pool(pool.clone());
+        let owner = share_user(&pool, 2120901).await;
+        share_earn(&pool, owner, "first_win", None, None, false).await;
+
+        assert_card(
+            &get(&state, &achievement_card_path("first_win", owner)).await,
+            HOUR,
+        );
+        // Unknown slug and unknown earner.
+        for path in [
+            achievement_card_path("nope", owner),
+            achievement_card_path("first_win", Uuid::new_v4()),
+            format!("/og/achievements/first_win/{owner}"),
+        ] {
+            assert_eq!(
+                get(&state, &path).await.status,
+                StatusCode::NOT_FOUND,
+                "{path}"
+            );
+        }
+    }
+
+    /// The card carries the earn itself — achievement, owner, date, snake —
+    /// and nothing about the game, so a hidden game is indistinguishable
+    /// from a public one on the card.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn achievement_card_carries_the_earn_and_no_game(pool: PgPool) {
+        let state = AppState::test_from_pool(pool.clone());
+
+        // A backfilled earn: no snake, still a finished-looking card.
+        let backfilled = share_user(&pool, 2120911).await;
+        share_earn(&pool, backfilled, "first_win", None, None, false).await;
+        let earn =
+            crate::routes::achievements::load_earn(&state.db, backfilled, Achievement::FirstWin)
+                .await
+                .unwrap()
+                .unwrap();
+        let card = achievement_profile_card(&earn);
+        assert_eq!(card.kicker, "Achievement");
+        assert_eq!(card.title, "First Win");
+        assert_eq!(card.subtitle, "Unlocked by og-earn-2120911");
+        assert_eq!(
+            stats(&card),
+            [("Unlocked", "Oct 31, 2026"), ("Reward", "Frog")]
+        );
+        assert_eq!(card.highlight, None);
+
+        // A live earn with its snake.
+        let winner = share_user(&pool, 2120912).await;
+        let winner_snake = share_snake(&pool, winner, "card earning snake").await;
+        let live_game: Uuid = sqlx::query_scalar(
+            "INSERT INTO games (board_size, game_type, status, finished_at) VALUES ('11x11', 'Standard', 'finished', NOW()) RETURNING game_id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO game_battlesnakes (game_id, battlesnake_id, placement) VALUES ($1, $2, 1)",
+        )
+        .bind(live_game)
+        .bind(winner_snake)
+        .execute(&pool)
+        .await
+        .unwrap();
+        share_earn(
+            &pool,
+            winner,
+            "first_win",
+            Some(winner_snake),
+            Some(live_game),
+            true,
+        )
+        .await;
+        let earn = crate::routes::achievements::load_earn(&state.db, winner, Achievement::FirstWin)
+            .await
+            .unwrap()
+            .unwrap();
+        let card = achievement_profile_card(&earn);
+        assert!(card.subtitle.contains("card earning snake"));
+        assert_eq!(
+            card.avatar.and_then(|(h, _)| h).map(|h| h.file),
+            Some("frog")
+        );
+
+        // A private-leaderboard game: the card still serves, and no field
+        // names the opponent, the game, or a replay path.
+        let private_owner = share_user(&pool, 2120913).await;
+        let private_snake = share_snake(&pool, private_owner, "card private snake").await;
+        let rival = share_user(&pool, 2120914).await;
+        let rival_snake = share_snake(&pool, rival, "Private Opponent").await;
+        let private_game: Uuid = sqlx::query_scalar(
+            "INSERT INTO games (board_size, game_type, status, finished_at) VALUES ('11x11', 'Standard', 'finished', NOW()) RETURNING game_id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO game_battlesnakes (game_id, battlesnake_id, placement) VALUES ($1, $2, 1), ($1, $3, 2)",
+        )
+        .bind(private_game)
+        .bind(private_snake)
+        .bind(rival_snake)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let private_lb = crate::models::private_leaderboard::create(
+            &pool,
+            &crate::models::private_leaderboard::CreatePrivateLeaderboard {
+                name: "Hidden".to_string(),
+                game_type: "Standard".to_string(),
+                board_size: "11x11".to_string(),
+                match_size: 2,
+            },
+        )
+        .await
+        .unwrap();
+        leaderboard::create_leaderboard_game(&pool, private_lb, private_game)
+            .await
+            .unwrap();
+        share_earn(
+            &pool,
+            private_owner,
+            "first_win",
+            Some(private_snake),
+            Some(private_game),
+            true,
+        )
+        .await;
+
+        let earn =
+            crate::routes::achievements::load_earn(&state.db, private_owner, Achievement::FirstWin)
+                .await
+                .unwrap()
+                .unwrap();
+        let card = achievement_profile_card(&earn);
+        let haystacks = [
+            card.kicker.as_str(),
+            card.title.as_str(),
+            card.subtitle.as_str(),
+            card.highlight.as_deref().unwrap_or_default(),
+        ];
+        let stat_values: Vec<&str> = card.stats.iter().map(|s| s.value.as_str()).collect();
+        for haystack in haystacks.iter().chain(stat_values.iter()) {
+            assert!(
+                !haystack.contains("Private Opponent"),
+                "opponent leaked: {haystack}"
+            );
+            assert!(
+                !haystack.contains(&private_game.to_string()),
+                "game id leaked"
+            );
+            assert!(!haystack.contains("/games/"), "replay path leaked");
+        }
+        // Control: the earn is real and the card serves over HTTP.
+        assert_card(
+            &get(&state, &achievement_card_path("first_win", private_owner)).await,
+            HOUR,
         );
     }
 }

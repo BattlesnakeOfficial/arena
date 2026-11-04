@@ -58,6 +58,12 @@ impl Achievement {
         }
     }
 
+    /// Resolve the achievement a share URL names, or `None` for an
+    /// unknown slug.
+    pub fn from_slug(slug: &str) -> Option<Self> {
+        Achievement::ALL.into_iter().find(|a| a.slug() == slug)
+    }
+
     /// Achievement family for analytics. All current achievements are
     /// Getting Started.
     pub const fn kind(self) -> &'static str {
@@ -114,6 +120,20 @@ pub fn for_item(kind: &str, slug: &str) -> Option<AchievementDef> {
             (kind == Head::KIND && slug == def.head.slug())
                 || (kind == Tail::KIND && def.tail.is_some_and(|tail| slug == tail.slug()))
         })
+}
+
+/// The achievements this user has earn rows for. Share links key off these,
+/// not customization grants: a token or code holder can own the items
+/// without ever earning them.
+pub async fn earned_slugs(pool: &PgPool, user_id: Uuid) -> cja::Result<HashSet<String>> {
+    let rows = sqlx::query!(
+        "SELECT achievement FROM achievement_earns WHERE user_id = $1",
+        user_id,
+    )
+    .fetch_all(pool)
+    .await
+    .wrap_err("Failed to read earned achievements")?;
+    Ok(rows.into_iter().map(|row| row.achievement).collect())
 }
 
 /// The game and snake that produced a rule fire, recorded on live earns.
@@ -3066,6 +3086,14 @@ mod tests {
         for achievement in Achievement::ALL {
             assert_eq!(achievement.kind(), "getting_started");
         }
+        // Share URLs name achievements by slug; both directions are stable.
+        for achievement in Achievement::ALL {
+            assert_eq!(
+                Achievement::from_slug(achievement.slug()),
+                Some(achievement)
+            );
+        }
+        assert_eq!(Achievement::from_slug("nope"), None);
     }
 
     #[sqlx::test(migrations = "../migrations")]
