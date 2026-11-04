@@ -959,6 +959,9 @@ table.data.test-results pre { margin-top: 8px; font-family: var(--mono); font-si
    (flex items default to min-width: auto) and the name to break. */
 .ach-share-owner > div { min-width: 0; }
 .ach-share-owner a { display: inline-flex; align-items: center; min-height: 44px; overflow-wrap: anywhere; }
+/* .user-avatar has no default size — only context classes size it — so the
+   share page sizes its own avatar or it collapses to the fallback glyph. */
+.ach-share-owner .avatar { width: 56px; height: 56px; border: 1px solid var(--hairline-dark); background: var(--pill); }
 .ach-share-snake { display: flex; align-items: center; gap: 8px; margin-top: 14px; font-size: 16px; min-width: 0; }
 /* Snake names run to 64 unbroken chars; the name is an explicit flex item
    so min-width and wrapping both take effect. */
@@ -969,7 +972,8 @@ table.data.test-results pre { margin-top: 8px; font-family: var(--mono); font-si
 .share-actions .btn { min-height: 44px; font-size: 16px; display: inline-flex; align-items: center; }
 /* .btn sets display, which would otherwise override [hidden] */
 .share-actions [hidden] { display: none; }
-.share-actions input { flex: 1 1 200px; min-height: 44px; font-size: 16px; }
+.share-actions input { flex: 1 1 200px; min-width: 0; min-height: 44px; font-family: var(--mono); font-size: 16px; color: var(--muted); background: var(--card); border: 1px solid var(--hairline-dark); border-radius: 10px; padding: 8px 12px; }
+.share-actions input:focus-visible { outline: none; border-color: var(--pink); box-shadow: 0 0 0 3px var(--pink-wash); }
 .share-cta { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 30px; }
 .share-cta .btn { min-height: 44px; font-size: 16px; display: inline-flex; align-items: center; }
 /* No margin-left here: .cz-step-state already owns the row's auto margin

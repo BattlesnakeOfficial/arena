@@ -42,6 +42,12 @@ test('guest share page fits a phone and the CTA posts', async ({ page }) => {
   await expect(page.locator('.ach-share-owner .name')).toHaveText(login);
   await expect(page.getByText('Unlocked Oct 31, 2026')).toBeVisible();
 
+  // The owner avatar is sized by the share page itself: .user-avatar has no
+  // default size, so nothing here may let it collapse to its fallback glyph.
+  const avatar = await page.locator('.ach-share-owner .user-avatar').boundingBox();
+  expect(avatar?.width).toBe(56);
+  expect(avatar?.height).toBe(56);
+
   // Both visitor CTAs are visible and comfortably tappable.
   const cta = page.locator('.share-cta .btn');
   await expect(cta).toHaveCount(2);

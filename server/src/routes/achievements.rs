@@ -888,6 +888,25 @@ mod tests {
         let reply = get(&state, &uri, &browser()).await;
         assert_eq!(reply.status, StatusCode::OK);
         assert!(!reply.body.contains("/games/"));
+
+        // Control 3: participants back, the rival's row carrying the private
+        // leaderboard entry, and the leaderboard_games link deleted — the
+        // entry route alone still hides the game.
+        participant(&pool, game_id, owner_snake, 1, None).await;
+        participant(&pool, game_id, rival_snake, 2, Some(entry)).await;
+        sqlx::query("DELETE FROM leaderboard_games WHERE game_id = $1")
+            .bind(game_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let reply = get(&state, &uri, &browser()).await;
+        assert_eq!(reply.status, StatusCode::OK);
+        assert!(!reply.body.contains(&game_id.to_string()), "game id leaked");
+        assert!(!reply.body.contains("/games/"), "game link leaked");
+        assert!(
+            !reply.body.contains("Private Opponent"),
+            "opponent name leaked"
+        );
     }
 
     #[sqlx::test(migrations = "../migrations")]
