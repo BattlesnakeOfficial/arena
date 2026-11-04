@@ -118,6 +118,9 @@ pub struct EmailMessage {
     pub text: String,
     pub html: String,
     pub list_unsubscribe: Option<String>,
+    /// Mailgun `o:tag` values, sent as repeated `o:tag` form fields.
+    /// Empty for every ordinary arena email.
+    pub tags: Vec<String>,
 }
 
 impl EmailMessage {
@@ -132,6 +135,9 @@ impl EmailMessage {
         if let Some(url) = &self.list_unsubscribe {
             fields.push(("h:List-Unsubscribe", url));
             fields.push(("h:List-Unsubscribe-Post", "List-Unsubscribe=One-Click"));
+        }
+        for tag in &self.tags {
+            fields.push(("o:tag", tag.as_str()));
         }
         fields
     }
@@ -420,6 +426,7 @@ pub fn finish(
         text,
         html,
         list_unsubscribe: unsubscribe_url.map(|url| format!("<{url}>")),
+        tags: Vec::new(),
     })
 }
 
@@ -691,6 +698,27 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn ordinary_notification_email_has_no_tags() {
+        let kind = NotificationKind::SnakeMatchmakingPaused;
+        let message = finish(
+            sample_notification(kind, "https://arena.example").unwrap(),
+            "test@example.com".into(),
+            kind,
+            "https://arena.example",
+            kind.toggleable()
+                .then_some("https://arena.example/unsubscribe"),
+        )
+        .unwrap();
+        assert!(message.tags.is_empty());
+        assert!(
+            message
+                .form_fields("x")
+                .iter()
+                .all(|(name, _)| *name != "o:tag")
+        );
     }
 
     #[test]

@@ -34,6 +34,22 @@ use crate::{
 
 /// `email_log` purpose for these sends.
 pub const PURPOSE: &str = "play_shutdown_notice";
+/// Mailgun tag carried by every real shutdown notice (DEV-2084), so
+/// delivery numbers can be read from Mailgun's tags API.
+pub const NOTICE_TAG: &str = "play_shutdown_notice";
+/// Per-wave Mailgun tag prefix: `play_shutdown_notice_wave_<N>`.
+pub const WAVE_TAG_PREFIX: &str = "play_shutdown_notice_wave_";
+/// The single tag on admin test sends — deliberately none of the real
+/// tags, so tests never count toward a wave's Mailgun numbers.
+pub const TEST_TAG: &str = "play_shutdown_notice_test";
+
+/// The two Mailgun tags for a real wave send (Mailgun allows 3; use 2).
+pub fn wave_tags(wave: Wave) -> Vec<String> {
+    vec![
+        NOTICE_TAG.to_string(),
+        format!("{WAVE_TAG_PREFIX}{}", wave.number()),
+    ]
+}
 /// Emails per cron run. At one run every [`CRON_INTERVAL_SECS`] this is
 /// ~900 an hour, so a wave of a few thousand finishes the same day.
 pub const BATCH_SIZE: i64 = 75;
@@ -330,6 +346,7 @@ pub fn notice_message(
         text,
         html,
         list_unsubscribe: Some(format!("<{unsubscribe_url}>")),
+        tags: Vec::new(),
     }
 }
 
@@ -503,7 +520,7 @@ async fn send_notice(
     }
 
     let token = unsubscribe_token(&state.cookie_key, recipient.imported_account_id);
-    let message = notice_message(
+    let mut message = notice_message(
         wave,
         &recipient.email,
         &recipient.username,
@@ -511,6 +528,7 @@ async fn send_notice(
         &state.config.base_url,
         &unsubscribe_url(&state.config.base_url, &token),
     );
+    message.tags = wave_tags(wave);
 
     let _permit = state.mailer.acquire_delivery_permit().await?;
     let mut tx = state.db.begin().await?;
@@ -1070,6 +1088,52 @@ mod tests {
         .await
         .unwrap();
         assert!(unsubscribed.is_some());
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn real_notices_carry_notice_and_wave_tags(pool: PgPool) {
+        create_play_tables(&pool).await;
+        play_account(&pool, "fresh", Some(10)).await;
+        imported(&pool, "fresh").await;
+
+        let server = mailgun().await;
+        // Both waves go to the same recipient within the hour; the existing
+        // limit convention is 5 (a limit below 2 would defer the second send).
+        let state = mailgun_state(&pool, &server, 5).await;
+
+        send_batch(&state, &pool, Wave::First, 50).await.unwrap();
+        send_batch(&state, &pool, Wave::Second, 50).await.unwrap();
+
+        let bodies = sent_bodies(&server).await;
+        assert_eq!(bodies.len(), 2);
+        // Compare whole tag values, not substrings: "o:tag=play_shutdown_notice"
+        // is a prefix of "o:tag=play_shutdown_notice_wave_1", so a contains()
+        // check would pass on the wave tag alone.
+        let tags = |body: &str| -> Vec<String> {
+            body.lines()
+                .filter_map(|line| line.strip_prefix("o:tag="))
+                .map(str::to_string)
+                .collect()
+        };
+        assert_eq!(
+            tags(&bodies[0]),
+            ["play_shutdown_notice", "play_shutdown_notice_wave_1"]
+        );
+        assert_eq!(
+            tags(&bodies[1]),
+            ["play_shutdown_notice", "play_shutdown_notice_wave_2"]
+        );
+        for body in &bodies {
+            assert!(!body.contains("play_shutdown_notice_test"));
+        }
+    }
+
+    #[test]
+    fn wave_tags_pair_the_notice_tag_with_the_wave_number() {
+        let tags = wave_tags(Wave::Second);
+        assert_eq!(tags.len(), 2);
+        assert_eq!(tags[0], NOTICE_TAG);
+        assert_eq!(tags[1], "play_shutdown_notice_wave_2");
     }
 
     #[sqlx::test(migrations = "../migrations")]

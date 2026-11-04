@@ -174,6 +174,7 @@ mod tests {
             text: "body".to_string(),
             html: "<p>body</p>".to_string(),
             list_unsubscribe: None,
+            tags: Vec::new(),
         }
     }
 
@@ -296,6 +297,7 @@ mod tests {
             text: "body".to_string(),
             html: "<p>body</p>".to_string(),
             list_unsubscribe: None,
+            tags: Vec::new(),
         };
         mailer.send(&msg).await.unwrap();
     }
