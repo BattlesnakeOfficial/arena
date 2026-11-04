@@ -97,7 +97,7 @@ pub async fn insert_shout_screening(
 /// `frequency` = number of turns the pair appears on. `snake_name` is MIN
 /// over turns — a rename mid-game collapses to one row (the GROUP BY is on
 /// id+text, never name).
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
 pub struct DistinctShout {
     pub snake_id: String,
     pub snake_name: String,
@@ -107,19 +107,25 @@ pub struct DistinctShout {
 
 /// Distinct (snake_id, snake_name, shout, frequency) from a game's
 /// persisted frames, deterministic order: snake_id ASC, frequency DESC,
-/// shout ASC. Extracted in SQL so a 5000-turn game never loads all frames
-/// into memory. Frames whose `Snakes` is missing or not an array are
-/// tolerated (the `CASE` guard yields an empty array); empty-string
-/// shouts are excluded — `FrameSnake.shout` serializes `""` for "no
-/// shout".
+/// shout ASC — all text comparisons pinned to byte order via
+/// `COLLATE "C"` so the result is identical on every database
+/// collation (an `en_US.utf8` cluster otherwise ignores punctuation at
+/// the primary level and orders `{...}`/`[...]` shouts before plain
+/// text; the Rust twin in
+/// [`distinct_game_shouts_from_raw_frames`] compares bytewise). Prod is
+/// C.UTF-8, so its order is unchanged. Extracted in SQL so a 5000-turn
+/// game never loads all frames into memory. Frames whose `Snakes` is
+/// missing or not an array are tolerated (the `CASE` guard yields an
+/// empty array); empty-string shouts are excluded — `FrameSnake.shout`
+/// serializes `""` for "no shout".
 pub async fn distinct_game_shouts(pool: &PgPool, game_id: Uuid) -> cja::Result<Vec<DistinctShout>> {
     sqlx::query_as!(
         DistinctShout,
         r#"
         SELECT
-            s->>'ID'    AS "snake_id!",
-            MIN(COALESCE(s->>'Name', '')) AS "snake_name!",
-            s->>'Shout' AS "text!",
+            (s->>'ID') COLLATE "C"    AS "snake_id!",
+            MIN(COALESCE(s->>'Name', '') COLLATE "C") AS "snake_name!",
+            (s->>'Shout') COLLATE "C" AS "text!",
             COUNT(*)::BIGINT AS "frequency!"
         FROM turns t
         CROSS JOIN LATERAL jsonb_array_elements(
@@ -131,14 +137,131 @@ pub async fn distinct_game_shouts(pool: &PgPool, game_id: Uuid) -> cja::Result<V
           AND s->>'ID' IS NOT NULL
           AND s->>'Shout' IS NOT NULL
           AND s->>'Shout' <> ''
-        GROUP BY s->>'ID', s->>'Shout'
-        ORDER BY s->>'ID' ASC, COUNT(*) DESC, s->>'Shout' ASC
+        GROUP BY (s->>'ID') COLLATE "C", (s->>'Shout') COLLATE "C"
+        ORDER BY (s->>'ID') COLLATE "C" ASC, COUNT(*) DESC, (s->>'Shout') COLLATE "C" ASC
         "#,
         game_id
     )
     .fetch_all(pool)
     .await
     .wrap_err("Failed to extract distinct game shouts")
+}
+
+/// `v.get(key) ->>` semantics: string → itself; missing/JSON-null →
+/// `None`; any other value → its text the way Postgres `->>` renders it —
+/// scalars stringify, and objects/arrays go through [`pg_jsonb_text`]
+/// (spaced, canonical-key-order jsonb text).
+fn json_text(v: &serde_json::Value, key: &str) -> Option<String> {
+    match v.get(key) {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(s)) => Some(s.clone()),
+        Some(other) => Some(pg_jsonb_text(other)),
+    }
+}
+
+/// Render a JSON value exactly as PostgreSQL renders `jsonb` to text —
+/// the format `->>` returns for composite values: a space after every
+/// `:` and `,`, and object keys in jsonb's canonical order (length first,
+/// then bytewise — `jsonb` stores them that way, so `{"aa": 2, "b": 1}`
+/// comes back `{"b": 1, "aa": 2}`). Strings stay JSON-quoted inside
+/// composites; scalars match serde_json's rendering for the integer and
+/// plain-decimal literals arena's serializers emit (a JSON float literal
+/// in exponent notation would render expanded by Postgres `numeric` —
+/// arena never writes those into frames).
+fn pg_jsonb_text(v: &serde_json::Value) -> String {
+    fn quoted(s: &str) -> String {
+        serde_json::Value::String(s.to_string()).to_string()
+    }
+    match v {
+        serde_json::Value::Null => "null".to_string(),
+        serde_json::Value::Bool(_) | serde_json::Value::Number(_) => v.to_string(),
+        serde_json::Value::String(s) => quoted(s),
+        serde_json::Value::Array(items) => {
+            let body = items
+                .iter()
+                .map(pg_jsonb_text)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("[{body}]")
+        }
+        serde_json::Value::Object(map) => {
+            let mut entries: Vec<(&String, &serde_json::Value)> = map.iter().collect();
+            entries.sort_by(|(a, _), (b, _)| {
+                a.len()
+                    .cmp(&b.len())
+                    .then_with(|| a.as_str().cmp(b.as_str()))
+            });
+            let body = entries
+                .iter()
+                .map(|(k, val)| format!("{}: {}", quoted(k), pg_jsonb_text(val)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{{{body}}}")
+        }
+    }
+}
+
+/// Distinct shouts from an archived game's raw frames — the Rust twin of
+/// [`distinct_game_shouts`]' SQL, for native games whose `turns` rows were
+/// pruned (DEV-1981). Identical semantics: per (snake_id, shout) group,
+/// snake_name = MIN(COALESCE(Name, '')) and frequency = frame count;
+/// frames without a `Snakes` array and empty/null shouts excluded; order
+/// snake_id ASC, frequency DESC, shout ASC. Field extraction mirrors
+/// Postgres `->>` via [`json_text`]: a JSON string yields itself, a
+/// missing key or JSON null yields None, and any other value yields its
+/// text as Postgres renders it — [`pg_jsonb_text`] reproduces `jsonb
+/// ->>`'s spaced, canonical-key-order rendering for objects and arrays
+/// (parity with the SQL extraction; pinned by
+/// `archived_shout_extraction_matches_sql`). Both sides compare
+/// bytewise — Rust `str` ordering, and the SQL pinned via `COLLATE "C"`
+/// — so the twin matches on every database collation.
+pub fn distinct_game_shouts_from_raw_frames(
+    frames: &[Box<serde_json::value::RawValue>],
+) -> cja::Result<Vec<DistinctShout>> {
+    let mut acc: std::collections::HashMap<(String, String), (String, i64)> =
+        std::collections::HashMap::new();
+    for raw in frames {
+        let frame: serde_json::Value =
+            serde_json::from_str(raw.get()).wrap_err("Failed to parse archived frame")?;
+        let Some(snakes) = frame.get("Snakes").and_then(serde_json::Value::as_array) else {
+            continue; // the SQL CASE guard: frames without a Snakes array
+        };
+        for snake in snakes {
+            let Some(id) = json_text(snake, "ID") else {
+                continue;
+            };
+            let Some(shout) = json_text(snake, "Shout") else {
+                continue;
+            };
+            if shout.is_empty() {
+                continue;
+            }
+            let name = json_text(snake, "Name").unwrap_or_default();
+            let entry = acc.entry((id, shout)).or_insert_with(|| (name.clone(), 0));
+            if name < entry.0 {
+                entry.0 = name;
+            }
+            entry.1 += 1;
+        }
+    }
+    let mut rows: Vec<DistinctShout> = acc
+        .into_iter()
+        .map(
+            |((snake_id, text), (snake_name, frequency))| DistinctShout {
+                snake_id,
+                snake_name,
+                text,
+                frequency,
+            },
+        )
+        .collect();
+    rows.sort_by(|a, b| {
+        a.snake_id
+            .cmp(&b.snake_id)
+            .then(b.frequency.cmp(&a.frequency))
+            .then(a.text.cmp(&b.text))
+    });
+    Ok(rows)
 }
 
 /// sha256 hex of a shout text — the dedup key for suppressions.
@@ -232,6 +355,35 @@ pub async fn suppressed_shout_pairs(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// `pg_jsonb_text` must match PostgreSQL `jsonb ->>` byte-for-byte
+    /// (verified against psql: jsonb renders spaced text and sorts object
+    /// keys by length then bytewise).
+    #[test]
+    fn pg_jsonb_text_matches_postgres_rendering() {
+        // Spaces after `:` and `,` (serde_json's to_string gives `{"a":1}`).
+        assert_eq!(pg_jsonb_text(&json!({"a": 1})), "{\"a\": 1}");
+        assert_eq!(pg_jsonb_text(&json!([1, 2])), "[1, 2]");
+        // Canonical key order: length first, then bytewise — `"b"` before
+        // `"aa"`, and `""`/`"B"` before `"a"`.
+        assert_eq!(
+            pg_jsonb_text(&json!({"aa": 2, "b": 1})),
+            "{\"b\": 1, \"aa\": 2}"
+        );
+        assert_eq!(
+            pg_jsonb_text(&json!({"a": 1, "B": 2, "": 3})),
+            "{\"\": 3, \"B\": 2, \"a\": 1}"
+        );
+        // Nesting, scalars, strings inside composites.
+        assert_eq!(
+            pg_jsonb_text(&json!({"a": {"x": [true, null, "q", 1.5, -3]}})),
+            "{\"a\": {\"x\": [true, null, \"q\", 1.5, -3]}}"
+        );
+        assert_eq!(pg_jsonb_text(&json!({})), "{}");
+        assert_eq!(pg_jsonb_text(&json!([])), "[]");
+        // Scalars stringify like `->>` inside composites.
+        assert_eq!(pg_jsonb_text(&json!([42, false])), "[42, false]");
+    }
 
     async fn fixture_game(pool: &PgPool, status: &str) -> cja::Result<Uuid> {
         let game_id: Uuid = sqlx::query_scalar(
@@ -472,6 +624,70 @@ mod tests {
         assert_eq!(marker.model.as_deref(), Some("jev-test"));
         assert!((marker.latency_ms.unwrap() - 123.4).abs() < 1e-9);
         assert_eq!(marker.input_tokens, Some(777));
+        Ok(())
+    }
+    /// SC (DEV-1981): the Rust extractor over raw frames returns exactly
+    /// the SQL extraction over the same persisted frames — including the
+    /// `->>` stringify semantics (a JSON-number Shout and a JSON-number
+    /// ID both behave like Postgres `->>`).
+    #[sqlx::test(migrations = "../migrations")]
+    async fn archived_shout_extraction_matches_sql(pool: PgPool) -> cja::Result<()> {
+        let game_id = fixture_game(&pool, "finished").await?;
+        let a = "11111111-1111-1111-1111-111111111111";
+        let b = "22222222-2222-2222-2222-222222222222";
+
+        let frames = vec![
+            // String fields, the common shape.
+            json!({"Turn": 0, "Snakes": [
+                {"ID": a, "Name": "Snek A", "Shout": "get rekt"},
+                {"ID": b, "Name": "Snek B", "Shout": "hi"},
+            ]}),
+            json!({"Turn": 1, "Snakes": [
+                {"ID": a, "Name": "Snek A", "Shout": "get rekt"},
+                // Shout as a JSON number -> Postgres ->> stringifies it.
+                {"ID": b, "Name": "Snek B", "Shout": 42},
+            ]}),
+            json!({"Turn": 2, "Snakes": [
+                // ID as a JSON number -> stringify too.
+                {"ID": 999, "Name": "Weird", "Shout": "numeric id"},
+                {"ID": a, "Name": "Snek A0", "Shout": "hello"},
+                {"ID": b, "Name": "Snek B", "Shout": ""},
+            ]}),
+            // PostgreSQL jsonb ->> renders composite values with spaces;
+            // the archive extractor must preserve the same shout text.
+            json!({"Turn": 3, "Snakes": [
+                {"ID": a, "Name": "Snek A", "Shout": {"a": 1}},
+                {"ID": b, "Name": "Snek B", "Shout": [1, 2]},
+            ]}),
+            // Frame without a Snakes array: tolerated.
+            json!({"Turn": 4, "Food": []}),
+        ];
+        let mut raw_frames = Vec::with_capacity(frames.len());
+        for (i, frame) in frames.into_iter().enumerate() {
+            fixture_turn(&pool, game_id, i as i32, frame.clone()).await?;
+            raw_frames.push(serde_json::value::RawValue::from_string(
+                serde_json::to_string(&frame)?,
+            )?);
+        }
+
+        let sql_rows = distinct_game_shouts(&pool, game_id).await?;
+        let rust_rows = distinct_game_shouts_from_raw_frames(&raw_frames)?;
+        assert_eq!(rust_rows, sql_rows, "Rust twin matches SQL extraction");
+        assert!(!rust_rows.is_empty());
+
+        // Spot-check the `->>` semantics survived: the numeric shout reads
+        // "42", the numeric id reads "999", empty shout excluded, and
+        // snake_name is the MIN name.
+        fn find<'a>(rows: &'a [DistinctShout], id: &str, text: &str) -> &'a DistinctShout {
+            rows.iter()
+                .find(|r| r.snake_id == id && r.text == text)
+                .unwrap_or_else(|| panic!("missing {id}/{text}"))
+        }
+        find(&rust_rows, b, "42");
+        find(&rust_rows, "999", "numeric id");
+        find(&rust_rows, a, "get rekt");
+        assert_eq!(find(&rust_rows, a, "get rekt").frequency, 2);
+        assert_eq!(find(&rust_rows, a, "get rekt").snake_name, "Snek A");
         Ok(())
     }
 }

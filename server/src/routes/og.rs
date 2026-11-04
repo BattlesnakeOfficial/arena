@@ -206,7 +206,7 @@ async fn load_game_card(
     state: &AppState,
     game_id: Uuid,
     show_spoilers: bool,
-) -> cja::Result<Option<GameCard>> {
+) -> ServerResult<Option<GameCard>, StatusCode> {
     let Some(game) = get_game_by_id(&state.db, game_id)
         .await
         .wrap_err("Failed to get game for social card")?
@@ -218,7 +218,7 @@ async fn load_game_card(
         .wrap_err("Failed to get game battlesnakes for social card")?;
 
     let spoilers = game.status == GameStatus::Finished && show_spoilers;
-    let frame = if spoilers {
+    let mut frame = if spoilers {
         get_latest_frame(&state.db, game_id)
             .await
             .wrap_err("Failed to get final frame for social card")?
@@ -231,6 +231,12 @@ async fn load_game_card(
             .rev()
             .find_map(|turn| turn.frame_data)
     };
+    // DEV-1981: a pruned terminal native game has no `turns` rows, so its
+    // card's frame comes from the archive. Terminal-gated: a live game's
+    // empty frame is just a game that hasn't produced turns yet.
+    if frame.is_none() && matches!(game.status, GameStatus::Finished | GameStatus::Failed) {
+        frame = archived_card_frame(state, game_id, spoilers).await?;
+    }
     // A frame that doesn't parse (an old import) just means an empty board.
     let frame = frame.and_then(|f| serde_json::from_value::<EngineGameFrame>(f).ok());
 
@@ -260,6 +266,49 @@ async fn load_game_card(
         spoilers,
         turns: frame.as_ref().filter(|_| spoilers).map(|f| f.turn),
     }))
+}
+
+/// DEV-1981: a pruned native game has no `turns` rows, so the social
+/// card's frame comes from the archive — the final frame for spoiler
+/// cards, else the last of the first `UNFURLED_TURN + 1` frames (the
+/// exact selection the DB path performs). Native rows only, resolved by
+/// their arena `game_id`: imported Play stubs carry `gcs_path` but
+/// Play-shaped frames and keep today's empty board, and legacy Play ids
+/// resolve a different row and keep it too. A missing archive object 404s
+/// the card (the frames endpoints' mapping — the object was
+/// content-confirmed at prune time, so its absence is data loss).
+/// Caller has already established the game is terminal.
+async fn archived_card_frame(
+    state: &AppState,
+    game_id: Uuid,
+    spoilers: bool,
+) -> ServerResult<Option<serde_json::Value>, StatusCode> {
+    let Some(record) = crate::models::game::get_game_row_by_any_id(&state.db, game_id)
+        .await
+        .wrap_err("Failed to fetch game row for social card archive fallback")?
+    else {
+        return Ok(None);
+    };
+    // Native stub-by-arena-id gate, then Play-id-resolution gate (the
+    // arena row wins get_game_row_by_any_id's ORDER BY, so the second
+    // check only trips if the arena row vanished mid-request → 404 anyway).
+    if record.engine_game_id.is_some() || record.game.game_id != game_id {
+        return Ok(None);
+    }
+    if !crate::routes::game::api::serves_from_archive(&state.db, &record).await? {
+        return Ok(None);
+    }
+    let archived = crate::routes::game::api::load_archived_for_http(state, &record).await?;
+    let limit = if spoilers {
+        usize::MAX
+    } else {
+        usize::try_from(UNFURLED_TURN + 1).unwrap_or(usize::MAX)
+    };
+    Ok(state
+        .archive
+        .last_frame_within(archived, limit)
+        .await
+        .wrap_err("Failed to look up archived card frame")?)
 }
 
 /// Roster entries in `snakes` order. Colour and head come from the frame
@@ -1440,5 +1489,116 @@ mod tests {
         let empty = board(7, 7, None, true);
         assert!(empty.snakes.is_empty());
         assert_eq!((empty.width, empty.height), (7, 7));
+    }
+
+    /// DEV-1981 review pin: the social card reads `turns` through
+    /// `get_latest_frame`/`get_turn_frames_page`, so pruning a game must not
+    /// change what its card shows (task: every reader of `models/turn.rs`
+    /// must handle pruned games or touch only games inside retention; this
+    /// endpoint takes any game id). The spoiler-free card loses its opening
+    /// board and the spoiler card loses its final board and turn count.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn game_card_identical_before_and_after_prune(pool: PgPool) {
+        let state = AppState::test_from_pool(pool.clone());
+        let old = chrono::Utc::now() - chrono::Duration::days(40);
+        let game_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO games (board_size, game_type, status, created_at, updated_at)
+             VALUES ('11x11', 'Solo', 'finished', $1, $1) RETURNING game_id",
+        )
+        .bind(old)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let user_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO users (external_github_id, github_login, github_access_token)
+             VALUES (888901, 'og-prune', '') RETURNING user_id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let snake_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO battlesnakes (user_id, name, url, visibility)
+             VALUES ($1, 'OG Prune', 'http://snake', 'public') RETURNING battlesnake_id",
+        )
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let gb_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO game_battlesnakes (game_id, battlesnake_id, created_at)
+             VALUES ($1, $2, $3) RETURNING game_battlesnake_id",
+        )
+        .bind(game_id)
+        .bind(snake_id)
+        .bind(old)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        for turn in 0..3 {
+            let frame = serde_json::json!({
+                "Turn": turn,
+                "Snakes": [{
+                    "ID": gb_id.to_string(), "Name": "OG Prune", "Health": 90,
+                    "Body": [{"X": 5, "Y": 5}, {"X": 5, "Y": 4}],
+                    "Color": "#123456", "HeadType": "beluga", "TailType": "curled",
+                    "Latency": "42", "Shout": "", "Death": null
+                }],
+                "Food": [{"X": 9, "Y": 9}],
+                "Hazards": []
+            });
+            sqlx::query("INSERT INTO turns (game_id, turn_number, frame_data) VALUES ($1, $2, $3)")
+                .bind(game_id)
+                .bind(turn)
+                .bind(frame)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        crate::native_backup::archive_native_game(&state, game_id)
+            .await
+            .unwrap();
+
+        let opening_before = load_game_card(&state, game_id, false)
+            .await
+            .unwrap()
+            .unwrap();
+        let final_before = load_game_card(&state, game_id, true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            !opening_before.board.snakes.is_empty(),
+            "fixture draws a board"
+        );
+        assert_eq!(final_before.turns, Some(2), "fixture shows the final turn");
+
+        crate::turn_retention::prune_game_turns(&state, game_id)
+            .await
+            .unwrap();
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE game_id = $1")
+            .bind(game_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(remaining, 0, "fixture was actually pruned");
+
+        let opening_after = load_game_card(&state, game_id, false)
+            .await
+            .unwrap()
+            .unwrap();
+        let final_after = load_game_card(&state, game_id, true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            format!("{opening_after:?}"),
+            format!("{opening_before:?}"),
+            "spoiler-free card changed after pruning"
+        );
+        assert_eq!(
+            format!("{final_after:?}"),
+            format!("{final_before:?}"),
+            "spoiler card changed after pruning"
+        );
     }
 }

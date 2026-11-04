@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE games SET turns_pruned_at = NOW()\n         WHERE game_id = $1 AND turns_pruned_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7c9517ef5d57bf65956a74cd80ce636d5d67134db4a342646db0dafb7078de07"
+}

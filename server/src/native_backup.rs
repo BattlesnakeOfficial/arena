@@ -84,7 +84,15 @@ fn native_gcs_path(game_id: Uuid, created_at: chrono::DateTime<chrono::Utc>) -> 
 /// index, never a turns scan. `frame_data::text` makes Postgres render the
 /// JSONB server-side; sqlx's TEXT -> String decode is a memcpy. NO
 /// serde_json work happens here or anywhere else on the async side.
-async fn fetch_native_frame_texts(db: &PgPool, game_id: Uuid) -> cja::Result<Vec<String>> {
+/// Also the confirm-side source of truth for DEV-1981's turn pruning: the
+/// prune compares this function's output against the decoded archive
+/// object, so the writer's and the confirmer's frame selections can never
+/// drift (same function, same `frame_data IS NOT NULL ORDER BY
+/// turn_number ASC` selection).
+pub(crate) async fn fetch_native_frame_texts(
+    db: &PgPool,
+    game_id: Uuid,
+) -> cja::Result<Vec<String>> {
     let texts: Vec<String> = sqlx::query_scalar!(
         r#"
         SELECT frame_data::text AS "frame_data!"

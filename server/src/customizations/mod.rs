@@ -1411,4 +1411,110 @@ mod tests {
         assert_eq!(chip_color(""), "#888888");
         assert_eq!(chip_color("red;position:fixed"), "#888888");
     }
+    /// SC (DEV-1981): the prune can't corrupt active-week credit. A
+    /// `finished_at`-less game whose legacy finish (last turn's
+    /// `created_at`) is 40 days old credits exactly one week before the
+    /// prune; after the real pruner deletes its turns (making
+    /// `legacy_finishes` fall back to the prune-bumped `updated_at`),
+    /// further backfill runs change nothing — the cursor has already
+    /// scanned past the link.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn backfill_weeks_unchanged_after_prune(pool: PgPool) -> cja::Result<()> {
+        use chrono::{Datelike as _, Utc};
+
+        let state = crate::state::AppState::test_from_pool(pool.clone());
+        let user = create_test_user(&pool).await?;
+        let snake = sqlx::query_scalar!(
+            "INSERT INTO battlesnakes (user_id, name, url) VALUES ($1, 'Prune Week Snake', 'https://example.com') RETURNING battlesnake_id",
+            user
+        )
+        .fetch_one(&pool)
+        .await?;
+        let old = Utc::now() - chrono::Duration::days(40);
+        let game = sqlx::query_scalar!(
+            "INSERT INTO games (board_size, game_type, status, created_at, updated_at)
+             VALUES ('11x11', 'Standard', 'finished', $1, $1) RETURNING game_id",
+            old
+        )
+        .fetch_one(&pool)
+        .await?;
+        sqlx::query!(
+            "INSERT INTO game_battlesnakes (game_id, battlesnake_id, created_at) VALUES ($1, $2, $3)",
+            game,
+            snake,
+            old
+        )
+        .execute(&pool)
+        .await?;
+        sqlx::query!(
+            "INSERT INTO turns (game_id, turn_number, frame_data, created_at)
+             VALUES ($1, 0, $2, $3)",
+            game,
+            serde_json::json!({"Turn": 0, "Snakes": []}),
+            old
+        )
+        .execute(&pool)
+        .await?;
+
+        // The real writer, so the real pruner will pass its confirm.
+        crate::native_backup::archive_native_game(&state, game).await?;
+
+        // Credit from behind the link: cursor 42 days ago, backfill runs
+        // until it stops advancing, then once more (0 inserted).
+        sqlx::query!(
+            "UPDATE customization_active_week_backfill_cursor SET scanned_through = $1 WHERE singleton = TRUE",
+            old - chrono::Duration::days(2)
+        )
+        .execute(&pool)
+        .await?;
+        let mut runs = 0;
+        loop {
+            let inserted = backfill_active_weeks(&pool).await?;
+            runs += 1;
+            assert!(runs <= 7, "backfill must converge within 7 runs");
+            if inserted == 0 {
+                break;
+            }
+        }
+
+        // Exactly one credit, at the legacy finish's week (Monday UTC of
+        // the last turn's created_at).
+        let week = sqlx::query_scalar!(
+            "SELECT week_start FROM customization_active_weeks WHERE user_id = $1",
+            user
+        )
+        .fetch_one(&pool)
+        .await?;
+        let expected = old.date_naive()
+            - chrono::Duration::days(i64::from(old.weekday().num_days_from_monday()));
+        assert_eq!(week, expected);
+
+        // The real pruner: turns gone, updated_at bumped to ~now.
+        crate::turn_retention::prune_game_turns(&state, game).await?;
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE game_id = $1")
+            .bind(game)
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(remaining, 0, "fixture was actually pruned");
+        let rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM customization_active_weeks WHERE user_id = $1",
+        )
+        .bind(user)
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(rows, 1);
+
+        // Two more backfill runs: the cursor is at NOW, so nothing
+        // rescans the (now turns-less) link and nothing re-credits.
+        assert_eq!(backfill_active_weeks(&pool).await?, 0);
+        assert_eq!(backfill_active_weeks(&pool).await?, 0);
+        let weeks = sqlx::query_scalar!(
+            "SELECT week_start FROM customization_active_weeks WHERE user_id = $1 ORDER BY week_start",
+            user
+        )
+        .fetch_all(&pool)
+        .await?;
+        assert_eq!(weeks, vec![expected]);
+        Ok(())
+    }
 }

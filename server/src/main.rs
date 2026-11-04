@@ -60,6 +60,7 @@ mod telemetry;
 mod test_capture;
 mod tournament_bracket;
 mod tournament_match;
+mod turn_retention;
 mod watched_games;
 mod wire;
 

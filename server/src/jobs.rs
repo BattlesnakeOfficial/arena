@@ -414,6 +414,40 @@ impl Job<AppState> for NativeBackupSingleGameJob {
     }
 }
 
+/// Cron job: hourly discovery of archived v2 native games past turn
+/// retention, enqueuing per-game prune jobs (DEV-1981). See
+/// [`crate::turn_retention`].
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TurnRetentionJob;
+
+#[async_trait::async_trait]
+impl Job<AppState> for TurnRetentionJob {
+    const NAME: &'static str = "TurnRetentionJob";
+
+    async fn run(&self, app_state: AppState) -> cja::Result<()> {
+        crate::turn_retention::run_retention_discovery(&app_state).await
+    }
+}
+
+/// Prune one archived native game's `turns` rows (snake_turns cascade)
+/// after confirming the archive object's content (version, id, frames).
+/// Enqueued by TurnRetentionJob; idempotent — the prune predicate is
+/// re-checked under the backup slot and `turns_pruned_at` is set inside
+/// the delete transaction.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PruneGameTurnsJob {
+    pub game_id: Uuid,
+}
+
+#[async_trait::async_trait]
+impl Job<AppState> for PruneGameTurnsJob {
+    const NAME: &'static str = "PruneGameTurnsJob";
+
+    async fn run(&self, app_state: AppState) -> cja::Result<()> {
+        crate::turn_retention::prune_game_turns(&app_state, self.game_id).await
+    }
+}
+
 /// Job to discover historical games and enqueue backup jobs in batches.
 /// Uses fork-join pattern: enqueues a batch, waits for completion, then enqueues next batch.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -631,6 +665,8 @@ cja::impl_job_registry!(
     HistoricalBackupDiscoveryJob,
     NativeGameBackupJob,
     NativeBackupSingleGameJob,
+    TurnRetentionJob,
+    PruneGameTurnsJob,
     LeaderboardMatchmakerJob,
     LeaderboardRatingUpdateJob,
     RunTournamentRoundJob,
