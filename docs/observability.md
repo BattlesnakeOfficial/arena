@@ -33,24 +33,24 @@ the `finished processing request` event — filter `target ==
 "cja::server::trace"` and read `fields.user_id` / `fields.auth_type`. That
 series starts at deploy. Both fields are also on the JSON stdout line, because
 `GcpJsonFormatter` prints event fields. So they reach Google Cloud Logging,
-where the `_Default` bucket keeps them for 7 days. The privacy policy states
-this, so it depends on that retention, on the `cloud-run-request-logs`
-exclusion on the `_Default` sink, and on logging being off on the arena load
-balancer backend. The retention and the exclusion are set by hand, not in
-Terraform. If any of them changes, the policy has to change too. Query them in
-Eyes, which is where the product metrics live. `fields.user_id` alone is not a
-request filter: `snake.lifecycle` spans and product events such as
-`user_authenticated` and `battlesnake_created` also carry `user_id`, so a
-metric or chart must also filter on the target or the message.
-`fields.auth_type` has the same trap: `user_authenticated` already carries
-`auth_type` with the values `cli` and `web`, so `session`/`token` charts need
-the same filter. A total-requests count or a denominator must filter on
-`message == "finished processing request"`. The target alone also matches
-`server.request` span rows and double-counts. Measured on production,
-2026-11-03, the same 15 minutes: target alone 750 rows, target plus message
-375. Until the first post-deploy events reach the lake, the `source` and
-`new_user` items show `unknown_field` errors. A cold 30-day lake query can
-return 503 at about 50 s; a retry then succeeds.
+where the `_Default` bucket keeps them for 7 days. The privacy policy says
+Google Cloud keeps server and load balancer logs "for a short time", and that
+they can hold the same kinds of details it lists for our observability system.
+So it depends on that retention, which is set by hand, not in Terraform. If
+the retention grows, or a new kind of personal data reaches these logs, the
+policy has to change too. Query them in Eyes, which is where the product
+metrics live. `fields.user_id` alone is not a request filter:
+`snake.lifecycle` spans and product events such as `user_authenticated` and
+`battlesnake_created` also carry `user_id`, so a metric or chart must also
+filter on the target or the message. `fields.auth_type` has the same trap:
+`user_authenticated` already carries `auth_type` with the values `cli` and
+`web`, so `session`/`token` charts need the same filter. A total-requests
+count or a denominator must filter on `message == "finished processing
+request"`. The target alone also matches `server.request` span rows and
+double-counts. Measured on production, 2026-11-03, the same 15 minutes: target
+alone 750 rows, target plus message 375. Until the first post-deploy events
+reach the lake, the `source` and `new_user` items show `unknown_field` errors.
+A cold 30-day lake query can return 503 at about 50 s; a retry then succeeds.
 
 Processing overhead measures elapsed turn-loop time minus elapsed time awaiting
 parallel move requests, including persistence and scheduling. The old event
