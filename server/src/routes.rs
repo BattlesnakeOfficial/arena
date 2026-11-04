@@ -35,6 +35,7 @@ pub struct UpdateProfileForm {
 }
 
 // Include route modules
+pub mod achievements;
 pub mod admin;
 pub mod api;
 pub mod auth;
@@ -150,6 +151,7 @@ pub fn routes(app_state: AppState) -> cja::Result<cja::server::App> {
         .route("/og/leaderboards/{id}", get(og::leaderboard_card))
         .route("/og/leaderboards/{id}/entries/{file}", get(og::entry_card))
         .route("/og/tournaments/{file}", get(og::tournament_card))
+        .route("/og/achievements/{slug}/{file}", get(og::achievement_card))
         // The permanent wordmark PNGs embedded in outgoing email headers
         .route(crate::brand::WORDMARK_PNG_PATH, get(brand_wordmark_png))
         .route(
@@ -170,6 +172,19 @@ pub fn routes(app_state: AppState) -> cja::Result<cja::server::App> {
         .route(
             "/users/{login}/{user_id}",
             get(users::show_user_profile_by_id),
+        )
+        // Public share pages for earned achievements
+        .route(
+            "/achievements/{slug}/{user_id}",
+            get(achievements::share_page),
+        )
+        .route(
+            "/achievements/{slug}/{user_id}/share-action",
+            post(achievements::share_action),
+        )
+        .route(
+            "/achievements/{slug}/{user_id}/cta-click",
+            post(achievements::share_cta_click),
         )
         // Profile page - requires authentication
         .route("/me", get(profile_page).post(update_profile))

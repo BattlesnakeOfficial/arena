@@ -53,7 +53,12 @@ reach the lake, the `source` and `new_user` items show `unknown_field` errors.
 A cold 30-day lake query can return 503 at about 50 s; a retry then succeeds.
 Achievements are counted from the `achievement_earned` event (fields `slug`,
 `kind`, `live`, `first`), emitted for live earns only, so those charts start
-at deploy.
+at deploy. Achievement shares are counted from `share_page_view` (fields
+`slug`, `owner_id`, `referrer`), `share_action` (`channel`), and
+`share_cta_click` (`cta`). Views exclude the owner, crawlers identified by
+User-Agent, and prefetches, so read them as an approximate count of outside
+visits. The POST endpoints behind the other two are unauthenticated, so those
+counts are best effort.
 
 Processing overhead measures elapsed turn-loop time minus elapsed time awaiting
 parallel move requests, including persistence and scheduling. The old event

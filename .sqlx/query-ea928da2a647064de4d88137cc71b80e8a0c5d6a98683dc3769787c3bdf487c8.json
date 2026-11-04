@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT (\n            EXISTS (\n                SELECT 1 FROM leaderboard_games lg\n                JOIN leaderboards l ON l.leaderboard_id = lg.leaderboard_id\n                WHERE lg.game_id = $1 AND l.visibility = 'private'\n            ) OR EXISTS (\n                SELECT 1\n                FROM game_battlesnakes gb\n                JOIN leaderboard_entries le ON le.leaderboard_entry_id = gb.leaderboard_entry_id\n                JOIN leaderboards l ON l.leaderboard_id = le.leaderboard_id\n                WHERE gb.game_id = $1 AND l.visibility = 'private'\n            ) OR EXISTS (\n                SELECT 1\n                FROM match_games mg\n                JOIN tournament_matches tm ON tm.match_id = mg.match_id\n                JOIN tournaments t ON t.tournament_id = tm.tournament_id\n                WHERE mg.game_id = $1 AND t.visibility <> 'public'\n            )\n        ) AS \"hidden!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "hidden!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "ea928da2a647064de4d88137cc71b80e8a0c5d6a98683dc3769787c3bdf487c8"
+}

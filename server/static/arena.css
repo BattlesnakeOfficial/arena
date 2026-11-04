@@ -947,6 +947,33 @@ table.data.test-results pre { margin-top: 8px; font-family: var(--mono); font-si
   .cz-ladder-foot { margin-left: 0; }
 }
 
+/* --- page: achievement share page ------------------------------------------ */
+.ach-share { max-width: 680px; font-size: 16px; }
+.ach-share-head { display: flex; gap: 22px; align-items: flex-start; }
+.ach-share-art { display: flex; gap: 6px; flex-shrink: 0; }
+.ach-share-art img { width: 88px; height: 88px; }
+.ach-share-head h1 { margin: 6px 0; }
+.ach-share .badge { font-size: 16px; }
+.ach-share-owner { display: flex; gap: 12px; align-items: center; margin-top: 20px; font-size: 16px; }
+.ach-share-owner a { display: inline-flex; align-items: center; min-height: 44px; }
+.ach-share-snake { display: flex; align-items: center; gap: 8px; margin-top: 14px; font-size: 16px; }
+.ach-share-game { margin-top: 14px; font-size: 16px; }
+.ach-share-game a { display: inline-flex; align-items: center; min-height: 44px; color: var(--pink); font-weight: 600; }
+.share-actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-top: 30px; }
+.share-actions .btn { min-height: 44px; font-size: 16px; display: inline-flex; align-items: center; }
+/* .btn sets display, which would otherwise override [hidden] */
+.share-actions [hidden] { display: none; }
+.share-actions input { flex: 1 1 200px; min-height: 44px; font-size: 16px; }
+.share-cta { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 30px; }
+.share-cta .btn { min-height: 44px; font-size: 16px; display: inline-flex; align-items: center; }
+/* No margin-left here: .cz-step-state already owns the row's auto margin
+   (arena.css .cz-step-state), and the link renders after that badge. */
+.cz-share-link { display: inline-flex; align-items: center; min-height: 44px; color: var(--pink); font-weight: 600; font-size: 16px; }
+
+@media (max-width: 640px) {
+  .ach-share-head { flex-direction: column; gap: 14px; }
+}
+
 @media (max-width: 640px) {
   .cz-grid { grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); gap: 10px; }
 }

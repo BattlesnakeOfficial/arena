@@ -40,9 +40,9 @@ pub(crate) struct Capture {
     /// the span, so a repeated id would stitch a closed span's URI onto
     /// another span's close events.
     request_seq: Arc<AtomicU64>,
-    /// Fields of `battlesnake_created` / `user_authenticated` / `achievement_earned`
-    /// events — the product-event buffers for the creation-path, sign-in, and
-    /// achievement-earn tests. Never cleared.
+    /// Fields of product events (`battlesnake_created`, `user_authenticated`,
+    /// `achievement_earned`, and the achievement share events) — never
+    /// cleared; each test filters on its own unique ids.
     events: Arc<Mutex<Vec<BTreeMap<String, String>>>>,
 }
 
@@ -102,7 +102,10 @@ where
             Some("game_phase") => self.phases.lock().unwrap().push((false, fields.0)),
             Some("battlesnake_created")
             | Some("user_authenticated")
-            | Some("achievement_earned") => {
+            | Some("achievement_earned")
+            | Some("share_page_view")
+            | Some("share_action")
+            | Some("share_cta_click") => {
                 self.events.lock().unwrap().push(fields.0);
             }
             _ => {
@@ -211,6 +214,26 @@ impl Capture {
             .filter(|fields| {
                 fields.get("event_type").map(String::as_str) == Some(event_type)
                     && fields.get("user_id").map(String::as_str) == Some(&user_id.to_string())
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// `event_type` events whose `field` equals `value`, in emission order.
+    /// Never clears the buffer — each test filters on its own unique ids.
+    pub(crate) fn events_with_field(
+        &self,
+        event_type: &str,
+        field: &str,
+        value: &str,
+    ) -> Vec<BTreeMap<String, String>> {
+        self.events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|fields| {
+                fields.get("event_type").map(String::as_str) == Some(event_type)
+                    && fields.get(field).map(String::as_str) == Some(value)
             })
             .cloned()
             .collect()
