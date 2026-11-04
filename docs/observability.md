@@ -51,6 +51,9 @@ double-counts. Measured on production, 2026-11-03, the same 15 minutes: target
 alone 750 rows, target plus message 375. Until the first post-deploy events
 reach the lake, the `source` and `new_user` items show `unknown_field` errors.
 A cold 30-day lake query can return 503 at about 50 s; a retry then succeeds.
+Achievements are counted from the `achievement_earned` event (fields `slug`,
+`kind`, `live`, `first`), emitted for live earns only, so those charts start
+at deploy.
 
 Processing overhead measures elapsed turn-loop time minus elapsed time awaiting
 parallel move requests, including persistence and scheduling. The old event

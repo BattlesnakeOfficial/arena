@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashSet};
 
 use arena::design_kit::AssetKind;
 use color_eyre::eyre::{Context as _, eyre};
-use sqlx::{PgConnection, PgPool};
+use sqlx::{Connection as _, PgConnection, PgPool};
 use uuid::Uuid;
 
 use super::{Head, Tail};
@@ -44,6 +44,31 @@ impl Achievement {
         Self::CrowdPleaser,
         Self::LadderRegular,
     ];
+
+    /// Stable machine identifier: `achievement_earns.achievement` value and
+    /// the `achievement_earned` event's `slug` field. Never rename — it is
+    /// the analytics contract.
+    pub const fn slug(self) -> &'static str {
+        match self {
+            Self::FirstWin => "first_win",
+            Self::SlowAndSteady => "slow_and_steady",
+            Self::ConstrictorChamp => "constrictor_champ",
+            Self::CrowdPleaser => "crowd_pleaser",
+            Self::LadderRegular => "ladder_regular",
+        }
+    }
+
+    /// Achievement family for analytics. All current achievements are
+    /// Getting Started.
+    pub const fn kind(self) -> &'static str {
+        match self {
+            Self::FirstWin
+            | Self::SlowAndSteady
+            | Self::ConstrictorChamp
+            | Self::CrowdPleaser
+            | Self::LadderRegular => "getting_started",
+        }
+    }
 
     pub const fn def(self) -> AchievementDef {
         match self {
@@ -91,6 +116,16 @@ pub fn for_item(kind: &str, slug: &str) -> Option<AchievementDef> {
         })
 }
 
+/// The game and snake that produced a rule fire, recorded on live earns.
+/// `battlesnake_id` is the winning/linked snake's id; the participants
+/// query inner-joins `battlesnakes` on the coalesced id, so it is never
+/// NULL at runtime.
+#[derive(Debug, Clone, Copy)]
+struct Provenance {
+    game_id: Uuid,
+    battlesnake_id: Uuid,
+}
+
 #[derive(Default, Clone, Copy)]
 struct WinFlags {
     first: bool,
@@ -98,6 +133,16 @@ struct WinFlags {
     crowd: bool,
     ladder: bool,
     ladder_win: bool,
+    /// Filled by the first outright-winning row (the row that flips `first`).
+    first_win_provenance: Option<Provenance>,
+    /// Filled by the first winning Constrictor row.
+    constrictor_provenance: Option<Provenance>,
+    /// Filled by the first winning row with >= 4 participants.
+    crowd_provenance: Option<Provenance>,
+    /// Filled by the first winning row that is ladder-linked.
+    ladder_win_provenance: Option<Provenance>,
+    /// Filled by the first ladder-linked row, win or loss.
+    ladder_provenance: Option<Provenance>,
 }
 
 impl WinFlags {
@@ -108,14 +153,50 @@ impl WinFlags {
         participants: i64,
         game_type: &str,
         ladder: bool,
+        provenance: Provenance,
     ) {
         self.ladder |= ladder;
+        if ladder && self.ladder_provenance.is_none() {
+            self.ladder_provenance = Some(provenance);
+        }
         // A shared first place is a draw, not a win.
         if placement == Some(1) && first_places == 1 && participants >= 2 {
+            if self.first_win_provenance.is_none() {
+                self.first_win_provenance = Some(provenance);
+            }
+            if game_type == GameType::Constrictor.as_str() {
+                self.constrictor = true;
+                if self.constrictor_provenance.is_none() {
+                    self.constrictor_provenance = Some(provenance);
+                }
+            }
+            if participants >= 4 {
+                self.crowd = true;
+                if self.crowd_provenance.is_none() {
+                    self.crowd_provenance = Some(provenance);
+                }
+            }
+            if ladder {
+                self.ladder_win = true;
+                if self.ladder_win_provenance.is_none() {
+                    self.ladder_win_provenance = Some(provenance);
+                }
+            }
             self.first = true;
-            self.constrictor |= game_type == GameType::Constrictor.as_str();
-            self.crowd |= participants >= 4;
-            self.ladder_win |= ladder;
+        }
+    }
+
+    /// Which game/snake earned a given achievement, for live earn records.
+    /// A slot is Some exactly when the matching flag is true. For the
+    /// count-based rules the attribution is the gate row: the ladder-linked
+    /// (or ladder-winning) row, earliest-first under the reconcile ORDER BY.
+    fn provenance_for(&self, achievement: Achievement) -> Option<Provenance> {
+        match achievement {
+            Achievement::FirstWin => self.first_win_provenance,
+            Achievement::ConstrictorChamp => self.constrictor_provenance,
+            Achievement::CrowdPleaser => self.crowd_provenance,
+            Achievement::SlowAndSteady => self.ladder_provenance,
+            Achievement::LadderRegular => self.ladder_win_provenance,
         }
     }
 }
@@ -124,6 +205,18 @@ impl WinFlags {
 struct AwardResult {
     inserted: u64,
     newly_earned: Vec<EarnedAchievement>,
+    /// Live earns recorded in this call, for post-commit Eyes events.
+    /// Stays empty when earn recording failed (the failure was logged;
+    /// the grants stand).
+    earned_events: Vec<EarnedEvent>,
+}
+
+/// A live earn recorded with provenance; drives the Eyes event.
+#[derive(Debug, Clone, Copy)]
+struct EarnedEvent {
+    achievement: Achievement,
+    first: bool,
+    provenance: Provenance,
 }
 
 struct EarnedAchievement {
@@ -302,23 +395,158 @@ async fn distinct_finished_count(
     Ok(count)
 }
 
+/// One row of the pre-call grant snapshot: what the user already owns,
+/// how each item was obtained, and when.
+struct ExistingGrant {
+    customization_type: String,
+    slug: String,
+    source: String,
+    created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Insert a live earn record with game/snake/turn provenance. `earned_at`
+/// is the game's finished_at (COALESCE covers fixtures with NULL
+/// finished_at). Returns `(achievement_earn_id, first)` when this call
+/// created the row.
+async fn record_live_earn(
+    conn: &mut PgConnection,
+    user_id: Uuid,
+    achievement: Achievement,
+    provenance: Provenance,
+) -> cja::Result<Option<(Uuid, bool)>> {
+    let earn_id = sqlx::query!(
+        r#"INSERT INTO achievement_earns
+               (user_id, achievement, battlesnake_id, game_id, turn_number, live, earned_at)
+           VALUES ($1, $2, $3, $4,
+                   (SELECT MAX(turn_number) FROM turns WHERE game_id = $4),
+                   TRUE,
+                   COALESCE((SELECT finished_at FROM games WHERE game_id = $4), NOW()))
+           ON CONFLICT (user_id, achievement) DO NOTHING
+           RETURNING achievement_earn_id"#,
+        user_id,
+        achievement.slug(),
+        provenance.battlesnake_id,
+        provenance.game_id,
+    )
+    .fetch_optional(&mut *conn)
+    .await
+    .wrap_err("Failed to insert live achievement earn")?
+    .map(|row| row.achievement_earn_id);
+    let Some(earn_id) = earn_id else {
+        return Ok(None);
+    };
+    let first = sqlx::query_scalar!(
+        r#"SELECT NOT EXISTS (
+               SELECT 1 FROM achievement_earns
+               WHERE achievement = $1 AND achievement_earn_id <> $2
+           ) AS "first!""#,
+        achievement.slug(),
+        earn_id,
+    )
+    .fetch_one(&mut *conn)
+    .await
+    .wrap_err("Failed to check first achievement earner")?;
+    Ok(Some((earn_id, first)))
+}
+
+/// Insert a non-live earn record dated from a grant (or from now for a
+/// fresh historical award). Never emits an event.
+async fn record_grant_earn(
+    conn: &mut PgConnection,
+    user_id: Uuid,
+    achievement: Achievement,
+    earned_at: chrono::DateTime<chrono::Utc>,
+) -> cja::Result<()> {
+    sqlx::query!(
+        r#"INSERT INTO achievement_earns (user_id, achievement, earned_at, live)
+           VALUES ($1, $2, $3, FALSE)
+           ON CONFLICT (user_id, achievement) DO NOTHING"#,
+        user_id,
+        achievement.slug(),
+        earned_at,
+    )
+    .execute(&mut *conn)
+    .await
+    .wrap_err("Failed to insert grant-dated achievement earn")?;
+    Ok(())
+}
+
+/// The distinct-game thresholds for the two count-based rules, shared by
+/// the normal evaluation and the live re-verification for both-item owners.
+async fn count_rule_satisfied(
+    conn: &mut PgConnection,
+    user_id: Uuid,
+    achievement: Achievement,
+) -> cja::Result<bool> {
+    let (cap, wins) = match achievement {
+        Achievement::SlowAndSteady => (3_000, false),
+        Achievement::LadderRegular => (1_000, true),
+        _ => return Ok(false),
+    };
+    Ok(
+        distinct_candidate_count(&mut *conn, user_id, cap, wins).await? >= cap
+            && distinct_finished_count(&mut *conn, user_id, cap, wins).await? >= cap,
+    )
+}
+
+/// What a live call can verify for a user who already owns both items and
+/// has no achievement-source grant. Win-family rules are proven by the
+/// provenance slots themselves (each slot fills exactly when its flag
+/// flips true). Count-based rules re-run the distinct-count queries under
+/// the same flag gates the normal evaluation uses. Backfill callers
+/// (live = None) verify nothing: a fully-held other-source set records
+/// nothing from backfill.
+async fn verified_live_provenance(
+    conn: &mut PgConnection,
+    user_id: Uuid,
+    achievement: Achievement,
+    live: Option<WinFlags>,
+) -> cja::Result<Option<Provenance>> {
+    let Some(flags) = live else {
+        return Ok(None);
+    };
+    match achievement {
+        Achievement::FirstWin | Achievement::ConstrictorChamp | Achievement::CrowdPleaser => {
+            Ok(flags.provenance_for(achievement))
+        }
+        Achievement::SlowAndSteady => Ok(if !flags.ladder {
+            None
+        } else {
+            count_rule_satisfied(&mut *conn, user_id, achievement)
+                .await?
+                .then_some(flags.ladder_provenance)
+                .flatten()
+        }),
+        Achievement::LadderRegular => Ok(if !flags.ladder_win {
+            None
+        } else {
+            count_rule_satisfied(&mut *conn, user_id, achievement)
+                .await?
+                .then_some(flags.ladder_win_provenance)
+                .flatten()
+        }),
+    }
+}
+
 async fn award_owner(
     conn: &mut PgConnection,
     user_id: Uuid,
     live: Option<WinFlags>,
 ) -> cja::Result<AwardResult> {
-    let existing = sqlx::query!(
-        "SELECT customization_type, slug FROM customization_grants WHERE user_id = $1",
+    let existing = sqlx::query_as!(
+        ExistingGrant,
+        "SELECT customization_type, slug, source, created_at FROM customization_grants WHERE user_id = $1",
         user_id,
     )
     .fetch_all(&mut *conn)
     .await
     .wrap_err("Failed to read achievement ownership")?;
-    let owned: HashSet<_> = existing
-        .into_iter()
-        .map(|r| (r.customization_type, r.slug))
+    let owned: HashSet<(String, String)> = existing
+        .iter()
+        .map(|grant| (grant.customization_type.clone(), grant.slug.clone()))
         .collect();
     let mut result = AwardResult::default();
+    let mut fired: Vec<Achievement> = Vec::new();
     for achievement in Achievement::ALL {
         let def = achievement.def();
         let head_owned = owned.contains(&(Head::KIND.to_string(), def.head.slug().to_string()));
@@ -345,23 +573,21 @@ async fn award_owner(
                 if !live.is_none_or(|flags| flags.ladder) {
                     false
                 } else {
-                    distinct_candidate_count(&mut *conn, user_id, 3_000, false).await? >= 3_000
-                        && distinct_finished_count(&mut *conn, user_id, 3_000, false).await?
-                            >= 3_000
+                    count_rule_satisfied(&mut *conn, user_id, achievement).await?
                 }
             }
             Achievement::LadderRegular => {
                 if !live.is_none_or(|flags| flags.ladder_win) {
                     false
                 } else {
-                    distinct_candidate_count(&mut *conn, user_id, 1_000, true).await? >= 1_000
-                        && distinct_finished_count(&mut *conn, user_id, 1_000, true).await? >= 1_000
+                    count_rule_satisfied(&mut *conn, user_id, achievement).await?
                 }
             }
         };
         if !earned {
             continue;
         }
+        fired.push(achievement);
         let mut head_granted = false;
         let mut tail_granted = false;
         for (kind, slug, held) in [
@@ -392,7 +618,157 @@ async fn award_owner(
             });
         }
     }
+    // Recording must never cost a grant: a failed statement would abort the
+    // shared award transaction, so all earn work runs in its own savepoint.
+    // sqlx::Connection::begin on a connection already inside a transaction
+    // issues SAVEPOINT; commit releases it, rollback restores it.
+    let mut savepoint = conn
+        .begin()
+        .await
+        .wrap_err("Failed to open earn savepoint")?;
+    match record_earns(&mut savepoint, user_id, &existing, live, &fired).await {
+        Ok(events) => {
+            savepoint
+                .commit()
+                .await
+                .wrap_err("Failed to release earn savepoint")?;
+            result.earned_events = events;
+        }
+        Err(error) => {
+            savepoint
+                .rollback()
+                .await
+                .wrap_err("Failed to roll back earn savepoint")?;
+            tracing::error!(
+                user_id = %user_id,
+                error = %format!("{error:#}"),
+                "Failed to record achievement earns"
+            );
+        }
+    }
     Ok(result)
+}
+
+/// Record earns for one owner inside the caller's savepoint. Exactly two
+/// facts create a row: a pre-call achievement-source grant (grant-dated,
+/// non-live) or a rule fire in this call (live with provenance on a live
+/// call, now-dated non-live on the backfill path). A both-items owner
+/// with no achievement-source grant gets a row only when a live call can
+/// verify the rule right now. Returns the live earns for post-commit
+/// events.
+async fn record_earns(
+    conn: &mut PgConnection,
+    user_id: Uuid,
+    existing: &[ExistingGrant],
+    live: Option<WinFlags>,
+    fired: &[Achievement],
+) -> cja::Result<Vec<EarnedEvent>> {
+    let mut events = Vec::new();
+    let already_earned: HashSet<String> = sqlx::query!(
+        "SELECT achievement FROM achievement_earns WHERE user_id = $1",
+        user_id,
+    )
+    .fetch_all(&mut *conn)
+    .await
+    .wrap_err("Failed to read earned achievements")?
+    .into_iter()
+    .map(|row| row.achievement)
+    .collect();
+    for achievement in Achievement::ALL {
+        if already_earned.contains(achievement.slug()) {
+            continue;
+        }
+        let def = achievement.def();
+        // An achievement-source grant proves a past rule fire — for
+        // partial holders (head-only) as well as full ones. Date the
+        // record from the earliest such grant without re-running the rule.
+        let ach_source_earned_at = existing
+            .iter()
+            .filter(|grant| {
+                grant.source == "achievement"
+                    && ((grant.customization_type == Head::KIND && grant.slug == def.head.slug())
+                        || def.tail.is_some_and(|tail| {
+                            grant.customization_type == Tail::KIND && grant.slug == tail.slug()
+                        }))
+            })
+            .map(|grant| grant.created_at)
+            .min();
+        if let Some(earned_at) = ach_source_earned_at {
+            record_grant_earn(&mut *conn, user_id, achievement, earned_at).await?;
+            continue;
+        }
+        if fired.contains(&achievement) {
+            match live
+                .as_ref()
+                .and_then(|flags| flags.provenance_for(achievement))
+            {
+                Some(provenance) => {
+                    if let Some((_earn_id, first)) =
+                        record_live_earn(&mut *conn, user_id, achievement, provenance).await?
+                    {
+                        events.push(EarnedEvent {
+                            achievement,
+                            first,
+                            provenance,
+                        });
+                    }
+                }
+                None => {
+                    // Fresh historical award (backfill path; a live fire
+                    // always has provenance). The grants were created in
+                    // this transaction, so NOW() is their created_at —
+                    // including a partial other-source holder whose rule
+                    // fired over history: the fresh achievement-source
+                    // grant is the earn proof, and the job-top statement
+                    // would write this same row on the next tick anyway.
+                    record_grant_earn(&mut *conn, user_id, achievement, chrono::Utc::now()).await?;
+                }
+            }
+            continue;
+        }
+        // Both items held from other sources: ownership alone must not
+        // create a record, but a live call may verify the rule right now.
+        // Backfill verifies nothing here.
+        let head_owned = existing
+            .iter()
+            .any(|grant| grant.customization_type == Head::KIND && grant.slug == def.head.slug());
+        let tail_owned = def.tail.is_none_or(|tail| {
+            existing
+                .iter()
+                .any(|grant| grant.customization_type == Tail::KIND && grant.slug == tail.slug())
+        });
+        if head_owned
+            && tail_owned
+            && let Some(provenance) =
+                verified_live_provenance(&mut *conn, user_id, achievement, live).await?
+            && let Some((_earn_id, first)) =
+                record_live_earn(&mut *conn, user_id, achievement, provenance).await?
+        {
+            events.push(EarnedEvent {
+                achievement,
+                first,
+                provenance,
+            });
+        }
+    }
+    Ok(events)
+}
+
+/// Emit the product event for a live earn. Called only after the award
+/// transaction commits, so a rolled-back award never emits. Non-live
+/// (backfill/grant-dated) records never emit.
+fn emit_earned_event(user_id: Uuid, event: &EarnedEvent) {
+    tracing::info!(
+        event_type = "achievement_earned",
+        user_id = %user_id,
+        slug = event.achievement.slug(),
+        kind = event.achievement.kind(),
+        live = true,
+        first = event.first,
+        game_id = %event.provenance.game_id,
+        battlesnake_id = %event.provenance.battlesnake_id,
+        "Achievement earned"
+    );
 }
 
 pub async fn award_for_game(pool: &PgPool, game_id: Uuid, base_url: &str) -> cja::Result<u64> {
@@ -411,10 +787,12 @@ pub async fn award_for_game(pool: &PgPool, game_id: Uuid, base_url: &str) -> cja
         return Ok(0);
     };
     let rows = sqlx::query!(
-        r#"SELECT bs.user_id, gb.placement, gb.leaderboard_entry_id FROM game_battlesnakes gb
-        LEFT JOIN leaderboard_entries le ON le.leaderboard_entry_id = gb.leaderboard_entry_id
-        JOIN battlesnakes bs ON bs.battlesnake_id = COALESCE(gb.battlesnake_id, le.battlesnake_id)
-        WHERE gb.game_id = $1"#,
+        r#"SELECT bs.user_id, gb.placement, gb.leaderboard_entry_id,
+                  COALESCE(gb.battlesnake_id, le.battlesnake_id) AS "snake_id!"
+           FROM game_battlesnakes gb
+           LEFT JOIN leaderboard_entries le ON le.leaderboard_entry_id = gb.leaderboard_entry_id
+           JOIN battlesnakes bs ON bs.battlesnake_id = COALESCE(gb.battlesnake_id, le.battlesnake_id)
+           WHERE gb.game_id = $1"#,
         game_id,
     )
     .fetch_all(&mut *tx)
@@ -430,13 +808,24 @@ pub async fn award_for_game(pool: &PgPool, game_id: Uuid, base_url: &str) -> cja
             participants,
             &game.game_type,
             row.leaderboard_entry_id.is_some(),
+            Provenance {
+                game_id,
+                battlesnake_id: row.snake_id,
+            },
         );
     }
     let mut inserted = 0;
     let mut receipts = Vec::new();
+    let mut earned_events: Vec<(Uuid, EarnedEvent)> = Vec::new();
     for (owner, flags) in owners {
         let awarded = award_owner(&mut tx, owner, Some(flags)).await?;
         inserted += awarded.inserted;
+        earned_events.extend(
+            awarded
+                .earned_events
+                .into_iter()
+                .map(|event| (owner, event)),
+        );
         if awarded.newly_earned.is_empty() {
             continue;
         }
@@ -491,6 +880,9 @@ pub async fn award_for_game(pool: &PgPool, game_id: Uuid, base_url: &str) -> cja
         .wrap_err("Failed to commit achievement award")?;
     for receipt in receipts {
         receipt.log_enqueued();
+    }
+    for (owner, event) in earned_events {
+        emit_earned_event(owner, &event);
     }
     Ok(inserted)
 }
@@ -568,6 +960,53 @@ pub async fn backfill_achievement_page(pool: &PgPool) -> cja::Result<BackfillPag
     })
 }
 
+/// Grant-dated earn records for every user holding an achievement-source
+/// grant — full or partial holders alike, whenever and however that grant
+/// was created (including ones the backfill page path granted earlier in
+/// the same job to a partial other-source holder). Runs at the top of
+/// BackfillAchievementsJob every tick: idempotent (NOT EXISTS + unique
+/// conflict), silent (never notifies, never emits), and near-free once
+/// every holder has a row.
+pub async fn backfill_earns_from_grants(pool: &PgPool) -> cja::Result<u64> {
+    let mut kinds = Vec::with_capacity(9);
+    let mut slugs = Vec::with_capacity(9);
+    let mut achievements = Vec::with_capacity(9);
+    for achievement in Achievement::ALL {
+        let def = achievement.def();
+        kinds.push(Head::KIND.to_string());
+        slugs.push(def.head.slug().to_string());
+        achievements.push(achievement.slug().to_string());
+        if let Some(tail) = def.tail {
+            kinds.push(Tail::KIND.to_string());
+            slugs.push(tail.slug().to_string());
+            achievements.push(achievement.slug().to_string());
+        }
+    }
+    let inserted = sqlx::query!(
+        r#"INSERT INTO achievement_earns (user_id, achievement, earned_at, live)
+           SELECT g.user_id, m.achievement, MIN(g.created_at), FALSE
+           FROM customization_grants g
+           JOIN UNNEST($1::text[], $2::text[], $3::text[])
+                AS m(customization_type, slug, achievement)
+             ON m.customization_type = g.customization_type AND m.slug = g.slug
+           WHERE g.source = 'achievement'
+             AND NOT EXISTS (
+                 SELECT 1 FROM achievement_earns ae
+                 WHERE ae.user_id = g.user_id AND ae.achievement = m.achievement
+             )
+           GROUP BY g.user_id, m.achievement
+           ON CONFLICT (user_id, achievement) DO NOTHING"#,
+        &kinds,
+        &slugs,
+        &achievements,
+    )
+    .execute(pool)
+    .await
+    .wrap_err("Failed to backfill achievement earns from grants")?
+    .rows_affected();
+    Ok(inserted)
+}
+
 pub async fn reconcile_recent_achievements(pool: &PgPool) -> cja::Result<u64> {
     let mut tx = pool
         .begin()
@@ -575,6 +1014,7 @@ pub async fn reconcile_recent_achievements(pool: &PgPool) -> cja::Result<u64> {
         .wrap_err("Failed to begin achievement reconciliation")?;
     let rows = sqlx::query!(
         r#"SELECT g.game_id, g.game_type, bs.user_id, gb.placement, gb.leaderboard_entry_id,
+            COALESCE(gb.battlesnake_id, le.battlesnake_id) AS "snake_id!",
             (SELECT COUNT(*) FROM game_battlesnakes peer WHERE peer.game_id = g.game_id) AS "participants!",
             (SELECT COUNT(*) FROM game_battlesnakes peer WHERE peer.game_id = g.game_id AND peer.placement = 1) AS "first_places!"
         FROM games g
@@ -582,10 +1022,20 @@ pub async fn reconcile_recent_achievements(pool: &PgPool) -> cja::Result<u64> {
         LEFT JOIN leaderboard_entries le ON le.leaderboard_entry_id = gb.leaderboard_entry_id
         JOIN battlesnakes bs ON bs.battlesnake_id = COALESCE(gb.battlesnake_id, le.battlesnake_id)
         WHERE g.status = 'finished' AND g.finished_at IS NOT NULL
-          AND g.finished_at > NOW() - INTERVAL '2 hours'"#,
+          AND g.finished_at > NOW() - INTERVAL '2 hours'
+        ORDER BY g.finished_at, g.game_id"#,
     ).fetch_all(&mut *tx).await.wrap_err("Failed to read recent achievement games")?;
     let candidate_games: HashSet<_> = rows.iter().map(|row| row.game_id).collect();
     let mut owners = BTreeMap::<Uuid, WinFlags>::new();
+    // Attribution under the window's ORDER BY: each earn records the
+    // earliest row in the window satisfying its rule gate (win slots: the
+    // earliest outright win of that rule's shape; ladder/ladder_win
+    // slots: the earliest ladder-linked or ladder-winning row).
+    // Count-based attribution here is approximate by construction, because
+    // a threshold-crossing game can't be identified cheaply in an
+    // aggregate window. The exact game is recorded when the earn flows
+    // through `award_for_game` (the normal path); reconcile is an hourly
+    // repair path.
     for row in rows {
         owners.entry(row.user_id).or_default().include(
             row.placement,
@@ -593,16 +1043,31 @@ pub async fn reconcile_recent_achievements(pool: &PgPool) -> cja::Result<u64> {
             row.participants,
             &row.game_type,
             row.leaderboard_entry_id.is_some(),
+            Provenance {
+                game_id: row.game_id,
+                battlesnake_id: row.snake_id,
+            },
         );
     }
     let owner_count = owners.len();
     let mut inserted = 0;
+    let mut earned_events: Vec<(Uuid, EarnedEvent)> = Vec::new();
     for (owner, flags) in owners {
-        inserted += award_owner(&mut tx, owner, Some(flags)).await?.inserted;
+        let awarded = award_owner(&mut tx, owner, Some(flags)).await?;
+        inserted += awarded.inserted;
+        earned_events.extend(
+            awarded
+                .earned_events
+                .into_iter()
+                .map(|event| (owner, event)),
+        );
     }
     tx.commit()
         .await
         .wrap_err("Failed to commit achievement reconciliation")?;
+    for (owner, event) in earned_events {
+        emit_earned_event(owner, &event);
+    }
     tracing::info!(
         candidate_games = candidate_games.len(),
         owners = owner_count,
@@ -1902,5 +2367,851 @@ mod tests {
             .unwrap();
         assert_eq!(backfill_achievement_page(&pool).await.unwrap().inserted, 1);
         assert_eq!(backfill_achievement_page(&pool).await.unwrap().inserted, 0);
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn live_earn_records_provenance_and_emits_event(pool: PgPool) {
+        crate::test_capture::Capture::shared();
+        let owner = user(&pool, 1669104).await;
+        let rival = user(&pool, 1669105).await;
+        let winner = snake(&pool, owner, "provenance winner").await;
+        let opponent = snake(&pool, rival, "provenance opponent").await;
+        let game_id = game(&pool, GameType::Standard.as_str(), "finished", Some(0)).await;
+        participant(&pool, game_id, winner, 1, None).await;
+        participant(&pool, game_id, opponent, 2, None).await;
+        sqlx::query("INSERT INTO turns (game_id, turn_number) VALUES ($1, 7)")
+            .bind(game_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            award_for_game(&pool, game_id, "https://arena.example")
+                .await
+                .unwrap(),
+            1
+        );
+        let finished_at: chrono::DateTime<chrono::Utc> =
+            sqlx::query_scalar("SELECT finished_at FROM games WHERE game_id = $1")
+                .bind(game_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let row = sqlx::query!(
+            "SELECT achievement, battlesnake_id, game_id, turn_number, live, earned_at FROM achievement_earns WHERE user_id = $1",
+            owner,
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.achievement, "first_win");
+        assert_eq!(row.battlesnake_id, Some(winner));
+        assert_eq!(row.game_id, Some(game_id));
+        assert_eq!(row.turn_number, Some(7));
+        assert!(row.live);
+        assert_eq!(row.earned_at, finished_at);
+        let events = crate::test_capture::Capture::shared().events("achievement_earned", owner);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["slug"], "first_win");
+        assert_eq!(events[0]["kind"], "getting_started");
+        assert_eq!(events[0]["live"], "true");
+        assert_eq!(events[0]["first"], "true");
+        assert_eq!(events[0]["game_id"], game_id.to_string());
+        assert_eq!(events[0]["battlesnake_id"], winner.to_string());
+        assert_eq!(
+            award_for_game(&pool, game_id, "https://arena.example")
+                .await
+                .unwrap(),
+            0
+        );
+        let rows: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM achievement_earns WHERE user_id = $1")
+                .bind(owner)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(rows, 1);
+        let events = crate::test_capture::Capture::shared().events("achievement_earned", owner);
+        assert_eq!(events.len(), 1);
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn second_live_earner_is_not_first(pool: PgPool) {
+        crate::test_capture::Capture::shared();
+        let first_owner = user(&pool, 1669106).await;
+        let second_owner = user(&pool, 1669107).await;
+        let rival = user(&pool, 1669108).await;
+        let first_snake = snake(&pool, first_owner, "first earner").await;
+        let second_snake = snake(&pool, second_owner, "second earner").await;
+        let rival_snake = snake(&pool, rival, "not first rival").await;
+        let one = game(&pool, GameType::Standard.as_str(), "finished", Some(0)).await;
+        participant(&pool, one, first_snake, 1, None).await;
+        participant(&pool, one, rival_snake, 2, None).await;
+        assert_eq!(
+            award_for_game(&pool, one, "https://arena.example")
+                .await
+                .unwrap(),
+            1
+        );
+        let two = game(&pool, GameType::Standard.as_str(), "finished", Some(0)).await;
+        participant(&pool, two, second_snake, 1, None).await;
+        participant(&pool, two, rival_snake, 2, None).await;
+        assert_eq!(
+            award_for_game(&pool, two, "https://arena.example")
+                .await
+                .unwrap(),
+            1
+        );
+        let first_events =
+            crate::test_capture::Capture::shared().events("achievement_earned", first_owner);
+        assert_eq!(first_events.len(), 1);
+        assert_eq!(first_events[0]["first"], "true");
+        let second_events =
+            crate::test_capture::Capture::shared().events("achievement_earned", second_owner);
+        assert_eq!(second_events.len(), 1);
+        assert_eq!(second_events[0]["first"], "false");
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn backfilled_holder_means_next_live_earn_is_not_first(pool: PgPool) {
+        crate::test_capture::Capture::shared();
+        let holder = user(&pool, 1669109).await;
+        let earner = user(&pool, 1669110).await;
+        let rival = user(&pool, 1669111).await;
+        sqlx::query(
+            "INSERT INTO customization_grants (user_id, customization_type, slug, source, created_at) VALUES ($1, 'head', 'frog', 'achievement', NOW() - INTERVAL '10 days')",
+        )
+        .bind(holder)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert_eq!(backfill_earns_from_grants(&pool).await.unwrap(), 1);
+        let holder_row = sqlx::query!(
+            "SELECT live, game_id, earned_at FROM achievement_earns WHERE user_id = $1",
+            holder,
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(!holder_row.live);
+        assert!(holder_row.game_id.is_none());
+        let winner = snake(&pool, earner, "late earner").await;
+        let opponent = snake(&pool, rival, "late rival").await;
+        let game_id = game(&pool, GameType::Standard.as_str(), "finished", Some(0)).await;
+        participant(&pool, game_id, winner, 1, None).await;
+        participant(&pool, game_id, opponent, 2, None).await;
+        assert_eq!(
+            award_for_game(&pool, game_id, "https://arena.example")
+                .await
+                .unwrap(),
+            1
+        );
+        let events = crate::test_capture::Capture::shared().events("achievement_earned", earner);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["first"], "false");
+        let holder_after = sqlx::query!(
+            "SELECT live, game_id, earned_at FROM achievement_earns WHERE user_id = $1",
+            holder,
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(holder_after.earned_at, holder_row.earned_at);
+        assert!(!holder_after.live);
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn reconcile_attributes_each_achievement_to_its_own_game(pool: PgPool) {
+        let owner = user(&pool, 1669112).await;
+        let rival = user(&pool, 1669113).await;
+        let winner = snake(&pool, owner, "attributed winner").await;
+        let second = snake(&pool, rival, "attributed second").await;
+        let third = snake(&pool, rival, "attributed third").await;
+        let fourth = snake(&pool, rival, "attributed fourth").await;
+        let two = game(&pool, "Standard", "finished", Some(1)).await;
+        participant(&pool, two, winner, 1, None).await;
+        participant(&pool, two, second, 2, None).await;
+        let four = game(&pool, GameType::Constrictor.as_str(), "finished", Some(0)).await;
+        participant(&pool, four, winner, 1, None).await;
+        participant(&pool, four, second, 2, None).await;
+        participant(&pool, four, third, 3, None).await;
+        participant(&pool, four, fourth, 4, None).await;
+        assert_eq!(reconcile_recent_achievements(&pool).await.unwrap(), 5);
+        let rows: Vec<(String, bool, Option<Uuid>, Option<Uuid>)> = sqlx::query_as(
+            "SELECT achievement, live, game_id, battlesnake_id FROM achievement_earns WHERE user_id = $1",
+        )
+        .bind(owner)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 3);
+        for (achievement, live, game_id, battlesnake_id) in rows {
+            assert!(live, "{achievement} should be live");
+            assert_eq!(battlesnake_id, Some(winner));
+            match achievement.as_str() {
+                "first_win" => assert_eq!(game_id, Some(two)),
+                "constrictor_champ" | "crowd_pleaser" => assert_eq!(game_id, Some(four)),
+                other => panic!("unexpected achievement {other}"),
+            }
+        }
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn backfill_earns_from_grants_records_holders_once_and_silently(pool: PgPool) {
+        let full = user(&pool, 1669114).await;
+        let partial = user(&pool, 1669115).await;
+        sqlx::query(
+            "INSERT INTO customization_grants (user_id, customization_type, slug, source, created_at) VALUES ($1, 'head', 'turtle', 'achievement', NOW() - INTERVAL '9 days'), ($1, 'tail', 'turtle', 'achievement', NOW() - INTERVAL '9 days')",
+        )
+        .bind(full)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO customization_grants (user_id, customization_type, slug, source, created_at) VALUES ($1, 'head', 'judge', 'achievement', NOW() - INTERVAL '5 days')",
+        )
+        .bind(partial)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert_eq!(backfill_earns_from_grants(&pool).await.unwrap(), 2);
+        let full_grant_at: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+            "SELECT MIN(created_at) FROM customization_grants WHERE user_id = $1 AND slug = 'turtle'",
+        )
+        .bind(full)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let full_row = sqlx::query!(
+            "SELECT achievement, battlesnake_id, game_id, turn_number, live, earned_at FROM achievement_earns WHERE user_id = $1",
+            full,
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(full_row.achievement, "slow_and_steady");
+        assert!(!full_row.live);
+        assert!(full_row.battlesnake_id.is_none());
+        assert!(full_row.game_id.is_none());
+        assert!(full_row.turn_number.is_none());
+        assert_eq!(full_row.earned_at, full_grant_at);
+        let partial_grant_at: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+            "SELECT created_at FROM customization_grants WHERE user_id = $1 AND slug = 'judge'",
+        )
+        .bind(partial)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let partial_row = sqlx::query!(
+            "SELECT achievement, earned_at FROM achievement_earns WHERE user_id = $1",
+            partial,
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(partial_row.achievement, "ladder_regular");
+        assert_eq!(partial_row.earned_at, partial_grant_at);
+        let partial_tails: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM customization_grants WHERE user_id = $1 AND customization_type = 'tail'",
+        )
+        .bind(partial)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(partial_tails, 0);
+        let side_effects: (i64, i64, i64) = sqlx::query_as(
+            "SELECT (SELECT COUNT(*) FROM notifications), \
+                    (SELECT COUNT(*) FROM notification_emails), \
+                    (SELECT COUNT(*) FROM jobs WHERE name = 'SendNotificationEmailJob')",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(side_effects, (0, 0, 0));
+        assert_eq!(backfill_earns_from_grants(&pool).await.unwrap(), 0);
+        let full_row_again = sqlx::query!(
+            "SELECT live, game_id, earned_at FROM achievement_earns WHERE user_id = $1",
+            full,
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(full_row_again.earned_at, full_row.earned_at);
+        assert_eq!(full_row_again.live, full_row.live);
+        assert_eq!(full_row_again.game_id, full_row.game_id);
+        let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM achievement_earns")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(total, 2);
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn backfill_achievements_job_records_earns_without_cursor_reset(pool: PgPool) {
+        let holder = user(&pool, 1669116).await;
+        sqlx::query(
+            "INSERT INTO customization_grants (user_id, customization_type, slug, source, created_at) VALUES ($1, 'head', 'turtle', 'achievement', NOW() - INTERVAL '9 days'), ($1, 'tail', 'turtle', 'achievement', NOW() - INTERVAL '9 days')",
+        )
+        .bind(holder)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE achievement_backfill_cursor SET completed_at = NOW() WHERE singleton = TRUE",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let state = crate::state::AppState::test_from_pool(pool.clone());
+        use cja::jobs::Job as _;
+        crate::jobs::BackfillAchievementsJob
+            .run(state)
+            .await
+            .unwrap();
+        let row = sqlx::query!(
+            "SELECT achievement, live FROM achievement_earns WHERE user_id = $1",
+            holder,
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.achievement, "slow_and_steady");
+        assert!(!row.live);
+        let completed_at: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+            "SELECT completed_at FROM achievement_backfill_cursor WHERE singleton = TRUE",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(completed_at.is_some());
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn other_source_items_never_count_as_earned(pool: PgPool) {
+        let token_holder = user(&pool, 1669117).await;
+        let code_holder = user(&pool, 1669118).await;
+        let rival = user(&pool, 1669119).await;
+        sqlx::query(
+            "INSERT INTO customization_grants (user_id, customization_type, slug, source) VALUES ($1, 'head', 'frog', 'token')",
+        )
+        .bind(token_holder)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO customization_grants (user_id, customization_type, slug, source) VALUES ($1, 'head', 'monkey', 'code'), ($1, 'tail', 'monkey', 'code')",
+        )
+        .bind(code_holder)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let token_snake = snake(&pool, token_holder, "token holder snake").await;
+        let code_snake = snake(&pool, code_holder, "code holder snake").await;
+        let rival_one = snake(&pool, rival, "other source rival one").await;
+        let rival_two = snake(&pool, rival, "other source rival two").await;
+        let rival_three = snake(&pool, rival, "other source rival three").await;
+        let rival_four = snake(&pool, rival, "other source rival four").await;
+        let token_win = game(&pool, "Standard", "finished", Some(0)).await;
+        participant(&pool, token_win, token_snake, 1, None).await;
+        participant(&pool, token_win, rival_one, 2, None).await;
+        let code_win = game(&pool, "Standard", "finished", Some(0)).await;
+        participant(&pool, code_win, code_snake, 1, None).await;
+        participant(&pool, code_win, rival_two, 2, None).await;
+        participant(&pool, code_win, rival_three, 3, None).await;
+        participant(&pool, code_win, rival_four, 4, None).await;
+
+        assert_eq!(backfill_earns_from_grants(&pool).await.unwrap(), 0);
+        sqlx::query("UPDATE achievement_backfill_cursor SET after_user_id = NULL, completed_at = NULL WHERE singleton = TRUE")
+            .execute(&pool)
+            .await
+            .unwrap();
+        loop {
+            let page = backfill_achievement_page(&pool).await.unwrap();
+            if page.complete {
+                break;
+            }
+        }
+        let token_rows: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM achievement_earns WHERE user_id = $1")
+                .bind(token_holder)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(token_rows, 0);
+        let code_crowd: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM achievement_earns WHERE user_id = $1 AND achievement = 'crowd_pleaser'",
+        )
+        .bind(code_holder)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(code_crowd, 0);
+        let code_first = sqlx::query!(
+            "SELECT live, game_id, turn_number FROM achievement_earns WHERE user_id = $1 AND achievement = 'first_win'",
+            code_holder,
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(!code_first.live);
+        assert!(code_first.game_id.is_none());
+        assert!(code_first.turn_number.is_none());
+        assert!(has(&grants(&pool, code_holder).await, Head::KIND, "frog"));
+        let side_effects: (i64, i64, i64) = sqlx::query_as(
+            "SELECT (SELECT COUNT(*) FROM notifications), \
+                    (SELECT COUNT(*) FROM notification_emails), \
+                    (SELECT COUNT(*) FROM jobs WHERE name = 'SendNotificationEmailJob')",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(side_effects, (0, 0, 0));
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn backfill_rule_fire_records_partial_other_source_holder(pool: PgPool) {
+        crate::test_capture::Capture::shared();
+        let partial = user(&pool, 1669120).await;
+        let rival = user(&pool, 1669121).await;
+        sqlx::query(
+            "INSERT INTO customization_grants (user_id, customization_type, slug, source) VALUES ($1, 'head', 'monkey', 'code')",
+        )
+        .bind(partial)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let own = snake(&pool, partial, "partial holder snake").await;
+        let rival_two = snake(&pool, rival, "partial rival two").await;
+        let rival_three = snake(&pool, rival, "partial rival three").await;
+        let rival_four = snake(&pool, rival, "partial rival four").await;
+        let win = game(&pool, "Standard", "finished", Some(0)).await;
+        participant(&pool, win, own, 1, None).await;
+        participant(&pool, win, rival_two, 2, None).await;
+        participant(&pool, win, rival_three, 3, None).await;
+        participant(&pool, win, rival_four, 4, None).await;
+        sqlx::query("UPDATE achievement_backfill_cursor SET after_user_id = NULL, completed_at = NULL WHERE singleton = TRUE")
+            .execute(&pool)
+            .await
+            .unwrap();
+        loop {
+            let page = backfill_achievement_page(&pool).await.unwrap();
+            if page.complete {
+                break;
+            }
+        }
+        assert!(grants(&pool, partial).await.contains(&(
+            Tail::KIND.to_string(),
+            "monkey".to_string(),
+            "achievement".to_string()
+        )));
+        let row = sqlx::query!(
+            "SELECT battlesnake_id, game_id, turn_number, live, earned_at FROM achievement_earns WHERE user_id = $1 AND achievement = 'crowd_pleaser'",
+            partial,
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(!row.live);
+        assert!(row.battlesnake_id.is_none());
+        assert!(row.game_id.is_none());
+        assert!(row.turn_number.is_none());
+        let tail_grant_at: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+            "SELECT created_at FROM customization_grants WHERE user_id = $1 AND customization_type = 'tail' AND slug = 'monkey'",
+        )
+        .bind(partial)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let delta = (row.earned_at - tail_grant_at).num_milliseconds().abs();
+        assert!(
+            delta < 5_000,
+            "crowd_pleaser earned_at {delta}ms from tail grant"
+        );
+        let first_win = sqlx::query!(
+            "SELECT live FROM achievement_earns WHERE user_id = $1 AND achievement = 'first_win'",
+            partial,
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(!first_win.live);
+        let side_effects: (i64, i64, i64) = sqlx::query_as(
+            "SELECT (SELECT COUNT(*) FROM notifications), \
+                    (SELECT COUNT(*) FROM notification_emails), \
+                    (SELECT COUNT(*) FROM jobs WHERE name = 'SendNotificationEmailJob')",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(side_effects, (0, 0, 0));
+        assert!(
+            crate::test_capture::Capture::shared()
+                .events("achievement_earned", partial)
+                .is_empty()
+        );
+        // Re-running both backfill paths leaves counts and earned_at unchanged.
+        loop {
+            let page = backfill_achievement_page(&pool).await.unwrap();
+            if page.complete {
+                break;
+            }
+        }
+        assert_eq!(backfill_earns_from_grants(&pool).await.unwrap(), 0);
+        let rows_after: Vec<(String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+            "SELECT achievement, earned_at FROM achievement_earns WHERE user_id = $1 ORDER BY achievement",
+        )
+        .bind(partial)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(rows_after.len(), 2);
+        let crowd_again = sqlx::query!(
+            "SELECT earned_at FROM achievement_earns WHERE user_id = $1 AND achievement = 'crowd_pleaser'",
+            partial,
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(crowd_again.earned_at, row.earned_at);
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn live_win_earns_recorded_for_other_source_holders(pool: PgPool) {
+        crate::test_capture::Capture::shared();
+        let owner = user(&pool, 1669122).await;
+        let rival = user(&pool, 1669123).await;
+        sqlx::query(
+            "INSERT INTO customization_grants (user_id, customization_type, slug, source) VALUES ($1, 'head', 'frog', 'code')",
+        )
+        .bind(owner)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let winner = snake(&pool, owner, "code frog winner").await;
+        let opponent = snake(&pool, rival, "code frog opponent").await;
+        let game_id = game(&pool, "Standard", "finished", Some(0)).await;
+        participant(&pool, game_id, winner, 1, None).await;
+        participant(&pool, game_id, opponent, 2, None).await;
+        assert_eq!(
+            award_for_game(&pool, game_id, "https://arena.example")
+                .await
+                .unwrap(),
+            0
+        );
+        let notified: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM notifications WHERE user_id = $1 AND kind = 'achievement_earned'",
+        )
+        .bind(owner)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(notified, 0);
+        let row = sqlx::query!(
+            "SELECT battlesnake_id, game_id, turn_number, live FROM achievement_earns WHERE user_id = $1",
+            owner,
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.battlesnake_id, Some(winner));
+        assert_eq!(row.game_id, Some(game_id));
+        assert_eq!(row.turn_number, None);
+        assert!(row.live);
+        let events = crate::test_capture::Capture::shared().events("achievement_earned", owner);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["slug"], "first_win");
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn count_based_live_earn_recorded_for_other_source_both_owner(pool: PgPool) {
+        crate::test_capture::Capture::shared();
+        let owner = user(&pool, 1669124).await;
+        let rival = user(&pool, 1669125).await;
+        sqlx::query(
+            "INSERT INTO customization_grants (user_id, customization_type, slug, source) VALUES ($1, 'head', 'turtle', 'play_import'), ($1, 'tail', 'turtle', 'play_import')",
+        )
+        .bind(owner)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let own = snake(&pool, owner, "imported turtle").await;
+        let own_entry = entry(&pool, own).await;
+        let peer = snake(&pool, rival, "turtle peer").await;
+        seed_games(
+            &pool,
+            own,
+            Some(own_entry),
+            Some(peer),
+            2_999,
+            2,
+            "finished",
+        )
+        .await;
+        // The peer wins the milestone game; pre-owned frog keeps its award a
+        // no-op so the owner's counts stay the only side effects.
+        sqlx::query(
+            "INSERT INTO customization_grants (user_id, customization_type, slug, source) VALUES ($1, 'head', 'frog', 'admin')",
+        )
+        .bind(rival)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let milestone = game(&pool, "Standard", "finished", Some(0)).await;
+        participant(&pool, milestone, own, 2, Some(own_entry)).await;
+        participant(&pool, milestone, peer, 1, None).await;
+        assert_eq!(
+            award_for_game(&pool, milestone, "https://arena.example")
+                .await
+                .unwrap(),
+            0
+        );
+        let row = sqlx::query!(
+            "SELECT battlesnake_id, game_id, turn_number, live FROM achievement_earns WHERE user_id = $1 AND achievement = 'slow_and_steady'",
+            owner,
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.battlesnake_id, Some(own));
+        assert_eq!(row.game_id, Some(milestone));
+        assert_eq!(row.turn_number, None);
+        assert!(row.live);
+        let owner_grants = grants(&pool, owner).await;
+        assert!(
+            owner_grants
+                .iter()
+                .all(|(_, _, source)| source != "achievement")
+        );
+        let notified: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM notifications WHERE user_id = $1 AND kind = 'achievement_earned'",
+        )
+        .bind(owner)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(notified, 0);
+        let events = crate::test_capture::Capture::shared().events("achievement_earned", owner);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["slug"], "slow_and_steady");
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn reconcile_records_live_earns_without_notifying(pool: PgPool) {
+        crate::test_capture::Capture::shared();
+        let owner = user(&pool, 1669126).await;
+        let rival = user(&pool, 1669127).await;
+        let own = snake(&pool, owner, "reconcile turtle").await;
+        let own_entry = entry(&pool, own).await;
+        let peer = snake(&pool, rival, "reconcile peer").await;
+        seed_games(
+            &pool,
+            own,
+            Some(own_entry),
+            Some(peer),
+            2_999,
+            2,
+            "finished",
+        )
+        .await;
+        let window = game(&pool, "Standard", "finished", Some(1)).await;
+        participant(&pool, window, own, 2, Some(own_entry)).await;
+        participant(&pool, window, peer, 1, None).await;
+        let before: (i64, i64, i64) = sqlx::query_as(
+            "SELECT (SELECT COUNT(*) FROM notifications), \
+                    (SELECT COUNT(*) FROM notification_emails), \
+                    (SELECT COUNT(*) FROM jobs WHERE name = 'SendNotificationEmailJob')",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(reconcile_recent_achievements(&pool).await.unwrap(), 3);
+        let row = sqlx::query!(
+            "SELECT battlesnake_id, game_id, live FROM achievement_earns WHERE user_id = $1 AND achievement = 'slow_and_steady'",
+            owner,
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.battlesnake_id, Some(own));
+        assert_eq!(row.game_id, Some(window));
+        assert!(row.live);
+        let events = crate::test_capture::Capture::shared().events("achievement_earned", owner);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["slug"], "slow_and_steady");
+        let after: (i64, i64, i64) = sqlx::query_as(
+            "SELECT (SELECT COUNT(*) FROM notifications), \
+                    (SELECT COUNT(*) FROM notification_emails), \
+                    (SELECT COUNT(*) FROM jobs WHERE name = 'SendNotificationEmailJob')",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(after, before);
+    }
+
+    #[test]
+    fn achievement_slugs_and_kinds_are_stable() {
+        let slugs: Vec<_> = Achievement::ALL.iter().map(|a| a.slug()).collect();
+        assert_eq!(
+            slugs,
+            vec![
+                "first_win",
+                "slow_and_steady",
+                "constrictor_champ",
+                "crowd_pleaser",
+                "ladder_regular"
+            ]
+        );
+        let unique: HashSet<_> = slugs.iter().copied().collect();
+        assert_eq!(unique.len(), Achievement::ALL.len());
+        for achievement in Achievement::ALL {
+            assert_eq!(achievement.kind(), "getting_started");
+        }
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn earn_recording_failure_never_costs_a_grant(pool: PgPool) {
+        crate::test_capture::Capture::shared();
+        let a = user(&pool, 1669101).await;
+        let b = user(&pool, 1669102).await;
+        let c = user(&pool, 1669103).await;
+        let rival = user(&pool, 1669128).await;
+        let a_snake = snake(&pool, a, "savepoint a").await;
+        let b_snake = snake(&pool, b, "savepoint b").await;
+        let c_snake = snake(&pool, c, "savepoint c").await;
+        let rival_a = snake(&pool, rival, "savepoint rival a").await;
+        let rival_b = snake(&pool, rival, "savepoint rival b").await;
+        let rival_c = snake(&pool, rival, "savepoint rival c").await;
+        sqlx::query(
+            "CREATE FUNCTION reject_achievement_earn() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected earn failure'; END $$",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TRIGGER reject_achievement_earn BEFORE INSERT ON achievement_earns FOR EACH ROW EXECUTE FUNCTION reject_achievement_earn()",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // A live award survives an earn-recording failure.
+        let a_game = game(&pool, "Standard", "finished", Some(0)).await;
+        participant(&pool, a_game, a_snake, 1, None).await;
+        participant(&pool, a_game, rival_a, 2, None).await;
+        assert_eq!(
+            award_for_game(&pool, a_game, "https://arena.example")
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(has(&grants(&pool, a).await, Head::KIND, "frog"));
+        let a_notified: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM notifications WHERE user_id = $1 AND kind = 'achievement_earned'",
+        )
+        .bind(a)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(a_notified, 1);
+        let a_emails: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM notification_emails e JOIN notifications n USING (notification_id) WHERE n.user_id = $1",
+        )
+        .bind(a)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(a_emails, 1);
+        let email_jobs: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE name = 'SendNotificationEmailJob'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(email_jobs, 1);
+        let a_earns: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM achievement_earns WHERE user_id = $1")
+                .bind(a)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(a_earns, 0);
+        assert!(
+            crate::test_capture::Capture::shared()
+                .events("achievement_earned", a)
+                .is_empty()
+        );
+
+        // Reconciliation completes for another owner with the trigger armed.
+        let b_game = game(&pool, "Standard", "finished", Some(1)).await;
+        participant(&pool, b_game, b_snake, 1, None).await;
+        participant(&pool, b_game, rival_b, 2, None).await;
+        reconcile_recent_achievements(&pool).await.unwrap();
+        assert!(has(&grants(&pool, b).await, Head::KIND, "frog"));
+        assert!(has(&grants(&pool, a).await, Head::KIND, "frog"));
+        let earns: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM achievement_earns")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(earns, 0);
+
+        // The backfill job survives too: its earn statement and its pages log
+        // and continue, and the cursor still completes.
+        let c_game = game(&pool, "Standard", "finished", Some(0)).await;
+        participant(&pool, c_game, c_snake, 1, None).await;
+        participant(&pool, c_game, rival_c, 2, None).await;
+        sqlx::query("UPDATE achievement_backfill_cursor SET after_user_id = NULL, completed_at = NULL WHERE singleton = TRUE")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let state = crate::state::AppState::test_from_pool(pool.clone());
+        use cja::jobs::Job as _;
+        crate::jobs::BackfillAchievementsJob
+            .run(state)
+            .await
+            .unwrap();
+        let completed_at: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+            "SELECT completed_at FROM achievement_backfill_cursor WHERE singleton = TRUE",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(completed_at.is_some());
+        assert!(has(&grants(&pool, c).await, Head::KIND, "frog"));
+        let earns: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM achievement_earns")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(earns, 0);
+
+        // Once recording works again, the job-top statement backfills every
+        // holder with a grant-dated, non-live row.
+        sqlx::query("DROP TRIGGER reject_achievement_earn ON achievement_earns")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DROP FUNCTION reject_achievement_earn()")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(backfill_earns_from_grants(&pool).await.unwrap(), 3);
+        for owner in [a, b, c] {
+            let row = sqlx::query!(
+                "SELECT game_id, turn_number, live, earned_at FROM achievement_earns WHERE user_id = $1 AND achievement = 'first_win'",
+                owner,
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert!(!row.live);
+            assert!(row.game_id.is_none());
+            assert!(row.turn_number.is_none());
+            let grant_at: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+                "SELECT created_at FROM customization_grants WHERE user_id = $1 AND slug = 'frog'",
+            )
+            .bind(owner)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(row.earned_at, grant_at);
+        }
     }
 }

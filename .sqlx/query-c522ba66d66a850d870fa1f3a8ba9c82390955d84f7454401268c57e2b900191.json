@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO achievement_earns\n               (user_id, achievement, battlesnake_id, game_id, turn_number, live, earned_at)\n           VALUES ($1, $2, $3, $4,\n                   (SELECT MAX(turn_number) FROM turns WHERE game_id = $4),\n                   TRUE,\n                   COALESCE((SELECT finished_at FROM games WHERE game_id = $4), NOW()))\n           ON CONFLICT (user_id, achievement) DO NOTHING\n           RETURNING achievement_earn_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "achievement_earn_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "c522ba66d66a850d870fa1f3a8ba9c82390955d84f7454401268c57e2b900191"
+}

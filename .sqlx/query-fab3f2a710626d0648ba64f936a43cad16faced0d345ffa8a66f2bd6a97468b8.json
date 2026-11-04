@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT bs.user_id, gb.placement, gb.leaderboard_entry_id,\n                  COALESCE(gb.battlesnake_id, le.battlesnake_id) AS \"snake_id!\"\n           FROM game_battlesnakes gb\n           LEFT JOIN leaderboard_entries le ON le.leaderboard_entry_id = gb.leaderboard_entry_id\n           JOIN battlesnakes bs ON bs.battlesnake_id = COALESCE(gb.battlesnake_id, le.battlesnake_id)\n           WHERE gb.game_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "placement",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 2,
+        "name": "leaderboard_entry_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "snake_id!",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      null
+    ]
+  },
+  "hash": "fab3f2a710626d0648ba64f936a43cad16faced0d345ffa8a66f2bd6a97468b8"
+}

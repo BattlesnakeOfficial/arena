@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO achievement_earns (user_id, achievement, earned_at, live)\n           VALUES ($1, $2, $3, FALSE)\n           ON CONFLICT (user_id, achievement) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "9b1038c959b22dff275f8f4b5a54c07d4cb28e6760ce1692ecb52ff96a6f3a90"
+}

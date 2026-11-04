@@ -1,0 +1,46 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT battlesnake_id, game_id, turn_number, live, earned_at FROM achievement_earns WHERE user_id = $1 AND achievement = 'crowd_pleaser'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "battlesnake_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "game_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "turn_number",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 3,
+        "name": "live",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 4,
+        "name": "earned_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "8bee36b7d069d40fe28b8559307b38a990ab3a5a3dc3d0f420acf2c183d81d4d"
+}
