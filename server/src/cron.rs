@@ -62,7 +62,10 @@ pub(crate) fn cron_registry(config: &AppConfig) -> CronRegistry<AppState> {
         Duration::from_secs(60 * 60),
     );
     // Turn retention: hourly, prunes archived native games' turns past
-    // retention (DEV-1981), oldest-first
+    // retention (DEV-1981), oldest-first. The crons row is seeded by a
+    // migration (20261103210000) so the first prune tick runs one
+    // interval after the migration applies, not at boot — cja treats a
+    // cron with no row as never-run and fires it on the first tick.
     registry.register_job(
         TurnRetentionJob,
         Some("Prune archived native games' turns past retention"),
@@ -317,6 +320,40 @@ mod tests {
             panic!("turn retention must use an interval");
         };
         assert_eq!(interval.0, Duration::from_secs(60 * 60));
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn turn_retention_cron_row_seeded_so_first_prune_is_not_at_boot(pool: sqlx::PgPool) {
+        // 20261103210000 seeds the crons row: without it, cja's
+        // IntervalSchedule::should_run treats the cron as never-run and
+        // the first tick (2s poll) enqueues the prune batch at boot.
+        let last_run_at: chrono::DateTime<chrono::Utc> =
+            sqlx::query_scalar!("SELECT last_run_at FROM crons WHERE name = 'TurnRetentionJob'")
+                .fetch_one(&pool)
+                .await
+                .expect("20261103210000 must seed the TurnRetentionJob cron row");
+        let registry = cron_registry(&AppConfig::test_default());
+        let job = registry
+            .get("TurnRetentionJob")
+            .expect("turn retention registered");
+        // One second after the seeded last_run_at — i.e. right after the
+        // deploy that applied the migration — the tick must not fire.
+        let just_after_boot = last_run_at + chrono::Duration::seconds(1);
+        assert!(!job.schedule.should_run(
+            Some(&last_run_at),
+            just_after_boot,
+            just_after_boot,
+            cja::chrono_tz::UTC
+        ));
+        // One registered interval (hourly) plus a second later, it must.
+        let one_interval_later =
+            last_run_at + chrono::Duration::hours(1) + chrono::Duration::seconds(1);
+        assert!(job.schedule.should_run(
+            Some(&last_run_at),
+            one_interval_later,
+            one_interval_later,
+            cja::chrono_tz::UTC
+        ));
     }
 
     #[test]

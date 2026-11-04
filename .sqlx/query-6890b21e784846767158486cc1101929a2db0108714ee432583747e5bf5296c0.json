@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT last_run_at FROM crons WHERE name = 'TurnRetentionJob'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "last_run_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "6890b21e784846767158486cc1101929a2db0108714ee432583747e5bf5296c0"
+}
