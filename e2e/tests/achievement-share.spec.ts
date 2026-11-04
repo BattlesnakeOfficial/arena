@@ -83,6 +83,44 @@ test('guest share page fits a phone and the CTA posts', async ({ page }) => {
   await expect(page).toHaveURL(/\/customizations\/achievements$/);
 });
 
+test('long unbroken names still fit a phone', async ({ page }) => {
+  const stamp = `${Date.now()}${Math.floor(Math.random() * 1000)}`;
+  // GitHub logins run to 39 characters and carry no break opportunities.
+  const login = `longlogin${stamp}`.padEnd(39, 'x');
+  const snakeName = `longsnake${stamp}`.padEnd(64, 'y');
+  const [user] = await query<{ user_id: string }>(
+    `INSERT INTO users (external_github_id, github_login, github_access_token)
+     VALUES ($1, $2, '') RETURNING user_id`,
+    [Date.now() * 1000 + Math.floor(Math.random() * 1000), login],
+  );
+  const [snake] = await query<{ battlesnake_id: string }>(
+    `INSERT INTO battlesnakes (user_id, name, url, visibility)
+     VALUES ($1, $2, 'https://example.com', 'private') RETURNING battlesnake_id`,
+    [user.user_id, snakeName],
+  );
+  try {
+    await query(
+      `INSERT INTO achievement_earns (user_id, achievement, battlesnake_id, live, earned_at)
+       VALUES ($1, 'first_win', $2, true, TIMESTAMPTZ '2026-10-31 12:00:00+00')`,
+      [user.user_id, snake.battlesnake_id],
+    );
+    await page.setViewportSize({ width: 375, height: 812 });
+    await page.goto(`/achievements/first_win/${user.user_id}`);
+    await page.evaluate(() => document.fonts.ready);
+    await expect(page.locator('.ach-share-owner .name')).toHaveText(login);
+    await expect(page.locator('.ach-share-snake')).toContainText(snakeName);
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      ),
+    ).toBeLessThan(1);
+  } finally {
+    await query('DELETE FROM achievement_earns WHERE user_id = $1', [user.user_id]);
+    await query('DELETE FROM battlesnakes WHERE battlesnake_id = $1', [snake.battlesnake_id]);
+    await query('DELETE FROM users WHERE user_id = $1', [user.user_id]);
+  }
+});
+
 test('unknown, unearned, and malformed share URLs are branded 404s', async ({ page }) => {
   const stamp = `${Date.now()}${Math.floor(Math.random() * 1000)}`;
   const login = `share_missing_${stamp}`;
