@@ -206,7 +206,10 @@ pub async fn send_test(
     let address = notification_email::resolved_recipient(&mut tx, user.user_id).await?;
     let mut outcome = "No notification address is available; no test was sent.".to_string();
     if let Some(to) = &address {
-        let message = sample_message(wave, to, &state.config.base_url);
+        let mut message = sample_message(wave, to, &state.config.base_url);
+        // Admin test sends carry only the test tag (DEV-2084): never the
+        // notice/wave tags, so they can't inflate a wave's Mailgun numbers.
+        message.tags = vec![notices::TEST_TAG.to_string()];
         outcome = match state
             .mailer
             .send_limited(
@@ -231,4 +234,129 @@ pub async fn send_test(
         .wrap_err("Failed to commit shutdown notice test attempt")?;
     let content = admin_content(&state, address.as_deref(), Some(&outcome)).await?;
     Ok(page_factory.create_page("Play shutdown notices".into(), Box::new(content)))
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::routes::test_support::{
+        api_app, create_user_session, session_user_id, signed_session_cookie,
+    };
+    use crate::state::AppState;
+    use sqlx::PgPool;
+    use tower::ServiceExt as _;
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+    // Returns cja::Result<()> (like admin.rs::email_tests) because the
+    // user-setup query below uses `?`.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn send_test_carries_only_the_test_tag_and_the_page_renders(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        let mut state = AppState::test_from_pool(pool.clone());
+        let session = create_user_session(&pool, 77201, true).await;
+        let user_id = session_user_id(&pool, session).await;
+        // Byte-identical to admin.rs::email_tests' query so the offline
+        // .sqlx cache entry is reused (CI clippy compiles offline).
+        sqlx::query!(
+            "UPDATE users SET github_email = 'admin@example.com' WHERE user_id = $1",
+            user_id
+        )
+        .execute(&pool)
+        .await?;
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+        state.mailer = crate::email::Mailer::new(
+            Some(crate::email::MailgunConfig {
+                api_key: "test".into(),
+                domain: "mg.example.com".into(),
+                from: "Battlesnake <reply@example.com>".into(),
+                base_url: server.uri(),
+            }),
+            reqwest::Client::new(),
+        );
+        // No hourly-limit override needed: AppConfig::test_default() already
+        // sets email_per_recipient_hourly_limit = 5 (config.rs:510), and this
+        // test sends once.
+
+        let app = api_app(&state);
+        let cookie = format!(
+            "{}={}",
+            crate::models::session::SESSION_COOKIE_NAME,
+            signed_session_cookie(&state, session)
+        );
+
+        // The admin page still renders, with each wave's preview subject.
+        let page = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/admin/play-notices")
+                    .header(axum::http::header::COOKIE, &cookie)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.status(), axum::http::StatusCode::OK);
+        let html = String::from_utf8(
+            axum::body::to_bytes(page.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        for subject in [
+            "Battlesnake has a new home",
+            "Your Battlesnake account is waiting on the new site",
+            "play.battlesnake.com redirects to the new site on November 30",
+        ] {
+            assert!(html.contains(subject), "missing subject {subject}");
+        }
+        // Each wave's HTML preview is still on the page.
+        for wave in 1..=3 {
+            assert!(
+                html.contains(&format!("Wave {wave} HTML preview")),
+                "missing wave {wave} preview"
+            );
+        }
+
+        // The test send goes out with exactly one tag: the test tag.
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/admin/play-notices/2/send-test")
+                    .header(axum::http::header::COOKIE, &cookie)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = String::from_utf8(
+            axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(body.contains("Sent wave 2 test"));
+
+        let sent = server.received_requests().await.unwrap();
+        assert_eq!(sent.len(), 1);
+        // Collect into a Vec, NOT a HashMap: duplicate o:tag keys would
+        // silently collapse in a map.
+        let tags: Vec<String> = url::form_urlencoded::parse(&sent[0].body)
+            .filter(|(k, _)| k == "o:tag")
+            .map(|(_, v)| v.into_owned())
+            .collect();
+        // Exact equality also proves neither real tag is present.
+        assert_eq!(tags, ["play_shutdown_notice_test"]);
+        Ok(())
+    }
 }
