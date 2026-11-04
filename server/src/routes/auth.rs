@@ -96,8 +96,12 @@ impl FromRequestParts<AppState> for CurrentSession {
         match result {
             Some((session, user)) => {
                 if let Some(user) = &user {
-                    tracing::Span::current().record("user_id", user.user_id.to_string());
-                    tracing::Span::current().record("auth_type", "session");
+                    // DEV-2076: rides the `finished processing request`
+                    // event (cja task-local). Returns false only outside a
+                    // request scope; the direct-extractor unit tests hit
+                    // that, so the result is intentionally dropped here —
+                    // the event-level tests pin the real path.
+                    let _ = cja::server::trace::record_request_user(user.user_id, "session");
                     app_state
                         .activity_recorder
                         .record(&app_state.db, user.user_id)
@@ -443,8 +447,7 @@ async fn try_bearer_auth(parts: &Parts, state: &AppState) -> BearerAuthResult {
 
     match get_user_by_id(&state.db, token_auth.user_id).await {
         Ok(Some(user)) => {
-            tracing::Span::current().record("user_id", user.user_id.to_string());
-            tracing::Span::current().record("auth_type", "token");
+            let _ = cja::server::trace::record_request_user(user.user_id, "token");
             state
                 .activity_recorder
                 .record(&state.db, user.user_id)
@@ -709,50 +712,35 @@ mod tests {
         assert!(!state.activity_recorder.record(&db, user_id).await);
     }
 
-    /// DEV-2061: the real `server.request` span records `user_id` and
-    /// `auth_type` from both auth paths, through cja's TraceLayer. This is
-    /// the DEV-2066 contract test — it fails without the Cargo.lock bump
-    /// (records on undeclared fields are silently dropped).
+    /// DEV-2076: the session path records through
+    /// `cja::server::trace::record_request_user`, so the request's one
+    /// `finished processing request` event carries `user_id` +
+    /// `auth_type = session`. The probe URI is unique to this test run —
+    /// no other request in this process shares it — so the counts are
+    /// exact, not filtered against sibling tests' traffic.
     #[sqlx::test(migrations = "../migrations")]
-    async fn server_request_span_records_user_and_auth_type(db: sqlx::PgPool) {
+    async fn finished_request_event_carries_session_user(db: sqlx::PgPool) {
+        use crate::routes::test_support::{
+            api_app, create_user_session, session_user_id, signed_session_cookie,
+        };
         use tower::ServiceExt as _;
 
         let capture = crate::test_capture::Capture::shared();
-        let user_id = sqlx::query_scalar!(
-            "INSERT INTO users(external_github_id, github_login, github_access_token) VALUES (1, 'span-record', '') RETURNING user_id"
-        )
-        .fetch_one(&db)
-        .await
-        .unwrap();
-        let session_id = sqlx::query_scalar!(
-            "INSERT INTO sessions(user_id) VALUES ($1) RETURNING session_id",
-            user_id
-        )
-        .fetch_one(&db)
-        .await
-        .unwrap();
-        let token = create_api_token(
-            &db,
-            user_id,
-            "span-record",
-            Permission::ALL.as_slice(),
-            crate::models::api_token::SnakeAccess::All,
-            &[],
-        )
-        .await
-        .unwrap();
-        let state = AppState::test_from_pool(db.clone());
-        let app = crate::routes::test_support::api_app(&state);
+        let session_id = create_user_session(&db, 62076, false).await;
+        let user_id = session_user_id(&db, session_id).await;
+        let state = AppState::test_from_pool(db);
+        let app = api_app(&state);
 
-        // Signed session probe on `/` (root_page takes PageFactory +
-        // OptionalUser, so CurrentSession runs at least twice — duplicate
-        // records are expected, so assertions are value-based, not counts).
-        let cookie = crate::routes::test_support::signed_session_cookie(&state, session_id);
+        // root_page takes PageFactory + OptionalUser, so CurrentSession
+        // runs at least twice per request — the task-local API is
+        // last-write-wins and still emits exactly ONE close event, which
+        // the count assertions below pin.
+        let probe = format!("/?probe={}", Uuid::new_v4());
+        let cookie = signed_session_cookie(&state, session_id);
         let response = app
-            .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/")
+                    .uri(probe.clone())
                     .header(
                         axum::http::header::COOKIE,
                         format!("{SESSION_COOKIE_NAME}={cookie}"),
@@ -763,24 +751,63 @@ mod tests {
             .await
             .unwrap();
         assert!(response.status().is_success());
-        let groups = capture.server_request_record_groups("/");
-        assert!(
-            groups.iter().any(|g| {
-                g.contains(&("user_id".to_string(), user_id.to_string()))
-                    && g.contains(&("auth_type".to_string(), "session".to_string()))
-                    && g.iter()
-                        .filter(|(f, _)| f == "user_id")
-                        .all(|(_, v)| v == &user_id.to_string())
-            }),
-            "no `/` span recorded user_id={user_id} + auth_type=session; groups: {groups:?}"
-        );
 
-        // Bearer probe on /api/me.
+        let groups = capture.request_close_event_groups(&probe);
+        assert_eq!(
+            groups.len(),
+            1,
+            "exactly one `{probe}` request expected: {groups:?}"
+        );
+        assert_eq!(
+            groups[0].len(),
+            1,
+            "one close event per request: {groups:?}"
+        );
+        let event = &groups[0][0];
+        assert_eq!(
+            event.get("user_id").map(String::as_str),
+            Some(user_id.to_string().as_str()),
+            "session close event must carry user_id={user_id}: {event:?}"
+        );
+        assert_eq!(
+            event.get("auth_type").map(String::as_str),
+            Some("session"),
+            "session close event must carry auth_type=session: {event:?}"
+        );
+    }
+
+    /// DEV-2076: the bearer-token path records through
+    /// `cja::server::trace::record_request_user`, so the request's one
+    /// `finished processing request` event carries `user_id` +
+    /// `auth_type = token`. Own test (own DB, own probe URI) so its
+    /// failing-first run is independent of the session probe — a panic
+    /// in one test function never exercises another.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn finished_request_event_carries_token_user(db: sqlx::PgPool) {
+        use crate::routes::test_support::{api_app, create_user_session, session_user_id};
+        use tower::ServiceExt as _;
+
+        let capture = crate::test_capture::Capture::shared();
+        let session_id = create_user_session(&db, 62077, false).await;
+        let user_id = session_user_id(&db, session_id).await;
+        let token = create_api_token(
+            &db,
+            user_id,
+            "dev-2076",
+            Permission::ALL.as_slice(),
+            crate::models::api_token::SnakeAccess::All,
+            &[],
+        )
+        .await
+        .unwrap();
+        let state = AppState::test_from_pool(db);
+        let app = api_app(&state);
+
+        let probe = format!("/api/me?probe={}", Uuid::new_v4());
         let response = app
-            .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/api/me")
+                    .uri(probe.clone())
                     .header(AUTHORIZATION, format!("Bearer {}", token.secret))
                     .body(axum::body::Body::empty())
                     .unwrap(),
@@ -788,67 +815,123 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        let groups = capture.server_request_record_groups("/api/me");
-        assert!(
-            groups.iter().any(|g| {
-                g.contains(&("user_id".to_string(), user_id.to_string()))
-                    && g.contains(&("auth_type".to_string(), "token".to_string()))
-            }),
-            "no `/api/me` span recorded user_id={user_id} + auth_type=token; groups: {groups:?}"
-        );
 
-        // Anonymous probes on /privacy: no cookie at all, then a signed
-        // cookie for a user-less session (`Some((session, None))` — the arm
-        // the record code must skip). Both must record nothing; both add a
-        // group each, so groups.len() >= 2 guards against vacuity.
+        let groups = capture.request_close_event_groups(&probe);
+        assert_eq!(
+            groups.len(),
+            1,
+            "exactly one `{probe}` request expected: {groups:?}"
+        );
+        assert_eq!(
+            groups[0].len(),
+            1,
+            "one close event per request: {groups:?}"
+        );
+        let event = &groups[0][0];
+        assert_eq!(
+            event.get("user_id").map(String::as_str),
+            Some(user_id.to_string().as_str()),
+            "token close event must carry user_id={user_id}: {event:?}"
+        );
+        assert_eq!(
+            event.get("auth_type").map(String::as_str),
+            Some("token"),
+            "token close event must carry auth_type=token: {event:?}"
+        );
+    }
+
+    /// One anonymous request through the full stack: exactly ONE close
+    /// event, carrying neither `user_id` nor `auth_type` (cja records `None`
+    /// as no field at all). Each caller's probe URI is unique, so the count
+    /// assertions are exact: an anonymous request that stopped emitting the
+    /// event fails the `len` assertion, not just the key one.
+    async fn assert_anonymous_close_event(
+        app: &axum::Router,
+        capture: &crate::test_capture::Capture,
+        probe: &str,
+        cookie: Option<String>,
+    ) {
+        use tower::ServiceExt as _;
+
+        let mut builder = Request::builder().uri(probe);
+        if let Some(cookie) = cookie {
+            builder = builder.header(axum::http::header::COOKIE, cookie);
+        }
         let response = app
             .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/privacy")
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(builder.body(axum::body::Body::empty()).unwrap())
             .await
             .unwrap();
         assert!(
             response.status().is_success(),
-            "anonymous /privacy probe failed: {}",
+            "`{probe}` probe failed: {}",
             response.status()
         );
-        let userless_session = crate::models::session::create_session(&db).await.unwrap();
-        let userless_cookie =
-            crate::routes::test_support::signed_session_cookie(&state, userless_session.session_id);
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/privacy")
-                    .header(
-                        axum::http::header::COOKIE,
-                        format!("{SESSION_COOKIE_NAME}={userless_cookie}"),
-                    )
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert!(
-            response.status().is_success(),
-            "user-less-session /privacy probe failed: {}",
-            response.status()
+        let groups = capture.request_close_event_groups(probe);
+        assert_eq!(
+            groups.len(),
+            1,
+            "exactly one `{probe}` request expected: {groups:?}"
         );
-        let groups = capture.server_request_record_groups("/privacy");
+        assert_eq!(
+            groups[0].len(),
+            1,
+            "one close event per request: {groups:?}"
+        );
+        let event = &groups[0][0];
         assert!(
-            groups.len() >= 2,
-            "expected at least the two probe spans, got {groups:?}"
+            event.contains_key("status"),
+            "close event shape must include status: {event:?}"
         );
         assert!(
-            groups
-                .iter()
-                .flatten()
-                .all(|(f, _)| f != "user_id" && f != "auth_type"),
-            "anonymous /privacy spans must record neither field; groups: {groups:?}"
+            !event.contains_key("user_id") && !event.contains_key("auth_type"),
+            "anonymous `{probe}` close event must carry neither key: {event:?}"
         );
+    }
+
+    /// DEV-2076: a request with no cookie at all (a brand-new session is
+    /// created) is anonymous on its close event. This test cannot fail
+    /// against unmigrated code, since nothing is recorded anywhere there;
+    /// its failure-capability is proven by the plan's mutation control,
+    /// recorded in the PR.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn finished_request_event_is_anonymous_without_cookie(db: sqlx::PgPool) {
+        use crate::routes::test_support::api_app;
+
+        let capture = crate::test_capture::Capture::shared();
+        let state = AppState::test_from_pool(db);
+        let app = api_app(&state);
+
+        assert_anonymous_close_event(
+            &app,
+            capture,
+            &format!("/privacy?probe={}", Uuid::new_v4()),
+            None,
+        )
+        .await;
+    }
+
+    /// DEV-2076: a signed cookie for a session with no user
+    /// (`Some((session, None))`, the shape the record code must skip) is
+    /// anonymous on its close event. Same mutation-control note as the
+    /// cookieless test. A separate function because a panic in the first
+    /// probe would otherwise leave this shape unexercised.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn finished_request_event_is_anonymous_with_userless_session(db: sqlx::PgPool) {
+        use crate::routes::test_support::{api_app, signed_session_cookie};
+
+        let capture = crate::test_capture::Capture::shared();
+        let state = AppState::test_from_pool(db.clone());
+        let app = api_app(&state);
+
+        let userless = crate::models::session::create_session(&db).await.unwrap();
+        let cookie = signed_session_cookie(&state, userless.session_id);
+        assert_anonymous_close_event(
+            &app,
+            capture,
+            &format!("/privacy?probe={}", Uuid::new_v4()),
+            Some(format!("{SESSION_COOKIE_NAME}={cookie}")),
+        )
+        .await;
     }
 }
