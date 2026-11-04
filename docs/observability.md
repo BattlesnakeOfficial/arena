@@ -31,12 +31,23 @@ the filtered tiles cover post-deploy data only. `user_id` and `auth_type`
 records them through `cja::server::trace::record_request_user`, and they ride
 the `finished processing request` event — filter `target ==
 "cja::server::trace"` and read `fields.user_id` / `fields.auth_type`. That
-series starts at deploy. `fields.user_id` alone is not a request filter:
-`snake.lifecycle` spans and product events such as `user_authenticated` and
-`battlesnake_created` also carry `user_id`, so a metric or chart must also
-filter on the target or the message. Until the first post-deploy events reach
-the lake, the `source` and `new_user` items show `unknown_field` errors. A
-cold 30-day lake query can return 503 at about 50 s; a retry then succeeds.
+series starts at deploy. Both fields are also on the JSON stdout line, because
+`GcpJsonFormatter` prints event fields. So they reach Google Cloud Logging,
+where the `_Default` bucket keeps them for 7 days. Query them in Eyes, which
+is where the product metrics live. `fields.user_id` alone is not a request
+filter: `snake.lifecycle` spans and product events such as
+`user_authenticated` and `battlesnake_created` also carry `user_id`, so a
+metric or chart must also filter on the target or the message.
+`fields.auth_type` has the same trap: `user_authenticated` already carries
+`auth_type` with the values `cli` and `web`, so `session`/`token` charts need
+the same filter. A total-requests
+count or a denominator must filter on `message == "finished processing
+request"`. The target alone also matches `server.request` span rows and
+double-counts. Measured on production, 2026-11-03, the same 15 minutes:
+target alone 750 rows, target plus message 375. Until the first post-deploy
+events reach the lake, the `source` and `new_user` items show `unknown_field`
+errors. A cold 30-day lake query can return 503 at about 50 s; a retry then
+succeeds.
 
 Processing overhead measures elapsed turn-loop time minus elapsed time awaiting
 parallel move requests, including persistence and scheduling. The old event
