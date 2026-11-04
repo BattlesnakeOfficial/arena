@@ -161,13 +161,9 @@ fn privacy_content() -> Markup {
                 "Battlesnake is hosted on Google Cloud. Game data from the legacy "
                 "Battlesnake Engine may be archived to Google Cloud Storage. "
                 "Technical logs are stored with the providers that host our "
-                "observability system. Google Cloud also keeps our server logs "
-                "and load balancer logs for 7 days. Server logs include your "
-                "account ID on signed-in requests, and your GitHub or Play "
-                "username on sign-in, Play account claim, and new public snake "
-                "events. Load balancer logs cover our images and our other "
-                "Battlesnake sites, and include the request URL, referring page, "
-                "IP address, and browser user agent of each request."
+                "observability system. Google Cloud also keeps server and load "
+                "balancer logs for a short time, which can contain the same kinds "
+                "of technical details described above."
             }
 
             h2 { "Cookies" }
