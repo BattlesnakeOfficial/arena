@@ -33,7 +33,11 @@
     const fallback = (): void => {
       input.focus();
       input.select();
-      try { document.execCommand('copy'); done(); } catch (_) { /* unchanged */ }
+      // execCommand signals failure by returning false, not by throwing;
+      // a failed copy is not a share action.
+      try {
+        if (document.execCommand('copy')) done();
+      } catch (_) { /* copy failed; nothing to record */ }
     };
     copy.addEventListener('click', () => {
       if (navigator.clipboard && navigator.clipboard.writeText) {

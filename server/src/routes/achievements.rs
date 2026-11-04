@@ -54,7 +54,8 @@ pub(crate) struct AchievementShareView {
 
 pub(crate) struct PublicGame {
     pub game_id: Uuid,
-    /// Display names of the other participants, in placement order.
+    /// Display names of the opponents' snakes — never the owner's own — in
+    /// placement order.
     pub opponents: Vec<String>,
 }
 
@@ -118,7 +119,7 @@ pub(crate) async fn load_share_view(
         return Ok(None);
     };
     let game = match refs.game_id {
-        Some(game_id) => public_game(pool, game_id, refs.battlesnake_id).await?,
+        Some(game_id) => public_game(pool, game_id, user_id, refs.battlesnake_id).await?,
         None => None,
     };
     Ok(Some(AchievementShareView { earn, game }))
@@ -130,6 +131,7 @@ pub(crate) async fn load_share_view(
 async fn public_game(
     pool: &sqlx::PgPool,
     game_id: Uuid,
+    owner_id: Uuid,
     earning_snake_id: Option<Uuid>,
 ) -> cja::Result<Option<PublicGame>> {
     if get_game_by_id(pool, game_id)
@@ -172,7 +174,9 @@ async fn public_game(
         .await
         .wrap_err("Failed to get game participants")?
         .into_iter()
-        .filter(|p| Some(p.battlesnake_id) != earning_snake_id)
+        // The owner's own snakes are not opponents, whoever earned the
+        // achievement; the filter covers the earning snake too.
+        .filter(|p| p.user_id != owner_id && Some(p.battlesnake_id) != earning_snake_id)
         .map(|p| p.name)
         .collect();
     Ok(Some(PublicGame { game_id, opponents }))
@@ -329,7 +333,7 @@ pub async fn share_page(
             @if let Some(snake) = &view.earn.snake {
                 p class="ach-share-snake" {
                     span class="chip" style={"background:" (chip_color(&snake.color))} {}
-                    "Earned by " (snake.name)
+                    span class="ach-share-snake-name" { "Earned by " (snake.name) }
                 }
             }
             @if let Some(game) = &view.game {
@@ -382,10 +386,11 @@ fn opponent_list(opponents: &[String]) -> String {
         2 => format!("{} and {}", opponents[0], opponents[1]),
         3 => format!("{}, {} and {}", opponents[0], opponents[1], opponents[2]),
         _ => format!(
-            "{}, {} and {} more",
+            "{}, {}, {} and {} more",
             opponents[0],
             opponents[1],
-            opponents.len() - 2
+            opponents[2],
+            opponents.len() - 3
         ),
     }
 }
@@ -660,6 +665,26 @@ mod tests {
         vec![(axum::http::header::USER_AGENT.as_str(), BROWSER_UA)]
     }
 
+    fn names(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| value.to_string()).collect()
+    }
+
+    #[test]
+    fn opponent_list_shows_three_names_then_counts_the_rest() {
+        assert_eq!(opponent_list(&[]), "");
+        assert_eq!(opponent_list(&names(&["A"])), "A");
+        assert_eq!(opponent_list(&names(&["A", "B"])), "A and B");
+        assert_eq!(opponent_list(&names(&["A", "B", "C"])), "A, B and C");
+        assert_eq!(
+            opponent_list(&names(&["A", "B", "C", "D"])),
+            "A, B, C and 1 more"
+        );
+        assert_eq!(
+            opponent_list(&names(&["A", "B", "C", "D", "E"])),
+            "A, B, C and 2 more"
+        );
+    }
+
     #[sqlx::test(migrations = "../migrations")]
     async fn unknown_slug_user_or_earn_404s(pool: PgPool) {
         crate::test_capture::Capture::shared();
@@ -745,9 +770,13 @@ mod tests {
         let loser = user(&pool, 2120202).await;
         let winner_snake = snake(&pool, winner, "public game winner").await;
         let loser_snake = snake(&pool, loser, "public game loser").await;
+        // A second snake belonging to the winner: their own snake is
+        // never an opponent, so its name must not appear on the page.
+        let winner_second_snake = snake(&pool, winner, "winner second entry").await;
         let game_id = game(&pool, "finished").await;
         participant(&pool, game_id, winner_snake, 1, None).await;
         participant(&pool, game_id, loser_snake, 2, None).await;
+        participant(&pool, game_id, winner_second_snake, 3, None).await;
         seed_earn(
             &pool,
             winner,
@@ -764,6 +793,10 @@ mod tests {
         assert!(reply.body.contains(&format!("href=\"/games/{game_id}\"")));
         assert!(reply.body.contains("Watch the replay"));
         assert!(reply.body.contains("public game loser"));
+        assert!(
+            !reply.body.contains("winner second entry"),
+            "the owner's other snake is not an opponent"
+        );
 
         // Snake colors are untrusted: a hostile value never reaches the
         // inline style, and the chip falls back to neutral gray.
@@ -998,10 +1031,15 @@ mod tests {
 
         // Owner: share actions, no CTAs, and no view of their own page.
         let cookie = session_cookie(&state, &pool, owner).await;
-        let mut headers = browser();
-        headers.push((axum::http::header::COOKIE.as_str(), cookie.as_str()));
-        // Two static strs; COOKIE.as_str() is 'static? yes HeaderName::as_str returns &'static str.
-        let reply = get(&state, &uri, &[headers[0], headers[1]]).await;
+        let reply = get(
+            &state,
+            &uri,
+            &[
+                (axum::http::header::USER_AGENT.as_str(), BROWSER_UA),
+                (axum::http::header::COOKIE.as_str(), cookie.as_str()),
+            ],
+        )
+        .await;
         assert_eq!(reply.status, StatusCode::OK);
         assert!(reply.body.contains("share-actions"));
         assert!(reply.body.contains("id=\"share-url\""));
@@ -1013,7 +1051,12 @@ mod tests {
         );
         assert!(reply.body.contains("id=\"share-download\""));
         assert!(reply.body.contains("id=\"share-native\""));
-        assert!(reply.body.contains("hidden"), "native share starts hidden");
+        assert!(
+            reply
+                .body
+                .contains(r#"<button id="share-native" class="btn" type="button" hidden>"#),
+            "native share starts hidden"
+        );
         assert!(!reply.body.contains("share-cta"));
         assert!(!reply.body.contains("Get started"));
         assert_eq!(page_views(owner).len(), 0, "owner self-view is not a view");

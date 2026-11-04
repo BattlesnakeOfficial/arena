@@ -955,9 +955,15 @@ table.data.test-results pre { margin-top: 8px; font-family: var(--mono); font-si
 .ach-share-head h1 { margin: 6px 0; }
 .ach-share .badge { font-size: 16px; }
 .ach-share-owner { display: flex; gap: 12px; align-items: center; margin-top: 20px; font-size: 16px; }
-.ach-share-owner a { display: inline-flex; align-items: center; min-height: 44px; }
-.ach-share-snake { display: flex; align-items: center; gap: 8px; margin-top: 14px; font-size: 16px; }
-.ach-share-game { margin-top: 14px; font-size: 16px; }
+/* Unbroken logins run 39 chars: the wrapper must be allowed to shrink
+   (flex items default to min-width: auto) and the name to break. */
+.ach-share-owner > div { min-width: 0; }
+.ach-share-owner a { display: inline-flex; align-items: center; min-height: 44px; overflow-wrap: anywhere; }
+.ach-share-snake { display: flex; align-items: center; gap: 8px; margin-top: 14px; font-size: 16px; min-width: 0; }
+/* Snake names run to 64 unbroken chars; the name is an explicit flex item
+   so min-width and wrapping both take effect. */
+.ach-share-snake .ach-share-snake-name { min-width: 0; overflow-wrap: anywhere; }
+.ach-share-game { margin-top: 14px; font-size: 16px; overflow-wrap: anywhere; }
 .ach-share-game a { display: inline-flex; align-items: center; min-height: 44px; color: var(--pink); font-weight: 600; }
 .share-actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-top: 30px; }
 .share-actions .btn { min-height: 44px; font-size: 16px; display: inline-flex; align-items: center; }
