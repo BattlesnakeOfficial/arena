@@ -107,9 +107,23 @@ impl Canvas {
         })
     }
 
+    /// A blank `width`×`height` canvas filled with the page background, for
+    /// non-card outputs (achievement clip frames).
+    pub(crate) fn with_dimensions(width: u32, height: u32) -> cja::Result<Self> {
+        let mut pixmap = Pixmap::new(width, height)
+            .ok_or_else(|| eyre!("Failed to allocate {width}x{height} pixmap"))?;
+        pixmap.fill(palette::paper());
+        Ok(Self {
+            pixmap,
+            fonts: Fonts::get()?,
+            clip: None,
+        })
+    }
+
     /// Clip drawing to `path` until [`Canvas::unclip`].
     pub fn clip_to(&mut self, path: &Path) {
-        self.clip = Mask::new(WIDTH, HEIGHT).map(|mut mask| {
+        let (width, height) = (self.pixmap.width(), self.pixmap.height());
+        self.clip = Mask::new(width, height).map(|mut mask| {
             mask.fill_path(path, FillRule::Winding, true, Transform::identity());
             mask
         });
@@ -206,6 +220,18 @@ impl Canvas {
     /// The card as an opaque RGB PNG.
     pub fn into_png(self) -> cja::Result<Vec<u8>> {
         encode_png(&self.pixmap)
+    }
+
+    /// The canvas as straight-alpha RGBA bytes (demultiplied), row-major,
+    /// for non-PNG encoders (achievement clip frames).
+    pub(crate) fn into_rgba(self) -> Vec<u8> {
+        let mut rgba =
+            Vec::with_capacity((self.pixmap.width() * self.pixmap.height() * 4) as usize);
+        for pixel in self.pixmap.pixels() {
+            let c = pixel.demultiply();
+            rgba.extend_from_slice(&[c.red(), c.green(), c.blue(), c.alpha()]);
+        }
+        rgba
     }
 }
 

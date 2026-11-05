@@ -125,8 +125,8 @@ impl ObjectStore for DisabledObjectStore {
     }
 }
 
-/// Test double: a path-keyed map with a get-counter, a put-counter, and
-/// a one-shot storage-fault knob.
+/// Test double: a path-keyed map with get/put counters and one-shot
+/// storage-fault knobs.
 #[derive(Default)]
 pub struct InMemoryObjectStore {
     objects: std::sync::Mutex<HashMap<String, Vec<u8>>>,
@@ -134,6 +134,8 @@ pub struct InMemoryObjectStore {
     puts: std::sync::atomic::AtomicUsize,
     /// When set, the next `get` returns `Err` once, then clears itself.
     fail_next_get: std::sync::atomic::AtomicBool,
+    /// When set, the next `put` returns `Err` once, then clears itself.
+    fail_next_put: std::sync::atomic::AtomicBool,
 }
 
 impl InMemoryObjectStore {
@@ -151,11 +153,22 @@ impl InMemoryObjectStore {
         self.fail_next_get
             .store(true, std::sync::atomic::Ordering::SeqCst);
     }
+
+    pub fn fail_next_put(&self) {
+        self.fail_next_put
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 #[async_trait::async_trait]
 impl ObjectStore for InMemoryObjectStore {
     async fn put(&self, path: &str, bytes: Vec<u8>) -> cja::Result<()> {
+        if self
+            .fail_next_put
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(cja::color_eyre::eyre::eyre!("Injected storage failure"));
+        }
         self.puts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.objects
             .lock()
@@ -225,6 +238,19 @@ mod tests {
         assert!(store.get("p").await.is_err());
         assert_eq!(store.get("p").await.unwrap(), Some(vec![9]));
         assert!(store.get("p").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn puts_are_counted_and_fail_next_put_fires_once() {
+        let store = InMemoryObjectStore::default();
+        store.put("a", vec![1]).await.unwrap();
+        store.fail_next_put();
+        assert!(store.put("b", vec![2]).await.is_err());
+        store.put("c", vec![3]).await.unwrap();
+        // The failed put counts nothing; two real puts went through.
+        assert_eq!(store.put_count(), 2);
+        assert!(store.get("b").await.unwrap().is_none());
+        assert_eq!(store.get("c").await.unwrap(), Some(vec![3]));
     }
 
     #[tokio::test]

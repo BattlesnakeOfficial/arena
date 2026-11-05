@@ -58,7 +58,15 @@ at deploy. Achievement shares are counted from `share_page_view` (fields
 `share_cta_click` (`cta`). Views exclude the owner, crawlers identified by
 User-Agent, and prefetches, so read them as an approximate count of outside
 visits. The POST endpoints behind the other two are unauthenticated, so those
-counts are best effort.
+counts are best effort. Achievement clips are counted from the `clip_rendered`
+event (fields `result` ∈ `rendered`/`failed`, `ms`, `bytes`,
+`achievement_earn_id`), emitted on every render attempt — success and failure
+alike — and on terminal `failed` transitions (sweep cleanups carry `ms = 0`,
+`bytes = 0`). `ms` measures encode + object put only, not queue wait; a failed
+attempt reports the ms it actually spent rendering, so `ms = 0` on a `failed`
+event means the attempt bailed out before any render work ran. A
+climbing `failed` rate or `ms` trend there is the signal to investigate clip
+rendering; the share page and clip route emit nothing.
 
 Processing overhead measures elapsed turn-loop time minus elapsed time awaiting
 parallel move requests, including persistence and scheduling. The old event

@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE achievement_clips\n                 SET status = 'rendered', byte_size = $2, render_ms = $3,\n                     rendered_at = NOW(), updated_at = NOW()\n                 WHERE achievement_earn_id = $1 AND status = 'pending'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ee263d1eab0e9dc378dae7f6e730c74435f4d2ff876db9bdf6c6a91bbd64659f"
+}

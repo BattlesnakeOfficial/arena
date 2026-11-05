@@ -951,7 +951,9 @@ table.data.test-results pre { margin-top: 8px; font-family: var(--mono); font-si
 .ach-share { max-width: 680px; font-size: 16px; }
 .ach-share-head { display: flex; gap: 22px; align-items: flex-start; }
 .ach-share-art { display: flex; gap: 6px; flex-shrink: 0; }
-.ach-share-art img { width: 88px; height: 88px; }
+/* Fixed light tile like .cz-swatch: the head/tail art has no fill of its own
+   and would sit black-on-transparent (near-invisible) in the dark theme. */
+.ach-share-art img { width: 88px; height: 88px; background: #F4F1EB; padding: 8px; border-radius: 10px; object-fit: contain; }
 .ach-share-head h1 { margin: 6px 0; }
 .ach-share .badge { font-size: 16px; }
 .ach-share-owner { display: flex; gap: 12px; align-items: center; margin-top: 20px; font-size: 16px; }
@@ -968,6 +970,9 @@ table.data.test-results pre { margin-top: 8px; font-family: var(--mono); font-si
 .ach-share-snake .ach-share-snake-name { min-width: 0; overflow-wrap: anywhere; }
 .ach-share-game { margin-top: 14px; font-size: 16px; overflow-wrap: anywhere; }
 .ach-share-game a { display: inline-flex; align-items: center; min-height: 44px; color: var(--pink); font-weight: 600; }
+.ach-share-clip { margin: 28px 0 0; }
+.ach-share-clip img { display: block; width: 100%; max-width: 504px; height: auto; border: 1px solid var(--hairline-dark); border-radius: 16px; }
+.ach-share-clip .btn { margin-top: 14px; min-height: 44px; font-size: 16px; display: inline-flex; align-items: center; }
 .share-actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-top: 30px; }
 .share-actions .btn { min-height: 44px; font-size: 16px; display: inline-flex; align-items: center; }
 /* .btn sets display, which would otherwise override [hidden] */

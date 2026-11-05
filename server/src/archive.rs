@@ -467,6 +467,69 @@ impl ArchiveReader {
         .wrap_err("Archive page parse task panicked")?
     }
 
+    /// The clip window's frames for one archived game, in ascending turn
+    /// order, parsed as EngineGameFrames. The window is computed inside the
+    /// closure from the object's final frame's `Turn` via
+    /// `crate::achievement_clips::clip_window` (frames are ascending, so the
+    /// last parsed frame's Turn is the game's last turn). Any frame that
+    /// fails to parse, or lacks a numeric `Turn`, fails the whole call — a
+    /// clip must not drop or reorder frames (unlike the social card, which
+    /// renders an empty board for an unparseable frame). `Ok(vec![])` for a
+    /// frameless object. Parsing runs on the blocking pool under
+    /// [`ARCHIVE_DECODE_SLOT`]; the permit moves into the closure.
+    pub async fn frames_for_clip(
+        &self,
+        archived: Arc<ArchivedGame>,
+        earning_turn: Option<i32>,
+    ) -> cja::Result<Vec<crate::engine_models::EngineGameFrame>> {
+        let permit = ARCHIVE_DECODE_SLOT
+            .acquire()
+            .await
+            .wrap_err("Archive decode slot closed")?;
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            // One pass: parse every raw frame as a Value (tracking the last
+            // numeric Turn), compute the window, then parse in-window frames
+            // as EngineGameFrames — bailing on any failure.
+            let mut last_turn: Option<i32> = None;
+            let mut parsed: Vec<serde_json::Value> = Vec::with_capacity(archived.frames().len());
+            for raw in archived.frames() {
+                let frame: serde_json::Value =
+                    serde_json::from_str(raw.get()).wrap_err("Failed to parse archived frame")?;
+                // A missing or non-numeric Turn fails the whole call, on
+                // the same path as a parse failure: the window filter
+                // below must never silently drop a turn from the clip.
+                let turn = frame
+                    .get("Turn")
+                    .and_then(serde_json::Value::as_i64)
+                    .ok_or_else(|| {
+                        cja::color_eyre::eyre::eyre!("Archived frame lacks a numeric Turn")
+                    })?;
+                last_turn = Some(i32::try_from(turn).unwrap_or(i32::MAX));
+                parsed.push(frame);
+            }
+            let last_turn = last_turn.unwrap_or(0);
+            let (from, to) = crate::achievement_clips::clip_window(earning_turn, last_turn);
+            parsed
+                .into_iter()
+                // Every frame carries a numeric Turn (checked above), so
+                // this filter selects without ever dropping a malformed one.
+                .filter(|frame| {
+                    frame
+                        .get("Turn")
+                        .and_then(serde_json::Value::as_i64)
+                        .is_some_and(|turn| turn >= i64::from(from) && turn <= i64::from(to))
+                })
+                .map(|frame| {
+                    serde_json::from_value(frame)
+                        .wrap_err("Failed to parse archived clip frame as an engine frame")
+                })
+                .collect()
+        })
+        .await
+        .wrap_err("Archive clip-frames task panicked")?
+    }
+
     /// Find the archived frame whose `Turn` field equals `turn`, parsed as a
     /// `Value` (DEV-1981: move-request fallback for pruned games). Frames are
     /// in ascending turn order, so the scan stops past `turn`. Parsing runs

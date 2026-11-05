@@ -48,9 +48,9 @@
     });
   }
 
-  const download = document.getElementById('share-download');
-  if (download) {
-    download.addEventListener('click', () => post('share-action', { channel: 'download' }));
+  // Card and clip downloads both count as the download share action.
+  for (const dl of document.querySelectorAll<HTMLAnchorElement>('[data-share-download]')) {
+    dl.addEventListener('click', () => post('share-action', { channel: 'download' }));
   }
 
   for (const cta of document.querySelectorAll<HTMLAnchorElement>('[data-share-cta]')) {

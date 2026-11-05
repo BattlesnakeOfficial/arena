@@ -105,7 +105,8 @@ where
             | Some("achievement_earned")
             | Some("share_page_view")
             | Some("share_action")
-            | Some("share_cta_click") => {
+            | Some("share_cta_click")
+            | Some("clip_rendered") => {
                 self.events.lock().unwrap().push(fields.0);
             }
             _ => {

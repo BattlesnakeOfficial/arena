@@ -339,6 +339,39 @@ impl Job<AppState> for ReconcileRecentAchievementsJob {
     }
 }
 
+/// Cron job: terminally fail stranded clips, re-drive stale pending
+/// clips, and enqueue renders for new public live earns. See
+/// [`crate::achievement_clips`].
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AchievementClipsSweepJob;
+
+#[async_trait::async_trait]
+impl Job<AppState> for AchievementClipsSweepJob {
+    const NAME: &'static str = "AchievementClipsSweepJob";
+
+    async fn run(&self, app_state: AppState) -> cja::Result<()> {
+        crate::achievement_clips::run_clip_sweep(&app_state).await
+    }
+}
+
+/// Render one earn's clip GIF. Enqueued by the sweep at
+/// CLIP_JOB_PRIORITY; idempotent (a duplicate run is refused by the
+/// attempt claim and no-ops).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RenderAchievementClipJob {
+    pub achievement_earn_id: Uuid,
+}
+
+#[async_trait::async_trait]
+impl Job<AppState> for RenderAchievementClipJob {
+    const NAME: &'static str = "RenderAchievementClipJob";
+
+    async fn run(&self, app_state: AppState) -> cja::Result<()> {
+        crate::achievement_clips::render_achievement_clip(&app_state, self.achievement_earn_id)
+            .await
+    }
+}
+
 #[async_trait::async_trait]
 impl Job<AppState> for CustomizationActiveWeekBackfillJob {
     const NAME: &'static str = "CustomizationActiveWeekBackfillJob";
@@ -658,6 +691,8 @@ cja::impl_job_registry!(
     AwardAchievementsForGameJob,
     BackfillAchievementsJob,
     ReconcileRecentAchievementsJob,
+    AchievementClipsSweepJob,
+    RenderAchievementClipJob,
     BackupSingleGameJob,
     PlayHistoryWalkJob,
     NativeGameBackupJob,
