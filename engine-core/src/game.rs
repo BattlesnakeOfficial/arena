@@ -541,12 +541,7 @@ mod tests {
                 .iter()
                 .enumerate()
                 .filter(|(_, s)| !s.eliminated_cause.is_eliminated())
-                .map(|(i, s)| {
-                    (
-                        s.id.clone(),
-                        CYCLE[(game.board.turn as usize + i) % 4],
-                    )
-                })
+                .map(|(i, s)| (s.id.clone(), CYCLE[(game.board.turn as usize + i) % 4]))
                 .collect();
             advance_turn(&mut game, &moves, &mut rng).expect("valid scripted turn");
             boards.push(game.board.clone());

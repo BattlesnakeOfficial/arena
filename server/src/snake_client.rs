@@ -338,7 +338,12 @@ pub async fn request_move(
                 error = %e,
                 "Network error calling snake, using fallback"
             );
-            engine_core::move_response::transport_fallback_result(snake_id, last_direction, None, true)
+            engine_core::move_response::transport_fallback_result(
+                snake_id,
+                last_direction,
+                None,
+                true,
+            )
         }
         Err(_) => {
             // Timeout - continue in same direction
@@ -347,7 +352,12 @@ pub async fn request_move(
                 timeout_ms = timeout.as_millis(),
                 "Snake timed out, using fallback"
             );
-            engine_core::move_response::transport_fallback_result(snake_id, last_direction, None, true)
+            engine_core::move_response::transport_fallback_result(
+                snake_id,
+                last_direction,
+                None,
+                true,
+            )
         }
     }
 }
@@ -364,7 +374,12 @@ fn invalid_move_response(
         error = %error,
         "Failed to parse move response, using fallback"
     );
-    engine_core::move_response::parse_failure_result(snake_id, last_direction, Some(elapsed), status_code)
+    engine_core::move_response::parse_failure_result(
+        snake_id,
+        last_direction,
+        Some(elapsed),
+        status_code,
+    )
 }
 
 /// Call /start endpoint (fire and forget, no response expected)
