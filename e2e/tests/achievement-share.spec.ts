@@ -315,3 +315,26 @@ test('a pending clip leaves the page finished with the card', async ({ page }) =
   await expect(page.locator('.ach-share-clip')).toHaveCount(0);
   expect(await page.content()).not.toContain('clip.gif');
 });
+test('the share art keeps its light tile in dark mode', async ({ page }) => {
+  const stamp = `${Date.now()}${Math.floor(Math.random() * 1000)}`;
+  const login = `share_dark_${stamp}`;
+  const [user] = await query<{ user_id: string }>(
+    `INSERT INTO users (external_github_id, github_login, github_access_token)
+     VALUES ($1, $2, '') RETURNING user_id`,
+    [Date.now() * 1000 + Math.floor(Math.random() * 1000), login],
+  );
+  seededUsers.push({ id: user.user_id, own: true });
+  await seedEarn(user.user_id, 'first_win');
+
+  // The head/tail art has no fill of its own: without a fixed light tile
+  // (like .cz-swatch) it renders black on transparent in the dark theme.
+  await page.emulateMedia({ colorScheme: 'dark' }); // before goto: bootstrap resolves it pre-paint
+  await page.goto(`/achievements/first_win/${user.user_id}`);
+  expect(await page.evaluate(() => document.documentElement.dataset.appTheme)).toBe('dark');
+  expect(
+    await page.evaluate(
+      () => getComputedStyle(document.querySelector('.ach-share-art img')!).backgroundColor,
+    ),
+  ).toBe('rgb(244, 241, 235)');
+  await page.emulateMedia({ colorScheme: 'light' }); // don't leak emulation into later tests
+});

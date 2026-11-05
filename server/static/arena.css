@@ -951,7 +951,9 @@ table.data.test-results pre { margin-top: 8px; font-family: var(--mono); font-si
 .ach-share { max-width: 680px; font-size: 16px; }
 .ach-share-head { display: flex; gap: 22px; align-items: flex-start; }
 .ach-share-art { display: flex; gap: 6px; flex-shrink: 0; }
-.ach-share-art img { width: 88px; height: 88px; }
+/* Fixed light tile like .cz-swatch: the head/tail art has no fill of its own
+   and would sit black-on-transparent (near-invisible) in the dark theme. */
+.ach-share-art img { width: 88px; height: 88px; background: #F4F1EB; padding: 8px; border-radius: 10px; object-fit: contain; }
 .ach-share-head h1 { margin: 6px 0; }
 .ach-share .badge { font-size: 16px; }
 .ach-share-owner { display: flex; gap: 12px; align-items: center; margin-top: 20px; font-size: 16px; }

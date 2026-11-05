@@ -2261,7 +2261,7 @@ mod tests {
                             let row = (k as i32) % side;
                             (
                                 column,
-                                if (k / side as usize) % 2 == 0 {
+                                if (k / side as usize).is_multiple_of(2) {
                                     row
                                 } else {
                                     side - 1 - row
