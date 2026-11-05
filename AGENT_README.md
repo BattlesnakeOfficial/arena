@@ -3,6 +3,7 @@
 ## Build/Lint/Test Commands
 
 - Build: `cargo build`
+- Build the CLI only: `cargo build -p battlesnake` (own crate in `cli/`, no server dependencies)
 - Run: `cargo run`
 - Check: `cargo check`
 - Lint: `cargo clippy`
