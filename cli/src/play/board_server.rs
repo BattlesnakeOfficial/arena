@@ -2076,4 +2076,37 @@ mod tests {
         );
         drop(b);
     }
+
+    /// A peer that never acknowledges Close has not completed the close
+    /// handshake. Its timeout must not end another tab's active replay.
+    #[tokio::test]
+    async fn unacknowledged_close_does_not_count_as_finished() {
+        let opts = BrowserOptions {
+            open_browser: false,
+            close_ack_timeout: Duration::from_millis(200),
+            ..fast_opts()
+        };
+        let mut log = Vec::new();
+        let mut srv = BoardServer::launch(
+            board_game(&config("standard"), "unacknowledged-close"),
+            &opts,
+            &mut log,
+        )
+        .await
+        .unwrap();
+        append_frame(&mut srv, 0);
+        let url = events_url(&srv);
+        let mut slow = ws_connect(&url).await;
+        let _other_tab = ws_connect(&url).await;
+        assert_eq!(next_json(&mut slow).await["Data"]["Turn"], 0);
+        srv.send_game_end().unwrap();
+        assert_eq!(next_json(&mut slow).await["Type"], "game_end");
+        // Deliberately do not read the server's Close. Tungstenite sends
+        // an acknowledgement only when that frame is read.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(
+            !srv.conn_rx.borrow().any_finished,
+            "the Close timeout marked an unacknowledged client as finished"
+        );
+    }
 }
