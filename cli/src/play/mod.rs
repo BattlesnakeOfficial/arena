@@ -3,6 +3,7 @@
 //! beyond the snake URLs (ported from the Go CLI's `cli/commands/play.go`,
 //! running arena's five game modes through `engine-core`).
 
+pub mod board_server;
 pub mod board_view;
 pub mod export;
 pub mod http;
@@ -32,10 +33,9 @@ pub struct SnakeSpec {
 /// The flag surface, byte-for-byte Go's long/short names (including
 /// camelCase). Every field whose long name is not the kebab-case of its Rust
 /// name has an explicit `long`. `--max-turns` is the single arena-added
-/// flag; every other long/short name is byte-for-byte Go's.
-///
-/// `--browser`/`--board-url` are DEV-2146 and deliberately absent, as are
-/// `--config`/`$HOME/.battlesnake.yaml` (dropped: nothing read them).
+/// flag; every other long/short name is byte-for-byte Go's, including
+/// `--browser`/`--board-url` (DEV-2146). `--config`/`$HOME/.battlesnake.yaml`
+/// are deliberately absent (dropped: nothing read them).
 #[derive(clap::Args, Debug)]
 pub struct PlayArgs {
     /// Width of Board
@@ -109,6 +109,16 @@ pub struct PlayArgs {
     // it gets a normal kebab-case long name (DEV-2164).
     #[arg(long, value_name = "N", allow_negative_numbers = true)]
     pub max_turns: Option<i32>,
+    /// View the game in the browser using the Battlesnake game board
+    #[arg(long, default_value_t = false)]
+    pub browser: bool,
+    /// Base URL for the game board when using --browser
+    #[arg(
+        long = "board-url",
+        default_value = "https://board.battlesnake.com",
+        value_name = "URL"
+    )]
+    pub board_url: String,
 }
 
 /// Fully-validated, engine-ready inputs. Built from `PlayArgs` by pure
@@ -142,6 +152,10 @@ pub struct PlayConfig {
     /// no limit — the game runs until it's over, like Go's CLI.
     /// `engine_core::MAX_TURNS` (5,000) stays server/prod-only.
     pub max_turns: Option<i32>,
+    /// `Some(opts)` when `--browser`: the board server's launch options
+    /// (base URL, browser spawn, shutdown timeouts). Whether browser mode
+    /// is on lives ONLY here.
+    pub browser: Option<board_server::BrowserOptions>,
 }
 
 /// Validate the parsed flags into a `PlayConfig`. Pure: no I/O, no clock
@@ -189,6 +203,18 @@ pub fn validate(args: &PlayArgs, verbose: bool) -> Result<PlayConfig> {
         royale_shrink: args.shrink_every_n_turns,
         snakes,
         max_turns: args.max_turns,
+        browser: if args.browser {
+            Some(board_server::BrowserOptions {
+                board_url: args.board_url.clone(),
+                // Test/CI affordance for the spawned binary; in-process
+                // tests build PlayConfig directly with open_browser:
+                // false instead.
+                open_browser: std::env::var_os("BATTLESNAKE_DONT_OPEN_BROWSER").is_none(),
+                ..Default::default()
+            })
+        } else {
+            None
+        },
     })
 }
 
@@ -464,8 +490,9 @@ pub async fn run_game(
     // 3. GET / per snake, in order (sequential, like Go). Failures are
     //    fatal with Go's wrapper.
     let mut customizations: HashMap<String, SnakeCustomizations> = HashMap::new();
+    let mut board_runtime: HashMap<String, board_server::SnakeRuntime> = HashMap::new();
     for (spec, id) in cfg.snakes.iter().zip(&snake_ids) {
-        let info = client
+        let http::PingInfo { info, author } = client
             .ping(&spec.url)
             .await
             .wrap_err("Error getting snake metadata")?;
@@ -476,14 +503,32 @@ pub async fn run_game(
                 color,
                 head,
                 tail,
-                author: String::new(),
+                author,
             },
         );
+        board_runtime.insert(id.clone(), board_server::SnakeRuntime::from_ping());
         write_log(
             log,
             &format!("Snake ID: {id} URL: {}, Name: \"{}\"", spec.url, spec.name),
         );
     }
+
+    // 3.5. Launch the board server (Go's order: ping -> open board ->
+    //     play; a dead snake URL exits 1 before a tab opens).
+    //     `board_srv`, not `board_server`: the module path stays unshadowed
+    //     for the `board_server::…` references below (and `board` is the
+    //     Write param).
+    let mut board_srv = match &cfg.browser {
+        Some(opts) => Some(
+            board_server::BoardServer::launch(
+                board_server::board_game(cfg, &game_id.to_string()),
+                opts,
+                log,
+            )
+            .await?,
+        ),
+        None => None,
+    };
 
     // 4. Turn-0 requests; POST /start sequentially, warn-only.
     let mut snake_contexts: HashMap<String, SnakeContext> = HashMap::new();
@@ -508,6 +553,9 @@ pub async fn run_game(
         &format!("Ruleset: {}, Seed: {}", cfg.gametype_label, cfg.seed),
     );
     print_board(&game, cfg, &customizations, log, board);
+    if let Some(srv) = board_srv.as_mut() {
+        srv.send_frame(&game, &customizations, &board_runtime)?;
+    }
 
     // 6. Export the turn-0 frame (`you` = the first snake, Go's choice).
     let mut exporter = output.as_mut().map(|_| {
@@ -581,11 +629,18 @@ pub async fn run_game(
                     shout: result.shout.clone(),
                 },
             );
+            board_runtime.insert(
+                result.snake_id.clone(),
+                board_server::SnakeRuntime::from_move_result(result, cfg.timeout_ms),
+            );
         }
 
         engine_core::advance_turn(&mut game, &moves, &mut rng)?;
 
         print_board(&game, cfg, &customizations, log, board);
+        if let Some(srv) = board_srv.as_mut() {
+            srv.send_frame(&game, &customizations, &board_runtime)?;
+        }
 
         if cfg.delay_ms > 0 {
             tokio::time::sleep(std::time::Duration::from_millis(cfg.delay_ms)).await;
@@ -606,6 +661,16 @@ pub async fn run_game(
                 &cfg.resolved,
             ));
         }
+    }
+
+    // 7.5. `game_end` goes out immediately after the game loop — before
+    //     the /end requests — so a connected browser gets it while those
+    //     are still in flight. Also stamps `game_ended_at`, anchoring
+    //     `finish`'s no-browser grace window at the true game end. The
+    //     last in-loop `send_frame` already carries the final board
+    //     state, so this is safe.
+    if let Some(srv) = board_srv.as_mut() {
+        srv.send_game_end()?;
     }
 
     // 8. Winner/draw from arena's placement code; /end for every snake
@@ -677,6 +742,15 @@ pub async fn run_game(
             log,
             &format!("Game stopped at the turn limit of {max_turns} turns."),
         );
+    }
+
+    // 10. Board server shutdown: the LAST step of the success path. Any
+    //     `?` above (engine error, export write failure) skips it — the
+    //     CLI exits 1 and process teardown kills the serve task, so a
+    //     failed game never waits on a browser. `/end` requests are
+    //     warn-only and don't take that path.
+    if let Some(srv) = board_srv.as_mut() {
+        srv.finish(log).await;
     }
 
     Ok(GameOutcome {

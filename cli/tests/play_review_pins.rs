@@ -33,6 +33,8 @@ fn solo_args(url: String) -> PlayArgs {
         hazard_damage_per_turn: 14,
         shrink_every_n_turns: 25,
         max_turns: None,
+        browser: false,
+        board_url: "https://board.battlesnake.com".into(),
     }
 }
 
