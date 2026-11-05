@@ -1037,6 +1037,376 @@ mod tests {
     }
 
     #[test]
+    fn product_metrics_declare_windows_ratios_and_labels() {
+        let manifest = manifest(
+            &crate::cron::cron_registry(&AppConfig::test_default()),
+            ProcessIdentity::new(ROLE),
+            FeatureFlags {
+                server: true,
+                jobs: true,
+                cron: true,
+            },
+        )
+        .unwrap();
+        // Assert against the serialized wire body, not the in-memory types:
+        // this pins exactly what ships to Eyes at boot.
+        let wire = serde_json::to_value(&manifest).unwrap();
+        let metrics: HashMap<_, _> = manifest
+            .metrics
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|metric| (metric.id.as_str(), metric))
+            .collect();
+        let metric_wire: HashMap<_, _> = wire["metrics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|metric| (metric["id"].as_str().unwrap().to_owned(), metric))
+            .collect();
+
+        // The 24 new ids exist, enumerated explicitly (other tasks add
+        // metrics to this file, so a total count would false-fail there).
+        const NEW_IDS: &[&str] = &[
+            "product.users.active",
+            "product.users.active.daily",
+            "product.users.active.weekly",
+            "product.users.active.month",
+            "product.owners.active",
+            "product.owners.active.daily",
+            "product.owners.active.weekly",
+            "product.owners.active.month",
+            "product.snakes.active",
+            "product.snakes.active.weekly",
+            "product.games.ladder",
+            "product.games.tournament",
+            "product.games.ladder.weekly",
+            "product.games.custom.weekly",
+            "product.games.tournament.weekly",
+            "product.new_users.weekly",
+            "product.new_snakes.weekly",
+            "product.users.active.stickiness.daily",
+            "product.users.active.stickiness.weekly",
+            "product.owners.active.stickiness.daily",
+            "product.owners.active.stickiness.weekly",
+            "product.games.ladder.share",
+            "product.games.user_created.share",
+            "product.games.tournament.share",
+        ];
+        for id in NEW_IDS {
+            assert!(metrics.contains_key(id), "missing new metric {id}");
+        }
+
+        // Monday weeks pinned by origin, not by width: `.time_bucket(604_800)`
+        // produces the same preferred_bucket_seconds with epoch
+        // (Thursday) buckets and no third argument (DEV-2060).
+        let weekly_ids = [
+            "product.users.active.weekly",
+            "product.owners.active.weekly",
+            "product.snakes.active.weekly",
+            "product.games.ladder.weekly",
+            "product.games.custom.weekly",
+            "product.games.tournament.weekly",
+            "product.new_users.weekly",
+            "product.new_snakes.weekly",
+        ];
+        for id in weekly_ids {
+            assert_eq!(metrics[id].preferred_bucket_seconds, Some(604_800), "{id}");
+            let stages = metric_wire[id]["query"]["query"]["stages"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{id} has no stages"));
+            let aggregate = stages
+                .last()
+                .unwrap_or_else(|| panic!("{id} has no aggregate stage"));
+            assert_eq!(aggregate["stage"], "aggregate", "{id}");
+            let groups = aggregate["groups"].as_array().unwrap();
+            let bucket = groups
+                .first()
+                .unwrap_or_else(|| panic!("{id} aggregate has no bucket group"));
+            assert_eq!(bucket["alias"], "bucket", "{id}");
+            let expected_call = serde_json::json!({
+                "type": "call",
+                "function": "time_bucket",
+                "args": [
+                    {"type": "path", "path": {"root": "timestamp", "segments": []}},
+                    {"type": "literal", "value": {"type": "duration", "value": 604_800_000_000u64}},
+                    {"type": "literal", "value": {
+                        "type": "duration",
+                        "value": eyes_subscriber::eyes_query::MONDAY_ORIGIN_US
+                    }},
+                ],
+            });
+            assert_eq!(bucket["expr"], expected_call, "{id} Monday-origin time_bucket");
+        }
+
+        // Filters pinned by stage order (stage order is evaluation order,
+        // and the population each filter carves is load-bearing).
+        let eq_stage = |path: &str, value: &str| {
+            let (root, key) = match path.split_once('.') {
+                Some((root, key)) => (root, Some(key)),
+                None => (path, None),
+            };
+            let segments = key
+                .map(|key| vec![serde_json::json!({"type": "key", "value": key})])
+                .unwrap_or_default();
+            serde_json::json!({
+                "stage": "where",
+                "predicate": {
+                    "type": "binary",
+                    "op": "eq",
+                    "left": {"type": "path", "path": {"root": root, "segments": segments}},
+                    "right": {"type": "literal", "value": {"type": "string", "value": value}},
+                },
+            })
+        };
+        let aggregate_stage = |argument_root: &str, argument_key: &str| {
+            serde_json::json!({
+                "stage": "aggregate",
+                "aggregates": [{
+                    "function": "count_distinct",
+                    "argument": {
+                        "type": "path",
+                        "path": {"root": argument_root, "segments": [{"type": "key", "value": argument_key}]},
+                    },
+                    "alias": "value",
+                }],
+                "groups": [],
+            })
+        };
+        let expected_stages = |filters: Vec<serde_json::Value>, aggregate: serde_json::Value| {
+            let mut stages = filters;
+            stages.push(aggregate);
+            stages
+        };
+        let users_stages = expected_stages(
+            vec![
+                eq_stage("target", "cja::server::trace"),
+                eq_stage("message", "finished processing request"),
+            ],
+            aggregate_stage("fields", "user_id"),
+        );
+        assert_eq!(
+            metric_wire["product.users.active"]["query"]["query"]["stages"],
+            serde_json::json!(users_stages),
+            "users base definition stages"
+        );
+        let owners_stages = expected_stages(
+            vec![
+                eq_stage("name", "snake.lifecycle"),
+                eq_stage("fields.endpoint", "end"),
+            ],
+            aggregate_stage("fields", "user_id"),
+        );
+        assert_eq!(
+            metric_wire["product.owners.active"]["query"]["query"]["stages"],
+            serde_json::json!(owners_stages),
+            "owners base definition stages"
+        );
+        let snakes_stages = expected_stages(
+            vec![
+                eq_stage("name", "snake.lifecycle"),
+                eq_stage("fields.endpoint", "end"),
+            ],
+            aggregate_stage("fields", "battlesnake_id"),
+        );
+        assert_eq!(
+            metric_wire["product.snakes.active"]["query"]["query"]["stages"],
+            serde_json::json!(snakes_stages),
+            "snakes base definition stages"
+        );
+
+        // Ratios: stickiness declare per-side windows over the 28-day side;
+        // source shares declare none (the item's window sizes both sides).
+        let stickiness = [
+            ("product.users.active.stickiness.daily", "product.users.active", DAY),
+            ("product.users.active.stickiness.weekly", "product.users.active", WEEK),
+            ("product.owners.active.stickiness.daily", "product.owners.active", DAY),
+            ("product.owners.active.stickiness.weekly", "product.owners.active", WEEK),
+        ];
+        let month_sides = [
+            ("product.users.active.stickiness.daily", "product.users.active.month"),
+            ("product.users.active.stickiness.weekly", "product.users.active.month"),
+            ("product.owners.active.stickiness.daily", "product.owners.active.month"),
+            ("product.owners.active.stickiness.weekly", "product.owners.active.month"),
+        ];
+        let month_sides: HashMap<_, _> = month_sides.into_iter().collect();
+        for (id, numerator, numerator_window) in stickiness {
+            let ratio = metrics[id].ratio.as_ref().unwrap();
+            assert_eq!(ratio.numerator, numerator, "{id}");
+            assert_eq!(ratio.denominator, month_sides[id], "{id}");
+            assert_eq!(ratio.numerator_window_seconds, Some(numerator_window), "{id}");
+            assert_eq!(ratio.denominator_window_seconds, Some(FOUR_WEEKS), "{id}");
+            assert!(ratio.display_as_percentage, "{id}");
+            assert!(metrics[id].query.is_none(), "{id}");
+            assert_eq!(metric_wire[id]["value_type"], "float", "{id}");
+        }
+        let shares = [
+            ("product.games.ladder.share", "product.games.ladder"),
+            ("product.games.user_created.share", "product.games.user_created"),
+            ("product.games.tournament.share", "product.games.tournament"),
+        ];
+        for (id, numerator) in shares {
+            let ratio = metrics[id].ratio.as_ref().unwrap();
+            assert_eq!(ratio.numerator, numerator, "{id}");
+            assert_eq!(ratio.denominator, "product.games.played", "{id}");
+            assert_eq!(ratio.numerator_window_seconds, None, "{id}");
+            assert_eq!(ratio.denominator_window_seconds, None, "{id}");
+            assert!(ratio.display_as_percentage, "{id}");
+            assert!(metrics[id].query.is_none(), "{id}");
+            assert_eq!(metric_wire[id]["value_type"], "float", "{id}");
+        }
+        // Every ratio side is a declared plain metric, never a ratio itself.
+        for id in stickiness.iter().map(|(id, _, _)| *id).chain(shares.iter().map(|(id, _)| *id)) {
+            for side in [&metrics[id].ratio.as_ref().unwrap().numerator, &metrics[id].ratio.as_ref().unwrap().denominator] {
+                let side = metrics.get(side.as_str()).unwrap_or_else(|| panic!("{id} side {side} not declared"));
+                assert!(side.ratio.is_none(), "{id} side {} is itself a ratio", side.id);
+            }
+        }
+
+        // Dashboards: fixed tiles carry exact windows and plain-word labels.
+        let dashboards: HashMap<_, _> = manifest
+            .dashboards
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|d| (d.id.as_str(), d))
+            .collect();
+        let product = dashboards["arena-product"];
+        fn find_section<'a>(dashboard: &'a NamedDashboard, title: &str) -> &'a Section {
+            dashboard
+                .sections
+                .iter()
+                .find(|s| s.title.as_deref() == Some(title))
+                .unwrap_or_else(|| panic!("dashboard has no {title} section"))
+        }
+        fn item_windows(section: &Section) -> Vec<(&str, Option<u64>)> {
+            section
+                .items
+                .iter()
+                .map(|item| match item {
+                    Item::Stat { query_id, window_seconds, .. }
+                    | Item::TimeSeries { query_id, window_seconds, .. }
+                    | Item::Table { query_id, window_seconds, .. } => {
+                        (query_id.as_str(), *window_seconds)
+                    }
+                    _ => panic!("section item is not a query item"),
+                })
+                .collect()
+        }
+        let active = find_section(product, "Active users, owners, and snakes");
+        assert_eq!(
+            item_windows(active),
+            vec![
+                ("product.users.active", Some(DAY)),
+                ("product.users.active", Some(WEEK)),
+                ("product.users.active", Some(FOUR_WEEKS)),
+                ("product.owners.active", Some(DAY)),
+                ("product.owners.active", Some(WEEK)),
+                ("product.owners.active", Some(FOUR_WEEKS)),
+                ("product.snakes.active", Some(WEEK)),
+                ("product.games.played", Some(WEEK)),
+            ],
+            "active tile windows"
+        );
+        let source_share = find_section(product, "Source share of games (last 7 days)");
+        assert_eq!(
+            item_windows(source_share),
+            vec![
+                ("product.games.ladder.share", Some(WEEK)),
+                ("product.games.user_created.share", Some(WEEK)),
+                ("product.games.tournament.share", Some(WEEK)),
+            ],
+            "source-share tile windows"
+        );
+        for item in active.items.iter().chain(source_share.items.iter()) {
+            let label = match item {
+                Item::Stat { label, .. } => label,
+                _ => panic!("expected a stat item"),
+            };
+            assert!(
+                label.as_deref().is_some_and(|l| !l.is_empty()),
+                "tile label empty"
+            );
+        }
+        let history = dashboards["arena-product-history"];
+        let history_windows: Vec<(&str, Option<u64>)> = history
+            .sections
+            .iter()
+            .flat_map(|s| item_windows(s))
+            .collect();
+        assert_eq!(
+            history_windows,
+            vec![
+                ("product.users.active.daily", Some(NINETY_DAYS)),
+                ("product.owners.active.daily", Some(NINETY_DAYS)),
+                ("product.users.active.weekly", Some(THREE_HUNDRED_SIXTY_FOUR_DAYS)),
+                ("product.owners.active.weekly", Some(THREE_HUNDRED_SIXTY_FOUR_DAYS)),
+                ("product.snakes.active.weekly", Some(THREE_HUNDRED_SIXTY_FOUR_DAYS)),
+                ("product.games.ladder.weekly", Some(THREE_HUNDRED_SIXTY_FOUR_DAYS)),
+                ("product.games.custom.weekly", Some(THREE_HUNDRED_SIXTY_FOUR_DAYS)),
+                ("product.games.tournament.weekly", Some(THREE_HUNDRED_SIXTY_FOUR_DAYS)),
+                ("product.new_users.weekly", Some(THREE_HUNDRED_SIXTY_FOUR_DAYS)),
+                ("product.new_snakes.weekly", Some(THREE_HUNDRED_SIXTY_FOUR_DAYS)),
+            ],
+            "history chart windows"
+        );
+
+        // Plain-words criterion: each definition says what it counts.
+        assert!(metrics["product.users.active"]
+            .display_name
+            .as_deref()
+            .is_some_and(|n| n.contains("authenticated request")));
+        assert!(metrics["product.owners.active"]
+            .display_name
+            .as_deref()
+            .is_some_and(|n| n.contains("Owners whose snake played")));
+        assert!(metrics["product.snakes.active"]
+            .display_name
+            .as_deref()
+            .is_some_and(|n| n.contains("Snakes that played")));
+
+        // Sections other tasks own keep main's item ids verbatim.
+        let achievements = find_section(product, "Achievements");
+        assert_eq!(
+            item_windows(achievements)
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect::<Vec<_>>(),
+            vec![
+                "product.achievements.earned",
+                "product.achievements.earned.daily",
+                "product.achievements.firsts.daily",
+                "product.achievements.by_slug",
+            ]
+        );
+        let sharing = find_section(product, "Sharing");
+        assert_eq!(
+            item_windows(sharing)
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect::<Vec<_>>(),
+            vec![
+                "product.shares.page_views",
+                "product.shares.page_views.daily",
+                "product.shares.page_views.by_referrer",
+                "product.shares.actions",
+                "product.shares.cta_clicks",
+            ]
+        );
+
+        // Manifest caps: a future addition trips a deliberate test edit,
+        // not an ingest rejection at boot.
+        assert!(manifest.metrics.as_ref().unwrap().len() <= 100);
+        assert!(manifest.dashboards.as_ref().unwrap().len() <= 20);
+        for dashboard in manifest.dashboards.as_ref().unwrap() {
+            assert!(dashboard.sections.len() <= 20);
+            for s in &dashboard.sections {
+                assert!(s.items.len() <= 24);
+            }
+        }
+    }
+
+    #[test]
     fn disabled_workers_do_not_declare_crons_or_critical_jobs() {
         let identity = ProcessIdentity::new(ROLE);
         let id = identity.instance_id();
