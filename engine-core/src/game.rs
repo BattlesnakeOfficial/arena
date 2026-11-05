@@ -249,7 +249,7 @@ pub fn create_initial_game(
 /// food, and the game ID (which drives Royale's hazard seed via `game_seed`
 /// and appears in the wire JSON as `game.id`). Drawing the ID from the same
 /// stream makes the whole game a pure function of the seed. The server does
-/// NOT use this — it passes its DB game ID and `thread_rng()`.
+/// NOT use this — it passes its DB game ID and a fresh per-game OS RNG.
 pub fn seeded_game(seed: u64) -> (ChaCha8Rng, Uuid) {
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
     let mut bytes = [0u8; 16];
