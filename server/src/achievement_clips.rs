@@ -1640,6 +1640,100 @@ mod tests {
         assert_eq!(decoded.len(), 21, "window 20..=40");
     }
 
+    /// An archived frame inside the window whose `Turn` isn't numeric: the
+    /// same contract as the DB path's unparseable frame. The render fails;
+    /// the clip never silently skips a turn.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn archive_frame_with_non_numeric_turn_fails_render_not_dropped(pool: PgPool) {
+        crate::test_capture::Capture::shared();
+        let (state, store) = clip_state(&pool).await;
+        use crate::routes::game::api::fixtures as fx;
+
+        let owner = user(&pool, 2121271).await;
+        let owner_snake = snake(&pool, owner, "bad archive frame owner").await;
+        let game_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO games (board_size, game_type, status) VALUES ('11x11', 'Standard', 'finished') RETURNING game_id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let gcs_path = format!("native/2026/11/05/{game_id}.json.zst");
+        sqlx::query(
+            "UPDATE games SET archived_at = NOW(), gcs_path = $1, archive_version = 2 WHERE game_id = $2",
+        )
+        .bind(&gcs_path)
+        .bind(game_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        participant(&pool, game_id, owner_snake, 1).await;
+        let mut frames: Vec<serde_json::Value> = (0..=40)
+            .map(|turn| fx::native_frame_json(turn, "bad-frame-snake"))
+            .collect();
+        frames[30]["Turn"] = serde_json::json!("x");
+        let object = serde_json::json!({
+            "archive_version": 2,
+            "game_id": game_id.to_string(),
+            "game": {"game_type": "Standard", "board_size": "11x11", "status": "finished"},
+            "frames": frames,
+            "exported_at": "2026-11-05T00:00:00Z",
+        });
+        store
+            .put(&gcs_path, fx::zstd_json(&object, 9))
+            .await
+            .unwrap();
+        let earn = seed_live_earn(
+            &pool,
+            owner,
+            "first_win",
+            Some(owner_snake),
+            Some(game_id),
+            Some(40),
+        )
+        .await;
+        run_clip_sweep(&state).await.unwrap();
+
+        render_achievement_clip(&state, earn).await.unwrap();
+
+        let stored = store.get(&clip_object_path(earn)).await.unwrap();
+        assert!(
+            stored.is_none(),
+            "a clip with a dropped frame must not be stored ({} frames decoded)",
+            stored.map_or(0, |bytes| decode_gif(&bytes).2.len()),
+        );
+        let row = clip(&pool, earn).await.unwrap();
+        assert_eq!((row.status.as_str(), row.attempts), ("pending", 1));
+        let events = clip_events(earn);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].get("result").map(String::as_str), Some("failed"));
+    }
+
+    /// `clip_rendered` carries ms on every attempt, success and failure. A
+    /// failure at the object put comes after the whole paint and encode,
+    /// which take well over a millisecond at 504px, so its ms can't be 0.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn failed_attempt_event_reports_elapsed_ms(pool: PgPool) {
+        crate::test_capture::Capture::shared();
+        let (state, store) = clip_state(&pool).await;
+        let earn = rendered_public_earn_setup(&pool, &state, 2121272).await;
+
+        store.fail_next_put();
+        render_achievement_clip(&state, earn).await.unwrap();
+
+        let events = clip_events(earn);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].get("result").map(String::as_str), Some("failed"));
+        assert_eq!(events[0].get("bytes").map(String::as_str), Some("0"));
+        let ms = events[0]
+            .get("ms")
+            .and_then(|ms| ms.parse::<i64>().ok())
+            .expect("numeric ms");
+        assert!(
+            ms > 0,
+            "a real failed attempt must report its elapsed ms, got {ms}"
+        );
+    }
+
     // ---- sweep predicate vs game_is_hidden ----
 
     #[sqlx::test(migrations = "../migrations")]
