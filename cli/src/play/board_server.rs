@@ -1962,4 +1962,47 @@ mod tests {
         assert!(got_end, "client B was cut off: no game_end");
         assert_eq!(close_code, Some(1000));
     }
+
+    /// PR review round 1 pin: a caught-up client that went away while
+    /// parked on `changed()` (a reloaded or closed tab — the browser sends
+    /// Close on navigation) must not count as finished when `game_end`
+    /// lands. Its handler only notices the dead peer after writing
+    /// `game_end` + Close into the dead socket, then `graceful_close`
+    /// reads the buffered Close/error and the handler sets
+    /// `any_finished` — so `finish` exits while the live tab (B) is still
+    /// mid-stream and has not completed its close handshake. Contract:
+    /// Design Decision 9 / coordinator edit 1 ("a tab that vanished
+    /// mid-stream can't set any_finished").
+    #[tokio::test]
+    async fn parked_vanished_client_does_not_count_as_finished() {
+        let mut srv = launch_server(Some(board_game(&config("standard"), "pin-r1"))).await;
+        for turn in 0..3 {
+            append_frame(&mut srv, turn);
+        }
+        let url = events_url(&srv);
+
+        // A reads everything so far (caught up; its handler parks on
+        // `changed()`), then leaves like a navigating tab: Close + drop.
+        let mut a = ws_connect(&url).await;
+        for turn in 0..3 {
+            assert_eq!(next_json(&mut a).await["Data"]["Turn"], turn);
+        }
+        let _ = a.close(None).await;
+        drop(a);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // B (the live tab) connects but has not read anything yet, so it
+        // cannot have completed a close handshake.
+        let b = ws_connect(&url).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        srv.send_game_end().unwrap();
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        assert!(
+            !srv.conn_rx.borrow().any_finished,
+            "a vanished tab counted as finished: finish would exit and cut off the live tab"
+        );
+        drop(b);
+    }
 }
