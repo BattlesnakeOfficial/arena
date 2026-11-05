@@ -121,20 +121,38 @@ async fn non_ok_move_warning_names_the_url_and_the_body() {
     );
 }
 
-/// A snake that went down mid-game refuses the connection immediately. Go logs
+/// A snake that went down mid-game fails the connection immediately. Go logs
 /// `Request to <url>/move failed` plus the real error. Saying "request timed
 /// out" sends the developer hunting for a slow snake instead of a dead one.
+///
+/// Mechanism note: the snake serves `GET /` (so the game starts), then every
+/// later connection is accepted and closed without a response — the exact
+/// shape of a dead process on the wire, and deterministic on every OS. A
+/// listener that is merely dropped leaves a released ephemeral port, which
+/// the Windows runner does NOT refuse quickly: the connect silently hangs
+/// until the timeout, which would masquerade as exactly the misreport this
+/// test forbids.
 #[tokio::test]
 async fn refused_move_is_not_reported_as_a_timeout() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
     let url = format!("http://{}", listener.local_addr().expect("addr"));
-    // Answer `GET /` once, then close the port for the rest of the game.
+    // Answer `GET /` once, then go down for the rest of the game.
     std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("accept");
-        let mut request = [0u8; 4096];
-        let _ = stream.read(&mut request);
-        let _ = stream
-            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}");
+        let mut served_ping = false;
+        for stream in listener.incoming() {
+            let mut stream = match stream {
+                Ok(stream) => stream,
+                Err(_) => break,
+            };
+            if served_ping {
+                continue; // accept + close: the snake is down.
+            }
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request);
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}");
+            served_ping = true;
+        }
     });
 
     let (log, _board) = play(&solo_args(url.clone())).await;

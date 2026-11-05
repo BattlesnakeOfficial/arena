@@ -163,9 +163,10 @@ impl SnakeHttpClient {
                     last_direction,
                 );
                 // Go checks the status before decoding (play.go
-                // getSnakeUpdate): a non-200 warns with the body it got,
-                // whatever the body is.
-                if !(200..300).contains(&status) {
+                // getSnakeUpdate): every status other than exactly 200 —
+                // including other 2xx like 201 — warns with the body it
+                // got, whatever the body is.
+                if status != 200 {
                     let result = interpreted.unwrap_or_else(|_| {
                         parse_failure_result(snake_id, last_direction, Some(elapsed), Some(status))
                     });
@@ -455,20 +456,29 @@ mod tests {
 
     #[tokio::test]
     async fn transport_failure_falls_back_timed_out() {
-        // Bind then drop a listener: the port answers nothing (wiremock pools
-        // servers, so a dropped MockServer would keep answering 404).
+        // A listener that accepts every connection and closes it without a
+        // response: the request fails at transport, deterministically, on
+        // every OS. Bind-then-drop relies on the OS refusing the released
+        // port quickly, which the Windows runner does not do — the connect
+        // to a released ephemeral port silently hangs until the timeout
+        // (wiremock pools servers, so a dropped MockServer would keep
+        // answering 404).
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
-        drop(listener);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                drop(stream);
+            }
+        });
 
-        let (result, warning) = client(500)
+        let (result, warning) = client(2000)
             .request_move(&url, &body_for_move(), "s1", Some(Direction::Up))
             .await;
         assert!(result.timed_out);
         assert!(!result.errored);
         assert_eq!(result.direction, Direction::Up);
-        // The warning names the URL and the real error — a refused
-        // connection is NOT reported as a timeout.
+        // The warning names the URL and the real error — a dead connection
+        // is NOT reported as a timeout.
         let warning = warning.expect("a transport failure carries Go's warning");
         assert!(
             warning.starts_with(&format!("Request to {url}/move failed")),
