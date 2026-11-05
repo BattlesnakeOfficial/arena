@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 use sqlx::{Executor, FromRow, PgPool, Postgres};
 use uuid::Uuid;
 
-pub use arena::api_scope::{Permission, SnakeAccess};
+pub use arena_api_scope::{Permission, SnakeAccess};
 
 /// API token stored in the database (hashed)
 #[derive(Debug, Serialize, Deserialize, FromRow)]

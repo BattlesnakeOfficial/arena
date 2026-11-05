@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE games g\n            SET created_at = CASE\n                    WHEN g.created_at < TIMESTAMPTZ '1971-01-01' THEN v.created_at\n                    ELSE g.created_at\n                END,\n                game_type = v.game_type\n            FROM unnest(CAST($1 AS text[]), CAST($2 AS timestamptz[]), CAST($3 AS text[]))\n                 AS v(engine_game_id, created_at, game_type)\n            WHERE g.engine_game_id = v.engine_game_id\n              AND (\n                    (g.created_at < TIMESTAMPTZ '1971-01-01' AND g.created_at <> v.created_at)\n                 OR g.game_type <> v.game_type\n              )\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "TextArray",
+        "TimestamptzArray",
+        "TextArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "de919bd24bb189d54a8ec95c1c6c5fb2dd8ef44084a10318cf1e7bdd0a3cd6d7"
+}

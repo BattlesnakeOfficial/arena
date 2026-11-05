@@ -401,14 +401,11 @@ impl Job<AppState> for GameBackupJob {
 }
 
 /// Job to backup a single game from the Engine database to GCS.
-/// Enqueued by GameBackupJob for each game that needs archiving.
+/// Enqueued by GameBackupJob and the play-history walk (DEV-1984) for each
+/// game that needs archiving.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BackupSingleGameJob {
     pub engine_game_id: String,
-    /// Optional batch ID for historical backfill tracking.
-    /// When set, completing this job will increment the batch's completed count.
-    #[serde(default)]
-    pub batch_id: Option<i32>,
 }
 
 #[async_trait::async_trait]
@@ -416,7 +413,7 @@ impl Job<AppState> for BackupSingleGameJob {
     const NAME: &'static str = "BackupSingleGameJob";
 
     async fn run(&self, app_state: AppState) -> cja::Result<()> {
-        crate::backup::backup_single_game(&app_state, &self.engine_game_id, self.batch_id).await?;
+        crate::backup::backup_single_game(&app_state, &self.engine_game_id).await?;
         Ok(())
     }
 }
@@ -488,27 +485,20 @@ impl Job<AppState> for PruneGameTurnsJob {
     }
 }
 
-/// Job to discover historical games and enqueue backup jobs in batches.
-/// Uses fork-join pattern: enqueues a batch, waits for completion, then enqueues next batch.
+/// Cron job: one tick of the play-history archive walk (DEV-1984) —
+/// pages engine games oldest-first past a durable cursor, trickles backup
+/// jobs for unarchived ones (in-flight-capped, below game-runner priority),
+/// corrects imported rows' created_at/game_type, and advances only past
+/// games that are archived or permanently excepted. See [`crate::play_history_walk`].
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct HistoricalBackupDiscoveryJob {
-    /// Cursor: only process games created after this timestamp
-    pub after_created: Option<chrono::NaiveDateTime>,
-    /// Cursor: for tie-breaking when created timestamps match
-    pub after_id: Option<String>,
-}
+pub struct PlayHistoryWalkJob;
 
 #[async_trait::async_trait]
-impl Job<AppState> for HistoricalBackupDiscoveryJob {
-    const NAME: &'static str = "HistoricalBackupDiscoveryJob";
+impl Job<AppState> for PlayHistoryWalkJob {
+    const NAME: &'static str = "PlayHistoryWalkJob";
 
     async fn run(&self, app_state: AppState) -> cja::Result<()> {
-        crate::backup::run_historical_backup_discovery(
-            &app_state,
-            self.after_created,
-            self.after_id.as_deref(),
-        )
-        .await?;
+        crate::play_history_walk::run_walk_tick(&app_state).await?;
         Ok(())
     }
 }
@@ -704,7 +694,7 @@ cja::impl_job_registry!(
     AchievementClipsSweepJob,
     RenderAchievementClipJob,
     BackupSingleGameJob,
-    HistoricalBackupDiscoveryJob,
+    PlayHistoryWalkJob,
     NativeGameBackupJob,
     NativeBackupSingleGameJob,
     TurnRetentionJob,

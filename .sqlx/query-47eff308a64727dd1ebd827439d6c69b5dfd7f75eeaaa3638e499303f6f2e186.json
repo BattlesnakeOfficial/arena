@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE play_history_walk_cursor SET last_created = $1, last_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Timestamp",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "47eff308a64727dd1ebd827439d6c69b5dfd7f75eeaaa3638e499303f6f2e186"
+}

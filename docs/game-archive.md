@@ -20,8 +20,89 @@ serving and failure rules.
 ## Who writes
 
 - `backup.rs` (Play/engine-DB games) writes through
-  `AppState.object_store` (`put`).
+  `AppState.object_store` (`put`). Its `backup_single_game` is shared by
+  the hourly `GameBackupJob` path and the play-history walk below, so a
+  permanently-unarchivable live game can land in
+  `play_archive_exceptions` too — intended: the completeness report
+  covers all engine games.
 - DEV-1980's `native_backup.rs` writes through the same seam.
+
+## Play history walk (DEV-1984)
+
+The historical backfill is a cron-driven, resumable walk over engine
+`games` in `(created, id)` order from the oldest (`play_history_walk.rs`,
+`PlayHistoryWalkJob`, every 5 min). It replaced the fork-join
+`backup_batches` chain, which is dead: its completion arithmetic could
+never be satisfied once a job's count was lost (batch 11 stalled
+2026-01-27 with `jobs_enqueued = 501` against a discovery `LIMIT 500`).
+The `backup_batches` TABLE remains for DEV-1545.
+
+- **Cursor**: the `play_history_walk_cursor` singleton holds
+  `(last_created, last_id)`, seeded with a FINITE `1970-01-01` sentinel
+  (never `-infinity`: sqlx's NaiveDateTime decoder panics on it, and a
+  panic kills the whole process). Advance is monotonic and guarded by a
+  row comparison, so duplicate/concurrent ticks can never move it
+  backward. The cursor only advances past rows that are done (archived
+  in arena, or in `play_archive_exceptions`) — an in-flight, retrying,
+  or dropped job pins the cursor so its game is never lost. The enqueue
+  scan still continues through the rest of the page, but the page STARTS
+  at the cursor: a pin that lasts stops new work after at most
+  `PLAY_WALK_PAGE_SIZE` (2,000) more rows, so a persistent pin is on a
+  clock, not an infinite leash. A pin whose job is failing shows as a
+  per-tick WARN (`cursor pinned by in-flight job`) with the game id and
+  `error_count` — investigate one that outlasts a few hours with a
+  rising `error_count`.
+- **Rate**: `PLAY_WALK_INFLIGHT_CEILING` bounds how many
+  `BackupSingleGameJob`/`NativeBackupSingleGameJob` jobs may be pending
+  (queued + running) at once — walk-originated or not: budget = ceiling
+  minus ALL such pending rows, so the walk never stacks on the
+  hourly/native drains. A code constant, not env config; ramping is a
+  one-line PR and 0 pauses the walk. Jobs go out at
+  `BACKUP_JOB_PRIORITY` (-10, below game runners at 0). During the
+  hourly archive drains (~:21-:45) the budget is zero and the tick
+  enqueues nothing, but still advances the cursor and applies
+  corrections. `PruneGameTurnsJob`'s ~2,000/hour queue is deliberately
+  NOT counted — it is not backfill backlog.
+- **24h floor**: the walk only pages games older than 24 h, so the
+  cursor can never pass a game younger than that; anything that flips
+  terminal within 24 h of creation is guaranteed a later page (closing
+  the hourly job's 4-hour-window gap). Once the backlog is gone, ticks
+  are cheap no-op pages — there is no "done" state until DEV-1545
+  removes the walk.
+- **Exceptions**: `play_archive_exceptions` records games that
+  permanently cannot be archived, with a reason — structural failures
+  only (`engine_row_missing`, `game_header_unparseable`,
+  `frame_unparseable`, `frame_null_value`, `no_frames`). Transient
+  errors (GCS 5xx, DB errors) retry through cja and NEVER land there;
+  no error-count threshold converts one to the other. Nothing with zero
+  frames is ever uploaded. A game that is both archived and excepted
+  stays archived — the completeness report prefers archived state.
+  Re-arming a game after a fix takes TWO steps: delete its exception
+  row AND make the walk see the game again — rewind
+  `play_history_walk_cursor` behind it (a rewind to the seed re-walks
+  ~270k done rows at 2,000/tick, ~11 h of cheap no-op pages) or enqueue
+  a `BackupSingleGameJob` for it directly. Once the cursor has passed a
+  game no tick revisits it, so deleting the row alone does nothing —
+  and erases the only record of why the game is missing.
+- **Dates**: `games.created_at`, the GCS date path, and the archived
+  header's `Created` (when the JSON key is missing) all come from the
+  engine `created` COLUMN. Pre-2023 `value` rows often lack the JSON
+  key, which used to date objects 1970-01-01.
+- **Row corrections**: as the walk passes archived rows it corrects
+  `created_at` — only when the stored value is the 1970 epoch artifact,
+  never the ~211k rows whose JSON `Created` differs by milliseconds —
+  and `game_type` whenever it differs (`Ruleset.name` fallback: the
+  JSON `RulesetName` key is absent on nearly all pre-2022 games).
+  `gcs_path` and the objects are never touched. A header serving with
+  `Created` 0 serves the row's corrected date; a missing `RulesetName`
+  serves `Ruleset.name`.
+- **Streamed writer**: production builds v2 objects through the
+  incremental `ExportWriter` (frames paged 200 at a time through one
+  zstd stream, parse/serialize/compress on the blocking pool under the
+  `BACKUP_SLOT`) — byte-identical to the one-shot reference builder and
+  bounded to ~one page of memory, so the 285 games over 1,000 frames
+  (max 5,567) can't OOM the 1 GiB box the way the old whole-game fetch
+  correlated with.
 
 ## Who reads
 

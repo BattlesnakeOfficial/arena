@@ -1,0 +1,39 @@
+[package]
+name = "battlesnake"
+version.workspace = true
+edition.workspace = true
+description = "Battlesnake Arena CLI"
+
+[lib]
+name = "battlesnake_cli"
+
+[[bin]]
+name = "battlesnake"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1.21", features = ["full"] }
+color-eyre = "0.6.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+reqwest = { version = "0.12.12", features = ["json", "rustls-tls"], default-features = false }
+uuid = "1.6.1"
+chrono = { version = "0.4.23", default-features = false, features = ["serde", "clock"] }
+clap = { version = "4", features = ["derive", "env"] }
+# CLI human-readable output
+dirs = "5"
+toml = "0.8"
+open = "5"
+hostname = "0.4"
+is-terminal = "0.4"
+tabled = "0.17"
+colored = "2"
+chrono-humanize = "0.2"
+arena-api-scope = { path = "../arena-api-scope" }
+# Shared game engine (DEV-2143): the play subcommand (DEV-2144) will run
+# offline games through it; depending now keeps its tree under this crate's
+# dependency-hygiene test in CI.
+engine-core = { path = "../engine-core" }
+
+[dev-dependencies]
+wiremock = "0.6"

@@ -135,9 +135,9 @@ impl AdminMetrics {
         let games_created = sqlx::query!(
             r#"
             SELECT
-                COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '1 hour') as "last_hour!: i64",
-                COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '24 hours') as "last_24h!: i64",
-                COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '7 days') as "last_7d!: i64"
+                COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '1 hour' AND engine_game_id IS NULL) as "last_hour!: i64",
+                COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '24 hours' AND engine_game_id IS NULL) as "last_24h!: i64",
+                COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '7 days' AND engine_game_id IS NULL) as "last_7d!: i64"
             FROM games
             "#
         )
@@ -153,9 +153,9 @@ impl AdminMetrics {
         let games_finished = sqlx::query!(
             r#"
             SELECT
-                COUNT(*) FILTER (WHERE updated_at > NOW() - INTERVAL '1 hour' AND status = 'finished') as "last_hour!: i64",
-                COUNT(*) FILTER (WHERE updated_at > NOW() - INTERVAL '24 hours' AND status = 'finished') as "last_24h!: i64",
-                COUNT(*) FILTER (WHERE updated_at > NOW() - INTERVAL '7 days' AND status = 'finished') as "last_7d!: i64"
+                COUNT(*) FILTER (WHERE updated_at > NOW() - INTERVAL '1 hour' AND status = 'finished' AND engine_game_id IS NULL) as "last_hour!: i64",
+                COUNT(*) FILTER (WHERE updated_at > NOW() - INTERVAL '24 hours' AND status = 'finished' AND engine_game_id IS NULL) as "last_24h!: i64",
+                COUNT(*) FILTER (WHERE updated_at > NOW() - INTERVAL '7 days' AND status = 'finished' AND engine_game_id IS NULL) as "last_7d!: i64"
             FROM games
             "#
         )
@@ -172,6 +172,7 @@ impl AdminMetrics {
             r#"
             SELECT AVG(EXTRACT(EPOCH FROM (updated_at - created_at))) as "avg_duration_secs: f64"
             FROM games WHERE status = 'finished' AND updated_at > NOW() - INTERVAL '24 hours'
+              AND engine_game_id IS NULL
             "#
         )
         .fetch_one(db)

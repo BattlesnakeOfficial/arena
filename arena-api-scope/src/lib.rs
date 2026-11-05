@@ -1,6 +1,6 @@
 //! API token scope vocabulary: the permission names and snake-access modes.
 //!
-//! Lives in the lib crate so the server and `arena-cli` share one list.
+//! Shared by the arena server and the `battlesnake` CLI so both use one list.
 
 use std::str::FromStr;
 
@@ -9,62 +9,61 @@ use serde::{Deserialize, Serialize};
 /// A permission held by an API token. The exact dotted names are the public
 /// API surface (DB CHECK constraint values, wire format, 403 bodies) — byte
 /// for byte.
-#[derive(
-    Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, sqlx::Type,
-)]
-#[sqlx(type_name = "text")]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
+#[cfg_attr(feature = "sqlx", sqlx(type_name = "text"))]
 pub enum Permission {
     /// `GET /api/me`
     #[serde(rename = "profile.read")]
-    #[sqlx(rename = "profile.read")]
+    #[cfg_attr(feature = "sqlx", sqlx(rename = "profile.read"))]
     ProfileRead,
     /// adds `email` to `/api/me`
     #[serde(rename = "email.read")]
-    #[sqlx(rename = "email.read")]
+    #[cfg_attr(feature = "sqlx", sqlx(rename = "email.read"))]
     EmailRead,
     /// list and get all of the user's snakes
     #[serde(rename = "snakes.read")]
-    #[sqlx(rename = "snakes.read")]
+    #[cfg_attr(feature = "sqlx", sqlx(rename = "snakes.read"))]
     SnakesRead,
     /// create snakes
     #[serde(rename = "snakes.create")]
-    #[sqlx(rename = "snakes.create")]
+    #[cfg_attr(feature = "sqlx", sqlx(rename = "snakes.create"))]
     SnakesCreate,
     /// read games
     #[serde(rename = "games.read")]
-    #[sqlx(rename = "games.read")]
+    #[cfg_attr(feature = "sqlx", sqlx(rename = "games.read"))]
     GamesRead,
     /// create games with any of the user's snakes
     #[serde(rename = "games.create")]
-    #[sqlx(rename = "games.create")]
+    #[cfg_attr(feature = "sqlx", sqlx(rename = "games.create"))]
     GamesCreate,
     /// list, create, and revoke API tokens
     #[serde(rename = "tokens.manage")]
-    #[sqlx(rename = "tokens.manage")]
+    #[cfg_attr(feature = "sqlx", sqlx(rename = "tokens.manage"))]
     TokensManage,
     /// the admin API routes (admin users only)
     #[serde(rename = "admin")]
-    #[sqlx(rename = "admin")]
+    #[cfg_attr(feature = "sqlx", sqlx(rename = "admin"))]
     Admin,
     /// see a snake's `url` (per snake, in the token's access)
     #[serde(rename = "snake.url.read")]
-    #[sqlx(rename = "snake.url.read")]
+    #[cfg_attr(feature = "sqlx", sqlx(rename = "snake.url.read"))]
     SnakeUrlRead,
     /// change a snake's `url`
     #[serde(rename = "snake.url.write")]
-    #[sqlx(rename = "snake.url.write")]
+    #[cfg_attr(feature = "sqlx", sqlx(rename = "snake.url.write"))]
     SnakeUrlWrite,
     /// change a snake's editable fields except `url`
     #[serde(rename = "snake.edit")]
-    #[sqlx(rename = "snake.edit")]
+    #[cfg_attr(feature = "sqlx", sqlx(rename = "snake.edit"))]
     SnakeEdit,
     /// delete a snake
     #[serde(rename = "snake.delete")]
-    #[sqlx(rename = "snake.delete")]
+    #[cfg_attr(feature = "sqlx", sqlx(rename = "snake.delete"))]
     SnakeDelete,
     /// join and leave leaderboards
     #[serde(rename = "snake.compete")]
-    #[sqlx(rename = "snake.compete")]
+    #[cfg_attr(feature = "sqlx", sqlx(rename = "snake.compete"))]
     SnakeCompete,
 }
 
@@ -173,8 +172,9 @@ impl FromStr for Permission {
 /// Which of the user's snakes a token may touch. `All` covers every snake the
 /// user owns, now and later; `Selected` covers an explicit list (snakes the
 /// token creates join it).
-#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, sqlx::Type)]
-#[sqlx(type_name = "text", rename_all = "lowercase")]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
+#[cfg_attr(feature = "sqlx", sqlx(type_name = "text", rename_all = "lowercase"))]
 #[serde(rename_all = "lowercase")]
 pub enum SnakeAccess {
     All,

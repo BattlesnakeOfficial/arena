@@ -43,6 +43,7 @@ mod object_store;
 mod observability;
 mod og;
 mod placement;
+mod play_history_walk;
 mod play_import;
 mod play_shutdown_notices;
 mod routes;
