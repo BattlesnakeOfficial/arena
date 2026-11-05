@@ -525,9 +525,7 @@ fn advance(
         };
         (id.clone(), scripted)
     }));
-    crate::engine::apply_turn(game, &moves)?;
-    game.board.turn += 1;
-    crate::engine::spawn_food(game);
+    crate::engine::advance_turn(game, &moves)?;
     Ok(())
 }
 
