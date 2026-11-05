@@ -186,8 +186,10 @@ pub fn mode_rules(
             },
             None,
         ),
-        // Standard (and anything unrecognized) currently runs standard rules.
-        _ => (
+        // Standard rules. An explicit arm, not a catch-all: adding a mode
+        // later must be a compile error here, never a silent standard
+        // fallback.
+        GameMode::Standard => (
             "standard",
             StandardSettings {
                 food_spawn_chance: 15,
@@ -209,11 +211,18 @@ pub fn create_initial_game(
     height: i32,
     mode: GameMode,
     snakes: &[InitialSnake],
-) -> EngineGame {
+) -> color_eyre::Result<EngineGame> {
+    use color_eyre::eyre::Context as _;
+
     let snake_ids: Vec<String> = snakes.iter().map(|s| s.id.clone()).collect();
 
     let mut board = rules::board::create_default_board_state(&mut *rng, width, height, &snake_ids)
-        .expect("Failed to create initial board state");
+        .map_err(|error| {
+            eyre!(
+                "failed to create initial board state ({width}x{height}, {} snakes): {error:?}",
+                snakes.len()
+            )
+        })?;
 
     let mut snake_names = std::collections::HashMap::new();
     for s in snakes {
@@ -227,11 +236,15 @@ pub fn create_initial_game(
         // pipeline runs once with no moves at game start): strip all food
         // and pin snakes at max health. Initial bodies are stacked, so no
         // growth happens here.
-        rules::constrictor::modify_initial_board(&mut board)
-            .expect("constrictor initial board modification failed: zero-length snake");
+        rules::constrictor::modify_initial_board(&mut board).map_err(|error| {
+            eyre!(
+                "constrictor initial board modification failed ({width}x{height}, {} snakes): {error:?}",
+                snakes.len()
+            )
+        })?;
     }
 
-    EngineGame {
+    Ok(EngineGame {
         board,
         meta: GameMeta {
             game_id: game_id.to_string(),
@@ -242,7 +255,7 @@ pub fn create_initial_game(
             source: GameSource::default(),
         },
         snake_names,
-    }
+    })
 }
 
 /// Deterministic game inputs for a seed: the RNG that drives placement and
@@ -410,6 +423,21 @@ pub fn is_game_over(game: &EngineGame) -> bool {
     }
 }
 
+/// Game-over for a game whose ruleset name may not match its snake count.
+///
+/// `play` (the battlesnake CLI) runs `-g standard` with a single snake too:
+/// the solo game-over check is chosen by how many snakes entered the game,
+/// not by the mode label, exactly like the Go CLI (`WithSolo(len(urls) < 2)`).
+/// The server keeps calling [`is_game_over`], whose ruleset-name dispatch
+/// matches every game it creates.
+pub fn is_game_over_for(game: &EngineGame, total_snakes: usize) -> bool {
+    if total_snakes < 2 {
+        rules::solo::is_game_over(&game.board)
+    } else {
+        is_game_over(game)
+    }
+}
+
 /// Apply a single turn: move snakes, reduce health, feed, eliminate
 ///
 /// Returns the IDs of the snakes that ate food this turn. This is the only
@@ -532,7 +560,8 @@ mod tests {
     /// snapshot after every turn (turn 0 included).
     fn play_scripted_game(mode: GameMode, seed: u64) -> Vec<BoardState> {
         let (mut rng, game_id) = seeded_game(seed);
-        let mut game = create_initial_game(&mut rng, game_id, 11, 11, mode, &initial_snakes(mode));
+        let mut game = create_initial_game(&mut rng, game_id, 11, 11, mode, &initial_snakes(mode))
+            .expect("valid initial game");
         let mut boards = vec![game.board.clone()];
         while !is_game_over(&game) && game.board.turn < MAX_TURNS {
             let moves: Vec<(String, Direction)> = game
@@ -583,7 +612,8 @@ mod tests {
 
     fn run_seeded_random_game(mode: GameMode, seed: u64) -> GameResult {
         let (mut rng, game_id) = seeded_game(seed);
-        let game = create_initial_game(&mut rng, game_id, 11, 11, mode, &initial_snakes(mode));
+        let game = create_initial_game(&mut rng, game_id, 11, 11, mode, &initial_snakes(mode))
+            .expect("valid initial game");
         run_game_with_random_moves(game, &mut rng).expect("valid game")
     }
 
@@ -603,5 +633,182 @@ mod tests {
                 );
             }
         }
+    }
+
+    // --- create_initial_game reachability (DEV-2144 carry-over #1) ---
+
+    /// 3×3 can never be populated: every snake spawn point collapses to the
+    /// center (1,1), every diagonal of (1,1) is a board corner, so food
+    /// placement has no valid square and the center itself is occupied.
+    #[test]
+    fn create_initial_game_3x3_is_err() {
+        let (mut rng, game_id) = seeded_game(0);
+        let snakes = vec![InitialSnake {
+            id: "s0".into(),
+            name: "S0".into(),
+        }];
+        assert!(create_initial_game(&mut rng, game_id, 3, 3, GameMode::Standard, &snakes).is_err());
+    }
+
+    /// Every input `play` accepts (7/11/19 square boards, 1–8 snakes) can
+    /// always be populated — `NoRoomForFood` is unreachable for validated
+    /// inputs. Bounded seed sweep (iteration-bounded, not wall-clock).
+    #[test]
+    fn create_initial_game_ok_for_every_valid_play_input() {
+        for &(width, height) in &[(7, 7), (11, 11), (19, 19)] {
+            for count in 1..=8 {
+                let snakes: Vec<InitialSnake> = (0..count)
+                    .map(|i| InitialSnake {
+                        id: format!("s{i}"),
+                        name: format!("S{i}"),
+                    })
+                    .collect();
+                for mode in MODES {
+                    for seed in 0..200u64 {
+                        let (mut rng, game_id) = seeded_game(seed);
+                        let result =
+                            create_initial_game(&mut rng, game_id, width, height, mode, &snakes);
+                        assert!(
+                            result.is_ok(),
+                            "{width}x{height} {count} snakes {mode:?} seed {seed}: \n{result:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // --- seeded_game determinism (DEV-2144 carry-over #2) ---
+
+    /// The game ID is a pure function of the seed: same seed, same UUID,
+    /// different seeds, different UUIDs — and the UUID is v4-shaped
+    /// (`Builder::from_random_bytes`).
+    #[test]
+    fn seeded_game_id_is_seed_derived() {
+        const SEED_A: u64 = 12345;
+        const SEED_B: u64 = 67890;
+
+        let (_, id_a1) = seeded_game(SEED_A);
+        let (_, id_a2) = seeded_game(SEED_A);
+        assert_eq!(id_a1, id_a2, "same seed must give the same game ID");
+
+        let (_, id_b) = seeded_game(SEED_B);
+        assert_ne!(id_a1, id_b, "different seeds must give different IDs");
+
+        assert_eq!(id_a1.get_version_num(), 4);
+        assert_eq!(id_b.get_version_num(), 4);
+    }
+
+    /// Royale hazards derive from the game ID's seed: two seeds whose games
+    /// get different IDs must produce different hazard regions, and the same
+    /// ID must always produce the same one. Pinned at turn 24 —
+    /// `populate_hazards` uses `turn + 1 = 25`, exactly one shrink at
+    /// shrink-every-25; at turn 0 both hazard sets are empty (no
+    /// discrimination) and with one shrink two seeds agree 1 time in 4, so
+    /// the turn AND the seed pair are pinned.
+    #[test]
+    fn royale_hazards_diverge_across_seed_derived_game_ids() {
+        const SEED_A: u64 = 12345;
+        const SEED_B: u64 = 67890;
+        const PINNED_TURN: i32 = 24;
+
+        let (_, id_a) = seeded_game(SEED_A);
+        let (_, id_b) = seeded_game(SEED_B);
+        let rules_a = mode_rules(GameMode::Royale, id_a).2;
+        let rules_b = mode_rules(GameMode::Royale, id_b).2;
+
+        let hazards = |rules: &Option<RoyaleSettings>| {
+            let mut board = BoardState {
+                turn: PINNED_TURN,
+                width: 11,
+                height: 11,
+                food: vec![],
+                snakes: vec![],
+                hazards: vec![],
+            };
+            rules::royale::populate_hazards(&mut board, rules.as_ref().unwrap()).unwrap();
+            board.hazards
+        };
+
+        // Same ID: deterministic.
+        assert_eq!(hazards(&rules_a), hazards(&rules_a));
+        // Different seed-derived IDs: different hazard regions. SEED_A and
+        // SEED_B were verified locally to differ at this turn (one shrink
+        // draws one edge from the seed; these two draw different edges).
+        assert_ne!(
+            hazards(&rules_a),
+            hazards(&rules_b),
+            "seeded_game must feed game_seed; hazards identical means the ID is not seed-derived"
+        );
+    }
+
+    // --- is_game_over_for (single-snake games with any mode label) ---
+
+    fn game_with_snakes(ruleset_name: &str, alive: usize, dead: usize) -> EngineGame {
+        let mut snakes = Vec::new();
+        for i in 0..alive {
+            snakes.push(rules::Snake {
+                id: format!("a{i}"),
+                body: vec![Point::new(i as i32, 0)],
+                health: 100,
+                eliminated_cause: rules::EliminationCause::NotEliminated,
+                eliminated_by: String::new(),
+                eliminated_on_turn: 0,
+            });
+        }
+        for i in 0..dead {
+            snakes.push(rules::Snake {
+                id: format!("d{i}"),
+                body: vec![Point::new(0, 10 - i as i32)],
+                health: 0,
+                eliminated_cause: rules::EliminationCause::OutOfHealth,
+                eliminated_by: String::new(),
+                eliminated_on_turn: 3,
+            });
+        }
+        EngineGame {
+            board: BoardState {
+                turn: 5,
+                width: 11,
+                height: 11,
+                food: vec![],
+                snakes,
+                hazards: vec![],
+            },
+            meta: GameMeta {
+                game_id: "g".into(),
+                ruleset_name: ruleset_name.into(),
+                timeout: 500,
+                settings: rules::StandardSettings {
+                    food_spawn_chance: 15,
+                    minimum_food: 1,
+                    hazard_damage_per_turn: 14,
+                },
+                royale: None,
+                source: GameSource::Custom,
+            },
+            snake_names: std::collections::HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn is_game_over_for_single_snake_uses_solo_check() {
+        // 1 alive of 1 entered, standard ruleset: the standard check would
+        // end the game at turn 0; the solo check keeps it running.
+        let game = game_with_snakes("standard", 1, 0);
+        assert!(!is_game_over_for(&game, 1));
+        // Once that snake dies, over.
+        let game = game_with_snakes("standard", 0, 1);
+        assert!(is_game_over_for(&game, 1));
+    }
+
+    #[test]
+    fn is_game_over_for_multi_snake_uses_standard_check() {
+        let game = game_with_snakes("standard", 2, 0);
+        assert!(!is_game_over_for(&game, 2));
+        let game = game_with_snakes("standard", 1, 1);
+        assert!(is_game_over_for(&game, 2));
+        let game = game_with_snakes("solo", 0, 2);
+        assert!(is_game_over_for(&game, 2));
     }
 }

@@ -14,6 +14,6 @@ pub mod wire;
 
 pub use game::{
     EngineGame, GameMeta, GameMode, GameResult, GameSource, InitialSnake, MAX_TURNS,
-    MOVE_TIMEOUT_MS, advance_turn, apply_turn, create_initial_game, is_game_over, mode_rules,
-    run_game_with_random_moves, seeded_game, spawn_food,
+    MOVE_TIMEOUT_MS, advance_turn, apply_turn, create_initial_game, is_game_over,
+    is_game_over_for, mode_rules, run_game_with_random_moves, seeded_game, spawn_food,
 };
