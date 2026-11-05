@@ -4,7 +4,7 @@
 //! The engine uses `rules::BoardState` internally; conversion happens at the HTTP
 //! boundary.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::EngineGame;
@@ -114,6 +114,34 @@ pub struct Game {
     pub turn: i32,
     pub board: Board,
     pub you: BattleSnake,
+}
+
+// --- Snake metadata (GET /) ---
+
+/// The `customizations` block of a snake's `GET /` response. Moved from the
+/// server so the CLI's `play` reads metadata through the same types.
+#[derive(Debug, Deserialize, Default)]
+pub struct InfoCustomizations {
+    #[serde(default)]
+    pub color: String,
+    #[serde(default)]
+    pub head: String,
+    #[serde(default)]
+    pub tail: String,
+}
+
+/// A snake's `GET /` (metadata) response. Every field defaults, so any JSON
+/// object parses; a non-object body is a parse failure.
+#[derive(Debug, Deserialize, Default)]
+pub struct SnakeInfoResponse {
+    #[serde(default)]
+    pub color: Option<String>,
+    #[serde(default)]
+    pub head: Option<String>,
+    #[serde(default)]
+    pub tail: Option<String>,
+    #[serde(default)]
+    pub customizations: Option<InfoCustomizations>,
 }
 
 // --- Conversion from engine types ---
@@ -975,5 +1003,25 @@ mod tests {
             json.get("squad").is_some(),
             "squad must always be serialized"
         );
+    }
+}
+
+#[cfg(test)]
+mod seq_shape_tests {
+    use super::SnakeInfoResponse;
+
+    /// What counts as a metadata parse failure. Non-JSON and non-object,
+    /// non-array bodies fail; a JSON object always parses (all fields
+    /// default). Quirk, documented: serde also accepts a positional JSON
+    /// ARRAY for a struct (Go's json.Unmarshal rejects it) — an edge case
+    /// of a snake answering `GET /` with an array that yields the default
+    /// metadata instead of a parse error. Not worth a custom Deserialize.
+    #[test]
+    fn metadata_parse_failure_shapes() {
+        assert!(serde_json::from_str::<SnakeInfoResponse>("5").is_err());
+        assert!(serde_json::from_str::<SnakeInfoResponse>(r#""hi""#).is_err());
+        assert!(serde_json::from_str::<SnakeInfoResponse>("").is_err());
+        assert!(serde_json::from_str::<SnakeInfoResponse>("{}").is_ok());
+        assert!(serde_json::from_str::<SnakeInfoResponse>("[1,2]").is_err());
     }
 }

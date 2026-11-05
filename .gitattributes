@@ -1,0 +1,3 @@
+# Byte-for-byte viewmap fixture compares in cli/tests would pass on
+# Linux/macOS and fail only on Windows if autocrlf rewrote them.
+cli/tests/play/testdata/** -text

@@ -69,6 +69,7 @@ pub fn create_initial_game(
         game_mode(&game_type),
         &snakes,
     )
+    .expect("Failed to create initial board state")
 }
 
 /// One full turn (moves, turn counter, food) with prod randomness.
