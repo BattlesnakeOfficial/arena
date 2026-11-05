@@ -22,17 +22,26 @@ Each archive contains the `battlesnake` binary (`battlesnake.exe` on Windows), t
 macOS/Linux:
 
 ```sh
-tar xzf battlesnake_<version>_Linux_x86_64.tar.gz
+tar xzf battlesnake_<version>_<OS>_<arch>.tar.gz
 chmod +x battlesnake
 ./battlesnake --version
 ```
 
 Windows: unzip the archive, then run `battlesnake.exe --version`.
 
+**macOS note:** the binary isn't signed or notarized. An archive downloaded in a browser is quarantined, and macOS refuses to run it. If macOS says it can't verify the developer, remove the quarantine attribute:
+
+```sh
+xattr -d com.apple.quarantine ./battlesnake
+```
+
+or allow it once under System Settings > Privacy & Security. Archives fetched with `curl` aren't quarantined.
+
 To verify a download, also grab `checksums.txt` from the same release and check just the archive you use:
 
 ```sh
 sha256sum -c checksums.txt --ignore-missing
+shasum -a 256 -c checksums.txt --ignore-missing  # macOS — sha256sum isn't on stock macOS
 ```
 
 ## Install — cargo
@@ -68,7 +77,9 @@ battlesnake play -W 11 -H 11 --name "My Snake" --url http://127.0.0.1:8085 -g so
 
 The CLI drives the game against your snake and prints the outcome.
 
-Add `--browser` to watch the game live on [board.battlesnake.com](https://board.battlesnake.com) instead of the terminal.
+Add `--browser` to watch the game live in your browser on [board.battlesnake.com](https://board.battlesnake.com).
+
+With `--browser`, Chrome and other Chromium browsers ask once: "board.battlesnake.com wants to: Access other apps and services on this device." Choose **Allow** — the board connects to the CLI on localhost to load the game. If you choose **Block**, the board can't load the game.
 
 ## What this CLI runs today
 
