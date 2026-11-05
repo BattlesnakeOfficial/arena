@@ -420,7 +420,7 @@ async fn browser_streams_whole_game_in_every_mode() {
         let status = run.wait_exit().await;
         assert_eq!(status.code(), Some(0), "{mode}");
 
-        // Solo also checks the exact URL built (byte-for-byte) and the
+        // Every mode checks the exact URL built (byte-for-byte) and the
         // Local Network Access hint.
         assert_eq!(
             url_line,

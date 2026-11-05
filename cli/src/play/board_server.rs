@@ -22,6 +22,7 @@
 use std::collections::HashMap;
 use std::io::Write;
 use std::sync::Arc;
+use std::task::Poll;
 use std::time::{Duration, Instant};
 
 use axum::extract::ws::{CloseFrame, Message, Utf8Bytes, WebSocket, WebSocketUpgrade};
@@ -463,7 +464,11 @@ async fn get_events(
 /// Per-connection task: full replay from turn 0, then the live tail. On a
 /// client that has everything (including `game_end`): graceful close
 /// FIRST, then signal `any_finished` — never before (aborting the serve
-/// task mid-close RSTs the final frames).
+/// task mid-close RSTs the final frames). A client that leaves before it
+/// has everything — including one that goes away while caught up and
+/// parked waiting for the next event (a closed or reloaded tab) — returns
+/// WITHOUT `any_finished`: it reconnects for a full replay, and `finish`
+/// must not mistake it for a finished tab and cut the live one off.
 async fn handle_client(
     socket: WebSocket,
     shared: Arc<SharedEvents>,
@@ -503,16 +508,57 @@ async fn handle_client(
             conn.send_modify(|s| s.last_progress = Instant::now());
         }
         if ended && sent == len {
+            // The sends above can succeed into a socket the client
+            // already left: a websocket Close only shuts the
+            // client→server direction, so the kernel happily buffers
+            // our `game_end` for a dead peer. One no-wait poll of the
+            // receive half — a Close/error/EOF already visible here
+            // means the client left before it had everything: vanished,
+            // NOT finished.
+            if let Poll::Ready(msg) = futures::poll!(receiver.next())
+                && client_left(msg)
+            {
+                return;
+            }
+            // A Pending poll (or client text/ping/pong): no evidence the
+            // client left — proceed to the graceful close.
             break;
         }
-        if state_rx.changed().await.is_err() {
-            return; // server dropped, NOT finished
+        // Park while caught up: wait for the next event OR the client
+        // leaving. `biased` with the receive half first, so a Close that
+        // is already buffered beats a simultaneously appended event — a
+        // tab that left while caught up must never fall through to the
+        // "has everything" exit above.
+        tokio::select! {
+            biased;
+            msg = receiver.next() => {
+                if client_left(msg) {
+                    // Closed or reloaded before it had everything:
+                    // vanished, NOT finished (ReconnectingWebSocket
+                    // reconnects for a full replay).
+                    return;
+                }
+                // Client text/ping/pong: keep waiting.
+            }
+            res = state_rx.changed() => {
+                if res.is_err() {
+                    return; // server dropped, NOT finished
+                }
+            }
         }
     }
     // Only reached when this client has everything, including game_end.
     graceful_close(&mut sender, &mut receiver, close_ack_timeout).await;
     conn.send_modify(|s| s.any_finished = true);
     // `active -= 1` happens ONLY via the guard's Drop — keep it that way.
+}
+
+/// Did the client leave? A Close frame (what a browser's websocket sends
+/// when its tab closes or reloads), a socket error, or EOF. Client
+/// text/ping/pong frames do not count — the board never sends those, but
+/// another client might.
+fn client_left(msg: Option<Result<Message, axum::Error>>) -> bool {
+    matches!(msg, None | Some(Err(_)) | Some(Ok(Message::Close(_))))
 }
 
 /// Send a Close(1000) frame and wait for the client's acknowledgement,
@@ -643,25 +689,34 @@ impl BoardServer {
         customizations: &HashMap<String, SnakeCustomizations>,
         runtime: &HashMap<String, SnakeRuntime>,
     ) -> Result<()> {
-        self.append(&GameEvent {
-            message_type: "frame",
-            data: build_frame(game, customizations, runtime),
-        })
+        self.append(
+            &GameEvent {
+                message_type: "frame",
+                data: build_frame(game, customizations, runtime),
+            },
+            false,
+        )
     }
 
-    /// Append `{"Type":"game_end","Data":{BoardGame}}`, set `ended`, and
-    /// stamp `game_ended_at` (one atomic `send_modify`).
+    /// Append `{"Type":"game_end","Data":{BoardGame}}` and stamp
+    /// `game_ended_at`. The append publishes the new length and `ended`
+    /// in ONE `send_modify`, so a client can never observe `game_end`'s
+    /// length without `ended` (or the reverse).
     pub fn send_game_end(&mut self) -> Result<()> {
-        self.append(&GameEvent {
-            message_type: "game_end",
-            data: self.game.clone(),
-        })?;
+        self.append(
+            &GameEvent {
+                message_type: "game_end",
+                data: self.game.clone(),
+            },
+            true,
+        )?;
         self.game_ended_at = Some(Instant::now());
-        self.shared.state.send_modify(|s| s.ended = true);
         Ok(())
     }
 
-    fn append(&self, event: &GameEvent<impl Serialize>) -> Result<()> {
+    /// Serialize + append an event. `ends_game` also flips `ended` in
+    /// the same atomic update (see `send_game_end`).
+    fn append(&self, event: &GameEvent<impl Serialize>, ends_game: bool) -> Result<()> {
         let json = serde_json::to_string(event).wrap_err("serializing board event")?;
         let mut log = self
             .shared
@@ -671,7 +726,10 @@ impl BoardServer {
         log.push(json.into());
         let len = log.len();
         drop(log); // never hold the std Mutex across an await (none here, keep the habit)
-        self.shared.state.send_modify(|s| s.len = len);
+        self.shared.state.send_modify(|s| {
+            s.len = len;
+            s.ended |= ends_game;
+        });
         Ok(())
     }
 
@@ -1879,10 +1937,9 @@ mod tests {
     /// client B still gets its full stream including game_end.
     #[tokio::test]
     async fn vanished_client_does_not_count_as_finished() {
-        // drain_stall long enough that only A's-send-failure path (not the
-        // stall clock) can let B complete... actually the load-bearing
-        // assert is the direct `any_finished` check below; keep the stall
-        // above B's total read time (~1.5 s of 150 ms reads).
+        // drain_stall sits above B's total read time (~1.5 s of 150 ms
+        // reads) so only `any_finished` — not the stall clock — can end
+        // `finish` before B is done.
         let opts = BrowserOptions {
             open_browser: false,
             connect_grace: Duration::from_secs(1),
@@ -1955,12 +2012,26 @@ mod tests {
                     _ => {}
                 }
             }
-            (got_end, close_code)
+            (got_end, close_code, Instant::now())
         };
+        // Ordering assertion (like B5): B must complete its close
+        // handshake BEFORE `finish` returns. An early `finish` aborts the
+        // serve task, which in the real CLI tears down the process with
+        // the reloaded tab still mid-replay — in-process the connection
+        // task survives the abort, so timestamps are the only way to
+        // catch it here.
         let mut finish_log = Vec::new();
-        let ((got_end, close_code), ()) = tokio::join!(client, srv.finish(&mut finish_log));
+        let finish = async {
+            srv.finish(&mut finish_log).await;
+            Instant::now()
+        };
+        let ((got_end, close_code, closed_at), finished_at) = tokio::join!(client, finish);
         assert!(got_end, "client B was cut off: no game_end");
         assert_eq!(close_code, Some(1000));
+        assert!(
+            closed_at <= finished_at,
+            "finish returned before B completed its close handshake"
+        );
     }
 
     /// PR review round 1 pin: a caught-up client that went away while
