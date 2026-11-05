@@ -23,8 +23,10 @@ attempts/failures. It uses existing tracing fields. Request counts include
 `/health` checks; failure-event counts include retry attempts, not unique jobs.
 HTTP duration metrics are microseconds; game timings are milliseconds.
 
-The `arena-product` dashboard defaults to a 30-day range and reads events only
-(fields present at emission). Per-source and new-user series start at deploy:
+The `arena-product` dashboard defaults to a 30-day range. Most of its
+metrics read events (fields present at emission); the owner and snake
+tiles read `snake.lifecycle` span rows, on the row written when the span
+opens. Per-source and new-user series start at deploy:
 pre-deploy events carry no `source` or `new_user` fields, so those charts and
 the filtered tiles cover post-deploy data only. `user_id` and `auth_type`
 (`session` or `token`) for authenticated requests are queryable: auth code
@@ -70,6 +72,10 @@ of the 28-day actives for each definition, and source-share tiles show
 each source's 7-day share of games played. The 90-day daily and 364-day
 Monday-week charts live on the separate `arena-product-history`
 dashboard, so the product page never pays for year-long lake scans.
+The Monday-week charts run over a trailing window, so the first bucket
+starts mid-week or at the lake's history start and has a partial count,
+and the current week's bucket at the end is partial too — the last point
+reading low is not a drop.
 History windows clamp to the lake's history start and show a `data from`
 chip until coverage grows (about 2027-09-24 for a full 364 days); a first
 load after idle can 503 near 50 s and answers on reload; and the year
@@ -119,8 +125,9 @@ under query budgets; Eyes exposes that state instead of claiming an exact result
 3. Bump cja's subscriber requirement to `0.10` and release cja.
 4. Update Arena's lockfile to the published subscriber and released cja
    (confirm exactly one subscriber version with `cargo tree -i
-   eyes-subscriber`), then deploy Arena and verify all named metrics,
-   both thresholds, and all three dashboards in production Eyes.
+   eyes-subscriber`), then deploy Arena and verify the process role,
+   heartbeat, and run-health declarations, all named metrics, both
+   thresholds, and all three dashboards in production Eyes.
 
 Local validation before publication uses an uncommitted Cargo patch file for
 cja, eyes-query, and eyes-subscriber. Those path overrides must not ship. Live
