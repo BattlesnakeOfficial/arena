@@ -7,9 +7,9 @@ use crate::{
 use cja::eyes_manifest::{AppManifest, ExpectedProcessRole, HttpMonitor};
 use eyes_subscriber::{
     AggregateFunction as Agg, DashboardItem as Item, DashboardSection as Section,
-    MetricThresholdBuilder, NamedDashboard, NamedMetric, NamedMetricBuilder as Metric,
-    ProcessHeartbeat, ProcessHeartbeatConfig, ProcessHeartbeatHandle, ProcessIdentity,
-    RetentionPolicy, ThresholdComparison::Above,
+    MetricResultShape, MetricThresholdBuilder, MetricValueType, NamedDashboard, NamedMetric,
+    NamedMetricBuilder as Metric, ProcessHeartbeat, ProcessHeartbeatConfig, ProcessHeartbeatHandle,
+    ProcessIdentity, RatioMetricBuilder, RetentionPolicy, ThresholdComparison::Above,
 };
 
 pub const ROLE: &str = "arena";
@@ -17,6 +17,14 @@ pub const ROLE: &str = "arena";
 /// Days Eyes keeps arena's DEBUG telemetry in Postgres; its lake keeps it after
 /// that. Every other level keeps Eyes' server default.
 pub const DEBUG_RETENTION_DAYS: u32 = 2;
+
+/// Trailing-window constants for the product dashboards' fixed tiles and
+/// charts (DEV-2062). All within the server's 1..=31_622_400 s item bound.
+const DAY: u64 = 86_400;
+const WEEK: u64 = 604_800;
+const FOUR_WEEKS: u64 = 2_419_200;
+const NINETY_DAYS: u64 = 7_776_000; // 90 days
+const THREE_HUNDRED_SIXTY_FOUR_DAYS: u64 = 31_449_600; // 364 days
 
 pub fn manifest(
     registry: &cja::cron::CronRegistry<AppState>,
@@ -88,7 +96,11 @@ pub fn manifest(
     Ok(manifest
         .metrics(metrics)
         .metric_thresholds(thresholds)
-        .dashboards(vec![dashboard()?, product_dashboard()?]))
+        .dashboards(vec![
+            dashboard()?,
+            product_dashboard()?,
+            product_history_dashboard()?,
+        ]))
 }
 
 fn count(id: &str, title: &str, path: &str, value: &str) -> Result<Metric, String> {
@@ -104,6 +116,30 @@ fn timing(id: &str, title: &str, kind: &str) -> Result<NamedMetric, String> {
         .display_name(title)
         .unit("ms")
         .build()
+}
+
+/// Distinct users with an authenticated request, counted on cja's
+/// `finished processing request` event. Target AND message, in that order:
+/// the target alone also matches `server.request` span rows, and
+/// `fields.user_id` alone also matches `snake.lifecycle` spans
+/// (DEV-2076 fallback ruling). Stage order is filter call order.
+fn active_request_users(id: &str, title: &str) -> Result<Metric, String> {
+    Ok(Metric::new(id, Agg::CountDistinct, Some("fields.user_id"))?
+        .display_name(title)
+        .filter_eq("target", "cja::server::trace")?
+        .filter_eq("message", "finished processing request")?
+        .unit("users"))
+}
+
+/// Distinct owners/snakes behind a real `/end` call. `endpoint` is a
+/// span-creation field on `snake.lifecycle` (DEV-2061) — open row, no
+/// close-row merge needed. Name first, then the endpoint field.
+fn active_lifecycle(id: &str, title: &str, value: &str, unit: &str) -> Result<Metric, String> {
+    Ok(Metric::new(id, Agg::CountDistinct, Some(value))?
+        .display_name(title)
+        .filter_eq("name", "snake.lifecycle")?
+        .filter_eq("fields.endpoint", "end")?
+        .unit(unit))
 }
 
 fn metrics() -> Result<Vec<NamedMetric>, String> {
@@ -329,6 +365,261 @@ fn metrics() -> Result<Vec<NamedMetric>, String> {
         .unit("snakes")
         .time_bucket(86_400)
         .build()?,
+        // DEV-2062: active users/owners/snakes, per-source games, weekly
+        // variants, and the ratios over them. Every aggregate is
+        // count_distinct or count over events that exist today; Arena
+        // computes nothing itself.
+        active_request_users("product.users.active", "Users with an authenticated request")?
+            .description(
+                "Distinct users who made an authenticated request (session sign-in or API token), counted on the request-completion event.",
+            )
+            .build()?,
+        active_request_users(
+            "product.users.active.daily",
+            "Users with an authenticated request, per day",
+        )?
+        .time_bucket(DAY)
+        .build()?,
+        active_request_users(
+            "product.users.active.weekly",
+            "Users with an authenticated request, per week",
+        )?
+        .time_bucket_weeks(1)
+        .build()?,
+        active_request_users(
+            "product.users.active.month",
+            "Users with an authenticated request (28-day side)",
+        )?
+        .build()?,
+        active_lifecycle(
+            "product.owners.active",
+            "Owners whose snake played",
+            "fields.user_id",
+            "users",
+        )?
+        .description(
+            "Distinct owners whose snake played a game, counted on the snake /end call (snake.lifecycle span, endpoint end).",
+        )
+        .build()?,
+        active_lifecycle(
+            "product.owners.active.daily",
+            "Owners whose snake played, per day",
+            "fields.user_id",
+            "users",
+        )?
+        .time_bucket(DAY)
+        .build()?,
+        active_lifecycle(
+            "product.owners.active.weekly",
+            "Owners whose snake played, per week",
+            "fields.user_id",
+            "users",
+        )?
+        .time_bucket_weeks(1)
+        .build()?,
+        active_lifecycle(
+            "product.owners.active.month",
+            "Owners whose snake played (28-day side)",
+            "fields.user_id",
+            "users",
+        )?
+        .build()?,
+        active_lifecycle(
+            "product.snakes.active",
+            "Snakes that played a game",
+            "fields.battlesnake_id",
+            "snakes",
+        )?
+        .description(
+            "Distinct battlesnakes that played a game, counted on the snake /end call (snake.lifecycle span, endpoint end).",
+        )
+        .build()?,
+        active_lifecycle(
+            "product.snakes.active.weekly",
+            "Snakes that played a game, per week",
+            "fields.battlesnake_id",
+            "snakes",
+        )?
+        .time_bucket_weeks(1)
+        .build()?,
+        count(
+            "product.games.ladder",
+            "Games played (ladder)",
+            "fields.event_type",
+            "game_completed",
+        )?
+        .filter_eq("fields.source", "ladder")?
+        .unit("games")
+        .build()?,
+        count(
+            "product.games.tournament",
+            "Games played (tournament)",
+            "fields.event_type",
+            "game_completed",
+        )?
+        .filter_eq("fields.source", "tournament")?
+        .unit("games")
+        .build()?,
+        count(
+            "product.games.ladder.weekly",
+            "Games played (ladder), per week",
+            "fields.event_type",
+            "game_completed",
+        )?
+        .filter_eq("fields.source", "ladder")?
+        .unit("games")
+        .time_bucket_weeks(1)
+        .build()?,
+        count(
+            "product.games.custom.weekly",
+            "Games played (custom), per week",
+            "fields.event_type",
+            "game_completed",
+        )?
+        .filter_eq("fields.source", "custom")?
+        .unit("games")
+        .time_bucket_weeks(1)
+        .build()?,
+        count(
+            "product.games.tournament.weekly",
+            "Games played (tournament), per week",
+            "fields.event_type",
+            "game_completed",
+        )?
+        .filter_eq("fields.source", "tournament")?
+        .unit("games")
+        .time_bucket_weeks(1)
+        .build()?,
+        count(
+            "product.new_users.weekly",
+            "New users, per week",
+            "fields.event_type",
+            "user_authenticated",
+        )?
+        .filter_eq("fields.new_user", true)?
+        .unit("users")
+        .time_bucket_weeks(1)
+        .build()?,
+        count(
+            "product.new_snakes.weekly",
+            "New snakes, per week",
+            "fields.event_type",
+            "battlesnake_created",
+        )?
+        .unit("snakes")
+        .time_bucket_weeks(1)
+        .build()?,
+        RatioMetricBuilder::new(
+            "product.users.active.stickiness.daily",
+            "product.users.active",
+            "product.users.active.month",
+        )
+        .numerator_window_seconds(DAY)
+        .denominator_window_seconds(FOUR_WEEKS)
+        .as_percentage()
+        .display_name("Users with an authenticated request: last 1 day as % of last 28 days")
+        .description(
+            "Distinct users with an authenticated request in the last 1 day as a percentage of the last 28 days.",
+        )
+        .build(
+            MetricResultShape::Scalar,
+            MetricValueType::Int,
+            MetricResultShape::Scalar,
+            MetricValueType::Int,
+        )?,
+        RatioMetricBuilder::new(
+            "product.users.active.stickiness.weekly",
+            "product.users.active",
+            "product.users.active.month",
+        )
+        .numerator_window_seconds(WEEK)
+        .denominator_window_seconds(FOUR_WEEKS)
+        .as_percentage()
+        .display_name("Users with an authenticated request: last 7 days as % of last 28 days")
+        .description(
+            "Distinct users with an authenticated request in the last 7 days as a percentage of the last 28 days.",
+        )
+        .build(
+            MetricResultShape::Scalar,
+            MetricValueType::Int,
+            MetricResultShape::Scalar,
+            MetricValueType::Int,
+        )?,
+        RatioMetricBuilder::new(
+            "product.owners.active.stickiness.daily",
+            "product.owners.active",
+            "product.owners.active.month",
+        )
+        .numerator_window_seconds(DAY)
+        .denominator_window_seconds(FOUR_WEEKS)
+        .as_percentage()
+        .display_name("Owners whose snake played: last 1 day as % of last 28 days")
+        .description(
+            "Distinct owners whose snake played in the last 1 day as a percentage of the last 28 days.",
+        )
+        .build(
+            MetricResultShape::Scalar,
+            MetricValueType::Int,
+            MetricResultShape::Scalar,
+            MetricValueType::Int,
+        )?,
+        RatioMetricBuilder::new(
+            "product.owners.active.stickiness.weekly",
+            "product.owners.active",
+            "product.owners.active.month",
+        )
+        .numerator_window_seconds(WEEK)
+        .denominator_window_seconds(FOUR_WEEKS)
+        .as_percentage()
+        .display_name("Owners whose snake played: last 7 days as % of last 28 days")
+        .description(
+            "Distinct owners whose snake played in the last 7 days as a percentage of the last 28 days.",
+        )
+        .build(
+            MetricResultShape::Scalar,
+            MetricValueType::Int,
+            MetricResultShape::Scalar,
+            MetricValueType::Int,
+        )?,
+        RatioMetricBuilder::new(
+            "product.games.ladder.share",
+            "product.games.ladder",
+            "product.games.played",
+        )
+        .as_percentage()
+        .display_name("Ladder share of games played")
+        .build(
+            MetricResultShape::Scalar,
+            MetricValueType::Int,
+            MetricResultShape::Scalar,
+            MetricValueType::Int,
+        )?,
+        RatioMetricBuilder::new(
+            "product.games.user_created.share",
+            "product.games.user_created",
+            "product.games.played",
+        )
+        .as_percentage()
+        .display_name("User-created share of games played")
+        .build(
+            MetricResultShape::Scalar,
+            MetricValueType::Int,
+            MetricResultShape::Scalar,
+            MetricValueType::Int,
+        )?,
+        RatioMetricBuilder::new(
+            "product.games.tournament.share",
+            "product.games.tournament",
+            "product.games.played",
+        )
+        .as_percentage()
+        .display_name("Tournament share of games played")
+        .build(
+            MetricResultShape::Scalar,
+            MetricValueType::Int,
+            MetricResultShape::Scalar,
+            MetricValueType::Int,
+        )?,
         count(
             "product.achievements.earned",
             "Achievements earned",
@@ -458,7 +749,7 @@ fn dashboard() -> Result<NamedDashboard, String> {
 
 fn product_dashboard() -> Result<NamedDashboard, String> {
     Ok(NamedDashboard::new("arena-product", "Arena product")?
-        .description("Games played, play claims, signups, new snakes, achievements earned, and achievement shares.")
+        .description("Games played, active users and snakes, play claims, signups, new snakes, achievements earned, and achievement shares. Long-window charts: arena-product-history.")
         .default_range_seconds(30 * 24 * 60 * 60)
         .section(
             Section::new()
@@ -468,11 +759,82 @@ fn product_dashboard() -> Result<NamedDashboard, String> {
         )
         .section(
             Section::new()
+                .title("Active users, owners, and snakes")
+                .item(
+                    Item::stat("product.users.active")
+                        .window_seconds(DAY)
+                        .label("Users with an authenticated request · last 1 day"),
+                )
+                .item(
+                    Item::stat("product.users.active")
+                        .window_seconds(WEEK)
+                        .label("Users with an authenticated request · last 7 days"),
+                )
+                .item(
+                    Item::stat("product.users.active")
+                        .window_seconds(FOUR_WEEKS)
+                        .label("Users with an authenticated request · last 28 days"),
+                )
+                .item(
+                    Item::stat("product.owners.active")
+                        .window_seconds(DAY)
+                        .label("Owners whose snake played · last 1 day"),
+                )
+                .item(
+                    Item::stat("product.owners.active")
+                        .window_seconds(WEEK)
+                        .label("Owners whose snake played · last 7 days"),
+                )
+                .item(
+                    Item::stat("product.owners.active")
+                        .window_seconds(FOUR_WEEKS)
+                        .label("Owners whose snake played · last 28 days"),
+                )
+                .item(
+                    Item::stat("product.snakes.active")
+                        .window_seconds(WEEK)
+                        .label("Snakes that played a game · last 7 days"),
+                )
+                .item(
+                    Item::stat("product.games.played")
+                        .window_seconds(WEEK)
+                        .label("Games played · last 7 days"),
+                ),
+        )
+        .section(
+            Section::new()
+                .title("Stickiness (share of 28-day actives)")
+                .item(Item::stat("product.users.active.stickiness.daily"))
+                .item(Item::stat("product.users.active.stickiness.weekly"))
+                .item(Item::stat("product.owners.active.stickiness.daily"))
+                .item(Item::stat("product.owners.active.stickiness.weekly")),
+        )
+        .section(
+            Section::new()
                 .title("Games played")
                 .item(Item::time_series("product.games.daily"))
                 .item(Item::time_series("product.games.ladder.daily"))
                 .item(Item::time_series("product.games.custom.daily"))
                 .item(Item::time_series("product.games.tournament.daily")),
+        )
+        .section(
+            Section::new()
+                .title("Source share of games (last 7 days)")
+                .item(
+                    Item::stat("product.games.ladder.share")
+                        .window_seconds(WEEK)
+                        .label("Ladder share of games · last 7 days"),
+                )
+                .item(
+                    Item::stat("product.games.user_created.share")
+                        .window_seconds(WEEK)
+                        .label("User-created share of games · last 7 days"),
+                )
+                .item(
+                    Item::stat("product.games.tournament.share")
+                        .window_seconds(WEEK)
+                        .label("Tournament share of games · last 7 days"),
+                ),
         )
         .section(
             Section::new()
@@ -497,6 +859,68 @@ fn product_dashboard() -> Result<NamedDashboard, String> {
                 .item(Item::table("product.shares.page_views.by_referrer"))
                 .item(Item::table("product.shares.actions"))
                 .item(Item::table("product.shares.cta_clicks")),
+        ))
+}
+
+/// The long-window charts (DEV-2062): 90-day daily series and 364-day
+/// Monday-week series, on their own page so `arena-product` never pays for
+/// year-long lake scans. Every window clamps to the lake's history start
+/// until coverage grows (DEV-2059).
+fn product_history_dashboard() -> Result<NamedDashboard, String> {
+    Ok(NamedDashboard::new("arena-product-history", "Arena product history")?
+        .description("Long-window engagement, games, and growth charts. Each card's window starts at the lake's history until coverage grows; every clamped card shows the date it starts from.")
+        .default_range_seconds(31_622_400) // 366 days, the post-DEV-2059 bound
+        .section(
+            Section::new()
+                .title("Active users, owners, and snakes over time")
+                .item(
+                    Item::time_series("product.users.active.daily")
+                        .window_seconds(NINETY_DAYS),
+                )
+                .item(
+                    Item::time_series("product.owners.active.daily")
+                        .window_seconds(NINETY_DAYS),
+                )
+                .item(
+                    Item::time_series("product.users.active.weekly")
+                        .window_seconds(THREE_HUNDRED_SIXTY_FOUR_DAYS),
+                )
+                .item(
+                    Item::time_series("product.owners.active.weekly")
+                        .window_seconds(THREE_HUNDRED_SIXTY_FOUR_DAYS),
+                )
+                .item(
+                    Item::time_series("product.snakes.active.weekly")
+                        .window_seconds(THREE_HUNDRED_SIXTY_FOUR_DAYS),
+                ),
+        )
+        .section(
+            Section::new()
+                .title("Games played by source")
+                .item(
+                    Item::time_series("product.games.ladder.weekly")
+                        .window_seconds(THREE_HUNDRED_SIXTY_FOUR_DAYS),
+                )
+                .item(
+                    Item::time_series("product.games.custom.weekly")
+                        .window_seconds(THREE_HUNDRED_SIXTY_FOUR_DAYS),
+                )
+                .item(
+                    Item::time_series("product.games.tournament.weekly")
+                        .window_seconds(THREE_HUNDRED_SIXTY_FOUR_DAYS),
+                ),
+        )
+        .section(
+            Section::new()
+                .title("Growth")
+                .item(
+                    Item::time_series("product.new_users.weekly")
+                        .window_seconds(THREE_HUNDRED_SIXTY_FOUR_DAYS),
+                )
+                .item(
+                    Item::time_series("product.new_snakes.weekly")
+                        .window_seconds(THREE_HUNDRED_SIXTY_FOUR_DAYS),
+                ),
         ))
 }
 
@@ -574,7 +998,10 @@ mod tests {
             .iter()
             .map(|d| d.id.as_str())
             .collect();
-        assert_eq!(ids, vec!["arena-operations", "arena-product"]);
+        assert_eq!(
+            ids,
+            vec!["arena-operations", "arena-product", "arena-product-history"]
+        );
         for dashboard in manifest.dashboards.as_ref().unwrap() {
             for section in &dashboard.sections {
                 for item in &section.items {
