@@ -35,12 +35,13 @@ test.describe('Mobile layout (375px)', () => {
     // Public snakes from other specs get their own Add to Game buttons.
     await authenticatedPage.locator('.card', { hasText: 'Mobile target test' }).getByRole('button', { name: 'Add to Game' }).click();
     // The page script re-submits the form itself, so the click can return before the page it
-    // navigates to. Create Game is the last button on that page, and needs a snake in the lineup.
-    await expect(authenticatedPage.locator('.gc-x')).toHaveCount(1);
+    // navigates to, which can be slow under CI. Create Game is the last button on that page, and
+    // needs a snake in the lineup.
+    await expect(authenticatedPage.locator('.gc-x')).toHaveCount(1, { timeout: 15_000 });
     await expect(authenticatedPage.getByRole('button', { name: 'Create Game' })).toBeVisible();
     // Includes both row actions, the small lineup X, Search, Reset, and Create Game.
     const buttons = authenticatedPage.locator('main button:visible');
-    expect(await buttons.count(), 'rendered buttons to measure').toBeGreaterThanOrEqual(5);
+    expect(await buttons.count(), 'rendered buttons to measure').toBeGreaterThanOrEqual(6);
     const assertTappable = async (button: Locator) => {
       const box = await button.boundingBox();
       expect(box?.height, await button.innerText()).toBeGreaterThanOrEqual(44);
