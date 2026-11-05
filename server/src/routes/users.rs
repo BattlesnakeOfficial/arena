@@ -121,6 +121,11 @@ async fn render_user_profile(
         .await
         .wrap_err("Failed to fetch saved games")?;
 
+    let earned_achievements =
+        crate::customizations::achievements::earned_for_profile(&state.db, user.user_id)
+            .await
+            .wrap_err("Failed to fetch profile achievements")?;
+
     let name = user.public_name().to_string();
     let social_image = crate::routes::og::player_card_path(user.user_id);
     let social_alt = format!("{name} on Battlesnake");
@@ -152,6 +157,8 @@ async fn render_user_profile(
             }
 
             (render_profile_rating(global_score.as_ref()))
+
+            (render_profile_achievements(user.user_id, &earned_achievements))
 
             section class="section" {
                 h2 { "Battlesnakes" }
@@ -255,6 +262,47 @@ fn render_profile_rating(score: Option<&GlobalPlayerScore>) -> Markup {
                 p { strong { "Unranked" } }
             }
             a href="/rankings" { "View global rankings" }
+        }
+    }
+}
+
+/// The player's earned achievements, newest first, each linking to its
+/// share page. Renders nothing at all for a player with no earns — no
+/// heading, no empty section. The section never reads or shows game
+/// context, so an earn from a private game looks the same as any other.
+fn render_profile_achievements(
+    profile_user_id: Uuid,
+    earned: &[(
+        crate::customizations::achievements::Achievement,
+        chrono::DateTime<chrono::Utc>,
+    )],
+) -> Markup {
+    if earned.is_empty() {
+        return html! {};
+    }
+    html! {
+        section class="section profile-achievements" {
+            h2 { "Achievements" }
+            ul class="profile-achievements-list" {
+                @for (achievement, earned_at) in earned {
+                    @let def = achievement.def();
+                    li {
+                        a class="profile-achievement"
+                           href={"/achievements/"(achievement.slug())"/"(profile_user_id)} {
+                            span class="profile-achievement-art" aria-hidden="true" {
+                                img src=(def.head.image_url()) alt="" width="44" height="44" loading="lazy";
+                                @if let Some(tail) = def.tail {
+                                    img src=(tail.image_url()) alt="" width="44" height="44" loading="lazy";
+                                }
+                            }
+                            span class="profile-achievement-copy" {
+                                span class="profile-achievement-name" { (def.name) }
+                                span class="profile-achievement-date" { "Unlocked " (earned_at.format("%b %-d, %Y")) }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -786,5 +834,466 @@ mod tests {
         let html = render_player_directory(&players, false, "", 1, 3, 101).into_string();
         assert!(html.contains(r#"href="/players?page=0""#));
         assert!(html.contains(r#"href="/players?page=2""#));
+    }
+
+    use axum::body::Body;
+    use axum::http::Request;
+    use sqlx::PgPool;
+    use tower::ServiceExt as _;
+
+    use crate::routes::test_support::signed_session_cookie;
+
+    async fn profile_user(pool: &PgPool, github_id: i64) -> Uuid {
+        sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO users (external_github_id, github_login, github_access_token) VALUES ($1, $2, '') RETURNING user_id",
+        )
+        .bind(github_id)
+        .bind(format!("profile-ach-{github_id}"))
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn profile_snake(pool: &PgPool, owner: Uuid, name: &str) -> Uuid {
+        sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO battlesnakes (user_id, name, url) VALUES ($1, $2, 'https://example.com') RETURNING battlesnake_id",
+        )
+        .bind(owner)
+        .bind(name)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn profile_game(pool: &PgPool, status: &str) -> Uuid {
+        sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO games (board_size, game_type, status, finished_at) VALUES ('11x11', 'Standard', $1, CASE WHEN $1 = 'finished' THEN NOW() ELSE NULL END) RETURNING game_id",
+        )
+        .bind(status)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn profile_participant(
+        pool: &PgPool,
+        game_id: Uuid,
+        snake_id: Uuid,
+        placement: i32,
+        entry: Option<Uuid>,
+    ) {
+        sqlx::query(
+            "INSERT INTO game_battlesnakes (game_id, battlesnake_id, placement, leaderboard_entry_id) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(game_id)
+        .bind(snake_id)
+        .bind(placement)
+        .bind(entry)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// A raw earn row. `live = false` rows must pass `None` for snake and
+    /// game (the table CHECK rejects otherwise); live rows may carry them.
+    async fn seed_earn(
+        pool: &PgPool,
+        user_id: Uuid,
+        slug: &str,
+        earned_at: chrono::DateTime<chrono::Utc>,
+        snake: Option<Uuid>,
+        game: Option<Uuid>,
+        live: bool,
+    ) {
+        sqlx::query(
+            "INSERT INTO achievement_earns (user_id, achievement, battlesnake_id, game_id, live, earned_at)
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(user_id)
+        .bind(slug)
+        .bind(snake)
+        .bind(game)
+        .bind(live)
+        .bind(earned_at)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn get(state: &AppState, uri: &str, cookie: Option<&str>) -> (StatusCode, String) {
+        let mut builder = Request::builder().method("GET").uri(uri);
+        if let Some(cookie) = cookie {
+            builder = builder.header(axum::http::header::COOKIE, cookie);
+        }
+        let response = crate::routes::routes(state.clone())
+            .expect("asset router")
+            .into_router()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec();
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    /// A signed session cookie for an existing user, minted with the same
+    /// state the requests will hit.
+    async fn profile_session_cookie(
+        state: &AppState,
+        pool: &sqlx::PgPool,
+        user_id: Uuid,
+    ) -> String {
+        let session_id: Uuid =
+            sqlx::query_scalar("INSERT INTO sessions (user_id) VALUES ($1) RETURNING session_id")
+                .bind(user_id)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        format!(
+            "{}={}",
+            crate::models::session::SESSION_COOKIE_NAME,
+            signed_session_cookie(state, session_id)
+        )
+    }
+
+    /// Just the achievements section of a rendered profile, so viewers can
+    /// be compared byte for byte.
+    fn section_html(body: &str) -> &str {
+        let start = body
+            .find("<section class=\"section profile-achievements\">")
+            .expect("achievements section missing");
+        let end = start
+            + body[start..]
+                .find("</section>")
+                .expect("achievements section unterminated")
+            + "</section>".len();
+        &body[start..end]
+    }
+
+    fn earn_instant(y: i32, m: u32, d: u32, h: u32) -> chrono::DateTime<chrono::Utc> {
+        use chrono::TimeZone as _;
+        chrono::Utc
+            .with_ymd_and_hms(y, m, d, h, 0, 0)
+            .single()
+            .expect("valid earn instant")
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn earned_achievements_render_newest_first_on_both_profile_routes(pool: PgPool) {
+        crate::test_capture::Capture::shared();
+        let state = AppState::test_from_pool(pool.clone());
+        let owner = profile_user(&pool, 2130001).await;
+        // Seeded deliberately out of the expected order, with the
+        // same-instant pair inserted opposite to the slug tie-break.
+        seed_earn(
+            &pool,
+            owner,
+            "crowd_pleaser",
+            earn_instant(2026, 10, 20, 0),
+            None,
+            None,
+            false,
+        )
+        .await;
+        seed_earn(
+            &pool,
+            owner,
+            "slow_and_steady",
+            earn_instant(2026, 10, 31, 12),
+            None,
+            None,
+            false,
+        )
+        .await;
+        seed_earn(
+            &pool,
+            owner,
+            "constrictor_champ",
+            earn_instant(2026, 10, 31, 12),
+            None,
+            None,
+            false,
+        )
+        .await;
+        seed_earn(
+            &pool,
+            owner,
+            "first_win",
+            earn_instant(2026, 11, 2, 12),
+            None,
+            None,
+            false,
+        )
+        .await;
+
+        let login = format!("profile-ach-{}", 2130001);
+        for uri in [format!("/users/{login}"), format!("/users/{login}/{owner}")] {
+            let (status, body) = get(&state, &uri, None).await;
+            assert_eq!(status, StatusCode::OK, "{}", body);
+            assert!(body.contains("<h2>Achievements</h2>"));
+            for slug in [
+                "first_win",
+                "constrictor_champ",
+                "slow_and_steady",
+                "crowd_pleaser",
+            ] {
+                assert!(
+                    body.contains(&format!("href=\"/achievements/{slug}/{owner}\"")),
+                    "missing {slug} link"
+                );
+            }
+            // Newest first: share links appear in this byte order.
+            let position = |slug: &str| {
+                body.find(&format!("/achievements/{slug}/{owner}"))
+                    .expect("share link present")
+            };
+            let first = position("first_win");
+            let constrictor = position("constrictor_champ");
+            let slow = position("slow_and_steady");
+            let crowd = position("crowd_pleaser");
+            assert!(first < constrictor, "first_win must be first");
+            assert!(
+                constrictor < slow,
+                "same-instant pair breaks by slug: constrictor_champ before slow_and_steady"
+            );
+            assert!(slow < crowd, "crowd_pleaser is oldest");
+            assert!(body.contains("Unlocked Nov 2, 2026"));
+            assert!(body.contains("Unlocked Oct 31, 2026"));
+        }
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn token_holder_without_earn_rows_gets_no_section(pool: PgPool) {
+        crate::test_capture::Capture::shared();
+        let state = AppState::test_from_pool(pool.clone());
+        let holder = profile_user(&pool, 2130101).await;
+        // Holds every achievement's reward items through token grants,
+        // without a single earn row.
+        for achievement in crate::customizations::achievements::Achievement::ALL {
+            let def = achievement.def();
+            sqlx::query(
+                "INSERT INTO customization_grants (user_id, customization_type, slug, source) VALUES ($1, $2, $3, 'token')",
+            )
+            .bind(holder)
+            .bind("head")
+            .bind(def.head.slug())
+            .execute(&pool)
+            .await
+            .unwrap();
+            if let Some(tail) = def.tail {
+                sqlx::query(
+                    "INSERT INTO customization_grants (user_id, customization_type, slug, source) VALUES ($1, $2, $3, 'token')",
+                )
+                .bind(holder)
+                .bind("tail")
+                .bind(tail.slug())
+                .execute(&pool)
+                .await
+                .unwrap();
+            }
+        }
+
+        let uri = format!("/users/profile-ach-{}", 2130101);
+        let (status, body) = get(&state, &uri, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!body.contains("<h2>Achievements</h2>"));
+        assert!(!body.contains("profile-achievement"));
+
+        // Positive control: one real earn row makes the section appear,
+        // proving the assertions above can fail.
+        seed_earn(
+            &pool,
+            holder,
+            "first_win",
+            earn_instant(2026, 11, 1, 0),
+            None,
+            None,
+            false,
+        )
+        .await;
+        let (status, body) = get(&state, &uri, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("<h2>Achievements</h2>"));
+        assert!(body.contains(&format!("href=\"/achievements/first_win/{holder}\"")));
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn unknown_slug_rows_are_skipped_without_error(pool: PgPool) {
+        crate::test_capture::Capture::shared();
+        let state = AppState::test_from_pool(pool.clone());
+        let owner = profile_user(&pool, 2130201).await;
+        seed_earn(
+            &pool,
+            owner,
+            "mystery_badge",
+            earn_instant(2026, 9, 1, 0),
+            None,
+            None,
+            false,
+        )
+        .await;
+        seed_earn(
+            &pool,
+            owner,
+            "first_win",
+            earn_instant(2026, 11, 1, 0),
+            None,
+            None,
+            false,
+        )
+        .await;
+
+        let (status, body) = get(&state, &format!("/users/profile-ach-{}", 2130201), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("<h2>Achievements</h2>"));
+        assert!(body.contains(&format!("href=\"/achievements/first_win/{owner}\"")));
+        assert!(!body.contains("mystery_badge"));
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn earn_from_private_game_shows_no_game_context(pool: PgPool) {
+        crate::test_capture::Capture::shared();
+        let state = AppState::test_from_pool(pool.clone());
+        let owner = profile_user(&pool, 2130301).await;
+        let rival = profile_user(&pool, 2130302).await;
+        let owner_snake = profile_snake(&pool, owner, "profile earn owner snake").await;
+        let rival_snake = profile_snake(&pool, rival, "Profile Hidden Rival").await;
+        let game_id = profile_game(&pool, "finished").await;
+        let private_lb = crate::models::private_leaderboard::create(
+            &pool,
+            &crate::models::private_leaderboard::CreatePrivateLeaderboard {
+                name: "Hidden".to_string(),
+                game_type: "Standard".to_string(),
+                board_size: "11x11".to_string(),
+                match_size: 2,
+            },
+        )
+        .await
+        .unwrap();
+        let entry = crate::models::leaderboard::get_or_create_entry(&pool, private_lb, rival_snake)
+            .await
+            .unwrap()
+            .leaderboard_entry_id;
+        profile_participant(&pool, game_id, owner_snake, 1, None).await;
+        profile_participant(&pool, game_id, rival_snake, 2, Some(entry)).await;
+        crate::models::leaderboard::create_leaderboard_game(&pool, private_lb, game_id)
+            .await
+            .unwrap();
+        seed_earn(
+            &pool,
+            owner,
+            "first_win",
+            earn_instant(2026, 11, 1, 0),
+            Some(owner_snake),
+            Some(game_id),
+            true,
+        )
+        .await;
+
+        let (status, body) = get(&state, &format!("/users/profile-ach-{}", 2130301), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("<h2>Achievements</h2>"));
+        assert!(body.contains(&format!("href=\"/achievements/first_win/{owner}\"")));
+        assert!(body.contains("First Win"));
+        // Game UUIDs are capabilities: no link, no id, no opponent name.
+        assert!(!body.contains(&game_id.to_string()), "game id leaked");
+        assert!(!body.contains("/games/"), "game link leaked");
+        assert!(
+            !body.contains("Profile Hidden Rival"),
+            "opponent name leaked"
+        );
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn anonymous_other_and_owner_see_the_same_section(pool: PgPool) {
+        crate::test_capture::Capture::shared();
+        let state = AppState::test_from_pool(pool.clone());
+        let owner = profile_user(&pool, 2130401).await;
+        let other = profile_user(&pool, 2130402).await;
+        seed_earn(
+            &pool,
+            owner,
+            "first_win",
+            earn_instant(2026, 11, 1, 0),
+            None,
+            None,
+            false,
+        )
+        .await;
+        let uri = format!("/users/profile-ach-{}/{}", 2130401, owner);
+
+        let anonymous = get(&state, &uri, None).await;
+        let signed_other = get(
+            &state,
+            &uri,
+            Some(&profile_session_cookie(&state, &pool, other).await),
+        )
+        .await;
+        let signed_owner = get(
+            &state,
+            &uri,
+            Some(&profile_session_cookie(&state, &pool, owner).await),
+        )
+        .await;
+
+        for (name, reply) in [
+            ("anonymous", &anonymous),
+            ("other", &signed_other),
+            ("owner", &signed_owner),
+        ] {
+            assert_eq!(reply.0, StatusCode::OK, "{} viewer", name);
+            assert!(reply.1.contains("<h2>Achievements</h2>"), "{} viewer", name);
+        }
+        assert_eq!(section_html(&anonymous.1), section_html(&signed_other.1));
+        assert_eq!(section_html(&anonymous.1), section_html(&signed_owner.1));
+        // Only the owner gets profile controls.
+        assert!(!anonymous.1.contains("Edit Profile"));
+        assert!(!signed_other.1.contains("Edit Profile"));
+        assert!(signed_owner.1.contains("Edit Profile"));
+    }
+
+    #[test]
+    fn profile_achievements_render_nothing_for_no_earns() {
+        assert!(
+            render_profile_achievements(Uuid::nil(), &[])
+                .into_string()
+                .trim()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn profile_achievements_render_link_art_and_date() {
+        let user_id = Uuid::from_u128(0x2123);
+        let earned_at = earn_instant(2026, 11, 2, 12);
+        let html = render_profile_achievements(
+            user_id,
+            &[(
+                crate::customizations::achievements::Achievement::FirstWin,
+                earned_at,
+            )],
+        )
+        .into_string();
+        assert!(html.contains("<h2>Achievements</h2>"));
+        assert!(html.contains(&format!("href=\"/achievements/first_win/{user_id}\"")));
+        assert!(html.contains("Unlocked Nov 2, 2026"));
+        // First Win has a head but no tail: exactly one image.
+        assert_eq!(html.matches("<img").count(), 1, "{html}");
+    }
+
+    #[test]
+    fn profile_achievements_render_tail_art_when_defined() {
+        let html = render_profile_achievements(
+            Uuid::nil(),
+            &[(
+                crate::customizations::achievements::Achievement::CrowdPleaser,
+                earn_instant(2026, 10, 20, 0),
+            )],
+        )
+        .into_string();
+        assert_eq!(html.matches("<img").count(), 2, "{html}");
     }
 }
