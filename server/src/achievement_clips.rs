@@ -2221,17 +2221,21 @@ mod tests {
     }
 
     /// The pixel at the center of board cell (cx, cy) for a `side`-wide
-    /// board panel, mirroring Canvas::board's layout math.
+    /// board panel, mirroring Canvas::board's layout math exactly: the
+    /// panel insets 3.5% per side, the board (BORDER + n*CELL + spacing)
+    /// is scaled into the room and centered, and Board's own center()
+    /// handles the y flip. A naive cells-are-CLIP_SIDE/cells-wide formula
+    /// misses cell centers entirely (it lands in gaps on small boards).
     fn cell_center_pixel(board_side: i32, cx: i32, cy: i32) -> (u32, u32) {
-        // Board::new adds a CELL margin on each side; board.px_width is
-        // cells * CELL + 2 * GAP-ish margins — read the constant the same
-        // way the painter does by scaling the full canvas.
-        let cells = board_side.max(1);
-        let px = f64::from(CLIP_SIDE) / f64::from(cells) / 2.0;
-        (
-            (f64::from(cx) * f64::from(CLIP_SIDE) / f64::from(cells) + px) as u32,
-            (f64::from(cy) * f64::from(CLIP_SIDE) / f64::from(cells) + px) as u32,
-        )
+        use crate::components::snake_board::Board;
+        let side = f64::from(CLIP_SIDE);
+        let board = Board::new(board_side.max(1), board_side.max(1));
+        let inset = side * 0.035;
+        let room = side - 2.0 * inset;
+        let scale = (room / f64::from(board.px_width)).min(room / f64::from(board.px_height));
+        let offset = (side - f64::from(board.px_width) * scale) / 2.0;
+        let (bx, by) = board.center((cx, cy));
+        ((offset + bx * scale) as u32, (offset + by * scale) as u32)
     }
 
     /// Manual, ignored: renders and encodes the two benchmark cases with
@@ -2242,8 +2246,10 @@ mod tests {
     #[ignore = "manual benchmark: cargo test --release -- --ignored clip_bench"]
     fn clip_bench() {
         /// A 4-snake frame with serpentine bodies of `length` segments on
-        /// a `side`-wide board, real catalog heads and tails.
-        fn bench_frame(side: i32, length: usize) -> BoardArt {
+        /// a `side`-wide board, real catalog heads and tails. Each `turn`
+        /// slides every body one row, so per-frame palettes genuinely
+        /// differ (identical frames would make the shimmer probe vacuous).
+        fn bench_frame(side: i32, length: usize, turn: i32) -> BoardArt {
             let heads = ["crystal-power", "dragon", "gamer", "sand-worm"];
             let tails = ["bolt", "alligator", "bee", "block-bum"];
             let colors = ["#ff3d8a", "#38bdf8", "#a3e635", "#fbbf24"];
@@ -2258,7 +2264,7 @@ mod tests {
                             // columns 0-1 stay empty in every frame, so the
                             // probe cell (1, side/2) is constant.
                             let column = 2 + (i as i32) * ((side - 2) / 5) + (k as i32 / side);
-                            let row = (k as i32) % side;
+                            let row = (k as i32 + turn) % side;
                             (
                                 column,
                                 if (k / side as usize).is_multiple_of(2) {
@@ -2295,7 +2301,9 @@ mod tests {
             ("worst-25x25-4x200", 25, 200),
             ("prod-today-11x11-4x5", 11, 5),
         ] {
-            let arts: Vec<BoardArt> = (0..26).map(|_turn| bench_frame(side, length)).collect();
+            let arts: Vec<BoardArt> = (0..26)
+                .map(|turn| bench_frame(side, length, turn))
+                .collect();
             // The always-empty probe cell: column 1 stays clear in every
             // frame (bodies start at column 2), food sits in the corners.
             let probe = cell_center_pixel(side, 1, side / 2);
