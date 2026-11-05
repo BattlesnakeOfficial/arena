@@ -813,12 +813,12 @@ mod run_game_tests {
     /// `you` = the first snake in every frame.
     #[tokio::test]
     async fn export_shape_matches_flags_in_every_mode() {
-        for (mode_args, mode) in [
-            (("standard", None), GameMode::Standard),
-            (("solo", None), GameMode::Solo),
-            (("royale", None), GameMode::Royale),
-            (("constrictor", None), GameMode::Constrictor),
-            (("snail_mode", None), GameMode::SnailMode),
+        for mode_args in [
+            ("standard", None),
+            ("solo", None),
+            ("royale", None),
+            ("constrictor", None),
+            ("snail_mode", None),
         ] {
             let server = always_up_server().await;
             let cfg = config_for_mode(mode_args, &[server.uri()], &["A"]);
@@ -868,7 +868,6 @@ mod run_game_tests {
                 // `you` is the first (only) snake in every frame.
                 assert_eq!(frame["you"]["name"], "A", "{mode_args:?}");
             }
-            let _ = mode;
         }
     }
 
@@ -909,6 +908,127 @@ mod run_game_tests {
         assert_eq!(
             String::from_utf8(out).unwrap().lines().count(),
             outcome.final_turn as usize + 3
+        );
+    }
+
+    /// `GET /` is called exactly once per snake before the game, and every
+    /// snake — including one that died mid-game — receives exactly one
+    /// `/end`. Each server backs exactly one snake, so exact counts are
+    /// assertable (wiremock `.expect(n)` + `verify`).
+    #[tokio::test]
+    async fn get_root_once_per_snake_and_end_for_every_snake() {
+        // Doomed always moves up and dies; Immortal walks the square and
+        // wins (the same setup as `winner_line_and_result`).
+        let doomed = MockServer::start().await;
+        let immortal = MockServer::start().await;
+        for server in [&doomed, &immortal] {
+            Mock::given(method("GET"))
+                .and(path("/"))
+                .respond_with(ResponseTemplate::new(200).set_body_string(METADATA))
+                .expect(1)
+                .mount(server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/start"))
+                .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+                .mount(server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/end"))
+                .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+                .expect(1)
+                .mount(server)
+                .await;
+        }
+        Mock::given(method("POST"))
+            .and(path("/move"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"move":"up"}"#))
+            .mount(&doomed)
+            .await;
+        for turn in 0..40 {
+            let move_json = json!({"move": CYCLE[turn % 4]});
+            Mock::given(method("POST"))
+                .and(path("/move"))
+                .and(body_partial_json(json!({"turn": turn})))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_string(serde_json::to_string(&move_json).unwrap()),
+                )
+                .mount(&immortal)
+                .await;
+        }
+
+        let urls = vec![doomed.uri(), immortal.uri()];
+        let cfg = config_for_mode(("standard", None), &urls, &["Doomed", "Immortal"]);
+        let (_out, _log, outcome) = run_with_output(&cfg).await;
+
+        assert_eq!(outcome.winner_name.as_deref(), Some("Immortal"));
+        doomed.verify().await;
+        immortal.verify().await;
+    }
+
+    /// `-s` actually serializes the `/move` round (not just "runs"): each
+    /// snake gets its own server whose /move answers after a 600 ms delay,
+    /// so a max-turns-1 game's single move round costs >= 2x the delay
+    /// sequential and ~1x concurrent. Server-side delays dominate, so slow
+    /// runners inflate both sides roughly equally.
+    async fn delayed_snake(delay_ms: u64) -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(METADATA))
+            .mount(&server)
+            .await;
+        for endpoint in ["/start", "/end"] {
+            Mock::given(method("POST"))
+                .and(path(endpoint))
+                .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+                .mount(&server)
+                .await;
+        }
+        Mock::given(method("POST"))
+            .and(path("/move"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(r#"{"move":"up"}"#)
+                    .set_delay(std::time::Duration::from_millis(delay_ms)),
+            )
+            .mount(&server)
+            .await;
+        server
+    }
+
+    async fn run_one_turn_game(sequential: bool) -> std::time::Duration {
+        let a = delayed_snake(600).await;
+        let b = delayed_snake(600).await;
+        let urls = vec![a.uri(), b.uri()];
+        let mut cfg = config_for_mode(("standard", None), &urls, &["A", "B"]);
+        cfg.sequential = sequential;
+        cfg.max_turns = 1;
+        // The 600 ms delays must land inside the snake timeout, or every
+        // /move times out at the default 500 ms and the assert measures
+        // timeouts, not serialization.
+        cfg.timeout_ms = 5000;
+        let started = std::time::Instant::now();
+        let _ = run_with_output(&cfg).await;
+        started.elapsed()
+    }
+
+    #[tokio::test]
+    async fn sequential_serializes_the_move_round() {
+        let concurrent = run_one_turn_game(false).await;
+        let sequential = run_one_turn_game(true).await;
+        assert!(
+            sequential.as_millis() as f64 > 1.5 * concurrent.as_millis() as f64,
+            "-s must serialize the move round: seq={sequential:?} conc={concurrent:?}"
+        );
+        assert!(
+            sequential.as_millis() >= 1200,
+            "two serialized 600 ms moves cost at least 1200 ms: {sequential:?}"
+        );
+        assert!(
+            concurrent.as_millis() < 1200,
+            "concurrent moves overlap instead of serializing: {concurrent:?}"
         );
     }
 

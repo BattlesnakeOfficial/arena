@@ -17,9 +17,9 @@ struct Cli {
     #[arg(long, global = true)]
     format: Option<String>,
 
-    /// Enable debug logging (play's verbose POST lines). Global like the
-    /// Go CLI's cobra persistent flag, so it parses before or after the
-    /// subcommand.
+    /// Enable debug logging (play's verbose POST lines)
+    // `global = true` like the Go CLI's cobra persistent flag, so it parses
+    // both before and after the subcommand.
     #[arg(long, global = true)]
     verbose: bool,
 

@@ -37,15 +37,20 @@ pub struct SnakeSpec {
 /// `--config`/`$HOME/.battlesnake.yaml` (dropped: nothing read them).
 #[derive(clap::Args, Debug)]
 pub struct PlayArgs {
+    /// Width of Board
     #[arg(short = 'W', long, default_value_t = 11)]
     pub width: i32,
+    /// Height of Board
     #[arg(short = 'H', long, default_value_t = 11)]
     pub height: i32,
+    /// Name of Snake
     #[arg(short = 'n', long = "name", value_name = "NAME")]
     pub names: Vec<String>,
+    /// URL of Snake
     #[arg(short = 'u', long = "url", value_name = "URL")]
     pub urls: Vec<String>,
-    /// 0 means 500, like the Go CLI.
+    /// Request Timeout
+    // 0 means 500, like the Go CLI (normalized in `validate`).
     #[arg(
         short = 't',
         long,
@@ -53,35 +58,48 @@ pub struct PlayArgs {
         allow_negative_numbers = true
     )]
     pub timeout: i64,
+    /// Use Sequential Processing
     #[arg(short = 's', long, default_value_t = false)]
     pub sequential: bool,
+    /// Type of Game Rules
     #[arg(short = 'g', long, default_value = "standard")]
     pub gametype: String,
-    /// No clap default: "omitted" and "standard" resolve differently
-    /// (e.g. `-g royale` alone is Royale; `-g royale -m standard` is an
-    /// error). Go defaulted `-m` to standard — the source of its
-    /// royale-without-hazards behaviour, which this CLI deliberately drops.
+    /// Game map to use to populate the board
+    // No clap default: "omitted" and "standard" resolve differently
+    // (e.g. `-g royale` alone is Royale; `-g royale -m standard` is an
+    // error). Go defaulted `-m` to standard — the source of its
+    // royale-without-hazards behaviour, which this CLI deliberately drops.
     #[arg(short = 'm', long = "map", value_name = "MAP")]
     pub map: Option<String>,
+    /// View the Map Each Turn
     #[arg(short = 'v', long = "viewmap", default_value_t = false)]
     pub view_map: bool,
+    /// Use color to draw the map
     #[arg(short = 'c', long, default_value_t = false)]
     pub color: bool,
-    /// Go's -r is an int64 flag and accepts negatives.
+    /// Random Seed
+    // Go's -r is an int64 flag and accepts negatives.
     #[arg(short = 'r', long, allow_negative_numbers = true)]
     pub seed: Option<i64>,
+    /// Turn Delay in Milliseconds
     #[arg(short = 'd', long = "delay", default_value_t = 0)]
     pub delay_ms: u64,
+    /// Minimum Turn Duration in Milliseconds
     #[arg(short = 'D', long = "duration", default_value_t = 0)]
     pub duration_ms: u64,
+    /// File path to output game state to. Existing files will be overwritten
     #[arg(short = 'o', long, value_name = "FILE")]
     pub output: Option<std::path::PathBuf>,
+    /// Percentage chance of spawning a new food every round
     #[arg(long = "foodSpawnChance", default_value_t = 15)]
     pub food_spawn_chance: i32,
+    /// Minimum food to keep on the board every turn
     #[arg(long = "minimumFood", default_value_t = 1)]
     pub minimum_food: i32,
+    /// Health damage a snake will take when ending its turn in a hazard
     #[arg(long = "hazardDamagePerTurn", default_value_t = 14)]
     pub hazard_damage_per_turn: i32,
+    /// In Royale mode, the number of turns between generating new hazards
     #[arg(long = "shrinkEveryNTurns", default_value_t = 25)]
     pub shrink_every_n_turns: i32,
 }
@@ -251,10 +269,119 @@ fn display_fields(info: &wire::SnakeInfoResponse) -> (String, String, String) {
     )
 }
 
+/// Serialize a snake request body where a `Result` context exists: the
+/// HTTP client takes pre-serialized bodies (`&str`), because its
+/// `MoveResult`/warn-text returns cannot propagate a serialization
+/// failure.
+fn serialize_body(body: &wire::Game) -> Result<String> {
+    serde_json::to_string(body).wrap_err("serializing snake request body")
+}
+
+/// Go's DEBUG line for every POST (`--verbose`): the endpoint URL and the
+/// request body.
+fn log_verbose_post(log: &mut dyn Write, url: &str, endpoint: &str, json: &str) {
+    let _ = writeln!(
+        log,
+        "POST {}: {}",
+        engine_core::http_util::build_endpoint_url(url, endpoint),
+        json
+    );
+}
+
+/// Per-snake request state for one `/move` round, all keyed by snake id
+/// (grouping keeps `collect_moves` under clippy's argument budget and
+/// names the bundle: everything `request_body` needs beyond the board).
+struct SnakeTurnState<'a> {
+    contexts: &'a HashMap<String, SnakeContext>,
+    customizations: &'a HashMap<String, SnakeCustomizations>,
+    last_directions: &'a HashMap<String, Direction>,
+}
+
+/// One `/move` round for every alive snake, in board order: build and
+/// serialize the request bodies, collect the moves (concurrent by default,
+/// one at a time with `-s`), and log the failure warnings Go would print
+/// (`Got non-ok status code from <url>/move`, `Request to <url>/move
+/// failed`, … — URL, status, body and the real error, not just an id).
+/// Returns only the move results; the warning texts are logged here.
+async fn collect_moves(
+    game: &EngineGame,
+    cfg: &PlayConfig,
+    client: &http::SnakeHttpClient,
+    snake_ids: &[String],
+    state: SnakeTurnState<'_>,
+    log: &mut dyn Write,
+) -> Result<Vec<engine_core::move_response::MoveResult>> {
+    // Alive snakes in board order (create_initial_game preserves the
+    // snake_ids order in board.snakes).
+    let alive: Vec<String> = snake_ids
+        .iter()
+        .filter(|id| {
+            game.board
+                .snakes
+                .iter()
+                .any(|s| &s.id == *id && !s.eliminated_cause.is_eliminated())
+        })
+        .cloned()
+        .collect();
+
+    let mut requests = Vec::new();
+    for (spec, id) in cfg.snakes.iter().zip(snake_ids) {
+        if !alive.contains(id) {
+            continue;
+        }
+        let body = request_body(
+            game,
+            id,
+            state.contexts,
+            state.customizations,
+            &cfg.resolved,
+        );
+        let json = serialize_body(&body)?;
+        if client.verbose() {
+            log_verbose_post(log, &spec.url, "move", &json);
+        }
+        requests.push((
+            spec.url.clone(),
+            id.clone(),
+            json,
+            state.last_directions.get(id).copied(),
+        ));
+    }
+
+    let collected: Vec<(engine_core::move_response::MoveResult, Option<String>)> = if cfg.sequential
+    {
+        let mut out = Vec::new();
+        for (url, id, json, last) in requests {
+            out.push(client.request_move(&url, &json, &id, last).await);
+        }
+        out
+    } else {
+        // Own the per-snake request state: join_all holds these
+        // futures across awaits, and borrowed locals would not
+        // outlive the loop.
+        join_all(
+            requests
+                .into_iter()
+                .map(|(url, id, json, last)| async move {
+                    client.request_move(&url, &json, &id, last).await
+                }),
+        )
+        .await
+    };
+
+    // Warnings in board order (the client cannot log: it has no writer).
+    for (_result, warning) in &collected {
+        if let Some(warning) = warning {
+            let _ = writeln!(log, "{warning}");
+        }
+    }
+
+    Ok(collected.into_iter().map(|(result, _)| result).collect())
+}
+
 /// Run the full game. Logs go to `log`, the `--viewmap` board to `board`,
 /// and the JSONL export (if any) to `output`. Test-callable with `Vec<u8>`
 /// writers.
-#[allow(clippy::too_many_lines)]
 pub async fn run_game(
     cfg: &PlayConfig,
     client: &http::SnakeHttpClient,
@@ -352,15 +479,11 @@ pub async fn run_game(
         .ok_or_else(|| eyre!("no snakes"))?;
     for (spec, id) in cfg.snakes.iter().zip(&snake_ids) {
         let body = request_body(&game, id, &snake_contexts, &customizations, &cfg.resolved);
+        let json = serialize_body(&body)?;
         if client.verbose() {
-            let _ = writeln!(
-                log,
-                "POST {}: {}",
-                engine_core::http_util::build_endpoint_url(&spec.url, "start"),
-                serde_json::to_string(&body).unwrap_or_default()
-            );
+            log_verbose_post(log, &spec.url, "start", &json);
         }
-        if let Some(failure) = client.start(&spec.url, &body).await {
+        if let Some(failure) = client.start(&spec.url, &json).await {
             write_log(log, &failure);
         }
     }
@@ -409,94 +532,19 @@ pub async fn run_game(
         let turn_deadline = (cfg.duration_ms > 0)
             .then(|| std::time::Instant::now() + std::time::Duration::from_millis(cfg.duration_ms));
 
-        // Alive snakes in board order (create_initial_game preserves the
-        // snake_ids order in board.snakes).
-        let alive: Vec<String> = snake_ids
-            .iter()
-            .filter(|id| {
-                game.board
-                    .snakes
-                    .iter()
-                    .any(|s| &s.id == *id && !s.eliminated_cause.is_eliminated())
-            })
-            .cloned()
-            .collect();
-
-        // Collect moves: concurrent by default, sequential with -s.
-        let mut results: Vec<engine_core::move_response::MoveResult> = Vec::new();
-        if cfg.sequential {
-            for (spec, id) in cfg.snakes.iter().zip(&snake_ids) {
-                if !alive.contains(id) {
-                    continue;
-                }
-                let body = request_body(&game, id, &snake_contexts, &customizations, &cfg.resolved);
-                if client.verbose() {
-                    let _ = writeln!(
-                        log,
-                        "POST {}: {}",
-                        engine_core::http_util::build_endpoint_url(&spec.url, "move"),
-                        serde_json::to_string(&body).unwrap_or_default()
-                    );
-                }
-                results.push(
-                    client
-                        .request_move(&spec.url, &body, id, last_directions.get(id).copied())
-                        .await,
-                );
-            }
-        } else {
-            let mut futures = Vec::new();
-            for (spec, id) in cfg.snakes.iter().zip(&snake_ids) {
-                if !alive.contains(id) {
-                    continue;
-                }
-                let body = request_body(&game, id, &snake_contexts, &customizations, &cfg.resolved);
-                if client.verbose() {
-                    let _ = writeln!(
-                        log,
-                        "POST {}: {}",
-                        engine_core::http_util::build_endpoint_url(&spec.url, "move"),
-                        serde_json::to_string(&body).unwrap_or_default()
-                    );
-                }
-                // Own the per-snake request state: join_all holds these
-                // futures across awaits, and borrowed locals would not
-                // outlive the loop.
-                let url = spec.url.clone();
-                let snake_id = id.clone();
-                let last = last_directions.get(id).copied();
-                futures
-                    .push(async move { client.request_move(&url, &body, &snake_id, last).await });
-            }
-            results = join_all(futures).await;
-        }
-
-        // Warnings in board order (the client cannot log: it has no writer).
-        for result in &results {
-            if result.timed_out {
-                write_log(
-                    log,
-                    &format!(
-                        "Request to move endpoint for {} failed\n\tError: request timed out",
-                        result.snake_id
-                    ),
-                );
-            } else if result.errored {
-                match result.status_code {
-                    Some(status) if !(200..300).contains(&status) => write_log(
-                        log,
-                        &format!(
-                            "Got non-ok status code from snake {}\n\tStatusCode: {} (expected 200)",
-                            result.snake_id, status
-                        ),
-                    ),
-                    _ => write_log(
-                        log,
-                        &format!("Failed to parse response from snake {}", result.snake_id),
-                    ),
-                }
-            }
-        }
+        let results = collect_moves(
+            &game,
+            cfg,
+            client,
+            &snake_ids,
+            SnakeTurnState {
+                contexts: &snake_contexts,
+                customizations: &customizations,
+                last_directions: &last_directions,
+            },
+            log,
+        )
+        .await?;
 
         let moves: Vec<(String, Direction)> = results
             .iter()
@@ -559,15 +607,11 @@ pub async fn run_game(
 
     for (spec, id) in cfg.snakes.iter().zip(&snake_ids) {
         let body = request_body(&game, id, &snake_contexts, &customizations, &cfg.resolved);
+        let json = serialize_body(&body)?;
         if client.verbose() {
-            let _ = writeln!(
-                log,
-                "POST {}: {}",
-                engine_core::http_util::build_endpoint_url(&spec.url, "end"),
-                serde_json::to_string(&body).unwrap_or_default()
-            );
+            log_verbose_post(log, &spec.url, "end", &json);
         }
-        if let Some(failure) = client.end(&spec.url, &body).await {
+        if let Some(failure) = client.end(&spec.url, &json).await {
             write_log(log, &failure);
         }
     }

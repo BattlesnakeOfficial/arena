@@ -97,8 +97,10 @@ pub(crate) fn parse_snake_color(color: &str) -> (i64, i64, i64) {
 /// Render the `--viewmap` board (Go's `printMap` into a String; the caller
 /// writes it to the board stream). Layout and bytes match Go exactly:
 /// Turn line, Hazards line, Food line, one line per snake (eliminated ones
-/// included), then grid rows top-down. Bounds-checks every body point — a
-/// wall death leaves the head off the board.
+/// included), then grid rows top-down, then the trailing blank line from
+/// Go's `fmt.Println(o.String())` on a buffer that already ends in `\n`
+/// (play.go:729) — every frame is followed by one blank line. Bounds-checks
+/// every body point — a wall death leaves the head off the board.
 pub fn render_map(
     game: &EngineGame,
     names: &HashMap<String, String>,
@@ -208,6 +210,9 @@ pub fn render_map(
         }
         let _ = writeln!(o);
     }
+    // Go prints the buffer with fmt.Println, adding one newline on top of
+    // the buffer's own trailing \n — i.e. a blank line after every frame.
+    o.push('\n');
     o
 }
 
@@ -245,7 +250,8 @@ mod tests {
     }
 
     /// The Go-generated golden board (see testdata/README.md): render_map's
-    /// output + the Println newline must equal the fixture byte-for-byte.
+    /// output — trailing blank line included — must equal the fixture
+    /// byte-for-byte.
     fn fixture_game() -> EngineGame {
         let s1 = rules::Snake {
             id: "s1".to_string(),
@@ -309,7 +315,7 @@ mod tests {
         let (game, names, chars, colors) = fixture_inputs();
         let rendered = render_map(&game, &names, &chars, &colors, false);
         let expected = expected_fixture_bytes("viewmap_text.txt");
-        assert_eq!(rendered + "\n", expected);
+        assert_eq!(rendered, expected);
     }
 
     #[test]
@@ -317,7 +323,7 @@ mod tests {
         let (game, names, chars, colors) = fixture_inputs();
         let rendered = render_map(&game, &names, &chars, &colors, true);
         let expected = expected_fixture_bytes("viewmap_color.txt");
-        assert_eq!(rendered + "\n", expected);
+        assert_eq!(rendered, expected);
     }
 
     // Shared fixture builder for viewmap tests (see
