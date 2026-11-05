@@ -60,6 +60,33 @@ User-Agent, and prefetches, so read them as an approximate count of outside
 visits. The POST endpoints behind the other two are unauthenticated, so those
 counts are best effort.
 
+The dashboard also carries fixed-window tiles (DEV-2062): both active-user
+definitions — distinct users with an authenticated request and distinct
+owners whose snake played a game — plus active snakes and games played,
+each over its own trailing 1-, 7-, or 28-day window, with the definition
+and window in the tile's title so the numbers never depend on the page
+range. Stickiness tiles show the 1-day and 7-day actives as a percentage
+of the 28-day actives for each definition, and source-share tiles show
+each source's 7-day share of games played. The 90-day daily and 364-day
+Monday-week charts live on the separate `arena-product-history`
+dashboard, so the product page never pays for year-long lake scans.
+History windows clamp to the lake's history start and show a `data from`
+chip until coverage grows (about 2027-09-24 for a full 364 days); a first
+load after idle can 503 near 50 s and answers on reload; and the year
+charts are projected to outgrow the ~50 s lake call budget around
+2027-01..2027-03. Raising that budget is an Eyes code change, tracked in
+DEV-2087 (trigger: any 364-day chart over 35 s warm, or 2026-12-31,
+whichever comes first). Each active definition's 28-day numbers are only
+meaningful about 28 days after its source went live — close-event
+`user_id` from DEV-2076's deploy and `snake.lifecycle` from 2026-11-03
+(owners ≈ 2026-12-01) — and until then the 28-day tiles read low and
+stickiness reads high while still reporting `complete: true`. By-source
+numbers start at DEV-2061's deploy on 2026-11-03 (pre-deploy
+`game_completed` rows carry a null `source`), so source shares read low
+until 2026-11-10 and the by-source weekly charts are empty before that
+week; the `data from` chip overstates the active and source fields'
+coverage in the same period.
+
 Processing overhead measures elapsed turn-loop time minus elapsed time awaiting
 parallel move requests, including persistence and scheduling. The old event
 subtracted summed snake latencies, double-counting overlapping requests and
@@ -85,13 +112,15 @@ under query budgets; Eyes exposes that state instead of claiming an exact result
 
 ## Release sequence
 
-1. Publish `eyes-query` 0.1.0, then `eyes-subscriber` 0.8.0 from the Eyes repo
-   (its server already accepts these contracts).
-2. Merge cja's subscriber bump / `TracingConfig` process-identity support.
-3. Update Arena's lockfile to that cja commit and published subscriber. Confirm
-   only one subscriber version with `cargo tree -i eyes-subscriber`.
-4. Deploy Arena, then verify its process role, heartbeat, run-health declarations,
-   all 28 named metrics, both thresholds, and both dashboards in production Eyes.
+1. Deploy the Eyes server carrying DEV-2058 (`count_distinct`), DEV-2059
+   (per-item windows, history clamping), DEV-2060 (Monday weeks), and
+   DEV-2065 (ratio metrics).
+2. Publish `eyes-subscriber` 0.10.x from the Eyes repo.
+3. Bump cja's subscriber requirement to `0.10` and release cja.
+4. Update Arena's lockfile to the published subscriber and released cja
+   (confirm exactly one subscriber version with `cargo tree -i
+   eyes-subscriber`), then deploy Arena and verify all named metrics,
+   both thresholds, and all three dashboards in production Eyes.
 
 Local validation before publication uses an uncommitted Cargo patch file for
 cja, eyes-query, and eyes-subscriber. Those path overrides must not ship. Live
