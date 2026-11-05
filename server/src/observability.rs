@@ -1136,7 +1136,10 @@ mod tests {
                     }},
                 ],
             });
-            assert_eq!(bucket["expr"], expected_call, "{id} Monday-origin time_bucket");
+            assert_eq!(
+                bucket["expr"], expected_call,
+                "{id} Monday-origin time_bucket"
+            );
         }
 
         // Filters pinned by stage order (stage order is evaluation order,
@@ -1218,23 +1221,55 @@ mod tests {
         // Ratios: stickiness declare per-side windows over the 28-day side;
         // source shares declare none (the item's window sizes both sides).
         let stickiness = [
-            ("product.users.active.stickiness.daily", "product.users.active", DAY),
-            ("product.users.active.stickiness.weekly", "product.users.active", WEEK),
-            ("product.owners.active.stickiness.daily", "product.owners.active", DAY),
-            ("product.owners.active.stickiness.weekly", "product.owners.active", WEEK),
+            (
+                "product.users.active.stickiness.daily",
+                "product.users.active",
+                DAY,
+            ),
+            (
+                "product.users.active.stickiness.weekly",
+                "product.users.active",
+                WEEK,
+            ),
+            (
+                "product.owners.active.stickiness.daily",
+                "product.owners.active",
+                DAY,
+            ),
+            (
+                "product.owners.active.stickiness.weekly",
+                "product.owners.active",
+                WEEK,
+            ),
         ];
         let month_sides = [
-            ("product.users.active.stickiness.daily", "product.users.active.month"),
-            ("product.users.active.stickiness.weekly", "product.users.active.month"),
-            ("product.owners.active.stickiness.daily", "product.owners.active.month"),
-            ("product.owners.active.stickiness.weekly", "product.owners.active.month"),
+            (
+                "product.users.active.stickiness.daily",
+                "product.users.active.month",
+            ),
+            (
+                "product.users.active.stickiness.weekly",
+                "product.users.active.month",
+            ),
+            (
+                "product.owners.active.stickiness.daily",
+                "product.owners.active.month",
+            ),
+            (
+                "product.owners.active.stickiness.weekly",
+                "product.owners.active.month",
+            ),
         ];
         let month_sides: HashMap<_, _> = month_sides.into_iter().collect();
         for (id, numerator, numerator_window) in stickiness {
             let ratio = metrics[id].ratio.as_ref().unwrap();
             assert_eq!(ratio.numerator, numerator, "{id}");
             assert_eq!(ratio.denominator, month_sides[id], "{id}");
-            assert_eq!(ratio.numerator_window_seconds, Some(numerator_window), "{id}");
+            assert_eq!(
+                ratio.numerator_window_seconds,
+                Some(numerator_window),
+                "{id}"
+            );
             assert_eq!(ratio.denominator_window_seconds, Some(FOUR_WEEKS), "{id}");
             assert!(ratio.display_as_percentage, "{id}");
             assert!(metrics[id].query.is_none(), "{id}");
@@ -1242,7 +1277,10 @@ mod tests {
         }
         let shares = [
             ("product.games.ladder.share", "product.games.ladder"),
-            ("product.games.user_created.share", "product.games.user_created"),
+            (
+                "product.games.user_created.share",
+                "product.games.user_created",
+            ),
             ("product.games.tournament.share", "product.games.tournament"),
         ];
         for (id, numerator) in shares {
@@ -1256,10 +1294,23 @@ mod tests {
             assert_eq!(metric_wire[id]["value_type"], "float", "{id}");
         }
         // Every ratio side is a declared plain metric, never a ratio itself.
-        for id in stickiness.iter().map(|(id, _, _)| *id).chain(shares.iter().map(|(id, _)| *id)) {
-            for side in [&metrics[id].ratio.as_ref().unwrap().numerator, &metrics[id].ratio.as_ref().unwrap().denominator] {
-                let side = metrics.get(side.as_str()).unwrap_or_else(|| panic!("{id} side {side} not declared"));
-                assert!(side.ratio.is_none(), "{id} side {} is itself a ratio", side.id);
+        for id in stickiness
+            .iter()
+            .map(|(id, _, _)| *id)
+            .chain(shares.iter().map(|(id, _)| *id))
+        {
+            for side in [
+                &metrics[id].ratio.as_ref().unwrap().numerator,
+                &metrics[id].ratio.as_ref().unwrap().denominator,
+            ] {
+                let side = metrics
+                    .get(side.as_str())
+                    .unwrap_or_else(|| panic!("{id} side {side} not declared"));
+                assert!(
+                    side.ratio.is_none(),
+                    "{id} side {} is itself a ratio",
+                    side.id
+                );
             }
         }
 
@@ -1284,11 +1335,21 @@ mod tests {
                 .items
                 .iter()
                 .map(|item| match item {
-                    Item::Stat { query_id, window_seconds, .. }
-                    | Item::TimeSeries { query_id, window_seconds, .. }
-                    | Item::Table { query_id, window_seconds, .. } => {
-                        (query_id.as_str(), *window_seconds)
+                    Item::Stat {
+                        query_id,
+                        window_seconds,
+                        ..
                     }
+                    | Item::TimeSeries {
+                        query_id,
+                        window_seconds,
+                        ..
+                    }
+                    | Item::Table {
+                        query_id,
+                        window_seconds,
+                        ..
+                    } => (query_id.as_str(), *window_seconds),
                     _ => panic!("section item is not a query item"),
                 })
                 .collect()
@@ -1339,31 +1400,61 @@ mod tests {
             vec![
                 ("product.users.active.daily", Some(NINETY_DAYS)),
                 ("product.owners.active.daily", Some(NINETY_DAYS)),
-                ("product.users.active.weekly", Some(THREE_HUNDRED_SIXTY_FOUR_DAYS)),
-                ("product.owners.active.weekly", Some(THREE_HUNDRED_SIXTY_FOUR_DAYS)),
-                ("product.snakes.active.weekly", Some(THREE_HUNDRED_SIXTY_FOUR_DAYS)),
-                ("product.games.ladder.weekly", Some(THREE_HUNDRED_SIXTY_FOUR_DAYS)),
-                ("product.games.custom.weekly", Some(THREE_HUNDRED_SIXTY_FOUR_DAYS)),
-                ("product.games.tournament.weekly", Some(THREE_HUNDRED_SIXTY_FOUR_DAYS)),
-                ("product.new_users.weekly", Some(THREE_HUNDRED_SIXTY_FOUR_DAYS)),
-                ("product.new_snakes.weekly", Some(THREE_HUNDRED_SIXTY_FOUR_DAYS)),
+                (
+                    "product.users.active.weekly",
+                    Some(THREE_HUNDRED_SIXTY_FOUR_DAYS)
+                ),
+                (
+                    "product.owners.active.weekly",
+                    Some(THREE_HUNDRED_SIXTY_FOUR_DAYS)
+                ),
+                (
+                    "product.snakes.active.weekly",
+                    Some(THREE_HUNDRED_SIXTY_FOUR_DAYS)
+                ),
+                (
+                    "product.games.ladder.weekly",
+                    Some(THREE_HUNDRED_SIXTY_FOUR_DAYS)
+                ),
+                (
+                    "product.games.custom.weekly",
+                    Some(THREE_HUNDRED_SIXTY_FOUR_DAYS)
+                ),
+                (
+                    "product.games.tournament.weekly",
+                    Some(THREE_HUNDRED_SIXTY_FOUR_DAYS)
+                ),
+                (
+                    "product.new_users.weekly",
+                    Some(THREE_HUNDRED_SIXTY_FOUR_DAYS)
+                ),
+                (
+                    "product.new_snakes.weekly",
+                    Some(THREE_HUNDRED_SIXTY_FOUR_DAYS)
+                ),
             ],
             "history chart windows"
         );
 
         // Plain-words criterion: each definition says what it counts.
-        assert!(metrics["product.users.active"]
-            .display_name
-            .as_deref()
-            .is_some_and(|n| n.contains("authenticated request")));
-        assert!(metrics["product.owners.active"]
-            .display_name
-            .as_deref()
-            .is_some_and(|n| n.contains("Owners whose snake played")));
-        assert!(metrics["product.snakes.active"]
-            .display_name
-            .as_deref()
-            .is_some_and(|n| n.contains("Snakes that played")));
+        assert!(
+            metrics["product.users.active"]
+                .display_name
+                .as_deref()
+                .is_some_and(|n| n.contains("authenticated request"))
+        );
+        assert!(
+            metrics["product.owners.active"]
+                .display_name
+                .as_deref()
+                .is_some_and(|n| n.contains("Owners whose snake played"))
+        );
+        assert!(
+            metrics["product.snakes.active"]
+                .display_name
+                .as_deref()
+                .is_some_and(|n| n.contains("Snakes that played"))
+        );
 
         // Sections other tasks own keep main's item ids verbatim.
         let achievements = find_section(product, "Achievements");
