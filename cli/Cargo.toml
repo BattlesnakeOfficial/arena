@@ -30,6 +30,10 @@ tabled = "0.17"
 colored = "2"
 chrono-humanize = "0.2"
 arena-api-scope = { path = "../arena-api-scope" }
+# Shared game engine (DEV-2143): the play subcommand (DEV-2144) will run
+# offline games through it; depending now keeps its tree under this crate's
+# dependency-hygiene test in CI.
+engine-core = { path = "../engine-core" }
 
 [dev-dependencies]
 wiremock = "0.6"

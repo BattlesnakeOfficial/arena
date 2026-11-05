@@ -463,9 +463,7 @@ mod tests {
                 .iter()
                 .map(|r| (r.snake_id.clone(), r.direction))
                 .collect();
-            crate::engine::apply_turn(&mut game, &moves).unwrap();
-            game.board.turn += 1;
-            crate::engine::spawn_food(&mut game);
+            crate::engine::advance_turn(&mut game, &moves).unwrap();
             for snake in &game.board.snakes {
                 if snake.eliminated_cause.is_eliminated()
                     && !deaths.iter().any(|d| d.snake_id == snake.id)
