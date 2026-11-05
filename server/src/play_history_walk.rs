@@ -33,12 +33,11 @@ use crate::state::AppState;
 /// pauses the walk (tick no-ops before any work). A claimed backup job
 /// holds its worker while waiting on `BACKUP_SLOT` and prod has 100
 /// workers, so this ceiling — not the enqueue count alone — is what keeps
-/// at least 75 workers free for game runners. Ships at 5 so the first prod
-/// run is a small batch; the coordinator ramps it after checking that
-/// batch. Math at 25: 25 x 12 ticks/h = 300/h theoretical; the hourly
-/// archive drains (~:21-:45) zero the budget for ~25-30 min/h -> ~150-200/h
-/// realistic during the backlog.
-pub(crate) const PLAY_WALK_INFLIGHT_CEILING: i64 = 5;
+/// at least 75 workers free for game runners. Shipped at 5 so the first prod
+/// run was a small batch, then ramped after checking it. Math at 25:
+/// 25 x 12 ticks/h = 300/h theoretical; at 5, the hourly drains zeroed the
+/// budget for 1 tick in 12 -> ~275/h during the backlog.
+pub(crate) const PLAY_WALK_INFLIGHT_CEILING: i64 = 25;
 /// Engine rows examined per tick — far above the ceiling so done rows
 /// advance the cursor well past the enqueue frontier each tick.
 const PLAY_WALK_PAGE_SIZE: i64 = 2_000;
