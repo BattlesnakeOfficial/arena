@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT status, attempts, byte_size, render_ms\n               FROM achievement_clips WHERE achievement_earn_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "status",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "attempts",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 2,
+        "name": "byte_size",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 3,
+        "name": "render_ms",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "22c3bd58bd9856c2d856e231ef318460183c4da778466c213d5b901f59dcf2c3"
+}

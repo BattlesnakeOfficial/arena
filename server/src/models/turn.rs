@@ -79,6 +79,31 @@ pub async fn get_turn_frames_page(
     Ok(turns)
 }
 
+/// The renderable frames whose turn falls in the inclusive range
+/// [from_turn, to_turn], ascending — the clip renderer's DB window.
+pub async fn get_turn_frames_range(
+    pool: &PgPool,
+    game_id: Uuid,
+    from_turn: i32,
+    to_turn: i32,
+) -> cja::Result<Vec<serde_json::Value>> {
+    let rows = sqlx::query!(
+        r#"SELECT frame_data AS "frame_data!: serde_json::Value"
+           FROM turns
+           WHERE game_id = $1
+             AND frame_data IS NOT NULL
+             AND turn_number BETWEEN $2 AND $3
+           ORDER BY turn_number ASC"#,
+        game_id,
+        from_turn,
+        to_turn,
+    )
+    .fetch_all(pool)
+    .await
+    .wrap_err("Failed to fetch turn frames range from database")?;
+    Ok(rows.into_iter().map(|r| r.frame_data).collect())
+}
+
 /// The most recent persisted frame of a game (the engine API's `LastFrame`),
 /// or `None` before turn 0 is stored.
 pub async fn get_latest_frame(

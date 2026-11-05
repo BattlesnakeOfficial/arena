@@ -11,6 +11,7 @@ use color_eyre::eyre::{Context as _, eyre};
 use state::AppState;
 use tracing::info;
 
+mod achievement_clips;
 mod activity;
 mod archive;
 mod backup;

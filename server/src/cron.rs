@@ -8,9 +8,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::AppConfig;
 use crate::jobs::{
-    BackfillAchievementsJob, CustomizationActiveWeekBackfillJob, GameBackupJob,
-    LeaderboardMatchmakerJob, NativeGameBackupJob, PlayGrantReconcileJob, RateLimitPruneJob,
-    ReconcileRecentAchievementsJob, SnakeHealthSweeperJob, StuckGameSweeperJob,
+    AchievementClipsSweepJob, BackfillAchievementsJob, CustomizationActiveWeekBackfillJob,
+    GameBackupJob, LeaderboardMatchmakerJob, NativeGameBackupJob, PlayGrantReconcileJob,
+    RateLimitPruneJob, ReconcileRecentAchievementsJob, SnakeHealthSweeperJob, StuckGameSweeperJob,
     StuckMatchSweeperJob, TurnRetentionJob,
 };
 use crate::state::AppState;
@@ -35,6 +35,9 @@ pub const STUCK_GAME_SWEEP_INTERVAL_SECS: u64 = 30 * 60;
 pub const CUSTOMIZATION_ACTIVE_WEEK_BACKFILL_INTERVAL_SECS: u64 = 60 * 60;
 pub const ACHIEVEMENT_BACKFILL_INTERVAL_SECS: u64 = 5 * 60;
 pub const ACHIEVEMENT_RECONCILE_INTERVAL_SECS: u64 = 60 * 60;
+/// Achievement clips sweep interval: a fresh earn's clip reaches the share
+/// page within a few ticks even behind the hourly backup burst.
+pub const ACHIEVEMENT_CLIPS_SWEEP_INTERVAL_SECS: u64 = 60;
 
 /// Weekly highlights digest: hourly tick computes the latest completed
 /// Saturday-noon week if missing, then retries pending Discord posts
@@ -87,6 +90,14 @@ pub(crate) fn cron_registry(config: &AppConfig) -> CronRegistry<AppState> {
         Some("Repair recent achievement awards"),
         Duration::from_secs(ACHIEVEMENT_RECONCILE_INTERVAL_SECS),
         |app_state, _| Box::pin(reconcile_achievements_callback(app_state)),
+    );
+    // Achievement clips: drive new and pending clips to a rendered GIF
+    // (bounded retries). The 60s tick keeps a fresh earn's clip on the share
+    // page within minutes even behind the hourly backup burst.
+    registry.register_job(
+        AchievementClipsSweepJob,
+        Some("Sweep achievement earns needing clips"),
+        Duration::from_secs(ACHIEVEMENT_CLIPS_SWEEP_INTERVAL_SECS),
     );
 
     // Hourly play grant and new-account reconciliation; configurable for rollout.

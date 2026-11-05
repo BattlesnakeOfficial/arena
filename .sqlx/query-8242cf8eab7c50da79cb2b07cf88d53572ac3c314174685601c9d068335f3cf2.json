@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE achievement_clips\n           SET status = 'failed', updated_at = NOW()\n           WHERE status = 'pending' AND attempts >= $1\n             AND updated_at < NOW() - make_interval(secs => $2)\n           RETURNING achievement_earn_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "achievement_earn_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Float8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "8242cf8eab7c50da79cb2b07cf88d53572ac3c314174685601c9d068335f3cf2"
+}

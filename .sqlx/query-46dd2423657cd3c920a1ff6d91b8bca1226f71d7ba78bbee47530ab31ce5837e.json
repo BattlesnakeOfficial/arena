@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT achievement_earn_id, game_id\n         FROM achievement_earns WHERE user_id = $1 AND achievement = $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "achievement_earn_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "game_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "46dd2423657cd3c920a1ff6d91b8bca1226f71d7ba78bbee47530ab31ce5837e"
+}

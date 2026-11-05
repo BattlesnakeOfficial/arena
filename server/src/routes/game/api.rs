@@ -249,7 +249,7 @@ impl From<&BoardViewerGame> for GameEndGame {
     }
 }
 
-fn archive_row_kind(record: &GameRow) -> ArchiveRowKind {
+pub(crate) fn archive_row_kind(record: &GameRow) -> ArchiveRowKind {
     if record.engine_game_id.is_some() {
         ArchiveRowKind::Play
     } else {
@@ -1094,7 +1094,7 @@ pub(crate) mod fixtures {
     /// PascalCase keys, URL already blank (native frames persist blanks),
     /// EMPTY Author whose snake ID is the `game_battlesnake_id` — the key
     /// `fill_frame_authors` matches.
-    fn native_frame_json(turn: i32, snake_id: &str) -> serde_json::Value {
+    pub(crate) fn native_frame_json(turn: i32, snake_id: &str) -> serde_json::Value {
         serde_json::json!({
             "Turn": turn,
             "Snakes": [{

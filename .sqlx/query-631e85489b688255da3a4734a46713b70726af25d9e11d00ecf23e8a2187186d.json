@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE achievement_clips\n           SET attempts = attempts + 1, last_attempt_at = NOW(), updated_at = NOW()\n           WHERE achievement_earn_id = $1\n             AND status = 'pending'\n             AND attempts < $2\n             AND (last_attempt_at IS NULL\n                  OR last_attempt_at < NOW() - make_interval(secs => $3))\n           RETURNING attempts AS \"attempts!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "attempts!",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4",
+        "Float8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "631e85489b688255da3a4734a46713b70726af25d9e11d00ecf23e8a2187186d"
+}

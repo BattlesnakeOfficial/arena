@@ -179,6 +179,10 @@ pub fn routes(app_state: AppState) -> cja::Result<cja::server::App> {
             get(achievements::share_page),
         )
         .route(
+            "/achievements/{slug}/{user_id}/clip.gif",
+            get(achievements::share_clip),
+        )
+        .route(
             "/achievements/{slug}/{user_id}/share-action",
             post(achievements::share_action),
         )

@@ -24,7 +24,7 @@ use crate::{
     errors::{ServerError, ServerResult},
     models::{
         battlesnake,
-        game::{GameStatus, get_game_by_id},
+        game::{GameBoardSize, GameStatus, get_game_by_id},
         game_battlesnake::{
             GameBattlesnakeWithDetails, get_battlesnakes_by_game_id,
             get_game_stats_for_battlesnake, join_order_key,
@@ -245,12 +245,7 @@ async fn load_game_card(
         snakes.sort_by_key(join_order_key);
     }
 
-    let (width, height) = game.board_size.dimensions();
-    let side = |n: u32| {
-        i32::try_from(n)
-            .unwrap_or(MAX_BOARD_SIDE)
-            .clamp(1, MAX_BOARD_SIDE)
-    };
+    let (width, height) = board_sides(&game.board_size);
     Ok(Some(GameCard {
         status: match game.status {
             GameStatus::Waiting => cards::GameStatus::Waiting,
@@ -259,13 +254,26 @@ async fn load_game_card(
             GameStatus::Failed => cards::GameStatus::Failed,
         },
         mode: game.game_type.as_str().to_string(),
-        width: side(width),
-        height: side(height),
+        width,
+        height,
         roster: roster(&snakes, frame.as_ref(), spoilers),
-        board: board(side(width), side(height), frame.as_ref(), spoilers),
+        board: board(width, height, frame.as_ref(), spoilers),
         spoilers,
         turns: frame.as_ref().filter(|_| spoilers).map(|f| f.turn),
     }))
+}
+
+/// Board sides for rendering, clamped to MAX_BOARD_SIDE: real boards top
+/// out at 25×25, and a malformed or hostile custom size must not turn
+/// into a million grid cells.
+pub(crate) fn board_sides(size: &GameBoardSize) -> (i32, i32) {
+    let side = |n: u32| {
+        i32::try_from(n)
+            .unwrap_or(MAX_BOARD_SIDE)
+            .clamp(1, MAX_BOARD_SIDE)
+    };
+    let (w, h) = size.dimensions();
+    (side(w), side(h))
 }
 
 /// DEV-1981: a pruned native game has no `turns` rows, so the social
@@ -346,7 +354,12 @@ fn roster(
         .collect()
 }
 
-fn board(width: i32, height: i32, frame: Option<&EngineGameFrame>, spoilers: bool) -> BoardArt {
+pub(crate) fn board(
+    width: i32,
+    height: i32,
+    frame: Option<&EngineGameFrame>,
+    spoilers: bool,
+) -> BoardArt {
     let cells = |points: &[crate::engine_models::Point]| -> Vec<(i32, i32)> {
         points.iter().map(|p| (p.x, p.y)).collect()
     };
