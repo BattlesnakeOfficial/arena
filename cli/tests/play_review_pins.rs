@@ -32,6 +32,7 @@ fn solo_args(url: String) -> PlayArgs {
         minimum_food: 1,
         hazard_damage_per_turn: 14,
         shrink_every_n_turns: 25,
+        max_turns: None,
     }
 }
 
