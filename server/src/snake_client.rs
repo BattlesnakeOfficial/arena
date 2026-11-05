@@ -17,7 +17,14 @@ use crate::models::battlesnake::EngineRegion;
 use crate::wire;
 use uuid::Uuid;
 
-pub(crate) const BODY_READ_CAP_BYTES: usize = 64 * 1024;
+// Move-response reading lives in engine-core (shared with the battlesnake
+// CLI); re-exported so every existing consumer path keeps compiling.
+pub use engine_core::move_response::{
+    BODY_READ_CAP_BYTES, MoveResponse, MoveResult, parse_direction,
+};
+// Only the test module below asserts against these via `use super::*`.
+#[cfg(test)]
+use engine_core::move_response::{MAX_SHOUT_CHARS, sanitize_shout};
 
 const PROXY_TRANSIT_MARGIN: Duration = Duration::from_millis(300);
 const LATENCY_HEADER: &str = "x-battlesnake-latency-ms";
@@ -202,111 +209,6 @@ pub(crate) async fn execute_proxy(
     }
 }
 
-/// Maximum length of a shout kept after sanitization. Longer shouts are
-/// truncated on a char boundary. 256 chars is far beyond any real shout
-/// (the board viewer clips much shorter) while bounding what an arbitrary
-/// third-party server can push into frame JSON (DEV-1297).
-pub(crate) const MAX_SHOUT_CHARS: usize = 256;
-
-/// Whitespace-like separators become a space rather than being dropped, so
-/// word boundaries survive sanitization ("gg\nwp" → "gg wp", not "ggwp").
-fn map_to_space(c: char) -> char {
-    match c {
-        '\t' | '\n' | '\r' | '\u{000B}' | '\u{000C}' | '\u{2028}' | '\u{2029}' => ' ',
-        _ => c,
-    }
-}
-
-/// Invisible / disguising characters, stripped outright:
-/// - remaining Cc (C0 minus mapped whitespace, DEL, C1) via `is_control`
-/// - Cf format characters: soft hyphen, Arabic letter mark, Khmer inherent
-///   vowels, Mongolian vowel separator, ZWSP/ZWNJ, LRM/RLM, bidi embedding
-///   and overrides (U+202A–U+202E — the RLO spoofing class), word joiner /
-///   invisible separators / bidi isolates (U+2060–U+206F), BOM (U+FEFF),
-///   interlinear annotation (U+FFF9–U+FFFB), and Unicode tags
-///   (U+E0000–U+E007F — "ASCII smuggling": invisible to humans, readable
-///   by models)
-/// - invisible non-Cf: combining grapheme joiner, blank-rendering Hangul
-///   fillers
-///
-/// Deliberately KEPT: U+200D (ZWJ) and U+FE00–U+FE0F (variation selectors)
-/// — stripping them breaks multi-codepoint emoji (👨‍👩‍👧, ❤️).
-fn is_invisible(c: char) -> bool {
-    c.is_control()
-        || matches!(u32::from(c),
-            0x00AD | 0x034F | 0x061C
-            | 0x115F | 0x1160 | 0x17B4 | 0x17B5
-            | 0x180E
-            | 0x200B | 0x200C | 0x200E | 0x200F
-            | 0x202A..=0x202E | 0x2060..=0x206F
-            | 0x3164 | 0xFFA0
-            | 0xFEFF | 0xFFF9..=0xFFFB
-            | 0xE0000..=0xE007F)
-}
-
-/// Sanitize a shout from a move response: map separators to spaces, strip
-/// invisible characters, collapse whitespace runs, trim, truncate to
-/// [`MAX_SHOUT_CHARS`] on a char boundary (then trim again). Returns None
-/// when nothing printable remains (frame code treats None as "no shout"
-/// and serializes "").
-pub(crate) fn sanitize_shout(raw: Option<String>) -> Option<String> {
-    let s = raw?;
-    let mut cleaned = String::with_capacity(s.len());
-    let mut last_was_space = false;
-    for c in s.chars().map(map_to_space) {
-        if is_invisible(c) {
-            continue;
-        }
-        if c == ' ' {
-            if !last_was_space {
-                cleaned.push(' ');
-            }
-            last_was_space = true;
-        } else {
-            cleaned.push(c);
-            last_was_space = false;
-        }
-    }
-    let mut cleaned = cleaned.trim().to_string();
-    if cleaned.chars().count() > MAX_SHOUT_CHARS {
-        cleaned = cleaned.chars().take(MAX_SHOUT_CHARS).collect();
-        cleaned = cleaned.trim_end().to_string();
-    }
-    (!cleaned.is_empty()).then_some(cleaned)
-}
-
-/// Response from a snake's /move endpoint
-#[derive(Debug, Deserialize)]
-pub struct MoveResponse {
-    #[serde(rename = "move")]
-    pub direction: String,
-    pub shout: Option<String>,
-}
-
-/// Result of a move request including timing info
-#[derive(Debug, Clone)]
-pub struct MoveResult {
-    pub snake_id: String,
-    pub direction: Direction,
-    pub latency_ms: Option<i64>,
-    pub timed_out: bool,
-    pub shout: Option<String>,
-    /// HTTP status the snake answered with; `None` when no response arrived
-    /// (timeout, transport error). Surfaced in frames as `StatusCode` like
-    /// the legacy engine. On `/move` an engine-proxy fault is retried
-    /// directly, so the turn carries the direct answer's status; the fault
-    /// itself still yields `None` here, as it does on the start/end/info and
-    /// health paths, which keep the fallback.
-    pub status_code: Option<u16>,
-    /// The snake answered but the answer was unusable: a non-2xx status, a
-    /// body that isn't a move response, or an unrecognized direction. Kept
-    /// apart from `timed_out` (no answer at all). An engine-proxy fault
-    /// never sets this (it is not the snake's answer); on `/move` such
-    /// faults are retried directly, so the turn carries the direct answer's
-    /// `errored` instead.
-    pub errored: bool,
-}
-
 /// Build the request body for a specific snake
 ///
 /// The Battlesnake API expects the `you` field to be set to the snake
@@ -318,14 +220,6 @@ fn build_request_for_snake(
     customizations: &HashMap<String, SnakeCustomizations>,
 ) -> wire::Game {
     wire::Game::from_engine_game(game, snake_id, snake_contexts, customizations)
-}
-
-/// Parse a direction string into a Direction enum
-///
-/// Shared with the on-demand snake health check (`snake_health`) so test
-/// results judge moves exactly like real games do.
-pub(crate) fn parse_direction(s: &str) -> Option<Direction> {
-    s.parse().ok()
 }
 
 /// Read a response body chunk by chunk, stopping at `cap` bytes.
@@ -424,20 +318,14 @@ pub async fn request_move(
         Ok(Ok(response)) => {
             let status = Some(response.status().as_u16());
             match read_body_capped(response, BODY_READ_CAP_BYTES).await {
-                Ok(body) => match serde_json::from_str::<MoveResponse>(&body) {
-                    Ok(move_response) => {
-                        let parsed = parse_direction(&move_response.direction);
-                        MoveResult {
-                            snake_id: snake_id.to_string(),
-                            direction: parsed
-                                .unwrap_or_else(|| last_direction.unwrap_or(Direction::Up)),
-                            latency_ms: Some(elapsed),
-                            timed_out: false,
-                            shout: sanitize_shout(move_response.shout),
-                            status_code: status,
-                            errored: move_errored(status, parsed),
-                        }
-                    }
+                Ok(body) => match engine_core::move_response::interpret_move_response(
+                    snake_id,
+                    &body,
+                    status,
+                    Some(elapsed),
+                    last_direction,
+                ) {
+                    Ok(result) => result,
                     Err(e) => invalid_move_response(snake_id, last_direction, elapsed, status, &e),
                 },
                 Err(e) => invalid_move_response(snake_id, last_direction, elapsed, status, &e),
@@ -450,15 +338,7 @@ pub async fn request_move(
                 error = %e,
                 "Network error calling snake, using fallback"
             );
-            MoveResult {
-                snake_id: snake_id.to_string(),
-                direction: last_direction.unwrap_or(Direction::Up),
-                latency_ms: None,
-                timed_out: true,
-                shout: None,
-                status_code: None,
-                errored: false,
-            }
+            engine_core::move_response::transport_fallback_result(snake_id, last_direction, None, true)
         }
         Err(_) => {
             // Timeout - continue in same direction
@@ -467,15 +347,7 @@ pub async fn request_move(
                 timeout_ms = timeout.as_millis(),
                 "Snake timed out, using fallback"
             );
-            MoveResult {
-                snake_id: snake_id.to_string(),
-                direction: last_direction.unwrap_or(Direction::Up),
-                latency_ms: None,
-                timed_out: true,
-                shout: None,
-                status_code: None,
-                errored: false,
-            }
+            engine_core::move_response::transport_fallback_result(snake_id, last_direction, None, true)
         }
     }
 }
@@ -492,22 +364,7 @@ fn invalid_move_response(
         error = %error,
         "Failed to parse move response, using fallback"
     );
-    MoveResult {
-        snake_id: snake_id.to_string(),
-        direction: last_direction.unwrap_or(Direction::Up),
-        latency_ms: Some(elapsed),
-        timed_out: false,
-        shout: None,
-        status_code,
-        errored: true,
-    }
-}
-
-/// Whether a parsed move response still counts as an error: real games use
-/// the move anyway, but a non-2xx status or an unrecognized direction means
-/// the snake's server is misbehaving.
-fn move_errored(status: Option<u16>, direction: Option<Direction>) -> bool {
-    direction.is_none() || !status.is_some_and(|s| (200..300).contains(&s))
+    engine_core::move_response::parse_failure_result(snake_id, last_direction, Some(elapsed), status_code)
 }
 
 /// Call /start endpoint (fire and forget, no response expected)
@@ -713,33 +570,27 @@ pub async fn request_move_routed(
         .await;
     };
     let body = build_request_for_snake(game, &endpoint.snake_id, snake_contexts, customizations);
-    let fallback = |latency_ms, timed_out| MoveResult {
-        snake_id: endpoint.snake_id.clone(),
-        direction: last_direction.unwrap_or(Direction::Up),
-        latency_ms,
-        timed_out,
-        shout: None,
-        status_code: None,
-        errored: false,
+    let fallback = |latency_ms, timed_out| {
+        engine_core::move_response::transport_fallback_result(
+            &endpoint.snake_id,
+            last_direction,
+            latency_ms,
+            timed_out,
+        )
     };
     match execute_proxy(builder.json(&body), timeout).await {
         ProxyCall::Response {
             class: ProxyResponseClass::SnakeResponse { latency_ms },
             body,
             status,
-        } => match serde_json::from_str::<MoveResponse>(&body) {
-            Ok(moved) => {
-                let parsed = parse_direction(&moved.direction);
-                MoveResult {
-                    snake_id: endpoint.snake_id.clone(),
-                    direction: parsed.unwrap_or_else(|| last_direction.unwrap_or(Direction::Up)),
-                    latency_ms: Some(latency_ms),
-                    timed_out: false,
-                    shout: sanitize_shout(moved.shout),
-                    status_code: Some(status.as_u16()),
-                    errored: move_errored(Some(status.as_u16()), parsed),
-                }
-            }
+        } => match engine_core::move_response::interpret_move_response(
+            &endpoint.snake_id,
+            &body,
+            Some(status.as_u16()),
+            Some(latency_ms),
+            last_direction,
+        ) {
+            Ok(moved) => moved,
             Err(error) => invalid_move_response(
                 &endpoint.snake_id,
                 last_direction,

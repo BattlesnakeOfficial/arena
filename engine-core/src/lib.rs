@@ -4,6 +4,7 @@
 //! storage stay in the server.
 
 pub mod game;
+pub mod move_response;
 pub mod wire;
 
 pub use game::{

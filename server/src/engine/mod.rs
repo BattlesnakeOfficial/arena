@@ -6,9 +6,14 @@
 pub mod frame;
 
 pub use engine_core::{
-    EngineGame, GameMeta, GameResult, GameSource, MAX_TURNS, MOVE_TIMEOUT_MS, apply_turn,
-    is_game_over,
+    EngineGame, GameMeta, GameResult, GameSource, MAX_TURNS, MOVE_TIMEOUT_MS, is_game_over,
 };
+
+// The untouched test module below drives apply_turn directly (its loops
+// manage the turn counter and food themselves), so only test code reaches
+// it through this path.
+#[cfg(test)]
+use engine_core::apply_turn;
 
 use rules::{Direction, RoyaleSettings, StandardSettings};
 use uuid::Uuid;
