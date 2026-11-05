@@ -180,15 +180,7 @@ impl From<Point> for FrameCoord {
     }
 }
 
-pub struct SnakeCustomizations {
-    pub color: String,
-    pub head: String,
-    pub tail: String,
-    /// The snake owner's login, shown as "by {author}" in the board viewer's
-    /// scoreboard. Not a visual customization, but it rides in this per-snake
-    /// display-metadata map so every frame consumer gets it for free.
-    pub author: String,
-}
+pub use engine_core::wire::SnakeCustomizations;
 
 use crate::snake_client::MoveResult;
 

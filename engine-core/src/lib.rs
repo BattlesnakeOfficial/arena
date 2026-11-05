@@ -4,6 +4,7 @@
 //! storage stay in the server.
 
 pub mod game;
+pub mod wire;
 
 pub use game::{
     EngineGame, GameMeta, GameMode, GameResult, GameSource, InitialSnake, MAX_TURNS,
