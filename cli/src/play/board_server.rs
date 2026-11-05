@@ -463,12 +463,15 @@ async fn get_events(
 
 /// Per-connection task: full replay from turn 0, then the live tail. On a
 /// client that has everything (including `game_end`): graceful close
-/// FIRST, then signal `any_finished` — never before (aborting the serve
-/// task mid-close RSTs the final frames). A client that leaves before it
+/// FIRST, and `any_finished` only when that close handshake COMPLETED —
+/// the peer acknowledged Close before the deadline (aborting the serve
+/// task mid-close RSTs the final frames, and a Close that times out
+/// unacknowledged is not a finished tab). A client that leaves before it
 /// has everything — including one that goes away while caught up and
-/// parked waiting for the next event (a closed or reloaded tab) — returns
-/// WITHOUT `any_finished`: it reconnects for a full replay, and `finish`
-/// must not mistake it for a finished tab and cut the live one off.
+/// parked waiting for the next event (a closed or reloaded tab) — also
+/// returns WITHOUT `any_finished`: it reconnects for a full replay, and
+/// `finish` must not mistake it for a finished tab and cut the live one
+/// off; the `active` count and the stall rules end the wait instead.
 async fn handle_client(
     socket: WebSocket,
     shared: Arc<SharedEvents>,
@@ -548,8 +551,14 @@ async fn handle_client(
         }
     }
     // Only reached when this client has everything, including game_end.
-    graceful_close(&mut sender, &mut receiver, close_ack_timeout).await;
-    conn.send_modify(|s| s.any_finished = true);
+    // `any_finished` requires the close handshake to have COMPLETED —
+    // the peer acknowledged Close. A Close that timed out unacknowledged
+    // (the peer may still be reading, or may be gone) is not a finished
+    // tab: return without the flag and let the `active` count and the
+    // stall rules end `finish`.
+    if graceful_close(&mut sender, &mut receiver, close_ack_timeout).await {
+        conn.send_modify(|s| s.any_finished = true);
+    }
     // `active -= 1` happens ONLY via the guard's Drop — keep it that way.
 }
 
@@ -565,26 +574,39 @@ fn client_left(msg: Option<Result<Message, axum::Error>>) -> bool {
 /// bounded by `timeout`. Dropping early can RST the TCP connection and
 /// destroy the final in-flight frames. Modeled on the server's
 /// `graceful_close` (hence the `socket.split()` in `handle_client`).
+///
+/// Returns whether the close handshake COMPLETED: the Close frame was
+/// sent and the peer answered with a Close of its own before the
+/// deadline. A timeout, a dropped connection, or a failed Close send is
+/// not completion — the caller must not count that peer as finished.
 async fn graceful_close(
     sender: &mut futures::stream::SplitSink<WebSocket, Message>,
     receiver: &mut futures::stream::SplitStream<WebSocket>,
     timeout: Duration,
-) {
-    let _ = tokio::time::timeout(timeout, async {
-        let _ = sender
+) -> bool {
+    tokio::time::timeout(timeout, async {
+        if sender
             .send(Message::Close(Some(CloseFrame {
                 code: 1000, // NORMAL, like the engine (absent reads as 1005)
                 reason: "".into(),
             })))
-            .await;
-        // Drain until the client sends Close back or the connection drops.
-        while let Some(msg) = receiver.next().await {
-            if matches!(msg, Ok(Message::Close(_)) | Err(_)) {
-                break;
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        // Drain until the client sends Close back or the connection
+        // drops — only the client's own Close is the acknowledgement.
+        loop {
+            match receiver.next().await {
+                Some(Ok(Message::Close(_))) => return true,
+                Some(Ok(_)) => {} // text/ping/pong, keep draining
+                Some(Err(_)) | None => return false,
             }
         }
     })
-    .await;
+    .await
+    .unwrap_or(false) // the deadline expired without an acknowledgement
 }
 
 pub struct BoardServer {
