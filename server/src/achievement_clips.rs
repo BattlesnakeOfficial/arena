@@ -290,7 +290,7 @@ pub(crate) async fn render_achievement_clip(state: &AppState, earn_id: Uuid) -> 
     };
     match render_and_store(state, earn_id, &record, earn.turn_number).await {
         Ok((bytes, ms)) => {
-            sqlx::query!(
+            let updated = sqlx::query!(
                 "UPDATE achievement_clips
                  SET status = 'rendered', byte_size = $2, render_ms = $3,
                      rendered_at = NOW(), updated_at = NOW()
@@ -302,6 +302,16 @@ pub(crate) async fn render_achievement_clip(state: &AppState, earn_id: Uuid) -> 
             .execute(&state.db)
             .await
             .wrap_err("Failed to record rendered achievement clip")?;
+            if updated.rows_affected() == 0 {
+                // The row is gone or no longer pending (user deleted
+                // mid-render, or a stale sweep marked it failed): no row
+                // says rendered, so no Eyes event claims one.
+                tracing::info!(
+                    achievement_earn_id = %earn_id,
+                    "Rendered achievement clip has no pending row left to record"
+                );
+                return Ok(());
+            }
             tracing::info!(
                 event_type = "clip_rendered",
                 result = "rendered",
@@ -311,12 +321,12 @@ pub(crate) async fn render_achievement_clip(state: &AppState, earn_id: Uuid) -> 
                 "Achievement clip rendered"
             );
         }
-        Err(report) => {
+        Err(failure) => {
             // The attempt is counted and the failure recorded; the job
             // returns Ok either way — a clip failure never dead-letters
             // or blocks anything. The sweep is the retry driver.
             tracing::warn!(
-                error = %format!("{report:#}"),
+                error = %format!("{:#}", failure.report),
                 achievement_earn_id = %earn_id,
                 "Achievement clip render failed"
             );
@@ -334,7 +344,7 @@ pub(crate) async fn render_achievement_clip(state: &AppState, earn_id: Uuid) -> 
             tracing::info!(
                 event_type = "clip_rendered",
                 result = "failed",
-                ms = 0,
+                ms = failure.ms,
                 bytes = 0,
                 achievement_earn_id = %earn_id,
                 "Achievement clip render failed"
@@ -416,28 +426,40 @@ async fn load_clip_frames(
 
 /// Paint + encode + store. Returns (bytes, render_ms), where render_ms
 /// measures encode + object put only (the clock starts at the render
-/// slot, not at job start).
+/// slot, not at job start). On failure the error carries the same
+/// measure: `ClipRenderFailure::ms` is the time spent past the render
+/// slot, or 0 when the failure predates it (no paint or encode ran).
 async fn render_and_store(
     state: &AppState,
     earn_id: Uuid,
     record: &GameRow,
     earning_turn: Option<i32>,
-) -> cja::Result<(usize, i32)> {
+) -> Result<(usize, i32), ClipRenderFailure> {
     if !state.object_store.is_configured() {
-        bail!("Object store not configured: cannot store achievement clip");
+        return Err(ClipRenderFailure::before_render(eyre!(
+            "Object store not configured: cannot store achievement clip"
+        )));
     }
-    let frames = load_clip_frames(state, record, earning_turn).await?;
+    let frames = load_clip_frames(state, record, earning_turn)
+        .await
+        .map_err(ClipRenderFailure::before_render)?;
     if frames.is_empty() {
-        bail!("No frames in the achievement clip window");
+        return Err(ClipRenderFailure::before_render(eyre!(
+            "No frames in the achievement clip window"
+        )));
     }
     // One clip at a time per process; the permit moves into the blocking
     // closure so no cancellation path frees the slot mid-render.
     let permit = CLIP_RENDER_SLOT
         .acquire()
         .await
-        .wrap_err("Clip render slot closed")?;
+        .wrap_err("Clip render slot closed")
+        .map_err(ClipRenderFailure::before_render)?;
     #[cfg(test)]
-    clip_seam_handoff(earn_id)?;
+    clip_seam_handoff(earn_id).map_err(ClipRenderFailure::before_render)?;
+    // The clock starts at the render slot: on success and failure alike,
+    // ms reports the paint/encode/put work that actually ran, so Eyes can
+    // tell an expensive failure from an early bail-out.
     let started = std::time::Instant::now();
     let (width, height) = crate::routes::og::board_sides(&record.game.board_size);
     let rendered = tokio::task::spawn_blocking(move || {
@@ -453,19 +475,45 @@ async fn render_and_store(
     .await;
     let bytes = match rendered {
         Ok(Ok(bytes)) => bytes,
-        Ok(Err(report)) => return Err(report),
+        Ok(Err(report)) => return Err(ClipRenderFailure::during_render(report, started)),
         Err(join_error) => {
             // A painter panic is contained by spawn_blocking: it is a
             // normal render failure, not a process failure.
-            return Err(eyre!("Clip render task panicked: {join_error}"));
+            return Err(ClipRenderFailure::during_render(
+                eyre!("Clip render task panicked: {join_error}"),
+                started,
+            ));
         }
     };
     let byte_count = bytes.len();
     state
         .object_store
         .put(&clip_object_path(earn_id), bytes)
-        .await?;
+        .await
+        .map_err(|report| ClipRenderFailure::during_render(report, started))?;
     Ok((byte_count, started.elapsed().as_millis() as i32))
+}
+
+/// Why a clip render attempt failed, with the milliseconds the attempt
+/// spent past the render slot (paint, encode, object put). `ms = 0`
+/// means no render work ran: the failure predates the slot, exactly like
+/// the sweep cleanups that also carry `ms = 0`.
+struct ClipRenderFailure {
+    report: cja::color_eyre::Report,
+    ms: i32,
+}
+
+impl ClipRenderFailure {
+    fn before_render(report: cja::color_eyre::Report) -> Self {
+        Self { report, ms: 0 }
+    }
+
+    fn during_render(report: cja::color_eyre::Report, started: std::time::Instant) -> Self {
+        Self {
+            report,
+            ms: started.elapsed().as_millis() as i32,
+        }
+    }
 }
 
 /// Test seams (#[cfg(test)] only, keyed by earn id: #[sqlx::test]s run in
@@ -2280,7 +2328,14 @@ mod tests {
         );
     }
 
-    // ---- worst-case benchmark (manual: cargo test --release -- --ignored clip_bench) ----
+    // ---- worst-case benchmark (manual) ----
+    //
+    // cargo test -p arena --bin arena clip_bench -- --ignored
+    //
+    // Dev profile: the root Cargo.toml keeps the paint and encode crates
+    // (tiny-skia, gif, color_quant, weezl) at opt-level = 3, and a release
+    // build of this crate does not complete on the dev VM under its memory
+    // limit. Measured numbers land in a PR comment.
 
     /// CPU time (user+sys) of this process in seconds, from /proc/self/stat.
     fn cpu_seconds() -> f64 {
@@ -2337,7 +2392,7 @@ mod tests {
     /// and per-frame NeuQuant shimmer at an always-empty cell. Writes the
     /// GIFs to $CLIP_BENCH_OUT when set.
     #[test]
-    #[ignore = "manual benchmark: cargo test --release -- --ignored clip_bench"]
+    #[ignore = "manual benchmark: cargo test -p arena --bin arena clip_bench -- --ignored (dev profile; see the section comment above)"]
     fn clip_bench() {
         /// A 4-snake frame with serpentine bodies of `length` segments on
         /// a `side`-wide board, real catalog heads and tails. Each `turn`

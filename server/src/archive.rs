@@ -496,15 +496,24 @@ impl ArchiveReader {
             for raw in archived.frames() {
                 let frame: serde_json::Value =
                     serde_json::from_str(raw.get()).wrap_err("Failed to parse archived frame")?;
-                if let Some(turn) = frame.get("Turn").and_then(serde_json::Value::as_i64) {
-                    last_turn = Some(i32::try_from(turn).unwrap_or(i32::MAX));
-                }
+                // A missing or non-numeric Turn fails the whole call, on
+                // the same path as a parse failure: the window filter
+                // below must never silently drop a turn from the clip.
+                let turn = frame
+                    .get("Turn")
+                    .and_then(serde_json::Value::as_i64)
+                    .ok_or_else(|| {
+                        cja::color_eyre::eyre::eyre!("Archived frame lacks a numeric Turn")
+                    })?;
+                last_turn = Some(i32::try_from(turn).unwrap_or(i32::MAX));
                 parsed.push(frame);
             }
             let last_turn = last_turn.unwrap_or(0);
             let (from, to) = crate::achievement_clips::clip_window(earning_turn, last_turn);
             parsed
                 .into_iter()
+                // Every frame carries a numeric Turn (checked above), so
+                // this filter selects without ever dropping a malformed one.
                 .filter(|frame| {
                     frame
                         .get("Turn")
