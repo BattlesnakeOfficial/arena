@@ -39,7 +39,10 @@ engine-core = { path = "../engine-core" }
 rules = { path = "../rules" }
 # join_all for concurrent /move requests in play.
 futures = "0.3"
-clap_complete = "4"
+# ~4.5: keep the server's clap pinned at 4.5.x. clap_complete 4.6 requires
+# clap ^4.6.6, which would drag the server and engine-proxy off 4.5.54 in
+# the shared lockfile — a server dependency change this PR must not carry.
+clap_complete = "~4.5"
 # play's missing-name namer shuffles a pool; engine-core already pulls rand.
 rand = "0.8"
 

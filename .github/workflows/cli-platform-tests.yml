@@ -34,6 +34,10 @@ jobs:
     name: cargo test -p battlesnake (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
+      # Surface every OS's results: a macOS failure must not cancel the
+      # Windows job (or vice versa) — one cancelled matrix leg hides the
+      # evidence this job exists to produce.
+      fail-fast: false
       matrix:
         os: [windows-latest, macos-latest]
     steps:
@@ -51,4 +55,7 @@ jobs:
           key: ${{ runner.os }}-cli-test-${{ hashFiles('**/Cargo.lock') }}
 
       - name: cargo test -p battlesnake
-        run: cargo test -p battlesnake
+        # --no-fail-fast: a failing lib test must not stop the run before
+        # the integration-test binaries (play_cli, play_review_pins, …)
+        # have executed — their results are part of the platform evidence.
+        run: cargo test -p battlesnake --no-fail-fast

@@ -458,11 +458,14 @@ mod tests {
     async fn transport_failure_falls_back_timed_out() {
         // A listener that accepts every connection and closes it without a
         // response: the request fails at transport, deterministically, on
-        // every OS. Bind-then-drop relies on the OS refusing the released
-        // port quickly, which the Windows runner does not do — the connect
-        // to a released ephemeral port silently hangs until the timeout
-        // (wiremock pools servers, so a dropped MockServer would keep
-        // answering 404).
+        // every OS. A refused connect reaches the same Transport branch in
+        // round_trip, but bind-then-drop relies on the OS refusing the
+        // released port quickly: CI showed a connect to the closed port
+        // taking longer than 500 ms on the Windows runner, so at
+        // client(500) it hit the timeout instead — whether it would
+        // eventually refuse given longer was never measured (wiremock
+        // pools servers, so a dropped MockServer would keep answering
+        // 404).
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         std::thread::spawn(move || {

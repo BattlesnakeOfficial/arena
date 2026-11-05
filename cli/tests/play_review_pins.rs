@@ -126,12 +126,16 @@ async fn non_ok_move_warning_names_the_url_and_the_body() {
 /// out" sends the developer hunting for a slow snake instead of a dead one.
 ///
 /// Mechanism note: the snake serves `GET /` (so the game starts), then every
-/// later connection is accepted and closed without a response — the exact
-/// shape of a dead process on the wire, and deterministic on every OS. A
-/// listener that is merely dropped leaves a released ephemeral port, which
-/// the Windows runner does NOT refuse quickly: the connect silently hangs
-/// until the timeout, which would masquerade as exactly the misreport this
-/// test forbids.
+/// later connection is accepted and closed without a response. A dead
+/// process refuses the connect; this fixture is a live process closing it,
+/// which reaches the same `Transport` branch in the client's `round_trip`
+/// as a refused connect — deterministically, on every OS, without depending
+/// on Windows connect timing. A listener that is merely dropped leaves a
+/// released ephemeral port: CI showed a connect to the closed port taking
+/// longer than 500 ms on the Windows runner (a round-1 lib test with a
+/// 500 ms client timeout hit its timeout instead of a transport error) —
+/// whether it would refuse given longer was never measured, so a dropped
+/// listener could masquerade as exactly the misreport this test forbids.
 #[tokio::test]
 async fn refused_move_is_not_reported_as_a_timeout() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
