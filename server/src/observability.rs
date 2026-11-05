@@ -1110,8 +1110,10 @@ mod tests {
             "product.new_users.weekly",
             "product.new_snakes.weekly",
         ];
-        for id in weekly_ids {
-            assert_eq!(metrics[id].preferred_bucket_seconds, Some(604_800), "{id}");
+        fn bucket_group(
+            metric_wire: &HashMap<String, &serde_json::Value>,
+            id: &str,
+        ) -> serde_json::Value {
             let stages = metric_wire[id]["query"]["query"]["stages"]
                 .as_array()
                 .unwrap_or_else(|| panic!("{id} has no stages"));
@@ -1119,10 +1121,16 @@ mod tests {
                 .last()
                 .unwrap_or_else(|| panic!("{id} has no aggregate stage"));
             assert_eq!(aggregate["stage"], "aggregate", "{id}");
-            let groups = aggregate["groups"].as_array().unwrap();
-            let bucket = groups
+            aggregate["groups"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{id} aggregate has no groups"))
                 .first()
-                .unwrap_or_else(|| panic!("{id} aggregate has no bucket group"));
+                .unwrap_or_else(|| panic!("{id} aggregate has no bucket group"))
+                .clone()
+        }
+        for id in weekly_ids {
+            assert_eq!(metrics[id].preferred_bucket_seconds, Some(604_800), "{id}");
+            let bucket = bucket_group(&metric_wire, id);
             assert_eq!(bucket["alias"], "bucket", "{id}");
             let expected_call = serde_json::json!({
                 "type": "call",
@@ -1140,6 +1148,23 @@ mod tests {
                 bucket["expr"], expected_call,
                 "{id} Monday-origin time_bucket"
             );
+        }
+        // Daily buckets pinned at the day width in the 2-arg (epoch-origin)
+        // form: switching a daily metric to `.time_bucket(WEEK)` keeps every
+        // other pin green and silently turns the "per day" chart weekly.
+        for id in ["product.users.active.daily", "product.owners.active.daily"] {
+            assert_eq!(metrics[id].preferred_bucket_seconds, Some(DAY), "{id}");
+            let bucket = bucket_group(&metric_wire, id);
+            assert_eq!(bucket["alias"], "bucket", "{id}");
+            let expected_call = serde_json::json!({
+                "type": "call",
+                "function": "time_bucket",
+                "args": [
+                    {"type": "path", "path": {"root": "timestamp", "segments": []}},
+                    {"type": "literal", "value": {"type": "duration", "value": 86_400_000_000u64}},
+                ],
+            });
+            assert_eq!(bucket["expr"], expected_call, "{id} daily time_bucket");
         }
 
         // Filters pinned by stage order (stage order is evaluation order,
@@ -1217,6 +1242,129 @@ mod tests {
             serde_json::json!(snakes_stages),
             "snakes base definition stages"
         );
+
+        // The base pins above cover three metrics; the weekly check above
+        // reads only the aggregate stage. Every new plain metric's filters
+        // are pinned here by stage order, so a swapped or dropped filter
+        // anywhere in the family goes red.
+        let where_stages = |id: &str| -> Vec<serde_json::Value> {
+            metric_wire[id]["query"]["query"]["stages"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{id} has no stages"))
+                .iter()
+                .filter(|stage| stage["stage"] == "where")
+                .cloned()
+                .collect()
+        };
+        // Bool literal wire form read from the manifest fixture: a bool
+        // filter serializes `value` as {"type":"bool","value":true}.
+        let eq_bool_stage = |path: &str, value: bool| {
+            let (root, key) = match path.split_once('.') {
+                Some((root, key)) => (root, Some(key)),
+                None => (path, None),
+            };
+            let segments = key
+                .map(|key| vec![serde_json::json!({"type": "key", "value": key})])
+                .unwrap_or_default();
+            serde_json::json!({
+                "stage": "where",
+                "predicate": {
+                    "type": "binary",
+                    "op": "eq",
+                    "left": {"type": "path", "path": {"root": root, "segments": segments}},
+                    "right": {"type": "literal", "value": {"type": "bool", "value": value}},
+                },
+            })
+        };
+        let request_filters = || {
+            vec![
+                eq_stage("target", "cja::server::trace"),
+                eq_stage("message", "finished processing request"),
+            ]
+        };
+        let lifecycle_filters = || {
+            vec![
+                eq_stage("name", "snake.lifecycle"),
+                eq_stage("fields.endpoint", "end"),
+            ]
+        };
+        let source_filters = |source: &str| {
+            vec![
+                eq_stage("fields.event_type", "game_completed"),
+                eq_stage("fields.source", source),
+            ]
+        };
+        let new_metric_filters: &[(&str, Vec<serde_json::Value>)] = &[
+            ("product.users.active", request_filters()),
+            ("product.users.active.daily", request_filters()),
+            ("product.users.active.weekly", request_filters()),
+            ("product.users.active.month", request_filters()),
+            ("product.owners.active", lifecycle_filters()),
+            ("product.owners.active.daily", lifecycle_filters()),
+            ("product.owners.active.weekly", lifecycle_filters()),
+            ("product.owners.active.month", lifecycle_filters()),
+            ("product.snakes.active", lifecycle_filters()),
+            ("product.snakes.active.weekly", lifecycle_filters()),
+            ("product.games.ladder", source_filters("ladder")),
+            ("product.games.ladder.weekly", source_filters("ladder")),
+            ("product.games.tournament", source_filters("tournament")),
+            (
+                "product.games.tournament.weekly",
+                source_filters("tournament"),
+            ),
+            ("product.games.custom.weekly", source_filters("custom")),
+            (
+                "product.new_users.weekly",
+                vec![
+                    eq_stage("fields.event_type", "user_authenticated"),
+                    eq_bool_stage("fields.new_user", true),
+                ],
+            ),
+            (
+                "product.new_snakes.weekly",
+                vec![eq_stage("fields.event_type", "battlesnake_created")],
+            ),
+        ];
+        for (id, expected) in new_metric_filters {
+            assert_eq!(&where_stages(id), expected, "{id} where stages");
+        }
+        // Distinct argument pinned per variant: fields.user_id on the
+        // users/owners metrics, fields.battlesnake_id on the snakes ones.
+        for (id, key) in [
+            ("product.users.active", "user_id"),
+            ("product.users.active.daily", "user_id"),
+            ("product.users.active.weekly", "user_id"),
+            ("product.users.active.month", "user_id"),
+            ("product.owners.active", "user_id"),
+            ("product.owners.active.daily", "user_id"),
+            ("product.owners.active.weekly", "user_id"),
+            ("product.owners.active.month", "user_id"),
+            ("product.snakes.active", "battlesnake_id"),
+            ("product.snakes.active.weekly", "battlesnake_id"),
+        ] {
+            let stages = metric_wire[id]["query"]["query"]["stages"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{id} has no stages"));
+            let aggregate = stages
+                .last()
+                .unwrap_or_else(|| panic!("{id} has no aggregate stage"));
+            assert_eq!(aggregate["stage"], "aggregate", "{id}");
+            assert_eq!(
+                aggregate["aggregates"][0]["function"], "count_distinct",
+                "{id} aggregate function"
+            );
+            let expected_argument = serde_json::json!({
+                "type": "path",
+                "path": {
+                    "root": "fields",
+                    "segments": [{"type": "key", "value": key}],
+                },
+            });
+            assert_eq!(
+                aggregate["aggregates"][0]["argument"], expected_argument,
+                "{id} distinct argument"
+            );
+        }
 
         // Ratios: stickiness declare per-side windows over the 28-day side;
         // source shares declare none (the item's window sizes both sides).
@@ -1354,41 +1502,101 @@ mod tests {
                 })
                 .collect()
         }
+        fn item_window_labels(section: &Section) -> Vec<(&str, Option<u64>, Option<&str>)> {
+            section
+                .items
+                .iter()
+                .map(|item| match item {
+                    Item::Stat {
+                        query_id,
+                        window_seconds,
+                        label,
+                        ..
+                    } => (query_id.as_str(), *window_seconds, label.as_deref()),
+                    _ => panic!("section item is not a stat item"),
+                })
+                .collect()
+        }
         let active = find_section(product, "Active users, owners, and snakes");
         assert_eq!(
-            item_windows(active),
+            item_window_labels(active),
             vec![
-                ("product.users.active", Some(DAY)),
-                ("product.users.active", Some(WEEK)),
-                ("product.users.active", Some(FOUR_WEEKS)),
-                ("product.owners.active", Some(DAY)),
-                ("product.owners.active", Some(WEEK)),
-                ("product.owners.active", Some(FOUR_WEEKS)),
-                ("product.snakes.active", Some(WEEK)),
-                ("product.games.played", Some(WEEK)),
+                (
+                    "product.users.active",
+                    Some(DAY),
+                    Some("Users with an authenticated request · last 1 day"),
+                ),
+                (
+                    "product.users.active",
+                    Some(WEEK),
+                    Some("Users with an authenticated request · last 7 days"),
+                ),
+                (
+                    "product.users.active",
+                    Some(FOUR_WEEKS),
+                    Some("Users with an authenticated request · last 28 days"),
+                ),
+                (
+                    "product.owners.active",
+                    Some(DAY),
+                    Some("Owners whose snake played · last 1 day"),
+                ),
+                (
+                    "product.owners.active",
+                    Some(WEEK),
+                    Some("Owners whose snake played · last 7 days"),
+                ),
+                (
+                    "product.owners.active",
+                    Some(FOUR_WEEKS),
+                    Some("Owners whose snake played · last 28 days"),
+                ),
+                (
+                    "product.snakes.active",
+                    Some(WEEK),
+                    Some("Snakes that played a game · last 7 days"),
+                ),
+                (
+                    "product.games.played",
+                    Some(WEEK),
+                    Some("Games played · last 7 days"),
+                ),
             ],
-            "active tile windows"
+            "active tile windows and labels"
+        );
+        let stickiness_section = find_section(product, "Stickiness (share of 28-day actives)");
+        assert_eq!(
+            item_windows(stickiness_section),
+            vec![
+                ("product.users.active.stickiness.daily", None),
+                ("product.users.active.stickiness.weekly", None),
+                ("product.owners.active.stickiness.daily", None),
+                ("product.owners.active.stickiness.weekly", None),
+            ],
+            "stickiness tiles, in order, declaring no item windows"
         );
         let source_share = find_section(product, "Source share of games (last 7 days)");
         assert_eq!(
-            item_windows(source_share),
+            item_window_labels(source_share),
             vec![
-                ("product.games.ladder.share", Some(WEEK)),
-                ("product.games.user_created.share", Some(WEEK)),
-                ("product.games.tournament.share", Some(WEEK)),
+                (
+                    "product.games.ladder.share",
+                    Some(WEEK),
+                    Some("Ladder share of games · last 7 days"),
+                ),
+                (
+                    "product.games.user_created.share",
+                    Some(WEEK),
+                    Some("User-created share of games · last 7 days"),
+                ),
+                (
+                    "product.games.tournament.share",
+                    Some(WEEK),
+                    Some("Tournament share of games · last 7 days"),
+                ),
             ],
-            "source-share tile windows"
+            "source-share tile windows and labels"
         );
-        for item in active.items.iter().chain(source_share.items.iter()) {
-            let label = match item {
-                Item::Stat { label, .. } => label,
-                _ => panic!("expected a stat item"),
-            };
-            assert!(
-                label.as_deref().is_some_and(|l| !l.is_empty()),
-                "tile label empty"
-            );
-        }
         let history = dashboards["arena-product-history"];
         let history_windows: Vec<(&str, Option<u64>)> = history
             .sections
