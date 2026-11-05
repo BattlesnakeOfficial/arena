@@ -373,6 +373,27 @@ mod tests {
         );
     }
 
+    /// Go's getSnakeUpdate warns for every status other than 200. A 201
+    /// response may carry a usable move, but it must still name the endpoint
+    /// and status so the developer can fix the snake's HTTP contract.
+    #[tokio::test]
+    async fn created_move_response_warns_about_non_200_status() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/move"))
+            .respond_with(ResponseTemplate::new(201).set_body_string(r#"{"move":"right"}"#))
+            .mount(&server)
+            .await;
+
+        let (result, warning) = client(2000)
+            .request_move(&server.uri(), &body_for_move(), "s1", None)
+            .await;
+        assert_eq!(result.direction, Direction::Right);
+        let warning = warning.expect("Go warns on status 201 even with a usable move");
+        assert!(warning.contains(&format!("{}/move", server.uri())));
+        assert!(warning.contains("StatusCode: 201 (expected 200)"));
+    }
+
     #[tokio::test]
     async fn timeout_falls_back_to_last_direction() {
         let server = MockServer::start().await;
