@@ -18,7 +18,7 @@ use futures::future::join_all;
 use rules::{Direction, RoyaleSettings, StandardSettings};
 
 use engine_core::wire::{self, SnakeContext, SnakeCustomizations};
-use engine_core::{EngineGame, GameMode, InitialSnake, MAX_TURNS};
+use engine_core::{EngineGame, GameMode, InitialSnake};
 
 pub use mode::ResolvedGame;
 
@@ -31,7 +31,8 @@ pub struct SnakeSpec {
 
 /// The flag surface, byte-for-byte Go's long/short names (including
 /// camelCase). Every field whose long name is not the kebab-case of its Rust
-/// name has an explicit `long`.
+/// name has an explicit `long`. `--max-turns` is the single arena-added
+/// flag; every other long/short name is byte-for-byte Go's.
 ///
 /// `--browser`/`--board-url` are DEV-2146 and deliberately absent, as are
 /// `--config`/`$HOME/.battlesnake.yaml` (dropped: nothing read them).
@@ -102,6 +103,12 @@ pub struct PlayArgs {
     /// In Royale mode, the number of turns between generating new hazards
     #[arg(long = "shrinkEveryNTurns", default_value_t = 25)]
     pub shrink_every_n_turns: i32,
+    /// Stop the game at this turn. Omitted: no limit, the game runs until
+    /// it's over.
+    // An arena addition, not a Go flag — Go's play had no cap at all — so
+    // it gets a normal kebab-case long name (DEV-2164).
+    #[arg(long, value_name = "N", allow_negative_numbers = true)]
+    pub max_turns: Option<i32>,
 }
 
 /// Fully-validated, engine-ready inputs. Built from `PlayArgs` by pure
@@ -131,8 +138,10 @@ pub struct PlayConfig {
     /// mid-game otherwise, after /start already went out).
     pub royale_shrink: i32,
     pub snakes: Vec<SnakeSpec>,
-    /// `engine_core::MAX_TURNS`; a test override, not a CLI flag.
-    pub max_turns: i32,
+    /// `Some(n)` from `--max-turns n`: stop at turn n. `None` (default):
+    /// no limit — the game runs until it's over, like Go's CLI.
+    /// `engine_core::MAX_TURNS` (5,000) stays server/prod-only.
+    pub max_turns: Option<i32>,
 }
 
 /// Validate the parsed flags into a `PlayConfig`. Pure: no I/O, no clock
@@ -151,6 +160,11 @@ pub fn validate(args: &PlayArgs, verbose: bool) -> Result<PlayConfig> {
             "shrinkEveryNTurns must be at least 1 in royale games (got {})",
             args.shrink_every_n_turns
         ));
+    }
+    if let Some(max_turns) = args.max_turns
+        && max_turns < 1
+    {
+        return Err(eyre!("--max-turns must be at least 1 (got {max_turns})"));
     }
     let seed = args.seed.unwrap_or_else(default_seed);
     Ok(PlayConfig {
@@ -174,7 +188,7 @@ pub fn validate(args: &PlayArgs, verbose: bool) -> Result<PlayConfig> {
         },
         royale_shrink: args.shrink_every_n_turns,
         snakes,
-        max_turns: MAX_TURNS,
+        max_turns: args.max_turns,
     })
 }
 
@@ -216,7 +230,7 @@ pub struct GameOutcome {
     pub winner_id: Option<String>,
     pub winner_name: Option<String>,
     pub is_draw: bool,
-    /// The loop stopped at `max_turns` rather than by game over.
+    /// The loop stopped at `--max-turns` rather than by game over.
     pub hit_turn_limit: bool,
     /// Lines in the `--output` file (0 when not exporting).
     pub lines_written: usize,
@@ -527,7 +541,8 @@ pub async fn run_game(
         .zip(cfg.snakes.iter().map(|s| s.name.clone()))
         .collect();
 
-    while !engine_core::is_game_over_for(&game, cfg.snakes.len()) && game.board.turn < cfg.max_turns
+    while !engine_core::is_game_over_for(&game, cfg.snakes.len())
+        && cfg.max_turns.is_none_or(|max| game.board.turn < max)
     {
         let turn_deadline = (cfg.duration_ms > 0)
             .then(|| std::time::Instant::now() + std::time::Duration::from_millis(cfg.duration_ms));
@@ -655,10 +670,12 @@ pub async fn run_game(
         }
     }
 
-    if hit_turn_limit {
+    if let Some(max_turns) = cfg.max_turns
+        && hit_turn_limit
+    {
         write_log(
             log,
-            &format!("Game stopped at the turn limit of {} turns.", cfg.max_turns),
+            &format!("Game stopped at the turn limit of {max_turns} turns."),
         );
     }
 

@@ -8,6 +8,9 @@ use std::process::{Command, Stdio};
 
 const BIN: &str = env!("CARGO_BIN_EXE_battlesnake");
 
+#[path = "support/survivor_policy.rs"]
+mod survivor_policy;
+
 /// A minimal HTTP/1.1 mock snake on a dedicated std thread (never
 /// tokio::spawn from a test — each #[tokio::test] owns and drops its
 /// runtime, killing the task). Answers:
@@ -77,9 +80,18 @@ fn read_request(stream: &mut std::net::TcpStream) -> std::io::Result<String> {
 
 const CYCLE: [&str; 4] = ["up", "right", "down", "left"];
 
+/// "POST /move HTTP/1.1" -> ("POST", "/move").
+fn request_method_and_path(request: &str) -> (&str, &str) {
+    let mut words = request
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .split_whitespace();
+    (words.next().unwrap_or(""), words.next().unwrap_or(""))
+}
+
 fn respond(request: &str) -> String {
-    let first_line = request.lines().next().unwrap_or_default();
-    let (method, path) = first_line.split_once(' ').unwrap_or(("", ""));
+    let (method, path) = request_method_and_path(request);
     let body_start = request.find("\r\n\r\n").map(|i| i + 4).unwrap_or(0);
     let body = &request[body_start..];
 
@@ -470,4 +482,270 @@ fn negative_timeout_exits_1_not_2() {
         out.stderr
     );
     assert!(out.stderr.contains("timeout"), "{}", out.stderr);
+}
+
+#[test]
+fn max_turns_below_one_exits_1_not_2() {
+    let out = run_play(
+        &["play", "--max-turns", "0", "-u", "http://127.0.0.1:1"],
+        &[],
+    );
+    assert_eq!(out.status, 1, "{}", out.stderr);
+    assert!(
+        out.stderr.contains("--max-turns must be at least 1"),
+        "{}",
+        out.stderr
+    );
+    assert!(
+        !out.stderr.contains("Location:"),
+        "no color-eyre report, just the message: {}",
+        out.stderr
+    );
+    // Negatives take the same path (allow_negative_numbers), not clap's exit 2.
+    let out = run_play(
+        &["play", "--max-turns", "-3", "-u", "http://127.0.0.1:1"],
+        &[],
+    );
+    assert_eq!(out.status, 1, "{}", out.stderr);
+}
+
+// --- C.7: turn limit (DEV-2164) ---
+
+/// --max-turns N through the real binary: the game stops at turn N with
+/// today's log line, as the final log line.
+#[test]
+fn max_turns_flag_stops_the_game_at_n() {
+    let snake = MockSnake::spawn();
+    let out = run_play(
+        &[
+            "play",
+            "-g",
+            "solo",
+            "--max-turns",
+            "2",
+            "-n",
+            "A",
+            "-u",
+            &snake.url(),
+        ],
+        &[],
+    );
+    assert_eq!(out.status, 0, "{}", out.stderr);
+    let last = out.stderr.lines().last();
+    assert_eq!(
+        last,
+        Some("Game stopped at the turn limit of 2 turns."),
+        "the turn-limit line is the final log line; stderr:\n{}",
+        out.stderr
+    );
+}
+
+/// A snake that plays the verified survivor policy (see
+/// `support/survivor_policy.rs`): MockSnake's exact transport shape, with
+/// `/move` calling `survivor_move`.
+struct SurvivorSnake {
+    port: u16,
+    #[allow(dead_code)]
+    thread: std::thread::JoinHandle<u16>,
+}
+
+impl SurvivorSnake {
+    fn spawn() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind survivor snake");
+        listener.set_nonblocking(false).expect("blocking listener");
+        let port = listener.local_addr().unwrap().port();
+        let thread = std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let Ok(request) = read_request(&mut stream) else {
+                    continue;
+                };
+                let response = survivor_respond(&request);
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+                // Connection: close — one request per connection.
+            }
+            port
+        });
+        Self { port, thread }
+    }
+
+    fn url(&self) -> String {
+        format!("http://127.0.0.1:{}", self.port)
+    }
+}
+
+fn survivor_respond(request: &str) -> String {
+    let (method, path) = request_method_and_path(request);
+    let body_start = request.find("\r\n\r\n").map(|i| i + 4).unwrap_or(0);
+    let body = &request[body_start..];
+
+    let (status, content_type, body_out) = if method == "GET" {
+        (
+            "200 OK",
+            "application/json",
+            r##"{"apiversion":"1","color":"#888800","head":"safe","tail":"bolt"}"##.to_string(),
+        )
+    } else if path.ends_with("/move") {
+        (
+            "200 OK",
+            "application/json",
+            format!(
+                r#"{{"move": "{}"}}"#,
+                survivor_policy::survivor_move(body, 5_000)
+            ),
+        )
+    } else {
+        ("200 OK", "application/json", "{}".to_string())
+    };
+    format!(
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body_out}",
+        body_out.len()
+    )
+}
+
+fn tail_lines(s: &str, n: usize) -> String {
+    let lines: Vec<&str> = s.lines().collect();
+    let start = lines.len().saturating_sub(n);
+    lines[start..].join("\n")
+}
+
+/// No --max-turns flag: the game must run past turn 5,000 and end by game
+/// over (the survivor suicides after turn 5,000), never at a turn limit.
+/// Deterministic: fixed seed + deterministic snake => identical every run
+/// (the no-fallback assertion below is what makes that claim airtight).
+///
+/// Seed 1 is pinned by the plan's engine-level sweep (30/30 seeds
+/// survived; seed 1 ends at exactly turn 5,001). If this ever fails with a
+/// different final turn or an early death, an engine/rules change moved
+/// the RNG path: re-run the ignored `survivor_seed_sweep` and pin the
+/// first survivor — do NOT rewrite the policy.
+#[test]
+fn no_default_turn_limit_game_runs_past_5000_turns() {
+    let snake = SurvivorSnake::spawn();
+    let out = run_play(
+        &[
+            "play",
+            "-g",
+            "solo",
+            "-W",
+            "19",
+            "-H",
+            "19",
+            "-n",
+            "Survivor",
+            "-u",
+            &snake.url(),
+            "-r",
+            "1",
+            "--foodSpawnChance",
+            "0",
+            "--minimumFood",
+            "15",
+            "-t",
+            "60000",
+        ],
+        &[],
+    );
+    assert_eq!(out.status, 0, "{}", out.stderr);
+    let final_turn: i64 = out
+        .stderr
+        .lines()
+        .find_map(|l| {
+            l.strip_prefix("Game completed after ")?
+                .split(" turns")
+                .next()
+        })
+        .and_then(|n| n.parse().ok())
+        .unwrap_or_else(|| {
+            panic!(
+                "no completion line; stderr tail:\n{}",
+                tail_lines(&out.stderr, 20)
+            )
+        });
+    assert!(
+        final_turn > 5_000,
+        "game stopped at {final_turn}, not past 5,000; stderr tail:\n{}",
+        tail_lines(&out.stderr, 20)
+    );
+    assert!(
+        !out.stderr.contains("Game stopped at the turn limit"),
+        "no flag was passed, but a turn limit fired; stderr tail:\n{}",
+        tail_lines(&out.stderr, 20)
+    );
+    assert_no_fallback_warnings(&out.stderr);
+}
+
+/// Every one of these line prefixes is a move-path warning that replaces
+/// the snake's move with a fallback (repeat-last-direction or error
+/// result) and silently changes the game (cli/src/play/http.rs: "Request
+/// to {move_url} failed" covers both timeouts and transport errors —
+/// http.rs:141/149 — plus "Failed to read response body from" :154,
+/// "Got non-ok status code from" :176, "Failed to parse JSON data from" :192,
+/// "Failed to decode JSON from" :209).
+/// One fallback move breaks determinism, so zero of them is required, not
+/// just zero timeouts: an early `Game completed after` with exit 0 can be
+/// a fallback artifact that merely looks like a policy failure.
+fn assert_no_fallback_warnings(stderr: &str) {
+    for line in stderr.lines() {
+        for prefix in [
+            "Request to",
+            "Failed to read",
+            "Got non-ok",
+            "Failed to parse",
+            "Failed to decode",
+        ] {
+            assert!(
+                !line.starts_with(prefix),
+                "a fallback warning changed the game: {line}; stderr tail:\n{}",
+                tail_lines(stderr, 20)
+            );
+        }
+    }
+}
+
+/// Re-pinning tool, not part of CI: runs the pinned-policy game for seeds
+/// 1..=30 (~7 min) and prints each final turn. If an engine change kills
+/// the pinned seed, pin the first survivor from this sweep's output.
+#[test]
+#[ignore = "sweep tool: ~7 min; re-pins the survivor seed after engine changes"]
+fn survivor_seed_sweep() {
+    for seed in 1..=30 {
+        let snake = SurvivorSnake::spawn();
+        let out = run_play(
+            &[
+                "play",
+                "-g",
+                "solo",
+                "-W",
+                "19",
+                "-H",
+                "19",
+                "-n",
+                "Survivor",
+                "-u",
+                &snake.url(),
+                "-r",
+                &seed.to_string(),
+                "--foodSpawnChance",
+                "0",
+                "--minimumFood",
+                "15",
+                "-t",
+                "60000",
+            ],
+            &[],
+        );
+        let final_turn: i64 = out
+            .stderr
+            .lines()
+            .find_map(|l| {
+                l.strip_prefix("Game completed after ")?
+                    .split(" turns")
+                    .next()
+            })
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(-1);
+        eprintln!("seed {seed}: final turn {final_turn}");
+    }
 }

@@ -33,6 +33,7 @@ fn base_args() -> PlayArgs {
         minimum_food: 1,
         hazard_damage_per_turn: 14,
         shrink_every_n_turns: 25,
+        max_turns: None,
     }
 }
 
@@ -95,6 +96,8 @@ fn every_flag_parses_with_its_exact_name_and_defaults() {
         "12",
         "--shrinkEveryNTurns",
         "5",
+        "--max-turns",
+        "9",
     ])
     .expect("every flag parses with its exact long name");
     assert_eq!((args.width, args.height), (7, 7));
@@ -118,6 +121,7 @@ fn every_flag_parses_with_its_exact_name_and_defaults() {
         ),
         (10, 3, 12, 5)
     );
+    assert_eq!(args.max_turns, Some(9));
 
     // Defaults match Go's.
     let defaults = parse_flags(&["-u", "http://a"]).expect("parses");
@@ -137,6 +141,7 @@ fn every_flag_parses_with_its_exact_name_and_defaults() {
     assert_eq!(defaults.delay_ms, 0);
     assert_eq!(defaults.duration_ms, 0);
     assert_eq!(defaults.seed, None);
+    assert_eq!(defaults.max_turns, None);
 }
 
 /// Any flag clap would kebab-case (`--view-map`, `--view-map`, `--delay-ms`,
@@ -184,6 +189,13 @@ fn negative_seed_parses() {
 }
 
 #[test]
+fn negative_max_turns_parses() {
+    let args =
+        parse_flags(&["-u", "http://a", "--max-turns", "-5"]).expect("negative max-turns parses");
+    assert_eq!(args.max_turns, Some(-5));
+}
+
+#[test]
 fn timeout_zero_normalizes_to_500() {
     let args = parse_flags(&["-u", "http://a", "-t", "0"]).expect("parses");
     let cfg = validate(&args, false).expect("valid");
@@ -213,6 +225,30 @@ fn default_seed_resolves() {
     args.seed = None;
     let cfg = validate(&args, false).expect("valid");
     let _ = cfg.seed;
+}
+
+#[test]
+fn max_turns_below_one_is_rejected() {
+    for bad in [0, -3] {
+        let args = PlayArgs {
+            max_turns: Some(bad),
+            ..base_args()
+        };
+        let err = validate(&args, false).unwrap_err().to_string();
+        assert_eq!(err, format!("--max-turns must be at least 1 (got {bad})"));
+    }
+}
+
+#[test]
+fn max_turns_defaults_to_none_and_passes_through() {
+    let cfg = validate(&base_args(), false).expect("valid");
+    assert_eq!(cfg.max_turns, None);
+    let args = PlayArgs {
+        max_turns: Some(7),
+        ..base_args()
+    };
+    let cfg = validate(&args, false).expect("valid");
+    assert_eq!(cfg.max_turns, Some(7));
 }
 
 #[test]
@@ -714,7 +750,17 @@ mod run_game_tests {
     async fn turn_limit_draw_and_final_log_line() {
         let server = square_walk_server().await;
         let urls = vec![server.uri(), server.uri()];
-        let mut cfg = config_for_mode(("standard", None), &urls, &["A", "B"]);
+        let args = PlayArgs {
+            urls: urls.clone(),
+            names: vec!["A".into(), "B".into()],
+            gametype: "standard".into(),
+            map: None,
+            seed: Some(42),
+            max_turns: Some(3), // the limit arrives the way users set it now
+            ..base_args()
+        };
+        let mut cfg = validate(&args, false).expect("valid config");
+        cfg.output_path = Some("out.jsonl".into());
         // No food: bodies stay length 3 (or 4 after initial food), so the
         // square walk never dies.
         cfg.settings = StandardSettings {
@@ -722,7 +768,6 @@ mod run_game_tests {
             minimum_food: 0,
             hazard_damage_per_turn: 14,
         };
-        cfg.max_turns = 3;
 
         let (out, log, outcome) = run_with_output(&cfg).await;
         assert!(outcome.hit_turn_limit);
@@ -880,7 +925,7 @@ mod run_game_tests {
         let (out1, _log1, o1) = run_with_output(&cfg).await;
 
         let mut cfg2 = cfg.clone();
-        cfg2.max_turns = 2;
+        cfg2.max_turns = Some(2);
         let (out2, _log2, o2) = run_with_output(&cfg2).await;
 
         assert_eq!(
@@ -1004,7 +1049,7 @@ mod run_game_tests {
         let urls = vec![a.uri(), b.uri()];
         let mut cfg = config_for_mode(("standard", None), &urls, &["A", "B"]);
         cfg.sequential = sequential;
-        cfg.max_turns = 1;
+        cfg.max_turns = Some(1);
         // The 600 ms delays must land inside the snake timeout, or every
         // /move times out at the default 500 ms and the assert measures
         // timeouts, not serialization.
