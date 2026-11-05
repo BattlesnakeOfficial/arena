@@ -1125,7 +1125,6 @@ mod tests {
         crate::test_capture::Capture::shared();
         let state = AppState::test_from_pool(pool.clone());
         let owner = profile_user(&pool, 2130201).await;
-        // The bogus row is oldest, so it would render first if it rendered.
         seed_earn(
             &pool,
             owner,

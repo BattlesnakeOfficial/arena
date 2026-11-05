@@ -131,3 +131,65 @@ test('one achievement and none at all', async ({ page }) => {
   await expect(page.getByRole('heading', { name: 'Achievements' })).toHaveCount(0);
   await expect(page.locator('.profile-achievements')).toHaveCount(0);
 });
+
+test('cards stay one-line and equal-height at desktop width', async ({ page }) => {
+  const stamp = `${Date.now()}${Math.floor(Math.random() * 1000)}`;
+  const login = `ach_desktop_${stamp}`;
+  const userId = await seedUser(login);
+  // Same five earns as the phone test, seeded oldest-first.
+  await seedEarn(userId, 'crowd_pleaser', '2026-09-05 12:00:00+00');
+  await seedEarn(userId, 'slow_and_steady', '2026-09-12 12:00:00+00');
+  await seedEarn(userId, 'constrictor_champ', '2026-09-19 12:00:00+00');
+  await seedEarn(userId, 'ladder_regular', '2026-09-26 12:00:00+00');
+  await seedEarn(userId, 'first_win', '2026-10-03 12:00:00+00');
+
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto(`/users/${login}`);
+  await page.evaluate(() => document.fonts.ready);
+
+  await expect(page.getByRole('heading', { name: 'Achievements' })).toBeVisible();
+  await expect(page.locator('.profile-achievement')).toHaveCount(5);
+
+  // Every unlock date fits on a single line at this width.
+  for (const el of await page.locator('.profile-achievement-date').all()) {
+    const box = await el.boundingBox();
+    const lineHeight = await el.evaluate((node) =>
+      parseFloat(getComputedStyle(node).lineHeight),
+    );
+    expect(box?.height, 'unlock date wraps onto a second line').toBeLessThan(lineHeight * 1.5);
+  }
+
+  // A card whose name wraps must not outgrow its row-mates.
+  await page.locator('.profile-achievement-name').first().evaluate((node) => {
+    node.textContent = 'An Achievement Name Long Enough To Wrap Onto A Second Line At This Width';
+  });
+  const boxes = await page.locator('.profile-achievement').evaluateAll((nodes) =>
+    nodes.map((node) => {
+      const rect = node.getBoundingClientRect();
+      return { top: rect.top, height: rect.height };
+    }),
+  );
+  const rows = new Map<number, number[]>();
+  for (const box of boxes) {
+    const key = Math.round(box.top);
+    rows.set(key, [...(rows.get(key) ?? []), box.height]);
+  }
+  for (const [top, heights] of rows) {
+    for (const height of heights) {
+      expect(height, `cards in the row at y=${top} must share one height`).toBe(
+        Math.max(...heights),
+      );
+    }
+  }
+
+  // The first card links to a working share page.
+  const [response] = await Promise.all([
+    page.waitForResponse(
+      (r) => new URL(r.url()).pathname === `/achievements/first_win/${userId}`,
+    ),
+    page.locator('.profile-achievement').first().click(),
+  ]);
+  expect(response.status()).toBe(200);
+  expect(page.url().endsWith(`/achievements/first_win/${userId}`)).toBe(true);
+  await expect(page.getByRole('heading', { name: 'First Win', level: 1 })).toBeVisible();
+});
