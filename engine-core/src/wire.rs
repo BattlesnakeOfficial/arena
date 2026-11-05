@@ -4,7 +4,7 @@
 //! The engine uses `rules::BoardState` internally; conversion happens at the HTTP
 //! boundary.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::EngineGame;
@@ -114,6 +114,34 @@ pub struct Game {
     pub turn: i32,
     pub board: Board,
     pub you: BattleSnake,
+}
+
+// --- Snake metadata (GET /) ---
+
+/// The `customizations` block of a snake's `GET /` response. Moved from the
+/// server so the CLI's `play` reads metadata through the same types.
+#[derive(Debug, Deserialize, Default)]
+pub struct InfoCustomizations {
+    #[serde(default)]
+    pub color: String,
+    #[serde(default)]
+    pub head: String,
+    #[serde(default)]
+    pub tail: String,
+}
+
+/// A snake's `GET /` (metadata) response. Every field defaults, so any JSON
+/// object parses; a non-object body is a parse failure.
+#[derive(Debug, Deserialize, Default)]
+pub struct SnakeInfoResponse {
+    #[serde(default)]
+    pub color: Option<String>,
+    #[serde(default)]
+    pub head: Option<String>,
+    #[serde(default)]
+    pub tail: Option<String>,
+    #[serde(default)]
+    pub customizations: Option<InfoCustomizations>,
 }
 
 // --- Conversion from engine types ---
