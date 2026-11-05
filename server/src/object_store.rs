@@ -125,12 +125,13 @@ impl ObjectStore for DisabledObjectStore {
     }
 }
 
-/// Test double: a path-keyed map with a get-counter and a one-shot
-/// storage-fault knob.
+/// Test double: a path-keyed map with a get-counter, a put-counter, and
+/// a one-shot storage-fault knob.
 #[derive(Default)]
 pub struct InMemoryObjectStore {
     objects: std::sync::Mutex<HashMap<String, Vec<u8>>>,
     gets: std::sync::atomic::AtomicUsize,
+    puts: std::sync::atomic::AtomicUsize,
     /// When set, the next `get` returns `Err` once, then clears itself.
     fail_next_get: std::sync::atomic::AtomicBool,
 }
@@ -138,6 +139,12 @@ pub struct InMemoryObjectStore {
 impl InMemoryObjectStore {
     pub fn get_count(&self) -> usize {
         self.gets.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Number of `put` calls so far — the "no put happened" control for
+    /// idempotency tests (DEV-1984).
+    pub fn put_count(&self) -> usize {
+        self.puts.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     pub fn fail_next_get(&self) {
@@ -149,6 +156,7 @@ impl InMemoryObjectStore {
 #[async_trait::async_trait]
 impl ObjectStore for InMemoryObjectStore {
     async fn put(&self, path: &str, bytes: Vec<u8>) -> cja::Result<()> {
+        self.puts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.objects
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -199,6 +207,14 @@ mod tests {
         let _ = store.get("x").await;
         let _ = store.get("y").await;
         assert_eq!(store.get_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn in_memory_counts_puts() {
+        let store = InMemoryObjectStore::default();
+        store.put("p", vec![1]).await.unwrap();
+        store.put("p", vec![2]).await.unwrap();
+        assert_eq!(store.put_count(), 2);
     }
 
     #[tokio::test]

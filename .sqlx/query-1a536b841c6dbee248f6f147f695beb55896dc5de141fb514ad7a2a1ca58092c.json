@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT reason FROM play_archive_exceptions WHERE engine_game_id = 'null-frame'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "reason",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "1a536b841c6dbee248f6f147f695beb55896dc5de141fb514ad7a2a1ca58092c"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO games (board_size, game_type, status, engine_game_id, archived_at, gcs_path, archive_version)\n            VALUES ('11x11', 'Standard', 'finished', 'C', NOW(), 'games/2020/01/01/C.json.zst', 1)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "62ec41f131993ab11ed955f07914c2d3199e2e42eaab25c47c4bb046a0fc771e"
+}
