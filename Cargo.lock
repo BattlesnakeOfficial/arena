@@ -178,6 +178,7 @@ checksum = "03918c3dbd7701a85c6b9887732e2921175f26c350b4563841d0958c21d57e6d"
 name = "arena"
 version = "0.1.0"
 dependencies = [
+ "arena-api-scope",
  "async-trait",
  "axum",
  "axum-macros",
@@ -190,20 +191,15 @@ dependencies = [
  "cja-secret",
  "clap",
  "color-eyre",
- "colored",
- "dirs",
  "engine-proxy",
  "eyes-subscriber",
  "futures",
  "google-cloud-storage",
  "hex",
- "hostname",
- "is-terminal",
  "jpeg-encoder",
  "libc",
  "maud",
  "num-bigint 0.4.6",
- "open",
  "pbkdf2",
  "png",
  "proptest",
@@ -224,7 +220,6 @@ dependencies = [
  "sqlx",
  "subtle",
  "svgtypes",
- "tabled",
  "tempfile",
  "thiserror 1.0.69",
  "time",
@@ -232,7 +227,6 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.28.0",
  "tokio-util",
- "toml",
  "tower 0.4.13",
  "tower-cookies",
  "tower-http 0.5.2",
@@ -248,6 +242,16 @@ dependencies = [
  "wiremock",
  "zstd",
  "zune-jpeg",
+]
+
+[[package]]
+name = "arena-api-scope"
+version = "0.1.0"
+dependencies = [
+ "color-eyre",
+ "serde",
+ "serde_json",
+ "sqlx",
 ]
 
 [[package]]
@@ -480,6 +484,30 @@ name = "base64ct"
 version = "1.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "89e25b6adfb930f02d1981565a6e5d9c547ac15a96606256d3b59040e5cd4ca3"
+
+[[package]]
+name = "battlesnake"
+version = "0.1.0"
+dependencies = [
+ "arena-api-scope",
+ "chrono",
+ "chrono-humanize",
+ "clap",
+ "color-eyre",
+ "colored",
+ "dirs",
+ "hostname",
+ "is-terminal",
+ "open",
+ "reqwest 0.12.15",
+ "serde",
+ "serde_json",
+ "tabled",
+ "tokio",
+ "toml",
+ "uuid",
+ "wiremock",
+]
 
 [[package]]
 name = "bit-set"

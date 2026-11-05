@@ -2,15 +2,15 @@ use clap::{Parser, Subcommand};
 use color_eyre::eyre::{Context as _, eyre};
 use std::time::Duration;
 
-// Include the cli module from the library
-use arena::api_scope::Permission;
-use arena::cli::config::{AuthConfig, CliConfig};
-use arena::cli::output::{
+// Library modules for the CLI binary
+use arena_api_scope::Permission;
+use battlesnake_cli::config::{AuthConfig, CliConfig};
+use battlesnake_cli::output::{
     OutputFormat, format_timestamp, print_field, print_success, print_table, status_colored,
 };
 
 #[derive(Parser)]
-#[command(name = "arena")]
+#[command(name = "battlesnake")]
 #[command(about = "Battlesnake CLI", long_about = None)]
 struct Cli {
     /// Output format: 'json' or 'human'. Default: human for TTY, json for pipes.
@@ -156,7 +156,7 @@ impl CreateTokenError {
                     "Failed to create token: {status} - {body}\n\
                      A token can only create tokens within its own permissions and snake \
                      access. If you logged in before token permissions existed, run \
-                     'arena auth login' for a token with every permission."
+                     'battlesnake auth login' for a token with every permission."
                 )
             }
             CreateTokenError::Status(status, body) => {
@@ -316,7 +316,7 @@ async fn handle_token_command(command: TokenCommands) -> color_eyre::Result<()> 
         .auth
         .as_ref()
         .and_then(|a| a.token.as_ref())
-        .ok_or_else(|| eyre!("Not logged in. Run 'arena auth login' first."))?;
+        .ok_or_else(|| eyre!("Not logged in. Run 'battlesnake auth login' first."))?;
 
     let client = reqwest::Client::new();
     let base_url = config.api_url();
@@ -453,7 +453,7 @@ async fn handle_snakes_command(
         .auth
         .as_ref()
         .and_then(|a| a.token.as_ref())
-        .ok_or_else(|| eyre!("Not logged in. Run 'arena auth login' first."))?;
+        .ok_or_else(|| eyre!("Not logged in. Run 'battlesnake auth login' first."))?;
 
     let client = reqwest::Client::new();
     let base_url = config.api_url();
@@ -481,7 +481,7 @@ async fn handle_snakes_command(
                 }
                 OutputFormat::Human => {
                     if snakes.is_empty() {
-                        println!("No snakes found. Create one with 'arena snakes create'.");
+                        println!("No snakes found. Create one with 'battlesnake snakes create'.");
                     } else {
                         println!("Your snakes:\n");
                         let rows: Vec<Vec<String>> = snakes
@@ -728,7 +728,7 @@ async fn handle_whoami(output_format: OutputFormat) -> color_eyre::Result<()> {
         .auth
         .as_ref()
         .and_then(|a| a.token.as_ref())
-        .ok_or_else(|| eyre!("Not logged in. Run 'arena auth login' first."))?;
+        .ok_or_else(|| eyre!("Not logged in. Run 'battlesnake auth login' first."))?;
 
     let me = match fetch_me(config.api_url(), token).await {
         Ok(me) => me,
@@ -737,7 +737,7 @@ async fn handle_whoami(output_format: OutputFormat) -> color_eyre::Result<()> {
         // than dumping a raw HTTP error like the other authed commands do.
         Err(FetchMeError::Status(reqwest::StatusCode::UNAUTHORIZED, _)) => {
             return Err(eyre!(
-                "Token rejected (revoked or expired). Run 'arena auth login' first."
+                "Token rejected (revoked or expired). Run 'battlesnake auth login' first."
             ));
         }
         Err(FetchMeError::Status(status, body)) => {
@@ -820,7 +820,7 @@ async fn handle_games_command(command: GamesCommands) -> color_eyre::Result<()> 
         .auth
         .as_ref()
         .and_then(|a| a.token.as_ref())
-        .ok_or_else(|| eyre!("Not logged in. Run 'arena auth login' first."))?;
+        .ok_or_else(|| eyre!("Not logged in. Run 'battlesnake auth login' first."))?;
 
     let client = reqwest::Client::new();
     let base_url = config.api_url();
@@ -1032,7 +1032,7 @@ mod token_create_tests {
     use wiremock::matchers::{body_partial_json, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    use arena::api_scope::Permission;
+    use arena_api_scope::Permission;
 
     use super::{CreateTokenError, build_create_token_body, post_create_token};
 
@@ -1126,7 +1126,7 @@ mod token_create_tests {
         .into_report()
         .to_string();
         assert!(report.contains("exceed this token's"), "{report}");
-        assert!(report.contains("arena auth login"), "{report}");
+        assert!(report.contains("battlesnake auth login"), "{report}");
 
         // Other 403s are reported as-is.
         let report = CreateTokenError::Status(
@@ -1135,7 +1135,7 @@ mod token_create_tests {
         )
         .into_report()
         .to_string();
-        assert!(!report.contains("arena auth login"), "{report}");
+        assert!(!report.contains("battlesnake auth login"), "{report}");
     }
 
     #[test]

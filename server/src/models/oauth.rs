@@ -20,7 +20,7 @@ use sqlx::{FromRow, PgPool};
 use subtle::ConstantTimeEq as _;
 use uuid::Uuid;
 
-pub use arena::api_scope::{Permission, SnakeAccess};
+pub use arena_api_scope::{Permission, SnakeAccess};
 
 use crate::models::api_token::{ApiToken, NewApiToken, create_api_token_on, decode_permissions};
 
