@@ -17,11 +17,12 @@ COPY server/Cargo.toml ./server/
 COPY server/build.rs ./server/
 COPY mock-github-oauth/Cargo.toml ./mock-github-oauth/
 COPY rules/Cargo.toml ./rules/
+COPY engine-core/Cargo.toml ./engine-core/
 COPY engine-proxy/Cargo.toml ./engine-proxy/
 COPY arena-api-scope/Cargo.toml ./arena-api-scope/
 COPY cli/Cargo.toml ./cli/
 
-RUN mkdir -p server/src/bin mock-github-oauth/src rules/src engine-proxy/src arena-api-scope/src cli/src && \
+RUN mkdir -p server/src/bin mock-github-oauth/src rules/src engine-proxy/src arena-api-scope/src cli/src engine-core/src && \
     echo "fn main() {}" > server/src/main.rs && \
     echo "" > server/src/lib.rs && \
     echo "fn main() {}" > server/src/bin/stress_test.rs && \
@@ -32,7 +33,8 @@ RUN mkdir -p server/src/bin mock-github-oauth/src rules/src engine-proxy/src are
     echo "" > engine-proxy/src/lib.rs && \
     echo "" > arena-api-scope/src/lib.rs && \
     echo "" > cli/src/lib.rs && \
-    echo "fn main() {}" > cli/src/main.rs
+    echo "fn main() {}" > cli/src/main.rs && \
+    echo "" > engine-core/src/lib.rs
 
 # Package-scoped: never compiles arena's sqlx::query! macros, so no
 # DATABASE_URL / .sqlx / SQLX_OFFLINE involved. No secrets needed.

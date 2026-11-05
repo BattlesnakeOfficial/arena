@@ -62,6 +62,7 @@ chrono-humanize = "0.2"
 
 skillratings = "0.28"
 rules = { path = "../rules" }
+engine-core = { path = "../engine-core" }
 # Shared API scope vocabulary (Permission, SnakeAccess) — see arena-api-scope/.
 # The sqlx feature enables the DB column <-> enum derives.
 arena-api-scope = { path = "../arena-api-scope", features = ["sqlx"] }

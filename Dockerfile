@@ -20,6 +20,7 @@ COPY server/frontend ./server/frontend
 COPY server/static ./server/static
 COPY mock-github-oauth/Cargo.toml ./mock-github-oauth/
 COPY rules/Cargo.toml ./rules/
+COPY engine-core/Cargo.toml ./engine-core/
 COPY engine-proxy/Cargo.toml ./engine-proxy/
 COPY arena-api-scope/Cargo.toml ./arena-api-scope/
 COPY cli/Cargo.toml ./cli/
@@ -30,7 +31,7 @@ COPY cli/Cargo.toml ./cli/
 # its dummy sources through the final build (like mock-github-oauth):
 # -p arena only parses its manifest. arena-api-scope gets real sources
 # later because arena compiles it.
-RUN mkdir -p server/src/bin mock-github-oauth/src rules/src engine-proxy/src arena-api-scope/src cli/src && \
+RUN mkdir -p server/src/bin mock-github-oauth/src rules/src engine-proxy/src arena-api-scope/src cli/src engine-core/src && \
     echo "fn main() {}" > server/src/main.rs && \
     echo "" > server/src/lib.rs && \
     echo "fn main() {}" > server/src/bin/stress_test.rs && \
@@ -41,19 +42,21 @@ RUN mkdir -p server/src/bin mock-github-oauth/src rules/src engine-proxy/src are
     echo "" > engine-proxy/src/lib.rs && \
     echo "" > arena-api-scope/src/lib.rs && \
     echo "" > cli/src/lib.rs && \
-    echo "fn main() {}" > cli/src/main.rs
+    echo "fn main() {}" > cli/src/main.rs && \
+    echo "" > engine-core/src/lib.rs
 
 # Build dependencies only (for caching)
 # VERGEN_IDEMPOTENT allows build without .git directory (uses placeholder values)
 RUN VERGEN_IDEMPOTENT=1 cargo build --release --package arena
 
 # Remove dummy files
-RUN rm -rf server/src rules/src arena-api-scope/src
+RUN rm -rf server/src rules/src arena-api-scope/src engine-core/src
 
 # Copy actual source code (arena and rules, not mock-github-oauth or cli;
 # arena-api-scope is compiled by arena so it needs real sources too)
 COPY server/src ./server/src
 COPY rules/src ./rules/src
+COPY engine-core/src ./engine-core/src
 COPY arena-api-scope/src ./arena-api-scope/src
 COPY migrations ./migrations
 COPY .sqlx ./.sqlx
@@ -65,7 +68,7 @@ COPY .git ./.git
 ENV SQLX_OFFLINE=true
 
 # Touch source files to ensure rebuild with actual source
-RUN touch server/src/main.rs rules/src/lib.rs arena-api-scope/src/lib.rs
+RUN touch server/src/main.rs rules/src/lib.rs arena-api-scope/src/lib.rs engine-core/src/lib.rs
 
 # Build the application (with real git info from .git)
 RUN cargo build --release --package arena
