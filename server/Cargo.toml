@@ -57,19 +57,14 @@ thiserror = "1"
 hex = "0.4"
 serde_urlencoded = "0.7"
 clap = { version = "4", features = ["derive", "env"] }
-dirs = "5"
-toml = "0.8"
-open = "5"
-hostname = "0.4"
-
-# CLI human-readable output
-is-terminal = "0.4"
-tabled = "0.17"
-colored = "2"
+# Relative-time labels in notifications and leaderboard feeds.
 chrono-humanize = "0.2"
 
 skillratings = "0.28"
 rules = { path = "../rules" }
+# Shared API scope vocabulary (Permission, SnakeAccess) — see arena-api-scope/.
+# The sqlx feature enables the DB column <-> enum derives.
+arena-api-scope = { path = "../arena-api-scope", features = ["sqlx"] }
 tokio-util = { version = "0.7.14", features = ["rt"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 
@@ -116,10 +111,6 @@ path = "src/lib.rs"
 [[bin]]
 name = "arena"
 path = "src/main.rs"
-
-[[bin]]
-name = "arena-cli"
-path = "src/bin/arena-cli.rs"
 
 [[bin]]
 name = "stress-test"
