@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT reason FROM play_archive_exceptions WHERE engine_game_id = 'never-existed'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "reason",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "230ef84f5c18c5275b03045d677aeea757e41baec3fb0893d690e0ede0d1687e"
+}

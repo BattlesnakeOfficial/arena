@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT last_created, last_id\n        FROM play_history_walk_cursor\n        WHERE singleton\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "last_created",
+        "type_info": "Timestamp"
+      },
+      {
+        "ordinal": 1,
+        "name": "last_id",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "be6f7a8b5bfdc829733525fe14bffe131284974844b1770a6124f8062914e5b0"
+}

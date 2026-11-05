@@ -9,8 +9,8 @@ use tokio_util::sync::CancellationToken;
 use crate::config::AppConfig;
 use crate::jobs::{
     BackfillAchievementsJob, CustomizationActiveWeekBackfillJob, GameBackupJob,
-    LeaderboardMatchmakerJob, NativeGameBackupJob, PlayGrantReconcileJob, RateLimitPruneJob,
-    ReconcileRecentAchievementsJob, SnakeHealthSweeperJob, StuckGameSweeperJob,
+    LeaderboardMatchmakerJob, NativeGameBackupJob, PlayGrantReconcileJob, PlayHistoryWalkJob,
+    RateLimitPruneJob, ReconcileRecentAchievementsJob, SnakeHealthSweeperJob, StuckGameSweeperJob,
     StuckMatchSweeperJob, TurnRetentionJob,
 };
 use crate::state::AppState;
@@ -45,6 +45,12 @@ pub const ACHIEVEMENT_RECONCILE_INTERVAL_SECS: u64 = 60 * 60;
 /// the window end, still inside the 2-hour SLA.
 pub const HIGHLIGHTS_CRON_INTERVAL_SECS: u64 = 60 * 60;
 
+/// Play-history archive walk cadence (DEV-1984): 5 minutes -> 12 chances
+/// an hour to land outside the ~:21-:45 hourly archive drain. The walk's
+/// RATE lives on `play_history_walk::PLAY_WALK_INFLIGHT_CEILING`, not
+/// here.
+pub const PLAY_HISTORY_WALK_INTERVAL_SECS: u64 = 5 * 60;
+
 pub(crate) fn cron_registry(config: &AppConfig) -> CronRegistry<AppState> {
     let mut registry = CronRegistry::new();
 
@@ -60,6 +66,16 @@ pub(crate) fn cron_registry(config: &AppConfig) -> CronRegistry<AppState> {
         NativeGameBackupJob,
         Some("Discover arena-native games needing GCS archive"),
         Duration::from_secs(60 * 60),
+    );
+    // Play-history archive walk (DEV-1984): backfill every un-archived
+    // engine game oldest-first, oldest bugs corrected as it passes, then
+    // keep ticking as a safety net until Play closes. The crons row is
+    // seeded by a migration (20261105000000) so the first tick runs one
+    // interval after the migration applies, not at boot.
+    registry.register_job(
+        PlayHistoryWalkJob,
+        Some("Play history archive walk: backfill engine games oldest-first"),
+        Duration::from_secs(PLAY_HISTORY_WALK_INTERVAL_SECS),
     );
     // Turn retention: hourly, prunes archived native games' turns past
     // retention (DEV-1981), oldest-first. The crons row is seeded by a
@@ -348,6 +364,58 @@ mod tests {
         // One registered interval (hourly) plus a second later, it must.
         let one_interval_later =
             last_run_at + chrono::Duration::hours(1) + chrono::Duration::seconds(1);
+        assert!(job.schedule.should_run(
+            Some(&last_run_at),
+            one_interval_later,
+            one_interval_later,
+            cja::chrono_tz::UTC
+        ));
+    }
+
+    #[test]
+    fn play_history_walk_registered_at_walk_interval() {
+        let registry = cron_registry(&AppConfig::test_default());
+        let job = registry
+            .get("PlayHistoryWalkJob")
+            .expect("play history walk registered");
+        assert_eq!(
+            job.description,
+            Some("Play history archive walk: backfill engine games oldest-first")
+        );
+        let cja::cron::Schedule::Interval(interval) = &job.schedule else {
+            panic!("play history walk must use an interval");
+        };
+        assert_eq!(
+            interval.0,
+            Duration::from_secs(PLAY_HISTORY_WALK_INTERVAL_SECS)
+        );
+        assert_eq!(PLAY_HISTORY_WALK_INTERVAL_SECS, 5 * 60);
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn play_history_walk_cron_row_seeded_so_first_tick_is_not_at_boot(pool: sqlx::PgPool) {
+        // 20261105000000 seeds the crons row: without it, cja's
+        // IntervalSchedule::should_run treats the cron as never-run and
+        // the first tick (2s poll) enqueues the walk at boot.
+        let last_run_at: chrono::DateTime<chrono::Utc> =
+            sqlx::query_scalar!("SELECT last_run_at FROM crons WHERE name = 'PlayHistoryWalkJob'")
+                .fetch_one(&pool)
+                .await
+                .expect("20261105000000 must seed the PlayHistoryWalkJob cron row");
+        let registry = cron_registry(&AppConfig::test_default());
+        let job = registry
+            .get("PlayHistoryWalkJob")
+            .expect("play history walk registered");
+        let just_after_boot = last_run_at + chrono::Duration::seconds(1);
+        assert!(!job.schedule.should_run(
+            Some(&last_run_at),
+            just_after_boot,
+            just_after_boot,
+            cja::chrono_tz::UTC
+        ));
+        let one_interval_later = last_run_at
+            + chrono::Duration::seconds(PLAY_HISTORY_WALK_INTERVAL_SECS as i64)
+            + chrono::Duration::seconds(1);
         assert!(job.schedule.should_run(
             Some(&last_run_at),
             one_interval_later,

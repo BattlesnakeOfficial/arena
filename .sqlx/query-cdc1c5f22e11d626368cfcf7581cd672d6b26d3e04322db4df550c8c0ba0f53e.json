@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM play_archive_exceptions WHERE engine_game_id = 'null-frame'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "cdc1c5f22e11d626368cfcf7581cd672d6b26d3e04322db4df550c8c0ba0f53e"
+}

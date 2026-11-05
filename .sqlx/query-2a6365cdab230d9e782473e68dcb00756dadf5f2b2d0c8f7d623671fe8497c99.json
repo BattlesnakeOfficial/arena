@@ -1,0 +1,32 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT\n                COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '1 hour' AND engine_game_id IS NULL) as \"last_hour!: i64\",\n                COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '24 hours' AND engine_game_id IS NULL) as \"last_24h!: i64\",\n                COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '7 days' AND engine_game_id IS NULL) as \"last_7d!: i64\"\n            FROM games\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "last_hour!: i64",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "last_24h!: i64",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "last_7d!: i64",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "2a6365cdab230d9e782473e68dcb00756dadf5f2b2d0c8f7d623671fe8497c99"
+}

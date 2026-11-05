@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT gcs_path, archive_version FROM games WHERE engine_game_id = 'B-fresh'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "gcs_path",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "archive_version",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      true,
+      true
+    ]
+  },
+  "hash": "df157a25801623088e99fc750396b096c055507325bee546efd634d2d495e424"
+}

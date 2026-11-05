@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM play_archive_exceptions WHERE engine_game_id = 'X'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "ee3a0b8dd07ee1d8204c574d8e73a99d579dab5a02dc76157ca78b5b93a1a322"
+}

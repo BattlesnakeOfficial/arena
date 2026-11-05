@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM jobs WHERE context LIKE 'fake%'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "efa168b0f0fc2a9b38c393be6aefe1f46a6b1dbe2e0828d5a84d29c6dfaf938d"
+}

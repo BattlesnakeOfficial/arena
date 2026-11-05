@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM jobs WHERE name = 'BackupSingleGameJob'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "da5969ec57b33fa4a2c85813e4b460f9ac1ab1bd8f9075d071195319a674ec3b"
+}

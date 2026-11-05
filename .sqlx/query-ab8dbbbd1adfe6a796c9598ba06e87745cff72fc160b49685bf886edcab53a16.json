@@ -1,15 +1,10 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT name, last_run_at FROM Crons",
+  "query": "SELECT last_run_at FROM crons WHERE name = 'PlayHistoryWalkJob'",
   "describe": {
     "columns": [
       {
         "ordinal": 0,
-        "name": "name",
-        "type_info": "Text"
-      },
-      {
-        "ordinal": 1,
         "name": "last_run_at",
         "type_info": "Timestamptz"
       }
@@ -18,9 +13,8 @@
       "Left": []
     },
     "nullable": [
-      false,
       false
     ]
   },
-  "hash": "2e8600b4e4fa5db5e0dc560da943548e9ce1802550014fec3461f8d9caec9d11"
+  "hash": "ab8dbbbd1adfe6a796c9598ba06e87745cff72fc160b49685bf886edcab53a16"
 }

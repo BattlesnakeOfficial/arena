@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE play_history_walk_cursor\n            SET last_created = $1, last_id = $2, updated_at = NOW()\n            WHERE singleton AND (last_created, last_id) < ($1, $2)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Timestamp",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "df9a0fb11f386b5b43ffe9c90e2e3a4e2a9d0f58f54b7ceaabcae440ff9ae40e"
+}

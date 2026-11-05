@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO play_archive_exceptions (engine_game_id, reason)\n        VALUES ($1, $2)\n        ON CONFLICT (engine_game_id) DO UPDATE SET reason = $2, recorded_at = NOW()\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7a58f4d95b94256d355ff23e7e77aea3863fa90973e612ed9176574a4ba44e3e"
+}
