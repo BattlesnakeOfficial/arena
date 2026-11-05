@@ -1005,3 +1005,23 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod seq_shape_tests {
+    use super::SnakeInfoResponse;
+
+    /// What counts as a metadata parse failure. Non-JSON and non-object,
+    /// non-array bodies fail; a JSON object always parses (all fields
+    /// default). Quirk, documented: serde also accepts a positional JSON
+    /// ARRAY for a struct (Go's json.Unmarshal rejects it) — an edge case
+    /// of a snake answering `GET /` with an array that yields the default
+    /// metadata instead of a parse error. Not worth a custom Deserialize.
+    #[test]
+    fn metadata_parse_failure_shapes() {
+        assert!(serde_json::from_str::<SnakeInfoResponse>("5").is_err());
+        assert!(serde_json::from_str::<SnakeInfoResponse>(r#""hi""#).is_err());
+        assert!(serde_json::from_str::<SnakeInfoResponse>("").is_err());
+        assert!(serde_json::from_str::<SnakeInfoResponse>("{}").is_ok());
+        assert!(serde_json::from_str::<SnakeInfoResponse>("[1,2]").is_err());
+    }
+}

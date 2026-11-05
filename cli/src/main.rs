@@ -17,6 +17,12 @@ struct Cli {
     #[arg(long, global = true)]
     format: Option<String>,
 
+    /// Enable debug logging (play's verbose POST lines). Global like the
+    /// Go CLI's cobra persistent flag, so it parses before or after the
+    /// subcommand.
+    #[arg(long, global = true)]
+    verbose: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -40,6 +46,13 @@ enum Commands {
         #[command(subcommand)]
         command: GamesCommands,
     },
+    /// Play a game of Battlesnake locally.
+    Play {
+        #[command(flatten)]
+        args: battlesnake_cli::play::PlayArgs,
+    },
+    /// Generate shell completion scripts.
+    Completion { shell: clap_complete::Shell },
 }
 
 #[derive(Subcommand)]
@@ -290,6 +303,16 @@ async fn main() -> color_eyre::Result<()> {
         Commands::Whoami => handle_whoami(output_format).await?,
         Commands::Snakes { command } => handle_snakes_command(command, output_format).await?,
         Commands::Games { command } => handle_games_command(command).await?,
+        Commands::Play { args } => battlesnake_cli::play::run_play(args, cli.verbose).await,
+        Commands::Completion { shell } => {
+            use clap::CommandFactory as _;
+            clap_complete::generate(
+                shell,
+                &mut Cli::command(),
+                "battlesnake",
+                &mut std::io::stdout(),
+            );
+        }
     }
 
     Ok(())
@@ -1029,6 +1052,8 @@ mod tests {
 
 #[cfg(test)]
 mod token_create_tests {
+    use super::{Cli, Commands};
+    use clap::Parser as _;
     use wiremock::matchers::{body_partial_json, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -1201,5 +1226,69 @@ mod token_create_tests {
             }
             other => panic!("expected FORBIDDEN, got {other:?}"),
         }
+    }
+
+    /// `--verbose` is global (like the Go CLI's cobra persistent flag), so
+    /// it must parse before the subcommand AND at the trailing position.
+    #[test]
+    fn verbose_parses_before_and_after_the_subcommand() {
+        let before = Cli::try_parse_from([
+            "battlesnake",
+            "--verbose",
+            "play",
+            "-n",
+            "A",
+            "-u",
+            "http://127.0.0.1:1",
+        ])
+        .expect("leading --verbose parses");
+        assert!(before.verbose);
+
+        let after = Cli::try_parse_from([
+            "battlesnake",
+            "play",
+            "-n",
+            "A",
+            "-u",
+            "http://127.0.0.1:1",
+            "--verbose",
+        ])
+        .expect("trailing --verbose parses");
+        assert!(after.verbose);
+    }
+
+    #[test]
+    fn play_flags_parse_through_the_real_cli() {
+        let cli = Cli::try_parse_from([
+            "battlesnake",
+            "play",
+            "-W",
+            "11",
+            "-H",
+            "11",
+            "--name",
+            "Rust Starter Project",
+            "--url",
+            "http://localhost:8000",
+            "-g",
+            "solo",
+        ])
+        .expect("README command parses");
+        match cli.command {
+            Commands::Play { args } => {
+                assert_eq!(args.width, 11);
+                assert_eq!(args.height, 11);
+                assert_eq!(args.names, ["Rust Starter Project"]);
+                assert_eq!(args.urls, ["http://localhost:8000"]);
+                assert_eq!(args.gametype, "solo");
+            }
+            _ => panic!("expected Play"),
+        }
+    }
+
+    #[test]
+    fn completion_takes_a_shell() {
+        let cli = Cli::try_parse_from(["battlesnake", "completion", "bash"]).expect("parses");
+        assert!(matches!(cli.command, Commands::Completion { .. }));
     }
 }

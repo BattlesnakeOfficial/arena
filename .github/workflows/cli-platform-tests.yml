@@ -1,0 +1,54 @@
+# Platform CI for the battlesnake CLI (DEV-2144): `cargo test -p battlesnake`
+# on Windows and macOS, so platform breakage shows up before the release task
+# (DEV-2149). The CLI's dependency tree never compiles the server's
+# sqlx::query! macros, so no Postgres service is needed.
+name: CLI Platform Tests
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "cli/**"
+      - "engine-core/**"
+      - "rules/**"
+      - "arena-api-scope/**"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - ".github/workflows/cli-platform-tests.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "cli/**"
+      - "engine-core/**"
+      - "rules/**"
+      - "arena-api-scope/**"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - ".github/workflows/cli-platform-tests.yml"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: cargo test -p battlesnake (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            target
+          key: ${{ runner.os }}-cli-test-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: cargo test -p battlesnake
+        run: cargo test -p battlesnake

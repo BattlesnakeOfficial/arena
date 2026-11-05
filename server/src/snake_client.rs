@@ -1665,7 +1665,6 @@ mod tests {
     }
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-
     #[tokio::test]
     async fn oversized_info_response_is_rejected() {
         let server = MockServer::start().await;
@@ -1781,7 +1780,6 @@ mod tests {
         assert!(result.timed_out);
         assert!(!result.errored);
     }
-
 
     fn create_test_engine_game_with_snakes(snake_ids: Vec<&str>) -> EngineGame {
         use rules::{BoardState, EliminationCause, Point, Snake, StandardSettings};

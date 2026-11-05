@@ -212,8 +212,6 @@ pub fn create_initial_game(
     mode: GameMode,
     snakes: &[InitialSnake],
 ) -> color_eyre::Result<EngineGame> {
-    use color_eyre::eyre::Context as _;
-
     let snake_ids: Vec<String> = snakes.iter().map(|s| s.id.clone()).collect();
 
     let mut board = rules::board::create_default_board_state(&mut *rng, width, height, &snake_ids)
