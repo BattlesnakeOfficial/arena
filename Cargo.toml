@@ -48,3 +48,13 @@ opt-level = 3
 
 [profile.dev.package.kurbo]
 opt-level = 3
+
+# Achievement clips: GIF colour quantisation and LZW encoding are per-pixel too.
+[profile.dev.package.gif]
+opt-level = 3
+
+[profile.dev.package.color_quant]
+opt-level = 3
+
+[profile.dev.package.weezl]
+opt-level = 3
