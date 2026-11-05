@@ -13,7 +13,9 @@ use engine_core::{EngineGame, GameMeta, GameMode, GameSource};
 use super::mode::ResolvedGame;
 use super::{PlayArgs, PlayConfig, display_fields, request_body, run_game, validate};
 
-fn base_args() -> PlayArgs {
+/// Shared by this module's tests and `board_server`'s (sibling module
+/// under `play`): the exhaustive `PlayArgs` literal.
+pub(super) fn base_args() -> PlayArgs {
     PlayArgs {
         width: 11,
         height: 11,
@@ -34,6 +36,8 @@ fn base_args() -> PlayArgs {
         hazard_damage_per_turn: 14,
         shrink_every_n_turns: 25,
         max_turns: None,
+        browser: false,
+        board_url: "https://board.battlesnake.com".into(),
     }
 }
 
@@ -98,6 +102,9 @@ fn every_flag_parses_with_its_exact_name_and_defaults() {
         "5",
         "--max-turns",
         "9",
+        "--browser",
+        "--board-url",
+        "https://example.test/board",
     ])
     .expect("every flag parses with its exact long name");
     assert_eq!((args.width, args.height), (7, 7));
@@ -122,6 +129,8 @@ fn every_flag_parses_with_its_exact_name_and_defaults() {
         (10, 3, 12, 5)
     );
     assert_eq!(args.max_turns, Some(9));
+    assert!(args.browser);
+    assert_eq!(args.board_url, "https://example.test/board");
 
     // Defaults match Go's.
     let defaults = parse_flags(&["-u", "http://a"]).expect("parses");
@@ -142,6 +151,8 @@ fn every_flag_parses_with_its_exact_name_and_defaults() {
     assert_eq!(defaults.duration_ms, 0);
     assert_eq!(defaults.seed, None);
     assert_eq!(defaults.max_turns, None);
+    assert!(!defaults.browser, "--browser defaults off");
+    assert_eq!(defaults.board_url, "https://board.battlesnake.com");
 }
 
 /// Any flag clap would kebab-case (`--view-map`, `--view-map`, `--delay-ms`,

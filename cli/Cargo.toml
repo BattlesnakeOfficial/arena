@@ -45,7 +45,13 @@ futures = "0.3"
 clap_complete = "~4.5"
 # play's missing-name namer shuffles a pool; engine-core already pulls rand.
 rand = "0.8"
+# play --browser (DEV-2146): serves the legacy-engine board API on
+# 127.0.0.1. Same version/features the server uses; adds no new crates to
+# the workspace lockfile.
+axum = { version = "0.8", features = ["ws"] }
 
 [dev-dependencies]
 wiremock = "0.6"
 tempfile = "3"
+# ws client for board-server tests (same version as the server's dev-dep)
+tokio-tungstenite = "0.28"

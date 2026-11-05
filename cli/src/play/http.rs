@@ -22,6 +22,17 @@ use engine_core::move_response::{
     transport_fallback_result,
 };
 
+/// `GET /` as the CLI reads it: arena's shared metadata plus the
+/// `author` only the board view uses. Not a field on
+/// `SnakeInfoResponse`, which the server parses every snake's metadata
+/// through — a non-string `author` must stay an ignored unknown field
+/// there, not a parse failure (Architecture Rule 12 of DEV-2146).
+#[derive(Debug)]
+pub struct PingInfo {
+    pub info: engine_core::wire::SnakeInfoResponse,
+    pub author: String,
+}
+
 /// Thin async client for one snake server. `timeout` bounds the ENTIRE
 /// round trip — send and body read — unlike the server's `request_move`
 /// (which wraps only `.send()`); a snake that answers headers and then
@@ -62,7 +73,7 @@ impl SnakeHttpClient {
     /// divergence from the Go CLI, whose ping ignores the status code: a
     /// deployed snake developer's local run should not print a board for a
     /// snake that is actually down).
-    pub async fn ping(&self, url: &str) -> Result<engine_core::wire::SnakeInfoResponse> {
+    pub async fn ping(&self, url: &str) -> Result<PingInfo> {
         let outcome = self
             .round_trip(|client| {
                 let request = client.get(url);
@@ -86,8 +97,16 @@ impl SnakeHttpClient {
                         "Snake metadata request to {url} returned status {status}"
                     ));
                 }
-                serde_json::from_str(&body)
-                    .map_err(|err| eyre!("Failed to parse response from {url}: {err}"))
+                let info = serde_json::from_str(&body)
+                    .map_err(|err| eyre!("Failed to parse response from {url}: {err}"))?;
+                // The ping's `author` is board-view-only; read it from the
+                // same body as a Value so a missing or non-string value
+                // becomes "" instead of failing the ping.
+                let author = serde_json::from_str::<serde_json::Value>(&body)
+                    .ok()
+                    .and_then(|v| v.get("author")?.as_str().map(str::to_owned))
+                    .unwrap_or_default();
+                Ok(PingInfo { info, author })
             }
         }
     }
@@ -554,7 +573,51 @@ mod tests {
             .await;
 
         let info = client(2000).ping(&server.uri()).await.expect("UA matched");
-        assert_eq!(info.color.as_deref(), Some("#888800"));
+        assert_eq!(info.info.color.as_deref(), Some("#888800"));
+    }
+
+    /// The ping's `author`: a string is carried through; a non-string or
+    /// missing value is `""` and never fails the ping (it is board-view
+    /// display data, not snake metadata the game depends on).
+    #[tokio::test]
+    async fn ping_author_is_string_or_empty() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(r##"{"apiversion":"1","author":"byte","color":"#fff"}"##),
+            )
+            .mount(&server)
+            .await;
+        let ping = client(2000).ping(&server.uri()).await.expect("parses");
+        assert_eq!(ping.author, "byte");
+        assert_eq!(ping.info.color.as_deref(), Some("#fff"));
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(r##"{"apiversion":"1","author":5,"color":"#fff"}"##),
+            )
+            .mount(&server)
+            .await;
+        let ping = client(2000).ping(&server.uri()).await.expect("parses");
+        assert_eq!(ping.author, "");
+        assert_eq!(ping.info.color.as_deref(), Some("#fff"));
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(r##"{"apiversion":"1","color":"#fff"}"##),
+            )
+            .mount(&server)
+            .await;
+        let ping = client(2000).ping(&server.uri()).await.expect("parses");
+        assert_eq!(ping.author, "");
     }
 
     /// A snake that writes headers and then stalls: the whole round trip
