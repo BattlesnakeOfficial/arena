@@ -209,6 +209,22 @@ fn strip_secret_snake_fields(frames: &mut [EngineGameFrame]) {
     }
 }
 
+/// Why [`ExportWriter::push_frame_texts`] failed. Only [`PushFrameError::Parse`]
+/// is structural — the frame text can never parse, so it becomes a
+/// permanent `play_archive_exceptions` row. [`PushFrameError::Internal`]
+/// failures (frame re-serialization, zstd writes) are internal, never bad
+/// data: classifying them permanent would record a false exception and
+/// hide the bug (DEV-1984 req 2), so they stay transient and retry.
+#[derive(Debug)]
+pub(crate) enum PushFrameError {
+    /// The frame text's JSON or types don't fit `EngineGameFrame` — can
+    /// never succeed on retry.
+    Parse(color_eyre::Report),
+    /// Internal serialize/zstd failure — code-bug territory, never bad
+    /// data; retry and surface loudly.
+    Internal(color_eyre::Report),
+}
+
 /// Incremental builder for a v2 archive object: writes the exact byte
 /// layout of `serde_json::to_vec(&GameExport{..})` — prefix
 /// `{"archive_version":..,"game_id":..,"game":..,"frames":[`, frames
@@ -257,19 +273,26 @@ impl ExportWriter {
 
     /// Parse each text into [`EngineGameFrame`], strip secret snake fields,
     /// serialize, and write the frames into the encoder, joined by `,`.
-    /// Pure CPU — blocking pool only.
-    pub(crate) fn push_frame_texts(&mut self, page: &[FrameTextRow]) -> cja::Result<()> {
+    /// Pure CPU — blocking pool only. Parse failures are structural
+    /// ([`PushFrameError::Parse`]); serialize/zstd failures are internal
+    /// ([`PushFrameError::Internal`]) and must never become permanent
+    /// exceptions.
+    pub(crate) fn push_frame_texts(&mut self, page: &[FrameTextRow]) -> Result<(), PushFrameError> {
         for row in page {
             let text = row.value_text.as_deref().unwrap_or_default();
-            let mut frame: EngineGameFrame =
-                serde_json::from_str(text).wrap_err("Failed to deserialize game frame")?;
+            let mut frame: EngineGameFrame = serde_json::from_str(text)
+                .wrap_err("Failed to deserialize game frame")
+                .map_err(PushFrameError::Parse)?;
             strip_secret_snake_fields(std::slice::from_mut(&mut frame));
-            let frame_bytes =
-                serde_json::to_vec(&frame).wrap_err("Failed to serialize game frame")?;
+            let frame_bytes = serde_json::to_vec(&frame)
+                .wrap_err("Failed to serialize game frame")
+                .map_err(PushFrameError::Internal)?;
             if self.frame_count > 0 {
-                self.write_json_fragment(b",")?;
+                self.write_json_fragment(b",")
+                    .map_err(PushFrameError::Internal)?;
             }
-            self.write_json_fragment(&frame_bytes)?;
+            self.write_json_fragment(&frame_bytes)
+                .map_err(PushFrameError::Internal)?;
             self.frame_count += 1;
         }
         Ok(())
@@ -352,9 +375,14 @@ async fn build_export_streamed(
         .map_err(ExportBuildError::Transient)?;
         writer = returned_writer;
         if let Err(error) = result {
-            return Err(ExportBuildError::Permanent(format!(
-                "frame_unparseable: {error:#}"
-            )));
+            return Err(match error {
+                PushFrameError::Parse(error) => {
+                    ExportBuildError::Permanent(format!("frame_unparseable: {error:#}"))
+                }
+                // Internal serialize/zstd failure: never bad data, so never
+                // an exception — retry (and the error surfaces loudly).
+                PushFrameError::Internal(error) => ExportBuildError::Transient(error),
+            });
         }
     }
     if writer.frame_count() == 0 {
@@ -369,7 +397,14 @@ async fn build_export_streamed(
 }
 
 /// Record a game as permanently unarchivable, with the reason. The walk
-/// treats an exceptions row as done; deleting the row re-arms the walk.
+/// treats an exceptions row as done. Re-arming a game after a fix takes
+/// BOTH deleting its row AND getting the walk to see the game again —
+/// rewind `play_history_walk_cursor` behind it (a rewind to the seed
+/// re-walks ~270k done rows at 2,000/tick, ~11 h of cheap no-op pages) or
+/// enqueue a `BackupSingleGameJob` for it directly. Once the cursor has
+/// passed a game no tick revisits it, so deleting the row alone does
+/// nothing — and erases the only record of why the game is missing
+/// (see docs/game-archive.md).
 async fn record_permanent_failure(
     db: &PgPool,
     engine_game_id: &str,
@@ -1256,8 +1291,10 @@ mod tests {
         assert_eq!(exception.reason, "frame_null_value");
         assert_eq!(store.put_count(), 0, "no object for a permanent failure");
 
-        // Control: delete the NULL frame and the exception row; re-run
-        // archives the game (deleting an exception re-arms the walk).
+        // Control: delete the NULL frame and the exception row; a direct
+        // re-run archives the game. (A direct call bypasses the cursor;
+        // re-arming the WALK itself also needs the cursor rewound behind
+        // the game — see docs/game-archive.md.)
         sqlx::query("DELETE FROM game_frames WHERE id = 'null-frame' AND turn = 1")
             .execute(&engine_pool)
             .await?;
@@ -1266,6 +1303,96 @@ mod tests {
             .await?;
         backup_single_game(&state, "null-frame").await?;
         assert_eq!(store.put_count(), 1);
+        Ok(())
+    }
+
+    /// DEV-1984 req 2: a parseable-JSON frame whose types don't fit
+    /// `EngineGameFrame` is structural (Permanent) — retrying can never fix
+    /// it. This drives the real streamed path (`build_export_streamed` /
+    /// `backup_single_game`), unlike `malformed_frame_fails_the_export`,
+    /// which only pins the test-only reference builder. Control: with the
+    /// bad frame replaced and the exception cleared, the game archives
+    /// normally.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn unparseable_frame_is_permanent_not_transient(pool: sqlx::PgPool) -> cja::Result<()> {
+        let (state, store, engine_pool) = engine_fixture(&pool).await?;
+        let created = chrono::NaiveDate::from_ymd_opt(2020, 6, 15)
+            .expect("date")
+            .and_hms_opt(0, 0, 0)
+            .expect("time");
+
+        insert_engine_game(
+            &engine_pool,
+            "bad-frame",
+            fixture_game_json("bad-frame", created.and_utc().timestamp_micros()),
+            created,
+        )
+        .await?;
+        insert_engine_frame(&engine_pool, "bad-frame", 0, Some(fixture_frame(0))).await?;
+        // Parseable JSON, wrong types ("Turn" must be an i32): serde fails
+        // inside `push_frame_texts` — the streamed path's frame exception.
+        insert_engine_frame(
+            &engine_pool,
+            "bad-frame",
+            1,
+            Some(serde_json::json!({"Turn": "nope", "Snakes": [], "Food": []})),
+        )
+        .await?;
+
+        backup_single_game(&state, "bad-frame")
+            .await
+            .expect("an unparseable frame is permanent, not a retryable error");
+
+        let exception = sqlx::query!(
+            "SELECT reason FROM play_archive_exceptions WHERE engine_game_id = 'bad-frame'"
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert!(
+            exception.reason.starts_with("frame_unparseable"),
+            "reason was: {}",
+            exception.reason
+        );
+        assert_eq!(store.put_count(), 0, "no object for a permanent failure");
+
+        // Control: replace the bad frame, clear the exception, re-run.
+        sqlx::query("DELETE FROM game_frames WHERE id = 'bad-frame' AND turn = 1")
+            .execute(&engine_pool)
+            .await?;
+        insert_engine_frame(&engine_pool, "bad-frame", 1, Some(fixture_frame(1))).await?;
+        sqlx::query!("DELETE FROM play_archive_exceptions WHERE engine_game_id = 'bad-frame'")
+            .execute(&pool)
+            .await?;
+        backup_single_game(&state, "bad-frame").await?;
+        assert_eq!(store.put_count(), 1);
+        Ok(())
+    }
+
+    /// DEV-1984 req 2: a missing engine row (7-day `expiry` on recent
+    /// games) is permanent — the game can never be archived. The job
+    /// returns Ok so the walk moves on; nothing is uploaded and no arena
+    /// row is created.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn missing_engine_row_is_permanent(pool: sqlx::PgPool) -> cja::Result<()> {
+        let (state, store, _engine_pool) = engine_fixture(&pool).await?;
+
+        backup_single_game(&state, "never-existed")
+            .await
+            .expect("a missing engine row is permanent, not a retryable error");
+
+        let exception = sqlx::query!(
+            "SELECT reason FROM play_archive_exceptions WHERE engine_game_id = 'never-existed'"
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(exception.reason, "engine_row_missing");
+        assert_eq!(store.put_count(), 0);
+        let games_row = sqlx::query_scalar!(
+            r#"SELECT COUNT(*) AS "count!" FROM games WHERE engine_game_id = 'never-existed'"#
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(games_row, 0, "no arena row for a missing engine game");
         Ok(())
     }
 

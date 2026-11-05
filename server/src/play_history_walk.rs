@@ -2,16 +2,19 @@
 //! wedged fork-join chain. See docs/game-archive.md.
 //!
 //! Every tick pages engine games oldest-first past a durable cursor and
-//! trickles at most `PLAY_WALK_INFLIGHT_CEILING` walk-originated
-//! `BackupSingleGameJob`s into the queue (below game-runner priority).
-//! The cursor only advances past rows that are done (archived in arena or
-//! in `play_archive_exceptions`), so an in-flight, retrying, or dropped
-//! job's game can never be lost; the enqueue scan still continues through
-//! the page so one bad row pins nothing but the cursor. As it passes, the
-//! walk corrects imported rows' `created_at` (epoch artifacts) and
-//! `game_type`. Once the backlog is gone, ticks are cheap no-op pages that
-//! also catch anything the hourly job's 4-hour window misses — there is no
-//! "done" state until DEV-1545 removes the walk.
+//! trickles `BackupSingleGameJob`s into the queue (below game-runner
+//! priority), capped by `PLAY_WALK_INFLIGHT_CEILING` pending backup-family
+//! jobs — walk-originated or not (see the constant). The cursor only
+//! advances past rows that are done (archived in arena or in
+//! `play_archive_exceptions`), so an in-flight, retrying, or dropped
+//! job's game can never be lost. The enqueue scan continues through the
+//! rest of the page, but the page STARTS at the cursor: a pin that lasts
+//! stops new work after at most `PLAY_WALK_PAGE_SIZE` (2,000) more rows,
+//! so a persistent pin is on a clock, not an infinite leash. As it
+//! passes, the walk corrects imported rows' `created_at` (epoch
+//! artifacts) and `game_type`. Once the backlog is gone, ticks are cheap
+//! no-op pages that also catch anything the hourly job's 4-hour window
+//! misses — there is no "done" state until DEV-1545 removes the walk.
 
 use chrono::{DateTime, NaiveDateTime, Utc};
 use color_eyre::eyre::Context as _;
@@ -21,8 +24,11 @@ use crate::backup::{BackupError, enqueue_backup_job};
 use crate::engine_models::normalize_game_type;
 use crate::state::AppState;
 
-/// Walk-originated backup jobs allowed in flight (queued + running) at
-/// once. A CODE CONSTANT by design (coordinator DEV-1984): env/Terraform
+/// Ceiling on pending (queued + running) `BackupSingleGameJob` /
+/// `NativeBackupSingleGameJob` rows — walk-originated or not. The budget
+/// is ceiling minus that shared count, which is what keeps the walk from
+/// stacking on the hourly/native drains. A CODE CONSTANT by design
+/// (coordinator DEV-1984): env/Terraform
 /// changes are outside this PR's authority; ramping is a one-line PR, and 0
 /// pauses the walk (tick no-ops before any work). A claimed backup job
 /// holds its worker while waiting on `BACKUP_SLOT` and prod has 100

@@ -44,20 +44,25 @@ The `backup_batches` TABLE remains for DEV-1545.
   row comparison, so duplicate/concurrent ticks can never move it
   backward. The cursor only advances past rows that are done (archived
   in arena, or in `play_archive_exceptions`) — an in-flight, retrying,
-  or dropped job pins the cursor so its game is never lost; the enqueue
-  scan still continues through the rest of the page so one bad row
-  stalls nothing else. A pin whose job is failing shows as a per-tick
-  WARN (`cursor pinned by in-flight job`) with the game id and
-  `error_count`.
-- **Rate**: `PLAY_WALK_INFLIGHT_CEILING` walk-originated
-  `BackupSingleGameJob`s may be in flight (queued + running) at once — a
-  code constant, not env config; ramping is a one-line PR and 0 pauses
-  the walk. Jobs go out at `BACKUP_JOB_PRIORITY` (-10, below game
-  runners at 0). During the hourly archive drains (~:21-:45) the budget
-  is zero and the tick enqueues nothing, but still advances the cursor
-  and applies corrections. The budget counts only
-  `BackupSingleGameJob`/`NativeBackupSingleGameJob` rows —
-  `PruneGameTurnsJob`'s ~2,000/hour queue is not backfill backlog.
+  or dropped job pins the cursor so its game is never lost. The enqueue
+  scan still continues through the rest of the page, but the page STARTS
+  at the cursor: a pin that lasts stops new work after at most
+  `PLAY_WALK_PAGE_SIZE` (2,000) more rows, so a persistent pin is on a
+  clock, not an infinite leash. A pin whose job is failing shows as a
+  per-tick WARN (`cursor pinned by in-flight job`) with the game id and
+  `error_count` — investigate one that outlasts a few hours with a
+  rising `error_count`.
+- **Rate**: `PLAY_WALK_INFLIGHT_CEILING` bounds how many
+  `BackupSingleGameJob`/`NativeBackupSingleGameJob` jobs may be pending
+  (queued + running) at once — walk-originated or not: budget = ceiling
+  minus ALL such pending rows, so the walk never stacks on the
+  hourly/native drains. A code constant, not env config; ramping is a
+  one-line PR and 0 pauses the walk. Jobs go out at
+  `BACKUP_JOB_PRIORITY` (-10, below game runners at 0). During the
+  hourly archive drains (~:21-:45) the budget is zero and the tick
+  enqueues nothing, but still advances the cursor and applies
+  corrections. `PruneGameTurnsJob`'s ~2,000/hour queue is deliberately
+  NOT counted — it is not backfill backlog.
 - **24h floor**: the walk only pages games older than 24 h, so the
   cursor can never pass a game younger than that; anything that flips
   terminal within 24 h of creation is guaranteed a later page (closing
@@ -70,9 +75,15 @@ The `backup_batches` TABLE remains for DEV-1545.
   `frame_unparseable`, `frame_null_value`, `no_frames`). Transient
   errors (GCS 5xx, DB errors) retry through cja and NEVER land there;
   no error-count threshold converts one to the other. Nothing with zero
-  frames is ever uploaded. To re-arm a game, delete its exception row.
-  A game that is both archived and excepted stays archived — the
-  completeness report prefers archived state.
+  frames is ever uploaded. A game that is both archived and excepted
+  stays archived — the completeness report prefers archived state.
+  Re-arming a game after a fix takes TWO steps: delete its exception
+  row AND make the walk see the game again — rewind
+  `play_history_walk_cursor` behind it (a rewind to the seed re-walks
+  ~270k done rows at 2,000/tick, ~11 h of cheap no-op pages) or enqueue
+  a `BackupSingleGameJob` for it directly. Once the cursor has passed a
+  game no tick revisits it, so deleting the row alone does nothing —
+  and erases the only record of why the game is missing.
 - **Dates**: `games.created_at`, the GCS date path, and the archived
   header's `Created` (when the JSON key is missing) all come from the
   engine `created` COLUMN. Pre-2023 `value` rows often lack the JSON
