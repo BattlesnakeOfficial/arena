@@ -7,9 +7,9 @@ use crate::{
 use cja::eyes_manifest::{AppManifest, ExpectedProcessRole, HttpMonitor};
 use eyes_subscriber::{
     AggregateFunction as Agg, DashboardItem as Item, DashboardSection as Section,
-    MetricThresholdBuilder, NamedDashboard, NamedMetric, NamedMetricBuilder as Metric,
-    ProcessHeartbeat, ProcessHeartbeatConfig, ProcessHeartbeatHandle, ProcessIdentity,
-    RetentionPolicy, ThresholdComparison::Above,
+    MetricResultShape, MetricThresholdBuilder, MetricValueType, NamedDashboard, NamedMetric,
+    NamedMetricBuilder as Metric, ProcessHeartbeat, ProcessHeartbeatConfig, ProcessHeartbeatHandle,
+    ProcessIdentity, RatioMetricBuilder, RetentionPolicy, ThresholdComparison::Above,
 };
 
 pub const ROLE: &str = "arena";
@@ -17,6 +17,14 @@ pub const ROLE: &str = "arena";
 /// Days Eyes keeps arena's DEBUG telemetry in Postgres; its lake keeps it after
 /// that. Every other level keeps Eyes' server default.
 pub const DEBUG_RETENTION_DAYS: u32 = 2;
+
+/// Trailing-window constants for the product dashboards' fixed tiles and
+/// charts (DEV-2062). All within the server's 1..=31_622_400 s item bound.
+const DAY: u64 = 86_400;
+const WEEK: u64 = 604_800;
+const FOUR_WEEKS: u64 = 2_419_200;
+const NINETY_DAYS: u64 = 7_776_000; // 90 days
+const THREE_HUNDRED_SIXTY_FOUR_DAYS: u64 = 31_449_600; // 364 days
 
 pub fn manifest(
     registry: &cja::cron::CronRegistry<AppState>,
@@ -88,7 +96,11 @@ pub fn manifest(
     Ok(manifest
         .metrics(metrics)
         .metric_thresholds(thresholds)
-        .dashboards(vec![dashboard()?, product_dashboard()?]))
+        .dashboards(vec![
+            dashboard()?,
+            product_dashboard()?,
+            product_history_dashboard()?,
+        ]))
 }
 
 fn count(id: &str, title: &str, path: &str, value: &str) -> Result<Metric, String> {
@@ -104,6 +116,30 @@ fn timing(id: &str, title: &str, kind: &str) -> Result<NamedMetric, String> {
         .display_name(title)
         .unit("ms")
         .build()
+}
+
+/// Distinct users with an authenticated request, counted on cja's
+/// `finished processing request` event. Target AND message, in that order:
+/// the target alone also matches `server.request` span rows, and
+/// `fields.user_id` alone also matches `snake.lifecycle` spans
+/// (DEV-2076 fallback ruling). Stage order is filter call order.
+fn active_request_users(id: &str, title: &str) -> Result<Metric, String> {
+    Ok(Metric::new(id, Agg::CountDistinct, Some("fields.user_id"))?
+        .display_name(title)
+        .filter_eq("target", "cja::server::trace")?
+        .filter_eq("message", "finished processing request")?
+        .unit("users"))
+}
+
+/// Distinct owners/snakes behind a real `/end` call. `endpoint` is a
+/// span-creation field on `snake.lifecycle` (DEV-2061) — open row, no
+/// close-row merge needed. Name first, then the endpoint field.
+fn active_lifecycle(id: &str, title: &str, value: &str, unit: &str) -> Result<Metric, String> {
+    Ok(Metric::new(id, Agg::CountDistinct, Some(value))?
+        .display_name(title)
+        .filter_eq("name", "snake.lifecycle")?
+        .filter_eq("fields.endpoint", "end")?
+        .unit(unit))
 }
 
 fn metrics() -> Result<Vec<NamedMetric>, String> {
@@ -329,6 +365,261 @@ fn metrics() -> Result<Vec<NamedMetric>, String> {
         .unit("snakes")
         .time_bucket(86_400)
         .build()?,
+        // DEV-2062: active users/owners/snakes, per-source games, weekly
+        // variants, and the ratios over them. Every aggregate is
+        // count_distinct or count over events that exist today; Arena
+        // computes nothing itself.
+        active_request_users("product.users.active", "Users with an authenticated request")?
+            .description(
+                "Distinct users who made an authenticated request (session sign-in or API token), counted on the request-completion event.",
+            )
+            .build()?,
+        active_request_users(
+            "product.users.active.daily",
+            "Users with an authenticated request, per day",
+        )?
+        .time_bucket(DAY)
+        .build()?,
+        active_request_users(
+            "product.users.active.weekly",
+            "Users with an authenticated request, per week",
+        )?
+        .time_bucket_weeks(1)
+        .build()?,
+        active_request_users(
+            "product.users.active.month",
+            "Users with an authenticated request (28-day side)",
+        )?
+        .build()?,
+        active_lifecycle(
+            "product.owners.active",
+            "Owners whose snake played",
+            "fields.user_id",
+            "users",
+        )?
+        .description(
+            "Distinct owners whose snake played a game, counted on the snake /end call (snake.lifecycle span, endpoint end).",
+        )
+        .build()?,
+        active_lifecycle(
+            "product.owners.active.daily",
+            "Owners whose snake played, per day",
+            "fields.user_id",
+            "users",
+        )?
+        .time_bucket(DAY)
+        .build()?,
+        active_lifecycle(
+            "product.owners.active.weekly",
+            "Owners whose snake played, per week",
+            "fields.user_id",
+            "users",
+        )?
+        .time_bucket_weeks(1)
+        .build()?,
+        active_lifecycle(
+            "product.owners.active.month",
+            "Owners whose snake played (28-day side)",
+            "fields.user_id",
+            "users",
+        )?
+        .build()?,
+        active_lifecycle(
+            "product.snakes.active",
+            "Snakes that played a game",
+            "fields.battlesnake_id",
+            "snakes",
+        )?
+        .description(
+            "Distinct battlesnakes that played a game, counted on the snake /end call (snake.lifecycle span, endpoint end).",
+        )
+        .build()?,
+        active_lifecycle(
+            "product.snakes.active.weekly",
+            "Snakes that played a game, per week",
+            "fields.battlesnake_id",
+            "snakes",
+        )?
+        .time_bucket_weeks(1)
+        .build()?,
+        count(
+            "product.games.ladder",
+            "Games played (ladder)",
+            "fields.event_type",
+            "game_completed",
+        )?
+        .filter_eq("fields.source", "ladder")?
+        .unit("games")
+        .build()?,
+        count(
+            "product.games.tournament",
+            "Games played (tournament)",
+            "fields.event_type",
+            "game_completed",
+        )?
+        .filter_eq("fields.source", "tournament")?
+        .unit("games")
+        .build()?,
+        count(
+            "product.games.ladder.weekly",
+            "Games played (ladder), per week",
+            "fields.event_type",
+            "game_completed",
+        )?
+        .filter_eq("fields.source", "ladder")?
+        .unit("games")
+        .time_bucket_weeks(1)
+        .build()?,
+        count(
+            "product.games.custom.weekly",
+            "Games played (custom), per week",
+            "fields.event_type",
+            "game_completed",
+        )?
+        .filter_eq("fields.source", "custom")?
+        .unit("games")
+        .time_bucket_weeks(1)
+        .build()?,
+        count(
+            "product.games.tournament.weekly",
+            "Games played (tournament), per week",
+            "fields.event_type",
+            "game_completed",
+        )?
+        .filter_eq("fields.source", "tournament")?
+        .unit("games")
+        .time_bucket_weeks(1)
+        .build()?,
+        count(
+            "product.new_users.weekly",
+            "New users, per week",
+            "fields.event_type",
+            "user_authenticated",
+        )?
+        .filter_eq("fields.new_user", true)?
+        .unit("users")
+        .time_bucket_weeks(1)
+        .build()?,
+        count(
+            "product.new_snakes.weekly",
+            "New snakes, per week",
+            "fields.event_type",
+            "battlesnake_created",
+        )?
+        .unit("snakes")
+        .time_bucket_weeks(1)
+        .build()?,
+        RatioMetricBuilder::new(
+            "product.users.active.stickiness.daily",
+            "product.users.active",
+            "product.users.active.month",
+        )
+        .numerator_window_seconds(DAY)
+        .denominator_window_seconds(FOUR_WEEKS)
+        .as_percentage()
+        .display_name("Users with an authenticated request: last 1 day as % of last 28 days")
+        .description(
+            "Distinct users with an authenticated request in the last 1 day as a percentage of the last 28 days.",
+        )
+        .build(
+            MetricResultShape::Scalar,
+            MetricValueType::Int,
+            MetricResultShape::Scalar,
+            MetricValueType::Int,
+        )?,
+        RatioMetricBuilder::new(
+            "product.users.active.stickiness.weekly",
+            "product.users.active",
+            "product.users.active.month",
+        )
+        .numerator_window_seconds(WEEK)
+        .denominator_window_seconds(FOUR_WEEKS)
+        .as_percentage()
+        .display_name("Users with an authenticated request: last 7 days as % of last 28 days")
+        .description(
+            "Distinct users with an authenticated request in the last 7 days as a percentage of the last 28 days.",
+        )
+        .build(
+            MetricResultShape::Scalar,
+            MetricValueType::Int,
+            MetricResultShape::Scalar,
+            MetricValueType::Int,
+        )?,
+        RatioMetricBuilder::new(
+            "product.owners.active.stickiness.daily",
+            "product.owners.active",
+            "product.owners.active.month",
+        )
+        .numerator_window_seconds(DAY)
+        .denominator_window_seconds(FOUR_WEEKS)
+        .as_percentage()
+        .display_name("Owners whose snake played: last 1 day as % of last 28 days")
+        .description(
+            "Distinct owners whose snake played in the last 1 day as a percentage of the last 28 days.",
+        )
+        .build(
+            MetricResultShape::Scalar,
+            MetricValueType::Int,
+            MetricResultShape::Scalar,
+            MetricValueType::Int,
+        )?,
+        RatioMetricBuilder::new(
+            "product.owners.active.stickiness.weekly",
+            "product.owners.active",
+            "product.owners.active.month",
+        )
+        .numerator_window_seconds(WEEK)
+        .denominator_window_seconds(FOUR_WEEKS)
+        .as_percentage()
+        .display_name("Owners whose snake played: last 7 days as % of last 28 days")
+        .description(
+            "Distinct owners whose snake played in the last 7 days as a percentage of the last 28 days.",
+        )
+        .build(
+            MetricResultShape::Scalar,
+            MetricValueType::Int,
+            MetricResultShape::Scalar,
+            MetricValueType::Int,
+        )?,
+        RatioMetricBuilder::new(
+            "product.games.ladder.share",
+            "product.games.ladder",
+            "product.games.played",
+        )
+        .as_percentage()
+        .display_name("Ladder share of games played")
+        .build(
+            MetricResultShape::Scalar,
+            MetricValueType::Int,
+            MetricResultShape::Scalar,
+            MetricValueType::Int,
+        )?,
+        RatioMetricBuilder::new(
+            "product.games.user_created.share",
+            "product.games.user_created",
+            "product.games.played",
+        )
+        .as_percentage()
+        .display_name("User-created share of games played")
+        .build(
+            MetricResultShape::Scalar,
+            MetricValueType::Int,
+            MetricResultShape::Scalar,
+            MetricValueType::Int,
+        )?,
+        RatioMetricBuilder::new(
+            "product.games.tournament.share",
+            "product.games.tournament",
+            "product.games.played",
+        )
+        .as_percentage()
+        .display_name("Tournament share of games played")
+        .build(
+            MetricResultShape::Scalar,
+            MetricValueType::Int,
+            MetricResultShape::Scalar,
+            MetricValueType::Int,
+        )?,
         count(
             "product.achievements.earned",
             "Achievements earned",
@@ -458,7 +749,7 @@ fn dashboard() -> Result<NamedDashboard, String> {
 
 fn product_dashboard() -> Result<NamedDashboard, String> {
     Ok(NamedDashboard::new("arena-product", "Arena product")?
-        .description("Games played, play claims, signups, new snakes, achievements earned, and achievement shares.")
+        .description("Games played, active users and snakes, play claims, signups, new snakes, achievements earned, and achievement shares. Long-window charts: arena-product-history.")
         .default_range_seconds(30 * 24 * 60 * 60)
         .section(
             Section::new()
@@ -468,11 +759,82 @@ fn product_dashboard() -> Result<NamedDashboard, String> {
         )
         .section(
             Section::new()
+                .title("Active users, owners, and snakes")
+                .item(
+                    Item::stat("product.users.active")
+                        .window_seconds(DAY)
+                        .label("Users with an authenticated request · last 1 day"),
+                )
+                .item(
+                    Item::stat("product.users.active")
+                        .window_seconds(WEEK)
+                        .label("Users with an authenticated request · last 7 days"),
+                )
+                .item(
+                    Item::stat("product.users.active")
+                        .window_seconds(FOUR_WEEKS)
+                        .label("Users with an authenticated request · last 28 days"),
+                )
+                .item(
+                    Item::stat("product.owners.active")
+                        .window_seconds(DAY)
+                        .label("Owners whose snake played · last 1 day"),
+                )
+                .item(
+                    Item::stat("product.owners.active")
+                        .window_seconds(WEEK)
+                        .label("Owners whose snake played · last 7 days"),
+                )
+                .item(
+                    Item::stat("product.owners.active")
+                        .window_seconds(FOUR_WEEKS)
+                        .label("Owners whose snake played · last 28 days"),
+                )
+                .item(
+                    Item::stat("product.snakes.active")
+                        .window_seconds(WEEK)
+                        .label("Snakes that played a game · last 7 days"),
+                )
+                .item(
+                    Item::stat("product.games.played")
+                        .window_seconds(WEEK)
+                        .label("Games played · last 7 days"),
+                ),
+        )
+        .section(
+            Section::new()
+                .title("Stickiness (share of 28-day actives)")
+                .item(Item::stat("product.users.active.stickiness.daily"))
+                .item(Item::stat("product.users.active.stickiness.weekly"))
+                .item(Item::stat("product.owners.active.stickiness.daily"))
+                .item(Item::stat("product.owners.active.stickiness.weekly")),
+        )
+        .section(
+            Section::new()
                 .title("Games played")
                 .item(Item::time_series("product.games.daily"))
                 .item(Item::time_series("product.games.ladder.daily"))
                 .item(Item::time_series("product.games.custom.daily"))
                 .item(Item::time_series("product.games.tournament.daily")),
+        )
+        .section(
+            Section::new()
+                .title("Source share of games (last 7 days)")
+                .item(
+                    Item::stat("product.games.ladder.share")
+                        .window_seconds(WEEK)
+                        .label("Ladder share of games · last 7 days"),
+                )
+                .item(
+                    Item::stat("product.games.user_created.share")
+                        .window_seconds(WEEK)
+                        .label("User-created share of games · last 7 days"),
+                )
+                .item(
+                    Item::stat("product.games.tournament.share")
+                        .window_seconds(WEEK)
+                        .label("Tournament share of games · last 7 days"),
+                ),
         )
         .section(
             Section::new()
@@ -497,6 +859,68 @@ fn product_dashboard() -> Result<NamedDashboard, String> {
                 .item(Item::table("product.shares.page_views.by_referrer"))
                 .item(Item::table("product.shares.actions"))
                 .item(Item::table("product.shares.cta_clicks")),
+        ))
+}
+
+/// The long-window charts (DEV-2062): 90-day daily series and 364-day
+/// Monday-week series, on their own page so `arena-product` never pays for
+/// year-long lake scans. Every window clamps to the lake's history start
+/// until coverage grows (DEV-2059).
+fn product_history_dashboard() -> Result<NamedDashboard, String> {
+    Ok(NamedDashboard::new("arena-product-history", "Arena product history")?
+        .description("Long-window engagement, games, and growth charts. Each card's window starts at the lake's history until coverage grows; every clamped card shows the date it starts from.")
+        .default_range_seconds(31_622_400) // 366 days, the post-DEV-2059 bound
+        .section(
+            Section::new()
+                .title("Active users, owners, and snakes over time")
+                .item(
+                    Item::time_series("product.users.active.daily")
+                        .window_seconds(NINETY_DAYS),
+                )
+                .item(
+                    Item::time_series("product.owners.active.daily")
+                        .window_seconds(NINETY_DAYS),
+                )
+                .item(
+                    Item::time_series("product.users.active.weekly")
+                        .window_seconds(THREE_HUNDRED_SIXTY_FOUR_DAYS),
+                )
+                .item(
+                    Item::time_series("product.owners.active.weekly")
+                        .window_seconds(THREE_HUNDRED_SIXTY_FOUR_DAYS),
+                )
+                .item(
+                    Item::time_series("product.snakes.active.weekly")
+                        .window_seconds(THREE_HUNDRED_SIXTY_FOUR_DAYS),
+                ),
+        )
+        .section(
+            Section::new()
+                .title("Games played by source")
+                .item(
+                    Item::time_series("product.games.ladder.weekly")
+                        .window_seconds(THREE_HUNDRED_SIXTY_FOUR_DAYS),
+                )
+                .item(
+                    Item::time_series("product.games.custom.weekly")
+                        .window_seconds(THREE_HUNDRED_SIXTY_FOUR_DAYS),
+                )
+                .item(
+                    Item::time_series("product.games.tournament.weekly")
+                        .window_seconds(THREE_HUNDRED_SIXTY_FOUR_DAYS),
+                ),
+        )
+        .section(
+            Section::new()
+                .title("Growth")
+                .item(
+                    Item::time_series("product.new_users.weekly")
+                        .window_seconds(THREE_HUNDRED_SIXTY_FOUR_DAYS),
+                )
+                .item(
+                    Item::time_series("product.new_snakes.weekly")
+                        .window_seconds(THREE_HUNDRED_SIXTY_FOUR_DAYS),
+                ),
         ))
 }
 
@@ -574,7 +998,10 @@ mod tests {
             .iter()
             .map(|d| d.id.as_str())
             .collect();
-        assert_eq!(ids, vec!["arena-operations", "arena-product"]);
+        assert_eq!(
+            ids,
+            vec!["arena-operations", "arena-product", "arena-product-history"]
+        );
         for dashboard in manifest.dashboards.as_ref().unwrap() {
             for section in &dashboard.sections {
                 for item in &section.items {
@@ -606,6 +1033,675 @@ mod tests {
                 manifest.jobs.contains(name),
                 "{name} must be a registered job"
             );
+        }
+    }
+
+    #[test]
+    fn product_metrics_declare_windows_ratios_and_labels() {
+        let manifest = manifest(
+            &crate::cron::cron_registry(&AppConfig::test_default()),
+            ProcessIdentity::new(ROLE),
+            FeatureFlags {
+                server: true,
+                jobs: true,
+                cron: true,
+            },
+        )
+        .unwrap();
+        // Assert against the serialized wire body, not the in-memory types:
+        // this pins exactly what ships to Eyes at boot.
+        let wire = serde_json::to_value(&manifest).unwrap();
+        let metrics: HashMap<_, _> = manifest
+            .metrics
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|metric| (metric.id.as_str(), metric))
+            .collect();
+        let metric_wire: HashMap<_, _> = wire["metrics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|metric| (metric["id"].as_str().unwrap().to_owned(), metric))
+            .collect();
+
+        // The 24 new ids exist, enumerated explicitly (other tasks add
+        // metrics to this file, so a total count would false-fail there).
+        const NEW_IDS: &[&str] = &[
+            "product.users.active",
+            "product.users.active.daily",
+            "product.users.active.weekly",
+            "product.users.active.month",
+            "product.owners.active",
+            "product.owners.active.daily",
+            "product.owners.active.weekly",
+            "product.owners.active.month",
+            "product.snakes.active",
+            "product.snakes.active.weekly",
+            "product.games.ladder",
+            "product.games.tournament",
+            "product.games.ladder.weekly",
+            "product.games.custom.weekly",
+            "product.games.tournament.weekly",
+            "product.new_users.weekly",
+            "product.new_snakes.weekly",
+            "product.users.active.stickiness.daily",
+            "product.users.active.stickiness.weekly",
+            "product.owners.active.stickiness.daily",
+            "product.owners.active.stickiness.weekly",
+            "product.games.ladder.share",
+            "product.games.user_created.share",
+            "product.games.tournament.share",
+        ];
+        for id in NEW_IDS {
+            assert!(metrics.contains_key(id), "missing new metric {id}");
+        }
+
+        // Monday weeks pinned by origin, not by width: `.time_bucket(604_800)`
+        // produces the same preferred_bucket_seconds with epoch
+        // (Thursday) buckets and no third argument (DEV-2060).
+        let weekly_ids = [
+            "product.users.active.weekly",
+            "product.owners.active.weekly",
+            "product.snakes.active.weekly",
+            "product.games.ladder.weekly",
+            "product.games.custom.weekly",
+            "product.games.tournament.weekly",
+            "product.new_users.weekly",
+            "product.new_snakes.weekly",
+        ];
+        fn bucket_group(
+            metric_wire: &HashMap<String, &serde_json::Value>,
+            id: &str,
+        ) -> serde_json::Value {
+            let stages = metric_wire[id]["query"]["query"]["stages"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{id} has no stages"));
+            let aggregate = stages
+                .last()
+                .unwrap_or_else(|| panic!("{id} has no aggregate stage"));
+            assert_eq!(aggregate["stage"], "aggregate", "{id}");
+            aggregate["groups"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{id} aggregate has no groups"))
+                .first()
+                .unwrap_or_else(|| panic!("{id} aggregate has no bucket group"))
+                .clone()
+        }
+        for id in weekly_ids {
+            assert_eq!(metrics[id].preferred_bucket_seconds, Some(604_800), "{id}");
+            let bucket = bucket_group(&metric_wire, id);
+            assert_eq!(bucket["alias"], "bucket", "{id}");
+            let expected_call = serde_json::json!({
+                "type": "call",
+                "function": "time_bucket",
+                "args": [
+                    {"type": "path", "path": {"root": "timestamp", "segments": []}},
+                    {"type": "literal", "value": {"type": "duration", "value": 604_800_000_000u64}},
+                    {"type": "literal", "value": {
+                        "type": "duration",
+                        "value": eyes_subscriber::eyes_query::MONDAY_ORIGIN_US
+                    }},
+                ],
+            });
+            assert_eq!(
+                bucket["expr"], expected_call,
+                "{id} Monday-origin time_bucket"
+            );
+        }
+        // Daily buckets pinned at the day width in the 2-arg (epoch-origin)
+        // form: switching a daily metric to `.time_bucket(WEEK)` keeps every
+        // other pin green and silently turns the "per day" chart weekly.
+        for id in ["product.users.active.daily", "product.owners.active.daily"] {
+            assert_eq!(metrics[id].preferred_bucket_seconds, Some(DAY), "{id}");
+            let bucket = bucket_group(&metric_wire, id);
+            assert_eq!(bucket["alias"], "bucket", "{id}");
+            let expected_call = serde_json::json!({
+                "type": "call",
+                "function": "time_bucket",
+                "args": [
+                    {"type": "path", "path": {"root": "timestamp", "segments": []}},
+                    {"type": "literal", "value": {"type": "duration", "value": 86_400_000_000u64}},
+                ],
+            });
+            assert_eq!(bucket["expr"], expected_call, "{id} daily time_bucket");
+        }
+
+        // Filters pinned by stage order (stage order is evaluation order,
+        // and the population each filter carves is load-bearing).
+        let eq_stage = |path: &str, value: &str| {
+            let (root, key) = match path.split_once('.') {
+                Some((root, key)) => (root, Some(key)),
+                None => (path, None),
+            };
+            let segments = key
+                .map(|key| vec![serde_json::json!({"type": "key", "value": key})])
+                .unwrap_or_default();
+            serde_json::json!({
+                "stage": "where",
+                "predicate": {
+                    "type": "binary",
+                    "op": "eq",
+                    "left": {"type": "path", "path": {"root": root, "segments": segments}},
+                    "right": {"type": "literal", "value": {"type": "string", "value": value}},
+                },
+            })
+        };
+        let aggregate_stage = |argument_root: &str, argument_key: &str| {
+            serde_json::json!({
+                "stage": "aggregate",
+                "aggregates": [{
+                    "function": "count_distinct",
+                    "argument": {
+                        "type": "path",
+                        "path": {"root": argument_root, "segments": [{"type": "key", "value": argument_key}]},
+                    },
+                    "alias": "value",
+                }],
+                "groups": [],
+            })
+        };
+        let expected_stages = |filters: Vec<serde_json::Value>, aggregate: serde_json::Value| {
+            let mut stages = filters;
+            stages.push(aggregate);
+            stages
+        };
+        let users_stages = expected_stages(
+            vec![
+                eq_stage("target", "cja::server::trace"),
+                eq_stage("message", "finished processing request"),
+            ],
+            aggregate_stage("fields", "user_id"),
+        );
+        assert_eq!(
+            metric_wire["product.users.active"]["query"]["query"]["stages"],
+            serde_json::json!(users_stages),
+            "users base definition stages"
+        );
+        let owners_stages = expected_stages(
+            vec![
+                eq_stage("name", "snake.lifecycle"),
+                eq_stage("fields.endpoint", "end"),
+            ],
+            aggregate_stage("fields", "user_id"),
+        );
+        assert_eq!(
+            metric_wire["product.owners.active"]["query"]["query"]["stages"],
+            serde_json::json!(owners_stages),
+            "owners base definition stages"
+        );
+        let snakes_stages = expected_stages(
+            vec![
+                eq_stage("name", "snake.lifecycle"),
+                eq_stage("fields.endpoint", "end"),
+            ],
+            aggregate_stage("fields", "battlesnake_id"),
+        );
+        assert_eq!(
+            metric_wire["product.snakes.active"]["query"]["query"]["stages"],
+            serde_json::json!(snakes_stages),
+            "snakes base definition stages"
+        );
+
+        // The base pins above cover three metrics; the weekly check above
+        // reads only the aggregate stage. Every new plain metric's filters
+        // are pinned here by stage order, so a swapped or dropped filter
+        // anywhere in the family goes red.
+        let where_stages = |id: &str| -> Vec<serde_json::Value> {
+            metric_wire[id]["query"]["query"]["stages"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{id} has no stages"))
+                .iter()
+                .filter(|stage| stage["stage"] == "where")
+                .cloned()
+                .collect()
+        };
+        // Bool literal wire form read from the manifest fixture: a bool
+        // filter serializes `value` as {"type":"bool","value":true}.
+        let eq_bool_stage = |path: &str, value: bool| {
+            let (root, key) = match path.split_once('.') {
+                Some((root, key)) => (root, Some(key)),
+                None => (path, None),
+            };
+            let segments = key
+                .map(|key| vec![serde_json::json!({"type": "key", "value": key})])
+                .unwrap_or_default();
+            serde_json::json!({
+                "stage": "where",
+                "predicate": {
+                    "type": "binary",
+                    "op": "eq",
+                    "left": {"type": "path", "path": {"root": root, "segments": segments}},
+                    "right": {"type": "literal", "value": {"type": "bool", "value": value}},
+                },
+            })
+        };
+        let request_filters = || {
+            vec![
+                eq_stage("target", "cja::server::trace"),
+                eq_stage("message", "finished processing request"),
+            ]
+        };
+        let lifecycle_filters = || {
+            vec![
+                eq_stage("name", "snake.lifecycle"),
+                eq_stage("fields.endpoint", "end"),
+            ]
+        };
+        let source_filters = |source: &str| {
+            vec![
+                eq_stage("fields.event_type", "game_completed"),
+                eq_stage("fields.source", source),
+            ]
+        };
+        let new_metric_filters: &[(&str, Vec<serde_json::Value>)] = &[
+            ("product.users.active", request_filters()),
+            ("product.users.active.daily", request_filters()),
+            ("product.users.active.weekly", request_filters()),
+            ("product.users.active.month", request_filters()),
+            ("product.owners.active", lifecycle_filters()),
+            ("product.owners.active.daily", lifecycle_filters()),
+            ("product.owners.active.weekly", lifecycle_filters()),
+            ("product.owners.active.month", lifecycle_filters()),
+            ("product.snakes.active", lifecycle_filters()),
+            ("product.snakes.active.weekly", lifecycle_filters()),
+            ("product.games.ladder", source_filters("ladder")),
+            ("product.games.ladder.weekly", source_filters("ladder")),
+            ("product.games.tournament", source_filters("tournament")),
+            (
+                "product.games.tournament.weekly",
+                source_filters("tournament"),
+            ),
+            ("product.games.custom.weekly", source_filters("custom")),
+            (
+                "product.new_users.weekly",
+                vec![
+                    eq_stage("fields.event_type", "user_authenticated"),
+                    eq_bool_stage("fields.new_user", true),
+                ],
+            ),
+            (
+                "product.new_snakes.weekly",
+                vec![eq_stage("fields.event_type", "battlesnake_created")],
+            ),
+        ];
+        for (id, expected) in new_metric_filters {
+            assert_eq!(&where_stages(id), expected, "{id} where stages");
+        }
+        // Distinct argument pinned per variant: fields.user_id on the
+        // users/owners metrics, fields.battlesnake_id on the snakes ones.
+        for (id, key) in [
+            ("product.users.active", "user_id"),
+            ("product.users.active.daily", "user_id"),
+            ("product.users.active.weekly", "user_id"),
+            ("product.users.active.month", "user_id"),
+            ("product.owners.active", "user_id"),
+            ("product.owners.active.daily", "user_id"),
+            ("product.owners.active.weekly", "user_id"),
+            ("product.owners.active.month", "user_id"),
+            ("product.snakes.active", "battlesnake_id"),
+            ("product.snakes.active.weekly", "battlesnake_id"),
+        ] {
+            let stages = metric_wire[id]["query"]["query"]["stages"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{id} has no stages"));
+            let aggregate = stages
+                .last()
+                .unwrap_or_else(|| panic!("{id} has no aggregate stage"));
+            assert_eq!(aggregate["stage"], "aggregate", "{id}");
+            assert_eq!(
+                aggregate["aggregates"][0]["function"], "count_distinct",
+                "{id} aggregate function"
+            );
+            let expected_argument = serde_json::json!({
+                "type": "path",
+                "path": {
+                    "root": "fields",
+                    "segments": [{"type": "key", "value": key}],
+                },
+            });
+            assert_eq!(
+                aggregate["aggregates"][0]["argument"], expected_argument,
+                "{id} distinct argument"
+            );
+        }
+
+        // Ratios: stickiness declare per-side windows over the 28-day side;
+        // source shares declare none (the item's window sizes both sides).
+        let stickiness = [
+            (
+                "product.users.active.stickiness.daily",
+                "product.users.active",
+                DAY,
+            ),
+            (
+                "product.users.active.stickiness.weekly",
+                "product.users.active",
+                WEEK,
+            ),
+            (
+                "product.owners.active.stickiness.daily",
+                "product.owners.active",
+                DAY,
+            ),
+            (
+                "product.owners.active.stickiness.weekly",
+                "product.owners.active",
+                WEEK,
+            ),
+        ];
+        let month_sides = [
+            (
+                "product.users.active.stickiness.daily",
+                "product.users.active.month",
+            ),
+            (
+                "product.users.active.stickiness.weekly",
+                "product.users.active.month",
+            ),
+            (
+                "product.owners.active.stickiness.daily",
+                "product.owners.active.month",
+            ),
+            (
+                "product.owners.active.stickiness.weekly",
+                "product.owners.active.month",
+            ),
+        ];
+        let month_sides: HashMap<_, _> = month_sides.into_iter().collect();
+        for (id, numerator, numerator_window) in stickiness {
+            let ratio = metrics[id].ratio.as_ref().unwrap();
+            assert_eq!(ratio.numerator, numerator, "{id}");
+            assert_eq!(ratio.denominator, month_sides[id], "{id}");
+            assert_eq!(
+                ratio.numerator_window_seconds,
+                Some(numerator_window),
+                "{id}"
+            );
+            assert_eq!(ratio.denominator_window_seconds, Some(FOUR_WEEKS), "{id}");
+            assert!(ratio.display_as_percentage, "{id}");
+            assert!(metrics[id].query.is_none(), "{id}");
+            assert_eq!(metric_wire[id]["value_type"], "float", "{id}");
+        }
+        let shares = [
+            ("product.games.ladder.share", "product.games.ladder"),
+            (
+                "product.games.user_created.share",
+                "product.games.user_created",
+            ),
+            ("product.games.tournament.share", "product.games.tournament"),
+        ];
+        for (id, numerator) in shares {
+            let ratio = metrics[id].ratio.as_ref().unwrap();
+            assert_eq!(ratio.numerator, numerator, "{id}");
+            assert_eq!(ratio.denominator, "product.games.played", "{id}");
+            assert_eq!(ratio.numerator_window_seconds, None, "{id}");
+            assert_eq!(ratio.denominator_window_seconds, None, "{id}");
+            assert!(ratio.display_as_percentage, "{id}");
+            assert!(metrics[id].query.is_none(), "{id}");
+            assert_eq!(metric_wire[id]["value_type"], "float", "{id}");
+        }
+        // Every ratio side is a declared plain metric, never a ratio itself.
+        for id in stickiness
+            .iter()
+            .map(|(id, _, _)| *id)
+            .chain(shares.iter().map(|(id, _)| *id))
+        {
+            for side in [
+                &metrics[id].ratio.as_ref().unwrap().numerator,
+                &metrics[id].ratio.as_ref().unwrap().denominator,
+            ] {
+                let side = metrics
+                    .get(side.as_str())
+                    .unwrap_or_else(|| panic!("{id} side {side} not declared"));
+                assert!(
+                    side.ratio.is_none(),
+                    "{id} side {} is itself a ratio",
+                    side.id
+                );
+            }
+        }
+
+        // Dashboards: fixed tiles carry exact windows and plain-word labels.
+        let dashboards: HashMap<_, _> = manifest
+            .dashboards
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|d| (d.id.as_str(), d))
+            .collect();
+        let product = dashboards["arena-product"];
+        fn find_section<'a>(dashboard: &'a NamedDashboard, title: &str) -> &'a Section {
+            dashboard
+                .sections
+                .iter()
+                .find(|s| s.title.as_deref() == Some(title))
+                .unwrap_or_else(|| panic!("dashboard has no {title} section"))
+        }
+        fn item_windows(section: &Section) -> Vec<(&str, Option<u64>)> {
+            section
+                .items
+                .iter()
+                .map(|item| match item {
+                    Item::Stat {
+                        query_id,
+                        window_seconds,
+                        ..
+                    }
+                    | Item::TimeSeries {
+                        query_id,
+                        window_seconds,
+                        ..
+                    }
+                    | Item::Table {
+                        query_id,
+                        window_seconds,
+                        ..
+                    } => (query_id.as_str(), *window_seconds),
+                    _ => panic!("section item is not a query item"),
+                })
+                .collect()
+        }
+        fn item_window_labels(section: &Section) -> Vec<(&str, Option<u64>, Option<&str>)> {
+            section
+                .items
+                .iter()
+                .map(|item| match item {
+                    Item::Stat {
+                        query_id,
+                        window_seconds,
+                        label,
+                        ..
+                    } => (query_id.as_str(), *window_seconds, label.as_deref()),
+                    _ => panic!("section item is not a stat item"),
+                })
+                .collect()
+        }
+        let active = find_section(product, "Active users, owners, and snakes");
+        assert_eq!(
+            item_window_labels(active),
+            vec![
+                (
+                    "product.users.active",
+                    Some(DAY),
+                    Some("Users with an authenticated request · last 1 day"),
+                ),
+                (
+                    "product.users.active",
+                    Some(WEEK),
+                    Some("Users with an authenticated request · last 7 days"),
+                ),
+                (
+                    "product.users.active",
+                    Some(FOUR_WEEKS),
+                    Some("Users with an authenticated request · last 28 days"),
+                ),
+                (
+                    "product.owners.active",
+                    Some(DAY),
+                    Some("Owners whose snake played · last 1 day"),
+                ),
+                (
+                    "product.owners.active",
+                    Some(WEEK),
+                    Some("Owners whose snake played · last 7 days"),
+                ),
+                (
+                    "product.owners.active",
+                    Some(FOUR_WEEKS),
+                    Some("Owners whose snake played · last 28 days"),
+                ),
+                (
+                    "product.snakes.active",
+                    Some(WEEK),
+                    Some("Snakes that played a game · last 7 days"),
+                ),
+                (
+                    "product.games.played",
+                    Some(WEEK),
+                    Some("Games played · last 7 days"),
+                ),
+            ],
+            "active tile windows and labels"
+        );
+        let stickiness_section = find_section(product, "Stickiness (share of 28-day actives)");
+        assert_eq!(
+            item_windows(stickiness_section),
+            vec![
+                ("product.users.active.stickiness.daily", None),
+                ("product.users.active.stickiness.weekly", None),
+                ("product.owners.active.stickiness.daily", None),
+                ("product.owners.active.stickiness.weekly", None),
+            ],
+            "stickiness tiles, in order, declaring no item windows"
+        );
+        let source_share = find_section(product, "Source share of games (last 7 days)");
+        assert_eq!(
+            item_window_labels(source_share),
+            vec![
+                (
+                    "product.games.ladder.share",
+                    Some(WEEK),
+                    Some("Ladder share of games · last 7 days"),
+                ),
+                (
+                    "product.games.user_created.share",
+                    Some(WEEK),
+                    Some("User-created share of games · last 7 days"),
+                ),
+                (
+                    "product.games.tournament.share",
+                    Some(WEEK),
+                    Some("Tournament share of games · last 7 days"),
+                ),
+            ],
+            "source-share tile windows and labels"
+        );
+        let history = dashboards["arena-product-history"];
+        let history_windows: Vec<(&str, Option<u64>)> = history
+            .sections
+            .iter()
+            .flat_map(|s| item_windows(s))
+            .collect();
+        assert_eq!(
+            history_windows,
+            vec![
+                ("product.users.active.daily", Some(NINETY_DAYS)),
+                ("product.owners.active.daily", Some(NINETY_DAYS)),
+                (
+                    "product.users.active.weekly",
+                    Some(THREE_HUNDRED_SIXTY_FOUR_DAYS)
+                ),
+                (
+                    "product.owners.active.weekly",
+                    Some(THREE_HUNDRED_SIXTY_FOUR_DAYS)
+                ),
+                (
+                    "product.snakes.active.weekly",
+                    Some(THREE_HUNDRED_SIXTY_FOUR_DAYS)
+                ),
+                (
+                    "product.games.ladder.weekly",
+                    Some(THREE_HUNDRED_SIXTY_FOUR_DAYS)
+                ),
+                (
+                    "product.games.custom.weekly",
+                    Some(THREE_HUNDRED_SIXTY_FOUR_DAYS)
+                ),
+                (
+                    "product.games.tournament.weekly",
+                    Some(THREE_HUNDRED_SIXTY_FOUR_DAYS)
+                ),
+                (
+                    "product.new_users.weekly",
+                    Some(THREE_HUNDRED_SIXTY_FOUR_DAYS)
+                ),
+                (
+                    "product.new_snakes.weekly",
+                    Some(THREE_HUNDRED_SIXTY_FOUR_DAYS)
+                ),
+            ],
+            "history chart windows"
+        );
+
+        // Plain-words criterion: each definition says what it counts.
+        assert!(
+            metrics["product.users.active"]
+                .display_name
+                .as_deref()
+                .is_some_and(|n| n.contains("authenticated request"))
+        );
+        assert!(
+            metrics["product.owners.active"]
+                .display_name
+                .as_deref()
+                .is_some_and(|n| n.contains("Owners whose snake played"))
+        );
+        assert!(
+            metrics["product.snakes.active"]
+                .display_name
+                .as_deref()
+                .is_some_and(|n| n.contains("Snakes that played"))
+        );
+
+        // Sections other tasks own keep main's item ids verbatim.
+        let achievements = find_section(product, "Achievements");
+        assert_eq!(
+            item_windows(achievements)
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect::<Vec<_>>(),
+            vec![
+                "product.achievements.earned",
+                "product.achievements.earned.daily",
+                "product.achievements.firsts.daily",
+                "product.achievements.by_slug",
+            ]
+        );
+        let sharing = find_section(product, "Sharing");
+        assert_eq!(
+            item_windows(sharing)
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect::<Vec<_>>(),
+            vec![
+                "product.shares.page_views",
+                "product.shares.page_views.daily",
+                "product.shares.page_views.by_referrer",
+                "product.shares.actions",
+                "product.shares.cta_clicks",
+            ]
+        );
+
+        // Manifest caps: a future addition trips a deliberate test edit,
+        // not an ingest rejection at boot.
+        assert!(manifest.metrics.as_ref().unwrap().len() <= 100);
+        assert!(manifest.dashboards.as_ref().unwrap().len() <= 20);
+        for dashboard in manifest.dashboards.as_ref().unwrap() {
+            assert!(dashboard.sections.len() <= 20);
+            for s in &dashboard.sections {
+                assert!(s.items.len() <= 24);
+            }
         }
     }
 

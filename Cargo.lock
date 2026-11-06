@@ -821,7 +821,7 @@ dependencies = [
 [[package]]
 name = "cja"
 version = "0.0.0"
-source = "git+https://github.com/coreyja/cja?branch=main#35b3eda30fd4dbcd8c6ee06a8e738607fa5f192f"
+source = "git+https://github.com/coreyja/cja?branch=main#109ca24e4a983e486bd80f3d7e786d5eb4c22530"
 dependencies = [
  "async-trait",
  "axum",
@@ -854,7 +854,7 @@ dependencies = [
 [[package]]
 name = "cja-build"
 version = "0.0.0"
-source = "git+https://github.com/coreyja/cja?branch=main#35b3eda30fd4dbcd8c6ee06a8e738607fa5f192f"
+source = "git+https://github.com/coreyja/cja?branch=main#109ca24e4a983e486bd80f3d7e786d5eb4c22530"
 dependencies = [
  "anyhow",
  "flate2",
@@ -875,7 +875,7 @@ dependencies = [
 [[package]]
 name = "cja-secret"
 version = "0.0.0"
-source = "git+https://github.com/coreyja/cja?branch=main#35b3eda30fd4dbcd8c6ee06a8e738607fa5f192f"
+source = "git+https://github.com/coreyja/cja?branch=main#109ca24e4a983e486bd80f3d7e786d5eb4c22530"
 dependencies = [
  "cja",
  "cja-secret-macros",
@@ -890,7 +890,7 @@ dependencies = [
 [[package]]
 name = "cja-secret-macros"
 version = "0.0.0"
-source = "git+https://github.com/coreyja/cja?branch=main#35b3eda30fd4dbcd8c6ee06a8e738607fa5f192f"
+source = "git+https://github.com/coreyja/cja?branch=main#109ca24e4a983e486bd80f3d7e786d5eb4c22530"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -900,7 +900,7 @@ dependencies = [
 [[package]]
 name = "cja-tailnet"
 version = "0.0.0"
-source = "git+https://github.com/coreyja/cja?branch=main#35b3eda30fd4dbcd8c6ee06a8e738607fa5f192f"
+source = "git+https://github.com/coreyja/cja?branch=main#109ca24e4a983e486bd80f3d7e786d5eb4c22530"
 dependencies = [
  "reqwest 0.13.5",
  "rustls",
@@ -1762,9 +1762,9 @@ dependencies = [
 
 [[package]]
 name = "eyes-query"
-version = "0.1.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ad47db44035e24bcc69c7f400cc904b0d370e44d5377ff06f1c7fa86d8bd1e98"
+checksum = "a75eeec71f0467f762835ceeeebebc2b8e037b8c085cce907b76de8dbeb59470"
 dependencies = [
  "chrono",
  "regex",
@@ -1776,9 +1776,9 @@ dependencies = [
 
 [[package]]
 name = "eyes-subscriber"
-version = "0.8.4"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e632dabb223b25001f43fd4118b29e6464f74e22d8b5cae2e24c3916c87baa61"
+checksum = "2b2e99146a3377c68ca19c88f7195e72336166d929fdcfea1e50d43246edcd38"
 dependencies = [
  "async-trait",
  "chrono",
@@ -6657,7 +6657,7 @@ dependencies = [
 [[package]]
 name = "setec"
 version = "0.0.0"
-source = "git+https://github.com/coreyja/cja?branch=main#35b3eda30fd4dbcd8c6ee06a8e738607fa5f192f"
+source = "git+https://github.com/coreyja/cja?branch=main#109ca24e4a983e486bd80f3d7e786d5eb4c22530"
 dependencies = [
  "base64 0.23.1",
  "bytes",
