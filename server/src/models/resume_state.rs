@@ -289,4 +289,117 @@ mod tests {
         assert_eq!(snake_rows, 0, "cascade removes snake rows");
         Ok(())
     }
+
+    /// A game with a two-snake roster holding resume state — shared fixture
+    /// for the FK-cascade tests.
+    async fn game_with_two_resume_snakes(pool: &sqlx::PgPool) -> cja::Result<(Uuid, [Uuid; 2])> {
+        let game_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO games (board_size, game_type, status)
+             VALUES ('11x11', 'Standard', 'running') RETURNING game_id",
+        )
+        .fetch_one(pool)
+        .await?;
+        let user_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO users (external_github_id, github_login, github_access_token)
+             VALUES (7313, 'fk-cascade-owner', 'test-token') RETURNING user_id",
+        )
+        .fetch_one(pool)
+        .await?;
+        let mut game_battlesnake_ids = [Uuid::new_v4(); 2];
+        for (i, id) in game_battlesnake_ids.iter_mut().enumerate() {
+            let battlesnake_id: Uuid = sqlx::query_scalar(
+                "INSERT INTO battlesnakes (user_id, name, url)
+                 VALUES ($1, $2, 'http://example.com') RETURNING battlesnake_id",
+            )
+            .bind(user_id)
+            .bind(format!("fk-cascade-snake-{i}"))
+            .fetch_one(pool)
+            .await?;
+            *id = sqlx::query_scalar(
+                "INSERT INTO game_battlesnakes (game_id, battlesnake_id)
+                 VALUES ($1, $2) RETURNING game_battlesnake_id",
+            )
+            .bind(game_id)
+            .bind(battlesnake_id)
+            .fetch_one(pool)
+            .await?;
+        }
+
+        let state = ResumeStateData {
+            turn_number: 4,
+            food: serde_json::json!([]),
+            hazards: serde_json::json!([]),
+            snakes: game_battlesnake_ids
+                .iter()
+                .map(|&id| ResumeSnakeRecord {
+                    game_battlesnake_id: id,
+                    health: 90,
+                    eliminated_cause: "not_eliminated".to_owned(),
+                    eliminated_by: String::new(),
+                    eliminated_on_turn: 0,
+                    last_move: Some("up".to_owned()),
+                    context_present: true,
+                    latency_ms: Some(120),
+                    shout: None,
+                    food_eaten: 0,
+                    death_turn: None,
+                    death_cause: None,
+                    death_eliminated_by: None,
+                    death_order: None,
+                    body: serde_json::json!([{"x": 1, "y": 1}]),
+                })
+                .collect(),
+        };
+        let mut tx = pool.begin().await?;
+        upsert_resume_state(&mut tx, game_id, &state).await?;
+        tx.commit().await?;
+        Ok((game_id, game_battlesnake_ids))
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn deleting_a_roster_row_drops_only_its_resume_snake_row(
+        pool: sqlx::PgPool,
+    ) -> cja::Result<()> {
+        let (game_id, ids) = game_with_two_resume_snakes(&pool).await?;
+
+        sqlx::query("DELETE FROM game_battlesnakes WHERE game_battlesnake_id = $1")
+            .bind(ids[0])
+            .execute(&pool)
+            .await?;
+
+        let remaining: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT game_battlesnake_id FROM game_resume_snakes WHERE game_id = $1",
+        )
+        .bind(game_id)
+        .fetch_all(&pool)
+        .await?;
+        assert_eq!(remaining, vec![ids[1]]);
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn deleting_a_game_removes_all_resume_state(pool: sqlx::PgPool) -> cja::Result<()> {
+        let (game_id, _ids) = game_with_two_resume_snakes(&pool).await?;
+
+        sqlx::query("DELETE FROM games WHERE game_id = $1")
+            .bind(game_id)
+            .execute(&pool)
+            .await?;
+
+        let states: i64 = sqlx::query_scalar("SELECT count(*) FROM game_resume_states")
+            .fetch_one(&pool)
+            .await?;
+        let snakes: i64 = sqlx::query_scalar("SELECT count(*) FROM game_resume_snakes")
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(
+            states, 0,
+            "deleting a game must remove its resume state row"
+        );
+        assert_eq!(
+            snakes, 0,
+            "deleting a game must remove its resume snake rows"
+        );
+        Ok(())
+    }
 }

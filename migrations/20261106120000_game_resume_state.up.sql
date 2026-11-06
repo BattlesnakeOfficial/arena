@@ -15,7 +15,7 @@ CREATE TABLE game_resume_states (
 
 CREATE TABLE game_resume_snakes (
     game_id UUID NOT NULL REFERENCES game_resume_states (game_id) ON DELETE CASCADE,
-    game_battlesnake_id UUID NOT NULL REFERENCES game_battlesnakes (game_battlesnake_id),
+    game_battlesnake_id UUID NOT NULL REFERENCES game_battlesnakes (game_battlesnake_id) ON DELETE CASCADE, -- dropping a roster row drops its resume bookkeeping
     health INTEGER NOT NULL,
     eliminated_cause TEXT NOT NULL,      -- serde snake_case of rules::EliminationCause
     eliminated_by TEXT NOT NULL,         -- rules::Snake.eliminated_by is a String

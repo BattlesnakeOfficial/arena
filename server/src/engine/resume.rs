@@ -575,6 +575,49 @@ mod tests {
             .collect()
     }
 
+    /// Edge distances from a head, with the direction that walks off each
+    /// edge: (distance, direction) for right/left/up/down.
+    fn edge_dirs(head_x: i32, head_y: i32, width: i32, height: i32) -> [(i32, Direction); 4] {
+        [
+            (width - 1 - head_x, Direction::Right),
+            (head_x, Direction::Left),
+            (height - 1 - head_y, Direction::Up),
+            (head_y, Direction::Down),
+        ]
+    }
+
+    /// For Constrictor: the 2x2 CYCLE walk self-collides on its 4th move
+    /// (the mode grows every turn), so it can never round-trip a live
+    /// Constrictor snake. Instead snake 0 walks to its NEAREST edge and is
+    /// eliminated within ~2 turns (its eliminated state and death_info
+    /// entry must survive the round-trip), and every other snake walks a
+    /// straight line toward its FARTHEST edge, surviving ~9 turns (past the
+    /// tests' K=8). Spawns sit on the board's inner ring, so both
+    /// directions are fixed per snake at spawn and the walk never
+    /// self-collides (straight lines) or crosses (verified per seed:
+    /// survivor and early-death paths are disjoint).
+    fn constrictor_monotone(run: &LiveRun) -> HashMap<String, Direction> {
+        let width = run.engine_game.board.width;
+        let height = run.engine_game.board.height;
+        run.engine_game
+            .board
+            .snakes
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                let head = s.head();
+                let edges = edge_dirs(head.x, head.y, width, height);
+                let (_, direction) = if i == 0 {
+                    edges.into_iter().min_by_key(|(distance, _)| *distance)
+                } else {
+                    edges.into_iter().max_by_key(|(distance, _)| *distance)
+                }
+                .expect("four edge distances");
+                (s.id.clone(), direction)
+            })
+            .collect()
+    }
+
     fn turns_for(mode: GameMode) -> i32 {
         if mode == GameMode::Royale {
             // With populate_hazards first firing when turn + 1 >= 25, the
@@ -591,16 +634,24 @@ mod tests {
             let k = turns_for(mode);
             let (mut run, game_id) =
                 LiveRun::start(mode, 42, if mode == GameMode::Solo { 1 } else { 2 });
-            let monotone = if mode == GameMode::SnailMode {
-                snail_monotone(&run)
-            } else {
-                HashMap::new()
+            let monotone = match mode {
+                GameMode::SnailMode => snail_monotone(&run),
+                GameMode::Constrictor => constrictor_monotone(&run),
+                _ => HashMap::new(),
             };
 
             while run.engine_game.board.turn < k {
                 let results = run.scripted_results(&monotone);
                 run.drive(&results);
             }
+
+            // A live snake must exist at K in every mode, or the round-trip
+            // proves nothing about live state (the CYCLE walk used to kill
+            // both Constrictor snakes at turn 4, silently).
+            assert!(
+                !run.alive_ids().is_empty(),
+                "{mode:?}: no snake alive at K={k} — fixture regression"
+            );
 
             // Mode state must actually exist before asserting it round-trips.
             if mode == GameMode::SnailMode {
@@ -684,15 +735,22 @@ mod tests {
             let k = turns_for(mode);
             let (mut run, game_id) =
                 LiveRun::start(mode, 7, if mode == GameMode::Solo { 1 } else { 2 });
-            let monotone = if mode == GameMode::SnailMode {
-                snail_monotone(&run)
-            } else {
-                HashMap::new()
+            let monotone = match mode {
+                GameMode::SnailMode => snail_monotone(&run),
+                GameMode::Constrictor => constrictor_monotone(&run),
+                _ => HashMap::new(),
             };
             while run.engine_game.board.turn < k {
                 let results = run.scripted_results(&monotone);
                 run.drive(&results);
             }
+
+            // A live snake must exist at K in every mode (the pre-fix CYCLE
+            // walk compared dead Constrictor snakes only).
+            assert!(
+                !run.alive_ids().is_empty(),
+                "{mode:?}: no snake alive at K={k} — fixture regression"
+            );
 
             let resumed =
                 run.restore_from(run.capture(), &fixture_game(game_type, game_id), game_id);
@@ -709,16 +767,25 @@ mod tests {
     /// final placements, death_info, and elimination order must match.
     ///
     /// Outcome by roster index (LiveRun mints fresh UUIDs per run):
-    /// placements, deaths as (index, turn, cause), and elimination order.
+    /// placements, deaths as (index, turn, cause), and elimination order,
+    /// plus whether the resume actually ran.
     type ConstrictorOutcome = (Vec<(usize, i32)>, Vec<(usize, i32, String)>, Vec<usize>);
 
     #[test]
     fn resumed_game_matches_full_game_outcome_constrictor() {
-        let play_full = |resume_at: Option<i32>| -> ConstrictorOutcome {
-            let (mut run, game_id) = LiveRun::start(GameMode::Constrictor, 3, 2);
-            // Both snakes suicide by walking left into the wall from turn 20
-            // so the game actually finishes.
-            let mut monotone: HashMap<String, Direction> = HashMap::new();
+        // Walk (seed 3, three snakes, `constrictor_monotone`): snake 0 walks
+        // to its nearest edge and is eliminated at turn 2, BEFORE the
+        // resume — its eliminated state and death_info entry must survive
+        // the restore or the final outcome diverges. Snakes 1 and 2 walk
+        // straight lines toward their farthest edges and are eliminated at
+        // turn 10, AFTER the resume, ending the game. K=6 sits mid-flight
+        // with two snakes alive, so the resume really runs.
+        const K: i32 = 6;
+
+        let play_full = |resume_at: Option<i32>| -> (ConstrictorOutcome, bool) {
+            let (mut run, game_id) = LiveRun::start(GameMode::Constrictor, 3, 3);
+            let monotone = constrictor_monotone(&run);
+            let mut did_resume = false;
             while !engine_core::is_game_over(&run.engine_game)
                 && run.engine_game.board.turn < engine_core::MAX_TURNS
             {
@@ -735,12 +802,7 @@ mod tests {
                     run.food_eaten = resumed.food_eaten;
                     run.last_moves = resumed.last_moves;
                     run.snake_contexts = resumed.snake_contexts;
-                }
-                if run.engine_game.board.turn >= 20 {
-                    monotone.clear();
-                    for s in &run.engine_game.board.snakes {
-                        monotone.insert(s.id.clone(), Direction::Left);
-                    }
+                    did_resume = true;
                 }
                 let results = run.scripted_results(&monotone);
                 run.drive(&results);
@@ -752,23 +814,44 @@ mod tests {
                     .expect("roster snake")
             };
             (
-                engine_core::placement::from_final_snakes(&run.engine_game.board.snakes)
-                    .iter()
-                    .map(|(id, p)| (index_of(id), *p))
-                    .collect(),
-                run.death_info
-                    .iter()
-                    .map(|d| (index_of(&d.snake_id), d.turn, d.cause.clone()))
-                    .collect(),
-                run.death_info
-                    .iter()
-                    .map(|d| index_of(&d.snake_id))
-                    .collect(),
+                (
+                    engine_core::placement::from_final_snakes(&run.engine_game.board.snakes)
+                        .iter()
+                        .map(|(id, p)| (index_of(id), *p))
+                        .collect(),
+                    run.death_info
+                        .iter()
+                        .map(|d| (index_of(&d.snake_id), d.turn, d.cause.clone()))
+                        .collect(),
+                    run.death_info
+                        .iter()
+                        .map(|d| index_of(&d.snake_id))
+                        .collect(),
+                ),
+                did_resume,
             )
         };
 
-        let uninterrupted = play_full(None);
-        let resumed = play_full(Some(6));
+        let (uninterrupted, _) = play_full(None);
+        let (resumed, did_resume) = play_full(Some(K));
+
+        // The resume really happened: K=6 is reached mid-flight, not after
+        // the game already ended. (The pre-fix CYCLE walk killed both
+        // snakes at turn 4, so the resume never ran and this test silently
+        // compared two uninterrupted runs.)
+        assert!(did_resume, "resume never ran — fixture regression");
+
+        // The outcome depends on state carried across the resume: at least
+        // one elimination before K and at least one after.
+        assert!(
+            resumed.1.iter().any(|(_, turn, _)| *turn < K),
+            "fixture must eliminate a snake before K={K}"
+        );
+        assert!(
+            resumed.1.iter().any(|(_, turn, _)| *turn > K),
+            "fixture must eliminate a snake after K={K}"
+        );
+
         assert_eq!(resumed.0, uninterrupted.0, "placements diverged");
         assert_eq!(resumed.1, uninterrupted.1, "death_info diverged");
         assert_eq!(resumed.2, uninterrupted.2, "elimination order diverged");
