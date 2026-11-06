@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO game_resume_states (game_id, turn_number, food, hazards)\n             VALUES ($1, 7, '[]', '[]')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "1efd4619bc3f6ac7e4cbff017df46816197c1ae7d7a5da272cc5cab00fbbf03d"
+}

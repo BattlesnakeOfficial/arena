@@ -1,5 +1,7 @@
+use serde::{Deserialize, Serialize};
+
 /// A 2D coordinate on the game board.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Point {
     pub x: i32,
     pub y: i32,
@@ -17,7 +19,8 @@ impl Point {
 }
 
 /// Why a snake was eliminated.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum EliminationCause {
     NotEliminated,
     OutOfHealth,
@@ -131,7 +134,7 @@ pub struct SnakeMove {
 }
 
 /// Settings for the standard game rules.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StandardSettings {
     /// Percent chance of spawning food each turn (default 15).
     pub food_spawn_chance: i32,
