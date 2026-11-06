@@ -96,7 +96,7 @@ pub async fn get_battlesnakes_by_game_id(
             ON COALESCE(gb.battlesnake_id, le.battlesnake_id) = b.battlesnake_id
         JOIN users u ON b.user_id = u.user_id
         WHERE gb.game_id = $1
-        ORDER BY gb.placement NULLS LAST, gb.created_at ASC
+        ORDER BY gb.placement NULLS LAST, gb.created_at ASC, gb.game_battlesnake_id
         "#,
     )
     .bind(game_id)

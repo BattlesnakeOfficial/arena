@@ -170,6 +170,7 @@ pub fn wire_ruleset_and_map(internal_ruleset: &str) -> (&'static str, &'static s
 }
 
 /// Extra per-snake context from the previous turn's MoveResults.
+#[derive(Debug, Clone, PartialEq)]
 pub struct SnakeContext {
     pub latency_ms: Option<i64>,
     pub shout: Option<String>,

@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM turns WHERE game_id = $1 AND turn_number > $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "fc986a15c6d27353a0c964e6f986e937dc1af4cefd0f44ea5e58afffe2c6198a"
+}

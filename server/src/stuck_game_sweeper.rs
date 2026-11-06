@@ -43,6 +43,11 @@ pub async fn run_sweep(app_state: &AppState) -> cja::Result<()> {
 /// `enqueued_at` and ages from creation, but once dispatched its runtime is
 /// measured from the enqueue, so a long hold can't get a live game failed.
 async fn fail_stuck_games(pool: &sqlx::PgPool, max_age_hours: i32) -> cja::Result<Vec<Uuid>> {
+    let mut tx = pool
+        .begin()
+        .await
+        .wrap_err("Failed to start stuck-game sweep transaction")?;
+
     let ids = sqlx::query_scalar!(
         r#"UPDATE games
            SET status = 'failed', updated_at = NOW()
@@ -64,9 +69,28 @@ async fn fail_stuck_games(pool: &sqlx::PgPool, max_age_hours: i32) -> cja::Resul
            RETURNING game_id"#,
         max_age_hours,
     )
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await
     .wrap_err("Failed to sweep stuck games")?;
+
+    // A Failed game must never keep resume state. Same transaction as the
+    // status flip: a crash between them would leave a Failed game holding
+    // resume rows no later sweep matches. Cascade handles the snake rows;
+    // the games-row cascade does NOT fire here because the sweeper does not
+    // delete the game row.
+    if !ids.is_empty() {
+        sqlx::query!(
+            "DELETE FROM game_resume_states WHERE game_id = ANY($1)",
+            &ids,
+        )
+        .execute(&mut *tx)
+        .await
+        .wrap_err("Failed to delete resume state of swept games")?;
+    }
+
+    tx.commit()
+        .await
+        .wrap_err("Failed to commit stuck-game sweep transaction")?;
 
     Ok(ids)
 }
@@ -280,6 +304,37 @@ mod tests {
         assert_eq!(game_status(&pool, match_game).await?, "running");
         assert_eq!(game_status(&pool, control).await?, "failed");
 
+        Ok(())
+    }
+
+    /// Aged-out running game with resume rows: swept to failed AND its
+    /// resume rows deleted in the same transaction.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn sweep_failing_stuck_games_deletes_resume_state(pool: PgPool) -> cja::Result<()> {
+        let base_time = Utc::now();
+        let game_id = insert_game(&pool, "running", base_time - Duration::hours(3)).await?;
+        sqlx::query!(
+            "INSERT INTO game_resume_states (game_id, turn_number, food, hazards)
+             VALUES ($1, 7, '[]', '[]')",
+            game_id,
+        )
+        .execute(&pool)
+        .await?;
+
+        let failed = fail_stuck_games(&pool, 2).await?;
+
+        assert_eq!(failed, vec![game_id]);
+        assert_eq!(game_status(&pool, game_id).await?, "failed");
+        assert_eq!(
+            sqlx::query_scalar!(
+                "SELECT count(*) FROM game_resume_states WHERE game_id = $1",
+                game_id
+            )
+            .fetch_one(&pool)
+            .await?,
+            Some(0),
+            "a Failed game must never keep resume state"
+        );
         Ok(())
     }
 

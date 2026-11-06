@@ -20,7 +20,7 @@ pub const MOVE_TIMEOUT_MS: i64 = 500;
 /// Metadata about the game that lives alongside the board state.
 ///
 /// This replaces the `NestedGame` / `Game` wrapper from `battlesnake-game-types`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct GameMeta {
     pub game_id: String,
     pub ruleset_name: String,
@@ -76,7 +76,7 @@ impl GameSource {
 }
 
 /// Full engine game state: board + metadata.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct EngineGame {
     pub board: BoardState,
     pub meta: GameMeta,

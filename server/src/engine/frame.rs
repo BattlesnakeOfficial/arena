@@ -11,7 +11,7 @@ use serde::Serialize;
 use super::EngineGame;
 
 /// Information about a snake's death
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DeathInfo {
     /// The snake's ID
     pub snake_id: String,

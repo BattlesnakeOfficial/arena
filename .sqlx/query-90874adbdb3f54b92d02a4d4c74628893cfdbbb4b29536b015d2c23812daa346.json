@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO game_resume_states (game_id, turn_number, food, hazards, updated_at)\n           VALUES ($1, $2, $3, $4, NOW())\n           ON CONFLICT (game_id) DO UPDATE SET\n               turn_number = EXCLUDED.turn_number,\n               food = EXCLUDED.food,\n               hazards = EXCLUDED.hazards,\n               updated_at = NOW()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4",
+        "Jsonb",
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "90874adbdb3f54b92d02a4d4c74628893cfdbbb4b29536b015d2c23812daa346"
+}

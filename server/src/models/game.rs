@@ -1072,6 +1072,10 @@ pub async fn mark_game_finished_tx(
     .execute(&mut *conn)
     .await
     .wrap_err_with(|| format!("Failed to finish game {game_id}"))?;
+
+    // A Finished game must never keep resume state.
+    crate::models::resume_state::delete_resume_state(&mut *conn, game_id).await?;
+
     Ok(())
 }
 
@@ -1138,6 +1142,10 @@ pub async fn reset_game_state_for_retry(pool: &PgPool, game_id: Uuid) -> cja::Re
     .execute(&mut *tx)
     .await
     .wrap_err_with(|| format!("Failed to clear results for game {game_id} reset"))?;
+
+    // The reset discards the old run's turns, so its resume state must go
+    // with them — inside the same transaction.
+    crate::models::resume_state::delete_resume_state(&mut *tx, game_id).await?;
 
     tx.commit()
         .await

@@ -4,6 +4,7 @@
 //! seedable for the battlesnake CLI.
 
 pub mod frame;
+pub mod resume;
 
 pub use engine_core::{
     EngineGame, GameMeta, GameResult, GameSource, MAX_TURNS, MOVE_TIMEOUT_MS, is_game_over,

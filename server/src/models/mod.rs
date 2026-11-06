@@ -16,6 +16,7 @@ pub mod notification_email;
 pub mod oauth;
 pub mod private_leaderboard;
 pub mod rate_limit;
+pub mod resume_state;
 pub mod saved_game;
 pub mod session;
 pub mod shout_moderation;
