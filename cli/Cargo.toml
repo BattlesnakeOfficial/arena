@@ -1,6 +1,9 @@
 [package]
 name = "battlesnake"
-version.workspace = true
+# Own version, not the workspace's: `cli-v<semver>` tags release this crate
+# on its own cadence (DEV-2149); the workspace version keeps versioning the
+# server crates.
+version = "0.1.0"
 edition.workspace = true
 description = "Battlesnake Arena CLI"
 

@@ -12,6 +12,7 @@ use battlesnake_cli::output::{
 #[derive(Parser)]
 #[command(name = "battlesnake")]
 #[command(about = "Battlesnake CLI", long_about = None)]
+#[command(version)] // CARGO_PKG_VERSION — must equal the cli-v<semver> tag (DEV-2149)
 struct Cli {
     /// Output format: 'json' or 'human'. Default: human for TTY, json for pipes.
     #[arg(long, global = true)]
@@ -970,7 +971,16 @@ mod tests {
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    use super::{FetchMeError, fetch_me, whoami_fields};
+    use super::{Cli, FetchMeError, fetch_me, whoami_fields};
+
+    #[test]
+    fn version_flag_reports_the_crate_version() {
+        use clap::CommandFactory as _;
+        assert_eq!(
+            Cli::command().get_version(),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
+    }
 
     fn me_body() -> serde_json::Value {
         serde_json::json!({
