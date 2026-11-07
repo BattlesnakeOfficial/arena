@@ -62,6 +62,7 @@ pub mod oauth;
 mod oauth_tests;
 pub mod og;
 pub mod pagination;
+pub mod play_links;
 pub mod play_notices;
 pub mod policy;
 #[cfg(test)]
@@ -164,6 +165,11 @@ pub fn routes(app_state: AppState) -> cja::Result<cja::server::App> {
         .route("/terms", get(policy::terms_page))
         // Public player directory
         .route("/players", get(users::list_players))
+        // Old play.battlesnake.com profile links (DEV-2210)
+        .route("/u/{username}", get(play_links::play_profile))
+        .route("/u/{username}/", get(play_links::play_profile))
+        .route("/profile/{username}", get(play_links::play_profile))
+        .route("/profile/{username}/", get(play_links::play_profile))
         .route("/rankings", get(users::list_global_rankings))
         // Public user profiles. The two-segment form is the stable one — the
         // UUID is authoritative and the login is a cosmetic slug — while the
