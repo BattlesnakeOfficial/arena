@@ -21,12 +21,15 @@
 //!
 //! # Failure recovery
 //!
-//! Every job in the pipeline can die permanently (cja deletes jobs that
-//! exhaust their retries), so nothing may depend on a single enqueue
-//! succeeding. The stuck-match sweeper cron ([`sweep_stuck_matches`])
-//! re-enqueues evaluation for in-progress matches that have gone quiet, and
-//! [`run_match`] re-enqueues the runner for a stalled game (`run_game` is
-//! re-entrant). Together these make the sweep converge a match no matter
+//! Every job in the pipeline can die permanently (cja moves jobs that
+//! exhaust their retries to its dead-letter queue, out of `jobs`), so nothing
+//! may depend on a single enqueue succeeding. The stuck-match sweeper cron
+//! ([`sweep_stuck_matches`]) re-enqueues evaluation for in-progress matches
+//! that have gone quiet, and [`run_match`] re-enqueues the runner for a
+//! stalled game — but only when no `GameRunnerJob` row remains for it: a
+//! queued, running, or backoff-parked job still owns the game, and a second
+//! runner would race it (`run_game` is re-entrant, so re-running a crashed
+//! game is safe). Together these make the sweep converge a match no matter
 //! where the pipeline died.
 
 use std::collections::HashMap;
@@ -53,9 +56,10 @@ use crate::tournament_bracket::{complete_match_with_winner, fill_participant_fro
 pub const TIE_ALLOWANCE: i32 = 5;
 
 /// How long a match game may go without any sign of life (a status change or
-/// a newly persisted turn) before [`run_match`] assumes its `GameRunnerJob`
-/// died and re-enqueues it. Generous on purpose: games are bounded by
-/// `MAX_TURNS` and normally finish in minutes.
+/// a newly persisted turn) before [`run_match`] considers it stalled and
+/// re-enqueues its runner only when no `GameRunnerJob` row remains. Generous
+/// on purpose: games are bounded by `MAX_TURNS` and normally finish in
+/// minutes.
 const GAME_STALL_THRESHOLD_MINUTES: i64 = 15;
 
 /// How long a tournament match may sit `in_progress` without updates before
@@ -143,9 +147,10 @@ pub async fn run_match(app_state: &AppState, match_id: Uuid) -> cja::Result<()> 
     let match_games = get_match_games_for_match(pool, match_id).await?;
 
     // If a game is still running, its completion hook re-enqueues us — unless
-    // the game has stalled (its GameRunnerJob died and was eventually deleted
-    // by the job system), in which case we re-enqueue the runner ourselves.
-    // `run_game` is re-entrant, so re-running a crashed game is safe.
+    // the game has stalled with no GameRunnerJob row left (a backoff-parked
+    // job still owns the game), in which case we re-enqueue the runner
+    // ourselves. `run_game` is re-entrant, so re-running a crashed game is
+    // safe.
     for match_game in &match_games {
         let Some(game) = crate::models::game::get_game_by_id(pool, match_game.game_id).await?
         else {
@@ -166,6 +171,19 @@ pub async fn run_match(app_state: &AppState, match_id: Uuid) -> cja::Result<()> 
             > chrono::Duration::minutes(GAME_STALL_THRESHOLD_MINUTES);
 
         if stalled {
+            // A live job still owns this game — including one parked deep in
+            // cja retry backoff, which is indistinguishable from a dead
+            // runner by activity alone. Enqueueing a second runner would race
+            // the first (DEV-2175), so wait for the existing job instead.
+            // Same ownership check as ladder dispatch.
+            if crate::jobs::game_runner_job_exists(pool, match_game.game_id).await? {
+                tracing::info!(
+                    match_id = %match_id,
+                    game_id = %match_game.game_id,
+                    "Match game stalled but a GameRunnerJob already exists; waiting for it"
+                );
+                return Ok(());
+            }
             // Touch the game before enqueueing so overlapping evaluations
             // (the sweeper fires every couple of minutes) don't enqueue
             // duplicate runners while this one waits in the queue.
@@ -1130,6 +1148,77 @@ mod tests {
         // enqueueing a duplicate runner.
         run_match(&app_state, tournament_match.match_id).await?;
         assert_eq!(count_jobs(&pool, "GameRunnerJob").await?, 1);
+
+        Ok(())
+    }
+
+    /// Plant a GameRunnerJob row for the game — byte-identical to the
+    /// ladder dispatcher test helper's insert (including the `$1::text`
+    /// cast) so both expand the same .sqlx cache entry.
+    async fn insert_runner_job(pool: &PgPool, game_id: Uuid) -> cja::Result<()> {
+        sqlx::query!(
+            "INSERT INTO jobs (job_id, name, payload, priority, context, created_at)
+             VALUES (gen_random_uuid(), 'GameRunnerJob', jsonb_build_object('game_id', $1::text), 0, 'test', clock_timestamp() - interval '31 seconds')",
+            game_id.to_string(),
+        ).execute(pool).await?;
+        Ok(())
+    }
+
+    /// DEV-2175: a stalled match game whose GameRunnerJob row still exists
+    /// (queued, locked, or parked in retry backoff) must NOT get a second
+    /// runner enqueued — the job system owns the game until its row leaves
+    /// `jobs`. Paired with `stalled_in_flight_game_gets_its_runner_reenqueued`
+    /// (no job planted → enqueue happens), which proves this fixture reaches
+    /// the stall path.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn stalled_in_flight_game_with_live_runner_job_enqueues_nothing(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        let app_state = AppState::test_from_pool(pool.clone());
+        let (_, tournament_match, _) =
+            fixture_two_snake_match(&pool, MatchStyle::SingleGame).await?;
+
+        // An in-flight (running, unfinished) game.
+        let game = create_game(
+            &pool,
+            CreateGame {
+                board_size: GameBoardSize::Medium,
+                game_type: GameType::Standard,
+            },
+        )
+        .await?;
+        create_match_game(&pool, tournament_match.match_id, game.game_id, 1).await?;
+        set_match_status(&pool, tournament_match.match_id, MatchStatus::InProgress).await?;
+        sqlx::query("UPDATE games SET status = 'running' WHERE game_id = $1")
+            .bind(game.game_id)
+            .execute(&pool)
+            .await?;
+
+        // Backdate the game past the stall threshold (trigger must be off).
+        sqlx::query("ALTER TABLE games DISABLE TRIGGER update_games_updated_at")
+            .execute(&pool)
+            .await?;
+        sqlx::query(
+            "UPDATE games SET updated_at = NOW() - INTERVAL '20 minutes' WHERE game_id = $1",
+        )
+        .bind(game.game_id)
+        .execute(&pool)
+        .await?;
+        sqlx::query("ALTER TABLE games ENABLE TRIGGER update_games_updated_at")
+            .execute(&pool)
+            .await?;
+
+        // The live runner job: the stall path must wait for it, not double it.
+        insert_runner_job(&pool, game.game_id).await?;
+
+        run_match(&app_state, tournament_match.match_id).await?;
+        assert_eq!(
+            count_jobs(&pool, "GameRunnerJob").await?,
+            1,
+            "the planted job only — no second runner enqueued"
+        );
+        let games = get_match_games_for_match(&pool, tournament_match.match_id).await?;
+        assert_eq!(games.len(), 1, "no next game scheduled");
 
         Ok(())
     }
