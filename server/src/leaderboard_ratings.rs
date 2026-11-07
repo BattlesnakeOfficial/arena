@@ -319,6 +319,88 @@ mod tests {
         Ok(())
     }
 
+    /// DEV-2174 regression: two concurrent update_ratings calls for the SAME
+    /// game. On main, both idempotency COUNTs read 0 while the first run is
+    /// still uncommitted, so the second run re-increments every counter and
+    /// ON CONFLICT DO NOTHING silently drops its result rows: one game,
+    /// games_played = 2. With the game-row lock, the second run blocks before
+    /// its COUNT, sees the committed rows after the first commits, and skips.
+    /// This is the interleaving that double-scored prod game
+    /// 3c7eb192-5e4d-4a97-a62b-4ca69594ce81.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn concurrent_update_ratings_for_one_game_applies_once(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        let user_id = create_user(&pool, 21740).await?;
+        let snake_a = create_snake(&pool, user_id, "snake-a").await?;
+        let snake_b = create_snake(&pool, user_id, "snake-b").await?;
+        let leaderboard_id = sqlx::query_scalar!(
+            "INSERT INTO leaderboards (name) VALUES ($1) RETURNING leaderboard_id",
+            "Double-Apply Board",
+        )
+        .fetch_one(&pool)
+        .await?;
+        let a = leaderboard::get_or_create_entry(&pool, leaderboard_id, snake_a)
+            .await?
+            .leaderboard_entry_id;
+        let b = leaderboard::get_or_create_entry(&pool, leaderboard_id, snake_b)
+            .await?
+            .leaderboard_entry_id;
+
+        let lb_game = finished_game(&pool, leaderboard_id, &[(a, 1), (b, 2)]).await?;
+
+        let mut state = AppState::test_from_pool(pool.clone());
+        let mut scoring = ScoringRegistry::new();
+        scoring.register(Box::new(WengLinScoring));
+        scoring.register(Box::new(WinRateScoring));
+        scoring.register(Box::new(FoodEatenScoring));
+        state.scoring = std::sync::Arc::new(scoring);
+
+        // Hold entry a so the first run is parked mid-transaction (its COUNTs
+        // already read 0), then start the second run: it also reads COUNT = 0
+        // under READ COMMITTED because the first run is uncommitted.
+        let mut holder = pool.begin().await?;
+        leaderboard::get_entry_for_update_by_id(&mut *holder, a).await?;
+
+        let first_state = state.clone();
+        let first = tokio::spawn(async move { update_ratings(&first_state, lb_game).await });
+        wait_for_lock_waiters(&pool, 1).await?;
+        let second_state = state.clone();
+        let second = tokio::spawn(async move { update_ratings(&second_state, lb_game).await });
+        wait_for_lock_waiters(&pool, 2).await?;
+        holder.rollback().await?;
+
+        let (first, second) = tokio::time::timeout(Duration::from_secs(30), async {
+            (first.await, second.await)
+        })
+        .await?;
+        first??;
+        second??;
+
+        // One application: exactly one result row per snake...
+        for id in [a, b] {
+            assert_eq!(
+                leaderboard::count_game_results_for_entry(&pool, id).await?,
+                1
+            );
+        }
+        // ...and every games_played counter incremented exactly once.
+        let counters: Vec<(Uuid, i32, i32)> = sqlx::query_as(
+            "SELECT le.leaderboard_entry_id, le.games_played, wr.games_played \
+             FROM leaderboard_entries le \
+             JOIN win_rate_stats wr USING (leaderboard_entry_id) \
+             WHERE le.leaderboard_entry_id = ANY($1)",
+        )
+        .bind(&[a, b][..])
+        .fetch_all(&pool)
+        .await?;
+        assert_eq!(counters.len(), 2);
+        for (id, games, wr_games) in counters {
+            assert_eq!((games, wr_games), (1, 1), "entry {id} scored exactly once");
+        }
+        Ok(())
+    }
+
     /// Two snakes that die on the same final turn share first place. That is a
     /// draw: neither gets a win, and equally rated snakes keep their mu.
     #[sqlx::test(migrations = "../migrations")]
