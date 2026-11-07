@@ -37,6 +37,8 @@ pub const PURPOSE: &str = "play_shutdown_notice";
 /// Mailgun tag carried by every real shutdown notice (DEV-2084), so
 /// delivery numbers can be read from Mailgun's tags API.
 pub const NOTICE_TAG: &str = "play_shutdown_notice";
+/// The merch store's Coming soon page, plugged in a P.S. on every notice.
+const SHOP_URL: &str = "https://battlesnake.shop";
 /// Per-wave Mailgun tag prefix: `play_shutdown_notice_wave_<N>`.
 pub const WAVE_TAG_PREFIX: &str = "play_shutdown_notice_wave_";
 /// The single tag on admin test sends — deliberately none of the real
@@ -297,6 +299,8 @@ pub fn notice_message(
                             November 30. Move your account over and you can enter your snakes \
                             on the new site's leaderboards.";
     let redirect_note = "play.battlesnake.com will redirect to the new site on November 30.";
+    let merch_note = "P.S. Official Battlesnake merch is coming soon: shirts, hats, stickers, \
+                      and a game-board desk mat. Get on the list at";
     let reason = "You're getting this because you have an account on play.battlesnake.com.";
 
     let mut text = format!("Hi {username},\n\n{}\n\n{carry_over}\n\n", wave.intro());
@@ -312,7 +316,7 @@ pub fn notice_message(
         text.push_str(&format!("\n{leaderboard_note}\n\n"));
     }
     text.push_str(&format!(
-        "Move my account: {welcome_url}\n\n— Battlesnake\n\n{reason}\nUnsubscribe from these emails: {unsubscribe_url}\n"
+        "Move my account: {welcome_url}\n\n— Battlesnake\n\n{merch_note} {SHOP_URL}\n\n{reason}\nUnsubscribe from these emails: {unsubscribe_url}\n"
     ));
 
     let body = html! {
@@ -328,6 +332,7 @@ pub fn notice_message(
         }
         (action_button("Move my account", &welcome_url))
         p { "— Battlesnake" }
+        p { (merch_note) " " a class="email-link" href=(SHOP_URL) style="color:#C11655;text-decoration:underline" { (SHOP_URL) } }
     };
     let footer = html! {
         p style="margin:0 0 12px" { (reason) }
@@ -764,6 +769,35 @@ mod tests {
             message.list_unsubscribe.as_deref(),
             Some("<https://arena.example/play-notices/unsubscribe/tok>")
         );
+    }
+
+    #[test]
+    fn notice_plugs_the_merch_store_after_the_sign_off() {
+        let message = notice_message(
+            Wave::Second,
+            "player@example.com",
+            "old-player",
+            &[],
+            "https://arena.example",
+            "https://arena.example/play-notices/unsubscribe/tok",
+        );
+        for body in [&message.text, &message.html] {
+            assert!(body.contains("Official Battlesnake merch is coming soon"));
+            assert!(body.contains("https://battlesnake.shop"));
+        }
+        let text = &message.text;
+        let sign_off = text.find("— Battlesnake").expect("sign-off");
+        let plug = text
+            .find("P.S. Official Battlesnake merch")
+            .expect("merch plug");
+        let unsubscribe = text
+            .find("Unsubscribe from these emails")
+            .expect("unsubscribe");
+        assert!(
+            sign_off < plug && plug < unsubscribe,
+            "the plug sits between sign-off and footer"
+        );
+        assert!(message.html.contains(r#"href="https://battlesnake.shop""#));
     }
 
     #[test]
