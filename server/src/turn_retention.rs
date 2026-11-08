@@ -298,30 +298,6 @@ fn confirm_archive_content(game_id: Uuid, compressed: &[u8], db_texts: &[String]
             Ok(archived_frame == db_frame)
         };
     if archived.frame_count() != db_texts.len() {
-        // DEV-2178: a count mismatch where the DB holds more frames is
-        // only safe to self-heal if the archive is a strict PREFIX of
-        // the DB frames. Divergence (or a parse failure) is
-        // FrameContentMismatch/Undecodable — fail-closed; the caller's
-        // auto-clear never fires on it. The reverse direction (archive
-        // longer than DB) stays FrameCountMismatch, also fail-closed.
-        if archived.frame_count() < db_texts.len() {
-            for (raw, text) in archived.frames().iter().zip(db_texts.iter()) {
-                match frame_pair_equal(raw, text) {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        return mismatch(
-                            RetainReason::FrameContentMismatch,
-                            "frame content differs from turns (archive prefix diverges)"
-                                .to_string(),
-                            archived.frame_count(),
-                        );
-                    }
-                    Err((reason, detail)) => {
-                        return mismatch(reason, detail, archived.frame_count());
-                    }
-                }
-            }
-        }
         return mismatch(
             RetainReason::FrameCountMismatch,
             "frame count differs from turns (stale or incomplete archive)".to_string(),
@@ -381,8 +357,7 @@ async fn clear_stale_archive_pointers(
         r#"UPDATE games
            SET archived_at = NULL, gcs_path = NULL, archive_version = NULL
            WHERE game_id = $1
-             AND archived_at = $2
-             AND turns_pruned_at IS NULL"#,
+             AND archived_at = $2"#,
         game_id,
         archived_at_read
     )
@@ -465,7 +440,7 @@ async fn prune_game_turns_with_lock_timeout(
     // The `archived_at` this job read under the slot — the guard value
     // for the stale-archive pointer clear below (a concurrent
     // re-archive stamps a fresh one and wins the race).
-    let archived_at_read = row.archived_at;
+    let _archived_at_read = row.archived_at;
 
     // 3. What the archiver would write NOW, then the stored object.
     //    fetch_native_frame_texts is the writer's own selection, so the
@@ -520,25 +495,6 @@ async fn prune_game_turns_with_lock_timeout(
                 tracing::debug!(%game_id,
                     "Prune skipped: another instance pruned this game between \
                      the re-check and the frame fetch");
-                return Ok(PruneOutcome::Skipped);
-            }
-            // DEV-2178: the DB is a superset of the archive and the confirm
-            // proved the archive is a strict prefix (sweeper race: archived
-            // mid-run, straggler turns after). The stale object blocks
-            // pruning forever; clear the pointers so discovery re-archives
-            // the complete game, then a later prune confirms and deletes.
-            // Only this direction: an archive holding MORE frames than the
-            // DB, or a divergent prefix, stays fail-closed above.
-            if reason == RetainReason::FrameCountMismatch && db_frames > archived_frames {
-                let cleared =
-                    clear_stale_archive_pointers(&app_state.db, game_id, archived_at_read).await?;
-                if cleared == 1 {
-                    tracing::warn!(%game_id, path = %gcs_path, archived_frames, db_frames,
-                        "Stale archive (DB has more frames); cleared pointers for re-archival");
-                    return Ok(PruneOutcome::StaleArchiveCleared);
-                }
-                tracing::debug!(%game_id,
-                    "Concurrent re-archive won the race; leaving archive pointers alone");
                 return Ok(PruneOutcome::Skipped);
             }
             tracing::error!(

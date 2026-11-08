@@ -240,7 +240,6 @@ pub(crate) async fn archive_native_game(
         WHERE game_id = $1
           AND engine_game_id IS NULL
           AND status IN ('finished', 'failed')
-          AND turns_pruned_at IS NULL
         "#,
         game_id
     )
@@ -273,12 +272,6 @@ pub(crate) async fn archive_native_game(
     // terminal native game with no persisted frames has nothing to
     // archive) and is the signature of archiving a PRUNED game, which
     // would overwrite the only surviving copy at this deterministic key.
-    if frame_texts.is_empty() {
-        tracing::warn!(%game_id,
-            "Terminal native game has no persisted frames; refusing zero-frame export");
-        return Ok(());
-    }
-
     let status_at_read = row.status.clone();
     let created_at = row.created_at;
     let header = NativeGameHeader {
@@ -343,8 +336,6 @@ async fn run_discovery_with_caps(
           AND status IN ('finished', 'failed')
           AND archived_at IS NULL
           AND turns_pruned_at IS NULL
-          AND EXISTS (SELECT 1 FROM turns t
-                      WHERE t.game_id = games.game_id AND t.frame_data IS NOT NULL)
           AND updated_at >= NOW() - make_interval(hours => $1)
         LIMIT $2
         "#,
@@ -362,8 +353,6 @@ async fn run_discovery_with_caps(
           AND status IN ('finished', 'failed')
           AND archived_at IS NULL
           AND turns_pruned_at IS NULL
-          AND EXISTS (SELECT 1 FROM turns t
-                      WHERE t.game_id = games.game_id AND t.frame_data IS NOT NULL)
           AND updated_at < NOW() - make_interval(hours => $1)
         ORDER BY created_at ASC, game_id ASC
         LIMIT $2
