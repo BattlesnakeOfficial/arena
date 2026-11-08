@@ -62,9 +62,32 @@ pub async fn update_ratings(app_state: &AppState, leaderboard_game_id: Uuid) -> 
         .await
         .wrap_err("Failed to start transaction for rating update")?;
 
-    // Authoritative idempotency check INSIDE the transaction.
-    // The early check above is a fast-path optimization; this is the real guard
-    // against concurrent job execution (e.g., timeout-triggered retry while original still runs).
+    // Serialize concurrent update_ratings runs for the same game (DEV-2174).
+    // This row lock is the transaction's FIRST statement: a concurrent run
+    // blocks here — before its idempotency COUNT — until this run commits,
+    // so the snapshot its COUNT takes afterwards includes this run's result
+    // rows. Safe against deadlock: nothing acquires a game lock while
+    // holding entry locks (this is always the first lock taken).
+    let game_row = sqlx::query!(
+        "SELECT 1 AS locked FROM leaderboard_games WHERE leaderboard_game_id = $1 FOR UPDATE",
+        leaderboard_game_id,
+    )
+    .fetch_optional(&mut *tx)
+    .await
+    .wrap_err("Failed to lock leaderboard game row")?;
+
+    if game_row.is_none() {
+        tracing::warn!(
+            leaderboard_game_id = %leaderboard_game_id,
+            "Leaderboard game vanished while rating, skipping"
+        );
+        return Ok(());
+    }
+
+    // Authoritative idempotency check INSIDE the transaction, AFTER the game
+    // row lock above: a READ COMMITTED snapshot taken here includes any
+    // previous run's committed result rows, so a concurrent run that waited
+    // on the lock now sees COUNT > 0 and skips.
     let existing_in_tx: (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM leaderboard_game_results WHERE leaderboard_game_id = $1",
     )
@@ -149,9 +172,25 @@ pub async fn update_ratings(app_state: &AppState, leaderboard_game_id: Uuid) -> 
             .collect(),
     };
 
-    // Run all scoring algorithms
+    // Run all scoring algorithms. An algorithm reports `false` when the game
+    // was already applied by a concurrent run — abort without committing.
+    let mut already_applied = false;
     for algo in app_state.scoring.algorithms() {
-        algo.process_game_result(&mut tx, &event).await?;
+        if !algo.process_game_result(&mut tx, &event).await? {
+            already_applied = true;
+            break;
+        }
+    }
+
+    if already_applied {
+        tx.rollback()
+            .await
+            .wrap_err("Failed to roll back rating update transaction")?;
+        tracing::info!(
+            leaderboard_game_id = %leaderboard_game_id,
+            "Ratings already applied (result insert conflicted), rolled back"
+        );
+        return Ok(());
     }
 
     // Commit the transaction — all rating updates are atomic
@@ -328,9 +367,7 @@ mod tests {
     /// This is the interleaving that double-scored prod game
     /// 3c7eb192-5e4d-4a97-a62b-4ca69594ce81.
     #[sqlx::test(migrations = "../migrations")]
-    async fn concurrent_update_ratings_for_one_game_applies_once(
-        pool: PgPool,
-    ) -> cja::Result<()> {
+    async fn concurrent_update_ratings_for_one_game_applies_once(pool: PgPool) -> cja::Result<()> {
         let user_id = create_user(&pool, 21740).await?;
         let snake_a = create_snake(&pool, user_id, "snake-a").await?;
         let snake_b = create_snake(&pool, user_id, "snake-b").await?;
