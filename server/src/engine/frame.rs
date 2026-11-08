@@ -196,16 +196,16 @@ pub fn game_to_frame(
                     turn: s.eliminated_on_turn,
                     eliminated_by: s.eliminated_by.clone(),
                 });
-                let eliminated_cause = s
-                    .eliminated_cause
-                    .is_eliminated()
-                    .then(|| s.eliminated_cause.arena_slug().to_string())
-                    .unwrap_or_default();
-                let eliminated_by = s
-                    .eliminated_cause
-                    .is_eliminated()
-                    .then(|| s.eliminated_by.clone())
-                    .unwrap_or_default();
+                let eliminated_cause = if s.eliminated_cause.is_eliminated() {
+                    s.eliminated_cause.arena_slug().to_string()
+                } else {
+                    String::new()
+                };
+                let eliminated_by = if s.eliminated_cause.is_eliminated() {
+                    s.eliminated_by.clone()
+                } else {
+                    String::new()
+                };
 
                 // Latency like the engine: measured ms clamped to [1, timeout],
                 // and a timeout reports the full timeout (with an Error)
