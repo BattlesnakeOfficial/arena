@@ -1200,6 +1200,27 @@ mod tests {
     }
 
     #[test]
+    fn game_status_is_terminal_only_for_finished_and_failed() {
+        assert!(!GameStatus::Waiting.is_terminal());
+        assert!(!GameStatus::Running.is_terminal());
+        assert!(GameStatus::Finished.is_terminal());
+        assert!(GameStatus::Failed.is_terminal());
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn games_status_check_rejects_unknown_status(pool: sqlx::PgPool) {
+        let err = sqlx::query(
+            "INSERT INTO games (board_size, game_type, status) VALUES ('11x11', 'Standard', 'bogus')",
+        )
+        .execute(&pool)
+        .await
+        .expect_err("bogus status must be rejected by games_status_domain");
+        let db = err.as_database_error().expect("expected a database error");
+        assert_eq!(db.code().as_deref(), Some("23514")); // check_violation
+        assert_eq!(db.constraint(), Some("games_status_domain"));
+    }
+
+    #[test]
     fn game_type_from_str_case_insensitive() {
         assert_eq!(GameType::from_str("Standard").unwrap(), GameType::Standard);
         assert_eq!(GameType::from_str("standard").unwrap(), GameType::Standard);
