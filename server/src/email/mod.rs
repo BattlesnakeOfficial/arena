@@ -243,9 +243,7 @@ impl Mailer {
             } else {
                 // 5xx, 429, and any unexpected status: retry, bounded by
                 // the per-recipient hourly cap.
-                SendError::Transient(color_eyre::eyre::eyre!(
-                    "Mailgun returned {status}: {body}"
-                ))
+                SendError::Transient(color_eyre::eyre::eyre!("Mailgun returned {status}: {body}"))
             });
         }
 
@@ -280,7 +278,9 @@ mod tests {
     async fn send_limited_caps_per_recipient_per_hour(pool: PgPool) -> cja::Result<()> {
         let server = MockServer::start().await;
         // The cap is the contract: with a limit of 2, exactly 2 requests may
-        // ever reach Mailgun no matter how many sends are attempted.
+        // ever reach Mailgun no matter how many sends are attempted. The log
+        // row now commits before the HTTP call, so failed attempts spend
+        // budget too — a transport error can no longer hide an attempt.
         Mock::given(method("POST"))
             .respond_with(ResponseTemplate::new(200).set_body_string("{\"id\":\"ok\"}"))
             .expect(2)
@@ -289,23 +289,22 @@ mod tests {
 
         let mailer = configured_mailer(server.uri());
         let msg = test_message();
-        let mut tx = pool.begin().await?;
 
         assert_eq!(
-            mailer.send_limited(&mut tx, 2, "test", &msg).await?,
+            mailer.send_limited(&pool, 2, "test", &msg).await?,
             SendOutcome::Sent
         );
         assert_eq!(
-            mailer.send_limited(&mut tx, 2, "test", &msg).await?,
+            mailer.send_limited(&pool, 2, "test", &msg).await?,
             SendOutcome::Sent
         );
         assert_eq!(
-            mailer.send_limited(&mut tx, 2, "test", &msg).await?,
+            mailer.send_limited(&pool, 2, "test", &msg).await?,
             SendOutcome::RateLimited
         );
         // Retrying doesn't help — the suppressed attempts spent budget too.
         assert_eq!(
-            mailer.send_limited(&mut tx, 2, "test", &msg).await?,
+            mailer.send_limited(&pool, 2, "test", &msg).await?,
             SendOutcome::RateLimited
         );
         // (Per-recipient isolation of the window is covered in email_log's
@@ -317,14 +316,12 @@ mod tests {
     #[sqlx::test(migrations = "../migrations")]
     async fn send_limited_disabled_is_a_noop_without_log_rows(pool: PgPool) -> cja::Result<()> {
         let mailer = Mailer::disabled();
-        let mut tx = pool.begin().await?;
         assert_eq!(
             mailer
-                .send_limited(&mut tx, 5, "test", &test_message())
+                .send_limited(&pool, 5, "test", &test_message())
                 .await?,
             SendOutcome::Disabled
         );
-        tx.commit().await?;
 
         let logged: i64 = sqlx::query_scalar!("SELECT COUNT(*) as \"c!\" FROM email_log")
             .fetch_one(&pool)
@@ -335,6 +332,10 @@ mod tests {
     }
 
     fn configured_mailer(base_url: String) -> Mailer {
+        configured_mailer_with_client(base_url, reqwest::Client::new())
+    }
+
+    fn configured_mailer_with_client(base_url: String, http: reqwest::Client) -> Mailer {
         Mailer::new(
             Some(MailgunConfig {
                 api_key: TEST_API_KEY.to_string(),
@@ -342,7 +343,7 @@ mod tests {
                 from: "Arena <reply@example.com>".to_string(),
                 base_url,
             }),
-            reqwest::Client::new(),
+            http,
         )
     }
 
@@ -401,7 +402,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn non_2xx_from_mailgun_is_an_error() {
+    async fn permanent_4xx_is_rejected() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .respond_with(ResponseTemplate::new(401).set_body_string("Unauthorized"))
@@ -410,6 +411,146 @@ mod tests {
 
         let mailer = configured_mailer(server.uri());
         let err = mailer.send(&test_message()).await.unwrap_err();
+        assert!(matches!(err, SendError::Rejected { .. }));
         assert!(err.to_string().contains("401"));
+    }
+
+    #[tokio::test]
+    async fn rate_limit_and_server_errors_are_transient() {
+        for status in [429u16, 503] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(status))
+                .mount(&server)
+                .await;
+
+            let mailer = configured_mailer(server.uri());
+            let err = mailer.send(&test_message()).await.unwrap_err();
+            assert!(
+                matches!(err, SendError::Transient(_)),
+                "{status} should classify as Transient, got {err:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn connection_refusal_is_transient_not_timeout() {
+        // Bind a listener, note the port, then drop it: connections to the
+        // freed port are refused — the request never reached the wire.
+        // (A dropped wiremock MockServer won't do: pooled servers keep
+        // answering 404.)
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let mailer = configured_mailer(format!("http://127.0.0.1:{port}"));
+        let err = mailer.send(&test_message()).await.unwrap_err();
+        assert!(matches!(err, SendError::Transient(_)), "got {err:?}");
+        assert!(!matches!(err, SendError::TimedOut(_)));
+    }
+
+    #[tokio::test]
+    async fn timeout_classified_as_timed_out() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200).set_delay(std::time::Duration::from_millis(400)),
+            )
+            .mount(&server)
+            .await;
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(150))
+            .build()
+            .unwrap();
+        let mailer = configured_mailer_with_client(server.uri(), client);
+        let err = mailer.send(&test_message()).await.unwrap_err();
+        assert!(matches!(err, SendError::TimedOut(_)), "got {err:?}");
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn permanent_failure_is_a_failed_outcome_and_is_logged(pool: PgPool) -> cja::Result<()> {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(400).set_body_string("Bad Request"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mailer = configured_mailer(server.uri());
+        let outcome = mailer
+            .send_limited(&pool, 5, "test", &test_message())
+            .await?;
+        assert_eq!(outcome, SendOutcome::Failed);
+
+        let logged: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM email_log")
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(logged, 1, "a rejected attempt still spent budget");
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn transient_failure_still_logs_the_attempt(pool: PgPool) -> cja::Result<()> {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(503))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mailer = configured_mailer(server.uri());
+        let err = mailer
+            .send_limited(&pool, 5, "test", &test_message())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SendError::Transient(_)));
+
+        // The core regression: the log row survives the transport error, so
+        // the attempt counts toward the cap even though the send failed.
+        let logged: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM email_log")
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(logged, 1);
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn timeouts_after_acceptance_count_toward_the_cap(pool: PgPool) -> cja::Result<()> {
+        let server = MockServer::start().await;
+        // A 200 that always arrives slower than the client timeout: Mailgun
+        // "accepted" each request, but the client never learns. Only two
+        // requests may ever reach the mock, no matter how many sends are
+        // attempted.
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200).set_delay(std::time::Duration::from_millis(400)),
+            )
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(150))
+            .build()?;
+        let mailer = configured_mailer_with_client(server.uri(), client);
+        let msg = test_message();
+
+        // Two timeouts: wiremock received both requests, so both attempts
+        // are logged and spent budget.
+        assert!(matches!(
+            mailer.send_limited(&pool, 2, "test", &msg).await,
+            Err(SendError::TimedOut(_))
+        ));
+        assert!(matches!(
+            mailer.send_limited(&pool, 2, "test", &msg).await,
+            Err(SendError::TimedOut(_))
+        ));
+        // The third attempt is suppressed by the cap before any HTTP call.
+        assert_eq!(
+            mailer.send_limited(&pool, 2, "test", &msg).await?,
+            SendOutcome::RateLimited
+        );
+        Ok(())
     }
 }
