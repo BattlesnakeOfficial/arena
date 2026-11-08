@@ -137,6 +137,14 @@ impl GameStatus {
             GameStatus::Failed => "failed",
         }
     }
+
+    /// True for the statuses a game never leaves: `Finished` (terminal
+    /// success) and `Failed` (terminal failure — see the variant docs).
+    /// Every terminal-set check routes through here; the DB CHECK
+    /// `games_status_domain` pins the same set in SQL.
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, GameStatus::Finished | GameStatus::Failed)
+    }
 }
 
 impl FromStr for GameStatus {
@@ -388,12 +396,15 @@ pub async fn claim_game_start(
     .fetch_one(&mut *tx)
     .await
     .wrap_err("Failed to lock game for start")?;
-    match target.status.as_str() {
-        "running" => return Ok(StartClaim::AlreadyRunning),
-        "finished" | "failed" => return Ok(StartClaim::Terminal),
-        "waiting" => {}
-        other => return Err(eyre!("Unknown game status {other}")),
+    let status = GameStatus::from_str(&target.status)
+        .wrap_err_with(|| format!("Unknown game status {}", target.status))?;
+    if status == GameStatus::Running {
+        return Ok(StartClaim::AlreadyRunning);
     }
+    if status.is_terminal() {
+        return Ok(StartClaim::Terminal);
+    }
+    // Waiting is the only remaining variant: proceed to claim.
     let roster = sqlx::query_scalar!(
         r#"SELECT DISTINCT COALESCE(gb.battlesnake_id, le.battlesnake_id) AS "snake_id!"
            FROM game_battlesnakes gb
@@ -999,54 +1010,6 @@ where
     Ok(())
 }
 
-// Update the status of a game
-pub async fn update_game_status(
-    pool: &PgPool,
-    game_id: Uuid,
-    status: GameStatus,
-) -> cja::Result<Game> {
-    let status_str = status.as_str();
-
-    let row = sqlx::query!(
-        r#"
-        UPDATE games
-        SET status = $2
-        WHERE game_id = $1
-        RETURNING
-            game_id,
-            board_size,
-            game_type,
-            status,
-            enqueued_at,
-            created_at,
-            updated_at
-        "#,
-        game_id,
-        status_str
-    )
-    .fetch_one(pool)
-    .await
-    .wrap_err_with(|| format!("Failed to update status for game {}", game_id))?;
-
-    let board_size = GameBoardSize::from_str(&row.board_size)
-        .wrap_err_with(|| format!("Invalid board size: {}", row.board_size))?;
-    let game_type = GameType::from_str(&row.game_type)
-        .wrap_err_with(|| format!("Invalid game type: {}", row.game_type))?;
-    let status = GameStatus::from_str(&row.status)
-        .wrap_err_with(|| format!("Invalid game status: {}", row.status))?;
-
-    Ok(Game {
-        game_id: row.game_id,
-        board_size,
-        game_type,
-        status,
-        enqueued_at: row.enqueued_at,
-        created_at: row.created_at,
-        updated_at: row.updated_at,
-    })
-}
-
-/// Flip a game to `finished` inside an existing transaction, stamping
 /// `finished_at` and clearing any archive bookkeeping — one atomic UPDATE.
 ///
 /// A game the stuck-game sweeper failed mid-run may already carry a
