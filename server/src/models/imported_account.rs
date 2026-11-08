@@ -450,21 +450,43 @@ pub async fn claim_account(
     imported_account_id: Uuid,
     user_id: Uuid,
 ) -> cja::Result<Option<ClaimSummary>> {
-    claim_account_inner(pool, imported_account_id, user_id, None).await
+    let mut tx = pool.begin().await.wrap_err("Failed to begin claim tx")?;
+    let Some(completed) = claim_account_tx(&mut tx, imported_account_id, user_id, None).await?
+    else {
+        // Losing the account CAS rolls back with the dropped tx.
+        return Ok(None);
+    };
+    tx.commit().await.wrap_err("Failed to commit claim tx")?;
+    log_claim_completed(user_id, &completed);
+    Ok(Some(completed.summary))
 }
 
-async fn claim_account_inner(
-    pool: &PgPool,
+/// What a completed claim materialized, plus the post-commit logging
+/// payloads.
+struct ClaimCompleted {
+    summary: ClaimSummary,
+    receipt: crate::notifications::RecordResult,
+    created_snake_ids: Vec<Uuid>,
+}
+
+/// Run one claim inside a caller-owned transaction: copy the display
+/// identity, materialize staged snakes and grants, and mark the account
+/// claimed. Guarded by a compare-and-set on `claimed_by_user_id IS NULL`,
+/// so concurrent claims of the same account cannot double-materialize; the
+/// loser gets Ok(None), and whether that transaction then commits or rolls
+/// back is the caller's decision — the email-link path commits so the
+/// one-time token is spent (see `redeem_email_claim`).
+async fn claim_account_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     imported_account_id: Uuid,
     user_id: Uuid,
     expected_github_uid: Option<i64>,
-) -> cja::Result<Option<ClaimSummary>> {
-    let mut tx = pool.begin().await.wrap_err("Failed to begin claim tx")?;
+) -> cja::Result<Option<ClaimCompleted>> {
     sqlx::query!(
         "SELECT user_id FROM users WHERE user_id = $1 FOR NO KEY UPDATE",
         user_id
     )
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut **tx)
     .await
     .wrap_err("Failed to lock user for play claim")?;
 
@@ -480,7 +502,7 @@ async fn claim_account_inner(
         user_id,
         expected_github_uid,
     )
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut **tx)
     .await
     .wrap_err("Failed to mark imported account claimed")?;
 
@@ -512,7 +534,7 @@ async fn claim_account_inner(
         claimed_country,
         claimed.backstory,
     )
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await
     .wrap_err("Failed to set display name and profile fields")?;
 
@@ -523,7 +545,7 @@ async fn claim_account_inner(
         "SELECT name FROM battlesnakes WHERE user_id = $1 AND deleted_at IS NULL",
         user_id
     )
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut **tx)
     .await
     .wrap_err("Failed to fetch existing snake names")?
     .into_iter()
@@ -539,7 +561,7 @@ async fn claim_account_inner(
         "#,
         imported_account_id,
     )
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut **tx)
     .await
     .wrap_err("Failed to fetch staged snakes")?;
 
@@ -569,7 +591,7 @@ async fn claim_account_inner(
             snake.tail,
             snake.engine_region,
         )
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await
         .wrap_err("Failed to materialize imported snake")?
         .battlesnake_id;
@@ -580,7 +602,7 @@ async fn claim_account_inner(
             snake.imported_snake_id,
             battlesnake_id,
         )
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .wrap_err("Failed to link materialized snake")?;
 
@@ -600,7 +622,7 @@ async fn claim_account_inner(
         "#,
         imported_account_id,
     )
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut **tx)
     .await
     .wrap_err("Failed to fetch staged grants")?;
 
@@ -626,7 +648,7 @@ async fn claim_account_inner(
             grant.customization_type,
             grant.slug,
         )
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut **tx)
         .await
         .wrap_err("Failed to check existing play grant")?;
         let changed = sqlx::query!(
@@ -641,7 +663,7 @@ async fn claim_account_inner(
             grant.customization_type,
             grant.slug,
         )
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .wrap_err("Failed to materialize grant")?
         .rows_affected();
@@ -662,7 +684,7 @@ async fn claim_account_inner(
         summary.grants_created,
     );
     let receipt = crate::notifications::record_in_tx(
-        &mut tx,
+        &mut *tx,
         crate::notifications::NewNotification {
             user_id,
             kind: crate::notifications::NotificationKind::PlayAccountClaimed,
@@ -680,10 +702,20 @@ async fn claim_account_inner(
         },
     )
     .await?;
-    tx.commit().await.wrap_err("Failed to commit claim tx")?;
-    receipt.log_enqueued();
 
-    for battlesnake_id in created_snake_ids {
+    Ok(Some(ClaimCompleted {
+        summary,
+        receipt,
+        created_snake_ids,
+    }))
+}
+
+/// Post-commit logging for a finished claim (moved verbatim from the old
+/// `claim_account_inner` tail so behavior is unchanged).
+fn log_claim_completed(user_id: Uuid, completed: &ClaimCompleted) {
+    completed.receipt.log_enqueued();
+
+    for battlesnake_id in &completed.created_snake_ids {
         tracing::info!(
             event_type = "battlesnake_created",
             battlesnake_id = %battlesnake_id,
@@ -692,8 +724,6 @@ async fn claim_account_inner(
             "battlesnake created via play claim"
         );
     }
-
-    Ok(Some(summary))
 }
 
 /// Auto-claim on GitHub login: if an unclaimed imported account carries
@@ -708,13 +738,69 @@ pub async fn try_auto_claim(
         return Ok(None);
     };
 
-    claim_account_inner(
-        pool,
+    let mut tx = pool.begin().await.wrap_err("Failed to begin claim tx")?;
+    let Some(completed) = claim_account_tx(
+        &mut tx,
         account.imported_account_id,
         user_id,
         Some(external_github_id),
     )
-    .await
+    .await?
+    else {
+        return Ok(None);
+    };
+    tx.commit().await.wrap_err("Failed to commit claim tx")?;
+    log_claim_completed(user_id, &completed);
+    Ok(Some(completed.summary))
+}
+
+/// Outcome of claiming via an email recovery link.
+#[derive(Debug)]
+pub enum EmailClaimOutcome {
+    /// Link unknown/expired/used/wrong-user: nothing happened, the token
+    /// CAS rolled back with the transaction.
+    InvalidToken,
+    /// Token was valid but the account was already claimed (race with
+    /// GitHub auto-link). The token is spent — a claimed account has
+    /// nothing left to unlock (pre-existing semantics).
+    AlreadyClaimed,
+    /// Claim succeeded.
+    Claimed(ClaimSummary),
+}
+
+/// Redeem a one-time email claim link and run the claim in ONE transaction
+/// (DEV-2185): a transient failure inside the claim rolls the token CAS
+/// back, so the link survives and the user isn't forced to spend another
+/// hourly claim attempt on a new link.
+pub async fn redeem_email_claim(
+    pool: &PgPool,
+    secret: &str,
+    user_id: Uuid,
+) -> cja::Result<EmailClaimOutcome> {
+    let mut tx = pool
+        .begin()
+        .await
+        .wrap_err("Failed to begin email claim tx")?;
+    let Some(imported_account_id) =
+        crate::models::claim_email_token::consume(&mut tx, secret, user_id).await?
+    else {
+        // Returning before commit rolls the tx back: the CAS never landed.
+        return Ok(EmailClaimOutcome::InvalidToken);
+    };
+    let completed = claim_account_tx(&mut tx, imported_account_id, user_id, None).await?;
+    let Some(completed) = completed else {
+        // Losing the account CAS still commits the spent token — a claimed
+        // account has nothing left to unlock (pre-existing semantics).
+        tx.commit()
+            .await
+            .wrap_err("Failed to commit email claim tx")?;
+        return Ok(EmailClaimOutcome::AlreadyClaimed);
+    };
+    tx.commit()
+        .await
+        .wrap_err("Failed to commit email claim tx")?;
+    log_claim_completed(user_id, &completed);
+    Ok(EmailClaimOutcome::Claimed(completed.summary))
 }
 
 /// Whether /me should prompt this user to claim a play account: they
@@ -826,8 +912,8 @@ mod tests {
 
     async fn create_user(pool: &PgPool, github_id: i64) -> cja::Result<Uuid> {
         let row = sqlx::query!(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES ($1, $2, 'test-token')
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES ($1, $2)
              RETURNING user_id",
             github_id,
             format!("gh-user-{github_id}"),
@@ -2011,11 +2097,18 @@ mod tests {
         b.account.github_uid = Some(90206);
         let b_id = stage_play_account(&pool, &b).await?.imported_account_id;
         let user = create_user(&pool, 9206).await?;
+        let mut tx = pool.begin().await.wrap_err("Failed to begin claim tx")?;
         assert!(
-            claim_account_inner(&pool, stale.imported_account_id, user, Some(90206))
+            claim_account_tx(&mut tx, stale.imported_account_id, user, Some(90206))
                 .await?
                 .is_none()
         );
+        // Release the user-row lock claim_account_tx took (SELECT ... FOR
+        // NO KEY UPDATE) before the pool calls below: claim_account re-takes
+        // that lock on another connection and would otherwise wait on this
+        // transaction forever (self-deadlock — PR review round 1). The CAS
+        // never landed, so there is nothing to commit; dropping rolls back.
+        drop(tx);
         assert_eq!(
             find_unclaimed_by_github_uid(&pool, 90206)
                 .await?
@@ -2061,6 +2154,47 @@ mod tests {
         .fetch_one(&pool)
         .await?;
         assert_eq!(b_count, 0);
+        Ok(())
+    }
+
+    /// The AlreadyClaimed contract of `redeem_email_claim` (PR review
+    /// round 1): when the link's account was claimed by someone else
+    /// first (race with the GitHub auto-link), the redemption reports
+    /// AlreadyClaimed and STILL spends the one-time token — a claimed
+    /// account has nothing left to unlock, and the link must not be
+    /// replayable later.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn already_claimed_email_link_still_spends_the_token(pool: PgPool) -> cja::Result<()> {
+        let user = create_user(&pool, 90218).await?;
+        let account_id = stage_play_account(&pool, &complete_payload(218))
+            .await?
+            .imported_account_id;
+        let mut connection = pool.acquire().await?;
+        let secret =
+            crate::models::claim_email_token::create(&mut connection, account_id, user).await?;
+        drop(connection);
+
+        // The account is claimed by a different user before the link is
+        // redeemed — the auto-link race.
+        let other_user = create_user(&pool, 90219).await?;
+        assert!(
+            claim_account(&pool, account_id, other_user)
+                .await?
+                .is_some()
+        );
+
+        let outcome = redeem_email_claim(&pool, &secret, user).await?;
+        assert!(matches!(outcome, EmailClaimOutcome::AlreadyClaimed));
+
+        let used: bool = sqlx::query_scalar(
+            "SELECT used_at IS NOT NULL FROM claim_email_tokens
+             WHERE imported_account_id = $1 AND requested_by_user_id = $2",
+        )
+        .bind(account_id)
+        .bind(user)
+        .fetch_one(&pool)
+        .await?;
+        assert!(used, "AlreadyClaimed must still spend the one-time token");
         Ok(())
     }
 

@@ -186,8 +186,8 @@ mod tests {
     impl Seed {
         async fn new(pool: PgPool) -> cja::Result<Self> {
             let user_id = sqlx::query_scalar!(
-                "INSERT INTO users (external_github_id, github_login, github_access_token)
-                 VALUES (4242, 'latency-owner', 'test-token')
+                "INSERT INTO users (external_github_id, github_login)
+                 VALUES (4242, 'latency-owner')
                  RETURNING user_id"
             )
             .fetch_one(&pool)

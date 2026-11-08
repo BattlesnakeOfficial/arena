@@ -1255,8 +1255,8 @@ mod tests {
 
     async fn test_user(pool: &PgPool, number: i64) -> cja::Result<Uuid> {
         Ok(sqlx::query!(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES ($1, $2, 'test-token') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES ($1, $2) RETURNING user_id",
             number,
             format!("reconcile-gh-{number}")
         )
@@ -2181,7 +2181,7 @@ mod tests {
         .fetch_one(&pool)
         .await?;
         let user_id: uuid::Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token) VALUES (999888, 'test-gh', 'test-token') RETURNING user_id"
+            "INSERT INTO users (external_github_id, github_login) VALUES (999888, 'test-gh') RETURNING user_id"
         ).fetch_one(&pool).await?;
         imported_account::claim_account(&pool, account_id, user_id).await?;
         let before: serde_json::Value = sqlx::query_scalar(

@@ -722,7 +722,7 @@ async fn notification_email_is_sent_once_even_for_concurrent_runs(pool: PgPool) 
         .expect(1)
         .mount(&server)
         .await;
-    let user_id = sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login, github_access_token, github_email) VALUES (1673001, 'notification-job-test', '', 'owner@example.com') RETURNING user_id").fetch_one(&pool).await?;
+    let user_id = sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login, github_email) VALUES (1673001, 'notification-job-test', 'owner@example.com') RETURNING user_id").fetch_one(&pool).await?;
     let receipt = crate::notifications::record(
         &pool,
         NewNotification {
@@ -844,7 +844,7 @@ async fn achievement_email_uses_confirmed_player_address_and_one_layout(
         .expect(1)
         .mount(&server)
         .await;
-    let user_id = sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login, github_access_token, github_email) VALUES (1669008, 'achievement-mail-test', '', 'github@example.com') RETURNING user_id").fetch_one(&pool).await?;
+    let user_id = sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login, github_email) VALUES (1669008, 'achievement-mail-test', 'github@example.com') RETURNING user_id").fetch_one(&pool).await?;
     sqlx::query!(
         "UPDATE users SET notification_email = 'confirmed@example.com' WHERE user_id = $1",
         user_id
@@ -944,7 +944,7 @@ async fn legacy_text_row_gets_escaped_html(pool: PgPool) -> cja::Result<()> {
         .expect(1)
         .mount(&server)
         .await;
-    let user_id = sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login, github_access_token, github_email) VALUES (1675001, 'legacy-html-test', '', 'owner@example.com') RETURNING user_id").fetch_one(&pool).await?;
+    let user_id = sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login, github_email) VALUES (1675001, 'legacy-html-test', 'owner@example.com') RETURNING user_id").fetch_one(&pool).await?;
     let notification_id = sqlx::query_scalar!("INSERT INTO notifications (user_id, kind, title, body, in_app_visible) VALUES ($1, 'snake_matchmaking_paused', 'Legacy', 'Legacy', true) RETURNING notification_id", user_id).fetch_one(&pool).await?;
     sqlx::query!("INSERT INTO notification_emails (notification_id, subject, text, recipient_user) VALUES ($1, 'Legacy', $2, true)", notification_id, "First line\n<script>alert(1)</script>\nLast line").execute(&pool).await?;
     let mut state = AppState::test_from_pool(pool.clone());
@@ -978,7 +978,7 @@ async fn send_time_opt_out_keeps_in_app_event(pool: PgPool) -> cja::Result<()> {
         EmailRecipient, NewEmail, NewNotification, NotificationChannel, NotificationKind,
     };
     use wiremock::MockServer;
-    let user_id = sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login, github_access_token) VALUES (1673002, 'notification-optout-test', '') RETURNING user_id").fetch_one(&pool).await?;
+    let user_id = sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login) VALUES (1673002, 'notification-optout-test') RETURNING user_id").fetch_one(&pool).await?;
     let receipt = crate::notifications::record(
         &pool,
         NewNotification {
@@ -1124,7 +1124,7 @@ async fn in_app_opt_out_at_raise_does_not_suppress_email(pool: PgPool) -> cja::R
         .expect(1)
         .mount(&server)
         .await;
-    let user_id = sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login, github_access_token, github_email) VALUES (1673006, 'in-app-off-test', '', 'owner@example.com') RETURNING user_id").fetch_one(&pool).await?;
+    let user_id = sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login, github_email) VALUES (1673006, 'in-app-off-test', 'owner@example.com') RETURNING user_id").fetch_one(&pool).await?;
     let mut connection = pool.acquire().await?;
     crate::models::notification::set_preference(
         &mut connection,
@@ -1200,7 +1200,7 @@ async fn verification_ignores_preferences_and_retries_transport_failure(
         )
         .mount(&server)
         .await;
-    let user_id = sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login, github_access_token) VALUES (1673003, 'verification-job-test', '') RETURNING user_id").fetch_one(&pool).await?;
+    let user_id = sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login) VALUES (1673003, 'verification-job-test') RETURNING user_id").fetch_one(&pool).await?;
     sqlx::query!(
         "UPDATE users SET notification_email = 'confirmed@example.com' WHERE user_id = $1",
         user_id
@@ -1372,7 +1372,7 @@ async fn terminal_delivery_conditions_do_not_retry(pool: PgPool) -> cja::Result<
         .expect(0)
         .mount(&server)
         .await;
-    let user_id = sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login, github_access_token, github_email) VALUES (1673004, 'terminal-job-test', '', 'owner@example.com') RETURNING user_id").fetch_one(&pool).await?;
+    let user_id = sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login, github_email) VALUES (1673004, 'terminal-job-test', 'owner@example.com') RETURNING user_id").fetch_one(&pool).await?;
     let make = |recipient| NewNotification {
         user_id,
         kind: NotificationKind::SnakeMatchmakingPaused,
@@ -1476,7 +1476,7 @@ async fn waiting_email_jobs_do_not_hold_pool_connections(pool: PgPool) -> cja::R
         .max_connections(5)
         .connect_with(options)
         .await?;
-    let user_id = sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login, github_access_token, github_email) VALUES (1673005, 'semaphore-job-test', '', 'owner@example.com') RETURNING user_id").fetch_one(&pool).await?;
+    let user_id = sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login, github_email) VALUES (1673005, 'semaphore-job-test', 'owner@example.com') RETURNING user_id").fetch_one(&pool).await?;
     let mut ids = Vec::new();
     for _address in ["first@example.com", "second@example.com"] {
         let receipt = crate::notifications::record(
@@ -1727,7 +1727,7 @@ async fn paused_notification(
     use crate::notifications::{EmailRecipient, NewEmail, NewNotification, NotificationKind};
 
     let user_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO users (external_github_id, github_login, github_access_token, github_email, notification_email) VALUES ($2, $1, '', $3, $3) RETURNING user_id",
+        "INSERT INTO users (external_github_id, github_login, github_email, notification_email) VALUES ($2, $1, $3, $3) RETURNING user_id",
     )
     .bind(login)
     .bind(github_id)
@@ -1783,7 +1783,7 @@ async fn confirmation_uses_hashed_single_use_link_and_user_mail_uses_confirmed_a
         .expect(6)
         .mount(&server)
         .await;
-    let user_id = sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login, github_access_token, github_email) VALUES (1674091, 'confirmation-job-test', '', 'public@example.com') RETURNING user_id").fetch_one(&pool).await?;
+    let user_id = sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login, github_email) VALUES (1674091, 'confirmation-job-test', 'public@example.com') RETURNING user_id").fetch_one(&pool).await?;
     let mut state = AppState::test_from_pool(pool.clone());
     state.mailer = Mailer::new(
         Some(MailgunConfig {
@@ -1985,7 +1985,7 @@ async fn confirmation_actual_send_budget_blocks_sixth_delayed_request(
         .expect(5)
         .mount(&server)
         .await;
-    let user_id = sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login, github_access_token) VALUES (1674092, 'confirmation-cap-test', '') RETURNING user_id").fetch_one(&pool).await?;
+    let user_id = sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login) VALUES (1674092, 'confirmation-cap-test') RETURNING user_id").fetch_one(&pool).await?;
     let mut state = AppState::test_from_pool(pool.clone());
     state.mailer = Mailer::new(
         Some(MailgunConfig {
@@ -2064,7 +2064,7 @@ async fn confirmation_transport_error_rolls_back_secret_and_retry_mints_another(
         .expect(2)
         .mount(&server)
         .await;
-    let user_id = sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login, github_access_token) VALUES (1674094, 'confirmation-retry-test', '') RETURNING user_id").fetch_one(&pool).await?;
+    let user_id = sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login) VALUES (1674094, 'confirmation-retry-test') RETURNING user_id").fetch_one(&pool).await?;
     let mut tx = pool.begin().await?;
     let (request_id, notification_id) =
         match notification_email::request_confirmation(&mut tx, user_id, "retry@example.com")

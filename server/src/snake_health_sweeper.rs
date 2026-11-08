@@ -548,8 +548,8 @@ mod tests {
     impl Seed {
         async fn new(pool: &PgPool, url: &str) -> cja::Result<Self> {
             let user_id = sqlx::query_scalar!(
-                "INSERT INTO users (external_github_id, github_login, github_access_token)
-                 VALUES (77001, 'sweep-owner', 'test-token')
+                "INSERT INTO users (external_github_id, github_login)
+                 VALUES (77001, 'sweep-owner')
                  RETURNING user_id",
             )
             .fetch_one(pool)
@@ -908,7 +908,7 @@ mod tests {
         first.broken_games(first_a).await?;
         first.broken_games(first_z).await?;
 
-        let second_user: Uuid = sqlx::query_scalar("INSERT INTO users (external_github_id, github_login, github_access_token) VALUES (77002, 'second-sweep-owner', 'test-token') RETURNING user_id")
+        let second_user: Uuid = sqlx::query_scalar("INSERT INTO users (external_github_id, github_login) VALUES (77002, 'second-sweep-owner') RETURNING user_id")
             .fetch_one(&pool).await?;
         let second_snake: Uuid = sqlx::query_scalar("INSERT INTO battlesnakes (user_id, name, url) VALUES ($1, 'second-sweep-snake', $2) RETURNING battlesnake_id")
             .bind(second_user).bind(server.uri()).fetch_one(&pool).await?;

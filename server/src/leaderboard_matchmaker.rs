@@ -501,8 +501,8 @@ mod tests {
 
     async fn leaderboard_with_snakes(pool: &sqlx::PgPool, snake_count: usize) -> cja::Result<Uuid> {
         let user_id = sqlx::query_scalar!(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (88001, 'mm-owner', 'test-token')
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (88001, 'mm-owner')
              RETURNING user_id",
         )
         .fetch_one(pool)
@@ -592,8 +592,8 @@ mod tests {
         .fetch_one(pool)
         .await?;
         let user_id = sqlx::query_scalar!(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (88010, 'mode-owner', 'test-token') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (88010, 'mode-owner') RETURNING user_id",
         )
         .fetch_one(pool)
         .await?;

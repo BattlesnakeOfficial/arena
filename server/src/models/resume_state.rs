@@ -202,8 +202,8 @@ mod tests {
         .fetch_one(&pool)
         .await?;
         let user_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (7312, 'resume-state-owner', 'test-token') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (7312, 'resume-state-owner') RETURNING user_id",
         )
         .fetch_one(&pool)
         .await?;
@@ -272,8 +272,8 @@ mod tests {
         .fetch_one(pool)
         .await?;
         let user_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (7313, 'fk-cascade-owner', 'test-token') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (7313, 'fk-cascade-owner') RETURNING user_id",
         )
         .fetch_one(pool)
         .await?;

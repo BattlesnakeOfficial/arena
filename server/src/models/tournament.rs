@@ -1679,6 +1679,104 @@ pub async fn find_stale_in_progress_matches(
     Ok(match_ids)
 }
 
+/// In-progress tournaments whose `current_round` matches are all
+/// completed/canceled and whose newest match change is older than `cutoff`.
+/// Normal progression enqueues `UpdateTournamentStatusJob` within
+/// milliseconds of the last match's completion, so a round in this state
+/// means that enqueue was lost (killed between commit and enqueue, or the
+/// job dead-lettered). The stuck-match sweeper re-enqueues progression;
+/// `update_tournament_progress` is idempotent, so duplicates are harmless.
+///
+/// Groups by tournament: a finished round yields one id, not one per match.
+/// `canceled` counts as finished, matching `count_unfinished_matches_in_round`.
+pub async fn find_in_progress_tournaments_with_finished_round(
+    pool: &PgPool,
+    cutoff: chrono::DateTime<chrono::Utc>,
+) -> cja::Result<Vec<Uuid>> {
+    let tournament_ids = sqlx::query_scalar!(
+        r#"
+        SELECT t.tournament_id
+        FROM tournaments t
+        JOIN tournament_matches m ON m.tournament_id = t.tournament_id AND m.round = t.current_round
+        WHERE t.status = 'in_progress'
+        GROUP BY t.tournament_id
+        HAVING bool_and(m.status IN ('completed', 'canceled'))
+           AND max(m.updated_at) < $1
+        ORDER BY t.tournament_id
+        "#,
+        cutoff,
+    )
+    .fetch_all(pool)
+    .await
+    .wrap_err("Failed to find in-progress tournaments with a finished round")?;
+
+    Ok(tournament_ids)
+}
+
+/// `scheduled` matches stranded in an already-started round: the match is in
+/// an in-progress tournament's `current_round`, both participant slots are
+/// filled, and a non-bye sibling in the same round is `in_progress` or
+/// `completed` **with its last state change older than `cutoff`** — evidence
+/// the owner started the round (Run Round) at least `cutoff` ago and this
+/// match's `RunMatchJob` was lost (killed between `run_round`'s per-match
+/// enqueues, or the job died before its first-game transaction committed).
+///
+/// The age gate lives on the *sibling*, not on this match: nothing writes a
+/// `scheduled` match's row between bracket creation and `run_match`, so its
+/// `updated_at` is bracket-creation time — for round 2 onward (and any round
+/// 1 run more than the cutoff after Start) that is always older than the
+/// cutoff, and only the sibling's flip/completion timestamp can measure
+/// "the round was started a while ago". `m.updated_at < cutoff` below is a
+/// defensive redundancy implied by the sibling gate in production.
+///
+/// Byes are excluded as evidence: a bye has exactly one `match_participants`
+/// row and is `completed` at bracket creation, before the round was started.
+/// Rounds with no eligible started sibling are never auto-started — Run
+/// Round stays an owner action. That includes every lone-match round (each
+/// final; e.g. a 5-snake round 1 has one real match plus byes): if the only
+/// real match's job is lost there is no witness, and the owner's Run Round
+/// recovers it.
+pub async fn find_stale_scheduled_matches_in_started_rounds(
+    pool: &PgPool,
+    cutoff: chrono::DateTime<chrono::Utc>,
+) -> cja::Result<Vec<Uuid>> {
+    let match_ids = sqlx::query_scalar!(
+        r#"
+        SELECT m.match_id
+        FROM tournament_matches m
+        JOIN tournaments t ON t.tournament_id = m.tournament_id
+        WHERE t.status = 'in_progress'
+          AND m.round = t.current_round
+          AND m.status = 'scheduled'
+          AND m.updated_at < $1
+          AND (
+              SELECT count(*) FROM match_participants mp
+              WHERE mp.match_id = m.match_id AND mp.battlesnake_id IS NOT NULL
+          ) = 2
+          AND EXISTS (
+              SELECT 1
+              FROM tournament_matches s
+              WHERE s.tournament_id = m.tournament_id
+                AND s.round = m.round
+                AND s.match_id <> m.match_id
+                AND s.status IN ('in_progress', 'completed')
+                AND s.updated_at < $1
+                AND (
+                    SELECT count(*) FROM match_participants sp
+                    WHERE sp.match_id = s.match_id
+                ) = 2
+          )
+        ORDER BY m.updated_at ASC
+        "#,
+        cutoff,
+    )
+    .fetch_all(pool)
+    .await
+    .wrap_err("Failed to find stale scheduled matches in started rounds")?;
+
+    Ok(match_ids)
+}
+
 /// A match participant enriched with its snake's name, for rendering the
 /// bracket. `snake_name` is `None` for unfilled slots (waiting on a feeder
 /// match).
@@ -1927,8 +2025,8 @@ mod tests {
     // fixtures don't need entries in the sqlx offline cache.
     async fn fixture_user_and_snake(pool: &PgPool) -> cja::Result<(Uuid, Uuid)> {
         let user_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES ($1, $2, $3) RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES ($1, $2) RETURNING user_id",
         )
         .bind(424_242_i64)
         .bind("test-user")

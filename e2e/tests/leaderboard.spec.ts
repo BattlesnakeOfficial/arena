@@ -504,8 +504,8 @@ test.describe('Country flags', () => {
       "SELECT leaderboard_id FROM leaderboards WHERE name = 'Standard 11x11'",
     );
     const users = await query<{ user_id: string }>(
-      `INSERT INTO users (external_github_id, github_login, github_access_token, display_name, country)
-       VALUES ($1::bigint, $2, 'tk', 'Flag Owner GB', 'GB'), ($3::bigint, $4, 'tk', 'No Flag Owner', '')
+      `INSERT INTO users (external_github_id, github_login, display_name, country)
+       VALUES ($1::bigint, $2, 'Flag Owner GB', 'GB'), ($3::bigint, $4, 'No Flag Owner', '')
        RETURNING user_id`,
       [Date.now() * 1000 + 700_100, `flag-owner-gb-${stamp}`, Date.now() * 1000 + 700_101, `no-flag-owner-${stamp}`],
     );

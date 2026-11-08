@@ -2330,8 +2330,11 @@ pub async fn run_round(
 /// - the game-completion hook (`resolve_finished_match_game`) no-ops for
 ///   games whose `match_games` row was cascaded away,
 /// - stranded `RunMatchJob`s warn and no-op when their match is gone,
-/// - the stuck-match sweeper only re-enqueues matches that still exist in
-///   `in_progress`, and
+/// - the stuck-match sweeper only enqueues work for matches and tournaments
+///   that still exist in an `in_progress` tournament (a reset zeroes
+///   `current_round` and flips the status in the same transaction, so every
+///   sweeper branch is inert after a reset; deleted matches can't be
+///   selected), and
 /// - a stranded `RunTournamentRoundJob` carries the round it was enqueued
 ///   for and no-ops when it no longer matches `current_round`.
 ///
@@ -2972,8 +2975,8 @@ mod tests {
     // offline cache.
     async fn fixture_user(pool: &PgPool, github_id: i64, login: &str) -> cja::Result<Uuid> {
         let user_id = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES ($1, $2, $3) RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES ($1, $2) RETURNING user_id",
         )
         .bind(github_id)
         .bind(login)

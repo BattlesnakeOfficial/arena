@@ -986,8 +986,8 @@ mod tests {
             .await;
 
         let user_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (1626, 'completion-test', 'test-token') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (1626, 'completion-test') RETURNING user_id",
         )
         .fetch_one(&pool)
         .await?;
@@ -1146,8 +1146,8 @@ mod tests {
     #[sqlx::test(migrations = "../migrations")]
     async fn busy_ladder_runner_makes_no_turns(pool: PgPool) -> cja::Result<()> {
         let owner = sqlx::query_scalar!(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (161302, 'runner-owner', 'test') RETURNING user_id"
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (161302, 'runner-owner') RETURNING user_id"
         )
         .fetch_one(&pool)
         .await?;
@@ -1214,8 +1214,8 @@ mod tests {
     /// (owner, battlesnake_id, game_id).
     async fn ladder_fixture(pool: &PgPool, snake_url: &str) -> cja::Result<(Uuid, Uuid, Uuid)> {
         let owner = sqlx::query_scalar!(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (1731, 'lifecycle-owner', 'test') RETURNING user_id"
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (1731, 'lifecycle-owner') RETURNING user_id"
         )
         .fetch_one(pool)
         .await?;
@@ -1373,8 +1373,8 @@ mod tests {
             .mount(&snake_server)
             .await;
         let user_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (1627, 'custom-source-test', 'test-token') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (1627, 'custom-source-test') RETURNING user_id",
         )
         .fetch_one(&pool)
         .await?;
@@ -1419,8 +1419,8 @@ mod tests {
 
         // Minimal tournament scaffolding for a match_games row.
         let user_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (424242, 'test-user', 'test-token') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (424242, 'test-user') RETURNING user_id",
         )
         .fetch_one(&pool)
         .await?;
@@ -1579,8 +1579,8 @@ mod tests {
         let app_state = crate::state::AppState::test_from_pool(pool.clone());
         let game_id = fixture_game(&pool, "waiting").await?;
         let user_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (424242, 'test-user', 'test-token') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (424242, 'test-user') RETURNING user_id",
         )
         .fetch_one(&pool)
         .await?;
@@ -1743,8 +1743,8 @@ mod tests {
         let game_id = fixture_game(&pool, "running").await?;
 
         let user_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (424242, 'test-user', 'test-token') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (424242, 'test-user') RETURNING user_id",
         )
         .fetch_one(&pool)
         .await?;
@@ -1841,8 +1841,8 @@ mod tests {
     async fn finished_game_records_food_eaten(pool: PgPool) -> cja::Result<()> {
         let app_state = crate::state::AppState::test_from_pool(pool.clone());
         let user_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (233, 'food-test', 'test-token') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (233, 'food-test') RETURNING user_id",
         )
         .fetch_one(&pool)
         .await?;
@@ -1951,8 +1951,8 @@ mod tests {
         scripts: &[ScriptedSnake],
     ) -> cja::Result<(Uuid, Vec<wiremock::MockServer>)> {
         let user_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (15691, 'resume-owner', 'test-token') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (15691, 'resume-owner') RETURNING user_id",
         )
         .fetch_one(pool)
         .await?;

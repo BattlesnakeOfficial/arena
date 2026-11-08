@@ -624,8 +624,8 @@ mod tests {
     /// indexed by seed (`snakes[0]` is seed 1).
     async fn fixture_persisted_bracket(pool: &PgPool, n: usize) -> cja::Result<(Uuid, Vec<Uuid>)> {
         let user_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES ($1, $2, $3) RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES ($1, $2) RETURNING user_id",
         )
         .bind(424_242_i64)
         .bind("test-user")

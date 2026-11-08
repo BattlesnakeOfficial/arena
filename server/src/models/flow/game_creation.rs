@@ -642,14 +642,14 @@ mod tests {
         pool: PgPool,
     ) -> cja::Result<()> {
         let owner: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (91281, 'flow-owner', 'token') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (91281, 'flow-owner') RETURNING user_id",
         )
         .fetch_one(&pool)
         .await?;
         let other: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (91282, 'flow-other', 'token') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (91282, 'flow-other') RETURNING user_id",
         )
         .fetch_one(&pool)
         .await?;
@@ -770,8 +770,8 @@ mod tests {
     #[sqlx::test(migrations = "../migrations")]
     async fn create_for_challenge_preselects_the_snake(pool: PgPool) -> cja::Result<()> {
         let user = sqlx::query!(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (7301, 'challenge-user', 'test-token')
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (7301, 'challenge-user')
              RETURNING user_id"
         )
         .fetch_one(&pool)
@@ -810,8 +810,8 @@ mod tests {
 
     async fn persisted_fixture(pool: &PgPool) -> cja::Result<(Uuid, Uuid, Uuid)> {
         let user: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (991282, 'mutation-owner', 'token') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (991282, 'mutation-owner') RETURNING user_id",
         )
         .fetch_one(pool)
         .await?;

@@ -2031,8 +2031,8 @@ mod public_list_tests {
 
     async fn seed_public_snakes(pool: &PgPool, count: usize) -> cja::Result<Uuid> {
         let user = sqlx::query!(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (9001, 'loader-owner', 'test-token')
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (9001, 'loader-owner')
              RETURNING user_id"
         )
         .fetch_one(pool)
@@ -2144,8 +2144,8 @@ mod deleted_snake_route_tests {
 
     async fn owner_with_snake(pool: &PgPool, github_id: i64, name: &str) -> (Uuid, Uuid) {
         let user_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES ($1, $2, '') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES ($1, $2) RETURNING user_id",
         )
         .bind(github_id)
         .bind(format!("route-owner-{github_id}"))
@@ -2777,8 +2777,8 @@ mod hosting_route_tests {
         url: &str,
     ) -> (Uuid, Uuid) {
         let user_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES ($1, $2, '') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES ($1, $2) RETURNING user_id",
         )
         .bind(github_id)
         .bind(format!("hosting-owner-{github_id}"))

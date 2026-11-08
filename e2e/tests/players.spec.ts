@@ -111,8 +111,8 @@ async function insertUser(
   displayName: string | null,
 ): Promise<string> {
   const rows = await query<{ user_id: string }>(
-    `INSERT INTO users (external_github_id, github_login, github_access_token, display_name)
-     VALUES ($1, $2, 'test-token', $3)
+    `INSERT INTO users (external_github_id, github_login, display_name)
+     VALUES ($1, $2, $3)
      RETURNING user_id`,
     [externalId, login, displayName],
   );
@@ -170,10 +170,9 @@ test.describe.serial('Player Directory', () => {
 
       // 51 active players — one more than a page — to exercise the pager.
       await query(
-        `INSERT INTO users (external_github_id, github_login, github_access_token, display_name)
+        `INSERT INTO users (external_github_id, github_login, display_name)
          SELECT $1::bigint + i,
                 $2 || '-page-' || to_char(i, 'FM000'),
-                'test-token',
                 $2 || '-page-' || to_char(i, 'FM000')
          FROM generate_series(0, 50) AS i`,
         [idBase + 100, prefix],

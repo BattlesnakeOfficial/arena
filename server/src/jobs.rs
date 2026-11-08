@@ -619,10 +619,12 @@ impl Job<AppState> for UpdateTournamentStatusJob {
     }
 }
 
-/// Cron job that re-enqueues evaluation for tournament matches whose driving
-/// jobs died (the job system deletes jobs that exhaust their retries, so a
-/// match can otherwise get stuck in progress forever). Runs every couple of
-/// minutes; see [`crate::tournament_match::sweep_stuck_matches`].
+/// Cron job that re-enqueues evaluation for stuck tournament matches whose
+/// driving jobs died — stale in-progress matches, scheduled matches
+/// stranded in a started round — and recovers lost round progression (the
+/// job system deletes jobs that exhaust their retries, so a tournament can
+/// otherwise get stuck forever). Runs every couple of minutes; see
+/// [`crate::tournament_match::sweep_stuck_matches`].
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct StuckMatchSweeperJob;
 
@@ -649,6 +651,28 @@ impl Job<AppState> for RateLimitPruneJob {
 
     async fn run(&self, app_state: AppState) -> cja::Result<()> {
         crate::models::rate_limit::prune_old_attempts(&app_state.db).await?;
+        Ok(())
+    }
+}
+
+/// Cron job: batched prune of expired `sessions` rows (DEV-2185). Every
+/// request without a cookie creates a row and nothing deleted them before;
+/// see [`crate::models::session::clean_expired_sessions`].
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SessionPruneJob;
+
+#[async_trait::async_trait]
+impl Job<AppState> for SessionPruneJob {
+    const NAME: &'static str = "SessionPruneJob";
+
+    async fn run(&self, app_state: AppState) -> cja::Result<()> {
+        let deleted = crate::models::session::clean_expired_sessions(
+            &app_state.db,
+            crate::models::session::SESSION_PRUNE_BATCH_ROWS,
+            crate::models::session::SESSION_PRUNE_MAX_BATCHES,
+        )
+        .await?;
+        tracing::info!(deleted, "Expired session prune completed");
         Ok(())
     }
 }
@@ -731,6 +755,7 @@ cja::impl_job_registry!(
     UpdateTournamentStatusJob,
     StuckMatchSweeperJob,
     RateLimitPruneJob,
+    SessionPruneJob,
     SnakeHealthSweeperJob,
     StuckGameSweeperJob,
     ScreenShoutsJob,

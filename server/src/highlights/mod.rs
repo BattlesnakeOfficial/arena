@@ -570,8 +570,8 @@ mod tests {
 
     async fn seed_user(pool: &PgPool, github_login: &str) -> Uuid {
         sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES ((SELECT COALESCE(MAX(external_github_id), 991000) + 1 FROM users), $1, '')
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES ((SELECT COALESCE(MAX(external_github_id), 991000) + 1 FROM users), $1)
              RETURNING user_id",
         )
         .bind(github_login)

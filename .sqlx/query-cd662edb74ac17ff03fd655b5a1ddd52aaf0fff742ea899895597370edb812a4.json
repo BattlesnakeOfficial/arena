@@ -1,0 +1,110 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO users (\n            external_github_id, github_login, github_avatar_url, github_name, github_email\n        )\n        VALUES ($1, $2, $3, $4, $5)\n        ON CONFLICT (external_github_id) DO UPDATE SET\n            github_login = $2,\n            github_avatar_url = $3,\n            github_name = $4,\n            github_email = $5\n        RETURNING\n            user_id,\n            external_github_id,\n            github_login,\n            github_avatar_url,\n            github_name,\n            github_email,\n            display_name,\n            pronouns,\n            country,\n            backstory,\n            is_admin,\n            site_theme,\n            theater_theme,\n            created_at,\n            updated_at\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "external_github_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "github_login",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "github_avatar_url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "github_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "github_email",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "display_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "pronouns",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "country",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "backstory",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 10,
+        "name": "is_admin",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 11,
+        "name": "site_theme",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 12,
+        "name": "theater_theme",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 13,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 14,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "cd662edb74ac17ff03fd655b5a1ddd52aaf0fff742ea899895597370edb812a4"
+}

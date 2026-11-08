@@ -151,8 +151,8 @@ mod tests {
 
     async fn user(pool: &PgPool, id: i64, login: &str) -> cja::Result<Uuid> {
         Ok(sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES ($1, $2, 'test') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES ($1, $2) RETURNING user_id",
         )
         .bind(id)
         .bind(login)

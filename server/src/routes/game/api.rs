@@ -3745,8 +3745,8 @@ mod live_tests {
         for (github, name) in [(9_980_001, "Replay One"), (9_980_002, "Replay Two")] {
             let login = format!("replay-{github}");
             let user_id: Uuid = sqlx::query_scalar(
-                "INSERT INTO users (external_github_id, github_login, github_access_token)
-                 VALUES ($1, $2, '') RETURNING user_id",
+                "INSERT INTO users (external_github_id, github_login)
+                 VALUES ($1, $2) RETURNING user_id",
             )
             .bind(github)
             .bind(&login)

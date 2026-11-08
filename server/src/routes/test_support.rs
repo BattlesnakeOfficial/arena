@@ -7,7 +7,7 @@ use crate::state::AppState;
 /// Insert a user; returns the user id.
 pub async fn create_user(db: &sqlx::PgPool, github_id: i64, is_admin: bool) -> Uuid {
     sqlx::query_scalar(
-        "INSERT INTO users (external_github_id, github_login, github_access_token, is_admin) VALUES ($1, $2, '', $3) RETURNING user_id",
+        "INSERT INTO users (external_github_id, github_login, is_admin) VALUES ($1, $2, $3) RETURNING user_id",
     )
     .bind(github_id)
     .bind(format!("test-user-{github_id}"))
