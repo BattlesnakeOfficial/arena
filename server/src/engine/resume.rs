@@ -206,7 +206,8 @@ pub fn restore(
 
     // Meta is rebuilt from the same inputs create_initial_game uses — never
     // trusted from the stored state.
-    let (ruleset_name, settings, royale) =
+    let mode = crate::engine::game_mode(&game.game_type);
+    let (settings, royale) =
         crate::engine::mode_rules(game.game_type.clone(), game.game_id);
     let (width, height) = game.board_size.dimensions();
     let (width, height) = (width as i32, height as i32);
@@ -357,7 +358,8 @@ pub fn restore(
         board,
         meta: GameMeta {
             game_id: game.game_id.to_string(),
-            ruleset_name: ruleset_name.to_string(),
+            mode,
+            game_over_rule: mode.default_game_over_rule(),
             timeout: MOVE_TIMEOUT_MS,
             settings,
             royale,

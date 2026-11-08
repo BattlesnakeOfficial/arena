@@ -348,7 +348,8 @@ fn create_test_engine_game_with_snakes(snake_ids: Vec<&str>) -> crate::engine::E
         },
         meta: GameMeta {
             game_id: "contract-game".to_string(),
-            ruleset_name: "standard".to_string(),
+            mode: engine_core::GameMode::Standard,
+            game_over_rule: engine_core::GameMode::Standard.default_game_over_rule(),
             timeout: 500,
             settings: StandardSettings::default(),
             royale: None,

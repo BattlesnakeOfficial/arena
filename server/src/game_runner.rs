@@ -413,7 +413,10 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
     let mut total_snake_wait = std::time::Duration::ZERO;
 
     // Run the game turn by turn
-    while !crate::engine::is_game_over(&engine_game) && engine_game.board.turn < MAX_TURNS {
+    let stop = loop {
+        if let Some(reason) = crate::engine::stop_reason(&engine_game, Some(MAX_TURNS)) {
+            break reason;
+        }
         // Request moves from all alive snakes in parallel
         let move_wait_start = std::time::Instant::now();
         let move_results = phase(
@@ -518,7 +521,7 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
             duration_us = yield_duration.as_micros() as u64,
             "async scheduler jitter"
         );
-    }
+    };
 
     // Emit processing_overhead metric
     let total_time = game_start.elapsed();
@@ -651,6 +654,7 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
         event_type = "game_completed",
         game_id = %game_id,
         final_turn = engine_game.board.turn,
+        stop_reason = stop.as_str(),
         total_ms = total_time_ms,
         winner_battlesnake_id = ?winner_snake_id,
         source = game_source.analytics_label(),

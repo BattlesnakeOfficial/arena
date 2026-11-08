@@ -17,6 +17,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
+use engine_core::{GameMode, GameOverRule};
+
 use crate::{
     errors::ServerResult,
     models::game::{
@@ -147,8 +149,9 @@ fn engine_rules(
     game_type: GameType,
     game_id: Uuid,
 ) -> (BTreeMap<String, String>, String, String, Vec<String>) {
-    let (internal, settings, royale) = crate::engine::mode_rules(game_type, game_id);
-    let (ruleset_name, map) = crate::wire::wire_ruleset_and_map(internal);
+    let mode = crate::engine::game_mode(&game_type);
+    let (settings, royale) = crate::engine::mode_rules(game_type.clone(), game_id);
+    let (ruleset_name, map) = crate::wire::wire_ruleset_and_map(mode);
 
     let mut ruleset = BTreeMap::from([
         ("name".to_string(), ruleset_name.to_string()),
@@ -170,13 +173,13 @@ fn engine_rules(
     }
 
     // Stage pipelines from play `core/game_stages.py`: the game-over stage
-    // depends on the snake count (Solo is the single-snake mode), and only
-    // Constrictor adds a stage to the standard pipeline; Royale's shrinking
-    // and Snail Mode's trails came from their maps.
-    let game_over = if internal == "solo" {
-        "game_over.solo_snake"
-    } else {
-        "game_over.standard"
+    // follows the rule this game will actually run (one source:
+    // default_game_over_rule), and only Constrictor adds a stage to the
+    // standard pipeline; Royale's shrinking and Snail Mode's trails came
+    // from their maps.
+    let game_over = match mode.default_game_over_rule() {
+        GameOverRule::AllSnakesDead => "game_over.solo_snake",
+        GameOverRule::LastSnakeStanding => "game_over.standard",
     };
     let mut stages = vec![
         game_over,
@@ -185,8 +188,9 @@ fn engine_rules(
         "hazard_damage.standard",
         "feed_snakes.standard",
     ];
-    if ruleset_name == "constrictor" {
-        stages.push("modify_snakes.always_grow");
+    match mode {
+        GameMode::Constrictor => stages.push("modify_snakes.always_grow"),
+        GameMode::Standard | GameMode::Royale | GameMode::SnailMode | GameMode::Solo => {}
     }
     stages.push("elimination.standard");
 

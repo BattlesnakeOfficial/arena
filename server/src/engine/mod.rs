@@ -7,7 +7,8 @@ pub mod frame;
 pub mod resume;
 
 pub use engine_core::{
-    EngineGame, GameMeta, GameResult, GameSource, MAX_TURNS, MOVE_TIMEOUT_MS, is_game_over,
+    EngineGame, GameMeta, GameResult, GameSource, MAX_TURNS, MOVE_TIMEOUT_MS, StopReason,
+    is_game_over, stop_reason,
 };
 
 // The untouched test module below drives apply_turn directly (its loops
@@ -30,7 +31,10 @@ use rules::{BoardState, Point};
 use crate::models::game::{GameBoardSize, GameType};
 use crate::models::game_battlesnake::GameBattlesnakeWithDetails;
 
-fn game_mode(game_type: &GameType) -> engine_core::GameMode {
+/// The single `GameType → GameMode` conversion point. `Other(_)` keeps its
+/// arm: `GameType::Other(String)` is an open DB-facing enum, and running
+/// standard rules is the defined meaning there.
+pub fn game_mode(game_type: &GameType) -> engine_core::GameMode {
     match game_type {
         GameType::Royale => engine_core::GameMode::Royale,
         GameType::Constrictor => engine_core::GameMode::Constrictor,
@@ -44,7 +48,7 @@ fn game_mode(game_type: &GameType) -> engine_core::GameMode {
 pub fn mode_rules(
     game_type: GameType,
     game_id: Uuid,
-) -> (&'static str, StandardSettings, Option<RoyaleSettings>) {
+) -> (StandardSettings, Option<RoyaleSettings>) {
     engine_core::mode_rules(game_mode(&game_type), game_id)
 }
 
@@ -185,7 +189,9 @@ mod tests {
                         },
                         meta: GameMeta {
                             game_id: "prop-test".to_string(),
-                            ruleset_name: "standard".to_string(),
+                            mode: engine_core::GameMode::Standard,
+                            game_over_rule: engine_core::GameMode::Standard
+                                .default_game_over_rule(),
                             timeout: 500,
                             settings: StandardSettings::default(),
                             royale: None,
@@ -1108,7 +1114,8 @@ mod tests {
             },
             meta: GameMeta {
                 game_id: "test-game".to_string(),
-                ruleset_name: "standard".to_string(),
+                mode: engine_core::GameMode::Standard,
+                game_over_rule: engine_core::GameMode::Standard.default_game_over_rule(),
                 timeout: 500,
                 settings: StandardSettings::default(),
                 royale: None,
@@ -1121,7 +1128,7 @@ mod tests {
     #[test]
     fn apply_turn_rejects_missing_royale_settings_before_mutation() {
         let mut game = create_test_game(2);
-        game.meta.ruleset_name = "royale".to_string();
+        game.meta.mode = engine_core::GameMode::Royale;
         let before = game.board.clone();
 
         let error = apply_turn(&mut game, &[]).expect_err("missing settings must fail");
@@ -1133,7 +1140,7 @@ mod tests {
     #[test]
     fn random_game_rejects_missing_royale_settings() {
         let mut game = create_test_game(2);
-        game.meta.ruleset_name = "royale".to_string();
+        game.meta.mode = engine_core::GameMode::Royale;
 
         let error = run_game_with_random_moves(game).expect_err("missing settings must fail");
 
@@ -1149,7 +1156,7 @@ mod tests {
     #[test]
     fn apply_turn_preserves_royale_rules_error_details() {
         let mut game = create_test_game(2);
-        game.meta.ruleset_name = "royale".to_string();
+        game.meta.mode = engine_core::GameMode::Royale;
         game.meta.royale = Some(RoyaleSettings {
             shrink_every_n_turns: 0,
             seed: 0,
@@ -1180,7 +1187,7 @@ mod tests {
     #[test]
     fn test_spawn_food_constrictor_never_spawns() {
         let mut game = create_test_game(2);
-        game.meta.ruleset_name = "constrictor".to_string();
+        game.meta.mode = engine_core::GameMode::Constrictor;
         game.board.food.clear();
 
         // food_spawn_chance is probabilistic; run enough iterations that a
@@ -1310,7 +1317,7 @@ mod tests {
             &battlesnakes,
         );
 
-        assert_eq!(game.meta.ruleset_name, "royale");
+        assert_eq!(game.meta.mode, engine_core::GameMode::Royale);
         assert_eq!(
             game.meta.settings.hazard_damage_per_turn, 14,
             "royale uses the Go rules default hazard damage"
@@ -1338,7 +1345,7 @@ mod tests {
             &battlesnakes,
         );
 
-        assert_eq!(game.meta.ruleset_name, "standard");
+        assert_eq!(game.meta.mode, engine_core::GameMode::Standard);
         assert_eq!(game.meta.settings.hazard_damage_per_turn, 15);
         assert!(game.meta.royale.is_none());
         assert!(game.board.hazards.is_empty());
@@ -1469,7 +1476,7 @@ mod tests {
             &battlesnakes,
         );
 
-        assert_eq!(game.meta.ruleset_name, "constrictor");
+        assert_eq!(game.meta.mode, engine_core::GameMode::Constrictor);
         assert_eq!(
             game.meta.settings.food_spawn_chance, 0,
             "constrictor never spawns food"
@@ -1657,7 +1664,7 @@ mod tests {
             &battlesnakes,
         );
 
-        assert_eq!(game.meta.ruleset_name, "snail_mode");
+        assert_eq!(game.meta.mode, engine_core::GameMode::SnailMode);
         assert_eq!(
             game.meta.settings.hazard_damage_per_turn, 14,
             "snail mode uses the Go rules default hazard damage"
@@ -1781,7 +1788,7 @@ mod tests {
             &battlesnakes,
         );
 
-        assert_eq!(game.meta.ruleset_name, "solo");
+        assert_eq!(game.meta.mode, engine_core::GameMode::Solo);
         // Standard food settings: spawning behavior identical to Standard.
         assert_eq!(game.meta.settings.food_spawn_chance, 15);
         assert_eq!(game.meta.settings.minimum_food, 1);
@@ -1839,7 +1846,7 @@ mod tests {
     #[test]
     fn test_standard_one_alive_snake_still_over() {
         let mut game = create_test_game(2);
-        assert_eq!(game.meta.ruleset_name, "standard");
+        assert_eq!(game.meta.mode, engine_core::GameMode::Standard);
         game.board.snakes[0].eliminated_cause = EliminationCause::OutOfHealth;
         assert!(is_game_over(&game));
     }
