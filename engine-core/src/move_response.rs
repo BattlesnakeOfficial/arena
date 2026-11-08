@@ -96,8 +96,9 @@ pub struct MoveResponse {
 pub struct MoveResult {
     pub snake_id: String,
     pub direction: Direction,
-    /// Measured at body completion (or the timeout firing) from request
-    /// start. `None` only when nothing was measurable (transport failure).
+    /// Measured from request start to body completion, or to the deadline
+    /// firing on the direct path. `None` when nothing was measured: transport
+    /// failures, and timeouts reported by the engine proxy or the CLI.
     pub latency_ms: Option<i64>,
     pub shout: Option<String>,
     /// How the request ended; the single classification source — readers
@@ -112,7 +113,8 @@ pub enum MoveOutcome {
     /// The snake answered 2xx with a usable, recognized move.
     Ok { status_code: u16 },
     /// No complete answer arrived within the move timeout — send or body
-    /// phase. `latency_ms` carries the real elapsed time.
+    /// phase. `latency_ms` is the real elapsed time on the direct path;
+    /// proxied and CLI timeouts have `None`.
     TimedOut,
     /// Transport-level failure (connect refused/reset/DNS): no HTTP answer.
     Transport,

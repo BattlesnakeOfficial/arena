@@ -2,12 +2,11 @@
 //! snake profile chart.
 //!
 //! Reads `snake_turns.latency_ms` / `timed_out`, which the game runner writes
-//! for every move request. A timeout stores the real elapsed latency plus
-//! `timed_out = true` (DEV-2184; transport failures store `NULL`), so the
-//! query keeps timeouts out of the answered count and percentiles with an
-//! explicit `FILTER (WHERE NOT st.timed_out)` — percentiles only cover
-//! answered moves and timeouts are counted separately — folding timeout
-//! latencies in would silently hide a snake's worst turns.
+//! for every move request. A direct-path timeout stores its real elapsed
+//! latency with `timed_out = true`; proxied timeouts and transport failures
+//! store `NULL`. The query keeps every timeout out of the answered count and
+//! percentiles with an explicit `FILTER (WHERE NOT st.timed_out)`, so
+//! percentiles cover answered moves only and timeouts are counted separately.
 
 use chrono::{DateTime, Utc};
 use color_eyre::eyre::Context as _;
