@@ -1015,6 +1015,46 @@ mod tests {
         Ok(())
     }
 
+    /// DEV-2180: the game-completion hook can fire after a tournament is
+    /// canceled but before the bulk-cancel reached this match (or from a
+    /// stale job retry). `run_match` must refuse to evaluate anything for
+    /// a tournament that is not `in_progress`: no next game, no winner, no
+    /// progression job.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn canceled_tournament_evaluation_is_a_no_op(pool: PgPool) -> cja::Result<()> {
+        let app_state = AppState::test_from_pool(pool.clone());
+        let (tournament, tournament_match, snakes) =
+            fixture_two_snake_match(&pool, MatchStyle::BestOf3).await?;
+
+        // 1-0 in a best-of-3: no winner yet, so an evaluation that ran would
+        // create game 2.
+        add_finished_game(&pool, tournament_match.match_id, 1, Some(snakes[0])).await?;
+
+        // Cancel ONLY the tournament — the match is still `scheduled`, the
+        // exact shape a hook racing the bulk-cancel sees.
+        set_tournament_status(
+            &pool,
+            tournament.tournament_id,
+            TournamentStatus::Canceled,
+            TournamentStatus::InProgress,
+        )
+        .await?;
+
+        run_match(&app_state, tournament_match.match_id).await?;
+
+        let games = get_match_games_for_match(&pool, tournament_match.match_id).await?;
+        assert_eq!(games.len(), 1, "no second game for a canceled tournament");
+        assert_eq!(count_jobs(&pool, "GameRunnerJob").await?, 0);
+        assert_eq!(count_jobs(&pool, "UpdateTournamentStatusJob").await?, 0);
+        let reloaded = get_match_by_id(&pool, tournament_match.match_id)
+            .await?
+            .unwrap();
+        assert_eq!(reloaded.status, MatchStatus::Scheduled);
+        assert_eq!(reloaded.winner_id, None);
+
+        Ok(())
+    }
+
     /// A RunTournamentRoundJob whose payload round no longer matches
     /// `current_round` (the round advanced, or a reset-then-restart rebuilt
     /// the bracket) must no-op instead of firing matches the owner never

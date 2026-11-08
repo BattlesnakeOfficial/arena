@@ -818,4 +818,32 @@ mod tests {
 
         Ok(())
     }
+
+    /// DEV-2180: completing a canceled match must be refused, not silently
+    /// flipped to completed.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn completing_a_canceled_match_is_refused(pool: PgPool) -> cja::Result<()> {
+        let (tournament_id, snakes) = fixture_persisted_bracket(&pool, 2).await?;
+        let matches = get_matches_for_tournament(&pool, tournament_id).await?;
+        let final_match = match_at(&matches, 1, 0);
+
+        sqlx::query("UPDATE tournament_matches SET status = 'canceled' WHERE match_id = $1")
+            .bind(final_match.match_id)
+            .execute(&pool)
+            .await?;
+
+        let mut tx = pool.begin().await?;
+        let err = complete_match_with_winner(&mut tx, final_match.match_id, snakes[0])
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("canceled"), "got: {err}");
+        tx.rollback().await?;
+
+        let matches = get_matches_for_tournament(&pool, tournament_id).await?;
+        let reloaded = match_at(&matches, 1, 0);
+        assert_eq!(reloaded.status, MatchStatus::Canceled);
+        assert_eq!(reloaded.winner_id, None);
+
+        Ok(())
+    }
 }

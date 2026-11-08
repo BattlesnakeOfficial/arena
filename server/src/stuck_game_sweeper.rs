@@ -307,6 +307,121 @@ mod tests {
         Ok(())
     }
 
+    /// DEV-2180: build a tournament match whose game is `match_game`, with
+    /// optional raw status overrides for the tournament and the match.
+    /// Non-macro fixture writes only.
+    async fn fixture_match_game(
+        pool: &PgPool,
+        user_id: Uuid,
+        name: &str,
+        game_id: Uuid,
+        tournament_status: Option<&str>,
+        match_status: Option<&str>,
+    ) -> cja::Result<()> {
+        let tournament_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO tournaments (name, user_id) VALUES ($1, $2) RETURNING tournament_id",
+        )
+        .bind(name)
+        .bind(user_id)
+        .fetch_one(pool)
+        .await?;
+        let match_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO tournament_matches (tournament_id, round, position, visual_column, visual_row)
+             VALUES ($1, 1, 0, 0, 0) RETURNING match_id",
+        )
+        .bind(tournament_id)
+        .fetch_one(pool)
+        .await?;
+        sqlx::query("INSERT INTO match_games (match_id, game_id, game_number) VALUES ($1, $2, 1)")
+            .bind(match_id)
+            .bind(game_id)
+            .execute(pool)
+            .await?;
+        if let Some(status) = tournament_status {
+            sqlx::query("UPDATE tournaments SET status = $2 WHERE tournament_id = $1")
+                .bind(tournament_id)
+                .bind(status)
+                .execute(pool)
+                .await?;
+        }
+        if let Some(status) = match_status {
+            sqlx::query("UPDATE tournament_matches SET status = $2 WHERE match_id = $1")
+                .bind(match_id)
+                .bind(status)
+                .execute(pool)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// DEV-2180: a canceled match's stranded game is swept like an ordinary
+    /// game — `run_match` refuses to evaluate a canceled match, so the
+    /// sweeper is its only janitor. The exclusion that keeps `run_match`'s
+    /// stall path from livelocking applies only to games of LIVE matches in
+    /// an `in_progress` tournament. Match C pins the tournament-status half
+    /// of the predicate (the legacy pre-bulk-cancel shape).
+    #[sqlx::test(migrations = "../migrations")]
+    async fn stale_game_of_a_canceled_match_is_failed(pool: PgPool) -> cja::Result<()> {
+        let base_time = Utc::now();
+        let user_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO users (external_github_id, github_login, github_access_token)
+             VALUES (2180, 'dev2180-user', 'test') RETURNING user_id",
+        )
+        .fetch_one(&pool)
+        .await?;
+
+        // A: live match in an in-progress tournament — excluded, stays running.
+        let game_a = insert_game(&pool, "running", base_time - Duration::hours(3)).await?;
+        fixture_match_game(
+            &pool,
+            user_id,
+            "dev2180-live",
+            game_a,
+            Some("in_progress"),
+            None,
+        )
+        .await?;
+
+        // B: canceled match in an in-progress tournament — swept.
+        let game_b = insert_game(&pool, "running", base_time - Duration::hours(3)).await?;
+        fixture_match_game(
+            &pool,
+            user_id,
+            "dev2180-canceled-match",
+            game_b,
+            Some("in_progress"),
+            Some("canceled"),
+        )
+        .await?;
+
+        // C: live-status match in a canceled tournament (legacy pre-fix
+        // cancel shape) — swept.
+        let game_c = insert_game(&pool, "running", base_time - Duration::hours(3)).await?;
+        fixture_match_game(
+            &pool,
+            user_id,
+            "dev2180-canceled-tournament",
+            game_c,
+            Some("canceled"),
+            None,
+        )
+        .await?;
+
+        let failed = fail_stuck_games(&pool, 2).await?;
+
+        assert!(!failed.contains(&game_a), "live match game stays running");
+        assert!(failed.contains(&game_b), "canceled match game is swept");
+        assert!(
+            failed.contains(&game_c),
+            "canceled-tournament game is swept"
+        );
+        assert_eq!(game_status(&pool, game_a).await?, "running");
+        assert_eq!(game_status(&pool, game_b).await?, "failed");
+        assert_eq!(game_status(&pool, game_c).await?, "failed");
+
+        Ok(())
+    }
+
     /// Aged-out running game with resume rows: swept to failed AND its
     /// resume rows deleted in the same transaction.
     #[sqlx::test(migrations = "../migrations")]
