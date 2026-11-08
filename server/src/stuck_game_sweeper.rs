@@ -7,11 +7,15 @@
 //! [`crate::config::AppConfig::stuck_game_max_age_hours`] as
 //! [`crate::models::game::GameStatus::Failed`].
 //!
-//! Tournament match games are excluded: [`crate::tournament_match::run_match`]
-//! treats any non-`Finished` match game as re-runnable, so failing one would
-//! livelock the stall path (re-enqueue after 15 minutes without activity,
-//! runner short-circuits). Lifting that exclusion is blocked on `run_match`
-//! gaining a `Failed` error/forfeit path (separate task).
+//! Tournament match games whose match is live (`scheduled`/`in_progress`)
+//! in an `in_progress` tournament are excluded: run_match treats any
+//! non-Finished match game of such a match as re-runnable, so failing one
+//! would livelock the stall path (re-enqueue after 15 minutes without
+//! activity, runner short-circuits). Games of canceled matches — and of
+//! matches stranded in a canceled tournament — are swept like ordinary
+//! games: run_match refuses to evaluate them, so nothing else would ever
+//! clear them. Lifting the exclusion for live matches remains blocked on
+//! run_match gaining a `Failed` error/forfeit path (separate task).
 //!
 //! Idempotent: the status predicate means a second sweep matches nothing, so
 //! duplicate cron enqueues and cja retries converge.
@@ -37,8 +41,8 @@ pub async fn run_sweep(app_state: &AppState) -> cja::Result<()> {
 }
 
 /// Atomically mark all eligible stuck games `failed`, returning their IDs.
-/// Eligibility = live status AND older than `max_age_hours` AND not a
-/// tournament match game. Age counts from `enqueued_at`, falling back to
+/// Eligibility = live status AND older than `max_age_hours` AND not a game
+/// of a live tournament match in an `in_progress` tournament. Age counts from `enqueued_at`, falling back to
 /// `created_at`: a ladder game held before dispatch (DEV-1613) has a NULL
 /// `enqueued_at` and ages from creation, but once dispatched its runtime is
 /// measured from the enqueue, so a long hold can't get a live game failed.
@@ -53,7 +57,14 @@ async fn fail_stuck_games(pool: &sqlx::PgPool, max_age_hours: i32) -> cja::Resul
            SET status = 'failed', updated_at = NOW()
            WHERE games.status IN ('waiting', 'running')
              AND COALESCE(games.enqueued_at, games.created_at) < NOW() - make_interval(hours => $1)
-             AND games.game_id NOT IN (SELECT game_id FROM match_games)
+             AND games.game_id NOT IN (
+               SELECT mg.game_id
+               FROM match_games mg
+               JOIN tournament_matches m ON m.match_id = mg.match_id
+               JOIN tournaments t ON t.tournament_id = m.tournament_id
+               WHERE m.status IN ('scheduled', 'in_progress')
+                 AND t.status = 'in_progress'
+             )
              AND NOT (games.status = 'waiting' AND EXISTS (
                SELECT 1 FROM leaderboard_games waiting_lg
                JOIN leaderboard_games running_lg ON running_lg.leaderboard_id = waiting_lg.leaderboard_id
@@ -297,6 +308,13 @@ mod tests {
         )
         .execute(&pool)
         .await?;
+        // The exclusion keys on match status AND tournament status: only a
+        // live match in an `in_progress` tournament is excluded (the default
+        // `created` status would be swept after the DEV-2180 narrowing).
+        sqlx::query("UPDATE tournaments SET status = 'in_progress' WHERE tournament_id = $1")
+            .bind(tournament_id)
+            .execute(&pool)
+            .await?;
 
         let failed = fail_stuck_games(&pool, 2).await?;
 

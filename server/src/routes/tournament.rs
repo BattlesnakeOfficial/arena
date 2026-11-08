@@ -2055,6 +2055,26 @@ pub async fn update_status(
         .await
         .wrap_err("Failed to update tournament status")?;
 
+    // Cancel stops the machine: every live match of the tournament is
+    // canceled in the same transaction as the status flip, so a finishing
+    // game's completion hook can't resurrect the bracket. Unconditional on
+    // the from-status — cancel from `created`/`registration` has no matches
+    // (the bracket is generated at start), and cancel from `completed` finds
+    // no live matches; both are no-ops.
+    if next_status == TournamentStatus::Canceled {
+        let canceled_matches =
+            tournament::cancel_unfinished_matches_for_tournament(&mut *tx, tournament_id)
+                .await
+                .wrap_err("Failed to cancel unfinished matches")?;
+        if canceled_matches > 0 {
+            tracing::info!(
+                tournament_id = %tournament_id,
+                canceled_matches = canceled_matches,
+                "Canceled in-flight tournament matches"
+            );
+        }
+    }
+
     tx.commit()
         .await
         .wrap_err("Failed to commit status transaction")?;
@@ -2123,7 +2143,10 @@ async fn start_tournament_in_tx(
     )
     .await
     .wrap_err("Failed to set tournament in progress")?;
-    tournament::set_tournament_current_round(&mut **tx, t.tournament_id, 1)
+    // `t` comes from get_tournament_for_update (row locked) and is 0 for
+    // both fresh and reset tournaments; the CAS's `status = 'in_progress'
+    // guard holds because the status flip above ran in this transaction.
+    tournament::set_tournament_current_round(&mut **tx, t.tournament_id, 1, t.current_round)
         .await
         .wrap_err("Failed to set current round")?;
 
@@ -2362,7 +2385,11 @@ pub async fn reset_tournament(
     tournament::delete_matches_for_tournament(&mut *tx, tournament_id)
         .await
         .wrap_err("Failed to delete tournament matches")?;
-    tournament::set_tournament_current_round(&mut *tx, tournament_id, 0)
+    // ORDER IS LOAD-BEARING: the round reset must run BEFORE the status flip
+    // below — the current_round CAS guard requires `status = 'in_progress'`,
+    // which still holds at this point in the transaction. Reordering would
+    // make reset fail.
+    tournament::set_tournament_current_round(&mut *tx, tournament_id, 0, t.current_round)
         .await
         .wrap_err("Failed to reset current round")?;
     tournament::set_tournament_status(
