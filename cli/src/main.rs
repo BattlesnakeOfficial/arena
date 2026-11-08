@@ -1098,8 +1098,8 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/api/games/abc/details"))
             .and(header("Authorization", "Bearer test-token"))
-            .expect(1)
             .respond_with(ResponseTemplate::new(200).set_body_json(watch_body("failed")))
+            .expect(1)
             .mount(&server)
             .await;
         let client = reqwest::Client::new();
@@ -1119,8 +1119,8 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/api/games/abc/details"))
             .and(header("Authorization", "Bearer test-token"))
-            .expect(1)
             .respond_with(ResponseTemplate::new(200).set_body_json(watch_body("finished")))
+            .expect(1)
             .mount(&server)
             .await;
         let client = reqwest::Client::new();
