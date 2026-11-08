@@ -286,14 +286,16 @@ impl SnakeRuntime {
         result: &engine_core::move_response::MoveResult,
         timeout_ms: i64,
     ) -> Self {
+        use engine_core::move_response::MoveOutcome;
         Self {
             latency: engine_core::wire::reported_latency_ms(
                 result.latency_ms,
-                result.timed_out,
+                result.outcome.timed_out(),
                 timeout_ms,
             ),
-            status_code: i32::from(result.status_code.unwrap_or(0)),
-            request_failed: result.timed_out || (result.errored && result.status_code == Some(200)),
+            status_code: i32::from(result.outcome.status_code().unwrap_or(0)),
+            request_failed: result.outcome.timed_out()
+                || matches!(result.outcome, MoveOutcome::Invalid { status_code: 200 }),
             shout: result.shout.clone().unwrap_or_default(),
         }
     }
@@ -1077,10 +1079,8 @@ mod tests {
                     snake_id: "snk_0".into(),
                     direction: rules::Direction::Up,
                     latency_ms: Some(47),
-                    timed_out: false,
-                    status_code: Some(200),
+                    outcome: engine_core::move_response::MoveOutcome::Ok { status_code: 200 },
                     shout: None,
-                    errored: false,
                 },
                 500,
             )),
@@ -1093,10 +1093,8 @@ mod tests {
                     snake_id: "snk_0".into(),
                     direction: rules::Direction::Up,
                     latency_ms: None,
-                    timed_out: true,
-                    status_code: None,
+                    outcome: engine_core::move_response::MoveOutcome::TimedOut,
                     shout: None,
-                    errored: false,
                 },
                 500,
             )),
@@ -1115,14 +1113,13 @@ mod tests {
     /// A5: the two Go error strings, with Rule 4's precedence.
     #[test]
     fn error_strings_match_go() {
-        let move_result = |timed_out, errored, status| engine_core::move_response::MoveResult {
+        use engine_core::move_response::MoveOutcome;
+        let move_result = |outcome| engine_core::move_response::MoveResult {
             snake_id: "snk_0".into(),
             direction: rules::Direction::Up,
             latency_ms: None,
-            timed_out,
-            status_code: status,
+            outcome,
             shout: None,
-            errored,
         };
         let error_of = |rt: &SnakeRuntime| {
             build_frame(
@@ -1137,16 +1134,16 @@ mod tests {
         // Timeout (no answer at all).
         assert_eq!(
             error_of(&SnakeRuntime::from_move_result(
-                &move_result(true, false, None),
+                &move_result(MoveOutcome::TimedOut),
                 500
             )),
             "0:Error communicating with server"
         );
-        // Transport failure: every transport arm sets timed_out, so it
-        // lands on the 0-string too.
+        // Transport failure: every transport arm is a timeout outcome, so
+        // it lands on the 0-string too.
         assert_eq!(
             error_of(&SnakeRuntime::from_move_result(
-                &move_result(true, false, None),
+                &move_result(MoveOutcome::Transport),
                 500
             )),
             "0:Error communicating with server"
@@ -1154,7 +1151,7 @@ mod tests {
         // Answered 503: Go checks status != 200.
         assert_eq!(
             error_of(&SnakeRuntime::from_move_result(
-                &move_result(false, true, Some(503)),
+                &move_result(MoveOutcome::HttpError { status_code: 503 }),
                 500
             )),
             "7:Bad HTTP status code 503"
@@ -1163,7 +1160,7 @@ mod tests {
         // valid-JSON-invalid-move also lands here; Go sent "").
         assert_eq!(
             error_of(&SnakeRuntime::from_move_result(
-                &move_result(false, true, Some(200)),
+                &move_result(MoveOutcome::Invalid { status_code: 200 }),
                 500
             )),
             "0:Error communicating with server"
@@ -1171,7 +1168,7 @@ mod tests {
         // Clean 200.
         assert_eq!(
             error_of(&SnakeRuntime::from_move_result(
-                &move_result(false, false, Some(200)),
+                &move_result(MoveOutcome::Ok { status_code: 200 }),
                 500
             )),
             ""
@@ -1179,7 +1176,7 @@ mod tests {
         // 201 with a valid move: Go's `!= 200` rule still gets the 7-string.
         assert_eq!(
             error_of(&SnakeRuntime::from_move_result(
-                &move_result(false, false, Some(201)),
+                &move_result(MoveOutcome::Ok { status_code: 201 }),
                 500
             )),
             "7:Bad HTTP status code 201"

@@ -470,8 +470,8 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
                         game_battlesnake_id: id,
                         direction: result.direction.to_string(),
                         latency_ms: result.latency_ms,
-                        timed_out: result.timed_out,
-                        errored: result.errored,
+                        timed_out: result.outcome.timed_out(),
+                        errored: result.outcome.errored(),
                     }
                 })
             })
@@ -697,7 +697,7 @@ pub(crate) fn apply_turn_results(
             wire::SnakeContext {
                 latency_ms: wire::reported_latency_ms(
                     result.latency_ms,
-                    result.timed_out,
+                    result.outcome.timed_out(),
                     engine_game.meta.timeout,
                 ),
                 shout: result.shout.clone(),
@@ -2117,10 +2117,8 @@ mod tests {
                     snake_id: id,
                     direction,
                     latency_ms: Some(50 + i as i64),
-                    timed_out: false,
                     shout: None,
-                    status_code: Some(200),
-                    errored: false,
+                    outcome: crate::snake_client::MoveOutcome::Ok { status_code: 200 },
                 });
             }
 
@@ -2149,8 +2147,8 @@ mod tests {
                             game_battlesnake_id: id,
                             direction: result.direction.to_string(),
                             latency_ms: result.latency_ms,
-                            timed_out: result.timed_out,
-                            errored: result.errored,
+                            timed_out: result.outcome.timed_out(),
+                            errored: result.outcome.errored(),
                         }
                     })
                 })

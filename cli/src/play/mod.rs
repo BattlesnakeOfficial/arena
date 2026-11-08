@@ -623,7 +623,7 @@ pub async fn run_game(
                 SnakeContext {
                     latency_ms: wire::reported_latency_ms(
                         result.latency_ms,
-                        result.timed_out,
+                        result.outcome.timed_out(),
                         game.meta.timeout,
                     ),
                     shout: result.shout.clone(),
