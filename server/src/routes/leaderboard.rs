@@ -1402,8 +1402,8 @@ mod owner_name_route_tests {
 
     async fn owner(pool: &PgPool, github_id: i64, login: &str, display_name: Option<&str>) -> Uuid {
         sqlx::query_scalar!(
-            "INSERT INTO users (external_github_id, github_login, github_access_token, display_name)
-             VALUES ($1, $2, 'token', $3) RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login, display_name)
+             VALUES ($1, $2, $3) RETURNING user_id",
             github_id,
             login,
             display_name
@@ -1734,8 +1734,8 @@ mod column_route_tests {
         .await
         .unwrap();
         let user_id = sqlx::query_scalar!(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES ($1, $2, 'token') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES ($1, $2) RETURNING user_id",
             github_id,
             format!("gh-{github_id}")
         )

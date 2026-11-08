@@ -5,8 +5,8 @@ async function seedOpponentCatalog(prefix: string, count: number) {
   const login = `${prefix}_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
   const externalId = Date.now() * 1000 + Math.floor(Math.random() * 1000);
   const [owner] = await query<{ user_id: string }>(
-    `INSERT INTO users (external_github_id, github_login, github_access_token)
-     VALUES ($1, $2, 'test-token') RETURNING user_id`,
+    `INSERT INTO users (external_github_id, github_login)
+     VALUES ($1, $2) RETURNING user_id`,
     [externalId, login],
   );
   const snakes: { battlesnake_id: string; name: string }[] = [];

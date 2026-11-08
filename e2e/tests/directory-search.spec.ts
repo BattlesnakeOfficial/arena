@@ -51,8 +51,8 @@ test('player search preserves its query across filters and pages and searches ha
   const term = `Player ${Date.now()} 100%_&+ café`;
   const loginPrefix = `lookup-${Date.now()}`;
   const users = await query<{ user_id: string }>(
-    `INSERT INTO users (external_github_id, github_login, github_access_token, display_name)
-     SELECT $1::bigint + i, $2 || '-' || i, 'test-token', $3 || ' ' || to_char(i, 'FM000')
+    `INSERT INTO users (external_github_id, github_login, display_name)
+     SELECT $1::bigint + i, $2 || '-' || i, $3 || ' ' || to_char(i, 'FM000')
      FROM generate_series(1, 52) i RETURNING user_id`,
     [Date.now() * 1000 + 700_000, loginPrefix, term],
   );

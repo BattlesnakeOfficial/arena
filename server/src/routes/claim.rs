@@ -13,7 +13,7 @@ use crate::{
     django_password,
     errors::ServerResult,
     flasher::Flasher,
-    models::{claim_email_token, imported_account},
+    models::imported_account,
     routes::auth::CurrentUser,
     state::AppState,
 };
@@ -525,23 +525,20 @@ pub async fn complete_email_claim(
             .into_response()
     };
 
-    let Some(imported_account_id) =
-        claim_email_token::consume(&state.db, &form.token, user.user_id)
-            .await
-            .wrap_err("Failed to consume claim token")?
-    else {
-        return Ok(failed(page_factory));
-    };
-
-    let summary = imported_account::claim_account(&state.db, imported_account_id, user.user_id)
+    let outcome = imported_account::redeem_email_claim(&state.db, &form.token, user.user_id)
         .await
-        .wrap_err("Failed to claim imported account")?;
+        .wrap_err("Failed to claim imported account via email link")?;
 
-    let Some(summary) = summary else {
-        // The account got claimed between link request and click (e.g. by
-        // GitHub auto-link in another session). The token is spent either
-        // way — a claimed account has nothing left to unlock.
-        return Ok(failed(page_factory));
+    let summary = match outcome {
+        imported_account::EmailClaimOutcome::InvalidToken
+        | imported_account::EmailClaimOutcome::AlreadyClaimed => {
+            // Unknown/expired/used/wrong-user token, or the account got
+            // claimed between link request and click (e.g. by GitHub
+            // auto-link in another session — the token is spent either
+            // way; a claimed account has nothing left to unlock).
+            return Ok(failed(page_factory));
+        }
+        imported_account::EmailClaimOutcome::Claimed(summary) => summary,
     };
 
     tracing::info!(

@@ -555,7 +555,7 @@ mod tests {
     async fn next_backfill_schedule_resumes_an_unfinished_page(pool: sqlx::PgPool) {
         let app = AppState::test_from_pool(pool.clone());
         for number in 0..27_i64 {
-            sqlx::query("INSERT INTO users (external_github_id, github_login, github_access_token) VALUES ($1, $2, '')")
+            sqlx::query("INSERT INTO users (external_github_id, github_login) VALUES ($1, $2)")
                 .bind(1644300 + number)
                 .bind(format!("backfill-resume-{number}"))
                 .execute(&pool).await.unwrap();

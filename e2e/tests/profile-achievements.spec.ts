@@ -15,8 +15,8 @@ test.afterEach(async () => {
 
 async function seedUser(login: string): Promise<string> {
   const [user] = await query<{ user_id: string }>(
-    `INSERT INTO users (external_github_id, github_login, github_access_token)
-     VALUES ($1, $2, '') RETURNING user_id`,
+    `INSERT INTO users (external_github_id, github_login)
+     VALUES ($1, $2) RETURNING user_id`,
     [Date.now() * 1000 + Math.floor(Math.random() * 1000), login],
   );
   seededUsers.push(user.user_id);

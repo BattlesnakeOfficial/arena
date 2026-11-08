@@ -500,8 +500,8 @@ mod tests {
     #[sqlx::test(migrations = "../migrations")]
     async fn game_projection_carries_engine_region(pool: PgPool) -> cja::Result<()> {
         let user_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (1480001, 'region-owner', 'test') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (1480001, 'region-owner') RETURNING user_id",
         )
         .fetch_one(&pool)
         .await?;
@@ -593,8 +593,8 @@ mod tests {
     #[sqlx::test(migrations = "../migrations")]
     async fn profile_membership_winner_and_stat_semantics(pool: PgPool) -> cja::Result<()> {
         let user_id = sqlx::query_scalar::<_, Uuid>(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (1482001, 'profile-model', 'test') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (1482001, 'profile-model') RETURNING user_id",
         )
         .fetch_one(&pool)
         .await?;
@@ -731,8 +731,8 @@ mod tests {
     #[sqlx::test(migrations = "../migrations")]
     async fn shared_first_place_is_a_draw_on_the_profile(pool: PgPool) -> cja::Result<()> {
         let user_id = sqlx::query_scalar::<_, Uuid>(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (1640001, 'profile-draw', 'test') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (1640001, 'profile-draw') RETURNING user_id",
         )
         .fetch_one(&pool)
         .await?;
@@ -767,8 +767,8 @@ mod tests {
     #[sqlx::test(migrations = "../migrations")]
     async fn profile_paging_keeps_full_history_stats(pool: PgPool) -> cja::Result<()> {
         let user_id = sqlx::query_scalar::<_, Uuid>(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (1482002, 'profile-paging', 'test') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (1482002, 'profile-paging') RETURNING user_id",
         )
         .fetch_one(&pool)
         .await?;

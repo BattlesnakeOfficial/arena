@@ -1927,8 +1927,8 @@ mod tests {
     // fixtures don't need entries in the sqlx offline cache.
     async fn fixture_user_and_snake(pool: &PgPool) -> cja::Result<(Uuid, Uuid)> {
         let user_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES ($1, $2, $3) RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES ($1, $2) RETURNING user_id",
         )
         .bind(424_242_i64)
         .bind("test-user")

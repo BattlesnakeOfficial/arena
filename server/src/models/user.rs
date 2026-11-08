@@ -390,8 +390,8 @@ mod tests {
 
     async fn create_user(pool: &PgPool, github_id: i64) -> cja::Result<Uuid> {
         let row = sqlx::query!(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES ($1, $2, 'test-token')
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES ($1, $2)
              RETURNING user_id",
             github_id,
             format!("gh-user-{github_id}"),
@@ -410,8 +410,8 @@ mod tests {
         display_name: Option<&str>,
     ) -> cja::Result<Uuid> {
         let row = sqlx::query!(
-            "INSERT INTO users (external_github_id, github_login, github_access_token, display_name)
-             VALUES ($1, $2, 'test-token', $3)
+            "INSERT INTO users (external_github_id, github_login, display_name)
+             VALUES ($1, $2, $3)
              RETURNING user_id",
             github_id,
             login,

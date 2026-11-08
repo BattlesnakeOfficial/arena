@@ -182,8 +182,8 @@ mod tests {
         pool: PgPool,
     ) -> cja::Result<()> {
         let user = sqlx::query_scalar!(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (1613, 'sweeper-owner', 'test') RETURNING user_id"
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (1613, 'sweeper-owner') RETURNING user_id"
         )
         .fetch_one(&pool)
         .await?;
@@ -283,8 +283,8 @@ mod tests {
         let control = insert_game(&pool, "running", base_time - Duration::hours(3)).await?;
 
         let user_id = sqlx::query_scalar!(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (424242, 'test-user', 'test-token') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (424242, 'test-user') RETURNING user_id",
         )
         .fetch_one(&pool)
         .await?;
@@ -382,8 +382,8 @@ mod tests {
     async fn stale_game_of_a_canceled_match_is_failed(pool: PgPool) -> cja::Result<()> {
         let base_time = Utc::now();
         let user_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (2180, 'dev2180-user', 'test') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (2180, 'dev2180-user') RETURNING user_id",
         )
         .fetch_one(&pool)
         .await?;

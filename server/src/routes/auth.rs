@@ -557,7 +557,7 @@ mod tests {
     #[sqlx::test(migrations = "../migrations")]
     async fn session_and_bearer_extractors_record_authenticated_activity_only(db: sqlx::PgPool) {
         let user_id = sqlx::query_scalar!(
-            "INSERT INTO users(external_github_id, github_login, github_access_token) VALUES (1, 'extractor', '') RETURNING user_id"
+            "INSERT INTO users(external_github_id, github_login) VALUES (1, 'extractor') RETURNING user_id"
         ).fetch_one(&db).await.unwrap();
         let session_id = sqlx::query_scalar!(
             "INSERT INTO sessions(user_id) VALUES ($1) RETURNING session_id",
@@ -637,7 +637,7 @@ mod tests {
     #[sqlx::test(migrations = "../migrations")]
     async fn token_lookup_failure_is_500_not_401(db: sqlx::PgPool) {
         let user_id = sqlx::query_scalar!(
-            "INSERT INTO users(external_github_id, github_login, github_access_token) VALUES (1, 'lookup', '') RETURNING user_id"
+            "INSERT INTO users(external_github_id, github_login) VALUES (1, 'lookup') RETURNING user_id"
         ).fetch_one(&db).await.unwrap();
         let token = create_api_token(
             &db,
@@ -682,7 +682,7 @@ mod tests {
     #[sqlx::test(migrations = "../migrations")]
     async fn activity_write_failure_does_not_fail_auth_or_retry_today(db: sqlx::PgPool) {
         let user_id = sqlx::query_scalar!(
-            "INSERT INTO users(external_github_id, github_login, github_access_token) VALUES (1, 'failure', '') RETURNING user_id"
+            "INSERT INTO users(external_github_id, github_login) VALUES (1, 'failure') RETURNING user_id"
         ).fetch_one(&db).await.unwrap();
         let session_id = sqlx::query_scalar!(
             "INSERT INTO sessions(user_id) VALUES ($1) RETURNING session_id",

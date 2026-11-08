@@ -850,8 +850,8 @@ mod tests {
         // Random identifiers so the fixture can be used more than once per test.
         let github_id = i64::from(Uuid::new_v4().as_fields().0);
         let user_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES ($1, $2, $3) RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES ($1, $2) RETURNING user_id",
         )
         .bind(github_id)
         .bind(format!("test-user-{github_id}"))
