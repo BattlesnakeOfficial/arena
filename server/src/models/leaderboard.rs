@@ -247,10 +247,12 @@ pub async fn get_or_create_entry(
     // and serializes against `battlesnake::delete_battlesnake`'s row lock, so a
     // join can't re-enable an entry while the snake is being deleted. The
     // DO UPDATE guard keeps a 'deleted'-marked entry terminal even if the
-    // conflict fires. Keep the deleted_at IS NULL predicate on the battlesnakes
-    // scan itself — see the lock-harness test in this module for why the
-    // predicate must stay inside the locked scan (EvalPlanQual re-checks it
-    // against the post-wait row version).
+    // conflict fires. Keep the deleted_at IS NULL predicate on the locked
+    // battlesnakes scan itself: when FOR SHARE waits on delete's row lock,
+    // READ COMMITTED re-checks only the locked relation's own predicates
+    // against the committed row version (EvalPlanQual). A liveness check
+    // anywhere else (a pre-check, a CTE) reads the pre-wait snapshot and lets
+    // the join through.
     let entry = sqlx::query_as!(
         LeaderboardEntry,
         r#"INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id)
@@ -1695,8 +1697,10 @@ mod tests {
     /// The race, replayed deterministically: `delete_battlesnake` holds the
     /// snake row locked with both of its writes applied (but uncommitted)
     /// while a join runs. The join must not resurrect the entry after the
-    /// delete commits. Both writes happen before the join is spawned — see
-    /// the plan for why the reverse order tests the harness, not the bug.
+    /// delete commits. Both writes happen before the join is spawned: the old
+    /// upsert never touches `battlesnakes`, so a join spawned before delete's
+    /// entry write has nothing to block on, finishes first, and the test
+    /// would pass on the old SQL.
     #[sqlx::test(migrations = "../migrations")]
     async fn join_cannot_resurrect_an_entry_while_delete_holds_the_snake_row(
         pool: PgPool,
