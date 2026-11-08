@@ -136,10 +136,9 @@ impl GameMode {
     pub fn default_game_over_rule(self) -> GameOverRule {
         match self {
             GameMode::Solo => GameOverRule::AllSnakesDead,
-            GameMode::Standard
-            | GameMode::Royale
-            | GameMode::Constrictor
-            | GameMode::SnailMode => GameOverRule::LastSnakeStanding,
+            GameMode::Standard | GameMode::Royale | GameMode::Constrictor | GameMode::SnailMode => {
+                GameOverRule::LastSnakeStanding
+            }
         }
     }
 }
@@ -840,11 +839,17 @@ mod tests {
     fn game_over_rule_decides_for_the_same_board() {
         let mut server = game_with_snakes(GameMode::Standard, 1, 0);
         server.meta.game_over_rule = GameOverRule::LastSnakeStanding;
-        assert!(is_game_over(&server), "1 alive snake ends a LastSnakeStanding game");
+        assert!(
+            is_game_over(&server),
+            "1 alive snake ends a LastSnakeStanding game"
+        );
 
         let mut cli = game_with_snakes(GameMode::Standard, 1, 0);
         cli.meta.game_over_rule = GameOverRule::AllSnakesDead;
-        assert!(!is_game_over(&cli), "1 alive snake keeps an AllSnakesDead game running");
+        assert!(
+            !is_game_over(&cli),
+            "1 alive snake keeps an AllSnakesDead game running"
+        );
 
         // Once that snake dies, over under either rule.
         let mut dead = game_with_snakes(GameMode::Standard, 0, 1);
@@ -911,17 +916,25 @@ mod tests {
             11,
             11,
             GameMode::Standard,
-            &[InitialSnake {
-                id: "wall".into(),
-                name: "Wall".into(),
-            }, InitialSnake {
-                id: "shield".into(),
-                name: "Shield".into(),
-            }],
+            &[
+                InitialSnake {
+                    id: "wall".into(),
+                    name: "Wall".into(),
+                },
+                InitialSnake {
+                    id: "shield".into(),
+                    name: "Shield".into(),
+                },
+            ],
         )
         .expect("valid initial game");
         // Place the walker on the left edge with its body behind it.
-        let walker = game.board.snakes.iter_mut().find(|s| s.id == "wall").unwrap();
+        let walker = game
+            .board
+            .snakes
+            .iter_mut()
+            .find(|s| s.id == "wall")
+            .unwrap();
         walker.body = vec![Point::new(0, 9), Point::new(1, 9), Point::new(2, 9)];
         let moves = vec![
             ("wall".to_string(), Direction::Left),
@@ -929,7 +942,10 @@ mod tests {
         ];
         advance_turn(&mut game, &moves, &mut rng).expect("valid turn");
         let walker = game.board.snakes.iter().find(|s| s.id == "wall").unwrap();
-        assert_eq!(walker.eliminated_cause, rules::EliminationCause::OutOfBounds);
+        assert_eq!(
+            walker.eliminated_cause,
+            rules::EliminationCause::OutOfBounds
+        );
         assert_eq!(
             walker.eliminated_on_turn, game.board.turn,
             "wall death: eliminated_on_turn must equal the post-increment turn"
@@ -944,13 +960,16 @@ mod tests {
             11,
             11,
             GameMode::Standard,
-            &[InitialSnake {
-                id: "a".into(),
-                name: "A".into(),
-            }, InitialSnake {
-                id: "b".into(),
-                name: "B".into(),
-            }],
+            &[
+                InitialSnake {
+                    id: "a".into(),
+                    name: "A".into(),
+                },
+                InitialSnake {
+                    id: "b".into(),
+                    name: "B".into(),
+                },
+            ],
         )
         .expect("valid initial game");
         // b: head (6,4), body trailing left; moving Up leaves (5,4) as its
