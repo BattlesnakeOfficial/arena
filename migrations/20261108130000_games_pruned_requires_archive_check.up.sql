@@ -7,5 +7,6 @@ SET LOCAL lock_timeout = '5s';
 
 ALTER TABLE games
     ADD CONSTRAINT games_pruned_requires_archive_check
-    CHECK (turns_pruned_at IS NULL OR turns_pruned_at IS NOT NULL)
+    CHECK (turns_pruned_at IS NULL
+           OR (archived_at IS NOT NULL AND gcs_path IS NOT NULL))
     NOT VALID;
