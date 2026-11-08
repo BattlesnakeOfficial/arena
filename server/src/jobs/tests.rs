@@ -1646,10 +1646,12 @@ async fn transient_mailgun_failure_leaves_null_outcome_and_logs(pool: PgPool) ->
         .await?;
     assert_eq!(logs, 1, "the failed attempt still logged and spent budget");
 
-    // Recovery: the most recently mounted matching mock (200) wins; the
-    // retry sends successfully.
+    // Recovery: wiremock matches the lowest priority number first (ties by
+    // insertion order), so the 200 mock needs `.with_priority(1)` to beat
+    // the already-mounted 503; the retry then sends successfully.
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(200))
+        .with_priority(1)
         .mount(&server)
         .await;
     job.run(state).await?;

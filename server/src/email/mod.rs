@@ -7,11 +7,17 @@
 //!
 //! Transport failures are classified at the type level by [`SendError`]: a
 //! 4xx other than 429 is a permanent [`SendError::Rejected`] (retrying the
-//! identical request cannot succeed), a response-wait timeout is
-//! [`SendError::TimedOut`] (the request was on the wire; delivery status
-//! unknown), and everything else — 5xx, 429, connection failures — is
-//! [`SendError::Transient`] (definitely not delivered; retry, bounded by the
-//! per-recipient hourly cap). Unknown statuses default to transient.
+//! identical request cannot succeed). A transport error is definite
+//! non-delivery — [`SendError::Transient`] — only when it failed in the
+//! connect phase ([`reqwest::Error::is_connect`]: refused, DNS, TLS, connect
+//! timeout): no request bytes were written, so Mailgun cannot have the
+//! message. Every other transport failure — a response-wait timeout, or the
+//! connection dying after the request was on the wire — is
+//! [`SendError::NoResponse`]: Mailgun may have accepted it, delivery status
+//! unknown. HTTP-level failures that are 5xx, 429, or otherwise unexpected
+//! are [`SendError::Transient`] (the server answered, so it did not accept
+//! the message); unknown statuses default to transient, safe because the
+//! per-recipient hourly cap bounds retries.
 
 pub mod messages;
 
@@ -50,15 +56,19 @@ pub enum SendError {
         status: reqwest::StatusCode,
         body: String,
     },
-    /// The request was sent and the client timed out waiting for the
-    /// response. Mailgun may have accepted the message: delivery status
-    /// is unknown. Callers that must not risk a duplicate (bulk sends to
-    /// cold addresses) should treat this as if delivered.
+    /// No response was received after the request may have been sent: a
+    /// response-wait timeout, or the connection lost after Mailgun received
+    /// the request (reset, closed mid-response). Mailgun may have accepted
+    /// the message: delivery status is unknown. Callers that must not risk
+    /// a duplicate (bulk sends to cold addresses) should treat this as if
+    /// delivered.
     #[error(transparent)]
-    TimedOut(color_eyre::eyre::Report),
+    NoResponse(color_eyre::eyre::Report),
     /// The message was definitely not delivered: 5xx, 429, other
-    /// non-2xx, connection failure, or an internal error before any HTTP
-    /// attempt. The caller should retry.
+    /// non-2xx (the server answered and did not accept it), a connect-phase
+    /// failure (connection refused, DNS, TLS, connect timeout — no request
+    /// bytes were written), or an internal error before any HTTP attempt.
+    /// The caller should retry.
     #[error(transparent)]
     Transient(color_eyre::eyre::Report),
 }
@@ -71,7 +81,7 @@ impl Mailer {
     /// a suppressed send still spends budget, and a transport error cannot
     /// roll the log row back: every send attempt counts toward the cap. A
     /// permanent Mailgun rejection returns [`SendOutcome::Failed`]
-    /// (terminal); timeouts and transient failures propagate as
+    /// (terminal); no-response and transient failures propagate as
     /// [`SendError`] for retry. Every production send should come through
     /// here; raw [`Mailer::send`] is the transport underneath.
     pub async fn send_limited(
@@ -134,7 +144,7 @@ impl Mailer {
                 );
                 Ok(SendOutcome::Failed)
             }
-            Err(error @ (SendError::TimedOut(_) | SendError::Transient(_))) => Err(error),
+            Err(error @ (SendError::NoResponse(_) | SendError::Transient(_))) => Err(error),
         }
     }
 }
@@ -192,11 +202,11 @@ impl Mailer {
     /// Send a message. When disabled, logs and returns `Ok(())` without any
     /// network call — so callers get uniform behavior whether or not creds
     /// are present. When enabled, POSTs the Mailgun form and classifies any
-    /// failure into [`SendError`]: permanent 4xx rejection, response-wait
-    /// timeout (delivery unknown), or transient. This method enforces no
-    /// timeout itself — the client's timeout governs, so every construction
-    /// site must build the client with one (`state.rs` sets 10s;
-    /// [`Mailer::disabled`] never sends).
+    /// failure into [`SendError`]: permanent 4xx rejection, no-response
+    /// (delivery unknown), or transient. This method enforces no timeout
+    /// itself — the client's timeout governs, so every construction site
+    /// must build the client with one (`state.rs` sets a 10s total timeout
+    /// and a 5s connect timeout; [`Mailer::disabled`] never sends).
     pub async fn send(&self, message: &EmailMessage) -> Result<(), SendError> {
         let Some(config) = &self.config else {
             tracing::info!(subject = %message.subject, "Email disabled (no Mailgun config); not sending");
@@ -219,19 +229,25 @@ impl Mailer {
             .await
         {
             Ok(response) => response,
-            // Response-wait timeout: the request was on the wire, so Mailgun
-            // may have accepted it. Connect-phase failures (including connect
-            // timeouts) take the Transient arm below — no request bytes were
-            // written, so delivery is definitely not-delivered.
-            Err(error) if error.is_timeout() && !error.is_connect() => {
-                return Err(SendError::TimedOut(
-                    color_eyre::eyre::Report::new(error).wrap_err("Timed out waiting for Mailgun"),
+            // Connect-phase failure (refused, DNS, TLS, connect timeout):
+            // no request bytes were written, so the message was definitely
+            // not delivered — retry. This is the *only* transport arm that
+            // is definite non-delivery: `state.rs` sets `connect_timeout`
+            // alongside the client's total timeout, so a connect-phase
+            // deadline surfaces as a connect error here. (A total-timeout
+            // deadline that fires while still connecting has no connect
+            // source and correctly falls through to the ambiguous arm.)
+            Err(error) if error.is_connect() => {
+                return Err(SendError::Transient(
+                    color_eyre::eyre::Report::new(error).wrap_err("Failed to connect to Mailgun"),
                 ));
             }
+            // Every other transport failure — a response-wait timeout, or
+            // the connection lost after the request was on the wire — leaves
+            // delivery status unknown: Mailgun may have accepted it.
             Err(error) => {
-                return Err(SendError::Transient(
-                    color_eyre::eyre::Report::new(error)
-                        .wrap_err("Failed to send request to Mailgun"),
+                return Err(SendError::NoResponse(
+                    color_eyre::eyre::Report::new(error).wrap_err("No response from Mailgun"),
                 ));
             }
         };
@@ -431,7 +447,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connection_refusal_is_transient_not_timeout() {
+    async fn connection_refusal_is_transient_not_no_response() {
         // Bind a listener, note the port, then drop it: connections to the
         // freed port are refused — the request never reached the wire.
         // (A dropped wiremock MockServer won't do: pooled servers keep
@@ -443,7 +459,7 @@ mod tests {
         let mailer = configured_mailer(format!("http://127.0.0.1:{port}"), reqwest::Client::new());
         let err = mailer.send(&test_message()).await.unwrap_err();
         assert!(matches!(err, SendError::Transient(_)), "got {err:?}");
-        assert!(!matches!(err, SendError::TimedOut(_)));
+        assert!(!matches!(err, SendError::NoResponse(_)));
     }
 
     #[tokio::test]
@@ -496,7 +512,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn timeout_classified_as_timed_out() {
+    async fn timeout_classified_as_no_response() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .respond_with(
@@ -511,7 +527,7 @@ mod tests {
             .unwrap();
         let mailer = configured_mailer(server.uri(), client);
         let err = mailer.send(&test_message()).await.unwrap_err();
-        assert!(matches!(err, SendError::TimedOut(_)), "got {err:?}");
+        assert!(matches!(err, SendError::NoResponse(_)), "got {err:?}");
     }
 
     #[sqlx::test(migrations = "../migrations")]
@@ -582,15 +598,15 @@ mod tests {
         let mailer = configured_mailer(server.uri(), client);
         let msg = test_message();
 
-        // Two timeouts: wiremock received both requests, so both attempts
-        // are logged and spent budget.
+        // Two no-response failures: wiremock received both requests, so
+        // both attempts are logged and spent budget.
         assert!(matches!(
             mailer.send_limited(&pool, 2, "test", &msg).await,
-            Err(SendError::TimedOut(_))
+            Err(SendError::NoResponse(_))
         ));
         assert!(matches!(
             mailer.send_limited(&pool, 2, "test", &msg).await,
-            Err(SendError::TimedOut(_))
+            Err(SendError::NoResponse(_))
         ));
         // The third attempt is suppressed by the cap before any HTTP call.
         assert_eq!(

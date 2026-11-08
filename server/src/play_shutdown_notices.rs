@@ -475,10 +475,10 @@ pub struct BatchCounts {
 
 enum NoticeOutcome {
     Sent,
-    /// Send failed (permanent rejection or timeout — `failed` recorded,
-    /// never re-sent; or definite transient failure — reservation released);
-    /// stops the batch so a Mailgun outage costs at most one account per
-    /// 5-minute tick.
+    /// Send failed (permanent rejection or no response — `failed`
+    /// recorded, never re-sent; or definite transient failure — reservation
+    /// released); stops the batch so a Mailgun outage costs at most one
+    /// account per 5-minute tick.
     Failed,
     Skipped,
     Deferred,
@@ -553,15 +553,16 @@ async fn send_notice(
         // Release the reservation so a later batch retries.
         Ok(SendOutcome::RateLimited) => (None, NoticeOutcome::Deferred),
         Ok(SendOutcome::Disabled) => (None, NoticeOutcome::Disabled),
-        // Response-wait timeout: Mailgun may have accepted the message. Keep
-        // the `failed` row (drop this account for the wave) rather than risk
-        // a duplicate to a cold address.
-        Err(SendError::TimedOut(error)) => {
+        // No response after the request may have been sent (response-wait
+        // timeout, or the connection lost after Mailgun received it): the
+        // message may be delivered. Keep the `failed` row (drop this account
+        // for the wave) rather than risk a duplicate to a cold address.
+        Err(SendError::NoResponse(error)) => {
             tracing::warn!(
                 imported_account_id = %recipient.imported_account_id,
                 wave = wave.number(),
                 error = format!("{error:#}"),
-                "Shutdown notice timed out; delivery unknown, not re-sending"
+                "Shutdown notice got no response; delivery unknown, not re-sending"
             );
             (Some("failed"), NoticeOutcome::Failed)
         }
@@ -1091,12 +1092,16 @@ mod tests {
         assert_eq!(statuses, vec![None, None, None]);
 
         // The release actually re-queues the account: a healthy batch picks
-        // one up and sends it successfully.
+        // one up and sends it successfully. wiremock matches the lowest
+        // priority number first (ties by insertion order), so the recovery
+        // mock needs `.with_priority(1)` to beat the already-mounted 503;
+        // the batch runs with limit 1 so it sends exactly one account.
         Mock::given(method("POST"))
             .respond_with(ResponseTemplate::new(200))
+            .with_priority(1)
             .mount(&server)
             .await;
-        let counts = send_batch(&state, &pool, Wave::First, 50).await.unwrap();
+        let counts = send_batch(&state, &pool, Wave::First, 1).await.unwrap();
         assert_eq!(counts.sent, 1);
         let sent: Vec<uuid::Uuid> = sqlx::query_scalar(
             "SELECT imported_account_id FROM play_shutdown_notices WHERE status = 'sent'",
@@ -1192,12 +1197,17 @@ mod tests {
         assert_eq!(statuses, vec![None, None, Some("failed".to_string())]);
 
         // Delivery is unknown, so the timed-out account must NOT be re-sent:
-        // a fast 200 batch sends a different account instead.
+        // a fast 200 batch sends a different account instead. The recovery
+        // mock takes `.with_priority(1)` to beat the already-mounted delayed
+        // mock (wiremock: lowest priority number wins, ties by insertion
+        // order), and the batch runs with limit 1 so exactly one of the two
+        // remaining accounts sends.
         Mock::given(method("POST"))
             .respond_with(ResponseTemplate::new(200))
+            .with_priority(1)
             .mount(&server)
             .await;
-        let counts = send_batch(&state, &pool, Wave::First, 50).await.unwrap();
+        let counts = send_batch(&state, &pool, Wave::First, 1).await.unwrap();
         assert_eq!(counts.sent, 1);
         let mut statuses = vec![
             status(&pool, a, Wave::First).await,
