@@ -225,16 +225,13 @@ impl Mailer {
             // written, so delivery is definitely not-delivered.
             Err(error) if error.is_timeout() && !error.is_connect() => {
                 return Err(SendError::TimedOut(
-                    Err::<(), _>(error)
-                        .wrap_err("Timed out waiting for Mailgun")
-                        .unwrap_err(),
+                    color_eyre::eyre::Report::new(error).wrap_err("Timed out waiting for Mailgun"),
                 ));
             }
             Err(error) => {
                 return Err(SendError::Transient(
-                    Err::<(), _>(error)
-                        .wrap_err("Failed to send request to Mailgun")
-                        .unwrap_err(),
+                    color_eyre::eyre::Report::new(error)
+                        .wrap_err("Failed to send request to Mailgun"),
                 ));
             }
         };
@@ -291,7 +288,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let mailer = configured_mailer(server.uri());
+        let mailer = configured_mailer(server.uri(), reqwest::Client::new());
         let msg = test_message();
 
         assert_eq!(
@@ -335,11 +332,7 @@ mod tests {
         Ok(())
     }
 
-    fn configured_mailer(base_url: String) -> Mailer {
-        configured_mailer_with_client(base_url, reqwest::Client::new())
-    }
-
-    fn configured_mailer_with_client(base_url: String, http: reqwest::Client) -> Mailer {
+    fn configured_mailer(base_url: String, http: reqwest::Client) -> Mailer {
         Mailer::new(
             Some(MailgunConfig {
                 api_key: TEST_API_KEY.to_string(),
@@ -377,7 +370,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let mailer = configured_mailer(server.uri());
+        let mailer = configured_mailer(server.uri(), reqwest::Client::new());
         mailer.send(&test_message()).await.unwrap();
         // Mock's .expect(1) verifies exactly one matching request on drop.
     }
@@ -393,7 +386,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let mailer = configured_mailer(server.uri());
+        let mailer = configured_mailer(server.uri(), reqwest::Client::new());
         let msg = EmailMessage {
             to: "   ".to_string(),
             subject: "hi".to_string(),
@@ -413,7 +406,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let mailer = configured_mailer(server.uri());
+        let mailer = configured_mailer(server.uri(), reqwest::Client::new());
         let err = mailer.send(&test_message()).await.unwrap_err();
         assert!(matches!(err, SendError::Rejected { .. }));
         assert!(err.to_string().contains("401"));
@@ -428,7 +421,7 @@ mod tests {
                 .mount(&server)
                 .await;
 
-            let mailer = configured_mailer(server.uri());
+            let mailer = configured_mailer(server.uri(), reqwest::Client::new());
             let err = mailer.send(&test_message()).await.unwrap_err();
             assert!(
                 matches!(err, SendError::Transient(_)),
@@ -447,7 +440,7 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         drop(listener);
 
-        let mailer = configured_mailer(format!("http://127.0.0.1:{port}"));
+        let mailer = configured_mailer(format!("http://127.0.0.1:{port}"), reqwest::Client::new());
         let err = mailer.send(&test_message()).await.unwrap_err();
         assert!(matches!(err, SendError::Transient(_)), "got {err:?}");
         assert!(!matches!(err, SendError::TimedOut(_)));
@@ -467,7 +460,7 @@ mod tests {
             .timeout(std::time::Duration::from_millis(150))
             .build()
             .unwrap();
-        let mailer = configured_mailer_with_client(server.uri(), client);
+        let mailer = configured_mailer(server.uri(), client);
         let err = mailer.send(&test_message()).await.unwrap_err();
         assert!(matches!(err, SendError::TimedOut(_)), "got {err:?}");
     }
@@ -481,7 +474,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let mailer = configured_mailer(server.uri());
+        let mailer = configured_mailer(server.uri(), reqwest::Client::new());
         let outcome = mailer
             .send_limited(&pool, 5, "test", &test_message())
             .await?;
@@ -503,7 +496,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let mailer = configured_mailer(server.uri());
+        let mailer = configured_mailer(server.uri(), reqwest::Client::new());
         let err = mailer
             .send_limited(&pool, 5, "test", &test_message())
             .await
@@ -537,7 +530,7 @@ mod tests {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_millis(150))
             .build()?;
-        let mailer = configured_mailer_with_client(server.uri(), client);
+        let mailer = configured_mailer(server.uri(), client);
         let msg = test_message();
 
         // Two timeouts: wiremock received both requests, so both attempts

@@ -923,11 +923,7 @@ mod tests {
         .unwrap()
     }
 
-    async fn mailgun_state(pool: &PgPool, server: &MockServer, hourly_limit: i64) -> AppState {
-        mailgun_state_with_client(pool, server, hourly_limit, reqwest::Client::new()).await
-    }
-
-    async fn mailgun_state_with_client(
+    async fn mailgun_state(
         pool: &PgPool,
         server: &MockServer,
         hourly_limit: i64,
@@ -1024,7 +1020,7 @@ mod tests {
         .unwrap();
 
         let server = mailgun().await;
-        let state = mailgun_state(&pool, &server, 5).await;
+        let state = mailgun_state(&pool, &server, 5, reqwest::Client::new()).await;
 
         let counts = send_batch(&state, &pool, Wave::First, 50).await.unwrap();
         assert_eq!(counts.sent, 1);
@@ -1074,7 +1070,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(503))
             .mount(&server)
             .await;
-        let state = mailgun_state(&pool, &server, 5).await;
+        let state = mailgun_state(&pool, &server, 5, reqwest::Client::new()).await;
 
         let counts = send_batch(&state, &pool, Wave::First, 50).await.unwrap();
         assert_eq!(counts.sent, 0);
@@ -1126,7 +1122,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(400))
             .mount(&server)
             .await;
-        let state = mailgun_state(&pool, &server, 5).await;
+        let state = mailgun_state(&pool, &server, 5, reqwest::Client::new()).await;
 
         let counts = send_batch(&state, &pool, Wave::First, 50).await.unwrap();
         assert_eq!(counts.failed, 1);
@@ -1182,7 +1178,7 @@ mod tests {
             .timeout(Duration::from_millis(150))
             .build()
             .unwrap();
-        let state = mailgun_state_with_client(&pool, &server, 5, client).await;
+        let state = mailgun_state(&pool, &server, 5, client).await;
 
         let counts = send_batch(&state, &pool, Wave::First, 50).await.unwrap();
         assert_eq!(counts.failed, 1);
@@ -1231,13 +1227,13 @@ mod tests {
         let fresh = imported(&pool, "fresh").await;
         let server = mailgun().await;
 
-        let limited = mailgun_state(&pool, &server, 0).await;
+        let limited = mailgun_state(&pool, &server, 0, reqwest::Client::new()).await;
         let counts = send_batch(&limited, &pool, Wave::First, 50).await.unwrap();
         assert_eq!(counts.deferred, 1);
         assert_eq!(status(&pool, fresh, Wave::First).await, None);
         assert!(sent_bodies(&server).await.is_empty());
 
-        let state = mailgun_state(&pool, &server, 5).await;
+        let state = mailgun_state(&pool, &server, 5, reqwest::Client::new()).await;
         let counts = send_batch(&state, &pool, Wave::First, 50).await.unwrap();
         assert_eq!(counts.sent, 1);
         assert_eq!(
@@ -1298,7 +1294,7 @@ mod tests {
         let server = mailgun().await;
         // Both waves go to the same recipient within the hour; the existing
         // limit convention is 5 (a limit below 2 would defer the second send).
-        let state = mailgun_state(&pool, &server, 5).await;
+        let state = mailgun_state(&pool, &server, 5, reqwest::Client::new()).await;
 
         send_batch(&state, &pool, Wave::First, 50).await.unwrap();
         send_batch(&state, &pool, Wave::Second, 50).await.unwrap();
