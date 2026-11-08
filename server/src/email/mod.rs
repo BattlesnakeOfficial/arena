@@ -447,6 +447,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn connection_lost_after_request_received_is_not_definite_non_delivery() {
+        use tokio::io::AsyncReadExt as _;
+
+        // A server that reads the entire request, then drops the connection
+        // before responding: Mailgun may have accepted the message, so this
+        // cannot be classified as `Transient` ("definitely not delivered").
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut received = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            loop {
+                let read = socket.read(&mut chunk).await.unwrap();
+                if read == 0 {
+                    break;
+                }
+                received.extend_from_slice(&chunk[..read]);
+                let Some(head_end) = received.windows(4).position(|w| w == b"\r\n\r\n") else {
+                    continue;
+                };
+                let head = String::from_utf8_lossy(&received[..head_end]).to_ascii_lowercase();
+                let body_length: usize = head
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length: "))
+                    .and_then(|value| value.trim().parse().ok())
+                    .unwrap_or(0);
+                if received.len() >= head_end + 4 + body_length {
+                    break;
+                }
+            }
+            String::from_utf8_lossy(&received).to_string()
+        });
+
+        let mailer = configured_mailer(format!("http://127.0.0.1:{port}"), reqwest::Client::new());
+        let err = mailer.send(&test_message()).await.unwrap_err();
+
+        let received = server.await.unwrap();
+        assert!(
+            received.contains("someone%40example.com"),
+            "the server must have received the full message: {received}"
+        );
+        assert!(
+            !matches!(err, SendError::Transient(_)),
+            "request reached the server, so delivery is unknown, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn timeout_classified_as_timed_out() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
