@@ -587,6 +587,7 @@ mod tests {
                 self.snake_id,
             )
             .await?
+            .expect("live snake joins")
             .leaderboard_entry_id)
         }
 

@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT disabled_at, disabled_reason\n             FROM leaderboard_entries\n             WHERE leaderboard_id = $1 AND battlesnake_id = $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "disabled_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 1,
+        "name": "disabled_reason",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true,
+      true
+    ]
+  },
+  "hash": "b4987c386035fa03cb2fcd1e324bf98a979693d504efbb3bd65dfea6048fbf98"
+}

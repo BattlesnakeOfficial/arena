@@ -230,13 +230,8 @@ pub async fn dispatch_pending_ladder_games(app_state: &AppState) -> cja::Result<
             // This must be a separate READ COMMITTED statement after the row lock.
             // A pass that waited for the lock needs a fresh snapshot of jobs
             // committed by the previous holder, even if that holder rolled back.
-            let has_job = sqlx::query_scalar!(
-                r#"SELECT EXISTS(SELECT 1 FROM jobs WHERE name = 'GameRunnerJob' AND payload->>'game_id' = $1) AS "has_job!""#,
-                candidate.game_id.to_string(),
-            )
-            .fetch_one(&mut *tx)
-            .await
-            .wrap_err("Failed to check outstanding ladder runner after dispatch lock")?;
+            let has_job =
+                crate::jobs::game_runner_job_exists(&mut *tx, candidate.game_id).await?;
             if has_job {
                 return Ok(());
             }
@@ -527,7 +522,9 @@ mod tests {
             )
             .fetch_one(pool)
             .await?;
-            leaderboard::get_or_create_entry(pool, leaderboard_id, battlesnake_id).await?;
+            leaderboard::get_or_create_entry(pool, leaderboard_id, battlesnake_id)
+                .await?
+                .expect("live snake joins");
         }
         Ok(leaderboard_id)
     }
@@ -610,8 +607,9 @@ mod tests {
             )
             .fetch_one(pool)
             .await?;
-            let entry =
-                leaderboard::get_or_create_entry(pool, lb.leaderboard_id, battlesnake_id).await?;
+            let entry = leaderboard::get_or_create_entry(pool, lb.leaderboard_id, battlesnake_id)
+                .await?
+                .expect("live snake joins");
             ids.insert(entry.leaderboard_entry_id);
         }
         Ok((lb, ids))

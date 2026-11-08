@@ -480,6 +480,8 @@ pub struct BatchCounts {
 
 enum NoticeOutcome {
     Sent,
+    /// Send failed; recorded `failed` and stops the batch so a Mailgun
+    /// outage costs at most one account per 5-minute tick.
     Failed,
     Skipped,
     Deferred,
@@ -615,7 +617,10 @@ pub async fn send_batch(
             .unwrap_or_default();
         match send_notice(state, wave, recipient, account_snakes).await? {
             NoticeOutcome::Sent => counts.sent += 1,
-            NoticeOutcome::Failed => counts.failed += 1,
+            NoticeOutcome::Failed => {
+                counts.failed += 1;
+                break;
+            }
             NoticeOutcome::Skipped => counts.skipped += 1,
             NoticeOutcome::Deferred => counts.deferred += 1,
             NoticeOutcome::Disabled => break,
@@ -1057,6 +1062,44 @@ mod tests {
         let second = send_batch(&state, &pool, Wave::Second, 50).await.unwrap();
         assert_eq!(second.sent, 1);
         assert_eq!(sent_bodies(&server).await.len(), 2);
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn mailgun_503_stops_the_batch_after_one_failure(pool: PgPool) {
+        create_play_tables(&pool).await;
+        for account in ["a", "b", "c"] {
+            play_account(&pool, account, Some(10)).await;
+        }
+        let a = imported(&pool, "a").await;
+        let b = imported(&pool, "b").await;
+        let c = imported(&pool, "c").await;
+
+        // A local 503 mock — NOT the 200-answering mailgun() helper.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+        let state = mailgun_state(&pool, &server, 5).await;
+
+        let counts = send_batch(&state, &pool, Wave::First, 50).await.unwrap();
+        assert_eq!(counts.sent, 0);
+        assert_eq!(counts.failed, 1);
+
+        // The batch stopped: three eligible accounts, one HTTP attempt.
+        assert_eq!(sent_bodies(&server).await.len(), 1);
+
+        // Exactly one account is `failed`; the other two have no row and stay
+        // eligible for the next tick. next_recipients orders by
+        // imported_account_id (a UUID), so which account fails first is not
+        // deterministic — compare as a multiset.
+        let mut statuses = vec![
+            status(&pool, a, Wave::First).await,
+            status(&pool, b, Wave::First).await,
+            status(&pool, c, Wave::First).await,
+        ];
+        statuses.sort();
+        assert_eq!(statuses, vec![None, None, Some("failed".to_string())]);
     }
 
     #[sqlx::test(migrations = "../migrations")]

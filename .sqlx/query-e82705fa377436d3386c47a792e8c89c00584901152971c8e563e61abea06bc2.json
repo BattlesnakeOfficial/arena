@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO users (external_github_id, github_login, github_access_token)\n             VALUES (9911812, 'join-resume-owner', 'token') RETURNING user_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "e82705fa377436d3386c47a792e8c89c00584901152971c8e563e61abea06bc2"
+}
