@@ -329,7 +329,9 @@ mod tests {
         )
         .fetch_one(pool)
         .await?;
-        let entry = leaderboard::get_or_create_entry(pool, leaderboard_id, battlesnake_id).await?;
+        let entry = leaderboard::get_or_create_entry(pool, leaderboard_id, battlesnake_id)
+            .await?
+            .expect("live snake joins");
         Ok(entry.leaderboard_entry_id)
     }
 
@@ -531,7 +533,9 @@ mod tests {
         .await?;
 
         record_failure(&mut *pool.acquire().await?, entry, "down", Utc::now()).await?;
-        leaderboard::get_or_create_entry(&pool, leaderboard_id, snake_id).await?;
+        leaderboard::get_or_create_entry(&pool, leaderboard_id, snake_id)
+            .await?
+            .expect("live snake joins");
         assert_eq!(
             state(&pool, entry).await?.failures,
             1,
@@ -539,7 +543,9 @@ mod tests {
         );
 
         assert!(deactivate(&mut *pool.acquire().await?, entry).await?);
-        leaderboard::get_or_create_entry(&pool, leaderboard_id, snake_id).await?;
+        leaderboard::get_or_create_entry(&pool, leaderboard_id, snake_id)
+            .await?
+            .expect("live snake joins");
         let after = state(&pool, entry).await?;
         assert!(!after.disabled);
         assert_eq!((after.failures, after.successes), (0, 0));

@@ -437,6 +437,7 @@ async fn private_leaderboards_are_unlisted(pool: PgPool) {
     let entry_id = leaderboard::get_or_create_entry(fx.db(), lb, fx.member_snake)
         .await
         .unwrap()
+        .expect("live snake joins")
         .leaderboard_entry_id;
     sqlx::query!(
         "UPDATE leaderboard_entries SET games_played = $2, display_score = 40
@@ -485,7 +486,8 @@ async fn private_leaderboards_are_unlisted(pool: PgPool) {
     let fellow_snake = snake(fx.db(), fellow_id, "Fellow Snake").await;
     leaderboard::get_or_create_entry(fx.db(), lb, fellow_snake)
         .await
-        .unwrap();
+        .unwrap()
+        .expect("live snake joins");
     let profiles = [
         format!("/battlesnakes/{}/profile", fx.member_snake),
         format!("/users/{member_login}"),
@@ -553,7 +555,8 @@ async fn private_leaderboards_are_unlisted(pool: PgPool) {
     let other = fx.first_public_leaderboard().await;
     leaderboard::get_or_create_entry(fx.db(), other, fx.outsider_snake)
         .await
-        .unwrap();
+        .unwrap()
+        .expect("live snake joins");
     let enabled = sqlx::query_scalar!(
         r#"SELECT enabled_leaderboards AS "enabled!" FROM global_player_scores(0) LIMIT 1"#
     )
@@ -574,6 +577,7 @@ async fn tournaments_cannot_import_from_private_leaderboards(pool: PgPool) {
     let entry_id = leaderboard::get_or_create_entry(fx.db(), lb, fx.member_snake)
         .await
         .unwrap()
+        .expect("live snake joins")
         .leaderboard_entry_id;
     sqlx::query!(
         "UPDATE leaderboard_entries SET games_played = $2 WHERE leaderboard_entry_id = $1",
@@ -621,4 +625,85 @@ async fn tournaments_cannot_import_from_private_leaderboards(pool: PgPool) {
     .await
     .unwrap();
     assert_eq!(registrations, 0);
+}
+
+/// A deleted snake can't rejoin a leaderboard through the web handler: the
+/// pre-check flashes, the POST still redirects (303), and the entry stays
+/// terminal. (Race serialization itself is covered by the model-level
+/// lock-harness test; this pins the wiring.)
+#[sqlx::test(migrations = "../migrations")]
+async fn deleted_snake_cannot_rejoin_via_web(pool: PgPool) {
+    let fx = Fixture::new(pool).await;
+    let public = fx.first_public_leaderboard().await;
+
+    assert!(
+        fx.join(public, fx.member_session, fx.member_snake, "")
+            .await
+    );
+
+    assert_eq!(
+        crate::models::battlesnake::delete_battlesnake(fx.db(), fx.member_snake, fx.member_id)
+            .await
+            .unwrap(),
+        crate::models::battlesnake::DeleteBattlesnakeOutcome::Deleted
+    );
+
+    assert!(
+        !fx.join(public, fx.member_session, fx.member_snake, "")
+            .await
+    );
+
+    // The refused join didn't re-enable the entry: it's still terminal.
+    let row = sqlx::query!(
+        "SELECT disabled_at, disabled_reason
+         FROM leaderboard_entries
+         WHERE leaderboard_id = $1 AND battlesnake_id = $2",
+        public,
+        fx.member_snake
+    )
+    .fetch_one(fx.db())
+    .await
+    .unwrap();
+    assert!(row.disabled_at.is_some(), "{row:?}");
+    assert_eq!(row.disabled_reason.as_deref(), Some("deleted"), "{row:?}");
+
+    // The refusal is flashed on the leaderboard page (DB-backed flash).
+    let (_, body) = fx
+        .get(&format!("/leaderboards/{public}"), Some(fx.member_session))
+        .await;
+    assert!(
+        body.contains("That battlesnake doesn't exist or has been deleted."),
+        "{body}"
+    );
+}
+
+/// Same refusal through the API handler: a deleted snake's join is a 404
+/// with the shared "Battlesnake not found" message, not a 500, and no entry
+/// is (re-)activated.
+#[sqlx::test(migrations = "../migrations")]
+async fn deleted_snake_cannot_join_via_api(pool: PgPool) {
+    let fx = Fixture::new(pool).await;
+    let public = fx.first_public_leaderboard().await;
+
+    assert!(
+        fx.join(public, fx.member_session, fx.member_snake, "")
+            .await
+    );
+
+    assert_eq!(
+        crate::models::battlesnake::delete_battlesnake(fx.db(), fx.member_snake, fx.member_id)
+            .await
+            .unwrap(),
+        crate::models::battlesnake::DeleteBattlesnakeOutcome::Deleted
+    );
+
+    let status = fx
+        .post_json(
+            &format!("/api/leaderboards/{public}/entries"),
+            fx.member_session,
+            serde_json::json!({ "battlesnake_id": fx.member_snake }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(!fx.active_entry(public, fx.member_snake).await);
 }

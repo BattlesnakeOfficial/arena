@@ -300,7 +300,8 @@ pub async fn create_entry(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Internal server error".to_string(),
             )
-        })?;
+        })?
+        .ok_or((StatusCode::NOT_FOUND, "Battlesnake not found".to_string()))?;
 
     // Initialize scoring algorithm entries
     for algo in state.scoring.algorithms() {

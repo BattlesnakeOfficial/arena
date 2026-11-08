@@ -527,7 +527,9 @@ mod tests {
             )
             .fetch_one(pool)
             .await?;
-            leaderboard::get_or_create_entry(pool, leaderboard_id, battlesnake_id).await?;
+            leaderboard::get_or_create_entry(pool, leaderboard_id, battlesnake_id)
+                .await?
+                .expect("live snake joins");
         }
         Ok(leaderboard_id)
     }
@@ -610,8 +612,9 @@ mod tests {
             )
             .fetch_one(pool)
             .await?;
-            let entry =
-                leaderboard::get_or_create_entry(pool, lb.leaderboard_id, battlesnake_id).await?;
+            let entry = leaderboard::get_or_create_entry(pool, lb.leaderboard_id, battlesnake_id)
+                .await?
+                .expect("live snake joins");
             ids.insert(entry.leaderboard_entry_id);
         }
         Ok((lb, ids))
