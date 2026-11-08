@@ -1299,8 +1299,8 @@ mod tests {
     #[sqlx::test(migrations = "../migrations")]
     async fn solo_game_round_trips_through_db(pool: sqlx::PgPool) -> cja::Result<()> {
         let user_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (7302, 'solo-user', 'test-token') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (7302, 'solo-user') RETURNING user_id",
         )
         .fetch_one(&pool)
         .await?;
@@ -1352,8 +1352,8 @@ mod tests {
 
     async fn rematch_user(pool: &PgPool, id: i64) -> cja::Result<Uuid> {
         Ok(sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES ($1, $2, 'test-token') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES ($1, $2) RETURNING user_id",
         )
         .bind(id)
         .bind(format!("rematch-user-{id}"))
@@ -1896,8 +1896,8 @@ mod tests {
         use crate::engine::GameSource;
 
         let user_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (7303, 'source-user', 'test-token') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (7303, 'source-user') RETURNING user_id",
         )
         .fetch_one(&pool)
         .await?;
@@ -2139,8 +2139,8 @@ mod tests {
     #[sqlx::test(migrations = "../migrations")]
     async fn concurrent_second_finish_loses_cleanly(pool: sqlx::PgPool) -> cja::Result<()> {
         let user_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES ($1, $2, $3) RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES ($1, $2) RETURNING user_id",
         )
         .bind(161_400_i64)
         .bind("finish-race-user")

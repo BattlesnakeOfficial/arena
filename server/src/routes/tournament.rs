@@ -2975,8 +2975,8 @@ mod tests {
     // offline cache.
     async fn fixture_user(pool: &PgPool, github_id: i64, login: &str) -> cja::Result<Uuid> {
         let user_id = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES ($1, $2, $3) RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES ($1, $2) RETURNING user_id",
         )
         .bind(github_id)
         .bind(login)

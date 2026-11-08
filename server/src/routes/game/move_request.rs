@@ -941,8 +941,8 @@ mod tests {
 
     async fn user(pool: &PgPool, github_id: i64) -> Uuid {
         sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES ($1, $2, '') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES ($1, $2) RETURNING user_id",
         )
         .bind(github_id)
         .bind(format!("move-req-{github_id}"))

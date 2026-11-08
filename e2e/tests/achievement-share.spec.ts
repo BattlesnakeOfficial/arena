@@ -44,8 +44,8 @@ test('guest share page fits a phone and the CTA posts', async ({ page }) => {
   const stamp = `${Date.now()}${Math.floor(Math.random() * 1000)}`;
   const login = `share_guest_${stamp}`;
   const [user] = await query<{ user_id: string }>(
-    `INSERT INTO users (external_github_id, github_login, github_access_token)
-     VALUES ($1, $2, '') RETURNING user_id`,
+    `INSERT INTO users (external_github_id, github_login)
+     VALUES ($1, $2) RETURNING user_id`,
     [Date.now() * 1000 + Math.floor(Math.random() * 1000), login],
   );
   seededUsers.push({ id: user.user_id, own: true });
@@ -113,8 +113,8 @@ test('long unbroken names still fit a phone', async ({ page }) => {
   const login = `longlogin${stamp}`.padEnd(39, 'x');
   const snakeName = `longsnake${stamp}`.padEnd(64, 'y');
   const [user] = await query<{ user_id: string }>(
-    `INSERT INTO users (external_github_id, github_login, github_access_token)
-     VALUES ($1, $2, '') RETURNING user_id`,
+    `INSERT INTO users (external_github_id, github_login)
+     VALUES ($1, $2) RETURNING user_id`,
     [Date.now() * 1000 + Math.floor(Math.random() * 1000), login],
   );
   const [snake] = await query<{ battlesnake_id: string }>(
@@ -149,8 +149,8 @@ test('unknown, unearned, and malformed share URLs are branded 404s', async ({ pa
   const stamp = `${Date.now()}${Math.floor(Math.random() * 1000)}`;
   const login = `share_missing_${stamp}`;
   const [noEarn] = await query<{ user_id: string }>(
-    `INSERT INTO users (external_github_id, github_login, github_access_token)
-     VALUES ($1, $2, '') RETURNING user_id`,
+    `INSERT INTO users (external_github_id, github_login)
+     VALUES ($1, $2) RETURNING user_id`,
     [Date.now() * 1000 + Math.floor(Math.random() * 1000), login],
   );
   seededUsers.push({ id: noEarn.user_id, own: true });
@@ -297,8 +297,8 @@ test('a pending clip leaves the page finished with the card', async ({ page }) =
   const stamp = `${Date.now()}${Math.floor(Math.random() * 1000)}`;
   const login = `clip_pending_${stamp}`;
   const [user] = await query<{ user_id: string }>(
-    `INSERT INTO users (external_github_id, github_login, github_access_token)
-     VALUES ($1, $2, '') RETURNING user_id`,
+    `INSERT INTO users (external_github_id, github_login)
+     VALUES ($1, $2) RETURNING user_id`,
     [Date.now() * 1000 + Math.floor(Math.random() * 1000), login],
   );
   seededUsers.push({ id: user.user_id, own: true });
@@ -319,8 +319,8 @@ test('the share art keeps its light tile in dark mode', async ({ page }) => {
   const stamp = `${Date.now()}${Math.floor(Math.random() * 1000)}`;
   const login = `share_dark_${stamp}`;
   const [user] = await query<{ user_id: string }>(
-    `INSERT INTO users (external_github_id, github_login, github_access_token)
-     VALUES ($1, $2, '') RETURNING user_id`,
+    `INSERT INTO users (external_github_id, github_login)
+     VALUES ($1, $2) RETURNING user_id`,
     [Date.now() * 1000 + Math.floor(Math.random() * 1000), login],
   );
   seededUsers.push({ id: user.user_id, own: true });

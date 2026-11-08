@@ -126,8 +126,8 @@ async fn seeded_detail_pages_carry_no_arena(db: PgPool) {
 
     // Seed with no "Arena" in any user-chosen name.
     let user_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO users (external_github_id, github_login, github_access_token)
-         VALUES ((SELECT COALESCE(MAX(external_github_id), 777000) + 1 FROM users), 'branding-owner', '')
+        "INSERT INTO users (external_github_id, github_login)
+         VALUES ((SELECT COALESCE(MAX(external_github_id), 777000) + 1 FROM users), 'branding-owner')
          RETURNING user_id",
     )
     .fetch_one(&state.db)

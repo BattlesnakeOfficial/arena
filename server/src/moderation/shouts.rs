@@ -759,8 +759,8 @@ mod tests {
     /// must be the game_battlesnake_id string.
     async fn fixture_owned_snake(pool: &PgPool, game_id: Uuid) -> cja::Result<(Uuid, Uuid, Uuid)> {
         let user_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (424242, 'test-user', 'test-token') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (424242, 'test-user') RETURNING user_id",
         )
         .fetch_one(pool)
         .await?;
