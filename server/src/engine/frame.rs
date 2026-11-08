@@ -377,7 +377,7 @@ mod tests {
     }
 
     #[test]
-    fn test_game_to_frame_with_death_info() {
+    fn test_game_to_frame_derives_death_from_snake_fields() {
         let mut game = create_test_game();
         game.board.snakes[0].eliminated_cause = EliminationCause::OutOfBounds;
         game.board.snakes[0].eliminated_on_turn = 5;

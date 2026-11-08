@@ -238,8 +238,8 @@ pub fn mode_rules(mode: GameMode, game_id: Uuid) -> (StandardSettings, Option<Ro
         ),
         // Solo: single-snake survival. Runs the standard pipeline with
         // standard food settings; only the game-over predicate differs
-        // (see `GameOverRule`). Kept as an explicit arm -- folding it into
-        // a shared arm below would silently change its food settings.
+        // (see `GameOverRule`). Each mode keeps its own arm so a new mode
+        // stays a compile error here.
         GameMode::Solo => (
             StandardSettings {
                 food_spawn_chance: 15,

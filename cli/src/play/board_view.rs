@@ -50,7 +50,7 @@ pub fn print_state(game: &EngineGame, names: &HashMap<String, String>, log: &mut
 
 /// Go's elimination-cause strings (`constants.go`), via
 /// [`rules::EliminationCause::go_slug`], as printed on the per-snake
-/// viewmap lines. CLI-local on purpose: arena's server frames use
+/// viewmap lines. Arena's server frames use
 /// [`rules::EliminationCause::arena_slug`] (`self-collision`), a separate
 /// vocabulary that must stay correct separately.
 fn go_cause(cause: &EliminationCause) -> &'static str {

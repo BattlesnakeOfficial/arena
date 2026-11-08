@@ -518,7 +518,7 @@ fn capitalize(s: &str) -> String {
     }
 }
 
-/// Wire-protocol elimination slugs (see `game_runner::elimination_cause_label`)
+/// Wire-protocol elimination slugs (see `rules::EliminationCause::arena_slug`)
 /// rendered as display copy. Total by construction: unknown slugs pass through
 /// unchanged so imported/legacy rows never panic.
 fn death_cause_copy(slug: &str) -> &str {
