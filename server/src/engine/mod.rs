@@ -1371,7 +1371,7 @@ mod tests {
             apply_turn(&mut game, &[]).expect("apply_turn on a valid fixture");
             game.board.turn += 1;
 
-            let frame = frame::game_to_frame(&game, &[], &[], &std::collections::HashMap::new());
+            let frame = frame::game_to_frame(&game, &[], &std::collections::HashMap::new());
             assert_eq!(
                 frame.hazards.len(),
                 game.board.hazards.len(),
@@ -1429,7 +1429,7 @@ mod tests {
             apply_turn(&mut game, &[]).expect("apply_turn on a valid fixture");
             game.board.turn += 1;
 
-            let frame = frame::game_to_frame(&game, &[], &[], &std::collections::HashMap::new());
+            let frame = frame::game_to_frame(&game, &[], &std::collections::HashMap::new());
             assert!(
                 frame.hazards.is_empty(),
                 "standard game must never have hazards (turn {})",
@@ -1552,7 +1552,7 @@ mod tests {
                 i + 1
             );
 
-            let frame = frame::game_to_frame(&game, &[], &[], &std::collections::HashMap::new());
+            let frame = frame::game_to_frame(&game, &[], &std::collections::HashMap::new());
             assert!(
                 frame.food.is_empty(),
                 "constrictor frames must never contain food (turn {})",
@@ -1711,7 +1711,7 @@ mod tests {
             apply_turn(&mut game, &moves).expect("apply_turn on a valid fixture");
             game.board.turn += 1;
 
-            let frame = frame::game_to_frame(&game, &[], &[], &std::collections::HashMap::new());
+            let frame = frame::game_to_frame(&game, &[], &std::collections::HashMap::new());
             for h in &frame.hazards {
                 assert!(
                     h.x >= 0 && h.x < 11 && h.y >= 0 && h.y < 11,

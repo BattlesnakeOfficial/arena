@@ -1,11 +1,11 @@
 use color_eyre::eyre::Context as _;
-use rules::{Direction, EliminationCause};
+use rules::Direction;
 use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::customizations;
 use crate::engine::MAX_TURNS;
-use crate::engine::frame::{DeathInfo, SnakeCustomizations, game_to_frame};
+use crate::engine::frame::{SnakeCustomizations, game_to_frame};
 use crate::game_progress::{Phase, phase};
 use crate::models::game::{
     GameStatus, StartClaim, claim_game_start, get_game_by_id, get_game_source,
@@ -318,7 +318,6 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
         .await?;
 
     let mut engine_game: crate::engine::EngineGame;
-    let mut death_info: Vec<DeathInfo>;
     let mut food_eaten: HashMap<String, i32>;
     let mut last_moves: HashMap<String, Direction>;
     let mut snake_contexts: HashMap<String, wire::SnakeContext>;
@@ -343,7 +342,6 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
             );
             engine_game.meta.source = game_source;
 
-            death_info = Vec::new();
             food_eaten = HashMap::new();
             last_moves = HashMap::new();
             snake_contexts = HashMap::new();
@@ -373,12 +371,11 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
 
             // Store turn 0 (initial state, no moves yet) atomically with
             // its (empty) resume snapshot, so even turn 0 is resumable.
-            let frame_0 = game_to_frame(&engine_game, &death_info, &[], &customizations);
+            let frame_0 = game_to_frame(&engine_game, &[], &customizations);
             let frame_0_json =
                 serde_json::to_value(&frame_0).wrap_err("Failed to serialize initial frame")?;
             let resume_0 = crate::engine::resume::capture_resume_state(
                 &engine_game,
-                &death_info,
                 &food_eaten,
                 &last_moves,
                 &snake_contexts,
@@ -398,7 +395,6 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
             // state (source already set by restore).
             let state = *state;
             engine_game = state.engine_game;
-            death_info = state.death_info;
             food_eaten = state.food_eaten;
             last_moves = state.last_moves;
             snake_contexts = state.snake_contexts;
@@ -413,7 +409,7 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
     let mut total_snake_wait = std::time::Duration::ZERO;
 
     // Run the game turn by turn
-    let stop = loop {
+    let stop: crate::engine::StopReason = loop {
         if let Some(reason) = crate::engine::stop_reason(&engine_game, Some(MAX_TURNS)) {
             break reason;
         }
@@ -444,23 +440,21 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
         apply_turn_results(
             &mut engine_game,
             &move_results,
-            &mut death_info,
             &mut food_eaten,
             &mut last_moves,
             &mut snake_contexts,
         )?;
 
         // Store the turn frame with latency info and notify subscribers
-        let frame = game_to_frame(&engine_game, &death_info, &move_results, &customizations);
+        let frame = game_to_frame(&engine_game, &move_results, &customizations);
         let frame_json = serde_json::to_value(&frame)
             .wrap_err_with(|| format!("Failed to serialize frame {}", engine_game.board.turn))?;
 
-        // Captured after apply_turn_results, i.e. after the maps and
-        // death_info are updated — the restored maps are exactly what an
-        // uninterrupted run would hold at this turn.
+        // Captured after apply_turn_results, i.e. after the maps are
+        // updated — the restored maps are exactly what an uninterrupted run
+        // would hold at this turn.
         let resume = crate::engine::resume::capture_resume_state(
             &engine_game,
-            &death_info,
             &food_eaten,
             &last_moves,
             &snake_contexts,
@@ -677,13 +671,12 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
 
 /// Apply one turn's move results exactly as the live loop does: update
 /// last_moves and snake_contexts from the results, advance the engine,
-/// record food eaten, and append newly eliminated snakes to death_info.
-/// Shared by run_game's turn loop and the resume test fixtures so the
-/// "interrupted run" the fixtures build cannot drift from the real loop.
+/// and record food eaten. Shared by run_game's turn loop and the resume
+/// test fixtures so the "interrupted run" the fixtures build cannot drift
+/// from the real loop.
 pub(crate) fn apply_turn_results(
     engine_game: &mut crate::engine::EngineGame,
     move_results: &[crate::snake_client::MoveResult],
-    death_info: &mut Vec<DeathInfo>,
     food_eaten: &mut HashMap<String, i32>,
     last_moves: &mut HashMap<String, Direction>,
     snake_contexts: &mut HashMap<String, wire::SnakeContext>,
@@ -719,20 +712,6 @@ pub(crate) fn apply_turn_results(
     let fed = crate::engine::advance_turn(engine_game, &moves)?;
     for snake_id in fed {
         *food_eaten.entry(snake_id).or_default() += 1;
-    }
-
-    // Track newly eliminated snakes
-    for snake in &engine_game.board.snakes {
-        if snake.eliminated_cause.is_eliminated()
-            && !death_info.iter().any(|death| death.snake_id == snake.id)
-        {
-            death_info.push(DeathInfo {
-                snake_id: snake.id.clone(),
-                turn: engine_game.board.turn,
-                cause: elimination_cause_label(&snake.eliminated_cause),
-                eliminated_by: snake.eliminated_by.clone(),
-            });
-        }
     }
 
     Ok(())
@@ -855,19 +834,6 @@ async fn enqueue_post_completion_jobs(app_state: &AppState, game_id: Uuid) -> cj
     .wrap_err("Failed to enqueue shout screening job")?;
 
     Ok(())
-}
-
-/// Human-readable label for an elimination cause, used in frame data.
-fn elimination_cause_label(cause: &EliminationCause) -> String {
-    match cause {
-        EliminationCause::NotEliminated => String::new(),
-        EliminationCause::OutOfHealth => "out-of-health".to_string(),
-        EliminationCause::OutOfBounds => "wall-collision".to_string(),
-        EliminationCause::SelfCollision => "self-collision".to_string(),
-        EliminationCause::Collision => "snake-collision".to_string(),
-        EliminationCause::HeadToHeadCollision => "head-collision".to_string(),
-        EliminationCause::Hazard => "hazard".to_string(),
-    }
 }
 
 #[cfg(test)]
@@ -2051,7 +2017,6 @@ mod tests {
         );
         engine_game.meta.source = game_source;
 
-        let mut death_info: Vec<DeathInfo> = Vec::new();
         let mut food_eaten: HashMap<String, i32> = HashMap::new();
         let mut last_moves: HashMap<String, Direction> = HashMap::new();
         let mut snake_contexts: HashMap<String, wire::SnakeContext> = HashMap::new();
@@ -2071,10 +2036,9 @@ mod tests {
             .collect();
 
         // Turn 0, exactly like the Fresh path persists it.
-        let frame_0 = game_to_frame(&engine_game, &death_info, &[], &customizations);
+        let frame_0 = game_to_frame(&engine_game, &[], &customizations);
         let resume_0 = crate::engine::resume::capture_resume_state(
             &engine_game,
-            &death_info,
             &food_eaten,
             &last_moves,
             &snake_contexts,
@@ -2091,8 +2055,8 @@ mod tests {
 
         loop {
             if until_game_over {
-                if crate::engine::is_game_over(&engine_game)
-                    || engine_game.board.turn >= crate::engine::MAX_TURNS
+                if crate::engine::stop_reason(&engine_game, Some(crate::engine::MAX_TURNS))
+                    .is_some()
                 {
                     break;
                 }
@@ -2129,16 +2093,14 @@ mod tests {
             apply_turn_results(
                 &mut engine_game,
                 &results,
-                &mut death_info,
                 &mut food_eaten,
                 &mut last_moves,
                 &mut snake_contexts,
             )?;
 
-            let frame = game_to_frame(&engine_game, &death_info, &results, &customizations);
+            let frame = game_to_frame(&engine_game, &results, &customizations);
             let resume = crate::engine::resume::capture_resume_state(
                 &engine_game,
-                &death_info,
                 &food_eaten,
                 &last_moves,
                 &snake_contexts,
