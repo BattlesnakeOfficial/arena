@@ -1149,7 +1149,7 @@ mod tests {
         assert_migration_backs_out_second_application(
             &pool,
             include_str!(
-                "../../migrations/20261108020156_repair_second_double_applied_ratings.up.sql"
+                "../../migrations/20261108120500_repair_second_double_applied_ratings.up.sql"
             ),
             Uuid::parse_str("d02f3e8a-e8fe-47fd-87d1-e2e2ac8a2256")
                 .wrap_err("DEV-2218 fixture UUID")?,
