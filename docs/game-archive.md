@@ -166,18 +166,38 @@ prune inside that window could re-credit a WRONG week). The predicate's
 partial index is `games_turns_prunable_idx`; rows leave it when
 `turns_pruned_at` is set, which is also the idempotency marker.
 
+**Invariant (DEV-2178)**: the `games` CHECK
+`games_pruned_requires_archive_check` enforces
+`turns_pruned_at IS NULL OR (archived_at IS NOT NULL AND gcs_path IS NOT
+NULL)` — a pruned game always carries the pointers naming its only
+surviving frame copy. Clearing a pruned game's pointers (by hand or via
+`mark_game_finished_tx` on a failed-era pruned game) is rejected by the
+constraint; the archiver independently refuses pruned games and refuses
+to write a zero-frame export, so a pruned game's deterministic key can
+never be overwritten with an empty archive. Terminal native games with
+no persisted frames (zero-frame) are never archived, never pruned (the
+prune requires `archived_at`), and stay out of discovery's enqueue set.
+
 **Content confirmation before delete**: GET the object, decode it, and
 require `archive_version = 2`, `game_id` matching the row, and frames
 equal one-for-one (as `serde_json::Value`) to what the archiver would
 write now (`native_backup::fetch_native_frame_texts` — the same selection
 on both sides). Rows are NEVER deleted for a game whose object is missing,
-undecodable, wrong-version, wrong-id, or content/frame-count mismatched:
-those are retained (fail-closed — the turns are the only complete copy),
-logged at ERROR, re-enqueued hourly. Remedy for permanently stuck games:
-clear `archived_at`/`gcs_path`/`archive_version` so DEV-1980 discovery
+undecodable, wrong-version, wrong-id, or content-diverged: those are
+retained (fail-closed — the turns are the only complete copy), logged at
+ERROR, re-enqueued hourly. Remedy for permanently stuck games: clear
+`archived_at`/`gcs_path`/`archive_version` so DEV-1980 discovery
 re-archives (the path is deterministic, so the re-archive overwrites the
 bad object). Enough stuck games (≥ the 2000/run cap) stall pruning
-entirely — visible as discovery candidates that never shrink.
+entirely — visible as discovery candidates that never shrink. The one
+self-healing case: a frame-count mismatch where the DB holds MORE frames
+and the object is a confirmed strict PREFIX of them (the sweeper race —
+archived mid-run, straggler turns after) is a stale archive: the prune
+clears the archive pointers itself (a guarded UPDATE keyed on the
+`archived_at` it read and `turns_pruned_at IS NULL`, logged at WARN),
+discovery re-archives the complete game within the hour, and the next
+prune confirms and deletes. An archive holding MORE frames than the DB,
+or a divergent prefix, stays fail-closed.
 
 **Concurrency**: per-game prune jobs (`PruneGameTurnsJob`, priority −20,
 below backup jobs' −10) serialize on the shared 1-permit `BACKUP_SLOT`

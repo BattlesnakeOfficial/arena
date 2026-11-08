@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT game_id FROM games\n        WHERE engine_game_id IS NULL\n          AND status IN ('finished', 'failed')\n          AND archived_at IS NULL\n          AND turns_pruned_at IS NULL\n          AND EXISTS (SELECT 1 FROM turns t\n                      WHERE t.game_id = games.game_id AND t.frame_data IS NOT NULL)\n          AND updated_at >= NOW() - make_interval(hours => $1)\n        LIMIT $2\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "game_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "e29c29576c297d0f0c9e00e9cfec6dba2e5cc0e4b95cc119e829a833b31495db"
+}

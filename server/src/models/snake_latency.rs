@@ -284,11 +284,14 @@ mod tests {
             latency_ms: Option<i32>,
             timed_out: bool,
         ) -> cja::Result<()> {
+            // DEV-2178: frame_data must be non-NULL for the real archiver/pruner
+            // (latency_chart_empty_after_prune) to treat this as a real game.
             let turn_id = sqlx::query_scalar!(
-                "INSERT INTO turns (game_id, turn_number)
-                 VALUES ($1, (SELECT COUNT(*)::int FROM turns WHERE game_id = $1))
-                 RETURNING turn_id",
-                game_id
+                r#"INSERT INTO turns (game_id, turn_number, frame_data)
+                 VALUES ($1, (SELECT COUNT(*)::int FROM turns WHERE game_id = $1), $2)
+                 RETURNING turn_id"#,
+                game_id,
+                serde_json::json!({"Turn": 0, "Snakes": []})
             )
             .fetch_one(&self.pool)
             .await?;
