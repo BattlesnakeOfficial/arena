@@ -649,8 +649,10 @@ pub async fn delete_battlesnake(
         .await
         .wrap_err("Failed to begin delete transaction")?;
 
-    // Row lock serializes against tournament registration, which takes a
-    // FOR SHARE lock on the snake before inserting.
+    // Row lock serializes against tournament registration and leaderboard
+    // join (`leaderboard::get_or_create_entry`), which both take a FOR SHARE
+    // lock on the snake before inserting. Joins wait on this transaction, so
+    // keep slow work out of it.
     let locked = sqlx::query_scalar!(
         r#"
         SELECT battlesnake_id

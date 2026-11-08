@@ -1835,6 +1835,7 @@ mod tests {
                     )
                     .await
                     .unwrap()
+                    .expect("live snake joins")
                     .leaderboard_entry_id;
                     sqlx::query(
                         "INSERT INTO game_battlesnakes (game_id, battlesnake_id, placement, leaderboard_entry_id) VALUES ($1, $2, 2, $3)",

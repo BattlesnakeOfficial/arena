@@ -334,9 +334,11 @@ mod tests {
         .await?;
         let a = leaderboard::get_or_create_entry(&pool, leaderboard_id, snake_a)
             .await?
+            .expect("live snake joins")
             .leaderboard_entry_id;
         let b = leaderboard::get_or_create_entry(&pool, leaderboard_id, snake_b)
             .await?
+            .expect("live snake joins")
             .leaderboard_entry_id;
 
         let a_won = finished_game(&pool, leaderboard_id, &[(a, 1), (b, 2)]).await?;
@@ -401,9 +403,11 @@ mod tests {
         .await?;
         let a = leaderboard::get_or_create_entry(&pool, leaderboard_id, snake_a)
             .await?
+            .expect("live snake joins")
             .leaderboard_entry_id;
         let b = leaderboard::get_or_create_entry(&pool, leaderboard_id, snake_b)
             .await?
+            .expect("live snake joins")
             .leaderboard_entry_id;
 
         let lb_game = finished_game(&pool, leaderboard_id, &[(a, 1), (b, 2)]).await?;
@@ -480,7 +484,9 @@ mod tests {
         state.scoring = std::sync::Arc::new(scoring);
         let mut entries = Vec::new();
         for snake_id in [snake_a, snake_b] {
-            let entry = leaderboard::get_or_create_entry(&pool, leaderboard_id, snake_id).await?;
+            let entry = leaderboard::get_or_create_entry(&pool, leaderboard_id, snake_id)
+                .await?
+                .expect("live snake joins");
             for algo in state.scoring.algorithms() {
                 algo.initialize_entry(&pool, entry.leaderboard_entry_id)
                     .await?;
@@ -556,9 +562,11 @@ mod tests {
         .await?;
         let a = leaderboard::get_or_create_entry(&pool, leaderboard_id, eater)
             .await?
+            .expect("live snake joins")
             .leaderboard_entry_id;
         let b = leaderboard::get_or_create_entry(&pool, leaderboard_id, unrecorded)
             .await?
+            .expect("live snake joins")
             .leaderboard_entry_id;
 
         let lb_game = finished_game(&pool, leaderboard_id, &[(a, 1), (b, 2)]).await?;
@@ -609,9 +617,11 @@ mod tests {
         .await?;
         let a = leaderboard::get_or_create_entry(&pool, leaderboard_id, snake_a)
             .await?
+            .expect("live snake joins")
             .leaderboard_entry_id;
         let b = leaderboard::get_or_create_entry(&pool, leaderboard_id, snake_b)
             .await?
+            .expect("live snake joins")
             .leaderboard_entry_id;
 
         let lb_game = finished_game(&pool, leaderboard_id, &[(a, 1), (b, 2)]).await?;
@@ -734,6 +744,7 @@ mod tests {
             ids.push(
                 leaderboard::get_or_create_entry(&pool, leaderboard_id, *snake_id)
                     .await?
+                    .expect("live snake joins")
                     .leaderboard_entry_id,
             );
         }
