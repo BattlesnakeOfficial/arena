@@ -398,13 +398,14 @@ pub async fn claim_game_start(
     .wrap_err("Failed to lock game for start")?;
     let status = GameStatus::from_str(&target.status)
         .wrap_err_with(|| format!("Unknown game status {}", target.status))?;
-    if status == GameStatus::Running {
-        return Ok(StartClaim::AlreadyRunning);
+    // Only Waiting proceeds; a status added later fails closed here instead
+    // of being claimed as if it were waiting.
+    match status {
+        GameStatus::Waiting => {}
+        GameStatus::Running => return Ok(StartClaim::AlreadyRunning),
+        s if s.is_terminal() => return Ok(StartClaim::Terminal),
+        other => return Err(eyre!("Unclaimable game status {}", other.as_str())),
     }
-    if status.is_terminal() {
-        return Ok(StartClaim::Terminal);
-    }
-    // Waiting is the only remaining variant: proceed to claim.
     let roster = sqlx::query_scalar!(
         r#"SELECT DISTINCT COALESCE(gb.battlesnake_id, le.battlesnake_id) AS "snake_id!"
            FROM game_battlesnakes gb
