@@ -48,19 +48,15 @@ pub fn print_state(game: &EngineGame, names: &HashMap<String, String>, log: &mut
     let _ = log.write_all(line.as_bytes());
 }
 
-/// Go's elimination-cause strings (`constants.go`), as printed on the
-/// per-snake viewmap lines. CLI-local on purpose: arena's server has its own
-/// `elimination_cause_label` using the arena frame vocabulary
-/// (`self-collision`), which must stay correct separately.
+/// Go's elimination-cause strings (`constants.go`), via
+/// [`rules::EliminationCause::go_slug`], as printed on the per-snake
+/// viewmap lines. CLI-local on purpose: arena's server frames use
+/// [`rules::EliminationCause::arena_slug`] (`self-collision`), a separate
+/// vocabulary that must stay correct separately.
 fn go_cause(cause: &EliminationCause) -> &'static str {
     match cause {
         EliminationCause::NotEliminated => "not-eliminated",
-        EliminationCause::Collision => "snake-collision",
-        EliminationCause::SelfCollision => "snake-self-collision",
-        EliminationCause::OutOfHealth => "out-of-health",
-        EliminationCause::HeadToHeadCollision => "head-collision",
-        EliminationCause::OutOfBounds => "wall-collision",
-        EliminationCause::Hazard => "hazard",
+        eliminated => eliminated.go_slug(),
     }
 }
 
@@ -369,7 +365,8 @@ mod tests {
             },
             meta: engine_core::GameMeta {
                 game_id: "g".into(),
-                ruleset_name: "standard".into(),
+                mode: engine_core::GameMode::Standard,
+                game_over_rule: engine_core::GameMode::Standard.default_game_over_rule(),
                 timeout: 500,
                 settings: rules::StandardSettings {
                     food_spawn_chance: 15,

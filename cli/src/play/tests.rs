@@ -307,7 +307,8 @@ fn go_fixture_game(settings: StandardSettings, royale: RoyaleSettings) -> Engine
         },
         meta: GameMeta {
             game_id: "GAME_ID".into(),
-            ruleset_name: "standard".into(),
+            mode: GameMode::Standard,
+            game_over_rule: GameMode::Standard.default_game_over_rule(),
             timeout: 500,
             settings,
             royale: Some(royale),
@@ -454,7 +455,8 @@ fn output_file_game() -> EngineGame {
         },
         meta: GameMeta {
             game_id: "GAME_ID".into(),
-            ruleset_name: "standard".into(),
+            mode: GameMode::Standard,
+            game_over_rule: GameMode::Standard.default_game_over_rule(),
             timeout: 500,
             settings: StandardSettings {
                 food_spawn_chance: 1,
