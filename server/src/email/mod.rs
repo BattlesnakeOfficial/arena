@@ -3,7 +3,15 @@
 //! [`Mailer`] is a no-op when Mailgun isn't configured (no `MAILGUN_API_KEY`),
 //! mirroring play's convention: the code compiles and runs everywhere, and
 //! sending only becomes real once credentials are set. Delivery jobs retry
-//! transport errors without failing the operation that raised the event.
+//! transient errors without failing the operation that raised the event.
+//!
+//! Transport failures are classified at the type level by [`SendError`]: a
+//! 4xx other than 429 is a permanent [`SendError::Rejected`] (retrying the
+//! identical request cannot succeed), a response-wait timeout is
+//! [`SendError::TimedOut`] (the request was on the wire; delivery status
+//! unknown), and everything else — 5xx, 429, connection failures — is
+//! [`SendError::Transient`] (definitely not delivered; retry, bounded by the
+//! per-recipient hourly cap). Unknown statuses default to transient.
 
 pub mod messages;
 
@@ -22,22 +30,57 @@ pub enum SendOutcome {
     RateLimited,
     /// Mailgun isn't configured; nothing was sent or logged.
     Disabled,
+    /// Mailgun permanently rejected the message (4xx other than 429). The
+    /// attempt still spent hourly budget; callers should record a terminal
+    /// failure.
+    Failed,
+}
+
+/// Why a Mailgun send failed, classified by whether a retry can help and
+/// whether the message may nonetheless have been delivered. Returned by
+/// [`Mailer::send`]; [`Mailer::send_limited`] folds [`SendError::Rejected`]
+/// into [`SendOutcome::Failed`] and propagates the other kinds for retry.
+#[derive(Debug, thiserror::Error)]
+pub enum SendError {
+    /// Mailgun permanently rejected the message: a 4xx other than 429
+    /// (malformed address, bad credentials, invalid payload). Retrying
+    /// the identical request cannot succeed.
+    #[error("Mailgun rejected the message: {status}: {body}")]
+    Rejected {
+        status: reqwest::StatusCode,
+        body: String,
+    },
+    /// The request was sent and the client timed out waiting for the
+    /// response. Mailgun may have accepted the message: delivery status
+    /// is unknown. Callers that must not risk a duplicate (bulk sends to
+    /// cold addresses) should treat this as if delivered.
+    #[error(transparent)]
+    TimedOut(color_eyre::eyre::Report),
+    /// The message was definitely not delivered: 5xx, 429, other
+    /// non-2xx, connection failure, or an internal error before any HTTP
+    /// attempt. The caller should retry.
+    #[error(transparent)]
+    Transient(color_eyre::eyre::Report),
 }
 
 impl Mailer {
     /// Send through the per-recipient hourly rate limit (play's safety net:
     /// no address gets more than `hourly_limit` emails/hour, no matter what
-    /// triggers them). The attempt is logged before the check — record-
-    /// before-check, so concurrent sends see each other and a suppressed
-    /// send still spends budget. Every production send should come through
+    /// triggers them). The attempt is logged and committed **before** the
+    /// HTTP call — record-before-check, so concurrent sends see each other,
+    /// a suppressed send still spends budget, and a transport error cannot
+    /// roll the log row back: every send attempt counts toward the cap. A
+    /// permanent Mailgun rejection returns [`SendOutcome::Failed`]
+    /// (terminal); timeouts and transient failures propagate as
+    /// [`SendError`] for retry. Every production send should come through
     /// here; raw [`Mailer::send`] is the transport underneath.
     pub async fn send_limited(
         &self,
-        connection: &mut sqlx::PgConnection,
+        db: &sqlx::PgPool,
         hourly_limit: i64,
         purpose: &str,
         message: &EmailMessage,
-    ) -> cja::Result<SendOutcome> {
+    ) -> Result<SendOutcome, SendError> {
         if !self.is_enabled() {
             // Keep the disabled path a true no-op (matching `send`): no log
             // rows for messages that never had a transport.
@@ -48,8 +91,26 @@ impl Mailer {
             return Ok(SendOutcome::Disabled);
         }
 
-        let recent =
-            email_log::record_and_count_recent_sends(connection, &message.to, purpose).await?;
+        // The log row commits before the HTTP call: a send attempt always
+        // counts toward the cap, even when the transport errors or the
+        // process dies mid-send. The cap — not any caller's transaction —
+        // is the retry bound, so a timeout-after-acceptance storm cannot
+        // bypass it.
+        let recent = {
+            let mut tx = db
+                .begin()
+                .await
+                .wrap_err("Failed to begin email log transaction")
+                .map_err(SendError::Transient)?;
+            let count = email_log::record_and_count_recent_sends(&mut tx, &message.to, purpose)
+                .await
+                .map_err(SendError::Transient)?;
+            tx.commit()
+                .await
+                .wrap_err("Failed to commit email log transaction")
+                .map_err(SendError::Transient)?;
+            count
+        };
         if recent > hourly_limit {
             tracing::warn!(
                 event_type = "email_rate_limited",
@@ -61,8 +122,20 @@ impl Mailer {
             return Ok(SendOutcome::RateLimited);
         }
 
-        self.send(message).await?;
-        Ok(SendOutcome::Sent)
+        match self.send(message).await {
+            Ok(()) => Ok(SendOutcome::Sent),
+            Err(SendError::Rejected { status, body }) => {
+                tracing::warn!(
+                    event_type = "email_rejected",
+                    recipient = %message.to,
+                    %status,
+                    body = %body,
+                    "Mailgun permanently rejected the message"
+                );
+                Ok(SendOutcome::Failed)
+            }
+            Err(error @ (SendError::TimedOut(_) | SendError::Transient(_))) => Err(error),
+        }
     }
 }
 
@@ -118,9 +191,13 @@ impl Mailer {
 
     /// Send a message. When disabled, logs and returns `Ok(())` without any
     /// network call — so callers get uniform behavior whether or not creds
-    /// are present. When enabled, POSTs the Mailgun form and errors on a
-    /// non-2xx response; delivery jobs propagate that error for retry.
-    pub async fn send(&self, message: &EmailMessage) -> cja::Result<()> {
+    /// are present. When enabled, POSTs the Mailgun form and classifies any
+    /// failure into [`SendError`]: permanent 4xx rejection, response-wait
+    /// timeout (delivery unknown), or transient. This method enforces no
+    /// timeout itself — the client's timeout governs, so every construction
+    /// site must build the client with one (`state.rs` sets 10s;
+    /// [`Mailer::disabled`] never sends).
+    pub async fn send(&self, message: &EmailMessage) -> Result<(), SendError> {
         let Some(config) = &self.config else {
             tracing::info!(subject = %message.subject, "Email disabled (no Mailgun config); not sending");
             return Ok(());
@@ -132,23 +209,44 @@ impl Mailer {
         }
 
         let url = format!("{}/v3/{}/messages", config.base_url, config.domain);
-        let response = self
+        let response = match self
             .http
             .post(&url)
             // Mailgun authenticates as `api:<key>` via HTTP basic auth.
             .basic_auth("api", Some(&config.api_key))
-            .timeout(std::time::Duration::from_secs(10))
             .form(&message.form_fields(&config.from))
             .send()
             .await
-            .wrap_err("Failed to send request to Mailgun")?;
+        {
+            Ok(response) => response,
+            // Response-wait timeout: the request was on the wire, so Mailgun
+            // may have accepted it. Connect-phase failures (including connect
+            // timeouts) take the Transient arm below — no request bytes were
+            // written, so delivery is definitely not-delivered.
+            Err(error) if error.is_timeout() && !error.is_connect() => {
+                return Err(SendError::TimedOut(
+                    error.wrap_err("Timed out waiting for Mailgun"),
+                ));
+            }
+            Err(error) => {
+                return Err(SendError::Transient(
+                    error.wrap_err("Failed to send request to Mailgun"),
+                ));
+            }
+        };
 
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            return Err(cja::color_eyre::eyre::eyre!(
-                "Mailgun returned {status}: {body}"
-            ));
+            return Err(if status.is_client_error() && status.as_u16() != 429 {
+                SendError::Rejected { status, body }
+            } else {
+                // 5xx, 429, and any unexpected status: retry, bounded by
+                // the per-recipient hourly cap.
+                SendError::Transient(color_eyre::eyre::eyre!(
+                    "Mailgun returned {status}: {body}"
+                ))
+            });
         }
 
         tracing::info!(subject = %message.subject, "Email sent");
