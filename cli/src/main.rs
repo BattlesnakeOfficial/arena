@@ -975,7 +975,7 @@ async fn handle_games_command(command: GamesCommands) -> color_eyre::Result<()> 
                 open::that(&url).wrap_err("Failed to open browser")?;
             } else {
                 let final_status =
-                    watch_game(&client, &base_url, token, &id, Duration::from_secs(2)).await?;
+                    watch_game(&client, base_url, token, &id, Duration::from_secs(2)).await?;
                 match final_status.as_str() {
                     "finished" => println!("\nGame finished!"),
                     "failed" => {
