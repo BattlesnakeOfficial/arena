@@ -96,23 +96,60 @@ pub struct MoveResponse {
 pub struct MoveResult {
     pub snake_id: String,
     pub direction: Direction,
+    /// Measured at body completion (or the timeout firing) from request
+    /// start. `None` only when nothing was measurable (transport failure).
     pub latency_ms: Option<i64>,
-    pub timed_out: bool,
     pub shout: Option<String>,
-    /// HTTP status the snake answered with; `None` when no response arrived
-    /// (timeout, transport error). Surfaced in frames as `StatusCode` like
-    /// the legacy engine. On `/move` an engine-proxy fault is retried
-    /// directly, so the turn carries the direct answer's status; the fault
-    /// itself still yields `None` here, as it does on the start/end/info and
-    /// health paths, which keep the fallback.
-    pub status_code: Option<u16>,
-    /// The snake answered but the answer was unusable: a non-2xx status, a
-    /// body that isn't a move response, or an unrecognized direction. Kept
-    /// apart from `timed_out` (no answer at all). An engine-proxy fault
-    /// never sets this (it is not the snake's answer); on `/move` such
-    /// faults are retried directly, so the turn carries the direct answer's
-    /// `errored` instead.
-    pub errored: bool,
+    /// How the request ended; the single classification source — readers
+    /// must not re-derive outcomes from loose status/bool pairs.
+    pub outcome: MoveOutcome,
+}
+
+/// How a `/move` request ended. The single classification source: readers
+/// must not re-derive outcomes from loose status/bool pairs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MoveOutcome {
+    /// The snake answered 2xx with a usable, recognized move.
+    Ok { status_code: u16 },
+    /// No complete answer arrived within the move timeout — send or body
+    /// phase. `latency_ms` carries the real elapsed time.
+    TimedOut,
+    /// Transport-level failure (connect refused/reset/DNS): no HTTP answer.
+    Transport,
+    /// The snake answered a non-2xx HTTP status.
+    HttpError { status_code: u16 },
+    /// An answer arrived but was unusable: unparseable/truncated body or
+    /// unrecognized direction. Status is 2xx by construction (a non-2xx
+    /// status classifies as `HttpError`).
+    Invalid { status_code: u16 },
+}
+
+impl MoveOutcome {
+    /// HTTP status when an answer arrived; `None` when none did.
+    pub fn status_code(&self) -> Option<u16> {
+        match *self {
+            MoveOutcome::Ok { status_code }
+            | MoveOutcome::HttpError { status_code }
+            | MoveOutcome::Invalid { status_code } => Some(status_code),
+            MoveOutcome::TimedOut | MoveOutcome::Transport => None,
+        }
+    }
+
+    /// No answer arrived inside the move budget (`TimedOut` or `Transport`).
+    /// Every legacy surface (DB `snake_turns.timed_out`, frame
+    /// `TIMEOUT_ERROR`, `reported_latency_ms`) treats both as a timeout.
+    pub fn timed_out(&self) -> bool {
+        matches!(self, MoveOutcome::TimedOut | MoveOutcome::Transport)
+    }
+
+    /// The snake answered but the answer was unusable (`HttpError` or
+    /// `Invalid`).
+    pub fn errored(&self) -> bool {
+        matches!(
+            self,
+            MoveOutcome::HttpError { .. } | MoveOutcome::Invalid { .. }
+        )
+    }
 }
 
 /// Parse a direction string into a Direction enum
@@ -123,69 +160,72 @@ pub fn parse_direction(s: &str) -> Option<Direction> {
     s.parse().ok()
 }
 
-/// Whether a parsed move response still counts as an error: real games use
-/// the move anyway, but a non-2xx status or an unrecognized direction means
-/// the snake's server is misbehaving.
-pub fn move_errored(status: Option<u16>, direction: Option<Direction>) -> bool {
-    direction.is_none() || !status.is_some_and(|s| (200..300).contains(&s))
-}
-
 /// Interpret a body the snake answered with. Ok only when the body parses
 /// as a move response; the direction falls back to the last move, then Up.
 /// Pure: logging stays with the HTTP caller.
 pub fn interpret_move_response(
     snake_id: &str,
     body: &str,
-    status_code: Option<u16>,
+    status_code: u16,
     latency_ms: Option<i64>,
     last_direction: Option<Direction>,
 ) -> std::result::Result<MoveResult, serde_json::Error> {
     let response: MoveResponse = serde_json::from_str(body)?;
     let parsed = parse_direction(&response.direction);
+    let outcome = if !(200..300).contains(&status_code) {
+        MoveOutcome::HttpError { status_code }
+    } else if parsed.is_none() {
+        MoveOutcome::Invalid { status_code }
+    } else {
+        MoveOutcome::Ok { status_code }
+    };
     Ok(MoveResult {
         snake_id: snake_id.to_string(),
         direction: parsed.unwrap_or_else(|| last_direction.unwrap_or(Direction::Up)),
         latency_ms,
-        timed_out: false,
         shout: sanitize_shout(response.shout),
-        status_code,
-        errored: move_errored(status_code, parsed),
+        outcome,
     })
 }
 
 /// The snake answered but the body was unusable: fallback move, errored.
+/// A non-2xx status classifies as `HttpError`, anything else as `Invalid`.
 pub fn parse_failure_result(
     snake_id: &str,
     last_direction: Option<Direction>,
     latency_ms: Option<i64>,
-    status_code: Option<u16>,
+    status_code: u16,
 ) -> MoveResult {
     MoveResult {
         snake_id: snake_id.to_string(),
         direction: last_direction.unwrap_or(Direction::Up),
         latency_ms,
-        timed_out: false,
         shout: None,
-        status_code,
-        errored: true,
+        outcome: if (200..300).contains(&status_code) {
+            MoveOutcome::Invalid { status_code }
+        } else {
+            MoveOutcome::HttpError { status_code }
+        },
     }
 }
 
-/// No answer arrived (timeout / transport failure): fallback move, timed_out.
+/// No answer arrived (timeout / transport failure): fallback move.
+/// Callers pass [`MoveOutcome::TimedOut`] (the deadline fired) or
+/// [`MoveOutcome::Transport`] (a network failure); both count as a
+/// timeout on every legacy surface. `latency_ms` is the real elapsed
+/// time when known.
 pub fn transport_fallback_result(
     snake_id: &str,
     last_direction: Option<Direction>,
     latency_ms: Option<i64>,
-    timed_out: bool,
+    outcome: MoveOutcome,
 ) -> MoveResult {
     MoveResult {
         snake_id: snake_id.to_string(),
         direction: last_direction.unwrap_or(Direction::Up),
         latency_ms,
-        timed_out,
         shout: None,
-        status_code: None,
-        errored: false,
+        outcome,
     }
 }
 
@@ -195,14 +235,14 @@ mod tests {
 
     #[test]
     fn interpret_valid_body_uses_parsed_direction() {
-        let result = interpret_move_response("s1", r#"{"move":"left"}"#, Some(200), Some(12), None)
+        let result = interpret_move_response("s1", r#"{"move":"left"}"#, 200, Some(12), None)
             .expect("valid body parses");
         assert_eq!(result.snake_id, "s1");
         assert_eq!(result.direction, Direction::Left);
         assert_eq!(result.latency_ms, Some(12));
-        assert!(!result.timed_out);
-        assert_eq!(result.status_code, Some(200));
-        assert!(!result.errored);
+        assert!(!result.outcome.timed_out());
+        assert_eq!(result.outcome.status_code(), Some(200));
+        assert!(!result.outcome.errored());
         assert_eq!(result.shout, None);
     }
 
@@ -211,41 +251,68 @@ mod tests {
         let result = interpret_move_response(
             "s1",
             r#"{"move":"sideways"}"#,
-            Some(200),
+            200,
             Some(9),
             Some(Direction::Down),
         )
         .expect("body still parses as a move response");
         assert_eq!(result.direction, Direction::Down, "last move wins");
-        assert!(result.errored, "unrecognized direction is an error");
-        assert!(!result.timed_out);
+        assert_eq!(result.outcome, MoveOutcome::Invalid { status_code: 200 });
+        assert!(
+            result.outcome.errored(),
+            "unrecognized direction is an error"
+        );
+        assert!(!result.outcome.timed_out());
+    }
+
+    #[test]
+    fn interpret_non_2xx_status_classifies_as_http_error() {
+        let result = interpret_move_response(
+            "s1",
+            r#"{"move":"up"}"#,
+            500,
+            Some(30),
+            Some(Direction::Down),
+        )
+        .expect("body still parses as a move response");
+        assert_eq!(result.outcome, MoveOutcome::HttpError { status_code: 500 });
+        assert!(result.outcome.errored());
+        assert!(!result.outcome.timed_out());
     }
 
     #[test]
     fn interpret_unparseable_body_is_err() {
-        let err =
-            interpret_move_response("s1", "not json", Some(200), None, None).expect_err("bad body");
+        let err = interpret_move_response("s1", "not json", 200, None, None).expect_err("bad body");
         assert!(!err.to_string().is_empty());
     }
 
     #[test]
     fn parse_failure_result_is_errored_fallback() {
-        let result = parse_failure_result("s1", Some(Direction::Down), Some(40), Some(500));
+        let result = parse_failure_result("s1", Some(Direction::Down), Some(40), 500);
         assert_eq!(result.direction, Direction::Down);
         assert_eq!(result.latency_ms, Some(40));
-        assert!(!result.timed_out);
-        assert_eq!(result.status_code, Some(500));
-        assert!(result.errored);
+        assert!(!result.outcome.timed_out());
+        assert_eq!(result.outcome, MoveOutcome::HttpError { status_code: 500 });
+        assert!(result.outcome.errored());
         assert_eq!(result.shout, None);
+
+        let result = parse_failure_result("s1", Some(Direction::Down), Some(40), 200);
+        assert_eq!(
+            result.outcome,
+            MoveOutcome::Invalid { status_code: 200 },
+            "a 2xx unusable answer is Invalid, not HttpError"
+        );
     }
 
     #[test]
     fn transport_fallback_result_is_timed_out_without_status() {
-        let result = transport_fallback_result("s1", None, None, true);
-        assert_eq!(result.direction, Direction::Up, "no last move: Up");
-        assert!(result.timed_out);
-        assert_eq!(result.status_code, None);
-        assert!(!result.errored);
-        assert_eq!(result.shout, None);
+        for outcome in [MoveOutcome::TimedOut, MoveOutcome::Transport] {
+            let result = transport_fallback_result("s1", None, Some(500), outcome);
+            assert_eq!(result.direction, Direction::Up, "no last move: Up");
+            assert!(result.outcome.timed_out());
+            assert_eq!(result.outcome.status_code(), None);
+            assert!(!result.outcome.errored());
+            assert_eq!(result.shout, None);
+        }
     }
 }

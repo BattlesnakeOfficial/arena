@@ -79,10 +79,12 @@ pub struct FrameSnake {
 /// Legacy engine `Error` for a move result: timeouts get the engine's timeout
 /// text, non-200 replies "Bad HTTP status code N", anything else "".
 fn move_error(result: &MoveResult) -> String {
-    if result.timed_out {
+    if result.outcome.timed_out() {
         return TIMEOUT_ERROR.to_string();
     }
-    match result.status_code {
+    // Deliberate legacy quirk: ANY status ≠ 200 gets the bad-status text,
+    // including a 2xx (e.g. 201) that carried a usable move.
+    match result.outcome.status_code() {
         Some(code) if code != 200 => format!("Bad HTTP status code {code}"),
         _ => String::new(),
     }
@@ -228,12 +230,14 @@ pub fn game_to_frame(
                     .and_then(|r| {
                         crate::wire::reported_latency_ms(
                             r.latency_ms,
-                            r.timed_out,
+                            r.outcome.timed_out(),
                             game.meta.timeout,
                         )
                     })
                     .map_or_else(|| "0".to_string(), |ms| ms.to_string());
-                let status_code = result.and_then(|r| r.status_code).unwrap_or(0);
+                let status_code = result
+                    .map(|r| r.outcome.status_code().unwrap_or(0))
+                    .unwrap_or(0);
                 let error = result.map(move_error).unwrap_or_default();
 
                 // Get shout from move result if available
@@ -612,10 +616,8 @@ mod tests {
             snake_id: "snake-1".to_string(),
             direction: rules::Direction::Up,
             latency_ms: Some(42),
-            timed_out: false,
             shout: None,
-            status_code: Some(200),
-            errored: false,
+            outcome: engine_core::move_response::MoveOutcome::Ok { status_code: 200 },
         }];
 
         let frame = game_to_frame(
@@ -638,10 +640,8 @@ mod tests {
             snake_id: "snake-1".to_string(),
             direction: rules::Direction::Up,
             latency_ms: None,
-            timed_out: true,
             shout: None,
-            status_code: None,
-            errored: false,
+            outcome: engine_core::move_response::MoveOutcome::TimedOut,
         }];
 
         let frame = game_to_frame(
@@ -663,23 +663,35 @@ mod tests {
         use crate::snake_client::MoveResult;
 
         let game = create_test_game();
-        let result = |status_code| MoveResult {
+        let result = |outcome| MoveResult {
             snake_id: "snake-1".to_string(),
             direction: rules::Direction::Up,
             latency_ms: Some(0),
-            timed_out: false,
             shout: None,
-            status_code,
-            errored: false,
+            outcome,
         };
 
-        let ok = game_to_frame(&game, &[], &[result(Some(200))], &Default::default());
+        let ok = game_to_frame(
+            &game,
+            &[],
+            &[result(engine_core::move_response::MoveOutcome::Ok {
+                status_code: 200,
+            })],
+            &Default::default(),
+        );
         assert_eq!(ok.snakes[0].status_code, 200);
         assert_eq!(ok.snakes[0].error, "");
         // Sub-millisecond replies report 1, like the engine.
         assert_eq!(ok.snakes[0].latency, "1");
 
-        let bad = game_to_frame(&game, &[], &[result(Some(502))], &Default::default());
+        let bad = game_to_frame(
+            &game,
+            &[],
+            &[result(engine_core::move_response::MoveOutcome::HttpError {
+                status_code: 502,
+            })],
+            &Default::default(),
+        );
         assert_eq!(bad.snakes[0].status_code, 502);
         assert_eq!(bad.snakes[0].error, "Bad HTTP status code 502");
     }
@@ -861,10 +873,8 @@ mod tests {
             snake_id: "snake-1".to_string(),
             direction: rules::Direction::Up,
             latency_ms: Some(100),
-            timed_out: false,
             shout: Some("Hello from move!".to_string()),
-            status_code: Some(200),
-            errored: false,
+            outcome: engine_core::move_response::MoveOutcome::Ok { status_code: 200 },
         }];
 
         let frame = game_to_frame(
@@ -889,10 +899,8 @@ mod tests {
             snake_id: "other-snake".to_string(),
             direction: rules::Direction::Down,
             latency_ms: Some(50),
-            timed_out: false,
             shout: None,
-            status_code: Some(200),
-            errored: false,
+            outcome: engine_core::move_response::MoveOutcome::Ok { status_code: 200 },
         }];
 
         let frame = game_to_frame(
