@@ -922,13 +922,17 @@ mod tests {
     };
     use sqlx::PgPool;
 
-    /// Create a two-snake tournament with its (single-match) bracket
-    /// persisted and the tournament moved to in_progress. Returns the
-    /// tournament, its only match, and the battlesnake ids by seed.
-    async fn fixture_two_snake_match(
+    /// Create a tournament with `participants` snakes (seeds 1..=N),
+    /// bracket persisted, status driven created -> registration ->
+    /// in_progress. `current_round` stays 0 (call
+    /// `set_tournament_current_round` to mimic the Start button). Returns
+    /// the tournament, all matches (via `get_matches_for_tournament`), and
+    /// the battlesnake ids by seed.
+    async fn fixture_tournament(
         pool: &PgPool,
         match_style: MatchStyle,
-    ) -> cja::Result<(Tournament, TournamentMatch, Vec<Uuid>)> {
+        participants: usize,
+    ) -> cja::Result<(Tournament, Vec<TournamentMatch>, Vec<Uuid>)> {
         // Random identifiers so the fixture can be used more than once per test.
         let github_id = i64::from(Uuid::new_v4().as_fields().0);
         let user_id: Uuid = sqlx::query_scalar(
@@ -953,14 +957,14 @@ mod tests {
                 visibility: TournamentVisibility::Public,
                 match_style,
                 max_snakes_per_user: 2,
-                required_participants: 2,
+                required_participants: participants as i32,
             },
         )
         .await?;
 
         let mut registrations = Vec::new();
         let mut snakes = Vec::new();
-        for seed in 1..=2i32 {
+        for seed in 1..=participants as i32 {
             let battlesnake_id: Uuid = sqlx::query_scalar(
                 "INSERT INTO battlesnakes (user_id, name, url)
                  VALUES ($1, $2, $3) RETURNING battlesnake_id",
@@ -1008,6 +1012,17 @@ mod tests {
         .await?;
 
         let matches = get_matches_for_tournament(pool, tournament.tournament_id).await?;
+        Ok((tournament, matches, snakes))
+    }
+
+    /// Create a two-snake tournament with its (single-match) bracket
+    /// persisted and the tournament moved to in_progress. Returns the
+    /// tournament, its only match, and the battlesnake ids by seed.
+    async fn fixture_two_snake_match(
+        pool: &PgPool,
+        match_style: MatchStyle,
+    ) -> cja::Result<(Tournament, TournamentMatch, Vec<Uuid>)> {
+        let (tournament, matches, snakes) = fixture_tournament(pool, match_style, 2).await?;
         assert_eq!(matches.len(), 1, "two participants means a single final");
         let tournament_match = matches.into_iter().next().unwrap();
         Ok((tournament, tournament_match, snakes))
@@ -1045,6 +1060,44 @@ mod tests {
                 .fetch_one(pool)
                 .await?,
         )
+    }
+
+    /// Payload-scoped job count for match-targeting jobs. A sweep can
+    /// legitimately enqueue for several different matches at once, so tests
+    /// must scope by payload wherever the total is ambiguous.
+    async fn count_match_jobs(pool: &PgPool, name: &str, match_id: Uuid) -> cja::Result<i64> {
+        Ok(sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM jobs WHERE name = $1 AND payload->>'match_id' = $2",
+        )
+        .bind(name)
+        .bind(match_id.to_string())
+        .fetch_one(pool)
+        .await?)
+    }
+
+    /// Backdate a match's `updated_at` past both sweeper staleness gates.
+    /// The updated_at trigger stamps NOW() on every UPDATE, so it has to be
+    /// disabled to plant a stale timestamp. 20 minutes clears both
+    /// MATCH_STALE_MINUTES (5) and ROUND_STALE_MINUTES (15).
+    async fn backdate_match_updated_at(pool: &PgPool, match_id: Uuid) -> cja::Result<()> {
+        sqlx::query(
+            "ALTER TABLE tournament_matches DISABLE TRIGGER update_tournament_matches_updated_at",
+        )
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "UPDATE tournament_matches SET updated_at = NOW() - INTERVAL '20 minutes'
+             WHERE match_id = $1",
+        )
+        .bind(match_id)
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "ALTER TABLE tournament_matches ENABLE TRIGGER update_tournament_matches_updated_at",
+        )
+        .execute(pool)
+        .await?;
+        Ok(())
     }
 
     #[sqlx::test(migrations = "../migrations")]
@@ -1272,28 +1325,7 @@ mod tests {
 
     #[sqlx::test(migrations = "../migrations")]
     async fn sweeper_finds_only_stale_in_progress_matches(pool: PgPool) -> cja::Result<()> {
-        async fn backdate_match(pool: &PgPool, match_id: Uuid) -> cja::Result<()> {
-            // The updated_at trigger stamps NOW() on every UPDATE, so it has
-            // to be disabled to plant a stale timestamp.
-            sqlx::query(
-                "ALTER TABLE tournament_matches DISABLE TRIGGER update_tournament_matches_updated_at",
-            )
-            .execute(pool)
-            .await?;
-            sqlx::query(
-                "UPDATE tournament_matches SET updated_at = NOW() - INTERVAL '10 minutes'
-                 WHERE match_id = $1",
-            )
-            .bind(match_id)
-            .execute(pool)
-            .await?;
-            sqlx::query(
-                "ALTER TABLE tournament_matches ENABLE TRIGGER update_tournament_matches_updated_at",
-            )
-            .execute(pool)
-            .await?;
-            Ok(())
-        }
+        let app_state = AppState::test_from_pool(pool.clone());
 
         // Stale in-progress match in an in-progress tournament: swept.
         let (_, stale_match, _) = fixture_two_snake_match(&pool, MatchStyle::SingleGame).await?;
@@ -1304,7 +1336,7 @@ mod tests {
             MatchStatus::Scheduled,
         )
         .await?;
-        backdate_match(&pool, stale_match.match_id).await?;
+        backdate_match_updated_at(&pool, stale_match.match_id).await?;
 
         // Fresh in-progress match: not swept.
         let (_, fresh_match, _) = fixture_two_snake_match(&pool, MatchStyle::SingleGame).await?;
@@ -1316,12 +1348,19 @@ mod tests {
         )
         .await?;
 
-        // Stale but still scheduled: not swept (nothing started it yet).
-        let (_, scheduled_match, _) =
+        // Stale but still scheduled, in the current round with both
+        // participants filled — genuinely eligible for the new
+        // scheduled-match query — but not swept: its round was never
+        // started, so there is no sibling evidence (a lone-match round has
+        // no sibling at all).
+        let (sched_t, scheduled_match, _) =
             fixture_two_snake_match(&pool, MatchStyle::SingleGame).await?;
-        backdate_match(&pool, scheduled_match.match_id).await?;
+        set_tournament_current_round(&pool, sched_t.tournament_id, 1, 0).await?;
+        backdate_match_updated_at(&pool, scheduled_match.match_id).await?;
 
-        // Stale in-progress match in a canceled tournament: not swept.
+        // Stale in-progress match in a canceled tournament: not swept. The
+        // round is set so the exclusion is by `t.status`, not the
+        // `current_round = 0` accident.
         let (canceled_tournament, canceled_match, _) =
             fixture_two_snake_match(&pool, MatchStyle::SingleGame).await?;
         set_match_status(
@@ -1331,7 +1370,8 @@ mod tests {
             MatchStatus::Scheduled,
         )
         .await?;
-        backdate_match(&pool, canceled_match.match_id).await?;
+        backdate_match_updated_at(&pool, canceled_match.match_id).await?;
+        set_tournament_current_round(&pool, canceled_tournament.tournament_id, 1, 0).await?;
         set_tournament_status(
             &pool,
             canceled_tournament.tournament_id,
@@ -1343,6 +1383,349 @@ mod tests {
         let cutoff = chrono::Utc::now() - chrono::Duration::minutes(MATCH_STALE_MINUTES);
         let stale = find_stale_in_progress_matches(&pool, cutoff).await?;
         assert_eq!(stale, vec![stale_match.match_id]);
+
+        let round_cutoff = chrono::Utc::now() - chrono::Duration::minutes(ROUND_STALE_MINUTES);
+        assert!(
+            find_stale_scheduled_matches_in_started_rounds(&pool, round_cutoff)
+                .await?
+                .is_empty()
+        );
+        assert!(
+            find_in_progress_tournaments_with_finished_round(&pool, round_cutoff)
+                .await?
+                .is_empty()
+        );
+
+        sweep_stuck_matches(&app_state).await?;
+        // The stale in-progress match is legitimately re-enqueued (that is
+        // this test's point) — scope by payload so the scheduled match's 0
+        // is meaningful.
+        assert_eq!(
+            count_match_jobs(&pool, "RunMatchJob", scheduled_match.match_id).await?,
+            0
+        );
+        assert_eq!(count_jobs(&pool, "UpdateTournamentStatusJob").await?, 0);
+
+        Ok(())
+    }
+
+    /// Kill point 1 (tournament-completes path): `complete_and_advance`
+    /// committed the final match but died before enqueueing
+    /// `UpdateTournamentStatusJob`. A fresh completion must not fire; once
+    /// the completion ages past `ROUND_STALE_MINUTES` the sweeper recovers
+    /// progression in one pass.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn sweeper_recovers_completed_final_with_lost_progression(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        let app_state = AppState::test_from_pool(pool.clone());
+        let (tournament, tournament_match, snakes) =
+            fixture_two_snake_match(&pool, MatchStyle::SingleGame).await?;
+        set_tournament_current_round(&pool, tournament.tournament_id, 1, 0).await?;
+
+        // Replay complete_and_advance up to its commit, skipping the
+        // post-commit enqueue (the kill).
+        let mut tx = pool.begin().await?;
+        crate::tournament_bracket::complete_match_with_winner(
+            &mut tx,
+            tournament_match.match_id,
+            snakes[0],
+        )
+        .await?;
+        tx.commit().await?;
+
+        // Negative guard: a fresh completion is not swept (the progression
+        // enqueue may simply not have happened yet).
+        sweep_stuck_matches(&app_state).await?;
+        assert_eq!(count_jobs(&pool, "UpdateTournamentStatusJob").await?, 0);
+
+        backdate_match_updated_at(&pool, tournament_match.match_id).await?;
+        sweep_stuck_matches(&app_state).await?;
+        assert_eq!(count_jobs(&pool, "UpdateTournamentStatusJob").await?, 1);
+
+        // Recovery within one sweep: executing the enqueued job's body
+        // completes the tournament.
+        update_tournament_progress(&app_state, tournament.tournament_id).await?;
+        let reloaded = get_tournament_by_id(&pool, tournament.tournament_id)
+            .await?
+            .unwrap();
+        assert_eq!(reloaded.status, TournamentStatus::Completed);
+        let reloaded_match = get_match_by_id(&pool, tournament_match.match_id)
+            .await?
+            .unwrap();
+        assert_eq!(reloaded_match.status, MatchStatus::Completed);
+        assert_eq!(reloaded_match.winner_id, Some(snakes[0]));
+
+        Ok(())
+    }
+
+    /// Kill point 1 (round-advance path): both round-1 matches committed
+    /// completed with their winners placed into the final, but the
+    /// progression enqueue was lost. One sweep re-enqueues exactly one
+    /// progression job (grouped per tournament) and never auto-starts the
+    /// ready round-2 final.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn sweeper_recovers_finished_round_that_never_advanced(pool: PgPool) -> cja::Result<()> {
+        let app_state = AppState::test_from_pool(pool.clone());
+        let (tournament, _, _) = fixture_tournament(&pool, MatchStyle::SingleGame, 4).await?;
+        set_tournament_current_round(&pool, tournament.tournament_id, 1, 0).await?;
+
+        let round_one = get_matches_for_round(&pool, tournament.tournament_id, 1).await?;
+        assert_eq!(round_one.len(), 2);
+
+        for tournament_match in &round_one {
+            // The slot-1 participant is the winner (slot 1 holds the lower
+            // seed of each pairing); complete_match_with_winner errors if
+            // the winner is not a participant, so fetch rather than index.
+            let participants = get_participants_for_match(&pool, tournament_match.match_id).await?;
+            let winner = participants[0].battlesnake_id.unwrap();
+
+            let mut tx = pool.begin().await?;
+            crate::tournament_bracket::complete_match_with_winner(
+                &mut tx,
+                tournament_match.match_id,
+                winner,
+            )
+            .await?;
+            if let Some(next_match_id) = tournament_match.next_match_id {
+                crate::tournament_bracket::fill_participant_from_source(
+                    &mut tx,
+                    next_match_id,
+                    tournament_match.match_id,
+                    winner,
+                )
+                .await?;
+            }
+            tx.commit().await?; // the kill: no progression enqueue follows
+        }
+
+        for tournament_match in &round_one {
+            backdate_match_updated_at(&pool, tournament_match.match_id).await?;
+        }
+
+        sweep_stuck_matches(&app_state).await?;
+        assert_eq!(count_jobs(&pool, "UpdateTournamentStatusJob").await?, 1);
+        assert_eq!(
+            count_jobs(&pool, "RunMatchJob").await?,
+            0,
+            "the ready round-2 final is not auto-started"
+        );
+
+        // Recovery within one sweep: the round advances.
+        update_tournament_progress(&app_state, tournament.tournament_id).await?;
+        let reloaded = get_tournament_by_id(&pool, tournament.tournament_id)
+            .await?
+            .unwrap();
+        assert_eq!(reloaded.status, TournamentStatus::InProgress);
+        assert_eq!(reloaded.current_round, 2);
+
+        Ok(())
+    }
+
+    /// Kill point 2b: Run Round's first match job flipped its match to
+    /// in_progress and then died; the sibling's enqueue was lost. A sibling
+    /// that started moments ago is not yet evidence; once it ages past the
+    /// gate the stranded match is recovered in one sweep.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn sweeper_recovers_scheduled_match_stranded_mid_round_start(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        let app_state = AppState::test_from_pool(pool.clone());
+        let (tournament, _, _) = fixture_tournament(&pool, MatchStyle::SingleGame, 4).await?;
+        set_tournament_current_round(&pool, tournament.tournament_id, 1, 0).await?;
+
+        let round_one = get_matches_for_round(&pool, tournament.tournament_id, 1).await?;
+        let a = &round_one[0];
+        let b = &round_one[1];
+
+        // Simulate Run Round partially succeeding: a's job ran (creates
+        // game 1, flips a to in_progress — exactly what a's RunMatchJob
+        // did before the kill); b's enqueue was lost.
+        run_match(&app_state, a.match_id).await?;
+
+        // Negative guard (production-shaped): the stranded match itself is
+        // old, but a sibling that started moments ago is not yet evidence.
+        backdate_match_updated_at(&pool, b.match_id).await?;
+        sweep_stuck_matches(&app_state).await?;
+        assert_eq!(count_jobs(&pool, "RunMatchJob").await?, 0);
+        assert_eq!(count_jobs(&pool, "UpdateTournamentStatusJob").await?, 0);
+
+        backdate_match_updated_at(&pool, a.match_id).await?;
+        sweep_stuck_matches(&app_state).await?;
+        // The stranded match is recovered...
+        assert_eq!(count_match_jobs(&pool, "RunMatchJob", b.match_id).await?, 1);
+        // ...and the total of 2 is explained by the existing 5-min branch
+        // correctly re-enqueueing the now-stale in-progress sibling.
+        assert_eq!(count_match_jobs(&pool, "RunMatchJob", a.match_id).await?, 1);
+        assert_eq!(count_jobs(&pool, "RunMatchJob").await?, 2);
+
+        // Recovery within one sweep: executing the enqueued job's body
+        // starts the match.
+        run_match(&app_state, b.match_id).await?;
+        let reloaded = get_match_by_id(&pool, b.match_id).await?.unwrap();
+        assert_eq!(reloaded.status, MatchStatus::InProgress);
+        assert_eq!(get_match_games_for_match(&pool, b.match_id).await?.len(), 1);
+
+        Ok(())
+    }
+
+    /// Kill point 2a: Run Round died between its per-match enqueues; by
+    /// sweep time the first match's job finished its match. The completed
+    /// sibling (aged) is the evidence; the stranded match is recovered in
+    /// one sweep.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn sweeper_recovers_scheduled_match_after_sibling_completed(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        let app_state = AppState::test_from_pool(pool.clone());
+        let (tournament, _, _) = fixture_tournament(&pool, MatchStyle::SingleGame, 4).await?;
+        set_tournament_current_round(&pool, tournament.tournament_id, 1, 0).await?;
+
+        let round_one = get_matches_for_round(&pool, tournament.tournament_id, 1).await?;
+        let a = &round_one[0];
+        let b = &round_one[1];
+
+        // a's job ran to completion (kill recipe: complete directly in a
+        // transaction, no enqueue); b's enqueue was lost.
+        let participants = get_participants_for_match(&pool, a.match_id).await?;
+        let winner = participants[0].battlesnake_id.unwrap();
+        let mut tx = pool.begin().await?;
+        crate::tournament_bracket::complete_match_with_winner(&mut tx, a.match_id, winner).await?;
+        tx.commit().await?;
+
+        // Negative guard: the stranded match is old, but a's completion
+        // just committed — not yet evidence, and the round is not finished.
+        backdate_match_updated_at(&pool, b.match_id).await?;
+        sweep_stuck_matches(&app_state).await?;
+        assert_eq!(count_jobs(&pool, "RunMatchJob").await?, 0);
+        assert_eq!(count_jobs(&pool, "UpdateTournamentStatusJob").await?, 0);
+
+        backdate_match_updated_at(&pool, a.match_id).await?;
+        sweep_stuck_matches(&app_state).await?;
+        // Unlike the in_progress-sibling case, the existing branch does
+        // not fire for a completed sibling: the total is exactly the
+        // recovery.
+        assert_eq!(count_match_jobs(&pool, "RunMatchJob", b.match_id).await?, 1);
+        assert_eq!(count_jobs(&pool, "RunMatchJob").await?, 1);
+
+        // Recovery within one sweep.
+        run_match(&app_state, b.match_id).await?;
+        let reloaded = get_match_by_id(&pool, b.match_id).await?.unwrap();
+        assert_eq!(reloaded.status, MatchStatus::InProgress);
+        assert_eq!(get_match_games_for_match(&pool, b.match_id).await?.len(), 1);
+
+        Ok(())
+    }
+
+    /// An unstarted round is never auto-started: both round-1 matches are
+    /// old and otherwise eligible, but no sibling has a started trace, so
+    /// the sweeper must not fire anything (Run Round stays an owner
+    /// action).
+    #[sqlx::test(migrations = "../migrations")]
+    async fn sweeper_leaves_an_unstarted_round_alone(pool: PgPool) -> cja::Result<()> {
+        let app_state = AppState::test_from_pool(pool.clone());
+        let (tournament, _, _) = fixture_tournament(&pool, MatchStyle::SingleGame, 4).await?;
+        set_tournament_current_round(&pool, tournament.tournament_id, 1, 0).await?;
+
+        let round_one = get_matches_for_round(&pool, tournament.tournament_id, 1).await?;
+        for tournament_match in &round_one {
+            backdate_match_updated_at(&pool, tournament_match.match_id).await?;
+        }
+
+        sweep_stuck_matches(&app_state).await?;
+        assert_eq!(count_jobs(&pool, "RunMatchJob").await?, 0);
+        assert_eq!(count_jobs(&pool, "UpdateTournamentStatusJob").await?, 0);
+
+        Ok(())
+    }
+
+    /// The bye trap: a 3-snake round 1 has one bye (completed at bracket
+    /// creation with a single participant row) plus one real match. The
+    /// bye must never count as "round started" evidence — both rows are
+    /// backdated so only the participant-count exclusion can keep the real
+    /// match from being auto-started.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn sweeper_does_not_treat_byes_as_round_started_evidence(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        let app_state = AppState::test_from_pool(pool.clone());
+        let (tournament, _, _) = fixture_tournament(&pool, MatchStyle::SingleGame, 3).await?;
+        set_tournament_current_round(&pool, tournament.tournament_id, 1, 0).await?;
+
+        let round_one = get_matches_for_round(&pool, tournament.tournament_id, 1).await?;
+        assert_eq!(round_one.len(), 2);
+
+        let mut byes = 0;
+        let mut real_matches = 0;
+        for tournament_match in &round_one {
+            let participants = get_participants_for_match(&pool, tournament_match.match_id).await?;
+            match (tournament_match.status, participants.len()) {
+                (MatchStatus::Completed, 1) => byes += 1,
+                (MatchStatus::Scheduled, 2) => real_matches += 1,
+                _ => {}
+            }
+            backdate_match_updated_at(&pool, tournament_match.match_id).await?;
+        }
+        assert_eq!(byes, 1, "one bye completed at bracket creation");
+        assert_eq!(real_matches, 1, "one real seeds-2v3 match");
+
+        sweep_stuck_matches(&app_state).await?;
+        assert_eq!(
+            count_jobs(&pool, "RunMatchJob").await?,
+            0,
+            "the bye is not round-started evidence"
+        );
+        assert_eq!(count_jobs(&pool, "UpdateTournamentStatusJob").await?, 0);
+
+        Ok(())
+    }
+
+    /// `t.status = 'in_progress'` guards both new queries: without it a
+    /// finished round in an ended tournament would re-enqueue progression
+    /// forever.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn sweeper_ignores_ended_tournaments(pool: PgPool) -> cja::Result<()> {
+        let app_state = AppState::test_from_pool(pool.clone());
+        let (tournament, tournament_match, snakes) =
+            fixture_two_snake_match(&pool, MatchStyle::SingleGame).await?;
+        set_tournament_current_round(&pool, tournament.tournament_id, 1, 0).await?;
+
+        // Kill recipe: complete the final, then end the tournament out
+        // from under the lost enqueue.
+        let mut tx = pool.begin().await?;
+        crate::tournament_bracket::complete_match_with_winner(
+            &mut tx,
+            tournament_match.match_id,
+            snakes[0],
+        )
+        .await?;
+        tx.commit().await?;
+        set_tournament_status(
+            &pool,
+            tournament.tournament_id,
+            TournamentStatus::Completed,
+            TournamentStatus::InProgress,
+        )
+        .await?;
+        backdate_match_updated_at(&pool, tournament_match.match_id).await?;
+
+        // With current_round = 1 and the match completed + backdated, the
+        // only exclusion is the status filter.
+        let round_cutoff = chrono::Utc::now() - chrono::Duration::minutes(ROUND_STALE_MINUTES);
+        assert!(
+            find_in_progress_tournaments_with_finished_round(&pool, round_cutoff)
+                .await?
+                .is_empty()
+        );
+        assert!(
+            find_stale_scheduled_matches_in_started_rounds(&pool, round_cutoff)
+                .await?
+                .is_empty()
+        );
+
+        sweep_stuck_matches(&app_state).await?;
+        assert_eq!(count_jobs(&pool, "UpdateTournamentStatusJob").await?, 0);
+        assert_eq!(count_jobs(&pool, "RunMatchJob").await?, 0);
 
         Ok(())
     }
