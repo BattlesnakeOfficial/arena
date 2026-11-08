@@ -62,9 +62,32 @@ pub async fn update_ratings(app_state: &AppState, leaderboard_game_id: Uuid) -> 
         .await
         .wrap_err("Failed to start transaction for rating update")?;
 
-    // Authoritative idempotency check INSIDE the transaction.
-    // The early check above is a fast-path optimization; this is the real guard
-    // against concurrent job execution (e.g., timeout-triggered retry while original still runs).
+    // Serialize concurrent update_ratings runs for the same game (DEV-2174).
+    // This row lock is the transaction's FIRST statement: a concurrent run
+    // blocks here — before its idempotency COUNT — until this run commits,
+    // so the snapshot its COUNT takes afterwards includes this run's result
+    // rows. Safe against deadlock: nothing acquires a game lock while
+    // holding entry locks (this is always the first lock taken).
+    let game_row = sqlx::query!(
+        "SELECT 1 AS locked FROM leaderboard_games WHERE leaderboard_game_id = $1 FOR UPDATE",
+        leaderboard_game_id,
+    )
+    .fetch_optional(&mut *tx)
+    .await
+    .wrap_err("Failed to lock leaderboard game row")?;
+
+    if game_row.is_none() {
+        tracing::warn!(
+            leaderboard_game_id = %leaderboard_game_id,
+            "Leaderboard game vanished while rating, skipping"
+        );
+        return Ok(());
+    }
+
+    // Authoritative idempotency check INSIDE the transaction, AFTER the game
+    // row lock above: a READ COMMITTED snapshot taken here includes any
+    // previous run's committed result rows, so a concurrent run that waited
+    // on the lock now sees COUNT > 0 and skips.
     let existing_in_tx: (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM leaderboard_game_results WHERE leaderboard_game_id = $1",
     )
@@ -149,9 +172,25 @@ pub async fn update_ratings(app_state: &AppState, leaderboard_game_id: Uuid) -> 
             .collect(),
     };
 
-    // Run all scoring algorithms
+    // Run all scoring algorithms. An algorithm reports `false` when the game
+    // was already applied by a concurrent run — abort without committing.
+    let mut already_applied = false;
     for algo in app_state.scoring.algorithms() {
-        algo.process_game_result(&mut tx, &event).await?;
+        if !algo.process_game_result(&mut tx, &event).await? {
+            already_applied = true;
+            break;
+        }
+    }
+
+    if already_applied {
+        tx.rollback()
+            .await
+            .wrap_err("Failed to roll back rating update transaction")?;
+        tracing::info!(
+            leaderboard_game_id = %leaderboard_game_id,
+            "Ratings already applied (result insert conflicted), rolled back"
+        );
+        return Ok(());
     }
 
     // Commit the transaction — all rating updates are atomic
@@ -174,8 +213,8 @@ mod tests {
     use super::*;
     use crate::models::game::{self, CreateGame, GameBoardSize, GameType};
     use crate::scoring::{
-        ScoringAlgorithm, ScoringRegistry, food_eaten::FoodEatenScoring, weng_lin::WengLinScoring,
-        win_rate::WinRateScoring,
+        GameResultEntry, GameResultEvent, ScoringAlgorithm, ScoringRegistry,
+        food_eaten::FoodEatenScoring, weng_lin::WengLinScoring, win_rate::WinRateScoring,
     };
     use sqlx::PgPool;
     use std::time::Duration;
@@ -212,6 +251,21 @@ mod tests {
         leaderboard_id: Uuid,
         placements: &[(Uuid, i32)],
     ) -> cja::Result<Uuid> {
+        let leaderboard_game_id = Uuid::new_v4();
+        finished_game_with_lb_game_id(pool, leaderboard_id, leaderboard_game_id, placements)
+            .await?;
+        Ok(leaderboard_game_id)
+    }
+
+    /// A leaderboard game the given entries finished in the given places,
+    /// with an explicit leaderboard_game_id (the repair migration is keyed
+    /// to one specific prod game id).
+    async fn finished_game_with_lb_game_id(
+        pool: &PgPool,
+        leaderboard_id: Uuid,
+        leaderboard_game_id: Uuid,
+        placements: &[(Uuid, i32)],
+    ) -> cja::Result<()> {
         let game = game::create_game(
             pool,
             CreateGame {
@@ -231,9 +285,16 @@ mod tests {
             .execute(pool)
             .await?;
         }
-        let lb_game =
-            leaderboard::create_leaderboard_game(pool, leaderboard_id, game.game_id).await?;
-        Ok(lb_game.leaderboard_game_id)
+        sqlx::query!(
+            "INSERT INTO leaderboard_games (leaderboard_game_id, leaderboard_id, game_id)
+             VALUES ($1, $2, $3)",
+            leaderboard_game_id,
+            leaderboard_id,
+            game.game_id,
+        )
+        .execute(pool)
+        .await?;
+        Ok(())
     }
 
     /// Wait until `n` sessions in this test's database are blocked on a lock.
@@ -273,9 +334,11 @@ mod tests {
         .await?;
         let a = leaderboard::get_or_create_entry(&pool, leaderboard_id, snake_a)
             .await?
+            .expect("live snake joins")
             .leaderboard_entry_id;
         let b = leaderboard::get_or_create_entry(&pool, leaderboard_id, snake_b)
             .await?
+            .expect("live snake joins")
             .leaderboard_entry_id;
 
         let a_won = finished_game(&pool, leaderboard_id, &[(a, 1), (b, 2)]).await?;
@@ -319,6 +382,88 @@ mod tests {
         Ok(())
     }
 
+    /// DEV-2174 regression: two concurrent update_ratings calls for the SAME
+    /// game. On main, both idempotency COUNTs read 0 while the first run is
+    /// still uncommitted, so the second run re-increments every counter and
+    /// ON CONFLICT DO NOTHING silently drops its result rows: one game,
+    /// games_played = 2. With the game-row lock, the second run blocks before
+    /// its COUNT, sees the committed rows after the first commits, and skips.
+    /// This is the interleaving that double-scored prod game
+    /// 3c7eb192-5e4d-4a97-a62b-4ca69594ce81.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn concurrent_update_ratings_for_one_game_applies_once(pool: PgPool) -> cja::Result<()> {
+        let user_id = create_user(&pool, 21740).await?;
+        let snake_a = create_snake(&pool, user_id, "snake-a").await?;
+        let snake_b = create_snake(&pool, user_id, "snake-b").await?;
+        let leaderboard_id = sqlx::query_scalar!(
+            "INSERT INTO leaderboards (name) VALUES ($1) RETURNING leaderboard_id",
+            "Double-Apply Board",
+        )
+        .fetch_one(&pool)
+        .await?;
+        let a = leaderboard::get_or_create_entry(&pool, leaderboard_id, snake_a)
+            .await?
+            .expect("live snake joins")
+            .leaderboard_entry_id;
+        let b = leaderboard::get_or_create_entry(&pool, leaderboard_id, snake_b)
+            .await?
+            .expect("live snake joins")
+            .leaderboard_entry_id;
+
+        let lb_game = finished_game(&pool, leaderboard_id, &[(a, 1), (b, 2)]).await?;
+
+        let mut state = AppState::test_from_pool(pool.clone());
+        let mut scoring = ScoringRegistry::new();
+        scoring.register(Box::new(WengLinScoring));
+        scoring.register(Box::new(WinRateScoring));
+        scoring.register(Box::new(FoodEatenScoring));
+        state.scoring = std::sync::Arc::new(scoring);
+
+        // Hold entry a so the first run is parked mid-transaction (its COUNTs
+        // already read 0), then start the second run: it also reads COUNT = 0
+        // under READ COMMITTED because the first run is uncommitted.
+        let mut holder = pool.begin().await?;
+        leaderboard::get_entry_for_update_by_id(&mut *holder, a).await?;
+
+        let first_state = state.clone();
+        let first = tokio::spawn(async move { update_ratings(&first_state, lb_game).await });
+        wait_for_lock_waiters(&pool, 1).await?;
+        let second_state = state.clone();
+        let second = tokio::spawn(async move { update_ratings(&second_state, lb_game).await });
+        wait_for_lock_waiters(&pool, 2).await?;
+        holder.rollback().await?;
+
+        let (first, second) = tokio::time::timeout(Duration::from_secs(30), async {
+            (first.await, second.await)
+        })
+        .await?;
+        first??;
+        second??;
+
+        // One application: exactly one result row per snake...
+        for id in [a, b] {
+            assert_eq!(
+                leaderboard::count_game_results_for_entry(&pool, id).await?,
+                1
+            );
+        }
+        // ...and every games_played counter incremented exactly once.
+        let counters: Vec<(Uuid, i32, i32)> = sqlx::query_as(
+            "SELECT le.leaderboard_entry_id, le.games_played, wr.games_played \
+             FROM leaderboard_entries le \
+             JOIN win_rate_stats wr USING (leaderboard_entry_id) \
+             WHERE le.leaderboard_entry_id = ANY($1)",
+        )
+        .bind(&[a, b][..])
+        .fetch_all(&pool)
+        .await?;
+        assert_eq!(counters.len(), 2);
+        for (id, games, wr_games) in counters {
+            assert_eq!((games, wr_games), (1, 1), "entry {id} scored exactly once");
+        }
+        Ok(())
+    }
+
     /// Two snakes that die on the same final turn share first place. That is a
     /// draw: neither gets a win, and equally rated snakes keep their mu.
     #[sqlx::test(migrations = "../migrations")]
@@ -339,7 +484,9 @@ mod tests {
         state.scoring = std::sync::Arc::new(scoring);
         let mut entries = Vec::new();
         for snake_id in [snake_a, snake_b] {
-            let entry = leaderboard::get_or_create_entry(&pool, leaderboard_id, snake_id).await?;
+            let entry = leaderboard::get_or_create_entry(&pool, leaderboard_id, snake_id)
+                .await?
+                .expect("live snake joins");
             for algo in state.scoring.algorithms() {
                 algo.initialize_entry(&pool, entry.leaderboard_entry_id)
                     .await?;
@@ -415,9 +562,11 @@ mod tests {
         .await?;
         let a = leaderboard::get_or_create_entry(&pool, leaderboard_id, eater)
             .await?
+            .expect("live snake joins")
             .leaderboard_entry_id;
         let b = leaderboard::get_or_create_entry(&pool, leaderboard_id, unrecorded)
             .await?
+            .expect("live snake joins")
             .leaderboard_entry_id;
 
         let lb_game = finished_game(&pool, leaderboard_id, &[(a, 1), (b, 2)]).await?;
@@ -448,6 +597,389 @@ mod tests {
         .fetch_all(&pool)
         .await?;
         assert_eq!(per_game, vec![(a, 7), (b, 0)]);
+        Ok(())
+    }
+    /// DEV-2174, fix item 2: re-processing an already-rated game must
+    /// report `false` so the caller rolls back, and must leave every
+    /// counter untouched.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn weng_lin_second_application_reports_false_and_writes_nothing(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        let user_id = create_user(&pool, 21741).await?;
+        let snake_a = create_snake(&pool, user_id, "snake-a").await?;
+        let snake_b = create_snake(&pool, user_id, "snake-b").await?;
+        let leaderboard_id = sqlx::query_scalar!(
+            "INSERT INTO leaderboards (name) VALUES ($1) RETURNING leaderboard_id",
+            "Already-Applied Board",
+        )
+        .fetch_one(&pool)
+        .await?;
+        let a = leaderboard::get_or_create_entry(&pool, leaderboard_id, snake_a)
+            .await?
+            .expect("live snake joins")
+            .leaderboard_entry_id;
+        let b = leaderboard::get_or_create_entry(&pool, leaderboard_id, snake_b)
+            .await?
+            .expect("live snake joins")
+            .leaderboard_entry_id;
+
+        let lb_game = finished_game(&pool, leaderboard_id, &[(a, 1), (b, 2)]).await?;
+
+        let mut state = AppState::test_from_pool(pool.clone());
+        let mut scoring = ScoringRegistry::new();
+        scoring.register(Box::new(WengLinScoring));
+        scoring.register(Box::new(WinRateScoring));
+        state.scoring = std::sync::Arc::new(scoring);
+        update_ratings(&state, lb_game).await?;
+
+        let before: Vec<(Uuid, i32, i32, i32, f64)> = sqlx::query_as(
+            "SELECT leaderboard_entry_id, games_played, first_place_finishes, \
+                    non_first_finishes, mu \
+             FROM leaderboard_entries WHERE leaderboard_entry_id = ANY($1) \
+             ORDER BY leaderboard_entry_id",
+        )
+        .bind(&[a, b][..])
+        .fetch_all(&pool)
+        .await?;
+
+        // Rebuild the event update_ratings built for the first application.
+        let game_id: Uuid = sqlx::query_scalar(
+            "SELECT game_id FROM leaderboard_games WHERE leaderboard_game_id = $1",
+        )
+        .bind(lb_game)
+        .fetch_one(&pool)
+        .await?;
+        let rows: Vec<(Uuid, Uuid, Option<i32>, f64, f64, Uuid)> = sqlx::query_as(
+            "SELECT gb.leaderboard_entry_id, le.battlesnake_id, gb.placement, \
+                    le.mu, le.sigma, gb.game_battlesnake_id \
+             FROM game_battlesnakes gb \
+             JOIN leaderboard_entries le ON le.leaderboard_entry_id = gb.leaderboard_entry_id \
+             WHERE gb.game_id = $1 \
+             ORDER BY gb.leaderboard_entry_id",
+        )
+        .bind(game_id)
+        .fetch_all(&pool)
+        .await?;
+        let event = GameResultEvent {
+            leaderboard_game_id: lb_game,
+            leaderboard_id,
+            game_id,
+            results: rows
+                .into_iter()
+                .map(
+                    |(
+                        leaderboard_entry_id,
+                        battlesnake_id,
+                        placement,
+                        mu,
+                        sigma,
+                        game_battlesnake_id,
+                    )| GameResultEntry {
+                        leaderboard_entry_id,
+                        battlesnake_id,
+                        placement: placement.unwrap_or(2),
+                        mu,
+                        sigma,
+                        game_battlesnake_id,
+                    },
+                )
+                .collect(),
+        };
+
+        let mut tx = pool.begin().await?;
+        let applied = WengLinScoring.process_game_result(&mut tx, &event).await?;
+        assert!(
+            !applied,
+            "re-processing a rated game must report already-applied"
+        );
+        tx.rollback().await?;
+
+        let after: Vec<(Uuid, i32, i32, i32, f64)> = sqlx::query_as(
+            "SELECT leaderboard_entry_id, games_played, first_place_finishes, \
+                    non_first_finishes, mu \
+             FROM leaderboard_entries WHERE leaderboard_entry_id = ANY($1) \
+             ORDER BY leaderboard_entry_id",
+        )
+        .bind(&[a, b][..])
+        .fetch_all(&pool)
+        .await?;
+        assert_eq!(
+            after, before,
+            "the rolled-back second application changed nothing"
+        );
+        for id in [a, b] {
+            assert_eq!(
+                leaderboard::count_game_results_for_entry(&pool, id).await?,
+                1
+            );
+        }
+        Ok(())
+    }
+
+    /// The repair migration backs out exactly the second application of the
+    /// doubled game, on every counter, and is idempotent. Executes the real
+    /// migration file, not a copy. a and b carry a prior opposite-outcome
+    /// game so their scores are 50% (not the degenerate 100%/0% of a
+    /// single-game entry) and the score assertions can actually fail.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn repair_migration_backs_out_second_application_exactly(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        let user_id = create_user(&pool, 21742).await?;
+        let mut snake_ids = Vec::new();
+        for name in [
+            "repair-a", "repair-b", "repair-c", "repair-d", "repair-e", "repair-f",
+        ] {
+            snake_ids.push(create_snake(&pool, user_id, name).await?);
+        }
+        let leaderboard_id = sqlx::query_scalar!(
+            "INSERT INTO leaderboards (name) VALUES ($1) RETURNING leaderboard_id",
+            "Repair Board",
+        )
+        .fetch_one(&pool)
+        .await?;
+        let mut ids = Vec::new();
+        for snake_id in &snake_ids {
+            ids.push(
+                leaderboard::get_or_create_entry(&pool, leaderboard_id, *snake_id)
+                    .await?
+                    .expect("live snake joins")
+                    .leaderboard_entry_id,
+            );
+        }
+        let [a, b, c, d, e, f] = [ids[0], ids[1], ids[2], ids[3], ids[4], ids[5]];
+
+        // A prior game with the OPPOSITE outcome for a and b (b beat a),
+        // rated through update_ratings. Without it, every doubled-game
+        // entry has played exactly one game: a sits at 100% and b at 0%
+        // both before and after the double-apply, so `after == before` on
+        // score would pass even if the migration never recomputed it. With
+        // the prior game a is at 50% before / 66.67% corrupted / 50%
+        // repaired, and b at 50% / 33.33% / 50% — the score check bites.
+        // No food is set on this game, so every food value in the DB got
+        // there through update_ratings (prior rows stay NULL — food_eaten
+        // is NULL by default and FoodEatenScoring skips NULL/0). a's and
+        // b's result-row count is now 2, so the migration's
+        // `games_played = count + 1` guard still matches after corruption
+        // (3 = 2 + 1).
+        let prior = finished_game(&pool, leaderboard_id, &[(b, 1), (a, 2)]).await?;
+
+        // The doubled prod game, recreated with its real leaderboard_game_id
+        // so the migration's keyed guards match it: a wins outright, a/b/c
+        // ate 10/8/1, d ate nothing.
+        let doubled = Uuid::parse_str("5fe9fddf-5a77-4c88-9ddd-05a3fbf9e175")
+            .wrap_err("DEV-2174 fixture UUID")?;
+        finished_game_with_lb_game_id(
+            &pool,
+            leaderboard_id,
+            doubled,
+            &[(a, 1), (b, 2), (c, 3), (d, 4)],
+        )
+        .await?;
+        for (entry_id, food) in [(a, 10), (b, 8), (c, 1)] {
+            // Scoped to the doubled game's game_id: a and b each also have
+            // a prior-game game_battlesnakes row, and an unscoped UPDATE
+            // would hand-set food on that row too.
+            sqlx::query!(
+                "UPDATE game_battlesnakes SET food_eaten = $2 \
+                 WHERE leaderboard_entry_id = $1 \
+                   AND game_id = (SELECT game_id FROM leaderboard_games \
+                                  WHERE leaderboard_game_id = $3)",
+                entry_id,
+                food,
+                doubled,
+            )
+            .execute(&pool)
+            .await?;
+        }
+        // A healthy game elsewhere: e wins and eats 5, f loses.
+        let healthy = finished_game(&pool, leaderboard_id, &[(e, 1), (f, 2)]).await?;
+        sqlx::query!(
+            "UPDATE game_battlesnakes SET food_eaten = 5 WHERE leaderboard_entry_id = $1",
+            e,
+        )
+        .execute(&pool)
+        .await?;
+
+        let mut state = AppState::test_from_pool(pool.clone());
+        let mut scoring = ScoringRegistry::new();
+        scoring.register(Box::new(WengLinScoring));
+        scoring.register(Box::new(WinRateScoring));
+        scoring.register(Box::new(FoodEatenScoring));
+        state.scoring = std::sync::Arc::new(scoring);
+        update_ratings(&state, prior).await?;
+        update_ratings(&state, doubled).await?;
+        update_ratings(&state, healthy).await?;
+
+        // Every counter the double-apply bumped, for one entry. Compared by
+        // exact equality — the repaired score is recomputed with the same
+        // double-precision expression the writer uses, over the same values.
+        #[derive(Debug, Clone, Copy, PartialEq)]
+        struct Counters {
+            games_played: i32,
+            first_place_finishes: i32,
+            non_first_finishes: i32,
+            wr_games_played: i32,
+            wins: i32,
+            losses: i32,
+            score: f64,
+            food_score: Option<i64>,
+        }
+
+        #[derive(Debug, sqlx::FromRow)]
+        struct CounterRow {
+            leaderboard_entry_id: Uuid,
+            games_played: i32,
+            first_place_finishes: i32,
+            non_first_finishes: i32,
+            wr_games_played: i32,
+            wins: i32,
+            losses: i32,
+            score: f64,
+            food_score: Option<i64>,
+        }
+
+        async fn read_counters(
+            pool: &PgPool,
+            ids: &[Uuid],
+        ) -> cja::Result<std::collections::HashMap<Uuid, Counters>> {
+            let rows: Vec<CounterRow> = sqlx::query_as(
+                "SELECT le.leaderboard_entry_id, le.games_played, \
+                            le.first_place_finishes, le.non_first_finishes, \
+                            wr.games_played AS wr_games_played, wr.wins, wr.losses, wr.score, fe.food_score \
+                     FROM leaderboard_entries le \
+                     JOIN win_rate_stats wr USING (leaderboard_entry_id) \
+                     LEFT JOIN food_eaten_stats fe USING (leaderboard_entry_id) \
+                     WHERE le.leaderboard_entry_id = ANY($1)",
+            )
+            .bind(ids)
+            .fetch_all(pool)
+            .await?;
+            Ok(rows
+                .into_iter()
+                .map(|row| {
+                    (
+                        row.leaderboard_entry_id,
+                        Counters {
+                            games_played: row.games_played,
+                            first_place_finishes: row.first_place_finishes,
+                            non_first_finishes: row.non_first_finishes,
+                            wr_games_played: row.wr_games_played,
+                            wins: row.wins,
+                            losses: row.losses,
+                            score: row.score,
+                            food_score: row.food_score,
+                        },
+                    )
+                })
+                .collect())
+        }
+
+        // Before the double-apply: a and b are each 1W-1L (50%), c/d lost
+        // the doubled game, e won the healthy game.
+        let before = read_counters(&pool, &ids).await?;
+
+        // Simulate main's double-apply on a, b, c only (d is the in-game
+        // consistent control; e, f are the other-game controls). This is
+        // what the second concurrent run wrote before its result inserts
+        // were swallowed by ON CONFLICT DO NOTHING.
+        sqlx::query!(
+            "UPDATE leaderboard_entries SET games_played = games_played + 1, \
+             first_place_finishes = first_place_finishes + 1 \
+             WHERE leaderboard_entry_id = $1",
+            a,
+        )
+        .execute(&pool)
+        .await?;
+        sqlx::query!(
+            "UPDATE leaderboard_entries SET games_played = games_played + 1, \
+             non_first_finishes = non_first_finishes + 1 \
+             WHERE leaderboard_entry_id = ANY($1)",
+            &[b, c][..],
+        )
+        .execute(&pool)
+        .await?;
+        sqlx::query!(
+            "UPDATE win_rate_stats SET games_played = games_played + 1, wins = wins + 1, \
+             score = (wins + 1)::double precision / (games_played + 1)::double precision * 100.0, \
+             updated_at = NOW() WHERE leaderboard_entry_id = $1",
+            a,
+        )
+        .execute(&pool)
+        .await?;
+        sqlx::query!(
+            "UPDATE win_rate_stats SET games_played = games_played + 1, losses = losses + 1, \
+             score = wins::double precision / (games_played + 1)::double precision * 100.0, \
+             updated_at = NOW() WHERE leaderboard_entry_id = ANY($1)",
+            &[b, c][..],
+        )
+        .execute(&pool)
+        .await?;
+        for (entry_id, food) in [(a, 10_i64), (b, 8), (c, 1)] {
+            sqlx::query!(
+                "UPDATE food_eaten_stats SET food_score = food_score + $2 \
+                 WHERE leaderboard_entry_id = $1",
+                entry_id,
+                food,
+            )
+            .execute(&pool)
+            .await?;
+        }
+
+        let corrupted = read_counters(&pool, &ids).await?;
+        // The simulation must really have moved every corrupted counter —
+        // otherwise the repair assertions below are vacuous.
+        for x in [a, b, c] {
+            assert_ne!(corrupted[&x], before[&x], "corruption applied to {x}");
+        }
+        // Score must have moved too (a: 66.67% vs 50%; b: 33.33% vs 50%),
+        // or the migration's score recomputation could never fail the
+        // final equality check.
+        assert_ne!(corrupted[&a].score, before[&a].score, "a's score moved");
+        assert_ne!(corrupted[&b].score, before[&b].score, "b's score moved");
+        assert_eq!(
+            corrupted[&d], before[&d],
+            "in-game control d untouched by corruption"
+        );
+        assert_eq!(
+            corrupted[&e], before[&e],
+            "other-game control e untouched by corruption"
+        );
+
+        // The REAL migration file — not a copy.
+        sqlx::raw_sql(include_str!(
+            "../../migrations/20261107170600_repair_double_applied_ratings.up.sql"
+        ))
+        .execute(&pool)
+        .await?;
+
+        let after = read_counters(&pool, &ids).await?;
+        assert_eq!(
+            after, before,
+            "every counter repaired to the single-application snapshot"
+        );
+
+        // Idempotent: a second run changes nothing.
+        sqlx::raw_sql(include_str!(
+            "../../migrations/20261107170600_repair_double_applied_ratings.up.sql"
+        ))
+        .execute(&pool)
+        .await?;
+        let again = read_counters(&pool, &ids).await?;
+        assert_eq!(again, before, "repair is idempotent");
+
+        // The task's success-criteria invariant holds for all six entries.
+        let drifted: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM leaderboard_entries le \
+             WHERE le.leaderboard_entry_id = ANY($1) \
+               AND le.games_played <> (SELECT count(*) FROM leaderboard_game_results r \
+                                       WHERE r.leaderboard_entry_id = le.leaderboard_entry_id)",
+        )
+        .bind(&ids[..])
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(drifted, 0);
         Ok(())
     }
 }

@@ -1239,7 +1239,8 @@ mod tests {
         .unwrap();
         let entry = leaderboard::get_or_create_entry(&pool, private, w.snake_id)
             .await
-            .unwrap();
+            .unwrap()
+            .expect("live snake joins");
         sqlx::query!(
             "UPDATE leaderboard_entries SET games_played = 50, display_score = 99
              WHERE leaderboard_entry_id = $1",

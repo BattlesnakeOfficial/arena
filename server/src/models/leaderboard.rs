@@ -226,22 +226,41 @@ pub async fn get_leaderboard_by_id(
 
 // --- Leaderboard entry queries ---
 
-/// Opt-in a snake to a leaderboard. Returns the existing entry if one already exists.
+/// Opt-in a snake to a leaderboard. `Ok(None)` = the snake is missing or
+/// deleted, or the entry is 'deleted'-marked (join refused — see the
+/// deleted-snake lock below); callers must surface that as not-found,
+/// not an error.
 ///
 /// Joining means "put this snake in rotation": a paused entry (manually or
 /// by the health sweeper) is re-enabled with its health streaks reset, so a
 /// streak from before the owner's fix can't re-pause it on the next failed
 /// probe. Re-joining an entry that's already in rotation changes nothing — an
-/// idempotent retry mustn't wipe a real failing streak.
+/// idempotent retry mustn't wipe a real failing streak. An entry marked
+/// `disabled_reason = 'deleted'` (by `battlesnake::delete_battlesnake`) is
+/// terminal and is never re-enabled.
 pub async fn get_or_create_entry(
     pool: &PgPool,
     leaderboard_id: Uuid,
     battlesnake_id: Uuid,
-) -> cja::Result<LeaderboardEntry> {
+) -> cja::Result<Option<LeaderboardEntry>> {
+    // Selecting the snake FOR SHARE (instead of VALUES) refuses deleted snakes
+    // and serializes against `battlesnake::delete_battlesnake`'s row lock, so a
+    // join can't re-enable an entry while the snake is being deleted. The
+    // DO UPDATE guard keeps a 'deleted'-marked entry terminal even if the
+    // conflict fires. Keep the deleted_at IS NULL predicate on the locked
+    // battlesnakes scan itself: when FOR SHARE waits on delete's row lock,
+    // READ COMMITTED re-checks only the locked relation's own predicates
+    // against the committed row version (EvalPlanQual). A liveness check
+    // anywhere else (a pre-check, a CTE) reads the pre-wait snapshot and lets
+    // the join through.
     let entry = sqlx::query_as!(
         LeaderboardEntry,
         r#"INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id)
-         VALUES ($1, $2)
+         SELECT $1::uuid, b.battlesnake_id
+         FROM battlesnakes b
+         WHERE b.battlesnake_id = $2
+           AND b.deleted_at IS NULL
+         FOR SHARE
          ON CONFLICT (leaderboard_id, battlesnake_id) DO UPDATE
             SET disabled_at = NULL, disabled_reason = NULL, updated_at = NOW(),
                 health_consecutive_failures = CASE
@@ -254,14 +273,16 @@ pub async fn get_or_create_entry(
                     WHEN leaderboard_entries.disabled_at IS NULL
                     THEN leaderboard_entries.health_last_failure
                 END
+            WHERE leaderboard_entries.disabled_reason IS DISTINCT FROM $3
          RETURNING
             leaderboard_entry_id, leaderboard_id, battlesnake_id,
             mu, sigma, display_score, games_played, first_place_finishes, non_first_finishes,
             disabled_at, disabled_reason, created_at, updated_at"#,
         leaderboard_id,
-        battlesnake_id
+        battlesnake_id,
+        crate::models::battlesnake::DISABLED_REASON_DELETED
     )
-    .fetch_one(pool)
+    .fetch_optional(pool)
     .await
     .wrap_err("Failed to create or get leaderboard entry")?;
 
@@ -1317,9 +1338,11 @@ mod tests {
         .await?;
         let low_entry = get_or_create_entry(&pool, leaderboard_id, low_snake)
             .await?
+            .expect("live snake joins")
             .leaderboard_entry_id;
         let high_entry = get_or_create_entry(&pool, leaderboard_id, high_snake)
             .await?
+            .expect("live snake joins")
             .leaderboard_entry_id;
         let game_id = sqlx::query_scalar!(
             "INSERT INTO games (board_size, game_type, status)
@@ -1434,6 +1457,7 @@ mod tests {
                 .await?;
                 let entry_id = get_or_create_entry(&pool, leaderboard_id, battlesnake_id)
                     .await?
+                    .expect("live snake joins")
                     .leaderboard_entry_id;
                 sqlx::query!(
                     "UPDATE leaderboard_entries SET games_played = $2
@@ -1526,6 +1550,247 @@ mod tests {
                 .collect::<BTreeSet<_>>(),
             feed_expected,
             "get_activity_feed"
+        );
+        Ok(())
+    }
+
+    /// Wait until `n` sessions in this test's database are blocked on a lock.
+    async fn wait_for_lock_waiters(pool: &PgPool, n: i64) -> cja::Result<()> {
+        for _ in 0..500 {
+            let waiting = sqlx::query_scalar!(
+                r#"SELECT COUNT(*) AS "count!" FROM pg_stat_activity
+                   WHERE datname = current_database() AND wait_event_type = 'Lock'"#
+            )
+            .fetch_one(pool)
+            .await?;
+            if waiting >= n {
+                return Ok(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        Err(cja::color_eyre::eyre::eyre!(
+            "timed out waiting for {n} lock waiters"
+        ))
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn joining_a_deleted_snake_is_refused(pool: PgPool) -> cja::Result<()> {
+        let leaderboard_id = sqlx::query_scalar!(
+            "INSERT INTO leaderboards (name) VALUES ('join-deleted') RETURNING leaderboard_id"
+        )
+        .fetch_one(&pool)
+        .await?;
+        let user_id = sqlx::query_scalar!(
+            "INSERT INTO users (external_github_id, github_login, github_access_token)
+             VALUES (9911811, 'join-deleted-owner', 'token') RETURNING user_id"
+        )
+        .fetch_one(&pool)
+        .await?;
+        let snake = sqlx::query_scalar!(
+            "INSERT INTO battlesnakes (user_id, name, url)
+             VALUES ($1, 'join-deleted-snake', 'http://snake') RETURNING battlesnake_id",
+            user_id
+        )
+        .fetch_one(&pool)
+        .await?;
+
+        let joined = get_or_create_entry(&pool, leaderboard_id, snake).await?;
+        assert!(joined.is_some(), "live snake must join: {joined:?}");
+
+        assert_eq!(
+            crate::models::battlesnake::delete_battlesnake(&pool, snake, user_id).await?,
+            crate::models::battlesnake::DeleteBattlesnakeOutcome::Deleted
+        );
+
+        // The join is refused and the entry stays terminal.
+        let rejoined = get_or_create_entry(&pool, leaderboard_id, snake).await?;
+        assert!(rejoined.is_none(), "deleted snake rejoined: {rejoined:?}");
+        let row = sqlx::query!(
+            "SELECT disabled_at, disabled_reason
+             FROM leaderboard_entries
+             WHERE leaderboard_id = $1 AND battlesnake_id = $2",
+            leaderboard_id,
+            snake
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert!(row.disabled_at.is_some(), "entry re-enabled: {row:?}");
+        assert_eq!(
+            row.disabled_reason.as_deref(),
+            Some("deleted"),
+            "marker cleared: {row:?}"
+        );
+
+        // A snake that never existed is refused the same way.
+        let missing = get_or_create_entry(&pool, leaderboard_id, Uuid::from_u128(99118110)).await?;
+        assert!(missing.is_none(), "missing snake joined: {missing:?}");
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn join_still_resumes_manually_paused_and_health_entries(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        let leaderboard_id = sqlx::query_scalar!(
+            "INSERT INTO leaderboards (name) VALUES ('join-resume') RETURNING leaderboard_id"
+        )
+        .fetch_one(&pool)
+        .await?;
+        let user_id = sqlx::query_scalar!(
+            "INSERT INTO users (external_github_id, github_login, github_access_token)
+             VALUES (9911812, 'join-resume-owner', 'token') RETURNING user_id"
+        )
+        .fetch_one(&pool)
+        .await?;
+        let snake = sqlx::query_scalar!(
+            "INSERT INTO battlesnakes (user_id, name, url)
+             VALUES ($1, 'join-resume-snake', 'http://snake') RETURNING battlesnake_id",
+            user_id
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert!(
+            get_or_create_entry(&pool, leaderboard_id, snake)
+                .await?
+                .is_some()
+        );
+
+        for reason in [None, Some("health")] {
+            sqlx::query!(
+                "UPDATE leaderboard_entries
+                 SET disabled_at = NOW(), disabled_reason = $2,
+                     health_consecutive_failures = 3, health_consecutive_successes = 2
+                 WHERE leaderboard_id = $1 AND battlesnake_id = $3",
+                leaderboard_id,
+                reason,
+                snake
+            )
+            .execute(&pool)
+            .await?;
+
+            let joined = get_or_create_entry(&pool, leaderboard_id, snake)
+                .await?
+                .expect("paused entry resumes on join");
+            assert!(joined.disabled_at.is_none(), "{joined:?}");
+            assert_eq!(joined.disabled_reason, None, "{joined:?}");
+            let row = sqlx::query!(
+                "SELECT health_consecutive_failures, health_consecutive_successes
+                 FROM leaderboard_entries
+                 WHERE leaderboard_id = $1 AND battlesnake_id = $2",
+                leaderboard_id,
+                snake
+            )
+            .fetch_one(&pool)
+            .await?;
+            assert_eq!(
+                (
+                    row.health_consecutive_failures,
+                    row.health_consecutive_successes
+                ),
+                (0, 0),
+                "re-enabling must reset health streaks (paused via {reason:?}): {row:?}"
+            );
+        }
+        Ok(())
+    }
+
+    /// The race, replayed deterministically: `delete_battlesnake` holds the
+    /// snake row locked with both of its writes applied (but uncommitted)
+    /// while a join runs. The join must not resurrect the entry after the
+    /// delete commits. Both writes happen before the join is spawned: the old
+    /// upsert never touches `battlesnakes`, so a join spawned before delete's
+    /// entry write has nothing to block on, finishes first, and the test
+    /// would pass on the old SQL.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn join_cannot_resurrect_an_entry_while_delete_holds_the_snake_row(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        let leaderboard_id = sqlx::query_scalar!(
+            "INSERT INTO leaderboards (name) VALUES ('join-race') RETURNING leaderboard_id"
+        )
+        .fetch_one(&pool)
+        .await?;
+        let user_id = sqlx::query_scalar!(
+            "INSERT INTO users (external_github_id, github_login, github_access_token)
+             VALUES (9911813, 'join-race-owner', 'token') RETURNING user_id"
+        )
+        .fetch_one(&pool)
+        .await?;
+        let snake = sqlx::query_scalar!(
+            "INSERT INTO battlesnakes (user_id, name, url)
+             VALUES ($1, 'join-race-snake', 'http://snake') RETURNING battlesnake_id",
+            user_id
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert!(
+            get_or_create_entry(&pool, leaderboard_id, snake)
+                .await?
+                .is_some()
+        );
+
+        // Holder mimics delete_battlesnake's transaction end-to-end:
+        // lock, then BOTH writes, all uncommitted.
+        let mut holder = pool.begin().await?;
+        sqlx::query_scalar!(
+            r#"SELECT battlesnake_id FROM battlesnakes
+               WHERE battlesnake_id = $1 AND deleted_at IS NULL FOR UPDATE"#,
+            snake
+        )
+        .fetch_one(&mut *holder)
+        .await?;
+        sqlx::query!(
+            "UPDATE battlesnakes SET deleted_at = NOW() WHERE battlesnake_id = $1",
+            snake
+        )
+        .execute(&mut *holder)
+        .await?;
+        sqlx::query!(
+            r#"UPDATE leaderboard_entries
+               SET disabled_at = COALESCE(disabled_at, NOW()),
+                   disabled_reason = $2, updated_at = NOW()
+               WHERE battlesnake_id = $1"#,
+            snake,
+            crate::models::battlesnake::DISABLED_REASON_DELETED
+        )
+        .execute(&mut *holder)
+        .await?;
+
+        // get_or_create_entry takes &PgPool, so clone into a local and move it.
+        let p = pool.clone();
+        let join =
+            tokio::spawn(async move { get_or_create_entry(&p, leaderboard_id, snake).await });
+
+        // Exactly one lock waiter on both sides of the fix: the old upsert
+        // queues on the entry row lock; the fixed one queues on FOR SHARE
+        // against the holder's FOR UPDATE.
+        wait_for_lock_waiters(&pool, 1).await?;
+
+        holder.commit().await?;
+
+        let joined = tokio::time::timeout(std::time::Duration::from_secs(30), join)
+            .await
+            .expect("join deadlocked")
+            .expect("join task panicked")?;
+        assert!(
+            joined.is_none(),
+            "join resurrected a deleted snake's entry: {joined:?}"
+        );
+
+        let row = sqlx::query!(
+            r#"SELECT disabled_at, disabled_reason
+               FROM leaderboard_entries
+               WHERE leaderboard_id = $1 AND battlesnake_id = $2"#,
+            leaderboard_id,
+            snake
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert!(row.disabled_at.is_some(), "entry re-enabled: {row:?}");
+        assert_eq!(
+            row.disabled_reason.as_deref(),
+            Some("deleted"),
+            "marker cleared: {row:?}"
         );
         Ok(())
     }

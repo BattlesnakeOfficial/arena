@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id)\n         VALUES ($1, $2)\n         ON CONFLICT (leaderboard_id, battlesnake_id) DO UPDATE\n            SET disabled_at = NULL, disabled_reason = NULL, updated_at = NOW(),\n                health_consecutive_failures = CASE\n                    WHEN leaderboard_entries.disabled_at IS NULL\n                    THEN leaderboard_entries.health_consecutive_failures\n                    ELSE 0\n                END,\n                health_consecutive_successes = 0,\n                health_last_failure = CASE\n                    WHEN leaderboard_entries.disabled_at IS NULL\n                    THEN leaderboard_entries.health_last_failure\n                END\n         RETURNING\n            leaderboard_entry_id, leaderboard_id, battlesnake_id,\n            mu, sigma, display_score, games_played, first_place_finishes, non_first_finishes,\n            disabled_at, disabled_reason, created_at, updated_at",
+  "query": "INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id)\n         SELECT $1::uuid, b.battlesnake_id\n         FROM battlesnakes b\n         WHERE b.battlesnake_id = $2\n           AND b.deleted_at IS NULL\n         FOR SHARE\n         ON CONFLICT (leaderboard_id, battlesnake_id) DO UPDATE\n            SET disabled_at = NULL, disabled_reason = NULL, updated_at = NOW(),\n                health_consecutive_failures = CASE\n                    WHEN leaderboard_entries.disabled_at IS NULL\n                    THEN leaderboard_entries.health_consecutive_failures\n                    ELSE 0\n                END,\n                health_consecutive_successes = 0,\n                health_last_failure = CASE\n                    WHEN leaderboard_entries.disabled_at IS NULL\n                    THEN leaderboard_entries.health_last_failure\n                END\n            WHERE leaderboard_entries.disabled_reason IS DISTINCT FROM $3\n         RETURNING\n            leaderboard_entry_id, leaderboard_id, battlesnake_id,\n            mu, sigma, display_score, games_played, first_place_finishes, non_first_finishes,\n            disabled_at, disabled_reason, created_at, updated_at",
   "describe": {
     "columns": [
       {
@@ -72,7 +72,8 @@
     "parameters": {
       "Left": [
         "Uuid",
-        "Uuid"
+        "Uuid",
+        "Text"
       ]
     },
     "nullable": [
@@ -91,5 +92,5 @@
       false
     ]
   },
-  "hash": "23bf0fcb651382ff0bc2594f301b0b602941c063197f8d0e0f0abbf555fc58b4"
+  "hash": "890a4c848c193f95a6197c04597f2423ad2b37d47fca7e5089a99c93addeabbe"
 }
