@@ -25,12 +25,19 @@
 //! exhaust their retries to its dead-letter queue, out of `jobs`), so nothing
 //! may depend on a single enqueue succeeding. The stuck-match sweeper cron
 //! ([`sweep_stuck_matches`]) re-enqueues evaluation for in-progress matches
-//! that have gone quiet, and [`run_match`] re-enqueues the runner for a
-//! stalled game — but only when no `GameRunnerJob` row remains for it: a
-//! queued, running, or backoff-parked job still owns the game, and a second
-//! runner would race it (`run_game` is re-entrant, so re-running a crashed
-//! game is safe). Together these make the sweep converge a match no matter
-//! where the pipeline died. Canceling a tournament cancels its live
+//! that have gone quiet; re-enqueues round progression for in-progress
+//! tournaments whose current round is fully finished but never advanced
+//! (the post-completion `UpdateTournamentStatusJob` enqueue was lost); and
+//! re-enqueues evaluation for `scheduled` matches stranded in an
+//! already-started round — a non-bye sibling in the same round that is
+//! `in_progress` or `completed` past the staleness gate is the evidence the
+//! round was started (byes never count as evidence, and rounds the owner
+//! hasn't started yet are never auto-started). Separately, [`run_match`]
+//! re-enqueues the runner for a stalled game — but only when no
+//! `GameRunnerJob` row remains for it: a queued, running, or backoff-parked
+//! job still owns the game, and a second runner would race it (`run_game`
+//! is re-entrant, so re-running a crashed game is safe). Together these
+//! make the sweep converge a match no matter where the pipeline died. Canceling a tournament cancels its live
 //! matches, and [`run_match`] refuses to evaluate anything for a tournament
 //! that is not `in_progress`; a canceled match's stranded games are the
 //! stuck-game sweeper's job (see `server/src/stuck_game_sweeper.rs`).
@@ -45,10 +52,12 @@ use crate::models::game::{CreateGame, GameStatus};
 use crate::models::game_battlesnake::AddBattlesnakeToGame;
 use crate::models::tournament::{
     MatchParticipant, MatchStatus, MatchStyle, TournamentMatch, TournamentStatus,
-    count_unfinished_matches_in_round, create_match_game, find_match_game_by_game_id,
-    find_stale_in_progress_matches, get_match_by_id, get_match_games_for_match,
-    get_matches_for_round, get_participants_for_match, get_tournament_by_id, round_exists,
-    set_match_status, try_set_tournament_current_round, try_set_tournament_status,
+    count_unfinished_matches_in_round, create_match_game,
+    find_in_progress_tournaments_with_finished_round, find_match_game_by_game_id,
+    find_stale_in_progress_matches, find_stale_scheduled_matches_in_started_rounds,
+    get_match_by_id, get_match_games_for_match, get_matches_for_round, get_participants_for_match,
+    get_tournament_by_id, round_exists, set_match_status, try_set_tournament_current_round,
+    try_set_tournament_status,
 };
 use crate::state::AppState;
 use crate::tournament_bracket::{complete_match_with_winner, fill_participant_from_source};
@@ -68,6 +77,18 @@ const GAME_STALL_THRESHOLD_MINUTES: i64 = 15;
 /// How long a tournament match may sit `in_progress` without updates before
 /// the stuck-match sweeper re-enqueues its evaluation.
 const MATCH_STALE_MINUTES: i64 = 5;
+
+/// How long evidence must age before the stuck-match sweeper takes over for
+/// states the in-progress-match branch can't see: a round whose matches are
+/// all completed but never advanced (lost `UpdateTournamentStatusJob`
+/// enqueue — measured from the last match's completion), and a `scheduled`
+/// match stranded in an already-started round (lost `RunMatchJob` enqueue —
+/// measured from the started sibling's last state change, because a
+/// scheduled match's own `updated_at` is its bracket-creation time).
+/// Generous on purpose: the enqueues being recovered normally happen within
+/// milliseconds of the triggering commit, so anything past this window was
+/// lost, not merely queued.
+const ROUND_STALE_MINUTES: i64 = 15;
 
 /// Decide the match winner from per-game winners (`None` = tie).
 ///
@@ -622,7 +643,8 @@ pub(crate) fn is_unique_violation(err: &color_eyre::eyre::Report, constraint: &s
     })
 }
 
-/// Re-enqueue evaluation for stuck matches.
+/// Re-enqueue evaluation for stuck matches, and recover lost round
+/// progression.
 ///
 /// Nothing else re-evaluates a match once its driving job dies (cja deletes
 /// jobs that exhaust their retries): game completion hooks only fire when a
@@ -632,10 +654,31 @@ pub(crate) fn is_unique_violation(err: &color_eyre::eyre::Report, constraint: &s
 /// `run_match` is idempotent and knows how to re-enqueue a stalled game's
 /// runner, so the sweep converges the match no matter where the pipeline
 /// died.
+///
+/// Two more branches cover states the in-progress branch can't see, both
+/// gated on `ROUND_STALE_MINUTES`:
+/// - an in-progress tournament whose current round is fully finished but
+///   never advanced (the post-completion `UpdateTournamentStatusJob`
+///   enqueue was lost) gets its progression re-enqueued;
+///   `update_tournament_progress` is idempotent, so duplicates are
+///   harmless, and
+/// - a `scheduled` match stranded in an already-started round (its
+///   `RunMatchJob` was lost) gets its evaluation re-enqueued, but only with
+///   sibling evidence that the round was actually started: a non-bye
+///   sibling in the same round that is `in_progress` or `completed` and
+///   older than the cutoff. Byes never count as evidence, and rounds the
+///   owner hasn't started yet are never auto-started — Run Round stays an
+///   owner action.
+///
+/// A sweeper-driven `run_match` charges the tournament owner's game-creation
+/// rate-limit window exactly like the original job would (see
+/// `record_game_creation_attempt`) — no new behavior.
 pub async fn sweep_stuck_matches(app_state: &AppState) -> cja::Result<()> {
-    let cutoff = chrono::Utc::now() - chrono::Duration::minutes(MATCH_STALE_MINUTES);
-    let match_ids = find_stale_in_progress_matches(&app_state.db, cutoff).await?;
+    let now = chrono::Utc::now();
+    let match_cutoff = now - chrono::Duration::minutes(MATCH_STALE_MINUTES);
+    let round_cutoff = now - chrono::Duration::minutes(ROUND_STALE_MINUTES);
 
+    let match_ids = find_stale_in_progress_matches(&app_state.db, match_cutoff).await?;
     for match_id in match_ids {
         tracing::info!(
             match_id = %match_id,
@@ -649,6 +692,45 @@ pub async fn sweep_stuck_matches(app_state: &AppState) -> cja::Result<()> {
         )
         .await
         .wrap_err("Failed to enqueue swept match evaluation")?;
+    }
+
+    // A round whose matches are all finished but which never advanced
+    // (the post-completion UpdateTournamentStatusJob enqueue was lost).
+    let tournament_ids =
+        find_in_progress_tournaments_with_finished_round(&app_state.db, round_cutoff).await?;
+    for tournament_id in tournament_ids {
+        tracing::warn!(
+            tournament_id = %tournament_id,
+            "Stuck-match sweeper recovering a finished round whose progression was lost"
+        );
+        cja::jobs::Job::enqueue(
+            crate::jobs::UpdateTournamentStatusJob { tournament_id },
+            app_state.clone(),
+            format!("Stuck-match sweep for tournament {tournament_id} round progression"),
+            None,
+        )
+        .await
+        .wrap_err("Failed to enqueue swept round progression")?;
+    }
+
+    // A scheduled match stranded in an already-started round (its
+    // RunMatchJob was lost between run_round's per-match enqueues, or died
+    // before the first game transaction).
+    let scheduled_ids =
+        find_stale_scheduled_matches_in_started_rounds(&app_state.db, round_cutoff).await?;
+    for match_id in scheduled_ids {
+        tracing::warn!(
+            match_id = %match_id,
+            "Stuck-match sweeper re-enqueueing a scheduled match stranded in a started round"
+        );
+        cja::jobs::Job::enqueue(
+            crate::jobs::RunMatchJob { match_id },
+            app_state.clone(),
+            format!("Stuck-match sweep for stranded scheduled match {match_id}"),
+            None,
+        )
+        .await
+        .wrap_err("Failed to enqueue swept scheduled match evaluation")?;
     }
 
     Ok(())

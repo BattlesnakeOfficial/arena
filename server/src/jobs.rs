@@ -619,10 +619,12 @@ impl Job<AppState> for UpdateTournamentStatusJob {
     }
 }
 
-/// Cron job that re-enqueues evaluation for tournament matches whose driving
-/// jobs died (the job system deletes jobs that exhaust their retries, so a
-/// match can otherwise get stuck in progress forever). Runs every couple of
-/// minutes; see [`crate::tournament_match::sweep_stuck_matches`].
+/// Cron job that re-enqueues evaluation for stuck tournament matches whose
+/// driving jobs died — stale in-progress matches, scheduled matches
+/// stranded in a started round — and recovers lost round progression (the
+/// job system deletes jobs that exhaust their retries, so a tournament can
+/// otherwise get stuck forever). Runs every couple of minutes; see
+/// [`crate::tournament_match::sweep_stuck_matches`].
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct StuckMatchSweeperJob;
 

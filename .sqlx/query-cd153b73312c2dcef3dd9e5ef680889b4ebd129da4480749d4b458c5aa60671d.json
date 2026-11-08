@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT m.match_id\n        FROM tournament_matches m\n        JOIN tournaments t ON t.tournament_id = m.tournament_id\n        WHERE t.status = 'in_progress'\n          AND m.round = t.current_round\n          AND m.status = 'scheduled'\n          AND m.updated_at < $1\n          AND (\n              SELECT count(*) FROM match_participants mp\n              WHERE mp.match_id = m.match_id AND mp.battlesnake_id IS NOT NULL\n          ) = 2\n          AND EXISTS (\n              SELECT 1\n              FROM tournament_matches s\n              WHERE s.tournament_id = m.tournament_id\n                AND s.round = m.round\n                AND s.match_id <> m.match_id\n                AND s.status IN ('in_progress', 'completed')\n                AND s.updated_at < $1\n                AND (\n                    SELECT count(*) FROM match_participants sp\n                    WHERE sp.match_id = s.match_id\n                ) = 2\n          )\n        ORDER BY m.updated_at ASC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "match_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "cd153b73312c2dcef3dd9e5ef680889b4ebd129da4480749d4b458c5aa60671d"
+}
