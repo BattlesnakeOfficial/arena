@@ -264,6 +264,30 @@ impl Job<AppState> for GameRunnerJob {
     }
 }
 
+/// True when a `GameRunnerJob` for `game_id` still exists in the queue —
+/// queued, locked/running, or waiting out retry backoff. Recovery paths use
+/// this to avoid enqueuing a second runner for a game one job already owns
+/// (DEV-2175). cja moves jobs that exhaust their retries to
+/// dead_letter_jobs, and panic/OOM-killed jobs are lease-reclaimed and stay
+/// in the queue, so a missing row means no runner will ever pick this game
+/// up again.
+pub async fn game_runner_job_exists<'e, E>(executor: E, game_id: Uuid) -> cja::Result<bool>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let exists = sqlx::query_scalar!(
+        r#"SELECT EXISTS(
+            SELECT 1 FROM jobs
+            WHERE name = 'GameRunnerJob' AND payload->>'game_id' = $1
+        ) AS "exists!""#,
+        game_id.to_string(),
+    )
+    .fetch_one(executor)
+    .await
+    .wrap_err("Failed to check for outstanding GameRunnerJob")?;
+    Ok(exists)
+}
+
 /// Job to discover games that need backup and enqueue individual backup jobs.
 /// Runs as a cron job every hour, checking games from the last 4 hours.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
