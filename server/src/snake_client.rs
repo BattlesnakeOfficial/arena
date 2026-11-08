@@ -938,7 +938,7 @@ mod tests {
     use super::*;
     use crate::wire;
     use proptest::prelude::*;
-    use tokio::io::AsyncWriteExt as _;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use wiremock::matchers::{header, method, path};
 
     #[test]
@@ -1838,6 +1838,42 @@ mod tests {
         assert!(!result.outcome.errored());
     }
 
+    /// Read one full HTTP request (headers + Content-Length body) off the
+    /// stream. hyper rejects a response that arrives while the request is
+    /// still being written (`UnexpectedMessage` → transport error), so a
+    /// raw-TCP mock must consume the whole request before answering — a
+    /// single `read` can return just the first TCP segment of a
+    /// multi-segment request body (the ~2 KB wire Game body spans two).
+    async fn read_full_request(stream: &mut tokio::net::TcpStream) {
+        let mut buf = Vec::with_capacity(4096);
+        let mut chunk = [0u8; 4096];
+        loop {
+            let Some(header_end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
+                let n = stream.read(&mut chunk).await.unwrap_or(0);
+                if n == 0 {
+                    return;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+                continue;
+            };
+            let headers = String::from_utf8_lossy(&buf[..header_end]).to_string();
+            let content_length = headers
+                .lines()
+                .find(|l| l.to_ascii_lowercase().starts_with("content-length:"))
+                .and_then(|l| l.split(':').nth(1))
+                .and_then(|v| v.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            if buf.len() >= header_end + 4 + content_length {
+                return;
+            }
+            let n = stream.read(&mut chunk).await.unwrap_or(0);
+            if n == 0 {
+                return;
+            }
+            buf.extend_from_slice(&chunk[..n]);
+        }
+    }
+
     /// DEV-2184 success criterion: headers arrive immediately, the body
     /// stalls past the move timeout. The move timeout must cover the body
     /// phase — `MoveOutcome::TimedOut` with the real elapsed time, not the
@@ -1849,6 +1885,7 @@ mod tests {
         let body = br#"{"move":"left"}"#;
         tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
+            read_full_request(&mut stream).await;
             stream
                 .write_all(
                     format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len()).as_bytes(),
@@ -1899,6 +1936,7 @@ mod tests {
         let body = br#"{"move":"left"}"#;
         tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
+            read_full_request(&mut stream).await;
             stream
                 .write_all(
                     format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len()).as_bytes(),
