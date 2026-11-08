@@ -59,38 +59,26 @@ pub async fn upsert_resume_state(
         .collect();
     let shouts: Vec<Option<String>> = state.snakes.iter().map(|s| s.shout.clone()).collect();
     let food_eatens: Vec<i32> = state.snakes.iter().map(|s| s.food_eaten).collect();
-    let death_turns: Vec<Option<i32>> = state.snakes.iter().map(|s| s.death_turn).collect();
-    let death_causes: Vec<Option<String>> =
-        state.snakes.iter().map(|s| s.death_cause.clone()).collect();
-    let death_eliminated_bys: Vec<Option<String>> = state
-        .snakes
-        .iter()
-        .map(|s| s.death_eliminated_by.clone())
-        .collect();
-    let death_orders: Vec<Option<i32>> = state.snakes.iter().map(|s| s.death_order).collect();
     let bodies: Vec<serde_json::Value> = state.snakes.iter().map(|s| s.body.clone()).collect();
 
     // One batched statement — no per-snake round trips. Runtime-checked
     // (not the query! macro): the nullable array bindings (last_move,
-    // latency_ms, shout, the death group) don't fit the macro's `&[T]`
-    // inference for `type[]` params; the behavioral tests pin every value
-    // this writes.
+    // latency_ms, shout) don't fit the macro's `&[T]` inference for
+    // `type[]` params; the behavioral tests pin every value this writes.
     sqlx::query(
         r#"INSERT INTO game_resume_snakes (
                game_id, game_battlesnake_id, health, eliminated_cause, eliminated_by,
                eliminated_on_turn, last_move, context_present, latency_ms, shout,
-               food_eaten, death_turn, death_cause, death_eliminated_by, death_order, body
+               food_eaten, body
            )
            SELECT $1, s.game_battlesnake_id, s.health, s.eliminated_cause, s.eliminated_by,
                   s.eliminated_on_turn, s.last_move, s.context_present, s.latency_ms, s.shout,
-                  s.food_eaten, s.death_turn, s.death_cause, s.death_eliminated_by,
-                  s.death_order, s.body
+                  s.food_eaten, s.body
            FROM UNNEST($2::uuid[], $3::int[], $4::text[], $5::text[], $6::int[], $7::text[],
-                       $8::bool[], $9::int[], $10::text[], $11::int[], $12::int[], $13::text[],
-                       $14::text[], $15::int[], $16::jsonb[])
+                       $8::bool[], $9::int[], $10::text[], $11::int[], $12::jsonb[])
                 AS s(game_battlesnake_id, health, eliminated_cause, eliminated_by,
                      eliminated_on_turn, last_move, context_present, latency_ms, shout,
-                     food_eaten, death_turn, death_cause, death_eliminated_by, death_order, body)
+                     food_eaten, body)
            ON CONFLICT (game_id, game_battlesnake_id) DO UPDATE SET
                health = EXCLUDED.health,
                eliminated_cause = EXCLUDED.eliminated_cause,
@@ -101,10 +89,6 @@ pub async fn upsert_resume_state(
                latency_ms = EXCLUDED.latency_ms,
                shout = EXCLUDED.shout,
                food_eaten = EXCLUDED.food_eaten,
-               death_turn = EXCLUDED.death_turn,
-               death_cause = EXCLUDED.death_cause,
-               death_eliminated_by = EXCLUDED.death_eliminated_by,
-               death_order = EXCLUDED.death_order,
                body = EXCLUDED.body"#,
     )
     .bind(game_id)
@@ -118,10 +102,6 @@ pub async fn upsert_resume_state(
     .bind(&latencies)
     .bind(&shouts)
     .bind(&food_eatens)
-    .bind(&death_turns)
-    .bind(&death_causes)
-    .bind(&death_eliminated_bys)
-    .bind(&death_orders)
     .bind(&bodies)
     .execute(&mut *tx)
     .await
@@ -150,7 +130,7 @@ pub async fn load_resume_state(
     let rows = sqlx::query!(
         r#"SELECT game_battlesnake_id, health, eliminated_cause, eliminated_by,
                   eliminated_on_turn, last_move, context_present, latency_ms, shout,
-                  food_eaten, death_turn, death_cause, death_eliminated_by, death_order, body
+                  food_eaten, body
            FROM game_resume_snakes WHERE game_id = $1"#,
         game_id
     )
@@ -172,10 +152,6 @@ pub async fn load_resume_state(
             latency_ms: row.latency_ms.map(i64::from),
             shout: row.shout,
             food_eaten: row.food_eaten,
-            death_turn: row.death_turn,
-            death_cause: row.death_cause,
-            death_eliminated_by: row.death_eliminated_by,
-            death_order: row.death_order,
             body: row.body,
         })
         .collect();
@@ -263,10 +239,6 @@ mod tests {
                 latency_ms: Some(300_000),
                 shout: Some("hi".to_owned()),
                 food_eaten: 1,
-                death_turn: None,
-                death_cause: None,
-                death_eliminated_by: None,
-                death_order: None,
                 body: serde_json::json!([{"x": 1, "y": 1}]),
             }],
         };
@@ -342,10 +314,6 @@ mod tests {
                     latency_ms: Some(120),
                     shout: None,
                     food_eaten: 0,
-                    death_turn: None,
-                    death_cause: None,
-                    death_eliminated_by: None,
-                    death_order: None,
                     body: serde_json::json!([{"x": 1, "y": 1}]),
                 })
                 .collect(),

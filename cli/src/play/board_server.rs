@@ -148,19 +148,12 @@ pub struct FramePoint {
 // Free functions
 // ---------------------------------------------------------------------------
 
-/// Go's cause strings (`rules/constants.go`; NotEliminated is "" and never
-/// used — `Death` is `None` there).
+/// Go's cause strings (`rules/constants.go`), via
+/// [`rules::EliminationCause::go_slug`]: the CLI's board parity with
+/// play.battlesnake.com. NotEliminated is "" (and never used — `Death`
+/// is `None` there).
 pub fn cause_str(cause: &rules::EliminationCause) -> &'static str {
-    use rules::EliminationCause as Cause;
-    match cause {
-        Cause::NotEliminated => "",
-        Cause::OutOfHealth => "out-of-health",
-        Cause::OutOfBounds => "wall-collision",
-        Cause::SelfCollision => "snake-self-collision",
-        Cause::Collision => "snake-collision",
-        Cause::HeadToHeadCollision => "head-collision",
-        Cause::Hazard => "hazard",
-    }
+    cause.go_slug()
 }
 
 /// Go's `boardGame` construction with arena values: the resolved wire
@@ -860,7 +853,8 @@ mod tests {
             },
             meta: engine_core::GameMeta {
                 game_id: "GAME_ID".into(),
-                ruleset_name: "standard".into(),
+                mode: GameMode::Standard,
+                game_over_rule: GameMode::Standard.default_game_over_rule(),
                 timeout: 500,
                 settings: StandardSettings {
                     food_spawn_chance: 15,

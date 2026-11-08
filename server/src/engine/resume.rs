@@ -13,7 +13,6 @@ use color_eyre::eyre::Context as _;
 use rules::{BoardState, Direction, EliminationCause, Point, Snake};
 use uuid::Uuid;
 
-use crate::engine::frame::DeathInfo;
 use crate::engine::{EngineGame, GameSource, MOVE_TIMEOUT_MS};
 use crate::models::game::Game;
 use crate::models::game_battlesnake::GameBattlesnakeWithDetails;
@@ -40,13 +39,6 @@ pub struct ResumeSnakeRecord {
     pub latency_ms: Option<i64>,
     pub shout: Option<String>,
     pub food_eaten: i32,
-    /// `death_*` are all-`None` as a group while the snake has no
-    /// `death_info` entry; `death_order` is its position in the runner's
-    /// `death_info` vector.
-    pub death_turn: Option<i32>,
-    pub death_cause: Option<String>,
-    pub death_eliminated_by: Option<String>,
-    pub death_order: Option<i32>,
     /// JSONB array of `{x,y}` `rules::Point`.
     pub body: serde_json::Value,
 }
@@ -75,12 +67,12 @@ fn cause_text(cause: &EliminationCause) -> cja::Result<String> {
 }
 
 /// Capture the runner's live state at persist time. `last_moves`,
-/// `snake_contexts`, `food_eaten` and the death group are the runner caches;
-/// they must be the ones built from THIS turn's move results (the runner
-/// updates them before persisting). Fails only when a snake id is not a UUID.
+/// `snake_contexts` and `food_eaten` are the runner caches; they must be the
+/// ones built from THIS turn's move results (the runner updates them before
+/// persisting). Elimination state rides on the snakes themselves. Fails only
+/// when a snake id is not a UUID.
 pub fn capture_resume_state(
     engine_game: &EngineGame,
-    death_info: &[DeathInfo],
     food_eaten: &HashMap<String, i32>,
     last_moves: &HashMap<String, Direction>,
     snake_contexts: &HashMap<String, SnakeContext>,
@@ -90,9 +82,6 @@ pub fn capture_resume_state(
         let game_battlesnake_id = Uuid::parse_str(&snake.id)
             .wrap_err_with(|| format!("snake id {} is not a game_battlesnake UUID", snake.id))?;
         let context = snake_contexts.get(&snake.id);
-        // Position in the runner's death_info vector, when it has one.
-        let death = death_info.iter().position(|d| d.snake_id == snake.id);
-        let death = death.map(|index| (index as i32, &death_info[index]));
         snakes.push(ResumeSnakeRecord {
             game_battlesnake_id,
             health: snake.health,
@@ -104,10 +93,6 @@ pub fn capture_resume_state(
             latency_ms: context.and_then(|c| c.latency_ms),
             shout: context.and_then(|c| c.shout.clone()),
             food_eaten: food_eaten.get(&snake.id).copied().unwrap_or(0),
-            death_turn: death.map(|(_, d)| d.turn),
-            death_cause: death.map(|(_, d)| d.cause.clone()),
-            death_eliminated_by: death.map(|(_, d)| d.eliminated_by.clone()),
-            death_order: death.map(|(index, _)| index),
             body: serde_json::to_value(&snake.body)
                 .wrap_err_with(|| format!("failed to serialize body of snake {}", snake.id))?,
         });
@@ -130,7 +115,6 @@ pub fn capture_resume_state(
 #[derive(Debug, PartialEq)]
 pub struct ResumedState {
     pub engine_game: EngineGame,
-    pub death_info: Vec<DeathInfo>,
     pub food_eaten: HashMap<String, i32>,
     pub last_moves: HashMap<String, Direction>,
     pub snake_contexts: HashMap<String, SnakeContext>,
@@ -184,8 +168,6 @@ fn parse_elimination_cause(text: &str) -> Result<EliminationCause, RestoreError>
 ///   - the record snake-id set and the roster's game_battlesnake_id set
 ///     differ in either direction (set equality)
 ///   - a snake's body is empty (a corrupt row that would panic the engine)
-///   - the death_* columns are not all-NULL-or-all-present for a snake, or
-///     death_order values collide (order must rebuild exactly)
 ///   - a `food` point, or a body point of a NOT-eliminated snake, lies
 ///     outside the board dimensions derived from the game row
 ///     → `snapshot_validation_failed`
@@ -206,8 +188,8 @@ pub fn restore(
 
     // Meta is rebuilt from the same inputs create_initial_game uses — never
     // trusted from the stored state.
-    let (ruleset_name, settings, royale) =
-        crate::engine::mode_rules(game.game_type.clone(), game.game_id);
+    let mode = crate::engine::game_mode(&game.game_type);
+    let (settings, royale) = crate::engine::mode_rules(game.game_type.clone(), game.game_id);
     let (width, height) = game.board_size.dimensions();
     let (width, height) = (width as i32, height as i32);
 
@@ -240,7 +222,6 @@ pub fn restore(
     let mut last_moves = HashMap::new();
     let mut snake_contexts = HashMap::new();
     let mut food_eaten = HashMap::new();
-    let mut deaths: Vec<(i32, DeathInfo)> = Vec::new();
 
     for bs in battlesnakes {
         let record = &records_by_id[&bs.game_battlesnake_id];
@@ -285,35 +266,6 @@ pub fn restore(
             food_eaten.insert(id.clone(), record.food_eaten);
         }
 
-        // The death group must be all-None or all-present together.
-        let death_group = [
-            record.death_turn.is_some(),
-            record.death_cause.is_some(),
-            record.death_eliminated_by.is_some(),
-            record.death_order.is_some(),
-        ];
-        if death_group.iter().any(|b| *b) && !death_group.iter().all(|b| *b) {
-            return Err(RestoreError::validation(&format!(
-                "snake {id} has a half-present death group"
-            )));
-        }
-        if let (Some(turn), Some(cause), Some(eliminated_by), Some(order)) = (
-            record.death_turn,
-            record.death_cause.clone(),
-            record.death_eliminated_by.clone(),
-            record.death_order,
-        ) {
-            deaths.push((
-                order,
-                DeathInfo {
-                    snake_id: id.clone(),
-                    turn,
-                    cause,
-                    eliminated_by,
-                },
-            ));
-        }
-
         snakes.push(Snake {
             id,
             body,
@@ -323,16 +275,6 @@ pub fn restore(
             eliminated_on_turn: record.eliminated_on_turn,
         });
     }
-
-    // death_order values must not collide: order must rebuild exactly.
-    let mut orders: Vec<i32> = deaths.iter().map(|(order, _)| *order).collect();
-    orders.sort_unstable();
-    orders.dedup();
-    if orders.len() != deaths.len() {
-        return Err(RestoreError::validation("colliding death_order values"));
-    }
-    deaths.sort_by_key(|(order, _)| *order);
-    let death_info: Vec<DeathInfo> = deaths.into_iter().map(|(_, d)| d).collect();
 
     // Food must be on the board.
     if let Some(point) = food
@@ -357,7 +299,8 @@ pub fn restore(
         board,
         meta: GameMeta {
             game_id: game.game_id.to_string(),
-            ruleset_name: ruleset_name.to_string(),
+            mode,
+            game_over_rule: mode.default_game_over_rule(),
             timeout: MOVE_TIMEOUT_MS,
             settings,
             royale,
@@ -368,7 +311,6 @@ pub fn restore(
 
     Ok(ResumedState {
         engine_game,
-        death_info,
         food_eaten,
         last_moves,
         snake_contexts,
@@ -445,7 +387,6 @@ mod tests {
     #[derive(Debug)]
     struct LiveRun {
         engine_game: EngineGame,
-        death_info: Vec<DeathInfo>,
         food_eaten: HashMap<String, i32>,
         last_moves: HashMap<String, Direction>,
         snake_contexts: HashMap<String, SnakeContext>,
@@ -472,7 +413,6 @@ mod tests {
             (
                 LiveRun {
                     engine_game,
-                    death_info: Vec::new(),
                     food_eaten: HashMap::new(),
                     last_moves: HashMap::new(),
                     snake_contexts: HashMap::new(),
@@ -524,7 +464,6 @@ mod tests {
             crate::game_runner::apply_turn_results(
                 &mut self.engine_game,
                 results,
-                &mut self.death_info,
                 &mut self.food_eaten,
                 &mut self.last_moves,
                 &mut self.snake_contexts,
@@ -535,7 +474,6 @@ mod tests {
         fn capture(&self) -> ResumeStateData {
             capture_resume_state(
                 &self.engine_game,
-                &self.death_info,
                 &self.food_eaten,
                 &self.last_moves,
                 &self.snake_contexts,
@@ -587,8 +525,8 @@ mod tests {
     /// For Constrictor: the 2x2 CYCLE walk self-collides on its 4th move
     /// (the mode grows every turn), so it can never round-trip a live
     /// Constrictor snake. Instead snake 0 walks to its NEAREST edge and is
-    /// eliminated within ~2 turns (its eliminated state and death_info
-    /// entry must survive the round-trip), and every other snake walks a
+    /// eliminated within ~2 turns (its eliminated state must survive the
+    /// round-trip), and every other snake walks a
     /// straight line toward its FARTHEST edge, surviving ~9 turns (past the
     /// tests' K=8). Spawns sit on the board's inner ring, so both
     /// directions are fixed per snake at spawn and the walk never
@@ -675,14 +613,10 @@ mod tests {
 
             // The whole ResumedState, exactly: engine game (snakes, health,
             // bodies, food, RAW hazards, Royale shrink state, eliminations,
-            // meta, snake_names), death_info, and every map's membership.
+            // meta, snake_names) and every map's membership.
             assert_eq!(
                 resumed.engine_game, run.engine_game,
                 "{mode:?}: engine state diverged across capture/restore"
-            );
-            assert_eq!(
-                resumed.death_info, run.death_info,
-                "{mode:?}: death_info diverged"
             );
             assert_eq!(
                 resumed.food_eaten, run.food_eaten,
@@ -762,7 +696,11 @@ mod tests {
 
     /// Constrictor never spawns food, so the game is deterministic given
     /// scripted moves: run to completion uninterrupted vs. resume-at-K; the
-    /// final placements, death_info, and elimination order must match.
+    /// final placements, deaths, and elimination order must match. Deaths
+    /// are read off the snakes' own elimination fields — (roster index,
+    /// eliminated_on_turn, arena cause slug) ordered by (turn, board
+    /// position) — same-turn deaths keep roster order, like the parallel
+    /// death list the frames used to carry.
     ///
     /// Outcome by roster index (LiveRun mints fresh UUIDs per run):
     /// placements, deaths as (index, turn, cause), and elimination order,
@@ -773,8 +711,8 @@ mod tests {
     fn resumed_game_matches_full_game_outcome_constrictor() {
         // Walk (seed 3, three snakes, `constrictor_monotone`): snake 0 walks
         // to its nearest edge and is eliminated at turn 2, BEFORE the
-        // resume — its eliminated state and death_info entry must survive
-        // the restore or the final outcome diverges. Snakes 1 and 2 walk
+        // resume — its eliminated state must survive the restore or the
+        // final outcome diverges. Snakes 1 and 2 walk
         // straight lines toward their farthest edges and are eliminated at
         // turn 10, AFTER the resume, ending the game. K=6 sits mid-flight
         // with two snakes alive, so the resume really runs.
@@ -784,8 +722,7 @@ mod tests {
             let (mut run, game_id) = LiveRun::start(GameMode::Constrictor, 3, 3);
             let monotone = constrictor_monotone(&run);
             let mut did_resume = false;
-            while !engine_core::is_game_over(&run.engine_game)
-                && run.engine_game.board.turn < engine_core::MAX_TURNS
+            while engine_core::stop_reason(&run.engine_game, Some(engine_core::MAX_TURNS)).is_none()
             {
                 if let Some(k) = resume_at
                     && run.engine_game.board.turn == k
@@ -796,7 +733,6 @@ mod tests {
                         game_id,
                     );
                     run.engine_game = resumed.engine_game;
-                    run.death_info = resumed.death_info;
                     run.food_eaten = resumed.food_eaten;
                     run.last_moves = resumed.last_moves;
                     run.snake_contexts = resumed.snake_contexts;
@@ -811,20 +747,34 @@ mod tests {
                     .position(|s| s.to_string() == id)
                     .expect("roster snake")
             };
+            let mut deaths: Vec<(i32, usize, (usize, i32, String))> = run
+                .engine_game
+                .board
+                .snakes
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| s.eliminated_cause.is_eliminated())
+                .map(|(board_pos, s)| {
+                    (
+                        s.eliminated_on_turn,
+                        board_pos,
+                        (
+                            index_of(&s.id),
+                            s.eliminated_on_turn,
+                            s.eliminated_cause.arena_slug().to_string(),
+                        ),
+                    )
+                })
+                .collect();
+            deaths.sort_by_key(|(turn, board_pos, _)| (*turn, *board_pos));
             (
                 (
                     engine_core::placement::from_final_snakes(&run.engine_game.board.snakes)
                         .iter()
                         .map(|(id, p)| (index_of(id), *p))
                         .collect(),
-                    run.death_info
-                        .iter()
-                        .map(|d| (index_of(&d.snake_id), d.turn, d.cause.clone()))
-                        .collect(),
-                    run.death_info
-                        .iter()
-                        .map(|d| index_of(&d.snake_id))
-                        .collect(),
+                    deaths.iter().map(|(_, _, death)| death.clone()).collect(),
+                    deaths.iter().map(|(_, _, (index, _, _))| *index).collect(),
                 ),
                 did_resume,
             )
@@ -851,7 +801,7 @@ mod tests {
         );
 
         assert_eq!(resumed.0, uninterrupted.0, "placements diverged");
-        assert_eq!(resumed.1, uninterrupted.1, "death_info diverged");
+        assert_eq!(resumed.1, uninterrupted.1, "deaths diverged");
         assert_eq!(resumed.2, uninterrupted.2, "elimination order diverged");
     }
 
@@ -974,8 +924,7 @@ mod tests {
     #[test]
     fn restore_rejects_bad_state() {
         let (mut run, _game_id) = LiveRun::start(GameMode::Standard, 11, 2);
-        // Two turns so last_moves/contexts/food have entries; kill a snake
-        // with a hand-set death group for the death-group cases.
+        // Two turns so last_moves/contexts/food have entries.
         for _ in 0..2 {
             let results = run.scripted_results(&HashMap::new());
             run.drive(&results);
@@ -1004,30 +953,6 @@ mod tests {
             restore_slug(s, &roster),
             "snapshot_validation_failed",
             "roster id not in records"
-        );
-
-        // Death columns half-present.
-        let mut s = base.clone();
-        s.snakes[0].death_turn = Some(3);
-        assert_eq!(
-            restore_slug(s, &roster),
-            "snapshot_validation_failed",
-            "half-present death group"
-        );
-
-        // Colliding death_order values.
-        let mut s = base.clone();
-        for (i, record) in s.snakes.iter_mut().enumerate() {
-            record.death_turn = Some(3);
-            record.death_cause = Some("wall-collision".to_owned());
-            record.death_eliminated_by = Some(String::new());
-            record.death_order = Some(i as i32);
-        }
-        s.snakes[1].death_order = Some(0);
-        assert_eq!(
-            restore_slug(s, &roster),
-            "snapshot_validation_failed",
-            "colliding death_order"
         );
 
         // Empty body.

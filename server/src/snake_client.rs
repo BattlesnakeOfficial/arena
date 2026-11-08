@@ -2006,7 +2006,8 @@ mod tests {
             },
             meta: crate::engine::GameMeta {
                 game_id: "test-game".to_string(),
-                ruleset_name: "standard".to_string(),
+                mode: engine_core::GameMode::Standard,
+                game_over_rule: engine_core::GameMode::Standard.default_game_over_rule(),
                 timeout: 500,
                 settings: StandardSettings::default(),
                 royale: None,

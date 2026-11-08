@@ -259,10 +259,12 @@ pub async fn get_move_request(
     let frame: EngineGameFrame =
         serde_json::from_value(frame).wrap_err("Failed to parse turn frame")?;
 
-    let (ruleset_name, settings, royale) = crate::engine::mode_rules(game.game_type, game_id);
+    let mode = crate::engine::game_mode(&game.game_type);
+    let (settings, royale) = crate::engine::mode_rules(game.game_type, game_id);
     let meta = GameMeta {
         game_id: game_id.to_string(),
-        ruleset_name: ruleset_name.to_string(),
+        mode,
+        game_over_rule: mode.default_game_over_rule(),
         timeout: MOVE_TIMEOUT_MS,
         settings,
         royale,
@@ -309,7 +311,7 @@ mod tests {
     use tower::ServiceExt as _;
 
     use crate::engine::GameSource;
-    use crate::engine::frame::{DeathInfo, game_to_frame, normalize_public_frame};
+    use crate::engine::frame::{game_to_frame, normalize_public_frame};
     use crate::models::game::GameType;
     use crate::snake_client::MoveResult;
 
@@ -325,12 +327,14 @@ mod tests {
         let game_id = Uuid::from_u128(rng.r#gen());
         let ids: Vec<String> = (0..snakes).map(|i| format!("snake-{i}")).collect();
         let board = rules::board::create_default_board_state(rng, 11, 11, &ids).unwrap();
-        let (ruleset_name, settings, royale) = crate::engine::mode_rules(game_type, game_id);
+        let mode = crate::engine::game_mode(&game_type);
+        let (settings, royale) = crate::engine::mode_rules(game_type, game_id);
         EngineGame {
             board,
             meta: GameMeta {
                 game_id: game_id.to_string(),
-                ruleset_name: ruleset_name.to_string(),
+                mode,
+                game_over_rule: mode.default_game_over_rule(),
                 timeout: MOVE_TIMEOUT_MS,
                 settings,
                 royale,
@@ -395,10 +399,9 @@ mod tests {
             .collect();
         let mut contexts: HashMap<String, SnakeContext> = HashMap::new();
         let mut results: Vec<MoveResult> = Vec::new();
-        let mut deaths: Vec<DeathInfo> = Vec::new();
 
         loop {
-            let frame = persisted(&game_to_frame(&game, &deaths, &results, &customizations));
+            let frame = persisted(&game_to_frame(&game, &results, &customizations));
             let size = (game.board.width, game.board.height);
             for snake in &game.board.snakes {
                 let rebuilt = move_request_from_frame(&frame, game.meta.clone(), size, &snake.id);
@@ -466,18 +469,6 @@ mod tests {
                 .map(|r| (r.snake_id.clone(), r.direction))
                 .collect();
             crate::engine::advance_turn(&mut game, &moves).unwrap();
-            for snake in &game.board.snakes {
-                if snake.eliminated_cause.is_eliminated()
-                    && !deaths.iter().any(|d| d.snake_id == snake.id)
-                {
-                    deaths.push(DeathInfo {
-                        snake_id: snake.id.clone(),
-                        turn: game.board.turn,
-                        cause: "test".to_string(),
-                        eliminated_by: snake.eliminated_by.clone(),
-                    });
-                }
-            }
         }
     }
 
@@ -506,11 +497,12 @@ mod tests {
     }
 
     fn standard_meta() -> GameMeta {
-        let (ruleset_name, settings, royale) =
-            crate::engine::mode_rules(GameType::Standard, Uuid::nil());
+        let mode = crate::engine::game_mode(&GameType::Standard);
+        let (settings, royale) = crate::engine::mode_rules(GameType::Standard, Uuid::nil());
         GameMeta {
             game_id: Uuid::nil().to_string(),
-            ruleset_name: ruleset_name.to_string(),
+            mode,
+            game_over_rule: mode.default_game_over_rule(),
             timeout: MOVE_TIMEOUT_MS,
             settings,
             royale,

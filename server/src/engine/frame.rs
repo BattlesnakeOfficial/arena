@@ -10,19 +10,6 @@ use serde::Serialize;
 
 use super::EngineGame;
 
-/// Information about a snake's death
-#[derive(Debug, Clone, PartialEq)]
-pub struct DeathInfo {
-    /// The snake's ID
-    pub snake_id: String,
-    /// The turn on which the snake died
-    pub turn: i32,
-    /// The cause of death (e.g., "wall-collision", "head-collision")
-    pub cause: String,
-    /// The ID of the snake that eliminated this snake (if applicable)
-    pub eliminated_by: String,
-}
-
 /// Frame data in PascalCase format for the board viewer
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "PascalCase")]
@@ -186,12 +173,14 @@ pub use engine_core::wire::SnakeCustomizations;
 
 use crate::snake_client::MoveResult;
 
-/// Convert an EngineGame state to a frame for the board viewer
+/// Convert an EngineGame state to a frame for the board viewer.
 ///
-/// Includes latency info from move results when provided.
+/// Includes latency info from move results when provided. A snake's death
+/// is derived from its own elimination fields (`eliminated_cause` /
+/// `eliminated_on_turn` / `eliminated_by`) — there is no parallel death
+/// list; the cause string is `EliminationCause::arena_slug()`.
 pub fn game_to_frame(
     game: &EngineGame,
-    death_info: &[DeathInfo],
     move_results: &[MoveResult],
     customizations: &std::collections::HashMap<String, SnakeCustomizations>,
 ) -> EngineGameFrame {
@@ -202,23 +191,20 @@ pub fn game_to_frame(
             .snakes
             .iter()
             .map(|s| {
-                let death = death_info
-                    .iter()
-                    .find(|d| d.snake_id == s.id)
-                    .map(|d| FrameDeath {
-                        cause: d.cause.clone(),
-                        turn: d.turn,
-                        eliminated_by: d.eliminated_by.clone(),
-                    });
-
-                let (eliminated_cause, eliminated_by) = if s.eliminated_cause.is_eliminated() {
-                    death_info
-                        .iter()
-                        .find(|d| d.snake_id == s.id)
-                        .map(|d| (d.cause.clone(), d.eliminated_by.clone()))
-                        .unwrap_or_default()
+                let death = s.eliminated_cause.is_eliminated().then(|| FrameDeath {
+                    cause: s.eliminated_cause.arena_slug().to_string(),
+                    turn: s.eliminated_on_turn,
+                    eliminated_by: s.eliminated_by.clone(),
+                });
+                let eliminated_cause = if s.eliminated_cause.is_eliminated() {
+                    s.eliminated_cause.arena_slug().to_string()
                 } else {
-                    Default::default()
+                    String::new()
+                };
+                let eliminated_by = if s.eliminated_cause.is_eliminated() {
+                    s.eliminated_by.clone()
+                } else {
+                    String::new()
                 };
 
                 // Latency like the engine: measured ms clamped to [1, timeout],
@@ -375,42 +361,10 @@ mod tests {
     }
 
     #[test]
-    fn test_death_info_struct() {
-        let death = DeathInfo {
-            snake_id: "snake-1".to_string(),
-            turn: 42,
-            cause: "wall-collision".to_string(),
-            eliminated_by: "snake-2".to_string(),
-        };
-
-        assert_eq!(death.snake_id, "snake-1");
-        assert_eq!(death.turn, 42);
-        assert_eq!(death.cause, "wall-collision");
-        assert_eq!(death.eliminated_by, "snake-2");
-    }
-
-    #[test]
-    fn test_death_info_clone() {
-        let death = DeathInfo {
-            snake_id: "snake-1".to_string(),
-            turn: 10,
-            cause: "head-collision".to_string(),
-            eliminated_by: "snake-2".to_string(),
-        };
-
-        let cloned = death.clone();
-        assert_eq!(death.snake_id, cloned.snake_id);
-        assert_eq!(death.turn, cloned.turn);
-        assert_eq!(death.cause, cloned.cause);
-        assert_eq!(death.eliminated_by, cloned.eliminated_by);
-    }
-
-    #[test]
     fn test_game_to_frame_basic() {
         let game = create_test_game();
-        let death_info: Vec<DeathInfo> = vec![];
 
-        let frame = game_to_frame(&game, &death_info, &[], &std::collections::HashMap::new());
+        let frame = game_to_frame(&game, &[], &std::collections::HashMap::new());
 
         assert_eq!(frame.turn, 0);
         assert_eq!(frame.snakes.len(), 1);
@@ -423,18 +377,12 @@ mod tests {
     }
 
     #[test]
-    fn test_game_to_frame_with_death_info() {
+    fn test_game_to_frame_derives_death_from_snake_fields() {
         let mut game = create_test_game();
         game.board.snakes[0].eliminated_cause = EliminationCause::OutOfBounds;
+        game.board.snakes[0].eliminated_on_turn = 5;
 
-        let death_info = vec![DeathInfo {
-            snake_id: "snake-1".to_string(),
-            turn: 5,
-            cause: "wall-collision".to_string(),
-            eliminated_by: "".to_string(),
-        }];
-
-        let frame = game_to_frame(&game, &death_info, &[], &std::collections::HashMap::new());
+        let frame = game_to_frame(&game, &[], &std::collections::HashMap::new());
 
         assert_eq!(frame.snakes.len(), 1);
         assert!(frame.snakes[0].death.is_some());
@@ -448,19 +396,110 @@ mod tests {
     fn test_game_to_frame_with_eliminated_by() {
         let mut game = create_test_game();
         game.board.snakes[0].eliminated_cause = EliminationCause::HeadToHeadCollision;
+        game.board.snakes[0].eliminated_on_turn = 10;
+        game.board.snakes[0].eliminated_by = "snake-2".to_string();
 
-        let death_info = vec![DeathInfo {
-            snake_id: "snake-1".to_string(),
-            turn: 10,
-            cause: "head-collision".to_string(),
-            eliminated_by: "snake-2".to_string(),
-        }];
-
-        let frame = game_to_frame(&game, &death_info, &[], &std::collections::HashMap::new());
+        let frame = game_to_frame(&game, &[], &std::collections::HashMap::new());
 
         let death = frame.snakes[0].death.as_ref().unwrap();
+        assert_eq!(death.cause, "head-collision");
+        assert_eq!(death.turn, 10);
         assert_eq!(death.eliminated_by, "snake-2");
         assert_eq!(frame.snakes[0].eliminated_by, "snake-2");
+    }
+
+    /// Prod analytics read `Snakes[].Death.Turn` straight from
+    /// `turns.frame_data` (tie-rate SQL), so `Death.Turn` must equal the
+    /// frame's turn on the death frame. `Death.turn` is now literally
+    /// `snake.eliminated_on_turn`, so this test — driving a real turn
+    /// through `apply_turn_results` — is what catches a future reordering
+    /// of the turn increment in the rules/engine pipeline (a direct unit
+    /// assertion on the field could not fail after this change).
+    #[test]
+    fn frame_death_turn_equals_frame_turn_for_real_deaths() {
+        use crate::snake_client::MoveResult;
+        use std::collections::HashMap;
+
+        let result = |id: &str, dir| MoveResult {
+            snake_id: id.to_string(),
+            direction: dir,
+            latency_ms: Some(42),
+            shout: None,
+            outcome: engine_core::move_response::MoveOutcome::Ok { status_code: 200 },
+        };
+        let drive = |game: &mut crate::engine::EngineGame, results: &[MoveResult]| {
+            let mut food_eaten = HashMap::new();
+            let mut last_moves = HashMap::new();
+            let mut snake_contexts = HashMap::new();
+            crate::game_runner::apply_turn_results(
+                game,
+                results,
+                &mut food_eaten,
+                &mut last_moves,
+                &mut snake_contexts,
+            )
+            .expect("valid turn");
+        };
+
+        // Wall death: snake 0 at x=0 walking Left off the board.
+        let mut game = create_test_game();
+        game.board.snakes.push(rules::Snake {
+            id: "snake-2".to_string(),
+            body: vec![Point::new(6, 5), Point::new(6, 4), Point::new(6, 3)],
+            health: 90,
+            eliminated_cause: EliminationCause::NotEliminated,
+            eliminated_by: String::new(),
+            eliminated_on_turn: 0,
+        });
+        game.snake_names
+            .insert("snake-2".to_string(), "Snake 2".to_string());
+        game.board.snakes[0].body = vec![Point::new(0, 9), Point::new(1, 9), Point::new(2, 9)];
+        drive(
+            &mut game,
+            &[
+                result("snake-1", rules::Direction::Left),
+                result("snake-2", rules::Direction::Up),
+            ],
+        );
+        let frame = game_to_frame(&game, &[], &HashMap::new());
+        let death = frame.snakes[0].death.as_ref().expect("wall death recorded");
+        assert_eq!(death.cause, "wall-collision");
+        assert_eq!(
+            death.turn, frame.turn,
+            "wall death: Death.Turn must equal the death frame's turn"
+        );
+
+        // Snake collision: snake 0 steps onto snake 1's post-move tail.
+        let mut game = create_test_game();
+        game.board.snakes[0].body = vec![Point::new(4, 4), Point::new(4, 5), Point::new(4, 6)];
+        game.board.snakes.push(rules::Snake {
+            id: "snake-2".to_string(),
+            body: vec![Point::new(6, 4), Point::new(5, 4), Point::new(5, 5)],
+            health: 90,
+            eliminated_cause: EliminationCause::NotEliminated,
+            eliminated_by: String::new(),
+            eliminated_on_turn: 0,
+        });
+        game.snake_names
+            .insert("snake-2".to_string(), "Snake 2".to_string());
+        drive(
+            &mut game,
+            &[
+                result("snake-1", rules::Direction::Right),
+                result("snake-2", rules::Direction::Up),
+            ],
+        );
+        let frame = game_to_frame(&game, &[], &HashMap::new());
+        let death = frame.snakes[0]
+            .death
+            .as_ref()
+            .expect("collision death recorded");
+        assert_eq!(death.cause, "snake-collision");
+        assert_eq!(death.eliminated_by, "snake-2");
+        assert_eq!(
+            death.turn, frame.turn,
+            "collision death: Death.Turn must equal the death frame's turn"
+        );
     }
 
     #[test]
@@ -478,8 +517,7 @@ mod tests {
         game.snake_names
             .insert("snake-2".to_string(), "Second Snake".to_string());
 
-        let death_info: Vec<DeathInfo> = vec![];
-        let frame = game_to_frame(&game, &death_info, &[], &std::collections::HashMap::new());
+        let frame = game_to_frame(&game, &[], &std::collections::HashMap::new());
 
         assert_eq!(frame.snakes.len(), 2);
         assert_eq!(frame.snakes[0].id, "snake-1");
@@ -492,7 +530,7 @@ mod tests {
         let mut game = create_test_game();
         game.board.food = vec![Point::new(5, 5), Point::new(7, 7)];
 
-        let frame = game_to_frame(&game, &[], &[], &std::collections::HashMap::new());
+        let frame = game_to_frame(&game, &[], &std::collections::HashMap::new());
 
         assert_eq!(frame.food.len(), 2);
         assert_eq!(frame.food[0].x, 5);
@@ -506,7 +544,7 @@ mod tests {
         let mut game = create_test_game();
         game.board.hazards = vec![Point::new(0, 0), Point::new(10, 10)];
 
-        let frame = game_to_frame(&game, &[], &[], &std::collections::HashMap::new());
+        let frame = game_to_frame(&game, &[], &std::collections::HashMap::new());
 
         assert_eq!(frame.hazards.len(), 2);
         assert_eq!(frame.hazards[0].x, 0);
@@ -530,7 +568,7 @@ mod tests {
             Point::new(-1, 5),
         ];
 
-        let frame = game_to_frame(&game, &[], &[], &std::collections::HashMap::new());
+        let frame = game_to_frame(&game, &[], &std::collections::HashMap::new());
 
         assert_eq!(
             frame.hazards.len(),
@@ -545,7 +583,7 @@ mod tests {
     #[test]
     fn test_game_to_frame_snake_body_coords() {
         let game = create_test_game();
-        let frame = game_to_frame(&game, &[], &[], &std::collections::HashMap::new());
+        let frame = game_to_frame(&game, &[], &std::collections::HashMap::new());
 
         // Snake body should be converted to FrameCoords
         assert_eq!(frame.snakes[0].body.len(), 3);
@@ -556,19 +594,12 @@ mod tests {
     #[test]
     fn test_game_to_frame_alive_snake_no_death() {
         let game = create_test_game();
-        // Even if there's death_info for this snake, if not eliminated, no eliminated fields
-        let death_info = vec![DeathInfo {
-            snake_id: "snake-1".to_string(),
-            turn: 5,
-            cause: "test".to_string(),
-            eliminated_by: "".to_string(),
-        }];
 
-        let frame = game_to_frame(&game, &death_info, &[], &std::collections::HashMap::new());
+        let frame = game_to_frame(&game, &[], &std::collections::HashMap::new());
 
-        // Death info is still attached (for replay purposes)
-        assert!(frame.snakes[0].death.is_some());
-        // But eliminated_cause/eliminated_by are empty since snake is alive
+        // An alive snake carries no Death at all: it is derived from the
+        // snake's own (NotEliminated) state, not a parallel list.
+        assert!(frame.snakes[0].death.is_none());
         assert_eq!(frame.snakes[0].eliminated_cause, "");
         assert_eq!(frame.snakes[0].eliminated_by, "");
     }
@@ -576,7 +607,7 @@ mod tests {
     #[test]
     fn test_frame_snake_serialization() {
         let game = create_test_game();
-        let frame = game_to_frame(&game, &[], &[], &std::collections::HashMap::new());
+        let frame = game_to_frame(&game, &[], &std::collections::HashMap::new());
 
         let json = serde_json::to_string(&frame).unwrap();
 
@@ -611,7 +642,6 @@ mod tests {
         use crate::snake_client::MoveResult;
 
         let game = create_test_game();
-        let death_info: Vec<DeathInfo> = vec![];
         let move_results = vec![MoveResult {
             snake_id: "snake-1".to_string(),
             direction: rules::Direction::Up,
@@ -620,12 +650,7 @@ mod tests {
             outcome: engine_core::move_response::MoveOutcome::Ok { status_code: 200 },
         }];
 
-        let frame = game_to_frame(
-            &game,
-            &death_info,
-            &move_results,
-            &std::collections::HashMap::new(),
-        );
+        let frame = game_to_frame(&game, &move_results, &std::collections::HashMap::new());
 
         assert_eq!(frame.snakes[0].latency, "42");
     }
@@ -635,7 +660,6 @@ mod tests {
         use crate::snake_client::MoveResult;
 
         let game = create_test_game();
-        let death_info: Vec<DeathInfo> = vec![];
         let move_results = vec![MoveResult {
             snake_id: "snake-1".to_string(),
             direction: rules::Direction::Up,
@@ -644,12 +668,7 @@ mod tests {
             outcome: engine_core::move_response::MoveOutcome::TimedOut,
         }];
 
-        let frame = game_to_frame(
-            &game,
-            &death_info,
-            &move_results,
-            &std::collections::HashMap::new(),
-        );
+        let frame = game_to_frame(&game, &move_results, &std::collections::HashMap::new());
 
         // Engine parity: the timeout in ms plus the engine's error text,
         // never a "timeout" sentinel (the board viewer renders "{latency}ms").
@@ -673,7 +692,6 @@ mod tests {
 
         let ok = game_to_frame(
             &game,
-            &[],
             &[result(engine_core::move_response::MoveOutcome::Ok {
                 status_code: 200,
             })],
@@ -686,7 +704,6 @@ mod tests {
 
         let bad = game_to_frame(
             &game,
-            &[],
             &[result(engine_core::move_response::MoveOutcome::HttpError {
                 status_code: 502,
             })],
@@ -701,7 +718,7 @@ mod tests {
     /// EliminatedCause/EliminatedBy.
     #[test]
     fn test_frame_schema_matches_legacy_engine() {
-        let frame = game_to_frame(&create_test_game(), &[], &[], &Default::default());
+        let frame = game_to_frame(&create_test_game(), &[], &Default::default());
         let json = serde_json::to_value(&frame).unwrap();
 
         let mut top: Vec<&str> = json
@@ -868,7 +885,6 @@ mod tests {
         use crate::snake_client::MoveResult;
 
         let game = create_test_game();
-        let death_info: Vec<DeathInfo> = vec![];
         let move_results = vec![MoveResult {
             snake_id: "snake-1".to_string(),
             direction: rules::Direction::Up,
@@ -877,12 +893,7 @@ mod tests {
             outcome: engine_core::move_response::MoveOutcome::Ok { status_code: 200 },
         }];
 
-        let frame = game_to_frame(
-            &game,
-            &death_info,
-            &move_results,
-            &std::collections::HashMap::new(),
-        );
+        let frame = game_to_frame(&game, &move_results, &std::collections::HashMap::new());
 
         // Shout from move result should be used
         assert_eq!(frame.snakes[0].shout, "Hello from move!");
@@ -893,7 +904,6 @@ mod tests {
         use crate::snake_client::MoveResult;
 
         let game = create_test_game();
-        let death_info: Vec<DeathInfo> = vec![];
         // Move result for a different snake
         let move_results = vec![MoveResult {
             snake_id: "other-snake".to_string(),
@@ -903,12 +913,7 @@ mod tests {
             outcome: engine_core::move_response::MoveOutcome::Ok { status_code: 200 },
         }];
 
-        let frame = game_to_frame(
-            &game,
-            &death_info,
-            &move_results,
-            &std::collections::HashMap::new(),
-        );
+        let frame = game_to_frame(&game, &move_results, &std::collections::HashMap::new());
 
         // Should default to "0" when no matching result
         assert_eq!(frame.snakes[0].latency, "0");
@@ -938,7 +943,8 @@ mod tests {
             },
             meta: GameMeta {
                 game_id: "test-game".to_string(),
-                ruleset_name: "standard".to_string(),
+                mode: engine_core::GameMode::Standard,
+                game_over_rule: engine_core::GameMode::Standard.default_game_over_rule(),
                 timeout: 500,
                 settings: StandardSettings::default(),
                 royale: None,
@@ -964,7 +970,7 @@ mod tests {
                 author: "byte-owner".to_string(),
             },
         );
-        let frame = game_to_frame(&game, &[], &[], &custom);
+        let frame = game_to_frame(&game, &[], &custom);
         assert_eq!(frame.snakes[0].color, "#ff0000", "should use custom color");
         assert_eq!(frame.snakes[0].head_type, "bendr", "should use custom head");
         assert_eq!(
@@ -977,7 +983,7 @@ mod tests {
     fn test_game_to_frame_falls_back_when_no_customizations() {
         use std::collections::HashMap;
         let game = create_test_game();
-        let frame = game_to_frame(&game, &[], &[], &HashMap::new());
+        let frame = game_to_frame(&game, &[], &HashMap::new());
         assert!(
             !frame.snakes[0].color.is_empty(),
             "fallback color should not be empty"
@@ -1010,7 +1016,7 @@ mod tests {
                 author: "byte-owner".to_string(),
             },
         );
-        let frame = game_to_frame(&game, &[], &[], &custom);
+        let frame = game_to_frame(&game, &[], &custom);
         assert!(
             !frame.snakes[0].color.is_empty(),
             "empty color should fall back to generated color"
@@ -1043,7 +1049,7 @@ mod tests {
                 author: "byte-owner".to_string(),
             },
         );
-        let frame = game_to_frame(&game, &[], &[], &custom);
+        let frame = game_to_frame(&game, &[], &custom);
         assert_eq!(
             frame.snakes[0].color, "#00ff00",
             "non-empty color should be used"
@@ -1072,7 +1078,7 @@ mod tests {
                 author: "byte-owner".to_string(),
             },
         );
-        let frame = game_to_frame(&game, &[], &[], &custom);
+        let frame = game_to_frame(&game, &[], &custom);
         assert_eq!(frame.snakes[0].id, "snake-1", "id should be preserved");
         assert_eq!(
             frame.snakes[0].name, "Test Snake",
