@@ -2177,7 +2177,11 @@ mod tests {
         // The account is claimed by a different user before the link is
         // redeemed — the auto-link race.
         let other_user = create_user(&pool, 90219).await?;
-        assert!(claim_account(&pool, account_id, other_user).await?.is_some());
+        assert!(
+            claim_account(&pool, account_id, other_user)
+                .await?
+                .is_some()
+        );
 
         let outcome = redeem_email_claim(&pool, &secret, user).await?;
         assert!(matches!(outcome, EmailClaimOutcome::AlreadyClaimed));
