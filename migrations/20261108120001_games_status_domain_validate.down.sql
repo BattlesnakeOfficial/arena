@@ -1,0 +1,2 @@
+-- Intentionally empty: "un-validating" a constraint is not a meaningful
+-- operation; the constraint itself is dropped by part 1's down migration.

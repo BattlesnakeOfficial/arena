@@ -837,6 +837,55 @@ fn logout() -> color_eyre::Result<()> {
     Ok(())
 }
 
+/// Statuses the watch loop keeps polling on. Anything else — `finished`,
+/// `failed`, or an unknown future status — ends the loop (mirrors the
+/// server's `GameStatus::is_terminal()`; the games.status CHECK pins the
+/// domain to these four).
+fn watch_still_live(status: &str) -> bool {
+    matches!(status, "waiting" | "running")
+}
+
+/// Poll `/api/games/{id}/details` until the game leaves `waiting`/`running`,
+/// clearing the screen and printing the game each tick. Returns the final
+/// status string. `poll_interval` is a parameter so tests can pass
+/// `Duration::ZERO`.
+async fn watch_game(
+    client: &reqwest::Client,
+    base_url: &str,
+    token: &str,
+    id: &str,
+    poll_interval: Duration,
+) -> color_eyre::Result<String> {
+    loop {
+        let response = client
+            .get(format!("{}/api/games/{}/details", base_url, id))
+            .bearer_auth(token)
+            .send()
+            .await
+            .wrap_err("Failed to get game")?;
+
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Err(eyre!("Game not found."));
+        } else if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(eyre!("Failed to get game: {} - {}", status, body));
+        }
+
+        let game: serde_json::Value = response.json().await?;
+
+        print!("\x1B[2J\x1B[1;1H");
+        println!("{}", serde_json::to_string_pretty(&game)?);
+
+        let status = game["status"].as_str().unwrap_or_default().to_string();
+        if !watch_still_live(&status) {
+            return Ok(status);
+        }
+
+        tokio::time::sleep(poll_interval).await;
+    }
+}
+
 async fn handle_games_command(command: GamesCommands) -> color_eyre::Result<()> {
     let config = CliConfig::load()?;
     let token = config
@@ -921,41 +970,19 @@ async fn handle_games_command(command: GamesCommands) -> color_eyre::Result<()> 
         }
         GamesCommands::Watch { id, web } => {
             if web {
-                // Open in browser
                 let url = format!("{}/games/{}", base_url, id);
                 println!("Opening game in browser...");
                 open::that(&url).wrap_err("Failed to open browser")?;
             } else {
-                // Poll loop
-                loop {
-                    let response = client
-                        .get(format!("{}/api/games/{}/details", base_url, id))
-                        .bearer_auth(token)
-                        .send()
-                        .await
-                        .wrap_err("Failed to get game")?;
-
-                    if response.status() == reqwest::StatusCode::NOT_FOUND {
-                        return Err(eyre!("Game not found."));
-                    } else if !response.status().is_success() {
-                        let status = response.status();
-                        let body = response.text().await.unwrap_or_default();
-                        return Err(eyre!("Failed to get game: {} - {}", status, body));
+                let final_status =
+                    watch_game(&client, base_url, token, &id, Duration::from_secs(2)).await?;
+                match final_status.as_str() {
+                    "finished" => println!("\nGame finished!"),
+                    "failed" => {
+                        println!("\nGame failed.");
+                        return Err(eyre!("Game ended in failed state"));
                     }
-
-                    let game: serde_json::Value = response.json().await?;
-
-                    // Clear screen and print current state
-                    print!("\x1B[2J\x1B[1;1H");
-                    println!("{}", serde_json::to_string_pretty(&game)?);
-
-                    // Check if game is finished
-                    if game["status"] == "finished" {
-                        println!("\nGame finished!");
-                        break;
-                    }
-
-                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    other => println!("\nGame ended with status: {other}"),
                 }
             }
         }
@@ -966,11 +993,13 @@ async fn handle_games_command(command: GamesCommands) -> color_eyre::Result<()> 
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use reqwest::StatusCode;
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    use super::{FetchMeError, fetch_me, whoami_fields};
+    use super::{FetchMeError, fetch_me, watch_game, watch_still_live, whoami_fields};
 
     fn me_body() -> serde_json::Value {
         serde_json::json!({
@@ -1047,6 +1076,62 @@ mod tests {
             Err(FetchMeError::Request(_)) => {}
             other => panic!("expected Request, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn watch_still_live_only_for_waiting_and_running() {
+        for s in ["waiting", "running"] {
+            assert!(watch_still_live(s));
+        }
+        for s in ["finished", "failed", "complete", ""] {
+            assert!(!watch_still_live(s));
+        }
+    }
+
+    fn watch_body(status: &str) -> serde_json::Value {
+        serde_json::json!({ "id": "g", "status": status, "snakes": [], "frames": [] })
+    }
+
+    #[tokio::test]
+    async fn watch_game_ends_on_failed() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/games/abc/details"))
+            .and(header("Authorization", "Bearer test-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(watch_body("failed")))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = reqwest::Client::new();
+        let status = tokio::time::timeout(
+            Duration::from_secs(5),
+            watch_game(&client, &server.uri(), "test-token", "abc", Duration::ZERO),
+        )
+        .await
+        .expect("watch loop must terminate on a failed game")
+        .unwrap();
+        assert_eq!(status, "failed");
+    }
+
+    #[tokio::test]
+    async fn watch_game_ends_on_finished() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/games/abc/details"))
+            .and(header("Authorization", "Bearer test-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(watch_body("finished")))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = reqwest::Client::new();
+        let status = tokio::time::timeout(
+            Duration::from_secs(5),
+            watch_game(&client, &server.uri(), "test-token", "abc", Duration::ZERO),
+        )
+        .await
+        .expect("watch loop must terminate on a finished game")
+        .unwrap();
+        assert_eq!(status, "finished");
     }
 }
 

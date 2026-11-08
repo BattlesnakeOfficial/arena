@@ -381,7 +381,7 @@ async fn poll_batch(
         }
         let Some(row) = row else { continue };
         match GameStatus::from_str(&row.status) {
-            Ok(status @ (GameStatus::Finished | GameStatus::Failed)) => {
+            Ok(status) if status.is_terminal() => {
                 let _ = entry.updates.send(WatchedGameUpdate::Terminal(status));
                 entry.readiness.send_replace(Readiness::Retired);
                 registry.entries.remove(&id);
