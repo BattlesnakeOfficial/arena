@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE win_rate_stats SET games_played = games_played + 1, losses = losses + 1, score = wins::double precision / (games_played + 1)::double precision * 100.0, updated_at = NOW() WHERE leaderboard_entry_id = ANY($1)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c241d16e213c9cf8eb3d564eb1b209f538ed3e435167148665ed5baeeebd7b81"
+}
