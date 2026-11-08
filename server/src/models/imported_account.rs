@@ -2091,8 +2091,12 @@ mod tests {
         b.account.github_uid = Some(90206);
         let b_id = stage_play_account(&pool, &b).await?.imported_account_id;
         let user = create_user(&pool, 9206).await?;
+        let mut tx = pool
+            .begin()
+            .await
+            .wrap_err("Failed to begin claim tx")?;
         assert!(
-            claim_account_inner(&pool, stale.imported_account_id, user, Some(90206))
+            claim_account_tx(&mut tx, stale.imported_account_id, user, Some(90206))
                 .await?
                 .is_none()
         );

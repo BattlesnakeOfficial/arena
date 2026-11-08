@@ -400,6 +400,56 @@ mod tests {
     }
 
     #[test]
+    fn session_prune_cadence() {
+        let registry = cron_registry(&AppConfig::test_default());
+        let job = registry
+            .get("SessionPruneJob")
+            .expect("session prune registered");
+        assert_eq!(
+            job.description,
+            Some("Prune expired sessions in bounded batches")
+        );
+        let cja::cron::Schedule::Interval(interval) = &job.schedule else {
+            panic!("session prune must use an interval");
+        };
+        assert_eq!(interval.0, Duration::from_secs(SESSION_PRUNE_INTERVAL_SECS));
+        assert_eq!(SESSION_PRUNE_INTERVAL_SECS, 60 * 60);
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn session_prune_cron_row_seeded_so_first_prune_is_not_at_boot(pool: sqlx::PgPool) {
+        // 20261108160000 seeds the crons row: without it, cja's
+        // IntervalSchedule::should_run treats the cron as never-run and
+        // the first tick (2s poll) enqueues the prune at boot — against
+        // the 1M-row prod backlog.
+        let last_run_at: chrono::DateTime<chrono::Utc> = sqlx::query_scalar!(
+            "SELECT last_run_at FROM crons WHERE name = 'SessionPruneJob'"
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("20261108160000 must seed the SessionPruneJob cron row");
+        let registry = cron_registry(&AppConfig::test_default());
+        let job = registry
+            .get("SessionPruneJob")
+            .expect("session prune registered");
+        let just_after_boot = last_run_at + chrono::Duration::seconds(1);
+        assert!(!job.schedule.should_run(
+            Some(&last_run_at),
+            just_after_boot,
+            just_after_boot,
+            cja::chrono_tz::UTC
+        ));
+        let one_interval_later =
+            last_run_at + chrono::Duration::hours(1) + chrono::Duration::seconds(1);
+        assert!(job.schedule.should_run(
+            Some(&last_run_at),
+            one_interval_later,
+            one_interval_later,
+            cja::chrono_tz::UTC
+        ));
+    }
+
+    #[test]
     fn play_history_walk_registered_at_walk_interval() {
         let registry = cron_registry(&AppConfig::test_default());
         let job = registry

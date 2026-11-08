@@ -8,7 +8,7 @@
 use color_eyre::eyre::Context as _;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
-use sqlx::{PgConnection, PgPool};
+use sqlx::PgConnection;
 use uuid::Uuid;
 
 /// How long a recovery link stays valid. Short on purpose: the owner is
@@ -86,6 +86,7 @@ pub async fn consume(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sqlx::PgPool;
 
     async fn create_user(pool: &PgPool, github_id: i64) -> cja::Result<Uuid> {
         let row = sqlx::query!(

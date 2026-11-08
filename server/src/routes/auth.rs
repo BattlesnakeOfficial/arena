@@ -27,7 +27,7 @@ use crate::{
 /// matching the DB `expires_at` set at creation/login. One source for the
 /// attributes so the login-rotation re-issue can't drift from the
 /// extractor issue (DEV-2185).
-pub(crate) fn build_session_cookie(session_id: Uuid) -> Cookie {
+pub(crate) fn build_session_cookie(session_id: Uuid) -> Cookie<'static> {
     let mut cookie = Cookie::new(SESSION_COOKIE_NAME, session_id.to_string());
     cookie.set_http_only(true);
     cookie.set_secure(true);
