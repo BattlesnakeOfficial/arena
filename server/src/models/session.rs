@@ -24,6 +24,13 @@ pub const SESSION_COOKIE_NAME: &str = "arena_session_id";
 // Default session expiration in seconds (30 days)
 pub const SESSION_EXPIRATION_SECONDS: i64 = 60 * 60 * 24 * 30;
 
+/// Rows deleted per DELETE statement in [`clean_expired_sessions`]. Bounded
+/// so no single statement locks a large slice of the expired backlog.
+pub const SESSION_PRUNE_BATCH_ROWS: i64 = 10_000;
+/// Batches per prune run. 50 × 10k = 500k rows/hour; the 1.02M-row prod
+/// backlog drains in ~2–3 runs.
+pub const SESSION_PRUNE_MAX_BATCHES: usize = 50;
+
 // Flash message types as constants
 pub const FLASH_TYPE_SUCCESS: &str = "success";
 pub const FLASH_TYPE_ERROR: &str = "error";
@@ -407,40 +414,6 @@ pub async fn get_session_with_user(
     }
 }
 
-/// Set GitHub OAuth state for a session
-pub async fn set_github_oauth_state(
-    pool: &PgPool,
-    session_id: Uuid,
-    oauth_state: String,
-) -> cja::Result<Session> {
-    let session = sqlx::query_as!(
-        Session,
-        r#"
-        UPDATE sessions
-        SET
-            github_oauth_state = $2
-        WHERE session_id = $1
-        RETURNING
-            session_id,
-            user_id,
-            github_oauth_state,
-            flash_message,
-            flash_type,
-            is_cli_auth,
-            created_at,
-            updated_at,
-            expires_at
-        "#,
-        session_id,
-        oauth_state
-    )
-    .fetch_one(pool)
-    .await
-    .wrap_err("Failed to set GitHub OAuth state for session")?;
-
-    Ok(session)
-}
-
 /// Set GitHub OAuth state and CLI auth flag for a session
 pub async fn set_github_oauth_state_with_cli(
     pool: &PgPool,
@@ -508,40 +481,65 @@ pub async fn clear_github_oauth_state(pool: &PgPool, session_id: Uuid) -> cja::R
     Ok(session)
 }
 
-/// Associate a user with a session
-pub async fn associate_user_with_session(
+/// Rotate the session at login (DEV-2185): insert a fresh row for `user_id`
+/// carrying over the old session's post-login redirect, then delete the old
+/// row — one transaction, so the old session id dies with the request and
+/// the carried state can't be stranded.
+///
+/// `pending_form_data` is deliberately NOT carried: the draft belongs to
+/// whoever was signed in on the old row (its only writer is the
+/// authenticated battlesnake form), and today's login clears it so a
+/// shared browser can't leak one user's draft to the next. The new row
+/// starts with NULL, preserving that. The caller must set the session
+/// cookie to the returned session in the same response (see
+/// [`crate::routes::auth::build_session_cookie`]).
+pub async fn rotate_session(
     pool: &PgPool,
-    session_id: Uuid,
+    old_session_id: Uuid,
     user_id: Uuid,
 ) -> cja::Result<Session> {
+    let mut tx = pool
+        .begin()
+        .await
+        .wrap_err("Failed to begin session rotation tx")?;
+
+    let carried = sqlx::query!(
+        "SELECT post_login_redirect FROM sessions WHERE session_id = $1 FOR UPDATE",
+        old_session_id
+    )
+    .fetch_optional(&mut *tx)
+    .await
+    .wrap_err("Failed to read old session for rotation")?;
+
+    let Some(carried) = carried else {
+        return Err(eyre!("Session {old_session_id} not found for rotation"));
+    };
+
     let session = sqlx::query_as!(
         Session,
         r#"
-        UPDATE sessions
-        SET
-            user_id = $2,
-            github_oauth_state = NULL,
-            pending_form_data = NULL,
-            expires_at = NOW() + INTERVAL '30 days'
-        WHERE session_id = $1
+        INSERT INTO sessions (user_id, post_login_redirect, expires_at)
+        VALUES ($1, $2, NOW() + make_interval(secs => $3))
         RETURNING
-            session_id,
-            user_id,
-            github_oauth_state,
-            flash_message,
-            flash_type,
-            is_cli_auth,
-            created_at,
-            updated_at,
-            expires_at
+            session_id, user_id, github_oauth_state, flash_message, flash_type,
+            is_cli_auth, created_at, updated_at, expires_at
         "#,
-        session_id,
-        user_id
+        user_id,
+        carried.post_login_redirect,
+        SESSION_EXPIRATION_SECONDS as f64,
     )
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await
-    .wrap_err("Failed to associate user with session")?;
+    .wrap_err("Failed to create rotated session")?;
 
+    sqlx::query!("DELETE FROM sessions WHERE session_id = $1", old_session_id)
+        .execute(&mut *tx)
+        .await
+        .wrap_err("Failed to delete pre-login session")?;
+
+    tx.commit()
+        .await
+        .wrap_err("Failed to commit session rotation")?;
     Ok(session)
 }
 
@@ -582,80 +580,59 @@ pub async fn disassociate_user_from_session(
     Ok(session)
 }
 
-/// Refresh a session's expiration time
-pub async fn refresh_session(pool: &PgPool, session_id: Uuid) -> cja::Result<Session> {
-    let session = sqlx::query_as!(
-        Session,
-        r#"
-        UPDATE sessions
-        SET
-            expires_at = GREATEST(expires_at, NOW() + INTERVAL '30 days')
-        WHERE session_id = $1
-        RETURNING
-            session_id,
-            user_id,
-            github_oauth_state,
-            flash_message,
-            flash_type,
-            is_cli_auth,
-            created_at,
-            updated_at,
-            expires_at
-        "#,
-        session_id
-    )
-    .fetch_one(pool)
-    .await
-    .wrap_err("Failed to refresh session")?;
-
-    Ok(session)
-}
-
-/// Delete a session
-pub async fn delete_session(pool: &PgPool, session_id: Uuid) -> cja::Result<()> {
-    sqlx::query!(
-        r#"
-        DELETE FROM sessions
-        WHERE session_id = $1
-        "#,
-        session_id
-    )
-    .execute(pool)
-    .await
-    .wrap_err("Failed to delete session")?;
-
-    Ok(())
-}
-
-/// Clean expired sessions
-pub async fn clean_expired_sessions(pool: &PgPool) -> cja::Result<u64> {
-    let result = sqlx::query!(
-        r#"
-        DELETE FROM sessions
-        WHERE expires_at < NOW()
-        "#
-    )
-    .execute(pool)
-    .await
-    .wrap_err("Failed to clean expired sessions")?;
-
-    Ok(result.rows_affected())
+/// Delete expired sessions in bounded batches. `ORDER BY expires_at` keeps
+/// the subselect an index scan that touches only the rows it deletes
+/// (ORDER BY ctid here forces a seq scan + sort of the whole expired set
+/// per batch); `FOR UPDATE SKIP LOCKED` makes concurrent prune instances
+/// partition the backlog instead of contending.
+pub async fn clean_expired_sessions(
+    pool: &PgPool,
+    batch_rows: i64,
+    max_batches: usize,
+) -> cja::Result<u64> {
+    let mut total = 0u64;
+    for _ in 0..max_batches {
+        let result = sqlx::query!(
+            r#"
+            DELETE FROM sessions
+            WHERE ctid IN (
+                SELECT ctid FROM sessions
+                WHERE expires_at < NOW()
+                ORDER BY expires_at
+                LIMIT $1
+                FOR UPDATE SKIP LOCKED
+            )
+            "#,
+            batch_rows
+        )
+        .execute(pool)
+        .await
+        .wrap_err("Failed to clean expired sessions")?;
+        let deleted = result.rows_affected();
+        total += deleted;
+        // Short batch = backlog empty OR another prune instance is holding
+        // rows (SKIP LOCKED). Either way this run is done; the concurrent
+        // instance or the next hourly run finishes the work.
+        if deleted < batch_rows as u64 {
+            break;
+        }
+    }
+    Ok(total)
 }
 
 #[cfg(test)]
 mod pending_form_data_tests {
     use super::{
-        associate_user_with_session, create_session, disassociate_user_from_session,
-        set_error_flash_with_form_data, take_pending_form_data,
+        clean_expired_sessions, create_session, disassociate_user_from_session,
+        get_active_session_by_id, rotate_session, set_error_flash_with_form_data,
+        take_pending_form_data,
     };
     use sqlx::PgPool;
     use uuid::Uuid;
 
     async fn seed_user(pool: &PgPool, github_id: i64, login: &str) -> cja::Result<Uuid> {
         let user_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES ($1, $2, 'test-token')
-             RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login) VALUES ($1, $2) RETURNING user_id",
         )
         .bind(github_id)
         .bind(login)
@@ -666,7 +643,7 @@ mod pending_form_data_tests {
     }
 
     /// A logout does not delete the session row or the session cookie: it only
-    /// nulls `user_id`, and the next login re-associates the SAME row. A form
+    /// nulls `user_id`, and the next login rotates to a fresh row. A form
     /// draft written by the user who just logged out must therefore not survive
     /// into the next user's session, or a shared browser hands one person's
     /// unsaved snake name/URL to the next person who signs in.
@@ -675,13 +652,13 @@ mod pending_form_data_tests {
         let alice = seed_user(&pool, 9101, "alice").await?;
         let bob = seed_user(&pool, 9102, "bob").await?;
 
-        let session = create_session(&pool).await?;
-        associate_user_with_session(&pool, session.session_id, alice).await?;
+        let anon = create_session(&pool).await?;
+        let alice_session = rotate_session(&pool, anon.session_id, alice).await?;
 
         // Alice's create form fails validation, so her input is parked on the session.
         set_error_flash_with_form_data(
             &pool,
-            session.session_id,
+            alice_session.session_id,
             "You already have a battlesnake named Secret Snake".to_string(),
             serde_json::json!({
                 "target": "New",
@@ -696,17 +673,64 @@ mod pending_form_data_tests {
         .await?;
 
         // Alice logs out without ever revisiting the form, then Bob signs in on
-        // the same browser and lands on the same session row.
-        disassociate_user_from_session(&pool, session.session_id).await?;
-        associate_user_with_session(&pool, session.session_id, bob).await?;
+        // the same browser: logout keeps the row anonymous and Bob's login
+        // rotates it to a fresh session row.
+        disassociate_user_from_session(&pool, alice_session.session_id).await?;
+        let bob_session = rotate_session(&pool, alice_session.session_id, bob).await?;
 
-        let leaked = take_pending_form_data(&pool, session.session_id).await?;
+        let leaked = take_pending_form_data(&pool, bob_session.session_id).await?;
 
         assert_eq!(
             leaked, None,
-            "logout left the previous user's battlesnake form draft on the reused \
-             session row; it will prefill the next user's /battlesnakes/new form"
+            "login rotation must not carry the previous user's battlesnake form \
+             draft onto the new session row; it would prefill the next \
+             user's /battlesnakes/new form"
         );
+
+        Ok(())
+    }
+
+    /// DEV-2185: the prune deletes in bounded batches and stops after a
+    /// short batch, so a run never locks the whole expired backlog and the
+    /// per-run cap bounds total work.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn prune_respects_batch_and_run_caps(pool: PgPool) -> cja::Result<()> {
+        // Non-macro on purpose: the macro can't infer the generate_series
+        // overload. Ten expired rows in one statement.
+        sqlx::query(
+            "INSERT INTO sessions (expires_at) \
+             SELECT NOW() - INTERVAL '1 day' FROM generate_series(1, 10)",
+        )
+        .execute(&pool)
+        .await?;
+        let fresh = create_session(&pool).await?;
+
+        // Two full batches of 3, then the cap (2 batches) stops the run.
+        let deleted = clean_expired_sessions(&pool, 3, 2).await?;
+        assert_eq!(deleted, 6);
+        let remaining: i64 = sqlx::query_scalar!(
+            r#"SELECT COUNT(*) AS "count!: i64" FROM sessions WHERE expires_at < NOW()"#
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(remaining, 4);
+        assert!(get_active_session_by_id(&pool, fresh.session_id)
+            .await?
+            .is_some());
+
+        // A full batch of 3 then a short batch of 1 exits early; 0 remain.
+        let deleted = clean_expired_sessions(&pool, 3, 2).await?;
+        assert_eq!(deleted, 4);
+        let remaining: i64 = sqlx::query_scalar!(
+            r#"SELECT COUNT(*) AS "count!: i64" FROM sessions WHERE expires_at < NOW()"#
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(remaining, 0);
+
+        // Nothing left to do.
+        let deleted = clean_expired_sessions(&pool, 3, 2).await?;
+        assert_eq!(deleted, 0);
 
         Ok(())
     }

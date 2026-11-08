@@ -16,7 +16,7 @@ use crate::{
     models::{
         api_token::{self, Permission, SnakeAccess},
         session::{
-            associate_user_with_session, clear_github_oauth_state, clear_post_login_redirect,
+            clear_github_oauth_state, clear_post_login_redirect,
             disassociate_user_from_session, set_github_oauth_state_with_cli,
             take_post_login_redirect,
         },
@@ -98,8 +98,11 @@ pub async fn github_auth_callback(
     State(state): State<AppState>,
     Query(params): Query<GitHubAuthParams>,
     current_session: CurrentSession,
-    flasher: Flasher,
+    cookie_jar: cja::server::cookies::CookieJar<AppState>,
 ) -> ServerResult<Response, StatusCode> {
+    // No `Flasher` extractor here: it would capture the pre-login session
+    // id, which login rotation below deletes — the web branch builds a
+    // flasher bound to the rotated session instead (DEV-2185).
     // Check if OAuth is configured
     let oauth_config = state.config.github.as_ref().ok_or_else(|| {
         ServerError(
@@ -178,7 +181,7 @@ pub async fn github_auth_callback(
         .wrap_err("Failed to parse GitHub user response")?;
 
     // Create or update user in the database
-    let user = create_or_update_user(&state.db, github_user, token_response)
+    let user = create_or_update_user(&state.db, github_user)
         .await
         .wrap_err("Failed to create or update user")?;
 
@@ -226,10 +229,20 @@ pub async fn github_auth_callback(
         state.discord.notify_user_signup(&user.github_login);
     }
 
-    // Associate the user with the current session
-    associate_user_with_session(&state.db, current_session.session.session_id, user.user_id)
-        .await
-        .wrap_err("Failed to associate user with session")?;
+    // Rotate the session at login (DEV-2185): a fresh session id, a fresh
+    // 30-day expiry, and a re-issued cookie in this response — the
+    // pre-login id dies with the request (no fixation) and the cookie's
+    // max-age always agrees with the DB `expires_at`. The old row's saved
+    // post-login redirect carries over; its form draft deliberately does
+    // not (see `rotate_session`).
+    let new_session = crate::models::session::rotate_session(
+        &state.db,
+        current_session.session.session_id,
+        user.user_id,
+    )
+    .await
+    .wrap_err("Failed to rotate session at login")?;
+    cookie_jar.add(super::auth::build_session_cookie(new_session.session_id));
 
     tracing::info!(
         event_type = "user_authenticated",
@@ -308,7 +321,10 @@ pub async fn github_auth_callback(
         return Ok(([(header::CACHE_CONTROL, "no-store")], page).into_response());
     }
 
-    // Redirect to home page with success message
+    // Redirect to home page with success message. The flasher targets the
+    // rotated session: the extractor-captured one would write to a deleted
+    // row and 500 (DEV-2185).
+    let flasher = Flasher::new(new_session.session_id, state.db.clone());
     if let Some(summary) = auto_claim {
         flasher
             .add_flash(format!(
@@ -324,8 +340,9 @@ pub async fn github_auth_callback(
 
     // Resume a saved page: an OAuth consent flow parked by /oauth/authorize,
     // or /welcome-back. The allowlist is the second half of the open-redirect
-    // guard. CLI logins never get here (they returned above).
-    let resume = take_post_login_redirect(&state.db, current_session.session.session_id)
+    // guard. CLI logins never get here (they returned above). Rotation
+    // carried the saved path onto the new row; the take consumes it there.
+    let resume = take_post_login_redirect(&state.db, new_session.session_id)
         .await
         .wrap_err("Failed to take post-login redirect")?;
     if let Some(path) = resume
@@ -348,9 +365,15 @@ pub async fn logout(
     current_session: CurrentSession,
     flasher: Flasher,
 ) -> impl IntoResponse {
-    // Disassociate user from the session (if logged in)
-    if current_session.user.is_some() {
-        let _ = disassociate_user_from_session(&state.db, current_session.session.session_id).await;
+    // Disassociate user from the session (if logged in). On failure, log
+    // and skip the success flash — "You have been logged out" would be a
+    // lie while the session is still signed in (DEV-2185).
+    if current_session.user.is_some()
+        && let Err(err) =
+            disassociate_user_from_session(&state.db, current_session.session.session_id).await
+    {
+        tracing::error!(error = %format!("{err:#}"), "Failed to sign out session");
+        return Redirect::to("/");
     }
 
     // Add flash message, but don't fail the request if it doesn't work

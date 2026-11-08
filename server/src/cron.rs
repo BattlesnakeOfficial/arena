@@ -10,8 +10,8 @@ use crate::config::AppConfig;
 use crate::jobs::{
     AchievementClipsSweepJob, BackfillAchievementsJob, CustomizationActiveWeekBackfillJob,
     GameBackupJob, LeaderboardMatchmakerJob, NativeGameBackupJob, PlayGrantReconcileJob,
-    PlayHistoryWalkJob, RateLimitPruneJob, ReconcileRecentAchievementsJob, SnakeHealthSweeperJob,
-    StuckGameSweeperJob, StuckMatchSweeperJob, TurnRetentionJob,
+    PlayHistoryWalkJob, RateLimitPruneJob, ReconcileRecentAchievementsJob, SessionPruneJob,
+    SnakeHealthSweeperJob, StuckGameSweeperJob, StuckMatchSweeperJob, TurnRetentionJob,
 };
 use crate::state::AppState;
 
@@ -32,6 +32,11 @@ pub const SNAKE_HEALTH_SWEEP_INTERVAL_SECS: u64 = 30 * 60;
 /// Stuck-game sweep interval. Fails non-tournament games left in
 /// waiting/running past the configured max age.
 pub const STUCK_GAME_SWEEP_INTERVAL_SECS: u64 = 30 * 60;
+
+/// Session prune interval (DEV-2185): each run deletes up to 500k expired
+/// `sessions` rows in 10k-row batches, so the 1.02M-row prod backlog
+/// drains in ~2–3 hourly runs.
+pub const SESSION_PRUNE_INTERVAL_SECS: u64 = 60 * 60;
 pub const CUSTOMIZATION_ACTIVE_WEEK_BACKFILL_INTERVAL_SECS: u64 = 60 * 60;
 pub const ACHIEVEMENT_BACKFILL_INTERVAL_SECS: u64 = 5 * 60;
 pub const ACHIEVEMENT_RECONCILE_INTERVAL_SECS: u64 = 60 * 60;
@@ -155,6 +160,17 @@ pub(crate) fn cron_registry(config: &AppConfig) -> CronRegistry<AppState> {
         RateLimitPruneJob,
         Some("Prune rate-limit attempt rows past retention"),
         Duration::from_secs(6 * 60 * 60),
+    );
+
+    // Session prune (DEV-2185): batched delete of expired `sessions` rows
+    // (every cookie-less request creates one and nothing deleted them
+    // before). The crons row is seeded by a migration (20261108160000) so
+    // the first prune runs one interval after the migration applies, not
+    // at boot against the 1M-row backlog.
+    registry.register_job(
+        SessionPruneJob,
+        Some("Prune expired sessions in bounded batches"),
+        Duration::from_secs(SESSION_PRUNE_INTERVAL_SECS),
     );
 
     // Snake health sweeper: probes leaderboard entries whose games show

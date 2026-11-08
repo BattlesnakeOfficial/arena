@@ -653,6 +653,28 @@ impl Job<AppState> for RateLimitPruneJob {
     }
 }
 
+/// Cron job: batched prune of expired `sessions` rows (DEV-2185). Every
+/// request without a cookie creates a row and nothing deleted them before;
+/// see [`crate::models::session::clean_expired_sessions`].
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SessionPruneJob;
+
+#[async_trait::async_trait]
+impl Job<AppState> for SessionPruneJob {
+    const NAME: &'static str = "SessionPruneJob";
+
+    async fn run(&self, app_state: AppState) -> cja::Result<()> {
+        let deleted = crate::models::session::clean_expired_sessions(
+            &app_state.db,
+            crate::models::session::SESSION_PRUNE_BATCH_ROWS,
+            crate::models::session::SESSION_PRUNE_MAX_BATCHES,
+        )
+        .await?;
+        tracing::info!(deleted, "Expired session prune completed");
+        Ok(())
+    }
+}
+
 /// Cron job that health-checks leaderboard entries whose games show
 /// timeouts or errors and pulls the ones that keep failing (BS-3534,
 /// DEV-1515). All bookkeeping is idempotent and the owner emails are gated by
@@ -731,6 +753,7 @@ cja::impl_job_registry!(
     UpdateTournamentStatusJob,
     StuckMatchSweeperJob,
     RateLimitPruneJob,
+    SessionPruneJob,
     SnakeHealthSweeperJob,
     StuckGameSweeperJob,
     ScreenShoutsJob,

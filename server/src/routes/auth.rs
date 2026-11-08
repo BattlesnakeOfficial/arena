@@ -22,6 +22,26 @@ use crate::{
     state::AppState,
 };
 
+/// The session cookie exactly as the extractors and the login rotation
+/// issue it: host-only path, Secure, HttpOnly, Lax, 30-day max-age
+/// matching the DB `expires_at` set at creation/login. One source for the
+/// attributes so the login-rotation re-issue can't drift from the
+/// extractor issue (DEV-2185).
+pub(crate) fn build_session_cookie(session_id: Uuid) -> Cookie {
+    let mut cookie = Cookie::new(SESSION_COOKIE_NAME, session_id.to_string());
+    cookie.set_http_only(true);
+    cookie.set_secure(true);
+    // Without an explicit path, RFC 6265 scopes the cookie to the
+    // directory of whatever request created the session. A visitor
+    // whose first request is /auth/github gets a session pinned to
+    // /auth — the authenticated session is then never sent for
+    // normal pages and login silently doesn't stick.
+    cookie.set_path("/");
+    cookie.set_same_site(cja::server::cookies::SameSite::Lax);
+    cookie.set_max_age(time::Duration::seconds(SESSION_EXPIRATION_SECONDS));
+    cookie
+}
+
 /// Current session and optional user
 ///
 /// This struct contains the current session and optional user.
@@ -65,19 +85,7 @@ impl FromRequestParts<AppState> for CurrentSession {
                 };
 
                 // Set the session cookie
-                let mut cookie =
-                    Cookie::new(SESSION_COOKIE_NAME, new_session.session_id.to_string());
-                cookie.set_http_only(true);
-                cookie.set_secure(true);
-                // Without an explicit path, RFC 6265 scopes the cookie to the
-                // directory of whatever request created the session. A visitor
-                // whose first request is /auth/github gets a session pinned to
-                // /auth — the authenticated session is then never sent for
-                // normal pages and login silently doesn't stick.
-                cookie.set_path("/");
-                cookie.set_same_site(cja::server::cookies::SameSite::Lax);
-                cookie.set_max_age(time::Duration::seconds(SESSION_EXPIRATION_SECONDS));
-                cookie_jar.add(cookie);
+                cookie_jar.add(build_session_cookie(new_session.session_id));
 
                 new_session.session_id
             }
@@ -120,19 +128,7 @@ impl FromRequestParts<AppState> for CurrentSession {
                 };
 
                 // Set the session cookie
-                let mut cookie =
-                    Cookie::new(SESSION_COOKIE_NAME, new_session.session_id.to_string());
-                cookie.set_http_only(true);
-                cookie.set_secure(true);
-                // Without an explicit path, RFC 6265 scopes the cookie to the
-                // directory of whatever request created the session. A visitor
-                // whose first request is /auth/github gets a session pinned to
-                // /auth — the authenticated session is then never sent for
-                // normal pages and login silently doesn't stick.
-                cookie.set_path("/");
-                cookie.set_same_site(cja::server::cookies::SameSite::Lax);
-                cookie.set_max_age(time::Duration::seconds(SESSION_EXPIRATION_SECONDS));
-                cookie_jar.add(cookie);
+                cookie_jar.add(build_session_cookie(new_session.session_id));
 
                 Ok(CurrentSession {
                     session: new_session,
