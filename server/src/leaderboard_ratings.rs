@@ -717,38 +717,71 @@ mod tests {
         Ok(())
     }
 
-    /// The repair migration backs out exactly the second application of the
-    /// doubled game, on every counter, and is idempotent. Executes the real
-    /// migration file, not a copy. a and b carry a prior opposite-outcome
-    /// game so their scores are 50% (not the degenerate 100%/0% of a
-    /// single-game entry) and the score assertions can actually fail.
-    #[sqlx::test(migrations = "../migrations")]
-    async fn repair_migration_backs_out_second_application_exactly(
-        pool: PgPool,
+    /// What the doubled prod game did to one of its four entries.
+    #[derive(Debug, Clone, Copy)]
+    struct DoubledEntrySpec {
+        placement: i32,
+        /// Food recorded on the doubled game's game_battlesnakes row
+        /// (None = left NULL: the snake ate nothing / was never recorded).
+        /// i32 because game_battlesnakes.food_eaten and
+        /// leaderboard_game_results.food_eaten are both INT (Int4 in the
+        /// sqlx macros); convert with i64::from when binding into the
+        /// BIGINT food_score corruption macro.
+        food_eaten: Option<i32>,
+        /// Whether the simulated second application drifts this entry.
+        /// In the 5fe9fddf fixture the placement-4 snake is left healthy
+        /// as an in-game control; in d02f3e8a all four drifted.
+        corrupted: bool,
+    }
+
+    /// Shared body of the repair-migration regression tests (DEV-2174 and
+    /// DEV-2218). Recreates a doubled prod game under its real
+    /// leaderboard_game_id, corrupts the counters by simulating the second
+    /// application, then runs the real migration file and asserts every
+    /// counter returns to the single-application snapshot, that the repair
+    /// is idempotent, and that all five DEV-2174 invariants hold. a and b
+    /// carry a prior opposite-outcome game so their scores are 50% (not the
+    /// degenerate 100%/0% of a single-game entry) and the score assertions
+    /// can actually fail.
+    async fn assert_migration_backs_out_second_application(
+        pool: &PgPool,
+        migration_sql: &str,
+        doubled_game_id: Uuid,
+        specs: &[DoubledEntrySpec; 4],
     ) -> cja::Result<()> {
-        let user_id = create_user(&pool, 21742).await?;
+        let user_id = create_user(pool, 21742).await?;
         let mut snake_ids = Vec::new();
         for name in [
             "repair-a", "repair-b", "repair-c", "repair-d", "repair-e", "repair-f",
         ] {
-            snake_ids.push(create_snake(&pool, user_id, name).await?);
+            snake_ids.push(create_snake(pool, user_id, name).await?);
         }
         let leaderboard_id = sqlx::query_scalar!(
             "INSERT INTO leaderboards (name) VALUES ($1) RETURNING leaderboard_id",
             "Repair Board",
         )
-        .fetch_one(&pool)
+        .fetch_one(pool)
         .await?;
         let mut ids = Vec::new();
         for snake_id in &snake_ids {
             ids.push(
-                leaderboard::get_or_create_entry(&pool, leaderboard_id, *snake_id)
+                leaderboard::get_or_create_entry(pool, leaderboard_id, *snake_id)
                     .await?
                     .expect("live snake joins")
                     .leaderboard_entry_id,
             );
         }
         let [a, b, c, d, e, f] = [ids[0], ids[1], ids[2], ids[3], ids[4], ids[5]];
+
+        assert_eq!(
+            specs.iter().filter(|s| s.placement == 1).count(),
+            1,
+            "fixture needs a single outright winner"
+        );
+        assert!(
+            specs[0].corrupted && specs[1].corrupted,
+            "prior-game entries must be corrupted so the score check bites"
+        );
 
         // A prior game with the OPPOSITE outcome for a and b (b beat a),
         // rated through update_ratings. Without it, every doubled-game
@@ -763,43 +796,48 @@ mod tests {
         // b's result-row count is now 2, so the migration's
         // `games_played = count + 1` guard still matches after corruption
         // (3 = 2 + 1).
-        let prior = finished_game(&pool, leaderboard_id, &[(b, 1), (a, 2)]).await?;
+        let prior = finished_game(pool, leaderboard_id, &[(b, 1), (a, 2)]).await?;
 
         // The doubled prod game, recreated with its real leaderboard_game_id
-        // so the migration's keyed guards match it: a wins outright, a/b/c
-        // ate 10/8/1, d ate nothing.
-        let doubled = Uuid::parse_str("5fe9fddf-5a77-4c88-9ddd-05a3fbf9e175")
-            .wrap_err("DEV-2174 fixture UUID")?;
+        // so the migration's keyed guards match it: placements and food
+        // come from the specs (the prod evidence for that game).
         finished_game_with_lb_game_id(
-            &pool,
+            pool,
             leaderboard_id,
-            doubled,
-            &[(a, 1), (b, 2), (c, 3), (d, 4)],
+            doubled_game_id,
+            &[
+                (a, specs[0].placement),
+                (b, specs[1].placement),
+                (c, specs[2].placement),
+                (d, specs[3].placement),
+            ],
         )
         .await?;
-        for (entry_id, food) in [(a, 10), (b, 8), (c, 1)] {
-            // Scoped to the doubled game's game_id: a and b each also have
-            // a prior-game game_battlesnakes row, and an unscoped UPDATE
-            // would hand-set food on that row too.
-            sqlx::query!(
-                "UPDATE game_battlesnakes SET food_eaten = $2 \
-                 WHERE leaderboard_entry_id = $1 \
-                   AND game_id = (SELECT game_id FROM leaderboard_games \
-                                  WHERE leaderboard_game_id = $3)",
-                entry_id,
-                food,
-                doubled,
-            )
-            .execute(&pool)
-            .await?;
+        for (i, spec) in specs.iter().enumerate() {
+            if let Some(food) = spec.food_eaten {
+                // Scoped to the doubled game's game_id: a and b each also
+                // have a prior-game game_battlesnakes row, and an unscoped
+                // UPDATE would hand-set food on that row too.
+                sqlx::query!(
+                    "UPDATE game_battlesnakes SET food_eaten = $2 \
+                     WHERE leaderboard_entry_id = $1 \
+                       AND game_id = (SELECT game_id FROM leaderboard_games \
+                                      WHERE leaderboard_game_id = $3)",
+                    ids[i],
+                    food,
+                    doubled_game_id,
+                )
+                .execute(pool)
+                .await?;
+            }
         }
         // A healthy game elsewhere: e wins and eats 5, f loses.
-        let healthy = finished_game(&pool, leaderboard_id, &[(e, 1), (f, 2)]).await?;
+        let healthy = finished_game(pool, leaderboard_id, &[(e, 1), (f, 2)]).await?;
         sqlx::query!(
             "UPDATE game_battlesnakes SET food_eaten = 5 WHERE leaderboard_entry_id = $1",
             e,
         )
-        .execute(&pool)
+        .execute(pool)
         .await?;
 
         let mut state = AppState::test_from_pool(pool.clone());
@@ -809,7 +847,7 @@ mod tests {
         scoring.register(Box::new(FoodEatenScoring));
         state.scoring = std::sync::Arc::new(scoring);
         update_ratings(&state, prior).await?;
-        update_ratings(&state, doubled).await?;
+        update_ratings(&state, doubled_game_id).await?;
         update_ratings(&state, healthy).await?;
 
         // Every counter the double-apply bumped, for one entry. Compared by
@@ -878,108 +916,266 @@ mod tests {
 
         // Before the double-apply: a and b are each 1W-1L (50%), c/d lost
         // the doubled game, e won the healthy game.
-        let before = read_counters(&pool, &ids).await?;
+        let before = read_counters(pool, &ids).await?;
 
-        // Simulate main's double-apply on a, b, c only (d is the in-game
+        // Simulate main's double-apply on the corrupted entries only (a
+        // non-corrupted doubled-game entry stays healthy as the in-game
         // consistent control; e, f are the other-game controls). This is
         // what the second concurrent run wrote before its result inserts
         // were swallowed by ON CONFLICT DO NOTHING.
+        let winners: Vec<Uuid> = specs
+            .iter()
+            .zip(&ids)
+            .filter(|(s, _)| s.corrupted && s.placement == 1)
+            .map(|(_, id)| *id)
+            .collect();
+        let losers: Vec<Uuid> = specs
+            .iter()
+            .zip(&ids)
+            .filter(|(s, _)| s.corrupted && s.placement != 1)
+            .map(|(_, id)| *id)
+            .collect();
+        assert_eq!(winners.len(), 1, "fixture must corrupt the outright winner");
         sqlx::query!(
             "UPDATE leaderboard_entries SET games_played = games_played + 1, \
              first_place_finishes = first_place_finishes + 1 \
              WHERE leaderboard_entry_id = $1",
-            a,
+            winners[0],
         )
-        .execute(&pool)
+        .execute(pool)
         .await?;
         sqlx::query!(
             "UPDATE leaderboard_entries SET games_played = games_played + 1, \
              non_first_finishes = non_first_finishes + 1 \
              WHERE leaderboard_entry_id = ANY($1)",
-            &[b, c][..],
+            &losers[..],
         )
-        .execute(&pool)
+        .execute(pool)
         .await?;
         sqlx::query!(
             "UPDATE win_rate_stats SET games_played = games_played + 1, wins = wins + 1, \
              score = (wins + 1)::double precision / (games_played + 1)::double precision * 100.0, \
              updated_at = NOW() WHERE leaderboard_entry_id = $1",
-            a,
+            winners[0],
         )
-        .execute(&pool)
+        .execute(pool)
         .await?;
         sqlx::query!(
             "UPDATE win_rate_stats SET games_played = games_played + 1, losses = losses + 1, \
              score = wins::double precision / (games_played + 1)::double precision * 100.0, \
              updated_at = NOW() WHERE leaderboard_entry_id = ANY($1)",
-            &[b, c][..],
+            &losers[..],
         )
-        .execute(&pool)
+        .execute(pool)
         .await?;
-        for (entry_id, food) in [(a, 10_i64), (b, 8), (c, 1)] {
-            sqlx::query!(
-                "UPDATE food_eaten_stats SET food_score = food_score + $2 \
-                 WHERE leaderboard_entry_id = $1",
-                entry_id,
-                food,
-            )
-            .execute(&pool)
-            .await?;
+        for (i, spec) in specs.iter().enumerate() {
+            if let Some(food) = spec.food_eaten
+                && spec.corrupted
+            {
+                sqlx::query!(
+                    "UPDATE food_eaten_stats SET food_score = food_score + $2 \
+                     WHERE leaderboard_entry_id = $1",
+                    ids[i],
+                    i64::from(food),
+                )
+                .execute(pool)
+                .await?;
+            }
         }
 
-        let corrupted = read_counters(&pool, &ids).await?;
+        let corrupted = read_counters(pool, &ids).await?;
         // The simulation must really have moved every corrupted counter —
         // otherwise the repair assertions below are vacuous.
-        for x in [a, b, c] {
-            assert_ne!(corrupted[&x], before[&x], "corruption applied to {x}");
+        for (i, spec) in specs.iter().enumerate() {
+            if spec.corrupted {
+                assert_ne!(
+                    corrupted[&ids[i]], before[&ids[i]],
+                    "corruption applied to {}",
+                    ids[i]
+                );
+            }
         }
         // Score must have moved too (a: 66.67% vs 50%; b: 33.33% vs 50%),
         // or the migration's score recomputation could never fail the
         // final equality check.
         assert_ne!(corrupted[&a].score, before[&a].score, "a's score moved");
         assert_ne!(corrupted[&b].score, before[&b].score, "b's score moved");
-        assert_eq!(
-            corrupted[&d], before[&d],
-            "in-game control d untouched by corruption"
-        );
+        for (i, spec) in specs.iter().enumerate() {
+            if !spec.corrupted {
+                assert_eq!(
+                    corrupted[&ids[i]], before[&ids[i]],
+                    "in-game control {} untouched by corruption",
+                    ids[i]
+                );
+            }
+        }
         assert_eq!(
             corrupted[&e], before[&e],
             "other-game control e untouched by corruption"
         );
 
         // The REAL migration file — not a copy.
-        sqlx::raw_sql(include_str!(
-            "../../migrations/20261107170600_repair_double_applied_ratings.up.sql"
-        ))
-        .execute(&pool)
-        .await?;
+        sqlx::raw_sql(migration_sql).execute(pool).await?;
 
-        let after = read_counters(&pool, &ids).await?;
+        let after = read_counters(pool, &ids).await?;
         assert_eq!(
             after, before,
             "every counter repaired to the single-application snapshot"
         );
 
         // Idempotent: a second run changes nothing.
-        sqlx::raw_sql(include_str!(
-            "../../migrations/20261107170600_repair_double_applied_ratings.up.sql"
-        ))
-        .execute(&pool)
-        .await?;
-        let again = read_counters(&pool, &ids).await?;
+        sqlx::raw_sql(migration_sql).execute(pool).await?;
+        let again = read_counters(pool, &ids).await?;
         assert_eq!(again, before, "repair is idempotent");
 
-        // The task's success-criteria invariant holds for all six entries.
-        let drifted: i64 = sqlx::query_scalar(
+        // The tasks' success-criteria invariants hold for all six entries.
+        let drifted_entries: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM leaderboard_entries le \
              WHERE le.leaderboard_entry_id = ANY($1) \
                AND le.games_played <> (SELECT count(*) FROM leaderboard_game_results r \
                                        WHERE r.leaderboard_entry_id = le.leaderboard_entry_id)",
         )
         .bind(&ids[..])
-        .fetch_one(&pool)
+        .fetch_one(pool)
         .await?;
-        assert_eq!(drifted, 0);
+        assert_eq!(
+            drifted_entries, 0,
+            "leaderboard_entries.games_played = count(results)"
+        );
+
+        let drifted_wr: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM win_rate_stats wr \
+             WHERE wr.leaderboard_entry_id = ANY($1) \
+               AND wr.games_played <> (SELECT count(*) FROM leaderboard_game_results r \
+                                       WHERE r.leaderboard_entry_id = wr.leaderboard_entry_id)",
+        )
+        .bind(&ids[..])
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(
+            drifted_wr, 0,
+            "win_rate_stats.games_played = count(results)"
+        );
+
+        let drifted_split: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM leaderboard_entries le \
+             WHERE le.leaderboard_entry_id = ANY($1) \
+               AND le.games_played <> le.first_place_finishes + le.non_first_finishes",
+        )
+        .bind(&ids[..])
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(
+            drifted_split, 0,
+            "leaderboard_entries.games_played = first_place_finishes + non_first_finishes"
+        );
+
+        let drifted_wl: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM win_rate_stats wr \
+             WHERE wr.leaderboard_entry_id = ANY($1) \
+               AND wr.wins + wr.losses <> wr.games_played",
+        )
+        .bind(&ids[..])
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(drifted_wl, 0, "win_rate_stats.wins + losses = games_played");
+
+        let drifted_food: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM leaderboard_entries le \
+             LEFT JOIN food_eaten_stats fe USING (leaderboard_entry_id) \
+             WHERE le.leaderboard_entry_id = ANY($1) \
+               AND COALESCE(fe.food_score, 0) <> COALESCE( \
+                     (SELECT SUM(r.food_eaten) FROM leaderboard_game_results r \
+                      WHERE r.leaderboard_entry_id = le.leaderboard_entry_id), 0)",
+        )
+        .bind(&ids[..])
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(
+            drifted_food, 0,
+            "food_eaten_stats.food_score = sum(food_eaten) (missing row counts as 0)"
+        );
         Ok(())
+    }
+
+    /// The repair migration backs out exactly the second application of the
+    /// doubled game, on every counter, and is idempotent. Executes the real
+    /// migration file, not a copy. a and b carry a prior opposite-outcome
+    /// game so their scores are 50% (not the degenerate 100%/0% of a
+    /// single-game entry) and the score assertions can actually fail.
+    /// (DEV-2174's game; the body lives in the shared helper.)
+    #[sqlx::test(migrations = "../migrations")]
+    async fn repair_migration_backs_out_second_application_exactly(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        assert_migration_backs_out_second_application(
+            &pool,
+            include_str!("../../migrations/20261107170600_repair_double_applied_ratings.up.sql"),
+            Uuid::parse_str("5fe9fddf-5a77-4c88-9ddd-05a3fbf9e175")
+                .wrap_err("DEV-2174 fixture UUID")?,
+            &[
+                DoubledEntrySpec {
+                    placement: 1,
+                    food_eaten: Some(10),
+                    corrupted: true,
+                },
+                DoubledEntrySpec {
+                    placement: 2,
+                    food_eaten: Some(8),
+                    corrupted: true,
+                },
+                DoubledEntrySpec {
+                    placement: 3,
+                    food_eaten: Some(1),
+                    corrupted: true,
+                },
+                DoubledEntrySpec {
+                    placement: 4,
+                    food_eaten: None,
+                    corrupted: false,
+                },
+            ],
+        )
+        .await
+    }
+
+    /// DEV-2218: the second doubled prod game, d02f3e8a-e8fe-47fd-87d1-
+    /// e2e2ac8a2256 (scored twice 2026-11-08T00:55:10Z, just before #322
+    /// deployed). All four entries drifted this time — everyone ate
+    /// (36/32/10/4) — so all four are corrupted; e and f remain the
+    /// healthy-game controls.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn second_repair_migration_backs_out_d02f3e8a_exactly(pool: PgPool) -> cja::Result<()> {
+        assert_migration_backs_out_second_application(
+            &pool,
+            include_str!(
+                "../../migrations/20261108120500_repair_second_double_applied_ratings.up.sql"
+            ),
+            Uuid::parse_str("d02f3e8a-e8fe-47fd-87d1-e2e2ac8a2256")
+                .wrap_err("DEV-2218 fixture UUID")?,
+            &[
+                DoubledEntrySpec {
+                    placement: 1,
+                    food_eaten: Some(36),
+                    corrupted: true,
+                },
+                DoubledEntrySpec {
+                    placement: 2,
+                    food_eaten: Some(32),
+                    corrupted: true,
+                },
+                DoubledEntrySpec {
+                    placement: 3,
+                    food_eaten: Some(10),
+                    corrupted: true,
+                },
+                DoubledEntrySpec {
+                    placement: 4,
+                    food_eaten: Some(4),
+                    corrupted: true,
+                },
+            ],
+        )
+        .await
     }
 }
