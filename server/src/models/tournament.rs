@@ -1561,6 +1561,13 @@ pub async fn find_match_game_by_game_id(
 ///
 /// Executor-generic so the game runner can write the result inside the same
 /// transaction that marks the game finished.
+///
+/// Write-once: the winner is recorded exactly once, atomically with the
+/// game's finish (`mark_game_finished_tx`) in the caller's transaction. A
+/// second write means a double finish raced the bracket forward and is an
+/// error, never a silent overwrite (DEV-2175). A tie re-write `NULL → NULL`
+/// still matches `winner_id IS NULL` and succeeds — the tie path is not
+/// guarded away.
 pub async fn set_match_game_winner<'e, E>(
     executor: E,
     match_game_id: Uuid,
@@ -1569,14 +1576,21 @@ pub async fn set_match_game_winner<'e, E>(
 where
     E: Executor<'e, Database = Postgres>,
 {
-    sqlx::query!(
-        "UPDATE match_games SET winner_id = $2 WHERE match_game_id = $1",
+    let updated = sqlx::query!(
+        "UPDATE match_games SET winner_id = $2
+         WHERE match_game_id = $1 AND winner_id IS NULL",
         match_game_id,
         winner_id,
     )
     .execute(executor)
     .await
     .wrap_err("Failed to set match game winner")?;
+
+    if updated.rows_affected() != 1 {
+        return Err(color_eyre::eyre::eyre!(
+            "Match game {match_game_id} already has a winner recorded; refusing to overwrite"
+        ));
+    }
 
     Ok(())
 }
@@ -2048,5 +2062,91 @@ mod tests {
             serde_json::from_str::<MatchStyle>(r#""best_of_3""#).unwrap(),
             MatchStyle::BestOf3
         );
+    }
+
+    /// Insert a bare game + match_games row, returning the match_game_id
+    /// (stuck_game_sweeper fixture shape; non-macro so no .sqlx entry).
+    async fn insert_match_game(
+        pool: &PgPool,
+        match_id: Uuid,
+        game_number: i32,
+    ) -> cja::Result<Uuid> {
+        let game_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO games (board_size, game_type) VALUES ('11x11', 'Standard') RETURNING game_id",
+        )
+        .fetch_one(pool)
+        .await?;
+        Ok(sqlx::query_scalar(
+            "INSERT INTO match_games (match_id, game_id, game_number)
+                 VALUES ($1, $2, $3) RETURNING match_game_id",
+        )
+        .bind(match_id)
+        .bind(game_id)
+        .bind(game_number)
+        .fetch_one(pool)
+        .await?)
+    }
+
+    /// DEV-2175: the match_games winner is write-once — a second write (a
+    /// double finish racing the bracket forward) errors instead of
+    /// overwriting. Uses a real second snake because winner_id carries an FK
+    /// to battlesnakes, so an arbitrary UUID would fail the FK and make the
+    /// guard look like it works when it doesn't. A tie write (NULL) on a
+    /// fresh row still succeeds.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn match_game_winner_is_write_once(pool: PgPool) -> cja::Result<()> {
+        let (user_id, _) = fixture_user_and_snake(&pool).await?;
+        let snake_a: Uuid = sqlx::query_scalar(
+            "INSERT INTO battlesnakes (user_id, name, url)
+             VALUES ($1, 'snake-a', 'http://example.com') RETURNING battlesnake_id",
+        )
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await?;
+        let snake_b: Uuid = sqlx::query_scalar(
+            "INSERT INTO battlesnakes (user_id, name, url)
+             VALUES ($1, 'snake-b', 'http://example.com') RETURNING battlesnake_id",
+        )
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await?;
+
+        let tournament = create_tournament(&pool, user_id, fixture_tournament()).await?;
+        let match_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO tournament_matches (tournament_id, round, position, visual_column, visual_row)
+             VALUES ($1, 1, 0, 0, 0) RETURNING match_id",
+        )
+        .bind(tournament.tournament_id)
+        .fetch_one(&pool)
+        .await?;
+
+        let mg = insert_match_game(&pool, match_id, 1).await?;
+        let mg2 = insert_match_game(&pool, match_id, 2).await?;
+
+        let read_winner = |match_game_id: Uuid| {
+            sqlx::query_scalar::<_, Option<Uuid>>(
+                "SELECT winner_id FROM match_games WHERE match_game_id = $1",
+            )
+            .bind(match_game_id)
+            .fetch_one(&pool)
+        };
+
+        // First write records the winner.
+        set_match_game_winner(&pool, mg, Some(snake_a)).await?;
+        assert_eq!(read_winner(mg).await?, Some(snake_a));
+
+        // Second write with a different snake: refused, winner unchanged.
+        assert!(
+            set_match_game_winner(&pool, mg, Some(snake_b))
+                .await
+                .is_err()
+        );
+        assert_eq!(read_winner(mg).await?, Some(snake_a));
+
+        // Tie path on a fresh row: recording NULL is fine and stays NULL.
+        set_match_game_winner(&pool, mg2, None).await?;
+        assert_eq!(read_winner(mg2).await?, None);
+
+        Ok(())
     }
 }

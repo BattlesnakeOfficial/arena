@@ -71,7 +71,7 @@ impl ScoringAlgorithm for FoodEatenScoring {
         &self,
         conn: &mut sqlx::PgConnection,
         event: &GameResultEvent,
-    ) -> cja::Result<()> {
+    ) -> cja::Result<bool> {
         let food_eaten_map = count_food_eaten(conn, event.game_id).await?;
 
         for result in &event.results {
@@ -139,7 +139,7 @@ impl ScoringAlgorithm for FoodEatenScoring {
             .wrap_err("Failed to update food_eaten on game result")?;
         }
 
-        Ok(())
+        Ok(true)
     }
 
     async fn get_scores(&self, pool: &PgPool, entry_ids: &[Uuid]) -> cja::Result<Vec<EntryScore>> {
