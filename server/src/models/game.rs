@@ -137,6 +137,14 @@ impl GameStatus {
             GameStatus::Failed => "failed",
         }
     }
+
+    /// True for the statuses a game never leaves: `Finished` (terminal
+    /// success) and `Failed` (terminal failure — see the variant docs).
+    /// Every terminal-set check routes through here; the DB CHECK
+    /// `games_status_domain` pins the same set in SQL.
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, GameStatus::Finished | GameStatus::Failed)
+    }
 }
 
 impl FromStr for GameStatus {
@@ -388,11 +396,15 @@ pub async fn claim_game_start(
     .fetch_one(&mut *tx)
     .await
     .wrap_err("Failed to lock game for start")?;
-    match target.status.as_str() {
-        "running" => return Ok(StartClaim::AlreadyRunning),
-        "finished" | "failed" => return Ok(StartClaim::Terminal),
-        "waiting" => {}
-        other => return Err(eyre!("Unknown game status {other}")),
+    let status = GameStatus::from_str(&target.status)
+        .wrap_err_with(|| format!("Unknown game status {}", target.status))?;
+    // Only Waiting proceeds; a status added later fails closed here instead
+    // of being claimed as if it were waiting.
+    match status {
+        GameStatus::Waiting => {}
+        GameStatus::Running => return Ok(StartClaim::AlreadyRunning),
+        s if s.is_terminal() => return Ok(StartClaim::Terminal),
+        other => return Err(eyre!("Unclaimable game status {}", other.as_str())),
     }
     let roster = sqlx::query_scalar!(
         r#"SELECT DISTINCT COALESCE(gb.battlesnake_id, le.battlesnake_id) AS "snake_id!"
@@ -999,54 +1011,6 @@ where
     Ok(())
 }
 
-// Update the status of a game
-pub async fn update_game_status(
-    pool: &PgPool,
-    game_id: Uuid,
-    status: GameStatus,
-) -> cja::Result<Game> {
-    let status_str = status.as_str();
-
-    let row = sqlx::query!(
-        r#"
-        UPDATE games
-        SET status = $2
-        WHERE game_id = $1
-        RETURNING
-            game_id,
-            board_size,
-            game_type,
-            status,
-            enqueued_at,
-            created_at,
-            updated_at
-        "#,
-        game_id,
-        status_str
-    )
-    .fetch_one(pool)
-    .await
-    .wrap_err_with(|| format!("Failed to update status for game {}", game_id))?;
-
-    let board_size = GameBoardSize::from_str(&row.board_size)
-        .wrap_err_with(|| format!("Invalid board size: {}", row.board_size))?;
-    let game_type = GameType::from_str(&row.game_type)
-        .wrap_err_with(|| format!("Invalid game type: {}", row.game_type))?;
-    let status = GameStatus::from_str(&row.status)
-        .wrap_err_with(|| format!("Invalid game status: {}", row.status))?;
-
-    Ok(Game {
-        game_id: row.game_id,
-        board_size,
-        game_type,
-        status,
-        enqueued_at: row.enqueued_at,
-        created_at: row.created_at,
-        updated_at: row.updated_at,
-    })
-}
-
-/// Flip a game to `finished` inside an existing transaction, stamping
 /// `finished_at` and clearing any archive bookkeeping — one atomic UPDATE.
 ///
 /// A game the stuck-game sweeper failed mid-run may already carry a
@@ -1234,6 +1198,27 @@ mod tests {
             assert_eq!(GameStatus::from_str(status.as_str()).unwrap(), status);
         }
         assert!(GameStatus::from_str("exploded").is_err());
+    }
+
+    #[test]
+    fn game_status_is_terminal_only_for_finished_and_failed() {
+        assert!(!GameStatus::Waiting.is_terminal());
+        assert!(!GameStatus::Running.is_terminal());
+        assert!(GameStatus::Finished.is_terminal());
+        assert!(GameStatus::Failed.is_terminal());
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn games_status_check_rejects_unknown_status(pool: sqlx::PgPool) {
+        let err = sqlx::query(
+            "INSERT INTO games (board_size, game_type, status) VALUES ('11x11', 'Standard', 'bogus')",
+        )
+        .execute(&pool)
+        .await
+        .expect_err("bogus status must be rejected by games_status_domain");
+        let db = err.as_database_error().expect("expected a database error");
+        assert_eq!(db.code().as_deref(), Some("23514")); // check_violation
+        assert_eq!(db.constraint(), Some("games_status_domain"));
     }
 
     #[test]

@@ -193,6 +193,11 @@ pub async fn unlock_with_token(
 
 /// Scan historical links in bounded timestamp windows. Credits and cursor
 /// advance share one transaction, so a failed batch is retried intact.
+/// Kept as an hourly safety net (DEV-2177): native finishes stamp
+/// `finished_at` (`mark_game_finished_tx`) and imported Play games carry no
+/// `game_battlesnakes` rows, so steady state inserts 0 rows — but any
+/// future writer that finishes a rostered game without stamping
+/// `finished_at` still gets its weeks credited here.
 pub async fn backfill_active_weeks(pool: &PgPool) -> cja::Result<u64> {
     let mut total = 0;
     loop {

@@ -83,15 +83,14 @@ pub async fn view_game(
         .wrap_err("Failed to get game battlesnakes")?;
 
     let finished = game.status == GameStatus::Finished;
-    let rematch =
-        if user.is_some() && matches!(game.status, GameStatus::Finished | GameStatus::Failed) {
-            crate::models::game::get_game_rematch_metadata(&state.db, game_id)
-                .await
-                .wrap_err("Failed to get game rematch metadata")?
-        } else {
-            None
-        };
-    let can_rematch = matches!(game.status, GameStatus::Finished | GameStatus::Failed)
+    let rematch = if user.is_some() && game.status.is_terminal() {
+        crate::models::game::get_game_rematch_metadata(&state.db, game_id)
+            .await
+            .wrap_err("Failed to get game rematch metadata")?
+    } else {
+        None
+    };
+    let can_rematch = game.status.is_terminal()
         && user.as_ref().is_some_and(|current| {
             rematch.as_ref().is_some_and(|metadata| {
                 metadata.created_by_user_id == Some(current.user_id)

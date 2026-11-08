@@ -490,10 +490,7 @@ pub(crate) async fn load_suppressed_set(
     game_id: Uuid,
     status: &crate::models::game::GameStatus,
 ) -> HashMap<String, HashSet<String>> {
-    if !matches!(
-        status,
-        crate::models::game::GameStatus::Finished | crate::models::game::GameStatus::Failed
-    ) {
+    if !status.is_terminal() {
         return HashMap::new();
     }
     match crate::models::shout_moderation::suppressed_shout_pairs(db, game_id).await {
