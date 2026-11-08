@@ -403,9 +403,11 @@ mod tests {
         .await?;
         let a = leaderboard::get_or_create_entry(&pool, leaderboard_id, snake_a)
             .await?
+            .expect("live snake joins")
             .leaderboard_entry_id;
         let b = leaderboard::get_or_create_entry(&pool, leaderboard_id, snake_b)
             .await?
+            .expect("live snake joins")
             .leaderboard_entry_id;
 
         let lb_game = finished_game(&pool, leaderboard_id, &[(a, 1), (b, 2)]).await?;
@@ -615,9 +617,11 @@ mod tests {
         .await?;
         let a = leaderboard::get_or_create_entry(&pool, leaderboard_id, snake_a)
             .await?
+            .expect("live snake joins")
             .leaderboard_entry_id;
         let b = leaderboard::get_or_create_entry(&pool, leaderboard_id, snake_b)
             .await?
+            .expect("live snake joins")
             .leaderboard_entry_id;
 
         let lb_game = finished_game(&pool, leaderboard_id, &[(a, 1), (b, 2)]).await?;
@@ -740,6 +744,7 @@ mod tests {
             ids.push(
                 leaderboard::get_or_create_entry(&pool, leaderboard_id, *snake_id)
                     .await?
+                    .expect("live snake joins")
                     .leaderboard_entry_id,
             );
         }
