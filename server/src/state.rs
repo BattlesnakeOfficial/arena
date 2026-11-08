@@ -161,6 +161,12 @@ impl AppState {
             Some(mailgun) => {
                 let email_client = reqwest::Client::builder()
                     .timeout(std::time::Duration::from_secs(10))
+                    // A connect-phase deadline that surfaces as a *connect*
+                    // error (so `SendError` can classify it definite
+                    // non-delivery and shutdown reservations get released)
+                    // instead of burning the whole total timeout and landing
+                    // in the ambiguous no-response bucket.
+                    .connect_timeout(std::time::Duration::from_secs(5))
                     .build()
                     .wrap_err("Failed to create email HTTP client")?;
                 tracing::info!(domain = %mailgun.domain, "Mailgun configured for email");
