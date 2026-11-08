@@ -530,7 +530,7 @@ mod tests {
         let mut game = create_test_game();
         game.board.food = vec![Point::new(5, 5), Point::new(7, 7)];
 
-        let frame = game_to_frame(&game, &[], &[], &std::collections::HashMap::new());
+        let frame = game_to_frame(&game, &[], &std::collections::HashMap::new());
 
         assert_eq!(frame.food.len(), 2);
         assert_eq!(frame.food[0].x, 5);
@@ -544,7 +544,7 @@ mod tests {
         let mut game = create_test_game();
         game.board.hazards = vec![Point::new(0, 0), Point::new(10, 10)];
 
-        let frame = game_to_frame(&game, &[], &[], &std::collections::HashMap::new());
+        let frame = game_to_frame(&game, &[], &std::collections::HashMap::new());
 
         assert_eq!(frame.hazards.len(), 2);
         assert_eq!(frame.hazards[0].x, 0);
@@ -568,7 +568,7 @@ mod tests {
             Point::new(-1, 5),
         ];
 
-        let frame = game_to_frame(&game, &[], &[], &std::collections::HashMap::new());
+        let frame = game_to_frame(&game, &[], &std::collections::HashMap::new());
 
         assert_eq!(
             frame.hazards.len(),
@@ -583,7 +583,7 @@ mod tests {
     #[test]
     fn test_game_to_frame_snake_body_coords() {
         let game = create_test_game();
-        let frame = game_to_frame(&game, &[], &[], &std::collections::HashMap::new());
+        let frame = game_to_frame(&game, &[], &std::collections::HashMap::new());
 
         // Snake body should be converted to FrameCoords
         assert_eq!(frame.snakes[0].body.len(), 3);
@@ -607,7 +607,7 @@ mod tests {
     #[test]
     fn test_frame_snake_serialization() {
         let game = create_test_game();
-        let frame = game_to_frame(&game, &[], &[], &std::collections::HashMap::new());
+        let frame = game_to_frame(&game, &[], &std::collections::HashMap::new());
 
         let json = serde_json::to_string(&frame).unwrap();
 
@@ -692,7 +692,6 @@ mod tests {
 
         let ok = game_to_frame(
             &game,
-            &[],
             &[result(engine_core::move_response::MoveOutcome::Ok {
                 status_code: 200,
             })],
@@ -705,7 +704,6 @@ mod tests {
 
         let bad = game_to_frame(
             &game,
-            &[],
             &[result(engine_core::move_response::MoveOutcome::HttpError {
                 status_code: 502,
             })],
@@ -720,7 +718,7 @@ mod tests {
     /// EliminatedCause/EliminatedBy.
     #[test]
     fn test_frame_schema_matches_legacy_engine() {
-        let frame = game_to_frame(&create_test_game(), &[], &[], &Default::default());
+        let frame = game_to_frame(&create_test_game(), &[], &Default::default());
         let json = serde_json::to_value(&frame).unwrap();
 
         let mut top: Vec<&str> = json
@@ -972,7 +970,7 @@ mod tests {
                 author: "byte-owner".to_string(),
             },
         );
-        let frame = game_to_frame(&game, &[], &[], &custom);
+        let frame = game_to_frame(&game, &[], &custom);
         assert_eq!(frame.snakes[0].color, "#ff0000", "should use custom color");
         assert_eq!(frame.snakes[0].head_type, "bendr", "should use custom head");
         assert_eq!(
@@ -985,7 +983,7 @@ mod tests {
     fn test_game_to_frame_falls_back_when_no_customizations() {
         use std::collections::HashMap;
         let game = create_test_game();
-        let frame = game_to_frame(&game, &[], &[], &HashMap::new());
+        let frame = game_to_frame(&game, &[], &HashMap::new());
         assert!(
             !frame.snakes[0].color.is_empty(),
             "fallback color should not be empty"
@@ -1018,7 +1016,7 @@ mod tests {
                 author: "byte-owner".to_string(),
             },
         );
-        let frame = game_to_frame(&game, &[], &[], &custom);
+        let frame = game_to_frame(&game, &[], &custom);
         assert!(
             !frame.snakes[0].color.is_empty(),
             "empty color should fall back to generated color"
@@ -1051,7 +1049,7 @@ mod tests {
                 author: "byte-owner".to_string(),
             },
         );
-        let frame = game_to_frame(&game, &[], &[], &custom);
+        let frame = game_to_frame(&game, &[], &custom);
         assert_eq!(
             frame.snakes[0].color, "#00ff00",
             "non-empty color should be used"
@@ -1080,7 +1078,7 @@ mod tests {
                 author: "byte-owner".to_string(),
             },
         );
-        let frame = game_to_frame(&game, &[], &[], &custom);
+        let frame = game_to_frame(&game, &[], &custom);
         assert_eq!(frame.snakes[0].id, "snake-1", "id should be preserved");
         assert_eq!(
             frame.snakes[0].name, "Test Snake",

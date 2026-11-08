@@ -748,7 +748,7 @@ mod tests {
                     .position(|s| s.to_string() == id)
                     .expect("roster snake")
             };
-            let mut deaths: Vec<(usize, i32, String)> = run
+            let mut deaths: Vec<(i32, usize, (usize, i32, String))> = run
                 .engine_game
                 .board
                 .snakes
