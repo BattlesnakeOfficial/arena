@@ -714,9 +714,11 @@ mod pending_form_data_tests {
         .fetch_one(&pool)
         .await?;
         assert_eq!(remaining, 4);
-        assert!(get_active_session_by_id(&pool, fresh.session_id)
-            .await?
-            .is_some());
+        assert!(
+            get_active_session_by_id(&pool, fresh.session_id)
+                .await?
+                .is_some()
+        );
 
         // A full batch of 3 then a short batch of 1 exits early; 0 remain.
         let deleted = clean_expired_sessions(&pool, 3, 2).await?;

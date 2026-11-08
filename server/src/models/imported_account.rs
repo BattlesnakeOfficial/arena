@@ -737,9 +737,13 @@ pub async fn try_auto_claim(
     };
 
     let mut tx = pool.begin().await.wrap_err("Failed to begin claim tx")?;
-    let Some(completed) =
-        claim_account_tx(&mut tx, account.imported_account_id, user_id, Some(external_github_id))
-            .await?
+    let Some(completed) = claim_account_tx(
+        &mut tx,
+        account.imported_account_id,
+        user_id,
+        Some(external_github_id),
+    )
+    .await?
     else {
         return Ok(None);
     };
@@ -2091,10 +2095,7 @@ mod tests {
         b.account.github_uid = Some(90206);
         let b_id = stage_play_account(&pool, &b).await?.imported_account_id;
         let user = create_user(&pool, 9206).await?;
-        let mut tx = pool
-            .begin()
-            .await
-            .wrap_err("Failed to begin claim tx")?;
+        let mut tx = pool.begin().await.wrap_err("Failed to begin claim tx")?;
         assert!(
             claim_account_tx(&mut tx, stale.imported_account_id, user, Some(90206))
                 .await?

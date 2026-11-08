@@ -275,7 +275,10 @@ async fn web_login_rotates_session_and_reissues_cookie(pool: PgPool) {
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert!(redirect.is_none(), "redirect consumed by the callback: {redirect:?}");
+    assert!(
+        redirect.is_none(),
+        "redirect consumed by the callback: {redirect:?}"
+    );
     assert!(draft.is_none(), "form draft must NOT carry across rotation");
 
     // The old row is gone.
@@ -369,15 +372,20 @@ async fn logout_failure_logs_and_shows_no_success_flash(pool: PgPool) {
     assert_eq!(response.headers()[header::LOCATION], "/");
 
     // Sign-out really failed, and no success flash was written.
-    let (user_id, flash): (Option<Uuid>, Option<String>) = sqlx::query_as(
-        "SELECT user_id::uuid, flash_message FROM sessions WHERE session_id = $1",
-    )
-    .bind(session_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert!(user_id.is_some(), "sign-out failed, user must still be attached");
-    assert_eq!(flash, None, "no 'You have been logged out' flash on failure");
+    let (user_id, flash): (Option<Uuid>, Option<String>) =
+        sqlx::query_as("SELECT user_id::uuid, flash_message FROM sessions WHERE session_id = $1")
+            .bind(session_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(
+        user_id.is_some(),
+        "sign-out failed, user must still be attached"
+    );
+    assert_eq!(
+        flash, None,
+        "no 'You have been logged out' flash on failure"
+    );
 }
 
 /// DEV-2185 happy-path sibling: a successful logout clears the user, the

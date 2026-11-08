@@ -9,13 +9,8 @@ use maud::{Markup, html};
 use serde::Deserialize;
 
 use crate::{
-    components::page_factory::PageFactory,
-    django_password,
-    errors::ServerResult,
-    flasher::Flasher,
-    models::imported_account,
-    routes::auth::CurrentUser,
-    state::AppState,
+    components::page_factory::PageFactory, django_password, errors::ServerResult, flasher::Flasher,
+    models::imported_account, routes::auth::CurrentUser, state::AppState,
 };
 
 /// Attempts per arena user per hour: stops one account from enumerating

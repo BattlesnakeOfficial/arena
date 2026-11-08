@@ -2337,12 +2337,9 @@ mod moderation_tests {
         let (_user, session) = user_with_session(&pool, 9417).await?;
         let admin_id = create_user_row(&pool, 9418, true).await?;
         let admin_session = crate::models::session::create_session(&pool).await?;
-        let admin_session = crate::models::session::rotate_session(
-            &pool,
-            admin_session.session_id,
-            admin_id,
-        )
-        .await?;
+        let admin_session =
+            crate::models::session::rotate_session(&pool, admin_session.session_id, admin_id)
+                .await?;
 
         let state = crate::state::AppState::test_from_pool(pool.clone());
 

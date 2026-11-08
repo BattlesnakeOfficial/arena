@@ -16,9 +16,8 @@ use crate::{
     models::{
         api_token::{self, Permission, SnakeAccess},
         session::{
-            clear_github_oauth_state, clear_post_login_redirect,
-            disassociate_user_from_session, set_github_oauth_state_with_cli,
-            take_post_login_redirect,
+            clear_github_oauth_state, clear_post_login_redirect, disassociate_user_from_session,
+            set_github_oauth_state_with_cli, take_post_login_redirect,
         },
         user::create_or_update_user,
     },

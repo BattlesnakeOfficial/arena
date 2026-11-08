@@ -422,12 +422,11 @@ mod tests {
         // IntervalSchedule::should_run treats the cron as never-run and
         // the first tick (2s poll) enqueues the prune at boot — against
         // the 1M-row prod backlog.
-        let last_run_at: chrono::DateTime<chrono::Utc> = sqlx::query_scalar!(
-            "SELECT last_run_at FROM crons WHERE name = 'SessionPruneJob'"
-        )
-        .fetch_one(&pool)
-        .await
-        .expect("20261108160000 must seed the SessionPruneJob cron row");
+        let last_run_at: chrono::DateTime<chrono::Utc> =
+            sqlx::query_scalar!("SELECT last_run_at FROM crons WHERE name = 'SessionPruneJob'")
+                .fetch_one(&pool)
+                .await
+                .expect("20261108160000 must seed the SessionPruneJob cron row");
         let registry = cron_registry(&AppConfig::test_default());
         let job = registry
             .get("SessionPruneJob")
@@ -608,7 +607,9 @@ mod tests {
             sqlx::query("INSERT INTO users (external_github_id, github_login) VALUES ($1, $2)")
                 .bind(1644300 + number)
                 .bind(format!("backfill-resume-{number}"))
-                .execute(&pool).await.unwrap();
+                .execute(&pool)
+                .await
+                .unwrap();
         }
         let page = crate::customizations::achievements::backfill_achievement_page(&pool)
             .await
