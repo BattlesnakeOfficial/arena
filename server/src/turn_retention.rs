@@ -1134,14 +1134,17 @@ mod tests {
     async fn clear_stale_archive_pointers_guards(pool: PgPool) -> cja::Result<()> {
         let old = chrono::Utc::now() - chrono::Duration::days(40);
         let game_id = fixture_game(&pool, "finished", old, None).await?;
-        let read_archived_at = |pool: &sqlx::PgPool| async {
-            let value: chrono::DateTime<chrono::Utc> =
+        async fn read_archived_at(
+            pool: &sqlx::PgPool,
+            game_id: Uuid,
+        ) -> cja::Result<chrono::DateTime<chrono::Utc>> {
+            Ok(
                 sqlx::query_scalar("SELECT archived_at FROM games WHERE game_id = $1")
                     .bind(game_id)
                     .fetch_one(pool)
-                    .await?;
-            cja::Result::<_>::Ok(value)
-        };
+                    .await?,
+            )
+        }
         let set_pointers = "UPDATE games SET archived_at = NOW(), gcs_path = 'native/2026/11/07/x.json.zst', archive_version = 2 WHERE game_id = $1";
 
         // (a) matching archived_at → 1 row, pointers cleared.
@@ -1149,7 +1152,7 @@ mod tests {
             .bind(game_id)
             .execute(&pool)
             .await?;
-        let read = read_archived_at(&pool).await?;
+        let read = read_archived_at(&pool, game_id).await?;
         assert_eq!(clear_stale_archive_pointers(&pool, game_id, read).await?, 1);
         let (archived_at, gcs_path, archive_version) = archive_pointers(&pool, game_id).await?;
         assert!(archived_at.is_none());
@@ -1162,7 +1165,7 @@ mod tests {
             .bind(game_id)
             .execute(&pool)
             .await?;
-        let read = read_archived_at(&pool).await?;
+        let read = read_archived_at(&pool, game_id).await?;
         let stale = read - chrono::Duration::seconds(1);
         assert_eq!(
             clear_stale_archive_pointers(&pool, game_id, stale).await?,
@@ -1182,7 +1185,7 @@ mod tests {
         .bind(game_id)
         .execute(&pool)
         .await?;
-        let read = read_archived_at(&pool).await?;
+        let read = read_archived_at(&pool, game_id).await?;
         assert_eq!(clear_stale_archive_pointers(&pool, game_id, read).await?, 0);
         let (archived_at, gcs_path, _) = archive_pointers(&pool, game_id).await?;
         assert!(archived_at.is_some(), "pruned game keeps its pointers");
@@ -1583,6 +1586,7 @@ mod tests {
             PruneOutcome::Pruned { .. } => 0,
             PruneOutcome::Skipped => 1,
             PruneOutcome::Retained { .. } => 2,
+            PruneOutcome::StaleArchiveCleared => 3,
         });
         assert_eq!(
             outcomes,
