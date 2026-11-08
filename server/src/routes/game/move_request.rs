@@ -435,12 +435,14 @@ mod tests {
                     snake_id: s.id.clone(),
                     direction: pick_move(s, &game.board, &mut rng),
                     latency_ms: rng.gen_bool(0.8).then(|| rng.gen_range(0..700)),
-                    timed_out: rng.gen_bool(0.1),
+                    outcome: if rng.gen_bool(0.1) {
+                        crate::snake_client::MoveOutcome::TimedOut
+                    } else {
+                        crate::snake_client::MoveOutcome::Ok { status_code: 200 }
+                    },
                     shout: rng
                         .gen_bool(0.5)
                         .then(|| format!("turn {}", game.board.turn)),
-                    status_code: Some(200),
-                    errored: false,
                 })
                 .collect();
             contexts = results
@@ -451,7 +453,7 @@ mod tests {
                         SnakeContext {
                             latency_ms: wire::reported_latency_ms(
                                 r.latency_ms,
-                                r.timed_out,
+                                r.outcome.timed_out(),
                                 game.meta.timeout,
                             ),
                             shout: r.shout.clone(),

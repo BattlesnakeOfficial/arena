@@ -513,10 +513,8 @@ mod tests {
                         snake_id: s.id.clone(),
                         direction,
                         latency_ms: Some(50 + i as i64),
-                        timed_out: false,
                         shout: (i % 2 == 0).then(|| format!("shout {i}")),
-                        status_code: Some(200),
-                        errored: false,
+                        outcome: engine_core::move_response::MoveOutcome::Ok { status_code: 200 },
                     }
                 })
                 .collect()

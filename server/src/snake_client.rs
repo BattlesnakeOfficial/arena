@@ -18,7 +18,7 @@ use uuid::Uuid;
 // Move-response reading lives in engine-core (shared with the battlesnake
 // CLI); re-exported so every existing consumer path keeps compiling.
 pub use engine_core::move_response::{
-    BODY_READ_CAP_BYTES, MoveResponse, MoveResult, parse_direction,
+    BODY_READ_CAP_BYTES, MoveOutcome, MoveResponse, MoveResult, parse_direction,
 };
 // Shared HTTP-boundary helpers, also moved to engine-core for the CLI's
 // `play`. `accumulate_body_chunk` is not re-exported: its tests moved with
@@ -247,14 +247,23 @@ pub async fn request_move(
 
     let start = Instant::now();
 
-    let result =
-        tokio::time::timeout(timeout, client.post(&move_url).json(&request_body).send()).await;
+    // One budget for send AND body read, like the CLI's `round_trip`: a
+    // body that stalls past the move timeout is a real timeout, not an
+    // unusable 200. Latency is measured at body completion (or the
+    // deadline firing).
+    let result = tokio::time::timeout(timeout, async {
+        let response = client.post(&move_url).json(&request_body).send().await?;
+        let status = response.status().as_u16();
+        let body = read_body_capped(response, BODY_READ_CAP_BYTES).await;
+        Ok::<_, reqwest::Error>((status, body))
+    })
+    .await;
 
     let elapsed = start.elapsed().as_millis() as i64;
 
     // `tokio::time::timeout` checks the inner future before its deadline, so
-    // a completed send that still exceeds the budget means this task was
-    // polled late: an arena-side stall, not a slow snake.
+    // a completed send+body that still exceeds the budget means this task
+    // was polled late: an arena-side stall, not a slow snake.
     if result.is_ok() && elapsed > timeout.as_millis() as i64 {
         tracing::warn!(
             metric_type = "late_poll",
@@ -266,21 +275,22 @@ pub async fn request_move(
     }
 
     match result {
-        Ok(Ok(response)) => {
-            let status = Some(response.status().as_u16());
-            match read_body_capped(response, BODY_READ_CAP_BYTES).await {
-                Ok(body) => match engine_core::move_response::interpret_move_response(
-                    snake_id,
-                    &body,
-                    status,
-                    Some(elapsed),
-                    last_direction,
-                ) {
-                    Ok(result) => result,
-                    Err(e) => invalid_move_response(snake_id, last_direction, elapsed, status, &e),
-                },
+        Ok(Ok((status, Ok(body)))) => {
+            match engine_core::move_response::interpret_move_response(
+                snake_id,
+                &body,
+                status,
+                Some(elapsed),
+                last_direction,
+            ) {
+                Ok(result) => result,
                 Err(e) => invalid_move_response(snake_id, last_direction, elapsed, status, &e),
             }
+        }
+        // Headers arrived but the body read failed inside the budget (e.g.
+        // a mid-body reset): an unusable answer, not a transport fault.
+        Ok(Ok((status, Err(e)))) => {
+            invalid_move_response(snake_id, last_direction, elapsed, status, &e)
         }
         Ok(Err(e)) => {
             // Network error - continue in same direction
@@ -293,7 +303,7 @@ pub async fn request_move(
                 snake_id,
                 last_direction,
                 None,
-                true,
+                MoveOutcome::Transport,
             )
         }
         Err(_) => {
@@ -306,8 +316,8 @@ pub async fn request_move(
             engine_core::move_response::transport_fallback_result(
                 snake_id,
                 last_direction,
-                None,
-                true,
+                Some(elapsed),
+                MoveOutcome::TimedOut,
             )
         }
     }
@@ -317,7 +327,7 @@ fn invalid_move_response(
     snake_id: &str,
     last_direction: Option<Direction>,
     elapsed: i64,
-    status_code: Option<u16>,
+    status_code: u16,
     error: &dyn std::fmt::Display,
 ) -> MoveResult {
     tracing::warn!(
@@ -448,14 +458,11 @@ async fn retry_move_direct(
 /// (no answer arrived in budget); `snake_error` is a non-2xx answer;
 /// `invalid_response` is a 2xx answer whose body/direction was unusable.
 fn retry_outcome(result: &MoveResult) -> &'static str {
-    if result.timed_out {
-        "snake_timeout"
-    } else if result.status_code.is_some_and(|s| !(200..300).contains(&s)) {
-        "snake_error"
-    } else if result.errored {
-        "invalid_response"
-    } else {
-        "moved"
+    match result.outcome {
+        MoveOutcome::TimedOut | MoveOutcome::Transport => "snake_timeout",
+        MoveOutcome::HttpError { .. } => "snake_error",
+        MoveOutcome::Invalid { .. } => "invalid_response",
+        MoveOutcome::Ok { .. } => "moved",
     }
 }
 
@@ -514,12 +521,12 @@ pub async fn request_move_routed(
         .await;
     };
     let body = build_request_for_snake(game, &endpoint.snake_id, snake_contexts, customizations);
-    let fallback = |latency_ms, timed_out| {
+    let fallback = |latency_ms, outcome| {
         engine_core::move_response::transport_fallback_result(
             &endpoint.snake_id,
             last_direction,
             latency_ms,
-            timed_out,
+            outcome,
         )
     };
     match execute_proxy(builder.json(&body), timeout).await {
@@ -530,7 +537,7 @@ pub async fn request_move_routed(
         } => match engine_core::move_response::interpret_move_response(
             &endpoint.snake_id,
             &body,
-            Some(status.as_u16()),
+            status.as_u16(),
             Some(latency_ms),
             last_direction,
         ) {
@@ -539,7 +546,7 @@ pub async fn request_move_routed(
                 &endpoint.snake_id,
                 last_direction,
                 latency_ms,
-                Some(status.as_u16()),
+                status.as_u16(),
                 &error,
             ),
         },
@@ -563,7 +570,14 @@ pub async fn request_move_routed(
                     "Network error calling snake, using fallback"
                 );
             }
-            fallback(None, true)
+            fallback(
+                None,
+                if timed_out {
+                    MoveOutcome::TimedOut
+                } else {
+                    MoveOutcome::Transport
+                },
+            )
         }
         ProxyCall::Response {
             class: ProxyResponseClass::ProxyFault,
@@ -924,7 +938,7 @@ mod tests {
     use super::*;
     use crate::wire;
     use proptest::prelude::*;
-    use tokio::io::AsyncWriteExt as _;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use wiremock::matchers::{header, method, path};
 
     #[test]
@@ -958,30 +972,25 @@ mod tests {
 
     #[test]
     fn retry_outcome_covers_all_four_outcomes_and_precedence() {
-        let result = |timed_out: bool, status_code: Option<u16>, errored: bool| MoveResult {
+        let result = |outcome: MoveOutcome| MoveResult {
             snake_id: "snake-1".to_string(),
             direction: Direction::Right,
             latency_ms: Some(120),
-            timed_out,
             shout: None,
-            status_code,
-            errored,
+            outcome,
         };
-        // (timed_out, status_code, errored) -> expected outcome.
-        // Rows 2-3 pin the precedence: `timed_out` outranks a non-2xx
-        // status, and a non-2xx status outranks `errored`.
         let cases = [
-            ((true, None, false), "snake_timeout"),
-            ((true, Some(504), true), "snake_timeout"),
-            ((false, Some(500), true), "snake_error"),
-            ((false, Some(200), true), "invalid_response"),
-            ((false, Some(200), false), "moved"),
+            (MoveOutcome::TimedOut, "snake_timeout"),
+            (MoveOutcome::Transport, "snake_timeout"),
+            (MoveOutcome::HttpError { status_code: 500 }, "snake_error"),
+            (
+                MoveOutcome::Invalid { status_code: 200 },
+                "invalid_response",
+            ),
+            (MoveOutcome::Ok { status_code: 200 }, "moved"),
         ];
-        for ((timed_out, status_code, errored), expected) in cases {
-            assert_eq!(
-                retry_outcome(&result(timed_out, status_code, errored)),
-                expected
-            );
+        for (outcome, expected) in cases {
+            assert_eq!(retry_outcome(&result(outcome)), expected);
         }
     }
 
@@ -1035,8 +1044,8 @@ mod tests {
         .await;
         assert_eq!(result.direction, Direction::Right);
         assert_eq!(result.latency_ms, Some(28));
-        assert!(!result.timed_out);
-        assert!(!result.errored);
+        assert!(!result.outcome.timed_out());
+        assert!(!result.outcome.errored());
     }
 
     #[tokio::test]
@@ -1100,10 +1109,10 @@ mod tests {
             )
             .await;
             assert_eq!(result.direction, direction);
-            assert_eq!(result.timed_out, timed_out);
+            assert_eq!(result.outcome.timed_out(), timed_out);
             // Transport failures are timeouts, and the 407 retry reached a
             // healthy snake: neither is an unusable answer.
-            assert!(!result.errored);
+            assert!(!result.outcome.errored());
             if status != 407 {
                 assert_eq!(result.latency_ms, latency);
             }
@@ -1155,9 +1164,14 @@ mod tests {
             .await;
             assert_eq!(result.direction, Direction::Down);
             assert_eq!(result.latency_ms, Some(41));
-            assert!(!result.timed_out);
+            assert!(!result.outcome.timed_out());
             // The move is still used, but a non-2xx answer is the snake erroring.
-            assert!(result.errored);
+            assert_eq!(
+                result.outcome,
+                MoveOutcome::HttpError {
+                    status_code: status
+                }
+            );
         }
     }
 
@@ -1268,8 +1282,11 @@ mod tests {
         // assert is ~3x that budget for slow hosts.
         assert!(start.elapsed() < Duration::from_secs(2));
         assert_eq!(result.direction, Direction::Right);
-        assert!(!result.timed_out);
-        assert!(!result.errored, "a proxy fault is never the snake's error");
+        assert!(!result.outcome.timed_out());
+        assert!(
+            !result.outcome.errored(),
+            "a proxy fault is never the snake's error"
+        );
         // The latency is measured on the direct call (wiremock's delay is a
         // floor, so the reply cannot arrive before 120ms); the proxy never
         // sent one. A lower bound also proves the fresh-timeout retry: a
@@ -1330,7 +1347,7 @@ mod tests {
         .await;
         assert_eq!(result.direction, Direction::Up);
         assert_eq!(result.latency_ms, Some(450));
-        assert!(!result.timed_out);
+        assert!(!result.outcome.timed_out());
     }
 
     #[tokio::test]
@@ -1422,8 +1439,11 @@ mod tests {
         // assert is ~3x that budget for slow hosts.
         assert!(started.elapsed() < Duration::from_millis(1500));
         assert_eq!(result.direction, Direction::Right);
-        assert!(!result.timed_out);
-        assert!(!result.errored, "a proxy fault is never the snake's error");
+        assert!(!result.outcome.timed_out());
+        assert!(
+            !result.outcome.errored(),
+            "a proxy fault is never the snake's error"
+        );
         let latency = result
             .latency_ms
             .expect("direct retry reports measured latency");
@@ -1544,8 +1564,8 @@ mod tests {
         )
         .await;
         assert_eq!(result.direction, Direction::Right);
-        assert!(!result.timed_out);
-        assert!(!result.errored);
+        assert!(!result.outcome.timed_out());
+        assert!(!result.outcome.errored());
         assert!(result.latency_ms.is_some());
     }
 
@@ -1598,8 +1618,8 @@ mod tests {
         )
         .await;
         assert_eq!(result.direction, Direction::Right);
-        assert!(!result.timed_out);
-        assert!(!result.errored);
+        assert!(!result.outcome.timed_out());
+        assert!(!result.outcome.errored());
         assert!(result.latency_ms.is_some());
     }
 
@@ -1658,9 +1678,18 @@ mod tests {
             )
             .await;
             assert_eq!(result.direction, Direction::Left, "status {status}");
-            assert!(result.timed_out, "status {status}");
+            assert!(result.outcome.timed_out(), "status {status}");
+            assert_eq!(
+                result.outcome,
+                if status == 504 {
+                    MoveOutcome::TimedOut
+                } else {
+                    MoveOutcome::Transport
+                },
+                "status {status}"
+            );
             assert_eq!(result.latency_ms, None, "status {status}");
-            assert!(!result.errored, "status {status}");
+            assert!(!result.outcome.errored(), "status {status}");
         }
     }
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1711,24 +1740,52 @@ mod tests {
 
         assert_eq!(result.direction, Direction::Left);
         assert!(result.shout.is_none());
-        assert!(!result.timed_out);
-        assert!(result.errored);
+        assert!(!result.outcome.timed_out());
+        assert_eq!(result.outcome, MoveOutcome::Invalid { status_code: 200 });
         assert!(result.latency_ms.is_some());
     }
 
     #[tokio::test]
     async fn unusable_move_answers_are_errored_but_not_timed_out() {
         let game = create_test_engine_game_with_snakes(vec!["snake-1"]);
-        for (status, body, errored) in [
-            (200, r#"{"move":"up"}"#, false),
-            (200, r#"{"move":"DOWN","shout":"hi"}"#, false),
-            (201, r#"{"move":"left"}"#, false),
-            (200, r#"{"move":"north"}"#, true),
-            (200, r#"{"shout":"no move"}"#, true),
-            (200, "not json", true),
-            (500, r#"{"move":"up"}"#, true),
-            (500, "Internal Server Error", true),
-            (404, "", true),
+        for (status, body, expected) in [
+            (
+                200,
+                r#"{"move":"up"}"#,
+                MoveOutcome::Ok { status_code: 200 },
+            ),
+            (
+                200,
+                r#"{"move":"DOWN","shout":"hi"}"#,
+                MoveOutcome::Ok { status_code: 200 },
+            ),
+            (
+                201,
+                r#"{"move":"left"}"#,
+                MoveOutcome::Ok { status_code: 201 },
+            ),
+            (
+                200,
+                r#"{"move":"north"}"#,
+                MoveOutcome::Invalid { status_code: 200 },
+            ),
+            (
+                200,
+                r#"{"shout":"no move"}"#,
+                MoveOutcome::Invalid { status_code: 200 },
+            ),
+            (200, "not json", MoveOutcome::Invalid { status_code: 200 }),
+            (
+                500,
+                r#"{"move":"up"}"#,
+                MoveOutcome::HttpError { status_code: 500 },
+            ),
+            (
+                500,
+                "Internal Server Error",
+                MoveOutcome::HttpError { status_code: 500 },
+            ),
+            (404, "", MoveOutcome::HttpError { status_code: 404 }),
         ] {
             let server = MockServer::start().await;
             Mock::given(method("POST"))
@@ -1747,8 +1804,8 @@ mod tests {
                 &HashMap::new(),
             )
             .await;
-            assert_eq!(result.errored, errored, "{status} {body}");
-            assert!(!result.timed_out, "{status} {body}");
+            assert_eq!(result.outcome, expected, "{status} {body}");
+            assert!(!result.outcome.timed_out(), "{status} {body}");
             assert!(result.latency_ms.is_some(), "{status} {body}");
         }
     }
@@ -1777,8 +1834,145 @@ mod tests {
             &HashMap::new(),
         )
         .await;
-        assert!(result.timed_out);
-        assert!(!result.errored);
+        assert!(result.outcome.timed_out());
+        assert!(!result.outcome.errored());
+    }
+
+    /// Read one full HTTP request (headers + Content-Length body) off the
+    /// stream. hyper rejects a response that arrives while the request is
+    /// still being written (`UnexpectedMessage` → transport error), so a
+    /// raw-TCP mock must consume the whole request before answering — a
+    /// single `read` can return just the first TCP segment of a
+    /// multi-segment request body (the ~2 KB wire Game body spans two).
+    async fn read_full_request(stream: &mut tokio::net::TcpStream) {
+        let mut buf = Vec::with_capacity(4096);
+        let mut chunk = [0u8; 4096];
+        loop {
+            let Some(header_end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
+                let n = stream.read(&mut chunk).await.unwrap_or(0);
+                if n == 0 {
+                    return;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+                continue;
+            };
+            let headers = String::from_utf8_lossy(&buf[..header_end]).to_string();
+            let content_length = headers
+                .lines()
+                .find(|l| l.to_ascii_lowercase().starts_with("content-length:"))
+                .and_then(|l| l.split(':').nth(1))
+                .and_then(|v| v.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            if buf.len() >= header_end + 4 + content_length {
+                return;
+            }
+            let n = stream.read(&mut chunk).await.unwrap_or(0);
+            if n == 0 {
+                return;
+            }
+            buf.extend_from_slice(&chunk[..n]);
+        }
+    }
+
+    /// DEV-2184 success criterion: headers arrive immediately, the body
+    /// stalls past the move timeout. The move timeout must cover the body
+    /// phase — `MoveOutcome::TimedOut` with the real elapsed time, not the
+    /// pre-fix errored-200 with header-time latency.
+    #[tokio::test]
+    async fn stalled_move_body_times_out_with_real_elapsed() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let body = br#"{"move":"left"}"#;
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_full_request(&mut stream).await;
+            stream
+                .write_all(
+                    format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len()).as_bytes(),
+                )
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(700)).await;
+            // The client is long gone by now; the write may fail.
+            let _ = stream.write_all(body).await;
+        });
+        // The 2s outer client timeout is load-bearing: a deadline-path
+        // test must fail fast, never hang.
+        let client = Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
+        let game = create_test_engine_game_with_snakes(vec!["snake-1"]);
+        let started = Instant::now();
+        let result = request_move(
+            &client,
+            &format!("http://{address}"),
+            &game,
+            "snake-1",
+            Duration::from_millis(500),
+            Some(Direction::Right),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .await;
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(result.direction, Direction::Right, "fallback move");
+        assert_eq!(result.outcome, MoveOutcome::TimedOut);
+        assert!(
+            result.latency_ms.is_some_and(|ms| ms >= 500),
+            "timeout records the real elapsed time: {:?}",
+            result.latency_ms
+        );
+        assert!(!result.outcome.errored());
+    }
+
+    /// DEV-2184: latency is measured at body completion, not at header
+    /// arrival — headers at ~0ms and a body at ~250ms must report a
+    /// >= 240ms latency (a header-time measurement would read ≪ 240).
+    #[tokio::test]
+    async fn move_latency_measured_at_body_completion() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let body = br#"{"move":"left"}"#;
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_full_request(&mut stream).await;
+            stream
+                .write_all(
+                    format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len()).as_bytes(),
+                )
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            stream.write_all(body).await.unwrap();
+        });
+        let client = Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
+        let game = create_test_engine_game_with_snakes(vec!["snake-1"]);
+        let result = request_move(
+            &client,
+            &format!("http://{address}"),
+            &game,
+            "snake-1",
+            Duration::from_millis(500),
+            Some(Direction::Right),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .await;
+        assert_eq!(
+            result.direction,
+            Direction::Left,
+            "the move comes from the body"
+        );
+        assert_eq!(result.outcome, MoveOutcome::Ok { status_code: 200 });
+        assert!(
+            result.latency_ms.is_some_and(|ms| ms >= 240),
+            "latency measured at body completion: {:?}",
+            result.latency_ms
+        );
     }
 
     fn create_test_engine_game_with_snakes(snake_ids: Vec<&str>) -> EngineGame {
@@ -1839,16 +2033,15 @@ mod tests {
             snake_id: "test".to_string(),
             direction: Direction::Up,
             latency_ms: Some(100),
-            timed_out: false,
             shout: Some("hello".to_string()),
-            status_code: Some(200),
-            errored: false,
+            outcome: MoveOutcome::Ok { status_code: 200 },
         };
         let cloned = result.clone();
         assert_eq!(cloned.snake_id, "test");
         assert_eq!(cloned.direction, Direction::Up);
         assert_eq!(cloned.latency_ms, Some(100));
-        assert!(!cloned.timed_out);
+        assert!(!cloned.outcome.timed_out());
+        assert_eq!(cloned.outcome, MoveOutcome::Ok { status_code: 200 });
         assert_eq!(cloned.shout, Some("hello".to_string()));
     }
 

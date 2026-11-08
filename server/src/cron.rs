@@ -147,7 +147,8 @@ pub(crate) fn cron_registry(config: &AppConfig) -> CronRegistry<AppState> {
     );
 
     // Stuck-match sweeper: runs every 2 minutes, re-enqueues evaluation for
-    // in-progress tournament matches whose driving jobs died
+    // stuck tournament matches (stale in-progress matches, scheduled
+    // matches stranded in a started round) and lost round progression
     registry.register_job(
         StuckMatchSweeperJob,
         Some("Re-enqueue evaluation for stuck tournament matches"),

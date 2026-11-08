@@ -2330,8 +2330,11 @@ pub async fn run_round(
 /// - the game-completion hook (`resolve_finished_match_game`) no-ops for
 ///   games whose `match_games` row was cascaded away,
 /// - stranded `RunMatchJob`s warn and no-op when their match is gone,
-/// - the stuck-match sweeper only re-enqueues matches that still exist in
-///   `in_progress`, and
+/// - the stuck-match sweeper only enqueues work for matches and tournaments
+///   that still exist in an `in_progress` tournament (a reset zeroes
+///   `current_round` and flips the status in the same transaction, so every
+///   sweeper branch is inert after a reset; deleted matches can't be
+///   selected), and
 /// - a stranded `RunTournamentRoundJob` carries the round it was enqueued
 ///   for and no-ops when it no longer matches `current_round`.
 ///
