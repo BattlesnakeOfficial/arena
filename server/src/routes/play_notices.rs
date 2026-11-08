@@ -213,7 +213,7 @@ pub async fn send_test(
         outcome = match state
             .mailer
             .send_limited(
-                &mut tx,
+                &state.db,
                 state.config.email_per_recipient_hourly_limit,
                 email_log::ADMIN_TEST_PURPOSE,
                 &message,
@@ -223,6 +223,10 @@ pub async fn send_test(
             Ok(SendOutcome::Sent) => format!("Sent wave {} test to {to}", wave.number()),
             Ok(SendOutcome::Disabled) => "Disabled (no Mailgun config)".into(),
             Ok(SendOutcome::RateLimited) => "RateLimited".into(),
+            Ok(SendOutcome::Failed) => {
+                "Failed (Mailgun rejected the message; see server logs, event_type=email_rejected)"
+                    .into()
+            }
             Err(err) => {
                 tracing::error!(error = %format!("{err:#}"), "Shutdown notice test email failed");
                 format!("{err:#}")

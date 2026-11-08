@@ -522,15 +522,15 @@ pub async fn send_test_email(
     page_factory: PageFactory,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
     let kind = email_kind(&key)?;
-    let mut tx = state.db.begin().await?;
-    let address = notification_email::resolved_recipient(&mut tx, user.user_id).await?;
+    let mut connection = state.db.acquire().await?;
+    let address = notification_email::resolved_recipient(&mut connection, user.user_id).await?;
     let mut outcome = "No notification address is available; no test was sent.".to_string();
     if let Some(to) = &address {
         let message = sample_message(kind, &state.config.base_url, to)?;
         outcome = match state
             .mailer
             .send_limited(
-                &mut tx,
+                &state.db,
                 state.config.email_per_recipient_hourly_limit,
                 email_log::ADMIN_TEST_PURPOSE,
                 &message,
@@ -540,24 +540,16 @@ pub async fn send_test_email(
             Ok(SendOutcome::Sent) => "Sent".into(),
             Ok(SendOutcome::Disabled) => "Disabled (no Mailgun config)".into(),
             Ok(SendOutcome::RateLimited) => "RateLimited".into(),
+            Ok(SendOutcome::Failed) => {
+                "Failed (Mailgun rejected the message; see server logs, event_type=email_rejected)"
+                    .into()
+            }
             Err(err) => {
                 tracing::error!(error = %format!("{err:#}"), "Admin test email failed");
                 format!("{err:#}")
             }
         };
     }
-    let status = match tx.commit().await {
-        Ok(()) => StatusCode::OK,
-        Err(err) => {
-            tracing::error!(error = %format!("{err:#}"), "Admin test email attempt commit failed");
-            outcome = if outcome == "Sent" {
-                format!("Mailgun accepted the email, but recording the attempt failed: {err:#}")
-            } else {
-                format!("{outcome}; recording the attempt failed: {err:#}")
-            };
-            StatusCode::INTERNAL_SERVER_ERROR
-        }
-    };
     let message = sample_message(kind, &state.config.base_url, "sample@example.com")?;
     let page = page_factory.create_page(
         kind.name().into(),
@@ -568,7 +560,7 @@ pub async fn send_test_email(
             Some(&outcome),
         )),
     );
-    Ok((status, [(header::CACHE_CONTROL, "no-store")], page))
+    Ok((StatusCode::OK, [(header::CACHE_CONTROL, "no-store")], page))
 }
 
 /// GET /admin/moderation — unreviewed moderation flags, newest first.
