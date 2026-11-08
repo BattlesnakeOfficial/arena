@@ -21,7 +21,7 @@ use crate::{
     engine_models::{EngineGameFrame, EngineSnake},
     errors::{ServerError, ServerResult},
     models::{
-        game::{GameStatus, get_game_by_id, get_game_source},
+        game::{get_game_by_id, get_game_source},
         turn::get_turn_frame,
     },
     state::AppState,
@@ -229,7 +229,7 @@ pub async fn get_move_request(
         // DEV-1981: a pruned terminal native game's frame comes from the
         // archive; a live game's turn miss is just a turn that hasn't
         // happened yet.
-        None if matches!(game.status, GameStatus::Finished | GameStatus::Failed) => {
+        None if game.status.is_terminal() => {
             match archived_turn_frame(&state, game_id, query.turn).await? {
                 Some(frame) => frame,
                 None => {

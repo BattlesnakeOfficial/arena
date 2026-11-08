@@ -264,12 +264,7 @@ pub(crate) fn archive_row_kind(record: &GameRow) -> ArchiveRowKind {
 /// websocket even if they carry a stale `gcs_path`. The `turns` probe runs
 /// only for archived-looking rows, so live games pay nothing.
 pub(crate) async fn serves_from_archive(db: &sqlx::PgPool, record: &GameRow) -> cja::Result<bool> {
-    if record.gcs_path.is_none()
-        || !matches!(
-            record.game.status,
-            GameStatus::Finished | GameStatus::Failed
-        )
-    {
+    if record.gcs_path.is_none() || !record.game.status.is_terminal() {
         return Ok(false);
     }
     Ok(!has_frames(db, record.game.game_id).await?)
@@ -741,7 +736,7 @@ async fn send_terminal(
         return;
     }
     match status {
-        GameStatus::Finished | GameStatus::Failed => {
+        status if status.is_terminal() => {
             if matches!(status, GameStatus::Failed) {
                 let _ = send_message(
                     sender,
@@ -948,7 +943,7 @@ async fn handle_game_websocket(
         return;
     }
     match get_game_by_id(&state.db, game_id).await {
-        Ok(Some(game)) if matches!(game.status, GameStatus::Finished | GameStatus::Failed) => {
+        Ok(Some(game)) if game.status.is_terminal() => {
             send_terminal(
                 &mut sender,
                 &mut receiver,

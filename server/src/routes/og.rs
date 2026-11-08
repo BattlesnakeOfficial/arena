@@ -234,7 +234,7 @@ async fn load_game_card(
     // DEV-1981: a pruned terminal native game has no `turns` rows, so its
     // card's frame comes from the archive. Terminal-gated: a live game's
     // empty frame is just a game that hasn't produced turns yet.
-    if frame.is_none() && matches!(game.status, GameStatus::Finished | GameStatus::Failed) {
+    if frame.is_none() && game.status.is_terminal() {
         frame = archived_card_frame(state, game_id, spoilers).await?;
     }
     // A frame that doesn't parse (an old import) just means an empty board.
