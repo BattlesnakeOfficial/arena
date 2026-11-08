@@ -302,7 +302,11 @@ async fn web_login_rotates_session_and_reissues_cookie(pool: PgPool) {
     assert!(set_cookie.contains("Path=/"), "{set_cookie}");
     let parsed = tower_cookies::Cookie::parse(set_cookie.to_string()).unwrap();
     let cookies = tower_cookies::Cookies::default();
-    cookies.private(&fx.state.cookie_key.0).add(parsed);
+    // The Set-Cookie value is ALREADY encrypted by the server. Add it to
+    // the plain jar so it is stored as-is; only the private `.get` below
+    // decrypts. (Going through `private(...).add` would encrypt it a
+    // second time and the read would return ciphertext — PR review r1.)
+    cookies.add(parsed);
     let decoded = cookies
         .private(&fx.state.cookie_key.0)
         .get(SESSION_COOKIE_NAME)

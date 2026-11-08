@@ -473,7 +473,9 @@ struct ClaimCompleted {
 /// identity, materialize staged snakes and grants, and mark the account
 /// claimed. Guarded by a compare-and-set on `claimed_by_user_id IS NULL`,
 /// so concurrent claims of the same account cannot double-materialize; the
-/// loser gets Ok(None) and the caller rolls back.
+/// loser gets Ok(None), and whether that transaction then commits or rolls
+/// back is the caller's decision — the email-link path commits so the
+/// one-time token is spent (see `redeem_email_claim`).
 async fn claim_account_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     imported_account_id: Uuid,
@@ -2101,6 +2103,12 @@ mod tests {
                 .await?
                 .is_none()
         );
+        // Release the user-row lock claim_account_tx took (SELECT ... FOR
+        // NO KEY UPDATE) before the pool calls below: claim_account re-takes
+        // that lock on another connection and would otherwise wait on this
+        // transaction forever (self-deadlock — PR review round 1). The CAS
+        // never landed, so there is nothing to commit; dropping rolls back.
+        drop(tx);
         assert_eq!(
             find_unclaimed_by_github_uid(&pool, 90206)
                 .await?
@@ -2146,6 +2154,43 @@ mod tests {
         .fetch_one(&pool)
         .await?;
         assert_eq!(b_count, 0);
+        Ok(())
+    }
+
+    /// The AlreadyClaimed contract of `redeem_email_claim` (PR review
+    /// round 1): when the link's account was claimed by someone else
+    /// first (race with the GitHub auto-link), the redemption reports
+    /// AlreadyClaimed and STILL spends the one-time token — a claimed
+    /// account has nothing left to unlock, and the link must not be
+    /// replayable later.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn already_claimed_email_link_still_spends_the_token(pool: PgPool) -> cja::Result<()> {
+        let user = create_user(&pool, 90218).await?;
+        let account_id = stage_play_account(&pool, &complete_payload(218))
+            .await?
+            .imported_account_id;
+        let mut connection = pool.acquire().await?;
+        let secret =
+            crate::models::claim_email_token::create(&mut connection, account_id, user).await?;
+        drop(connection);
+
+        // The account is claimed by a different user before the link is
+        // redeemed — the auto-link race.
+        let other_user = create_user(&pool, 90219).await?;
+        assert!(claim_account(&pool, account_id, other_user).await?.is_some());
+
+        let outcome = redeem_email_claim(&pool, &secret, user).await?;
+        assert!(matches!(outcome, EmailClaimOutcome::AlreadyClaimed));
+
+        let used: bool = sqlx::query_scalar(
+            "SELECT used_at IS NOT NULL FROM claim_email_tokens
+             WHERE imported_account_id = $1 AND requested_by_user_id = $2",
+        )
+        .bind(account_id)
+        .bind(user)
+        .fetch_one(&pool)
+        .await?;
+        assert!(used, "AlreadyClaimed must still spend the one-time token");
         Ok(())
     }
 
