@@ -26,6 +26,7 @@ use uuid::Uuid;
 
 use crate::{
     email::{
+        SendError,
         SendOutcome,
         messages::{EmailMessage, action_button, render_layout},
     },
@@ -475,8 +476,10 @@ pub struct BatchCounts {
 
 enum NoticeOutcome {
     Sent,
-    /// Send failed; recorded `failed` and stops the batch so a Mailgun
-    /// outage costs at most one account per 5-minute tick.
+    /// Send failed (permanent rejection or timeout — `failed` recorded,
+    /// never re-sent; or definite transient failure — reservation released);
+    /// stops the batch so a Mailgun outage costs at most one account per
+    /// 5-minute tick.
     Failed,
     Skipped,
     Deferred,
@@ -533,34 +536,51 @@ async fn send_notice(
     message.tags = wave_tags(wave);
 
     let _permit = state.mailer.acquire_delivery_permit().await?;
-    let mut tx = state.db.begin().await?;
     let sent = state
         .mailer
         .send_limited(
-            &mut tx,
+            &state.db,
             state.config.email_per_recipient_hourly_limit,
             PURPOSE,
             &message,
         )
         .await;
-    tx.commit()
-        .await
-        .wrap_err("Failed to commit shutdown notice email log")?;
 
     let (status, outcome) = match sent {
         Ok(SendOutcome::Sent) => (Some("sent"), NoticeOutcome::Sent),
+        // Permanent rejection (4xx other than 429): retrying this address
+        // cannot succeed — keep the `failed` row.
+        Ok(SendOutcome::Failed) => (Some("failed"), NoticeOutcome::Failed),
         // Release the reservation so a later batch retries.
         Ok(SendOutcome::RateLimited) => (None, NoticeOutcome::Deferred),
         Ok(SendOutcome::Disabled) => (None, NoticeOutcome::Disabled),
-        Err(error) => {
+        // Response-wait timeout: Mailgun may have accepted the message. Keep
+        // the `failed` row (drop this account for the wave) rather than risk
+        // a duplicate to a cold address.
+        Err(SendError::TimedOut(error)) => {
             tracing::warn!(
                 imported_account_id = %recipient.imported_account_id,
                 wave = wave.number(),
                 error = format!("{error:#}"),
-                "Shutdown notice failed to send"
+                "Shutdown notice timed out; delivery unknown, not re-sending"
             );
             (Some("failed"), NoticeOutcome::Failed)
         }
+        // Definite non-delivery (5xx, 429, connection failure): release the
+        // reservation so a later batch retries this account. The batch still
+        // stops (DEV-2176): an outage costs at most one account per tick.
+        Err(SendError::Transient(error)) => {
+            tracing::warn!(
+                imported_account_id = %recipient.imported_account_id,
+                wave = wave.number(),
+                error = format!("{error:#}"),
+                "Shutdown notice failed to send; reservation released for a later batch"
+            );
+            (None, NoticeOutcome::Failed)
+        }
+        // `send_limited` folds Rejected into Ok(Failed); unreachable, kept
+        // for exhaustiveness safety.
+        Err(SendError::Rejected { .. }) => (Some("failed"), NoticeOutcome::Failed),
     };
     match status {
         Some(status) => {
