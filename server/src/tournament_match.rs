@@ -37,10 +37,11 @@
 //! `GameRunnerJob` row remains for it: a queued, running, or backoff-parked
 //! job still owns the game, and a second runner would race it (`run_game`
 //! is re-entrant, so re-running a crashed game is safe). Together these
-//! make the sweep converge a match no matter where the pipeline died. Canceling a tournament cancels its live
-//! matches, and [`run_match`] refuses to evaluate anything for a tournament
-//! that is not `in_progress`; a canceled match's stranded games are the
-//! stuck-game sweeper's job (see `server/src/stuck_game_sweeper.rs`).
+//! make the sweep converge a match no matter where the pipeline died.
+//! Canceling a tournament cancels its live matches, and [`run_match`]
+//! refuses to evaluate anything for a tournament that is not `in_progress`;
+//! a canceled match's stranded games are the stuck-game sweeper's job (see
+//! `server/src/stuck_game_sweeper.rs`).
 
 use std::collections::HashMap;
 
@@ -1680,9 +1681,9 @@ mod tests {
         Ok(())
     }
 
-    /// `t.status = 'in_progress'` guards both new queries: without it a
-    /// finished round in an ended tournament would re-enqueue progression
-    /// forever.
+    /// `t.status = 'in_progress'` guards the finished-round query: without
+    /// it a finished round in an ended tournament would re-enqueue
+    /// progression forever.
     #[sqlx::test(migrations = "../migrations")]
     async fn sweeper_ignores_ended_tournaments(pool: PgPool) -> cja::Result<()> {
         let app_state = AppState::test_from_pool(pool.clone());
@@ -1710,7 +1711,9 @@ mod tests {
         backdate_match_updated_at(&pool, tournament_match.match_id).await?;
 
         // With current_round = 1 and the match completed + backdated, the
-        // only exclusion is the status filter.
+        // status filter is the finished-round query's only exclusion. The
+        // scheduled query skips this match on its own `completed` status;
+        // the next test pins that query's status filter.
         let round_cutoff = chrono::Utc::now() - chrono::Duration::minutes(ROUND_STALE_MINUTES);
         assert!(
             find_in_progress_tournaments_with_finished_round(&pool, round_cutoff)
@@ -1725,6 +1728,48 @@ mod tests {
 
         sweep_stuck_matches(&app_state).await?;
         assert_eq!(count_jobs(&pool, "UpdateTournamentStatusJob").await?, 0);
+        assert_eq!(count_jobs(&pool, "RunMatchJob").await?, 0);
+
+        Ok(())
+    }
+
+    /// The scheduled-match query's own `t.status` guard: a stranded match
+    /// with an aged, started sibling in an ended tournament meets every
+    /// other condition, so only the status filter can exclude it.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn sweeper_ignores_stranded_match_in_ended_tournament(pool: PgPool) -> cja::Result<()> {
+        let app_state = AppState::test_from_pool(pool.clone());
+        let (tournament, _, _) = fixture_tournament(&pool, MatchStyle::SingleGame, 4).await?;
+        set_tournament_current_round(&pool, tournament.tournament_id, 1, 0).await?;
+
+        let round_one = get_matches_for_round(&pool, tournament.tournament_id, 1).await?;
+        let a = &round_one[0];
+        let b = &round_one[1];
+
+        let participants = get_participants_for_match(&pool, a.match_id).await?;
+        let winner = participants[0].battlesnake_id.unwrap();
+        let mut tx = pool.begin().await?;
+        crate::tournament_bracket::complete_match_with_winner(&mut tx, a.match_id, winner).await?;
+        tx.commit().await?;
+
+        set_tournament_status(
+            &pool,
+            tournament.tournament_id,
+            TournamentStatus::Canceled,
+            TournamentStatus::InProgress,
+        )
+        .await?;
+        backdate_match_updated_at(&pool, a.match_id).await?;
+        backdate_match_updated_at(&pool, b.match_id).await?;
+
+        let round_cutoff = chrono::Utc::now() - chrono::Duration::minutes(ROUND_STALE_MINUTES);
+        assert!(
+            find_stale_scheduled_matches_in_started_rounds(&pool, round_cutoff)
+                .await?
+                .is_empty()
+        );
+
+        sweep_stuck_matches(&app_state).await?;
         assert_eq!(count_jobs(&pool, "RunMatchJob").await?, 0);
 
         Ok(())
