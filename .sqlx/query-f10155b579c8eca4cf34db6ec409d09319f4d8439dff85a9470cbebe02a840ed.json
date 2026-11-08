@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT game_battlesnake_id, health, eliminated_cause, eliminated_by,\n                  eliminated_on_turn, last_move, context_present, latency_ms, shout,\n                  food_eaten, death_turn, death_cause, death_eliminated_by, death_order, body\n           FROM game_resume_snakes WHERE game_id = $1",
+  "query": "SELECT game_battlesnake_id, health, eliminated_cause, eliminated_by,\n                  eliminated_on_turn, last_move, context_present, latency_ms, shout,\n                  food_eaten, body\n           FROM game_resume_snakes WHERE game_id = $1",
   "describe": {
     "columns": [
       {
@@ -55,26 +55,6 @@
       },
       {
         "ordinal": 10,
-        "name": "death_turn",
-        "type_info": "Int4"
-      },
-      {
-        "ordinal": 11,
-        "name": "death_cause",
-        "type_info": "Text"
-      },
-      {
-        "ordinal": 12,
-        "name": "death_eliminated_by",
-        "type_info": "Text"
-      },
-      {
-        "ordinal": 13,
-        "name": "death_order",
-        "type_info": "Int4"
-      },
-      {
-        "ordinal": 14,
         "name": "body",
         "type_info": "Jsonb"
       }
@@ -95,12 +75,8 @@
       true,
       true,
       false,
-      true,
-      true,
-      true,
-      true,
       false
     ]
   },
-  "hash": "4ec06767c57b8beac430312f32033758d902b089de68bd6333b6cde1d83211a3"
+  "hash": "f10155b579c8eca4cf34db6ec409d09319f4d8439dff85a9470cbebe02a840ed"
 }
