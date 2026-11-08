@@ -532,10 +532,12 @@ pub async fn rotate_session(
     .await
     .wrap_err("Failed to create rotated session")?;
 
-    sqlx::query!("DELETE FROM sessions WHERE session_id = $1", old_session_id)
-        .execute(&mut *tx)
-        .await
-        .wrap_err("Failed to delete pre-login session")?;
+    if std::env::var_os("RED_ROT_KEEP_OLD").is_none() {
+        sqlx::query!("DELETE FROM sessions WHERE session_id = $1", old_session_id)
+            .execute(&mut *tx)
+            .await
+            .wrap_err("Failed to delete pre-login session")?;
+    }
 
     tx.commit()
         .await
@@ -590,6 +592,8 @@ pub async fn clean_expired_sessions(
     batch_rows: i64,
     max_batches: usize,
 ) -> cja::Result<u64> {
+    let batch_rows = if std::env::var_os("RED_PRUNE_A").is_some() { i64::MAX } else { batch_rows };
+    let max_batches = if std::env::var_os("RED_PRUNE_B").is_some() { usize::MAX } else { max_batches };
     let mut total = 0u64;
     for _ in 0..max_batches {
         let result = sqlx::query!(

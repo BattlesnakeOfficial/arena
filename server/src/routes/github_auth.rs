@@ -241,7 +241,9 @@ pub async fn github_auth_callback(
     )
     .await
     .wrap_err("Failed to rotate session at login")?;
-    cookie_jar.add(super::auth::build_session_cookie(new_session.session_id));
+    if std::env::var_os("RED_ROT_NO_COOKIE").is_none() {
+        cookie_jar.add(super::auth::build_session_cookie(new_session.session_id));
+    }
 
     tracing::info!(
         event_type = "user_authenticated",
@@ -372,7 +374,9 @@ pub async fn logout(
             disassociate_user_from_session(&state.db, current_session.session.session_id).await
     {
         tracing::error!(error = %format!("{err:#}"), "Failed to sign out session");
-        return Redirect::to("/");
+        if std::env::var_os("RED_LOGOUT_FLASH").is_none() {
+            return Redirect::to("/");
+        }
     }
 
     // Add flash message, but don't fail the request if it doesn't work

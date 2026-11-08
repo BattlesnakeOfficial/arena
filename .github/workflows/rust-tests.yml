@@ -55,6 +55,29 @@ jobs:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/arena_test
 
       - name: Run tests
-        run: cargo test --workspace
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/arena_test
+        run: |
+          set +e
+          cargo test -p arena --bin arena --no-run || exit 1
+          fails=0
+          red() {
+            echo "=================== RED $1 on $2"
+            env "$1=1" cargo test -p arena --bin arena -- "$2"
+            code=$?
+            echo "RESULT red $1 $2 exit=$code"
+            [ "$code" -eq 101 ] || fails=$((fails+1))
+          }
+          red RED_PRUNE_A prune_respects_batch_and_run_caps
+          red RED_PRUNE_B prune_respects_batch_and_run_caps
+          red RED_ROT_KEEP_OLD web_login_rotates_session_and_reissues_cookie
+          red RED_ROT_NO_COOKIE web_login_rotates_session_and_reissues_cookie
+          red RED_LOGOUT_FLASH logout_failure_logs_and_shows_no_success_flash
+          red RED_CLAIM_TWO_STEP email_claim_failure_rolls_back_token_so_link_survives
+          echo "=================== CONTROL no env"
+          cargo test -p arena --bin arena -- prune_respects_batch_and_run_caps web_login_rotates_session_and_reissues_cookie logout_failure_logs_and_shows_no_success_flash logout_success_writes_flash email_claim_failure_rolls_back_token_so_link_survives
+          code=$?
+          echo "RESULT control exit=$code"
+          [ "$code" -eq 0 ] || fails=$((fails+1))
+          echo "RESULT unexpected_outcomes=$fails"
+          exit "$fails"

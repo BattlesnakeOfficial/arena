@@ -787,6 +787,10 @@ pub async fn redeem_email_claim(
         // Returning before commit rolls the tx back: the CAS never landed.
         return Ok(EmailClaimOutcome::InvalidToken);
     };
+    if std::env::var_os("RED_CLAIM_TWO_STEP").is_some() {
+        tx.commit().await.wrap_err("red commit")?;
+        tx = pool.begin().await.wrap_err("red begin")?;
+    }
     let completed = claim_account_tx(&mut tx, imported_account_id, user_id, None).await?;
     let Some(completed) = completed else {
         // Losing the account CAS still commits the spent token — a claimed
