@@ -969,17 +969,17 @@ mod tests {
         .execute(pool)
         .await?;
         for (i, spec) in specs.iter().enumerate() {
-            if let Some(food) = spec.food_eaten {
-                if spec.corrupted {
-                    sqlx::query!(
-                        "UPDATE food_eaten_stats SET food_score = food_score + $2 \
-                         WHERE leaderboard_entry_id = $1",
-                        ids[i],
-                        i64::from(food),
-                    )
-                    .execute(pool)
-                    .await?;
-                }
+            if let Some(food) = spec.food_eaten
+                && spec.corrupted
+            {
+                sqlx::query!(
+                    "UPDATE food_eaten_stats SET food_score = food_score + $2 \
+                     WHERE leaderboard_entry_id = $1",
+                    ids[i],
+                    i64::from(food),
+                )
+                .execute(pool)
+                .await?;
             }
         }
 
