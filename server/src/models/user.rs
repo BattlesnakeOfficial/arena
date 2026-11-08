@@ -863,4 +863,26 @@ mod tests {
                 .is_ok()
         );
     }
+
+    /// DEV-2206: the leaked-credential columns (DEV-2165) are gone from the
+    /// schema after migrations run, and `users` remains writable.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn github_token_columns_are_dropped(pool: PgPool) -> cja::Result<()> {
+        // INSERT via RETURNING proves the table still accepts the
+        // post-DEV-2185 column set.
+        create_user(&pool, 7326).await?;
+
+        let columns: Vec<String> = sqlx::query_scalar(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = 'users'",
+        )
+        .fetch_all(&pool)
+        .await?;
+        assert!(
+            !columns.iter().any(|name| name == "github_access_token"
+                || name == "github_refresh_token"
+                || name == "github_token_expires_at"),
+            "users still carries a leaked-credential column: {columns:?}"
+        );
+        Ok(())
+    }
 }
