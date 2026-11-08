@@ -35,6 +35,38 @@ impl EliminationCause {
     pub fn is_eliminated(&self) -> bool {
         !matches!(self, EliminationCause::NotEliminated)
     }
+
+    /// The arena frame/viewer vocabulary: the death-cause string persisted
+    /// in game frames (and consumed by the board viewer, game pages and
+    /// highlight detectors). MUST NOT change — stored frames depend on it.
+    /// `NotEliminated` is `""` (alive snakes carry no `Death`).
+    pub fn arena_slug(&self) -> &'static str {
+        match self {
+            EliminationCause::NotEliminated => "",
+            EliminationCause::OutOfHealth => "out-of-health",
+            EliminationCause::OutOfBounds => "wall-collision",
+            EliminationCause::SelfCollision => "self-collision",
+            EliminationCause::Collision => "snake-collision",
+            EliminationCause::HeadToHeadCollision => "head-collision",
+            EliminationCause::Hazard => "hazard",
+        }
+    }
+
+    /// The Go rules vocabulary (`rules/constants.go`), used by the
+    /// battlesnake CLI for board parity with play.battlesnake.com.
+    /// Identical to [`Self::arena_slug`] except `SelfCollision` →
+    /// `"snake-self-collision"`.
+    pub fn go_slug(&self) -> &'static str {
+        match self {
+            EliminationCause::NotEliminated => "",
+            EliminationCause::OutOfHealth => "out-of-health",
+            EliminationCause::OutOfBounds => "wall-collision",
+            EliminationCause::SelfCollision => "snake-self-collision",
+            EliminationCause::Collision => "snake-collision",
+            EliminationCause::HeadToHeadCollision => "head-collision",
+            EliminationCause::Hazard => "hazard",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -193,5 +225,53 @@ mod tests {
     #[test]
     fn manhattan_distance_negative_coords() {
         assert_eq!(Point::new(-1, -1).manhattan_distance(Point::new(1, 1)), 4);
+    }
+
+    #[test]
+    fn arena_slug_table() {
+        use EliminationCause::*;
+        assert_eq!(NotEliminated.arena_slug(), "");
+        assert_eq!(OutOfHealth.arena_slug(), "out-of-health");
+        assert_eq!(OutOfBounds.arena_slug(), "wall-collision");
+        assert_eq!(SelfCollision.arena_slug(), "self-collision");
+        assert_eq!(Collision.arena_slug(), "snake-collision");
+        assert_eq!(HeadToHeadCollision.arena_slug(), "head-collision");
+        assert_eq!(Hazard.arena_slug(), "hazard");
+    }
+
+    #[test]
+    fn go_slug_table() {
+        use EliminationCause::*;
+        assert_eq!(NotEliminated.go_slug(), "");
+        assert_eq!(OutOfHealth.go_slug(), "out-of-health");
+        assert_eq!(OutOfBounds.go_slug(), "wall-collision");
+        assert_eq!(SelfCollision.go_slug(), "snake-self-collision");
+        assert_eq!(Collision.go_slug(), "snake-collision");
+        assert_eq!(HeadToHeadCollision.go_slug(), "head-collision");
+        assert_eq!(Hazard.go_slug(), "hazard");
+    }
+
+    /// The two vocabularies differ ONLY for SelfCollision: arena frames
+    /// say "self-collision", Go's rules (and the CLI's parity output) say
+    /// "snake-self-collision".
+    #[test]
+    fn slugs_differ_only_for_self_collision() {
+        use EliminationCause::*;
+        for cause in [
+            NotEliminated,
+            OutOfHealth,
+            OutOfBounds,
+            SelfCollision,
+            Collision,
+            HeadToHeadCollision,
+            Hazard,
+        ] {
+            let expected = if cause == SelfCollision {
+                cause.arena_slug() != cause.go_slug()
+            } else {
+                cause.arena_slug() == cause.go_slug()
+            };
+            assert!(expected, "{cause:?}: slug agreement is wrong");
+        }
     }
 }
