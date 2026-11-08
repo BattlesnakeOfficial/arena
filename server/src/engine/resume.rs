@@ -722,8 +722,7 @@ mod tests {
             let (mut run, game_id) = LiveRun::start(GameMode::Constrictor, 3, 3);
             let monotone = constrictor_monotone(&run);
             let mut did_resume = false;
-            while engine_core::stop_reason(&run.engine_game, Some(engine_core::MAX_TURNS))
-                .is_none()
+            while engine_core::stop_reason(&run.engine_game, Some(engine_core::MAX_TURNS)).is_none()
             {
                 if let Some(k) = resume_at
                     && run.engine_game.board.turn == k
