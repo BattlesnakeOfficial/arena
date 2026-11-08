@@ -7,11 +7,15 @@
 //! [`crate::config::AppConfig::stuck_game_max_age_hours`] as
 //! [`crate::models::game::GameStatus::Failed`].
 //!
-//! Tournament match games are excluded: [`crate::tournament_match::run_match`]
-//! treats any non-`Finished` match game as re-runnable, so failing one would
-//! livelock the stall path (re-enqueue after 15 minutes without activity,
-//! runner short-circuits). Lifting that exclusion is blocked on `run_match`
-//! gaining a `Failed` error/forfeit path (separate task).
+//! Tournament match games whose match is live (`scheduled`/`in_progress`)
+//! in an `in_progress` tournament are excluded: run_match treats any
+//! non-Finished match game of such a match as re-runnable, so failing one
+//! would livelock the stall path (re-enqueue after 15 minutes without
+//! activity, runner short-circuits). Games of canceled matches — and of
+//! matches stranded in a canceled tournament — are swept like ordinary
+//! games: run_match refuses to evaluate them, so nothing else would ever
+//! clear them. Lifting the exclusion for live matches remains blocked on
+//! run_match gaining a `Failed` error/forfeit path (separate task).
 //!
 //! Idempotent: the status predicate means a second sweep matches nothing, so
 //! duplicate cron enqueues and cja retries converge.
@@ -37,8 +41,8 @@ pub async fn run_sweep(app_state: &AppState) -> cja::Result<()> {
 }
 
 /// Atomically mark all eligible stuck games `failed`, returning their IDs.
-/// Eligibility = live status AND older than `max_age_hours` AND not a
-/// tournament match game. Age counts from `enqueued_at`, falling back to
+/// Eligibility = live status AND older than `max_age_hours` AND not a game
+/// of a live tournament match in an `in_progress` tournament. Age counts from `enqueued_at`, falling back to
 /// `created_at`: a ladder game held before dispatch (DEV-1613) has a NULL
 /// `enqueued_at` and ages from creation, but once dispatched its runtime is
 /// measured from the enqueue, so a long hold can't get a live game failed.
@@ -53,7 +57,14 @@ async fn fail_stuck_games(pool: &sqlx::PgPool, max_age_hours: i32) -> cja::Resul
            SET status = 'failed', updated_at = NOW()
            WHERE games.status IN ('waiting', 'running')
              AND COALESCE(games.enqueued_at, games.created_at) < NOW() - make_interval(hours => $1)
-             AND games.game_id NOT IN (SELECT game_id FROM match_games)
+             AND games.game_id NOT IN (
+               SELECT mg.game_id
+               FROM match_games mg
+               JOIN tournament_matches m ON m.match_id = mg.match_id
+               JOIN tournaments t ON t.tournament_id = m.tournament_id
+               WHERE m.status IN ('scheduled', 'in_progress')
+                 AND t.status = 'in_progress'
+             )
              AND NOT (games.status = 'waiting' AND EXISTS (
                SELECT 1 FROM leaderboard_games waiting_lg
                JOIN leaderboard_games running_lg ON running_lg.leaderboard_id = waiting_lg.leaderboard_id
@@ -297,12 +308,134 @@ mod tests {
         )
         .execute(&pool)
         .await?;
+        // The exclusion keys on match status AND tournament status: only a
+        // live match in an `in_progress` tournament is excluded (the default
+        // `created` status would be swept after the DEV-2180 narrowing).
+        sqlx::query("UPDATE tournaments SET status = 'in_progress' WHERE tournament_id = $1")
+            .bind(tournament_id)
+            .execute(&pool)
+            .await?;
 
         let failed = fail_stuck_games(&pool, 2).await?;
 
         assert_eq!(failed, vec![control]);
         assert_eq!(game_status(&pool, match_game).await?, "running");
         assert_eq!(game_status(&pool, control).await?, "failed");
+
+        Ok(())
+    }
+
+    /// DEV-2180: build a tournament match whose game is `match_game`, with
+    /// optional raw status overrides for the tournament and the match.
+    /// Non-macro fixture writes only.
+    async fn fixture_match_game(
+        pool: &PgPool,
+        user_id: Uuid,
+        name: &str,
+        game_id: Uuid,
+        tournament_status: Option<&str>,
+        match_status: Option<&str>,
+    ) -> cja::Result<()> {
+        let tournament_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO tournaments (name, user_id) VALUES ($1, $2) RETURNING tournament_id",
+        )
+        .bind(name)
+        .bind(user_id)
+        .fetch_one(pool)
+        .await?;
+        let match_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO tournament_matches (tournament_id, round, position, visual_column, visual_row)
+             VALUES ($1, 1, 0, 0, 0) RETURNING match_id",
+        )
+        .bind(tournament_id)
+        .fetch_one(pool)
+        .await?;
+        sqlx::query("INSERT INTO match_games (match_id, game_id, game_number) VALUES ($1, $2, 1)")
+            .bind(match_id)
+            .bind(game_id)
+            .execute(pool)
+            .await?;
+        if let Some(status) = tournament_status {
+            sqlx::query("UPDATE tournaments SET status = $2 WHERE tournament_id = $1")
+                .bind(tournament_id)
+                .bind(status)
+                .execute(pool)
+                .await?;
+        }
+        if let Some(status) = match_status {
+            sqlx::query("UPDATE tournament_matches SET status = $2 WHERE match_id = $1")
+                .bind(match_id)
+                .bind(status)
+                .execute(pool)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// DEV-2180: a canceled match's stranded game is swept like an ordinary
+    /// game — `run_match` refuses to evaluate a canceled match, so the
+    /// sweeper is its only janitor. The exclusion that keeps `run_match`'s
+    /// stall path from livelocking applies only to games of LIVE matches in
+    /// an `in_progress` tournament. Match C pins the tournament-status half
+    /// of the predicate (the legacy pre-bulk-cancel shape).
+    #[sqlx::test(migrations = "../migrations")]
+    async fn stale_game_of_a_canceled_match_is_failed(pool: PgPool) -> cja::Result<()> {
+        let base_time = Utc::now();
+        let user_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO users (external_github_id, github_login, github_access_token)
+             VALUES (2180, 'dev2180-user', 'test') RETURNING user_id",
+        )
+        .fetch_one(&pool)
+        .await?;
+
+        // A: live match in an in-progress tournament — excluded, stays running.
+        let game_a = insert_game(&pool, "running", base_time - Duration::hours(3)).await?;
+        fixture_match_game(
+            &pool,
+            user_id,
+            "dev2180-live",
+            game_a,
+            Some("in_progress"),
+            None,
+        )
+        .await?;
+
+        // B: canceled match in an in-progress tournament — swept.
+        let game_b = insert_game(&pool, "running", base_time - Duration::hours(3)).await?;
+        fixture_match_game(
+            &pool,
+            user_id,
+            "dev2180-canceled-match",
+            game_b,
+            Some("in_progress"),
+            Some("canceled"),
+        )
+        .await?;
+
+        // C: live-status match in a canceled tournament (legacy pre-fix
+        // cancel shape) — swept.
+        let game_c = insert_game(&pool, "running", base_time - Duration::hours(3)).await?;
+        fixture_match_game(
+            &pool,
+            user_id,
+            "dev2180-canceled-tournament",
+            game_c,
+            Some("canceled"),
+            None,
+        )
+        .await?;
+
+        let failed = fail_stuck_games(&pool, 2).await?;
+
+        assert!(!failed.contains(&game_a), "live match game stays running");
+        assert!(failed.contains(&game_b), "canceled match game is swept");
+        assert!(
+            failed.contains(&game_c),
+            "canceled-tournament game is swept"
+        );
+        assert_eq!(game_status(&pool, game_a).await?, "running");
+        assert_eq!(game_status(&pool, game_b).await?, "failed");
+        assert_eq!(game_status(&pool, game_c).await?, "failed");
 
         Ok(())
     }

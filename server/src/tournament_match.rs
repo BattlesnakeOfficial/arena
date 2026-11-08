@@ -30,7 +30,10 @@
 //! queued, running, or backoff-parked job still owns the game, and a second
 //! runner would race it (`run_game` is re-entrant, so re-running a crashed
 //! game is safe). Together these make the sweep converge a match no matter
-//! where the pipeline died.
+//! where the pipeline died. Canceling a tournament cancels its live
+//! matches, and [`run_match`] refuses to evaluate anything for a tournament
+//! that is not `in_progress`; a canceled match's stranded games are the
+//! stuck-game sweeper's job (see `server/src/stuck_game_sweeper.rs`).
 
 use std::collections::HashMap;
 
@@ -45,7 +48,7 @@ use crate::models::tournament::{
     count_unfinished_matches_in_round, create_match_game, find_match_game_by_game_id,
     find_stale_in_progress_matches, get_match_by_id, get_match_games_for_match,
     get_matches_for_round, get_participants_for_match, get_tournament_by_id, round_exists,
-    set_match_status, set_tournament_current_round, try_set_tournament_status,
+    set_match_status, try_set_tournament_current_round, try_set_tournament_status,
 };
 use crate::state::AppState;
 use crate::tournament_bracket::{complete_match_with_winner, fill_participant_from_source};
@@ -126,6 +129,15 @@ pub async fn run_match(app_state: &AppState, match_id: Uuid) -> cja::Result<()> 
             tournament_match.tournament_id
         ));
     };
+    if tournament.status != TournamentStatus::InProgress {
+        tracing::warn!(
+            tournament_id = %tournament_match.tournament_id,
+            match_id = %match_id,
+            status = tournament.status.as_str(),
+            "Match evaluation for a tournament that is not in progress; skipping"
+        );
+        return Ok(());
+    }
 
     let participants = get_participants_for_match(pool, match_id).await?;
     let snake_ids: Vec<Uuid> = participants
@@ -261,6 +273,39 @@ pub async fn run_match(app_state: &AppState, match_id: Uuid) -> cja::Result<()> 
         .begin()
         .await
         .wrap_err("Failed to start match game transaction")?;
+
+    // Lock the match row and re-verify it is still live under the lock: a
+    // concurrent cancel bulk-updates tournament_matches in its own
+    // transaction, so it either blocks here until we commit, or has already
+    // committed and we see a terminal status and abort — a stale unlocked
+    // tournament read must not mint one more game for a dead match.
+    //
+    // The explicit FOR UPDATE is load-bearing: a child INSERT's FK
+    // (match_games -> tournament_matches) takes only FOR KEY SHARE on the
+    // parent row, which does not conflict with cancel's FOR NO KEY UPDATE —
+    // the FK alone would let game creation commit alongside a cancel.
+    let locked_status = sqlx::query_scalar!(
+        r#"SELECT status as "status: MatchStatus" FROM tournament_matches WHERE match_id = $1 FOR UPDATE"#,
+        match_id,
+    )
+    .fetch_optional(&mut *tx)
+    .await
+    .wrap_err("Failed to lock match row")?;
+    if !matches!(
+        locked_status,
+        Some(MatchStatus::Scheduled | MatchStatus::InProgress)
+    ) {
+        tx.rollback()
+            .await
+            .wrap_err("Failed to roll back match game transaction")?;
+        tracing::info!(
+            match_id = %match_id,
+            status = ?locked_status,
+            "Match is no longer live; not creating the next game"
+        );
+        return Ok(());
+    }
+
     let game = crate::models::game::create_game(
         &mut *tx,
         CreateGame {
@@ -312,8 +357,14 @@ pub async fn run_match(app_state: &AppState, match_id: Uuid) -> cja::Result<()> 
         return Err(err);
     }
 
-    if tournament_match.status == MatchStatus::Scheduled {
-        set_match_status(&mut *tx, match_id, MatchStatus::InProgress).await?;
+    if locked_status == Some(MatchStatus::Scheduled) {
+        set_match_status(
+            &mut *tx,
+            match_id,
+            MatchStatus::InProgress,
+            MatchStatus::Scheduled,
+        )
+        .await?;
     }
 
     // Tournament games spend the owner's game-creation budget (same table
@@ -438,12 +489,25 @@ pub async fn update_tournament_progress(
 
     let next_round = tournament.current_round + 1;
     if round_exists(pool, tournament_id, next_round).await? {
-        set_tournament_current_round(pool, tournament_id, next_round).await?;
-        tracing::info!(
-            tournament_id = %tournament_id,
-            round = next_round,
-            "Round complete; advanced to next round (waiting for Run Round)"
-        );
+        let advanced = try_set_tournament_current_round(
+            pool,
+            tournament_id,
+            next_round,
+            tournament.current_round,
+        )
+        .await?;
+        if advanced {
+            tracing::info!(
+                tournament_id = %tournament_id,
+                round = next_round,
+                "Round complete; advanced to next round (waiting for Run Round)"
+            );
+        } else {
+            tracing::info!(
+                tournament_id = %tournament_id,
+                "Round or status changed concurrently; not advancing current_round"
+            );
+        }
     } else {
         // No next round: the final just finished. Compare-and-swap on the
         // InProgress status we observed above so a concurrent status change
@@ -770,7 +834,8 @@ mod tests {
     use crate::models::game::{GameBoardSize, GameType, create_game};
     use crate::models::tournament::{
         CreateTournament, RegistrationStatus, Tournament, TournamentVisibility,
-        create_registration, create_tournament, get_matches_for_tournament, set_match_game_winner,
+        cancel_unfinished_matches_for_tournament, create_registration, create_tournament,
+        get_matches_for_tournament, set_match_game_winner, set_tournament_current_round,
         set_tournament_status,
     };
     use sqlx::PgPool;
@@ -1015,6 +1080,91 @@ mod tests {
         Ok(())
     }
 
+    /// DEV-2180: canceling a best-of-3 during game 1's aftermath must stop
+    /// the machine: the bulk-cancel marks the match canceled, `run_match`
+    /// refuses to evaluate it, no game 2 is created (no game-creation budget
+    /// burn), and nothing advances.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn cancel_during_best_of_three_creates_no_second_game(pool: PgPool) -> cja::Result<()> {
+        let app_state = AppState::test_from_pool(pool.clone());
+        let (tournament, tournament_match, snakes) =
+            fixture_two_snake_match(&pool, MatchStyle::BestOf3).await?;
+
+        // 1-0 in a best-of-3: no winner yet — without the guards, finishing
+        // game 1 would create game 2 and charge the owner's budget again.
+        add_finished_game(&pool, tournament_match.match_id, 1, Some(snakes[0])).await?;
+
+        // Cancel exactly as the handler does: status flip + bulk-cancel in
+        // one transaction.
+        set_tournament_status(
+            &pool,
+            tournament.tournament_id,
+            TournamentStatus::Canceled,
+            TournamentStatus::InProgress,
+        )
+        .await?;
+        cancel_unfinished_matches_for_tournament(&pool, tournament.tournament_id).await?;
+
+        run_match(&app_state, tournament_match.match_id).await?;
+
+        let reloaded = get_match_by_id(&pool, tournament_match.match_id)
+            .await?
+            .unwrap();
+        assert_eq!(reloaded.status, MatchStatus::Canceled);
+        assert_eq!(reloaded.winner_id, None);
+        let games = get_match_games_for_match(&pool, tournament_match.match_id).await?;
+        assert_eq!(games.len(), 1, "no second game after cancel");
+        assert_eq!(count_jobs(&pool, "GameRunnerJob").await?, 0);
+        assert_eq!(count_jobs(&pool, "UpdateTournamentStatusJob").await?, 0);
+        let tournament = get_tournament_by_id(&pool, tournament.tournament_id)
+            .await?
+            .unwrap();
+        assert_eq!(tournament.status, TournamentStatus::Canceled);
+        assert_eq!(tournament.current_round, 0, "nothing advanced");
+
+        Ok(())
+    }
+
+    /// DEV-2180: the game-completion hook can fire after a tournament is
+    /// canceled but before the bulk-cancel reached this match (or from a
+    /// stale job retry). `run_match` must refuse to evaluate anything for
+    /// a tournament that is not `in_progress`: no next game, no winner, no
+    /// progression job.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn canceled_tournament_evaluation_is_a_no_op(pool: PgPool) -> cja::Result<()> {
+        let app_state = AppState::test_from_pool(pool.clone());
+        let (tournament, tournament_match, snakes) =
+            fixture_two_snake_match(&pool, MatchStyle::BestOf3).await?;
+
+        // 1-0 in a best-of-3: no winner yet, so an evaluation that ran would
+        // create game 2.
+        add_finished_game(&pool, tournament_match.match_id, 1, Some(snakes[0])).await?;
+
+        // Cancel ONLY the tournament — the match is still `scheduled`, the
+        // exact shape a hook racing the bulk-cancel sees.
+        set_tournament_status(
+            &pool,
+            tournament.tournament_id,
+            TournamentStatus::Canceled,
+            TournamentStatus::InProgress,
+        )
+        .await?;
+
+        run_match(&app_state, tournament_match.match_id).await?;
+
+        let games = get_match_games_for_match(&pool, tournament_match.match_id).await?;
+        assert_eq!(games.len(), 1, "no second game for a canceled tournament");
+        assert_eq!(count_jobs(&pool, "GameRunnerJob").await?, 0);
+        assert_eq!(count_jobs(&pool, "UpdateTournamentStatusJob").await?, 0);
+        let reloaded = get_match_by_id(&pool, tournament_match.match_id)
+            .await?
+            .unwrap();
+        assert_eq!(reloaded.status, MatchStatus::Scheduled);
+        assert_eq!(reloaded.winner_id, None);
+
+        Ok(())
+    }
+
     /// A RunTournamentRoundJob whose payload round no longer matches
     /// `current_round` (the round advanced, or a reset-then-restart rebuilt
     /// the bracket) must no-op instead of firing matches the owner never
@@ -1023,7 +1173,9 @@ mod tests {
     async fn stale_round_payload_no_ops(pool: PgPool) -> cja::Result<()> {
         let app_state = AppState::test_from_pool(pool.clone());
         let (tournament, _, _) = fixture_two_snake_match(&pool, MatchStyle::SingleGame).await?;
-        set_tournament_current_round(&pool, tournament.tournament_id, 1).await?;
+        // The fixture drives only status transitions, so `current_round`
+        // still holds its default 0.
+        set_tournament_current_round(&pool, tournament.tournament_id, 1, 0).await?;
 
         // Stale payload: no match jobs are enqueued.
         run_round(&app_state, tournament.tournament_id, 2).await?;
@@ -1063,12 +1215,24 @@ mod tests {
 
         // Stale in-progress match in an in-progress tournament: swept.
         let (_, stale_match, _) = fixture_two_snake_match(&pool, MatchStyle::SingleGame).await?;
-        set_match_status(&pool, stale_match.match_id, MatchStatus::InProgress).await?;
+        set_match_status(
+            &pool,
+            stale_match.match_id,
+            MatchStatus::InProgress,
+            MatchStatus::Scheduled,
+        )
+        .await?;
         backdate_match(&pool, stale_match.match_id).await?;
 
         // Fresh in-progress match: not swept.
         let (_, fresh_match, _) = fixture_two_snake_match(&pool, MatchStyle::SingleGame).await?;
-        set_match_status(&pool, fresh_match.match_id, MatchStatus::InProgress).await?;
+        set_match_status(
+            &pool,
+            fresh_match.match_id,
+            MatchStatus::InProgress,
+            MatchStatus::Scheduled,
+        )
+        .await?;
 
         // Stale but still scheduled: not swept (nothing started it yet).
         let (_, scheduled_match, _) =
@@ -1078,7 +1242,13 @@ mod tests {
         // Stale in-progress match in a canceled tournament: not swept.
         let (canceled_tournament, canceled_match, _) =
             fixture_two_snake_match(&pool, MatchStyle::SingleGame).await?;
-        set_match_status(&pool, canceled_match.match_id, MatchStatus::InProgress).await?;
+        set_match_status(
+            &pool,
+            canceled_match.match_id,
+            MatchStatus::InProgress,
+            MatchStatus::Scheduled,
+        )
+        .await?;
         backdate_match(&pool, canceled_match.match_id).await?;
         set_tournament_status(
             &pool,
@@ -1114,7 +1284,13 @@ mod tests {
         )
         .await?;
         create_match_game(&pool, tournament_match.match_id, game.game_id, 1).await?;
-        set_match_status(&pool, tournament_match.match_id, MatchStatus::InProgress).await?;
+        set_match_status(
+            &pool,
+            tournament_match.match_id,
+            MatchStatus::InProgress,
+            MatchStatus::Scheduled,
+        )
+        .await?;
         sqlx::query("UPDATE games SET status = 'running' WHERE game_id = $1")
             .bind(game.game_id)
             .execute(&pool)
@@ -1188,7 +1364,13 @@ mod tests {
         )
         .await?;
         create_match_game(&pool, tournament_match.match_id, game.game_id, 1).await?;
-        set_match_status(&pool, tournament_match.match_id, MatchStatus::InProgress).await?;
+        set_match_status(
+            &pool,
+            tournament_match.match_id,
+            MatchStatus::InProgress,
+            MatchStatus::Scheduled,
+        )
+        .await?;
         sqlx::query("UPDATE games SET status = 'running' WHERE game_id = $1")
             .bind(game.game_id)
             .execute(&pool)
