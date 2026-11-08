@@ -780,7 +780,7 @@ pub async fn redeem_email_claim(
         .await
         .wrap_err("Failed to begin email claim tx")?;
     let Some(imported_account_id) =
-        crate::models::claim_email_token::consume(&mut *tx, secret, user_id).await?
+        crate::models::claim_email_token::consume(&mut tx, secret, user_id).await?
     else {
         // Returning before commit rolls the tx back: the CAS never landed.
         return Ok(EmailClaimOutcome::InvalidToken);
