@@ -166,7 +166,7 @@ impl Job<AppState> for SendNotificationEmailJob {
                 let outcome = state
                     .mailer
                     .send_limited(
-                        &mut tx,
+                        &state.db,
                         state.config.email_per_recipient_hourly_limit,
                         kind.key(),
                         &message,
@@ -177,7 +177,7 @@ impl Job<AppState> for SendNotificationEmailJob {
                         SendOutcome::Sent => {
                             sqlx::query!("UPDATE notification_email_requests SET sent_at = NOW() WHERE request_id = $1", request_id).execute(&mut *tx).await?;
                         }
-                        SendOutcome::RateLimited | SendOutcome::Disabled => {
+                        SendOutcome::RateLimited | SendOutcome::Disabled | SendOutcome::Failed => {
                             sqlx::query!("UPDATE notification_email_requests SET token_hash = NULL, expires_at = NULL WHERE request_id = $1", request_id).execute(&mut *tx).await?;
                         }
                     }
@@ -186,6 +186,7 @@ impl Job<AppState> for SendNotificationEmailJob {
                     SendOutcome::Sent => "sent",
                     SendOutcome::RateLimited => "rate_limited",
                     SendOutcome::Disabled => "transport_disabled",
+                    SendOutcome::Failed => "failed",
                 });
             }
         }
