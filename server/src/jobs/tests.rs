@@ -10,6 +10,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{AppState, Jobs, SendNotificationEmailJob};
 use crate::config::{AppConfig, DEFAULT_JOB_SHUTDOWN_DRAIN_SECS};
+use uuid::Uuid;
 
 fn assert_html_links_in_text(form: &std::collections::HashMap<String, String>) {
     let html = form.get("html").expect("HTML part");

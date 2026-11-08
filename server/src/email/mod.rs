@@ -225,12 +225,16 @@ impl Mailer {
             // written, so delivery is definitely not-delivered.
             Err(error) if error.is_timeout() && !error.is_connect() => {
                 return Err(SendError::TimedOut(
-                    error.wrap_err("Timed out waiting for Mailgun"),
+                    Err::<(), _>(error)
+                        .wrap_err("Timed out waiting for Mailgun")
+                        .unwrap_err(),
                 ));
             }
             Err(error) => {
                 return Err(SendError::Transient(
-                    error.wrap_err("Failed to send request to Mailgun"),
+                    Err::<(), _>(error)
+                        .wrap_err("Failed to send request to Mailgun")
+                        .unwrap_err(),
                 ));
             }
         };

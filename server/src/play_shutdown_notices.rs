@@ -682,7 +682,7 @@ impl Job<AppState> for PlayShutdownNoticeJob {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{sync::Arc, time::Duration};
 
     use axum::{
         body::Body,
@@ -1102,7 +1102,7 @@ mod tests {
             .await;
         let counts = send_batch(&state, &pool, Wave::First, 50).await.unwrap();
         assert_eq!(counts.sent, 1);
-        let sent = sqlx::query_scalar(
+        let sent: Vec<uuid::Uuid> = sqlx::query_scalar(
             "SELECT imported_account_id FROM play_shutdown_notices WHERE status = 'sent'",
         )
         .fetch_all(&pool)
