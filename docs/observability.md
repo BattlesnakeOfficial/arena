@@ -109,7 +109,8 @@ notification delivery additionally depends on Eyes' Discord webhook configuratio
 
 Each `run_game` invocation has an `arena.game` span carrying `game_id` at
 creation, nested under its cja job attempt. Its phases are `load_game`,
-`reset_game` (retries), `prepare_snakes`, `start_snakes`, `request_moves`,
+`resume_game` (a re-run of a `Running` game), `reset_game` (retries that
+cannot resume), `prepare_snakes`, `start_snakes`, `request_moves`,
 `persist_turn`, `end_snakes`, `finish_game`, and `post_completion`.
 
 An `arena.game.phase` span carries game ID, phase, the applicable turn,
@@ -121,22 +122,31 @@ Terminal events include elapsed milliseconds; failures preserve the error cause
 chain. `finish_game` completes only after the database commit, and follow-up
 jobs are a separate phase. An interrupted future never emits `completed`.
 
+A re-run of a `Running` game (deploy, SIGKILL, OOM, or a same-revision
+instance replacement) emits one INFO event with `event_type=game_resumed`
+(fields `game_id`, `resumed_from_turn`, `job_attempt`) when it resumes from
+the last committed turn, or one WARN with `event_type=game_resume_fallback`
+(fields `game_id`, `reason`, `detail`) when it cannot. `reason` is a stable
+slug: `no_turns_persisted` (the previous attempt died before turn 0
+committed — expected in small numbers during deploy waves),
+`no_resume_state` (turns exist but no resume state — a pre-DEV-1569 binary),
+`unparseable_resume_state`, or `snapshot_validation_failed`.
+
 Turn persistence has nested phases with the same lifecycle contract:
 
 | Phase | Measured operation |
 | --- | --- |
-| `persist_turn.acquire_frame_connection` | SQLx connection acquisition before the frame write |
-| `persist_turn.insert_frame` | Frame INSERT on the acquired connection |
-| `persist_turn.acquire_snake_connection` | SQLx connection acquisition before each snake move write |
-| `persist_turn.insert_snake` | One snake move INSERT on the acquired connection |
+| `persist_turn.acquire_frame_connection` | The transaction `begin()` — checkout of the single connection the whole turn commits on |
+| `persist_turn.insert_frame` | Frame INSERT on the transaction connection |
+| `persist_turn.insert_snake` | One snake move INSERT on the same transaction connection |
 
 Every stage carries game ID and turn at span creation and inherits the job/game
 trace. `eyes investigate --game <UUID> --since 1h` includes these invocations.
-Acquisition can include pool checkout checks or opening a connection; insert
+The connection acquisition covers pool checkout or opening a connection; insert
 timing includes the database round trip and row decoding, not just server CPU.
-Live viewers are notified by a database trigger on the committed turn insert,
-so notification is not a phase. Writes retain their existing order and
-autocommit behavior.
+The turn row, every snake move, and the live resume state commit in one
+transaction on that connection, so a committed turn is always complete; the
+live-viewer trigger fires at commit, so notification is not a phase.
 The enclosing `persist_turn` duration includes these stages, so summing parent
 and child durations double-counts time. Routine stage fields contain no frame
 payloads, SQL parameters, or credentials.
@@ -152,10 +162,10 @@ Phases are a closed set (`game_progress::Phase`). Per-turn phases
 (`request_moves`, `persist_turn`, and the `persist_turn.*` stages) emit their
 start span and `completed` event at DEBUG, which Eyes keeps in Postgres for 2
 days and in its lake after that. Once-per-game phases (`load_game`,
-`reset_game`, `prepare_snakes`, `start_snakes`, `end_snakes`, `finish_game`,
-`post_completion`) stay at INFO, which Postgres keeps for longer. `failed` is
-ERROR and `cancelled` is WARN for every phase, so a failure never ages out
-early. The per-turn `db_write_latency` and
+`resume_game`, `reset_game`, `prepare_snakes`, `start_snakes`, `end_snakes`,
+`finish_game`, `post_completion`) stay at INFO, which Postgres keeps for
+longer. `failed` is ERROR and `cancelled` is WARN for every phase, so a
+failure never ages out early. The per-turn `db_write_latency` and
 `scheduler_jitter` metric events stay at INFO because named metrics and
 thresholds read them over 24-hour and 7-day windows.
 

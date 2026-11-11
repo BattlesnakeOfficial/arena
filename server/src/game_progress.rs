@@ -16,6 +16,7 @@ use uuid::Uuid;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
     LoadGame,
+    ResumeGame,
     ResetGame,
     ClaimStart,
     PrepareSnakes,
@@ -24,7 +25,6 @@ pub enum Phase {
     PersistTurn,
     PersistTurnAcquireFrameConnection,
     PersistTurnInsertFrame,
-    PersistTurnAcquireSnakeConnection,
     PersistTurnInsertSnake,
     EndSnakes,
     FinishGame,
@@ -34,6 +34,7 @@ pub enum Phase {
 impl Phase {
     pub const ALL: [Phase; 14] = [
         Phase::LoadGame,
+        Phase::ResumeGame,
         Phase::ResetGame,
         Phase::ClaimStart,
         Phase::PrepareSnakes,
@@ -42,7 +43,6 @@ impl Phase {
         Phase::PersistTurn,
         Phase::PersistTurnAcquireFrameConnection,
         Phase::PersistTurnInsertFrame,
-        Phase::PersistTurnAcquireSnakeConnection,
         Phase::PersistTurnInsertSnake,
         Phase::EndSnakes,
         Phase::FinishGame,
@@ -52,6 +52,7 @@ impl Phase {
     pub fn as_str(self) -> &'static str {
         match self {
             Phase::LoadGame => "load_game",
+            Phase::ResumeGame => "resume_game",
             Phase::ResetGame => "reset_game",
             Phase::ClaimStart => "claim_start",
             Phase::PrepareSnakes => "prepare_snakes",
@@ -60,7 +61,6 @@ impl Phase {
             Phase::PersistTurn => "persist_turn",
             Phase::PersistTurnAcquireFrameConnection => "persist_turn.acquire_frame_connection",
             Phase::PersistTurnInsertFrame => "persist_turn.insert_frame",
-            Phase::PersistTurnAcquireSnakeConnection => "persist_turn.acquire_snake_connection",
             Phase::PersistTurnInsertSnake => "persist_turn.insert_snake",
             Phase::EndSnakes => "end_snakes",
             Phase::FinishGame => "finish_game",
@@ -77,9 +77,9 @@ impl Phase {
             | Phase::PersistTurn
             | Phase::PersistTurnAcquireFrameConnection
             | Phase::PersistTurnInsertFrame
-            | Phase::PersistTurnAcquireSnakeConnection
             | Phase::PersistTurnInsertSnake => true,
             Phase::LoadGame
+            | Phase::ResumeGame
             | Phase::ResetGame
             | Phase::ClaimStart
             | Phase::PrepareSnakes
@@ -328,7 +328,6 @@ mod tests {
                 "persist_turn",
                 "persist_turn.acquire_frame_connection",
                 "persist_turn.insert_frame",
-                "persist_turn.acquire_snake_connection",
                 "persist_turn.insert_snake",
             ]
         );

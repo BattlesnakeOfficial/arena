@@ -17,6 +17,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
+use engine_core::{GameMode, GameOverRule};
+
 use crate::{
     errors::ServerResult,
     models::game::{
@@ -147,8 +149,9 @@ fn engine_rules(
     game_type: GameType,
     game_id: Uuid,
 ) -> (BTreeMap<String, String>, String, String, Vec<String>) {
-    let (internal, settings, royale) = crate::engine::mode_rules(game_type, game_id);
-    let (ruleset_name, map) = crate::wire::wire_ruleset_and_map(internal);
+    let mode = crate::engine::game_mode(&game_type);
+    let (settings, royale) = crate::engine::mode_rules(game_type.clone(), game_id);
+    let (ruleset_name, map) = crate::wire::wire_ruleset_and_map(mode);
 
     let mut ruleset = BTreeMap::from([
         ("name".to_string(), ruleset_name.to_string()),
@@ -170,13 +173,13 @@ fn engine_rules(
     }
 
     // Stage pipelines from play `core/game_stages.py`: the game-over stage
-    // depends on the snake count (Solo is the single-snake mode), and only
-    // Constrictor adds a stage to the standard pipeline; Royale's shrinking
-    // and Snail Mode's trails came from their maps.
-    let game_over = if internal == "solo" {
-        "game_over.solo_snake"
-    } else {
-        "game_over.standard"
+    // follows the rule this game will actually run (one source:
+    // default_game_over_rule), and only Constrictor adds a stage to the
+    // standard pipeline; Royale's shrinking and Snail Mode's trails came
+    // from their maps.
+    let game_over = match mode.default_game_over_rule() {
+        GameOverRule::AllSnakesDead => "game_over.solo_snake",
+        GameOverRule::LastSnakeStanding => "game_over.standard",
     };
     let mut stages = vec![
         game_over,
@@ -185,8 +188,9 @@ fn engine_rules(
         "hazard_damage.standard",
         "feed_snakes.standard",
     ];
-    if ruleset_name == "constrictor" {
-        stages.push("modify_snakes.always_grow");
+    match mode {
+        GameMode::Constrictor => stages.push("modify_snakes.always_grow"),
+        GameMode::Standard | GameMode::Royale | GameMode::SnailMode | GameMode::Solo => {}
     }
     stages.push("elimination.standard");
 
@@ -264,12 +268,7 @@ pub(crate) fn archive_row_kind(record: &GameRow) -> ArchiveRowKind {
 /// websocket even if they carry a stale `gcs_path`. The `turns` probe runs
 /// only for archived-looking rows, so live games pay nothing.
 pub(crate) async fn serves_from_archive(db: &sqlx::PgPool, record: &GameRow) -> cja::Result<bool> {
-    if record.gcs_path.is_none()
-        || !matches!(
-            record.game.status,
-            GameStatus::Finished | GameStatus::Failed
-        )
-    {
+    if record.gcs_path.is_none() || !record.game.status.is_terminal() {
         return Ok(false);
     }
     Ok(!has_frames(db, record.game.game_id).await?)
@@ -741,7 +740,7 @@ async fn send_terminal(
         return;
     }
     match status {
-        GameStatus::Finished | GameStatus::Failed => {
+        status if status.is_terminal() => {
             if matches!(status, GameStatus::Failed) {
                 let _ = send_message(
                     sender,
@@ -948,7 +947,7 @@ async fn handle_game_websocket(
         return;
     }
     match get_game_by_id(&state.db, game_id).await {
-        Ok(Some(game)) if matches!(game.status, GameStatus::Finished | GameStatus::Failed) => {
+        Ok(Some(game)) if game.status.is_terminal() => {
             send_terminal(
                 &mut sender,
                 &mut receiver,
@@ -3746,8 +3745,8 @@ mod live_tests {
         for (github, name) in [(9_980_001, "Replay One"), (9_980_002, "Replay Two")] {
             let login = format!("replay-{github}");
             let user_id: Uuid = sqlx::query_scalar(
-                "INSERT INTO users (external_github_id, github_login, github_access_token)
-                 VALUES ($1, $2, '') RETURNING user_id",
+                "INSERT INTO users (external_github_id, github_login)
+                 VALUES ($1, $2) RETURNING user_id",
             )
             .bind(github)
             .bind(&login)

@@ -487,6 +487,14 @@ pub async fn run_game(
         },
     });
 
+    // #147 / Go parity: a single-snake game runs the solo game-over check
+    // (Go's `WithSolo(len(urls) < 2)`), whatever the -g label says.
+    // One-directional on purpose: multi-snake games keep whatever rule
+    // create_initial_game chose for their mode.
+    if cfg.snakes.len() < 2 {
+        game.meta.game_over_rule = engine_core::GameOverRule::AllSnakesDead;
+    }
+
     // 3. GET / per snake, in order (sequential, like Go). Failures are
     //    fatal with Go's wrapper.
     let mut customizations: HashMap<String, SnakeCustomizations> = HashMap::new();
@@ -580,7 +588,8 @@ pub async fn run_game(
         ));
     }
 
-    // 7. The game loop. Never issues /move after is_game_over_for is true;
+    // 7. The game loop. Never issues /move after the game is over or the
+    //    turn cap is hit (stop_reason is checked before each iteration);
     //    the reported turn equals the final board's turn.
     let mut last_directions: HashMap<String, Direction> = HashMap::new();
     let names_by_id: HashMap<String, String> = snake_ids
@@ -589,9 +598,11 @@ pub async fn run_game(
         .zip(cfg.snakes.iter().map(|s| s.name.clone()))
         .collect();
 
-    while !engine_core::is_game_over_for(&game, cfg.snakes.len())
-        && cfg.max_turns.is_none_or(|max| game.board.turn < max)
-    {
+    let stop = loop {
+        if let Some(reason) = engine_core::stop_reason(&game, cfg.max_turns) {
+            break reason;
+        }
+
         let turn_deadline = (cfg.duration_ms > 0)
             .then(|| std::time::Instant::now() + std::time::Duration::from_millis(cfg.duration_ms));
 
@@ -623,7 +634,7 @@ pub async fn run_game(
                 SnakeContext {
                     latency_ms: wire::reported_latency_ms(
                         result.latency_ms,
-                        result.timed_out,
+                        result.outcome.timed_out(),
                         game.meta.timeout,
                     ),
                     shout: result.shout.clone(),
@@ -661,7 +672,7 @@ pub async fn run_game(
                 &cfg.resolved,
             ));
         }
-    }
+    };
 
     // 7.5. `game_end` goes out immediately after the game loop — before
     //     the /end requests — so a connected browser gets it while those
@@ -714,7 +725,7 @@ pub async fn run_game(
         (None, false) => write_log(log, &format!("Game completed after {final_turn} turns.")),
     }
 
-    let hit_turn_limit = !engine_core::is_game_over_for(&game, cfg.snakes.len());
+    let hit_turn_limit = stop == engine_core::StopReason::TurnCap;
 
     let mut lines_written = 0usize;
     if let (Some(exporter), Some(out)) = (&mut exporter, output.as_mut()) {

@@ -10,8 +10,8 @@ use crate::config::AppConfig;
 use crate::jobs::{
     AchievementClipsSweepJob, BackfillAchievementsJob, CustomizationActiveWeekBackfillJob,
     GameBackupJob, LeaderboardMatchmakerJob, NativeGameBackupJob, PlayGrantReconcileJob,
-    PlayHistoryWalkJob, RateLimitPruneJob, ReconcileRecentAchievementsJob, SnakeHealthSweeperJob,
-    StuckGameSweeperJob, StuckMatchSweeperJob, TurnRetentionJob,
+    PlayHistoryWalkJob, RateLimitPruneJob, ReconcileRecentAchievementsJob, SessionPruneJob,
+    SnakeHealthSweeperJob, StuckGameSweeperJob, StuckMatchSweeperJob, TurnRetentionJob,
 };
 use crate::state::AppState;
 
@@ -32,6 +32,11 @@ pub const SNAKE_HEALTH_SWEEP_INTERVAL_SECS: u64 = 30 * 60;
 /// Stuck-game sweep interval. Fails non-tournament games left in
 /// waiting/running past the configured max age.
 pub const STUCK_GAME_SWEEP_INTERVAL_SECS: u64 = 30 * 60;
+
+/// Session prune interval (DEV-2185): each run deletes up to 500k expired
+/// `sessions` rows in 10k-row batches, so the 1.02M-row prod backlog
+/// drains in ~2–3 hourly runs.
+pub const SESSION_PRUNE_INTERVAL_SECS: u64 = 60 * 60;
 pub const CUSTOMIZATION_ACTIVE_WEEK_BACKFILL_INTERVAL_SECS: u64 = 60 * 60;
 pub const ACHIEVEMENT_BACKFILL_INTERVAL_SECS: u64 = 5 * 60;
 pub const ACHIEVEMENT_RECONCILE_INTERVAL_SECS: u64 = 60 * 60;
@@ -142,7 +147,8 @@ pub(crate) fn cron_registry(config: &AppConfig) -> CronRegistry<AppState> {
     );
 
     // Stuck-match sweeper: runs every 2 minutes, re-enqueues evaluation for
-    // in-progress tournament matches whose driving jobs died
+    // stuck tournament matches (stale in-progress matches, scheduled
+    // matches stranded in a started round) and lost round progression
     registry.register_job(
         StuckMatchSweeperJob,
         Some("Re-enqueue evaluation for stuck tournament matches"),
@@ -155,6 +161,17 @@ pub(crate) fn cron_registry(config: &AppConfig) -> CronRegistry<AppState> {
         RateLimitPruneJob,
         Some("Prune rate-limit attempt rows past retention"),
         Duration::from_secs(6 * 60 * 60),
+    );
+
+    // Session prune (DEV-2185): batched delete of expired `sessions` rows
+    // (every cookie-less request creates one and nothing deleted them
+    // before). The crons row is seeded by a migration (20261108160000) so
+    // the first prune runs one interval after the migration applies, not
+    // at boot against the 1M-row backlog.
+    registry.register_job(
+        SessionPruneJob,
+        Some("Prune expired sessions in bounded batches"),
+        Duration::from_secs(SESSION_PRUNE_INTERVAL_SECS),
     );
 
     // Snake health sweeper: probes leaderboard entries whose games show
@@ -384,6 +401,55 @@ mod tests {
     }
 
     #[test]
+    fn session_prune_cadence() {
+        let registry = cron_registry(&AppConfig::test_default());
+        let job = registry
+            .get("SessionPruneJob")
+            .expect("session prune registered");
+        assert_eq!(
+            job.description,
+            Some("Prune expired sessions in bounded batches")
+        );
+        let cja::cron::Schedule::Interval(interval) = &job.schedule else {
+            panic!("session prune must use an interval");
+        };
+        assert_eq!(interval.0, Duration::from_secs(SESSION_PRUNE_INTERVAL_SECS));
+        assert_eq!(SESSION_PRUNE_INTERVAL_SECS, 60 * 60);
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn session_prune_cron_row_seeded_so_first_prune_is_not_at_boot(pool: sqlx::PgPool) {
+        // 20261108160000 seeds the crons row: without it, cja's
+        // IntervalSchedule::should_run treats the cron as never-run and
+        // the first tick (2s poll) enqueues the prune at boot — against
+        // the 1M-row prod backlog.
+        let last_run_at: chrono::DateTime<chrono::Utc> =
+            sqlx::query_scalar!("SELECT last_run_at FROM crons WHERE name = 'SessionPruneJob'")
+                .fetch_one(&pool)
+                .await
+                .expect("20261108160000 must seed the SessionPruneJob cron row");
+        let registry = cron_registry(&AppConfig::test_default());
+        let job = registry
+            .get("SessionPruneJob")
+            .expect("session prune registered");
+        let just_after_boot = last_run_at + chrono::Duration::seconds(1);
+        assert!(!job.schedule.should_run(
+            Some(&last_run_at),
+            just_after_boot,
+            just_after_boot,
+            cja::chrono_tz::UTC
+        ));
+        let one_interval_later =
+            last_run_at + chrono::Duration::hours(1) + chrono::Duration::seconds(1);
+        assert!(job.schedule.should_run(
+            Some(&last_run_at),
+            one_interval_later,
+            one_interval_later,
+            cja::chrono_tz::UTC
+        ));
+    }
+
+    #[test]
     fn play_history_walk_registered_at_walk_interval() {
         let registry = cron_registry(&AppConfig::test_default());
         let job = registry
@@ -539,10 +605,12 @@ mod tests {
     async fn next_backfill_schedule_resumes_an_unfinished_page(pool: sqlx::PgPool) {
         let app = AppState::test_from_pool(pool.clone());
         for number in 0..27_i64 {
-            sqlx::query("INSERT INTO users (external_github_id, github_login, github_access_token) VALUES ($1, $2, '')")
+            sqlx::query("INSERT INTO users (external_github_id, github_login) VALUES ($1, $2)")
                 .bind(1644300 + number)
                 .bind(format!("backfill-resume-{number}"))
-                .execute(&pool).await.unwrap();
+                .execute(&pool)
+                .await
+                .unwrap();
         }
         let page = crate::customizations::achievements::backfill_achievement_page(&pool)
             .await

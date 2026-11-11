@@ -20,14 +20,25 @@ pub const MOVE_TIMEOUT_MS: i64 = 500;
 /// Metadata about the game that lives alongside the board state.
 ///
 /// This replaces the `NestedGame` / `Game` wrapper from `battlesnake-game-types`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct GameMeta {
     pub game_id: String,
-    pub ruleset_name: String,
+    /// What kind of game this is. The single dispatch input for rules:
+    /// every engine path matches on it exhaustively, so adding a mode is a
+    /// compile error at every site instead of a silent standard fallback.
+    /// The public `(ruleset name, map)` wire pair is derived from it at the
+    /// HTTP boundary (`wire::wire_ruleset_and_map`).
+    pub mode: GameMode,
+    /// Which game-over predicate ends this game; recorded at creation so
+    /// the rule is data, not a re-derivation (see [`GameOverRule`]).
+    pub game_over_rule: GameOverRule,
     pub timeout: i64,
     pub settings: StandardSettings,
-    /// `Some` when this is a Royale game; drives hazard population each turn
-    /// and the `royale` block of the wire-protocol ruleset settings.
+    /// Hazard parameters: required when `mode == Royale` (consumed by
+    /// royale hazard population); other modes may carry it only for the
+    /// wire `settings.royale` block (Go shows the `--shrinkEveryNTurns`
+    /// flag value even on standard games). Never read to determine the
+    /// mode — dispatch on `mode`, always.
     pub royale: Option<RoyaleSettings>,
     /// Where the game came from; sent to snakes as `game.source`.
     pub source: GameSource,
@@ -76,7 +87,7 @@ impl GameSource {
 }
 
 /// Full engine game state: board + metadata.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct EngineGame {
     pub board: BoardState,
     pub meta: GameMeta,
@@ -105,6 +116,65 @@ pub enum GameMode {
     Solo,
 }
 
+/// Which game-over predicate ends this game. Recorded at creation so the
+/// rule is data, not a dispatch re-derived from a mode string (#147: a
+/// 1-snake standard *server* game ends immediately; a 1-snake standard
+/// *CLI* game runs to the snake's death, like Go's `WithSolo(len < 2)`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GameOverRule {
+    /// Over once at most one snake remains alive (rules::standard::is_game_over).
+    LastSnakeStanding,
+    /// Over only once no snake remains alive (rules::solo::is_game_over).
+    AllSnakesDead,
+}
+
+impl GameMode {
+    /// The game-over rule a game of this mode gets at creation. Every
+    /// server path that rebuilds `GameMeta` (resume restore, move-request
+    /// rebuild) and the public engine-API stage list use the same mapping —
+    /// one place to update per new mode.
+    pub fn default_game_over_rule(self) -> GameOverRule {
+        match self {
+            GameMode::Solo => GameOverRule::AllSnakesDead,
+            GameMode::Standard | GameMode::Royale | GameMode::Constrictor | GameMode::SnailMode => {
+                GameOverRule::LastSnakeStanding
+            }
+        }
+    }
+}
+
+/// Why a game's turn loop stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopReason {
+    GameOver,
+    TurnCap,
+}
+
+impl StopReason {
+    /// Stable label for tracing/log fields.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StopReason::GameOver => "game_over",
+            StopReason::TurnCap => "turn_cap",
+        }
+    }
+}
+
+/// The single turn-loop condition: `None` = keep playing, checked *before*
+/// each iteration's body (a resumed-but-already-over game issues zero
+/// requests). `turn_cap` of `None` means uncapped (the CLI's default;
+/// engine `MAX_TURNS` stays server/prod-only). A game that is both over
+/// and at the cap reports `GameOver`.
+pub fn stop_reason(game: &EngineGame, turn_cap: Option<i32>) -> Option<StopReason> {
+    if is_game_over(game) {
+        Some(StopReason::GameOver)
+    } else if turn_cap.is_some_and(|cap| game.board.turn >= cap) {
+        Some(StopReason::TurnCap)
+    } else {
+        None
+    }
+}
+
 /// A snake entering a game: engine ID (arena's game_battlesnake_id string)
 /// and display name. Named fields so id/name can't be swapped silently.
 pub struct InitialSnake {
@@ -122,14 +192,11 @@ fn game_seed(game_id: Uuid) -> u64 {
     u64::from_le_bytes(bytes[..8].try_into().expect("uuid has 16 bytes"))
 }
 
-/// Per-mode rules: the internal ruleset name (drives engine dispatch), the
-/// standard settings, and Royale's shrink settings. Single source for both
-/// game creation and everything that describes a game's rules (snake
-/// payloads via `GameMeta`, the engine-compatible game API).
-pub fn mode_rules(
-    mode: GameMode,
-    game_id: Uuid,
-) -> (&'static str, StandardSettings, Option<RoyaleSettings>) {
+/// Per-mode rules: the standard settings and Royale's shrink settings.
+/// Single source for both game creation and everything that describes a
+/// game's rules (snake payloads via `GameMeta`, the engine-compatible game
+/// API). The engine dispatches on `GameMeta.mode`, never on a string.
+pub fn mode_rules(mode: GameMode, game_id: Uuid) -> (StandardSettings, Option<RoyaleSettings>) {
     // Hazard damage: the arena has historically used 15 for standard games
     // (where it is inert -- standard boards never spawn hazards), and we keep
     // that unchanged. Royale and Snail Mode use 14, the default in the
@@ -140,7 +207,6 @@ pub fn mode_rules(
     // standard's.
     match mode {
         GameMode::Royale => (
-            "royale",
             StandardSettings {
                 food_spawn_chance: 15,
                 minimum_food: 1,
@@ -151,11 +217,10 @@ pub fn mode_rules(
                 seed: game_seed(game_id),
             }),
         ),
-        // Internal name only: on the wire snakes see ruleset "standard" with
+        // Internal mode only: on the wire snakes see ruleset "standard" with
         // game.map = "snail_mode", matching play.battlesnake.com where Snail
         // Mode was a community map on the standard ruleset (see wire.rs).
         GameMode::SnailMode => (
-            "snail_mode",
             StandardSettings {
                 food_spawn_chance: 15,
                 minimum_food: 1,
@@ -164,7 +229,6 @@ pub fn mode_rules(
             None,
         ),
         GameMode::Constrictor => (
-            "constrictor",
             StandardSettings {
                 food_spawn_chance: 0,
                 minimum_food: 0,
@@ -174,11 +238,9 @@ pub fn mode_rules(
         ),
         // Solo: single-snake survival. Runs the standard pipeline with
         // standard food settings; only the game-over predicate differs
-        // (see `is_game_over` and `rules::solo`). Kept as an explicit arm --
-        // folding it into the catch-all below would silently give it
-        // "standard" rules and the standard game-over check.
+        // (see `GameOverRule`). Each mode keeps its own arm so a new mode
+        // stays a compile error here.
         GameMode::Solo => (
-            "solo",
             StandardSettings {
                 food_spawn_chance: 15,
                 minimum_food: 1,
@@ -190,7 +252,6 @@ pub fn mode_rules(
         // later must be a compile error here, never a silent standard
         // fallback.
         GameMode::Standard => (
-            "standard",
             StandardSettings {
                 food_spawn_chance: 15,
                 minimum_food: 1,
@@ -227,26 +288,30 @@ pub fn create_initial_game(
         snake_names.insert(s.id.clone(), s.name.clone());
     }
 
-    let (ruleset_name, settings, royale) = mode_rules(mode, game_id);
+    let (settings, royale) = mode_rules(mode, game_id);
 
-    if ruleset_name == "constrictor" {
-        // Match the Go engine's initialization pass (the constrictor
-        // pipeline runs once with no moves at game start): strip all food
-        // and pin snakes at max health. Initial bodies are stacked, so no
-        // growth happens here.
-        rules::constrictor::modify_initial_board(&mut board).map_err(|error| {
-            eyre!(
-                "constrictor initial board modification failed ({width}x{height}, {} snakes): {error:?}",
-                snakes.len()
-            )
-        })?;
+    match mode {
+        GameMode::Constrictor => {
+            // Match the Go engine's initialization pass (the constrictor
+            // pipeline runs once with no moves at game start): strip all food
+            // and pin snakes at max health. Initial bodies are stacked, so no
+            // growth happens here.
+            rules::constrictor::modify_initial_board(&mut board).map_err(|error| {
+                eyre!(
+                    "constrictor initial board modification failed ({width}x{height}, {} snakes): {error:?}",
+                    snakes.len()
+                )
+            })?;
+        }
+        GameMode::Standard | GameMode::Royale | GameMode::SnailMode | GameMode::Solo => {}
     }
 
     Ok(EngineGame {
         board,
         meta: GameMeta {
             game_id: game_id.to_string(),
-            ruleset_name: ruleset_name.to_string(),
+            mode,
+            game_over_rule: mode.default_game_over_rule(),
             timeout: MOVE_TIMEOUT_MS,
             settings,
             royale,
@@ -293,19 +358,19 @@ pub fn advance_turn(
     Ok(fed)
 }
 
-/// Run a complete game with random moves, returning placements
+/// Run a complete game with random moves, returning placements.
+///
+/// The runner drives the production `advance_turn` pipeline, so tests of it
+/// exercise the exact path the server game runner and CLI `play` use.
 pub fn run_game_with_random_moves(
     mut game: EngineGame,
     rng: &mut impl Rng,
 ) -> color_eyre::Result<GameResult> {
-    let royale = (game.meta.ruleset_name == "royale")
-        .then(|| royale_settings(&game))
-        .transpose()?;
     let mut elimination_order: Vec<String> = Vec::new();
 
-    while !is_game_over(&game) && game.board.turn < MAX_TURNS {
+    while stop_reason(&game, Some(MAX_TURNS)).is_none() {
         // Build random moves for each alive snake
-        let moves: Vec<SnakeMove> = game
+        let moves: Vec<(String, Direction)> = game
             .board
             .snakes
             .iter()
@@ -342,45 +407,17 @@ pub fn run_game_with_random_moves(
                     *reasonable.choose(&mut *rng).unwrap()
                 };
 
-                SnakeMove {
-                    id: s.id.clone(),
-                    direction: dir,
-                }
+                (s.id.clone(), dir)
             })
             .collect();
 
-        // Apply the turn. Dispatch on the ruleset name so each mode's arm
-        // stays independent (parallel game-mode PRs union their arms here).
-        let _game_over = match game.meta.ruleset_name.as_str() {
-            "royale" => {
-                let Some(settings) = royale.as_ref() else {
-                    unreachable!("royale settings were validated before game execution")
-                };
-                rules::royale::execute_turn(&mut game.board, &moves, &game.meta.settings, settings)
-            }
-            "constrictor" => {
-                rules::constrictor::execute_turn(&mut game.board, &moves, &game.meta.settings)
-            }
-            "snail_mode" => {
-                rules::snail::execute_turn(&mut game.board, &moves, &game.meta.settings)
-            }
-            "solo" => rules::solo::execute_turn(&mut game.board, &moves, &game.meta.settings),
-            _ => rules::standard::execute_turn(&mut game.board, &moves, &game.meta.settings),
-        }
-        .map_err(|error| {
+        advance_turn(&mut game, &moves, rng).map_err(|error| {
             eyre!(
-                "execute_turn failed for ruleset {}: {error:?}",
-                game.meta.ruleset_name
+                "advance_turn failed for mode {:?} on turn {}: {error:#}",
+                game.meta.mode,
+                game.board.turn + 1
             )
         })?;
-
-        // Spawn food after turn. Constrictor games never spawn food (their
-        // settings are food_spawn_chance=0 / minimum_food=0, which would make
-        // this a no-op anyway, but skip it outright to keep the invariant
-        // explicit).
-        if game.meta.ruleset_name != "constrictor" {
-            rules::food::maybe_spawn_food(&mut *rng, &mut game.board, &game.meta.settings);
-        }
 
         // Track newly eliminated snakes
         for snake in &game.board.snakes {
@@ -410,29 +447,16 @@ pub fn run_game_with_random_moves(
     })
 }
 
-/// Check if the game is over.
-///
-/// Mode-aware: Solo games (ruleset "solo") end only when no snake is alive;
-/// every other mode ends when 1 or fewer snakes remain alive.
+/// Check if the game is over: dispatch on the recorded game-over rule, not
+/// the mode — the rule is chosen at creation (`create_initial_game` for
+/// server games, the CLI's snake-count override for `play`), and #147 pins
+/// a deliberate divergence: a 1-snake *standard* server game ends at turn
+/// 0 (`LastSnakeStanding`), while a 1-snake standard *CLI* game runs to
+/// the snake's death (`AllSnakesDead`, Go's `WithSolo`).
 pub fn is_game_over(game: &EngineGame) -> bool {
-    match game.meta.ruleset_name.as_str() {
-        "solo" => rules::solo::is_game_over(&game.board),
-        _ => rules::standard::is_game_over(&game.board),
-    }
-}
-
-/// Game-over for a game whose ruleset name may not match its snake count.
-///
-/// `play` (the battlesnake CLI) runs `-g standard` with a single snake too:
-/// the solo game-over check is chosen by how many snakes entered the game,
-/// not by the mode label, exactly like the Go CLI (`WithSolo(len(urls) < 2)`).
-/// The server keeps calling [`is_game_over`], whose ruleset-name dispatch
-/// matches every game it creates.
-pub fn is_game_over_for(game: &EngineGame, total_snakes: usize) -> bool {
-    if total_snakes < 2 {
-        rules::solo::is_game_over(&game.board)
-    } else {
-        is_game_over(game)
+    match game.meta.game_over_rule {
+        GameOverRule::AllSnakesDead => rules::solo::is_game_over(&game.board),
+        GameOverRule::LastSnakeStanding => rules::standard::is_game_over(&game.board),
     }
 }
 
@@ -442,6 +466,10 @@ pub fn is_game_over_for(game: &EngineGame, total_snakes: usize) -> bool {
 /// reliable food signal: body growth isn't, because Constrictor grows every
 /// snake every turn without any food on the board.
 ///
+/// Stage errors (`move_snakes`, `eliminate_snakes`) propagate as `Err` — no
+/// stage result is discarded, so a malformed move set can never leave a
+/// half-moved board silently.
+///
 /// Note: Unlike the rules crate's `execute_turn`, this does NOT increment
 /// `board.turn` internally -- the caller must do that (for compatibility with
 /// game_runner.rs which increments after recording frames).
@@ -449,9 +477,10 @@ pub fn apply_turn(
     game: &mut EngineGame,
     moves: &[(String, Direction)],
 ) -> color_eyre::Result<Vec<String>> {
-    let royale = (game.meta.ruleset_name == "royale")
-        .then(|| royale_settings(game))
-        .transpose()?;
+    let royale = match game.meta.mode {
+        GameMode::Royale => Some(royale_settings(game)?),
+        GameMode::Standard | GameMode::Constrictor | GameMode::SnailMode | GameMode::Solo => None,
+    };
     let snake_moves: Vec<SnakeMove> = moves
         .iter()
         .map(|(id, dir)| SnakeMove {
@@ -461,21 +490,29 @@ pub fn apply_turn(
         .collect();
 
     // Run the standard pipeline steps individually (so we can control turn increment)
-    let _ = rules::standard::move_snakes(&mut game.board, &snake_moves);
+    rules::standard::move_snakes(&mut game.board, &snake_moves)
+        .map_err(|error| eyre!("move_snakes failed: {error:?}"))?;
     rules::standard::reduce_snake_health(&mut game.board);
     rules::standard::damage_hazards(&mut game.board, &game.meta.settings);
     let fed = rules::standard::feed_snakes(&mut game.board);
-    let _ = rules::standard::eliminate_snakes(&mut game.board);
+    // Unreachable today: an empty-bodied alive snake panics earlier in the
+    // pipeline (damage_hazards/feed_snakes call Snake::head, which is body[0])
+    // before eliminate_snakes runs. The propagation is structural — no stage
+    // result is discarded (DEV-2182) — so there is intentionally no test for
+    // this error path while stage order is unchanged.
+    rules::standard::eliminate_snakes(&mut game.board)
+        .map_err(|error| eyre!("eliminate_snakes failed: {error:?}"))?;
 
-    // Mode-specific post-elimination stages. Dispatch on the ruleset name so
-    // each mode's arm stays independent (parallel game-mode PRs union their
-    // arms here).
-    match game.meta.ruleset_name.as_str() {
+    // Mode-specific post-elimination stages. Dispatch on the mode so each
+    // mode's arm stays independent (parallel game-mode PRs union their arms
+    // here) and a new mode fails to compile here instead of silently
+    // running standard rules.
+    match game.meta.mode {
         // Royale: spawn/grow hazards for the next turn (matches Go's
         // StageSpawnHazardsShrinkMap, which runs after elimination). Uses
         // `board.turn + 1` internally, so this must run before the caller
         // increments `board.turn`.
-        "royale" => {
+        GameMode::Royale => {
             let Some(settings) = royale.as_ref() else {
                 unreachable!("royale settings were validated before turn application")
             };
@@ -485,7 +522,7 @@ pub fn apply_turn(
         // Constrictor: clear all food and grow every snake (matches Go's
         // StageSpawnFoodNoFood + StageModifySnakesAlwaysGrow, which run after
         // elimination).
-        "constrictor" => {
+        GameMode::Constrictor => {
             rules::constrictor::remove_food(&mut game.board);
             rules::constrictor::grow_snakes(&mut game.board)
                 .expect("constrictor growth failed: zero-length snake");
@@ -493,8 +530,10 @@ pub fn apply_turn(
         // Snail Mode: decay hazard trails and record vacated tail squares
         // (matches Go's SnailModeMap.PostUpdateBoard, which runs after all
         // ruleset stages).
-        "snail_mode" => rules::snail::post_update_board(&mut game.board),
-        _ => {}
+        GameMode::SnailMode => rules::snail::post_update_board(&mut game.board),
+        // Standard and Solo have no post-elimination stage: the standard
+        // pipeline above already covered them.
+        GameMode::Standard | GameMode::Solo => {}
     }
 
     Ok(fed)
@@ -507,10 +546,12 @@ pub fn apply_turn(
 /// `apply_turn` must also call this. Constrictor games never spawn food; all
 /// other modes use the standard chance/minimum settings.
 pub fn spawn_food(game: &mut EngineGame, rng: &mut impl Rng) {
-    if game.meta.ruleset_name == "constrictor" {
-        return;
+    match game.meta.mode {
+        GameMode::Constrictor => {}
+        GameMode::Standard | GameMode::Royale | GameMode::SnailMode | GameMode::Solo => {
+            rules::food::maybe_spawn_food(&mut *rng, &mut game.board, &game.meta.settings);
+        }
     }
-    rules::food::maybe_spawn_food(&mut *rng, &mut game.board, &game.meta.settings);
 }
 
 #[cfg(test)]
@@ -561,7 +602,7 @@ mod tests {
         let mut game = create_initial_game(&mut rng, game_id, 11, 11, mode, &initial_snakes(mode))
             .expect("valid initial game");
         let mut boards = vec![game.board.clone()];
-        while !is_game_over(&game) && game.board.turn < MAX_TURNS {
+        while stop_reason(&game, Some(MAX_TURNS)).is_none() {
             let moves: Vec<(String, Direction)> = game
                 .board
                 .snakes
@@ -712,8 +753,8 @@ mod tests {
 
         let (_, id_a) = seeded_game(SEED_A);
         let (_, id_b) = seeded_game(SEED_B);
-        let rules_a = mode_rules(GameMode::Royale, id_a).2;
-        let rules_b = mode_rules(GameMode::Royale, id_b).2;
+        let rules_a = mode_rules(GameMode::Royale, id_a).1;
+        let rules_b = mode_rules(GameMode::Royale, id_b).1;
 
         let hazards = |rules: &Option<RoyaleSettings>| {
             let mut board = BoardState {
@@ -740,9 +781,9 @@ mod tests {
         );
     }
 
-    // --- is_game_over_for (single-snake games with any mode label) ---
+    // --- game-over rule (#147: rule as data, not mode dispatch) ---
 
-    fn game_with_snakes(ruleset_name: &str, alive: usize, dead: usize) -> EngineGame {
+    fn game_with_snakes(mode: GameMode, alive: usize, dead: usize) -> EngineGame {
         let mut snakes = Vec::new();
         for i in 0..alive {
             snakes.push(rules::Snake {
@@ -775,7 +816,8 @@ mod tests {
             },
             meta: GameMeta {
                 game_id: "g".into(),
-                ruleset_name: ruleset_name.into(),
+                mode,
+                game_over_rule: mode.default_game_over_rule(),
                 timeout: 500,
                 settings: rules::StandardSettings {
                     food_spawn_chance: 15,
@@ -789,24 +831,254 @@ mod tests {
         }
     }
 
+    /// #147: the same 1-alive-snake standard board is over under
+    /// `LastSnakeStanding` (a server standard game) and running under
+    /// `AllSnakesDead` (a CLI single-snake game). The rule — not the mode
+    /// — decides.
     #[test]
-    fn is_game_over_for_single_snake_uses_solo_check() {
-        // 1 alive of 1 entered, standard ruleset: the standard check would
-        // end the game at turn 0; the solo check keeps it running.
-        let game = game_with_snakes("standard", 1, 0);
-        assert!(!is_game_over_for(&game, 1));
-        // Once that snake dies, over.
-        let game = game_with_snakes("standard", 0, 1);
-        assert!(is_game_over_for(&game, 1));
+    fn game_over_rule_decides_for_the_same_board() {
+        let mut server = game_with_snakes(GameMode::Standard, 1, 0);
+        server.meta.game_over_rule = GameOverRule::LastSnakeStanding;
+        assert!(
+            is_game_over(&server),
+            "1 alive snake ends a LastSnakeStanding game"
+        );
+
+        let mut cli = game_with_snakes(GameMode::Standard, 1, 0);
+        cli.meta.game_over_rule = GameOverRule::AllSnakesDead;
+        assert!(
+            !is_game_over(&cli),
+            "1 alive snake keeps an AllSnakesDead game running"
+        );
+
+        // Once that snake dies, over under either rule.
+        let mut dead = game_with_snakes(GameMode::Standard, 0, 1);
+        dead.meta.game_over_rule = GameOverRule::AllSnakesDead;
+        assert!(is_game_over(&dead));
+    }
+
+    /// The mode→rule mapping a server game gets at creation: only Solo runs
+    /// the all-dead check.
+    #[test]
+    fn default_game_over_rule_maps_only_solo_to_all_dead() {
+        assert_eq!(
+            GameMode::Solo.default_game_over_rule(),
+            GameOverRule::AllSnakesDead
+        );
+        for mode in [
+            GameMode::Standard,
+            GameMode::Royale,
+            GameMode::Constrictor,
+            GameMode::SnailMode,
+        ] {
+            assert_eq!(
+                mode.default_game_over_rule(),
+                GameOverRule::LastSnakeStanding,
+                "{mode:?}"
+            );
+        }
+    }
+
+    /// `stop_reason` checks over before the cap, so a game that is both
+    /// over and at its cap reports `GameOver`.
+    #[test]
+    fn stop_reason_reports_game_over_before_turn_cap() {
+        let game = game_with_snakes(GameMode::Standard, 0, 2); // over at turn 5
+        assert_eq!(stop_reason(&game, Some(0)), Some(StopReason::GameOver));
+        // Not over, under the cap: keep playing.
+        let game = game_with_snakes(GameMode::Standard, 2, 0);
+        assert_eq!(stop_reason(&game, Some(6)), None);
+        // Not over, at the cap.
+        assert_eq!(stop_reason(&game, Some(5)), Some(StopReason::TurnCap));
+        // Not over, uncapped.
+        assert_eq!(stop_reason(&game, None), None);
+        // Over, uncapped.
+        let game = game_with_snakes(GameMode::Standard, 0, 2);
+        assert_eq!(stop_reason(&game, None), Some(StopReason::GameOver));
+    }
+
+    // --- eliminated_on_turn contract (rules sets it pre-increment) ---
+
+    /// `rules` sets `eliminated_on_turn = board.turn + 1` *before* the
+    /// engine increments `board.turn` (documented at
+    /// `rules/src/standard.rs`), so after `advance_turn` a newly dead snake
+    /// carries `eliminated_on_turn == board.turn`. Frame `Death.Turn`
+    /// derives from that field, so a future reordering of the increment
+    /// would silently shift every frame's death turn — pin it here for two
+    /// elimination paths (wall death and snake collision).
+    #[test]
+    fn advance_turn_pins_eliminated_on_turn_to_post_increment_turn() {
+        // Wall death: snake 0 at x=0 walking Left.
+        let (mut rng, game_id) = seeded_game(0);
+        let mut game = create_initial_game(
+            &mut rng,
+            game_id,
+            11,
+            11,
+            GameMode::Standard,
+            &[
+                InitialSnake {
+                    id: "wall".into(),
+                    name: "Wall".into(),
+                },
+                InitialSnake {
+                    id: "shield".into(),
+                    name: "Shield".into(),
+                },
+            ],
+        )
+        .expect("valid initial game");
+        // Place the walker on the left edge with its body behind it.
+        let walker = game
+            .board
+            .snakes
+            .iter_mut()
+            .find(|s| s.id == "wall")
+            .unwrap();
+        walker.body = vec![Point::new(0, 9), Point::new(1, 9), Point::new(2, 9)];
+        let moves = vec![
+            ("wall".to_string(), Direction::Left),
+            ("shield".to_string(), Direction::Up),
+        ];
+        advance_turn(&mut game, &moves, &mut rng).expect("valid turn");
+        let walker = game.board.snakes.iter().find(|s| s.id == "wall").unwrap();
+        assert_eq!(
+            walker.eliminated_cause,
+            rules::EliminationCause::OutOfBounds
+        );
+        assert_eq!(
+            walker.eliminated_on_turn, game.board.turn,
+            "wall death: eliminated_on_turn must equal the post-increment turn"
+        );
+
+        // Snake collision: a steps Right onto b's body (b's post-move
+        // tail), a separate elimination path from the wall death above.
+        let (mut rng, game_id) = seeded_game(1);
+        let mut game = create_initial_game(
+            &mut rng,
+            game_id,
+            11,
+            11,
+            GameMode::Standard,
+            &[
+                InitialSnake {
+                    id: "a".into(),
+                    name: "A".into(),
+                },
+                InitialSnake {
+                    id: "b".into(),
+                    name: "B".into(),
+                },
+            ],
+        )
+        .expect("valid initial game");
+        // b: head (6,4), body trailing left; moving Up leaves (5,4) as its
+        // tail. a: head (4,4) stepping Right onto exactly that tail.
+        let a = game.board.snakes.iter_mut().find(|s| s.id == "a").unwrap();
+        a.body = vec![Point::new(4, 4), Point::new(4, 5), Point::new(4, 6)];
+        let b = game.board.snakes.iter_mut().find(|s| s.id == "b").unwrap();
+        b.body = vec![Point::new(6, 4), Point::new(5, 4), Point::new(5, 5)];
+        let moves = vec![
+            ("a".to_string(), Direction::Right), // (4,4) -> (5,4): b's tail
+            ("b".to_string(), Direction::Up),    // (6,4) -> (6,5), survives
+        ];
+        advance_turn(&mut game, &moves, &mut rng).expect("valid turn");
+        let a = game.board.snakes.iter().find(|s| s.id == "a").unwrap();
+        assert_eq!(
+            a.eliminated_cause,
+            rules::EliminationCause::Collision,
+            "expected a snake-collision elimination"
+        );
+        assert_eq!(a.eliminated_by, "b");
+        assert_eq!(
+            a.eliminated_on_turn, game.board.turn,
+            "collision death turn must equal the post-increment turn"
+        );
+        let b = game.board.snakes.iter().find(|s| s.id == "b").unwrap();
+        assert!(!b.eliminated_cause.is_eliminated(), "b must survive");
     }
 
     #[test]
-    fn is_game_over_for_multi_snake_uses_standard_check() {
-        let game = game_with_snakes("standard", 2, 0);
-        assert!(!is_game_over_for(&game, 2));
-        let game = game_with_snakes("standard", 1, 1);
-        assert!(is_game_over_for(&game, 2));
-        let game = game_with_snakes("solo", 0, 2);
-        assert!(is_game_over_for(&game, 2));
+    fn apply_turn_propagates_move_snakes_no_move_found_error() {
+        let mut game = game_with_snakes(GameMode::Standard, 2, 0);
+        // Move for a0 only: non-empty (so move_snakes skips its empty-slice
+        // no-op) but missing a1's entry.
+        let moves = vec![("a0".to_string(), Direction::Up)];
+        let error = apply_turn(&mut game, &moves).expect_err("missing move must fail");
+        let msg = error.to_string();
+        assert!(msg.contains("move_snakes failed"), "got: {msg}");
+        assert!(msg.contains("NoMoveFound"), "got: {msg}");
+    }
+
+    #[test]
+    fn apply_turn_propagates_move_snakes_zero_length_error() {
+        let mut game = game_with_snakes(GameMode::Standard, 2, 0);
+        game.board.snakes[1].body = vec![];
+        let moves = vec![("a0".to_string(), Direction::Up)];
+        let error = apply_turn(&mut game, &moves).expect_err("zero-length snake must fail");
+        let msg = error.to_string();
+        assert!(msg.contains("move_snakes failed"), "got: {msg}");
+        assert!(msg.contains("ZeroLengthSnake"), "got: {msg}");
+    }
+
+    #[test]
+    fn advance_turn_refills_minimum_food_from_empty_board() {
+        for mode in MODES {
+            if mode == GameMode::Constrictor {
+                continue; // minimum_food = 0: no refill contract
+            }
+            for seed in 0..5u64 {
+                let (mut rng, game_id) = seeded_game(seed);
+                let mut game =
+                    create_initial_game(&mut rng, game_id, 11, 11, mode, &initial_snakes(mode))
+                        .expect("valid initial game");
+                game.board.food.clear();
+                let moves: Vec<(String, Direction)> = game
+                    .board
+                    .snakes
+                    .iter()
+                    .enumerate()
+                    .map(|(i, s)| (s.id.clone(), CYCLE[i % 4]))
+                    .collect();
+                advance_turn(&mut game, &moves, &mut rng).expect("valid turn");
+                assert!(
+                    !game.board.food.is_empty(),
+                    "mode {mode:?} seed {seed}: advance_turn spawned no food"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn scripted_games_maintain_minimum_food() {
+        for mode in MODES {
+            if mode == GameMode::Constrictor {
+                continue; // minimum_food = 0
+            }
+            for seed in 0..5u64 {
+                let boards = play_scripted_game(mode, seed);
+                // Anti-vacuity: the invariant must cover a real game, not a
+                // game that ended after a turn or two. Observed board counts
+                // (turns + 1) at 21450c8, seeds 0..5: Standard 101; Royale
+                // [101, 35, 101, 35, 35, 35]; SnailMode 7 every seed (the CYCLE
+                // walk self-collides on its own snail trail at turn 6); Solo
+                // [101, 101, 101, 101, 103, 101]. Standard/Solo/Snail games end
+                // by starvation/trail death around turn 100/6 — not MAX_TURNS
+                // (5000). The floor is 5, one turn of headroom under the
+                // observed minimum of 7.
+                assert!(
+                    boards.len() >= 5,
+                    "mode {mode:?} seed {seed}: only {} boards — game ended too early \
+                     for the food invariant to mean anything",
+                    boards.len()
+                );
+                for board in &boards[1..] {
+                    assert!(
+                        !board.food.is_empty(),
+                        "mode {mode:?} seed {seed}: mid-game board has no food"
+                    );
+                }
+            }
+        }
     }
 }

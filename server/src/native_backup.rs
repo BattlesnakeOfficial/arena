@@ -18,7 +18,11 @@
 //! "Archived" means "as of the current terminal state": a game the sweeper
 //! failed and later finished gets its archive fields cleared by
 //! models::game::mark_game_finished_tx and is re-archived (same key,
-//! complete frames) by the next discovery run.
+//! complete frames) by the next discovery run. Pruned games and terminal
+//! games with no persisted frames are refused (DEV-2178): the former's
+//! only surviving frame copy lives at the deterministic key this job
+//! would overwrite with nothing; the latter have nothing to archive and
+//! are kept out of discovery's enqueue set entirely.
 
 use std::sync::Arc;
 
@@ -236,6 +240,7 @@ pub(crate) async fn archive_native_game(
         WHERE game_id = $1
           AND engine_game_id IS NULL
           AND status IN ('finished', 'failed')
+          AND turns_pruned_at IS NULL
         "#,
         game_id
     )
@@ -244,7 +249,7 @@ pub(crate) async fn archive_native_game(
     .wrap_err("Failed to fetch native game for archival")?;
 
     let Some(row) = row else {
-        tracing::debug!(%game_id, "Game is not a terminal native game, skipping archive");
+        tracing::debug!(%game_id, "Game is not an unpruned terminal native game, skipping archive");
         return Ok(());
     };
     if row.archived_at.is_some() {
@@ -263,6 +268,16 @@ pub(crate) async fn archive_native_game(
     // ::text => Vec<String>: a memcpy, NO parse on the async worker.
     // Only the slot holder reaches this line.
     let frame_texts = fetch_native_frame_texts(&app_state.db, game_id).await?;
+
+    // DEV-2178: a zero-frame export is never a legitimate archive (a
+    // terminal native game with no persisted frames has nothing to
+    // archive) and is the signature of archiving a PRUNED game, which
+    // would overwrite the only surviving copy at this deterministic key.
+    if frame_texts.is_empty() {
+        tracing::warn!(%game_id,
+            "Terminal native game has no persisted frames; refusing zero-frame export");
+        return Ok(());
+    }
 
     let status_at_read = row.status.clone();
     let created_at = row.created_at;
@@ -327,6 +342,9 @@ async fn run_discovery_with_caps(
         WHERE engine_game_id IS NULL
           AND status IN ('finished', 'failed')
           AND archived_at IS NULL
+          AND turns_pruned_at IS NULL
+          AND EXISTS (SELECT 1 FROM turns t
+                      WHERE t.game_id = games.game_id AND t.frame_data IS NOT NULL)
           AND updated_at >= NOW() - make_interval(hours => $1)
         LIMIT $2
         "#,
@@ -343,6 +361,9 @@ async fn run_discovery_with_caps(
         WHERE engine_game_id IS NULL
           AND status IN ('finished', 'failed')
           AND archived_at IS NULL
+          AND turns_pruned_at IS NULL
+          AND EXISTS (SELECT 1 FROM turns t
+                      WHERE t.game_id = games.game_id AND t.frame_data IS NOT NULL)
           AND updated_at < NOW() - make_interval(hours => $1)
         ORDER BY created_at ASC, game_id ASC
         LIMIT $2
@@ -608,6 +629,7 @@ mod tests {
             None,
         )
         .await?;
+        fixture_turn(&pool, finished, 0, modern_frame(0)).await?;
         let failed = fixture_game(
             &pool,
             "failed",
@@ -617,6 +639,7 @@ mod tests {
             None,
         )
         .await?;
+        fixture_turn(&pool, failed, 0, modern_frame(0)).await?;
         let running = fixture_game(
             &pool,
             "running",
@@ -680,6 +703,7 @@ mod tests {
             None,
         )
         .await?;
+        fixture_turn(&pool, a, 0, modern_frame(0)).await?;
         let b = fixture_game(
             &pool,
             "finished",
@@ -689,6 +713,7 @@ mod tests {
             None,
         )
         .await?;
+        fixture_turn(&pool, b, 0, modern_frame(0)).await?;
         let c = fixture_game(
             &pool,
             "finished",
@@ -698,6 +723,7 @@ mod tests {
             None,
         )
         .await?;
+        fixture_turn(&pool, c, 0, modern_frame(0)).await?;
         let r = fixture_game(
             &pool,
             "finished",
@@ -707,6 +733,7 @@ mod tests {
             None,
         )
         .await?;
+        fixture_turn(&pool, r, 0, modern_frame(0)).await?;
 
         run_discovery_with_caps(&state, 6, 10, 2).await?;
 
@@ -739,6 +766,7 @@ mod tests {
             None,
         )
         .await?;
+        fixture_turn(&pool, game_id, 0, modern_frame(0)).await?;
 
         run_discovery_with_caps(&state, 6, 10, 10).await?;
         let after_first = enqueued_native_job_ids(&pool).await?;
@@ -928,6 +956,7 @@ mod tests {
             None,
         )
         .await?;
+        fixture_turn(&pool, game_id, 0, modern_frame(0)).await?;
         mark_archived_via_sql(&pool, game_id).await?;
 
         // The finish path's actual write.
@@ -973,7 +1002,7 @@ mod tests {
         let mut state = AppState::test_from_pool(pool.clone());
         configured_state(&mut state);
         let now = Utc::now();
-        fixture_game(
+        let game_id = fixture_game(
             &pool,
             "finished",
             now - chrono::Duration::days(5),
@@ -982,6 +1011,7 @@ mod tests {
             None,
         )
         .await?;
+        fixture_turn(&pool, game_id, 0, modern_frame(0)).await?;
 
         run_discovery_with_caps(&state, 6, 10, 10).await?;
         crate::jobs::GameRunnerJob {
@@ -1073,6 +1103,105 @@ mod tests {
             let frame: serde_json::Value = serde_json::from_str(raw.get())?;
             assert_eq!(&frame, &db_frames[i]);
         }
+        Ok(())
+    }
+
+    /// SC (DEV-2178): a terminal native game with NO persisted frames is
+    /// never archived (zero-frame refusal — nothing written, no mark) and
+    /// never enqueued by discovery (the framed-turns EXISTS probe).
+    #[sqlx::test(migrations = "../migrations")]
+    async fn archive_native_game_refuses_zero_frame_export(pool: sqlx::PgPool) -> cja::Result<()> {
+        let mut state = AppState::test_from_pool(pool.clone());
+        configured_state(&mut state);
+        let created_at = Utc::now() - chrono::Duration::days(5);
+        let game_id = fixture_game(&pool, "finished", created_at, Utc::now(), false, None).await?;
+        // NO turns: the game has nothing to archive.
+
+        archive_native_game(&state, game_id).await?;
+
+        let (archived_at, gcs_path): (Option<chrono::DateTime<Utc>>, Option<String>) =
+            sqlx::query_as("SELECT archived_at, gcs_path FROM games WHERE game_id = $1")
+                .bind(game_id)
+                .fetch_one(&pool)
+                .await?;
+        assert!(
+            archived_at.is_none(),
+            "no archive mark for a zero-frame game"
+        );
+        assert!(gcs_path.is_none());
+        // Nothing written — pins the zero-frame refusal specifically (the
+        // deterministic key stays empty, not even an empty-frames object).
+        assert!(
+            state
+                .object_store
+                .get(&native_gcs_path(game_id, created_at))
+                .await?
+                .is_none()
+        );
+
+        // Discovery never enqueues it (the EXISTS probe).
+        run_discovery_with_caps(&state, 6, 10, 10).await?;
+        let ids = enqueued_native_job_ids(&pool).await?;
+        assert!(
+            !ids.iter()
+                .any(|v| v.as_str() == Some(game_id.to_string().as_str())),
+            "zero-turn game must stay out of the enqueue set"
+        );
+        Ok(())
+    }
+
+    /// SC (DEV-2178): the header query's `turns_pruned_at IS NULL` filter
+    /// protects a DB that lacks the CHECK (restored from a pre-CHECK
+    /// backup, or the pre-migration window) — with the CHECK present, a
+    /// pruned game must carry pointers, so the archived_at skip would
+    /// mask the filter. Construct that CHECK-less world explicitly.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn archive_native_game_skips_pruned_game_even_without_the_check(
+        pool: sqlx::PgPool,
+    ) -> cja::Result<()> {
+        // The pre-CHECK world (per-test DB — disposable).
+        sqlx::query("ALTER TABLE games DROP CONSTRAINT games_pruned_requires_archive_check")
+            .execute(&pool)
+            .await?;
+
+        // Misconfigured env: DisabledObjectStore — reaching the upload
+        // would error, so Ok(()) proves the header skip ran before any
+        // store touch (mirrors the existing skip tests).
+        let mut state = AppState::test_from_pool(pool.clone());
+        state.object_store = std::sync::Arc::new(crate::object_store::DisabledObjectStore);
+        let now = Utc::now();
+        let game_id = fixture_game(
+            &pool,
+            "failed",
+            now - chrono::Duration::days(40),
+            now,
+            false,
+            None,
+        )
+        .await?;
+        // A framed turn, so ONLY the pruned-game filter can skip this
+        // game (the zero-frame refusal would otherwise mask it).
+        fixture_turn(&pool, game_id, 0, modern_frame(0)).await?;
+        // The gap-#1 state: pruned, pointers NULL (needs the CHECK gone).
+        sqlx::query("UPDATE games SET turns_pruned_at = NOW() WHERE game_id = $1")
+            .bind(game_id)
+            .execute(&pool)
+            .await?;
+
+        archive_native_game(&state, game_id).await?;
+
+        let gcs_path: Option<String> =
+            sqlx::query_scalar("SELECT gcs_path FROM games WHERE game_id = $1")
+                .bind(game_id)
+                .fetch_one(&pool)
+                .await?;
+        assert!(gcs_path.is_none(), "pruned game must not be re-archived");
+        let archived_at: Option<chrono::DateTime<Utc>> =
+            sqlx::query_scalar("SELECT archived_at FROM games WHERE game_id = $1")
+                .bind(game_id)
+                .fetch_one(&pool)
+                .await?;
+        assert!(archived_at.is_none());
         Ok(())
     }
 }

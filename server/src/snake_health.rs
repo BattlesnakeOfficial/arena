@@ -990,7 +990,7 @@ mod tests {
                 spec.game_type.clone(),
                 &[],
             );
-            assert_eq!(game.engine_game.meta.ruleset_name, real.meta.ruleset_name);
+            assert_eq!(game.engine_game.meta.mode, real.meta.mode);
             let (ours, theirs) = (&game.engine_game.meta.settings, &real.meta.settings);
             assert_eq!(ours.food_spawn_chance, theirs.food_spawn_chance);
             assert_eq!(ours.minimum_food, theirs.minimum_food);

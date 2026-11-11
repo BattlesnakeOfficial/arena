@@ -35,8 +35,8 @@ test.afterEach(async () => {
 async function seedDuel(): Promise<Duel> {
   const unique = Date.now() * 1000 + Math.floor(Math.random() * 1000);
   const [user] = await query<{ user_id: string }>(
-    `INSERT INTO users (external_github_id, github_login, github_access_token)
-     VALUES ($1, $2, '') RETURNING user_id::text AS user_id`,
+    `INSERT INTO users (external_github_id, github_login)
+     VALUES ($1, $2) RETURNING user_id::text AS user_id`,
     [unique, `turnjson_${unique}`],
   );
   seededUsers.push(user.user_id);

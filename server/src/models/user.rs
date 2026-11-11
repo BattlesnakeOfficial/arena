@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::github::auth::{GitHubTokenResponse, GitHubUser};
+use crate::github::auth::GitHubUser;
 
 // User model for our application
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -247,37 +247,19 @@ pub async fn get_players_paginated(
     Ok(players)
 }
 
-pub async fn create_or_update_user(
-    pool: &PgPool,
-    github_user: GitHubUser,
-    token: GitHubTokenResponse,
-) -> cja::Result<User> {
-    let token_expires_at = token
-        .expires_in
-        .map(|expires_in| chrono::Utc::now() + chrono::Duration::seconds(expires_in));
-
+pub async fn create_or_update_user(pool: &PgPool, github_user: GitHubUser) -> cja::Result<User> {
     let user = sqlx::query_as!(
         User,
         r#"
         INSERT INTO users (
-            external_github_id,
-            github_login,
-            github_avatar_url,
-            github_name,
-            github_email,
-            github_access_token,
-            github_refresh_token,
-            github_token_expires_at
+            external_github_id, github_login, github_avatar_url, github_name, github_email
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        VALUES ($1, $2, $3, $4, $5)
         ON CONFLICT (external_github_id) DO UPDATE SET
             github_login = $2,
             github_avatar_url = $3,
             github_name = $4,
-            github_email = $5,
-            github_access_token = $6,
-            github_refresh_token = $7,
-            github_token_expires_at = $8
+            github_email = $5
         RETURNING
             user_id,
             external_github_id,
@@ -299,10 +281,7 @@ pub async fn create_or_update_user(
         github_user.login,
         github_user.avatar_url,
         github_user.name,
-        github_user.email,
-        token.access_token,
-        token.refresh_token,
-        token_expires_at
+        github_user.email
     )
     .fetch_one(pool)
     .await
@@ -411,8 +390,8 @@ mod tests {
 
     async fn create_user(pool: &PgPool, github_id: i64) -> cja::Result<Uuid> {
         let row = sqlx::query!(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES ($1, $2, 'test-token')
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES ($1, $2)
              RETURNING user_id",
             github_id,
             format!("gh-user-{github_id}"),
@@ -431,8 +410,8 @@ mod tests {
         display_name: Option<&str>,
     ) -> cja::Result<Uuid> {
         let row = sqlx::query!(
-            "INSERT INTO users (external_github_id, github_login, github_access_token, display_name)
-             VALUES ($1, $2, 'test-token', $3)
+            "INSERT INTO users (external_github_id, github_login, display_name)
+             VALUES ($1, $2, $3)
              RETURNING user_id",
             github_id,
             login,
@@ -883,5 +862,27 @@ mod tests {
             validate_profile_fields(&max_display, &max_pronouns, max_country, &max_backstory)
                 .is_ok()
         );
+    }
+
+    /// DEV-2206: the leaked-credential columns (DEV-2165) are gone from the
+    /// schema after migrations run, and `users` remains writable.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn github_token_columns_are_dropped(pool: PgPool) -> cja::Result<()> {
+        // INSERT via RETURNING proves the table still accepts the
+        // post-DEV-2185 column set.
+        create_user(&pool, 7326).await?;
+
+        let columns: Vec<String> = sqlx::query_scalar(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = 'users'",
+        )
+        .fetch_all(&pool)
+        .await?;
+        assert!(
+            !columns.iter().any(|name| name == "github_access_token"
+                || name == "github_refresh_token"
+                || name == "github_token_expires_at"),
+            "users still carries a leaked-credential column: {columns:?}"
+        );
+        Ok(())
     }
 }

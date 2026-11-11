@@ -234,7 +234,7 @@ async fn load_game_card(
     // DEV-1981: a pruned terminal native game has no `turns` rows, so its
     // card's frame comes from the archive. Terminal-gated: a live game's
     // empty frame is just a game that hasn't produced turns yet.
-    if frame.is_none() && matches!(game.status, GameStatus::Finished | GameStatus::Failed) {
+    if frame.is_none() && game.status.is_terminal() {
         frame = archived_card_frame(state, game_id, spoilers).await?;
     }
     // A frame that doesn't parse (an old import) just means an empty board.
@@ -992,9 +992,9 @@ mod tests {
     /// turn 3; "Late Comer" won. Frames for turns 0-4.
     async fn fixture_duel(pool: &PgPool, status: &str) -> (Uuid, [Uuid; 2]) {
         let user_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
+            "INSERT INTO users (external_github_id, github_login)
              VALUES ((SELECT COALESCE(MAX(external_github_id), 777000) + 1 FROM users),
-                     'og-owner-' || gen_random_uuid(), '')
+                     'og-owner-' || gen_random_uuid())
              RETURNING user_id",
         )
         .fetch_one(pool)
@@ -1074,8 +1074,8 @@ mod tests {
 
     async fn fixture_world(pool: &PgPool) -> World {
         let user_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token, display_name)
-             VALUES (888001, 'og-player', '', 'OG Player') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login, display_name)
+             VALUES (888001, 'og-player', 'OG Player') RETURNING user_id",
         )
         .fetch_one(pool)
         .await
@@ -1239,7 +1239,8 @@ mod tests {
         .unwrap();
         let entry = leaderboard::get_or_create_entry(&pool, private, w.snake_id)
             .await
-            .unwrap();
+            .unwrap()
+            .expect("live snake joins");
         sqlx::query!(
             "UPDATE leaderboard_entries SET games_played = 50, display_score = 99
              WHERE leaderboard_entry_id = $1",
@@ -1579,8 +1580,8 @@ mod tests {
         .await
         .unwrap();
         let user_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (888901, 'og-prune', '') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (888901, 'og-prune') RETURNING user_id",
         )
         .fetch_one(&pool)
         .await
@@ -1673,7 +1674,7 @@ mod tests {
 
     async fn share_user(pool: &PgPool, github_id: i64) -> Uuid {
         sqlx::query_scalar::<_, Uuid>(
-            "INSERT INTO users (external_github_id, github_login, github_access_token) VALUES ($1, $2, '') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login) VALUES ($1, $2) RETURNING user_id",
         )
         .bind(github_id)
         .bind(format!("og-earn-{github_id}"))

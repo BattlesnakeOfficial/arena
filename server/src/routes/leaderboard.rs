@@ -1079,17 +1079,20 @@ pub async fn join_leaderboard(
         return Ok(redirect);
     }
 
-    // Verify snake belongs to user
-    let snake = battlesnake::get_battlesnake_by_id(&state.db, form.battlesnake_id)
+    // Verify snake belongs to user. `get_battlesnake_by_id` filters
+    // deleted snakes, so a missing/deleted snake is a flash, not a 500.
+    let Some(snake) = battlesnake::get_battlesnake_by_id(&state.db, form.battlesnake_id)
         .await
         .wrap_err("Failed to fetch battlesnake")
         .with_redirect(redirect.clone())?
-        .ok_or_else(|| {
-            crate::errors::ServerError(
-                color_eyre::eyre::eyre!("Battlesnake not found"),
-                redirect.clone(),
-            )
-        })?;
+    else {
+        flasher
+            .error("That battlesnake doesn't exist or has been deleted.")
+            .await
+            .wrap_err("Failed to flash")
+            .with_redirect(redirect.clone())?;
+        return Ok(redirect);
+    };
 
     if snake.user_id != user.user_id {
         return Err(crate::errors::ServerError(
@@ -1114,10 +1117,21 @@ pub async fn join_leaderboard(
     // Opt-in (or resume if paused). Resuming also clears the entry's health
     // streak, so a snake the sweeper pulled isn't re-paused on the very next
     // sweep (see `get_or_create_entry`).
-    let entry = leaderboard::get_or_create_entry(&state.db, leaderboard_id, form.battlesnake_id)
-        .await
-        .wrap_err("Failed to join leaderboard")
-        .with_redirect(redirect.clone())?;
+    let Some(entry) =
+        leaderboard::get_or_create_entry(&state.db, leaderboard_id, form.battlesnake_id)
+            .await
+            .wrap_err("Failed to join leaderboard")
+            .with_redirect(redirect.clone())?
+    else {
+        // Raced a delete: the snake was live at the pre-check but is gone (or
+        // its entry is 'deleted'-marked) by the time the upsert ran.
+        flasher
+            .error("That battlesnake doesn't exist or has been deleted.")
+            .await
+            .wrap_err("Failed to flash")
+            .with_redirect(redirect.clone())?;
+        return Ok(redirect);
+    };
 
     // Initialize scoring algorithm entries
     for algo in state.scoring.algorithms() {
@@ -1388,8 +1402,8 @@ mod owner_name_route_tests {
 
     async fn owner(pool: &PgPool, github_id: i64, login: &str, display_name: Option<&str>) -> Uuid {
         sqlx::query_scalar!(
-            "INSERT INTO users (external_github_id, github_login, github_access_token, display_name)
-             VALUES ($1, $2, 'token', $3) RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login, display_name)
+             VALUES ($1, $2, $3) RETURNING user_id",
             github_id,
             login,
             display_name
@@ -1421,6 +1435,7 @@ mod owner_name_route_tests {
         let entry_id = leaderboard::get_or_create_entry(pool, leaderboard_id, battlesnake_id)
             .await
             .unwrap()
+            .expect("live snake joins")
             .leaderboard_entry_id;
         sqlx::query!(
             "UPDATE leaderboard_entries SET games_played = $2 WHERE leaderboard_entry_id = $1",
@@ -1719,8 +1734,8 @@ mod column_route_tests {
         .await
         .unwrap();
         let user_id = sqlx::query_scalar!(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES ($1, $2, 'token') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES ($1, $2) RETURNING user_id",
             github_id,
             format!("gh-{github_id}")
         )
@@ -1738,6 +1753,7 @@ mod column_route_tests {
         let entry_id = leaderboard::get_or_create_entry(pool, leaderboard_id, battlesnake_id)
             .await
             .unwrap()
+            .expect("live snake joins")
             .leaderboard_entry_id;
         sqlx::query!(
             "UPDATE leaderboard_entries SET games_played = $2 WHERE leaderboard_entry_id = $1",

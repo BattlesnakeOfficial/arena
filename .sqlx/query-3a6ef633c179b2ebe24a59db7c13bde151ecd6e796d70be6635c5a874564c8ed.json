@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT turn_number, food, hazards FROM game_resume_states WHERE game_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "turn_number",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 1,
+        "name": "food",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 2,
+        "name": "hazards",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "3a6ef633c179b2ebe24a59db7c13bde151ecd6e796d70be6635c5a874564c8ed"
+}

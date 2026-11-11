@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT gcs_path AS \"gcs_path!\", archived_at AS \"archived_at!\"\n        FROM games\n        WHERE game_id = $1\n          AND engine_game_id IS NULL\n          AND status IN ('finished', 'failed')\n          AND archived_at IS NOT NULL\n          AND archive_version = 2\n          AND turns_pruned_at IS NULL\n          AND gcs_path IS NOT NULL\n          AND created_at < NOW() - make_interval(days => $2)\n          AND NOT EXISTS (\n              SELECT 1 FROM game_battlesnakes gb\n              WHERE gb.game_id = games.game_id\n                AND gb.created_at >= (SELECT scanned_through - INTERVAL '1 day'\n                                      FROM customization_active_week_backfill_cursor\n                                      WHERE singleton)\n          )\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "gcs_path!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "archived_at!",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      true,
+      true
+    ]
+  },
+  "hash": "9d33ba7f2367abd212173caa24ba77dc5b6bcf95705f3968464c1ad7ac41543d"
+}

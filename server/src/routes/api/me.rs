@@ -129,8 +129,8 @@ mod tests {
     /// Insert a fully-populated user; returns the user id.
     async fn create_full_user(pool: &PgPool) -> Uuid {
         sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_avatar_url, github_email, display_name, pronouns, country, github_access_token)
-             VALUES (9961001, 'gh-me', 'https://avatars.example/octo.png', 'octo@example.com', 'Display Person', 'they/them', 'CA', '')
+            "INSERT INTO users (external_github_id, github_login, github_avatar_url, github_email, display_name, pronouns, country)
+             VALUES (9961001, 'gh-me', 'https://avatars.example/octo.png', 'octo@example.com', 'Display Person', 'they/them', 'CA')
              RETURNING user_id",
         )
         .fetch_one(pool)
@@ -207,8 +207,8 @@ mod tests {
         let app = app(&state);
         // Rely on column defaults: display_name NULL, pronouns '', country ''.
         let user_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (9961003, 'gh-bare', '')
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (9961003, 'gh-bare')
              RETURNING user_id",
         )
         .fetch_one(&pool)
@@ -254,8 +254,8 @@ mod tests {
         let state = AppState::test_from_pool(pool.clone());
         let app = app(&state);
         let bare: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (9961004, 'gh-no-email', '') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (9961004, 'gh-no-email') RETURNING user_id",
         )
         .fetch_one(&pool)
         .await

@@ -9,13 +9,8 @@ use maud::{Markup, html};
 use serde::Deserialize;
 
 use crate::{
-    components::page_factory::PageFactory,
-    django_password,
-    errors::ServerResult,
-    flasher::Flasher,
-    models::{claim_email_token, imported_account},
-    routes::auth::CurrentUser,
-    state::AppState,
+    components::page_factory::PageFactory, django_password, errors::ServerResult, flasher::Flasher,
+    models::imported_account, routes::auth::CurrentUser, state::AppState,
 };
 
 /// Attempts per arena user per hour: stops one account from enumerating
@@ -525,23 +520,20 @@ pub async fn complete_email_claim(
             .into_response()
     };
 
-    let Some(imported_account_id) =
-        claim_email_token::consume(&state.db, &form.token, user.user_id)
-            .await
-            .wrap_err("Failed to consume claim token")?
-    else {
-        return Ok(failed(page_factory));
-    };
-
-    let summary = imported_account::claim_account(&state.db, imported_account_id, user.user_id)
+    let outcome = imported_account::redeem_email_claim(&state.db, &form.token, user.user_id)
         .await
-        .wrap_err("Failed to claim imported account")?;
+        .wrap_err("Failed to claim imported account via email link")?;
 
-    let Some(summary) = summary else {
-        // The account got claimed between link request and click (e.g. by
-        // GitHub auto-link in another session). The token is spent either
-        // way — a claimed account has nothing left to unlock.
-        return Ok(failed(page_factory));
+    let summary = match outcome {
+        imported_account::EmailClaimOutcome::InvalidToken
+        | imported_account::EmailClaimOutcome::AlreadyClaimed => {
+            // Unknown/expired/used/wrong-user token, or the account got
+            // claimed between link request and click (e.g. by GitHub
+            // auto-link in another session — the token is spent either
+            // way; a claimed account has nothing left to unlock).
+            return Ok(failed(page_factory));
+        }
+        imported_account::EmailClaimOutcome::Claimed(summary) => summary,
     };
 
     tracing::info!(
@@ -760,6 +752,123 @@ mod tests {
         .await;
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
         assert_claim_notice(&pool, user_id, "play-112@example.com").await?;
+        Ok(())
+    }
+
+    /// DEV-2185: the token CAS and the claim body share one transaction, so
+    /// a failure inside the claim rolls the consume back — the link
+    /// survives a transient error instead of being burned by it (a fresh
+    /// link costs one of 5 hourly claim attempts).
+    #[sqlx::test(migrations = "../migrations")]
+    async fn email_claim_failure_rolls_back_token_so_link_survives(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        let state = AppState::test_from_pool(pool.clone());
+        let app = app(&state);
+        let session = create_user_session(&pool, 1674101, false).await;
+        let user_id = session_user_id(&pool, session).await;
+        let cookie = signed_session_cookie(&state, session);
+        let account_id = seed_play_account(&pool, 101).await?;
+        sqlx::query(
+            "INSERT INTO imported_snakes (imported_account_id, play_snake_id, name, url, head, tail, color, is_public, engine_region)
+             VALUES ($1, 'snake-1', 'n', 'https://s.example', 'default', 'default', '#123456', true, 'us-west1')",
+        )
+        .bind(account_id)
+        .execute(&pool)
+        .await?;
+
+        let mut connection = pool.acquire().await?;
+        let token = claim_email_token::create(&mut connection, account_id, user_id).await?;
+        drop(connection);
+
+        // Force a mid-claim failure: materializing the staged snake aborts.
+        // (DDL as two separate non-macro statements, never `query!`.)
+        sqlx::query(
+            "CREATE FUNCTION battlesnakes_insert_boom() RETURNS trigger AS $$
+             BEGIN RAISE EXCEPTION 'boom'; END $$ LANGUAGE plpgsql",
+        )
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "CREATE TRIGGER fail_battlesnakes_insert BEFORE INSERT ON battlesnakes
+             FOR EACH ROW EXECUTE FUNCTION battlesnakes_insert_boom()",
+        )
+        .execute(&pool)
+        .await?;
+
+        let response = post_form(
+            &app,
+            "/claim/email/verify",
+            &cookie,
+            &format!("token={token}"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        // The link survived: neither the token nor the account transitioned.
+        let token_unused: bool = sqlx::query_scalar(
+            "SELECT used_at IS NULL FROM claim_email_tokens
+             WHERE imported_account_id = $1 AND requested_by_user_id = $2",
+        )
+        .bind(account_id)
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await?;
+        assert!(token_unused, "transient claim failure burned the link");
+        let unclaimed: bool = sqlx::query_scalar(
+            "SELECT claimed_by_user_id IS NULL FROM imported_accounts WHERE imported_account_id = $1",
+        )
+        .bind(account_id)
+        .fetch_one(&pool)
+        .await?;
+        assert!(unclaimed);
+
+        // Repair the failure mode: the SAME link now completes the claim.
+        sqlx::query("DROP TRIGGER fail_battlesnakes_insert ON battlesnakes")
+            .execute(&pool)
+            .await?;
+        sqlx::query("DROP FUNCTION battlesnakes_insert_boom()")
+            .execute(&pool)
+            .await?;
+        let response = post_form(
+            &app,
+            "/claim/email/verify",
+            &cookie,
+            &format!("token={token}"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|l| l.to_str().ok())
+            .map(str::to_string);
+        assert_eq!(location.as_deref(), Some("/battlesnakes"));
+
+        let token_used: bool = sqlx::query_scalar(
+            "SELECT used_at IS NOT NULL FROM claim_email_tokens
+             WHERE imported_account_id = $1 AND requested_by_user_id = $2",
+        )
+        .bind(account_id)
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await?;
+        assert!(token_used);
+        let claimed_by: Option<uuid::Uuid> = sqlx::query_scalar(
+            "SELECT claimed_by_user_id FROM imported_accounts WHERE imported_account_id = $1",
+        )
+        .bind(account_id)
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(claimed_by, Some(user_id));
+        let materialized: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM imported_snakes
+             WHERE imported_account_id = $1 AND materialized_battlesnake_id IS NOT NULL",
+        )
+        .bind(account_id)
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(materialized, 1);
         Ok(())
     }
 

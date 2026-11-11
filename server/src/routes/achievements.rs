@@ -647,7 +647,7 @@ mod tests {
 
     async fn user(pool: &PgPool, github_id: i64) -> Uuid {
         sqlx::query_scalar::<_, Uuid>(
-            "INSERT INTO users (external_github_id, github_login, github_access_token) VALUES ($1, $2, '') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login) VALUES ($1, $2) RETURNING user_id",
         )
         .bind(github_id)
         .bind(format!("share-{github_id}"))
@@ -967,6 +967,7 @@ mod tests {
         let entry = crate::models::leaderboard::get_or_create_entry(&pool, private_lb, rival_snake)
             .await
             .unwrap()
+            .expect("live snake joins")
             .leaderboard_entry_id;
         participant(&pool, game_id, owner_snake, 1, None).await;
         participant(&pool, game_id, rival_snake, 2, Some(entry)).await;

@@ -26,7 +26,7 @@ use uuid::Uuid;
 
 use crate::{
     email::{
-        SendOutcome,
+        SendError, SendOutcome,
         messages::{EmailMessage, action_button, render_layout},
     },
     state::AppState,
@@ -475,6 +475,10 @@ pub struct BatchCounts {
 
 enum NoticeOutcome {
     Sent,
+    /// Send failed (permanent rejection or no response — `failed`
+    /// recorded, never re-sent; or definite transient failure — reservation
+    /// released); stops the batch so a Mailgun outage costs at most one
+    /// account per 5-minute tick.
     Failed,
     Skipped,
     Deferred,
@@ -531,34 +535,52 @@ async fn send_notice(
     message.tags = wave_tags(wave);
 
     let _permit = state.mailer.acquire_delivery_permit().await?;
-    let mut tx = state.db.begin().await?;
     let sent = state
         .mailer
         .send_limited(
-            &mut tx,
+            &state.db,
             state.config.email_per_recipient_hourly_limit,
             PURPOSE,
             &message,
         )
         .await;
-    tx.commit()
-        .await
-        .wrap_err("Failed to commit shutdown notice email log")?;
 
     let (status, outcome) = match sent {
         Ok(SendOutcome::Sent) => (Some("sent"), NoticeOutcome::Sent),
+        // Permanent rejection (4xx other than 429): retrying this address
+        // cannot succeed — keep the `failed` row.
+        Ok(SendOutcome::Failed) => (Some("failed"), NoticeOutcome::Failed),
         // Release the reservation so a later batch retries.
         Ok(SendOutcome::RateLimited) => (None, NoticeOutcome::Deferred),
         Ok(SendOutcome::Disabled) => (None, NoticeOutcome::Disabled),
-        Err(error) => {
+        // No response after the request may have been sent (response-wait
+        // timeout, or the connection lost after Mailgun received it): the
+        // message may be delivered. Keep the `failed` row (drop this account
+        // for the wave) rather than risk a duplicate to a cold address.
+        Err(SendError::NoResponse(error)) => {
             tracing::warn!(
                 imported_account_id = %recipient.imported_account_id,
                 wave = wave.number(),
                 error = format!("{error:#}"),
-                "Shutdown notice failed to send"
+                "Shutdown notice got no response; delivery unknown, not re-sending"
             );
             (Some("failed"), NoticeOutcome::Failed)
         }
+        // Definite non-delivery (5xx, 429, connection failure): release the
+        // reservation so a later batch retries this account. The batch still
+        // stops (DEV-2176): an outage costs at most one account per tick.
+        Err(SendError::Transient(error)) => {
+            tracing::warn!(
+                imported_account_id = %recipient.imported_account_id,
+                wave = wave.number(),
+                error = format!("{error:#}"),
+                "Shutdown notice failed to send; reservation released for a later batch"
+            );
+            (None, NoticeOutcome::Failed)
+        }
+        // `send_limited` folds Rejected into Ok(Failed); unreachable, kept
+        // for exhaustiveness safety.
+        Err(SendError::Rejected { .. }) => (Some("failed"), NoticeOutcome::Failed),
     };
     match status {
         Some(status) => {
@@ -610,7 +632,10 @@ pub async fn send_batch(
             .unwrap_or_default();
         match send_notice(state, wave, recipient, account_snakes).await? {
             NoticeOutcome::Sent => counts.sent += 1,
-            NoticeOutcome::Failed => counts.failed += 1,
+            NoticeOutcome::Failed => {
+                counts.failed += 1;
+                break;
+            }
             NoticeOutcome::Skipped => counts.skipped += 1,
             NoticeOutcome::Deferred => counts.deferred += 1,
             NoticeOutcome::Disabled => break,
@@ -658,7 +683,7 @@ impl Job<AppState> for PlayShutdownNoticeJob {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{sync::Arc, time::Duration};
 
     use axum::{
         body::Body,
@@ -899,7 +924,12 @@ mod tests {
         .unwrap()
     }
 
-    async fn mailgun_state(pool: &PgPool, server: &MockServer, hourly_limit: i64) -> AppState {
+    async fn mailgun_state(
+        pool: &PgPool,
+        server: &MockServer,
+        hourly_limit: i64,
+        client: reqwest::Client,
+    ) -> AppState {
         let mut state = AppState::test_from_pool(pool.clone());
         let config = Arc::get_mut(&mut state.config).expect("unique config Arc");
         config.email_per_recipient_hourly_limit = hourly_limit;
@@ -910,7 +940,7 @@ mod tests {
                 from: "Battlesnake <reply@example.com>".into(),
                 base_url: server.uri(),
             }),
-            reqwest::Client::new(),
+            client,
         );
         state
     }
@@ -991,7 +1021,7 @@ mod tests {
         .unwrap();
 
         let server = mailgun().await;
-        let state = mailgun_state(&pool, &server, 5).await;
+        let state = mailgun_state(&pool, &server, 5, reqwest::Client::new()).await;
 
         let counts = send_batch(&state, &pool, Wave::First, 50).await.unwrap();
         assert_eq!(counts.sent, 1);
@@ -1026,19 +1056,194 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "../migrations")]
+    async fn mailgun_503_stops_the_batch_and_releases_the_reservation(pool: PgPool) {
+        create_play_tables(&pool).await;
+        for account in ["a", "b", "c"] {
+            play_account(&pool, account, Some(10)).await;
+        }
+        let a = imported(&pool, "a").await;
+        let b = imported(&pool, "b").await;
+        let c = imported(&pool, "c").await;
+
+        // A local 503 mock — NOT the 200-answering mailgun() helper.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+        let state = mailgun_state(&pool, &server, 5, reqwest::Client::new()).await;
+
+        let counts = send_batch(&state, &pool, Wave::First, 50).await.unwrap();
+        assert_eq!(counts.sent, 0);
+        assert_eq!(counts.failed, 1);
+
+        // The batch stopped: three eligible accounts, one HTTP attempt.
+        assert_eq!(sent_bodies(&server).await.len(), 1);
+
+        // The 503 is a definite non-delivery, so the reservation was
+        // released — no account keeps a `failed` row, all three stay
+        // eligible for the next tick.
+        let mut statuses = vec![
+            status(&pool, a, Wave::First).await,
+            status(&pool, b, Wave::First).await,
+            status(&pool, c, Wave::First).await,
+        ];
+        statuses.sort();
+        assert_eq!(statuses, vec![None, None, None]);
+
+        // The release actually re-queues the account: a healthy batch picks
+        // one up and sends it successfully. wiremock matches the lowest
+        // priority number first (ties by insertion order), so the recovery
+        // mock needs `.with_priority(1)` to beat the already-mounted 503;
+        // the batch runs with limit 1 so it sends exactly one account.
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        let counts = send_batch(&state, &pool, Wave::First, 1).await.unwrap();
+        assert_eq!(counts.sent, 1);
+        let sent: Vec<uuid::Uuid> = sqlx::query_scalar(
+            "SELECT imported_account_id FROM play_shutdown_notices WHERE status = 'sent'",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(sent.len(), 1);
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn mailgun_400_keeps_the_failed_row(pool: PgPool) {
+        create_play_tables(&pool).await;
+        for account in ["a", "b", "c"] {
+            play_account(&pool, account, Some(10)).await;
+        }
+        let a = imported(&pool, "a").await;
+        let b = imported(&pool, "b").await;
+        let c = imported(&pool, "c").await;
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(400))
+            .mount(&server)
+            .await;
+        let state = mailgun_state(&pool, &server, 5, reqwest::Client::new()).await;
+
+        let counts = send_batch(&state, &pool, Wave::First, 50).await.unwrap();
+        assert_eq!(counts.failed, 1);
+        assert_eq!(sent_bodies(&server).await.len(), 1);
+
+        // A permanent rejection is terminal: exactly one account keeps a
+        // `failed` row (never re-sent for this wave); the other two stay
+        // eligible. Which account fails first is not deterministic
+        // (UUID ordering) — compare as a multiset.
+        let mut statuses = vec![
+            status(&pool, a, Wave::First).await,
+            status(&pool, b, Wave::First).await,
+            status(&pool, c, Wave::First).await,
+        ];
+        statuses.sort();
+        assert_eq!(statuses, vec![None, None, Some("failed".to_string())]);
+
+        // A later batch skips the failed account and spends its one
+        // attempt on the next account instead.
+        let counts = send_batch(&state, &pool, Wave::First, 50).await.unwrap();
+        assert_eq!(counts.failed, 1);
+        let mut statuses = vec![
+            status(&pool, a, Wave::First).await,
+            status(&pool, b, Wave::First).await,
+            status(&pool, c, Wave::First).await,
+        ];
+        statuses.sort();
+        assert_eq!(
+            statuses,
+            vec![None, Some("failed".to_string()), Some("failed".to_string())]
+        );
+        assert_eq!(sent_bodies(&server).await.len(), 2);
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn mailgun_timeout_keeps_the_failed_row_no_resend(pool: PgPool) {
+        create_play_tables(&pool).await;
+        for account in ["a", "b", "c"] {
+            play_account(&pool, account, Some(10)).await;
+        }
+        let a = imported(&pool, "a").await;
+        let b = imported(&pool, "b").await;
+        let c = imported(&pool, "c").await;
+
+        // 200s that always arrive slower than the client timeout: Mailgun
+        // may have accepted the message; the client never learns.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_millis(400)))
+            .mount(&server)
+            .await;
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_millis(150))
+            .build()
+            .unwrap();
+        let state = mailgun_state(&pool, &server, 5, client).await;
+
+        let counts = send_batch(&state, &pool, Wave::First, 50).await.unwrap();
+        assert_eq!(counts.failed, 1);
+        assert_eq!(sent_bodies(&server).await.len(), 1);
+        let mut statuses = vec![
+            status(&pool, a, Wave::First).await,
+            status(&pool, b, Wave::First).await,
+            status(&pool, c, Wave::First).await,
+        ];
+        statuses.sort();
+        assert_eq!(statuses, vec![None, None, Some("failed".to_string())]);
+
+        // Delivery is unknown, so the timed-out account must NOT be re-sent:
+        // a fast 200 batch sends a different account instead. The recovery
+        // mock takes `.with_priority(1)` to beat the already-mounted delayed
+        // mock (wiremock: lowest priority number wins, ties by insertion
+        // order), and the batch runs with limit 1 so exactly one of the two
+        // remaining accounts sends.
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        let counts = send_batch(&state, &pool, Wave::First, 1).await.unwrap();
+        assert_eq!(counts.sent, 1);
+        let mut statuses = vec![
+            status(&pool, a, Wave::First).await,
+            status(&pool, b, Wave::First).await,
+            status(&pool, c, Wave::First).await,
+        ];
+        statuses.sort();
+        assert_eq!(
+            statuses,
+            vec![None, Some("failed".to_string()), Some("sent".to_string())]
+        );
+        let bodies = sent_bodies(&server).await;
+        assert_eq!(bodies.len(), 2);
+        let to_of = |body: &String| {
+            body.lines()
+                .find(|line| line.starts_with("to="))
+                .expect("to= field in body")
+                .to_string()
+        };
+        assert_ne!(to_of(&bodies[0]), to_of(&bodies[1]));
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
     async fn rate_limited_sends_are_released_for_a_later_batch(pool: PgPool) {
         create_play_tables(&pool).await;
         play_account(&pool, "fresh", Some(10)).await;
         let fresh = imported(&pool, "fresh").await;
         let server = mailgun().await;
 
-        let limited = mailgun_state(&pool, &server, 0).await;
+        let limited = mailgun_state(&pool, &server, 0, reqwest::Client::new()).await;
         let counts = send_batch(&limited, &pool, Wave::First, 50).await.unwrap();
         assert_eq!(counts.deferred, 1);
         assert_eq!(status(&pool, fresh, Wave::First).await, None);
         assert!(sent_bodies(&server).await.is_empty());
 
-        let state = mailgun_state(&pool, &server, 5).await;
+        let state = mailgun_state(&pool, &server, 5, reqwest::Client::new()).await;
         let counts = send_batch(&state, &pool, Wave::First, 50).await.unwrap();
         assert_eq!(counts.sent, 1);
         assert_eq!(
@@ -1099,7 +1304,7 @@ mod tests {
         let server = mailgun().await;
         // Both waves go to the same recipient within the hour; the existing
         // limit convention is 5 (a limit below 2 would defer the second send).
-        let state = mailgun_state(&pool, &server, 5).await;
+        let state = mailgun_state(&pool, &server, 5, reqwest::Client::new()).await;
 
         send_batch(&state, &pool, Wave::First, 50).await.unwrap();
         send_batch(&state, &pool, Wave::Second, 50).await.unwrap();

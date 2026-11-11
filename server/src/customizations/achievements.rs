@@ -1130,7 +1130,7 @@ mod tests {
 
     async fn user(pool: &PgPool, number: i64) -> Uuid {
         sqlx::query_scalar::<_, Uuid>(
-            "INSERT INTO users (external_github_id, github_login, github_access_token) VALUES ($1, $2, '') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login) VALUES ($1, $2) RETURNING user_id",
         )
         .bind(number)
         .bind(format!("achievement-{number}"))

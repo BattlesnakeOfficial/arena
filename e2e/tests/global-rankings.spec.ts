@@ -108,9 +108,9 @@ test('rankings pages past fifty rows', async ({ page }) => {
   try {
     await query(
       `WITH inserted_users AS (
-         INSERT INTO users (external_github_id, github_login, github_access_token, display_name)
+         INSERT INTO users (external_github_id, github_login, display_name)
          SELECT 800000000000000 + $1::bigint * 100 + n,
-                CASE WHEN n = 1 THEN $4 ELSE $2 || '_' || n END, 'test',
+                CASE WHEN n = 1 THEN $4 ELSE $2 || '_' || n END,
                 CASE WHEN n = 2 THEN $5 ELSE NULL END
          FROM generate_series(1, 55) n RETURNING user_id, github_login
        ), inserted_snakes AS (
@@ -165,8 +165,8 @@ test('rankings pages past fifty rows', async ({ page }) => {
 test('rankings player cell shows the owner country flag', async ({ page }) => {
   const stamp = `${Date.now()}_${Math.floor(Math.random() * 10000)}`;
   const [owner] = await query<{ user_id: string }>(
-    `INSERT INTO users (external_github_id, github_login, github_access_token, display_name, country)
-     VALUES ($1::bigint, $2, 'tk', 'Ranking Flag GB', 'GB') RETURNING user_id`,
+    `INSERT INTO users (external_github_id, github_login, display_name, country)
+     VALUES ($1::bigint, $2, 'Ranking Flag GB', 'GB') RETURNING user_id`,
     [Date.now() * 1000 + 700_200, `ranking-flag-gb-${stamp}`],
   );
   try {

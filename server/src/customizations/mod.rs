@@ -193,6 +193,11 @@ pub async fn unlock_with_token(
 
 /// Scan historical links in bounded timestamp windows. Credits and cursor
 /// advance share one transaction, so a failed batch is retried intact.
+/// Kept as an hourly safety net (DEV-2177): native finishes stamp
+/// `finished_at` (`mark_game_finished_tx`) and imported Play games carry no
+/// `game_battlesnakes` rows, so steady state inserts 0 rows — but any
+/// future writer that finishes a rostered game without stamping
+/// `finished_at` still gets its weeks credited here.
 pub async fn backfill_active_weeks(pool: &PgPool) -> cja::Result<u64> {
     let mut total = 0;
     loop {
@@ -482,8 +487,8 @@ mod tests {
 
     async fn create_test_user(pool: &PgPool) -> cja::Result<Uuid> {
         let row = sqlx::query!(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (42424242, 'customization-tester', 'test-token')
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (42424242, 'customization-tester')
              RETURNING user_id"
         )
         .fetch_one(pool)
@@ -586,7 +591,7 @@ mod tests {
         use chrono::{TimeZone as _, Utc};
         let owner = create_test_user(&pool).await?;
         let other = sqlx::query_scalar!(
-            "INSERT INTO users (external_github_id, github_login, github_access_token) VALUES (42424243, 'other-customization-tester', 'token') RETURNING user_id"
+            "INSERT INTO users (external_github_id, github_login) VALUES (42424243, 'other-customization-tester') RETURNING user_id"
         ).fetch_one(&pool).await?;
         let snake = sqlx::query_scalar!(
             "INSERT INTO battlesnakes (user_id, name, url) VALUES ($1, 'Week Snake', 'https://example.com') RETURNING battlesnake_id", owner
@@ -800,7 +805,7 @@ mod tests {
     async fn failed_backfill_batch_rolls_back_credit_and_cursor(pool: PgPool) -> cja::Result<()> {
         let a = create_test_user(&pool).await?;
         let b = sqlx::query_scalar!(
-            "INSERT INTO users (external_github_id, github_login, github_access_token) VALUES (42424243, 'poison-tester', 'token') RETURNING user_id"
+            "INSERT INTO users (external_github_id, github_login) VALUES (42424243, 'poison-tester') RETURNING user_id"
         ).fetch_one(&pool).await?;
         let (normal, poisoned) = if a < b { (a, b) } else { (b, a) };
         let start = chrono::Utc::now() - chrono::Duration::hours(4);
@@ -1139,7 +1144,7 @@ mod tests {
             let mut users = Vec::new();
             for owner in 0..2 {
                 users.push(sqlx::query_scalar!(
-                    "INSERT INTO users (external_github_id, github_login, github_access_token) VALUES ($1, $2, 'token') RETURNING user_id",
+                    "INSERT INTO users (external_github_id, github_login) VALUES ($1, $2) RETURNING user_id",
                     4_000_000_i64 + i64::from(case) * 2 + owner as i64,
                     format!("property-{case}-{owner}"),
                 ).fetch_one(&pool).await?);

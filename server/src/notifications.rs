@@ -295,7 +295,7 @@ mod tests {
     use super::*;
 
     async fn user(pool: &PgPool) -> cja::Result<Uuid> {
-        Ok(sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login, github_access_token) VALUES (9001673, 'notification-test', '') RETURNING user_id").fetch_one(pool).await?)
+        Ok(sqlx::query_scalar!("INSERT INTO users (external_github_id, github_login) VALUES (9001673, 'notification-test') RETURNING user_id").fetch_one(pool).await?)
     }
 
     #[test]

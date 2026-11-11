@@ -2,10 +2,11 @@
 //! snake profile chart.
 //!
 //! Reads `snake_turns.latency_ms` / `timed_out`, which the game runner writes
-//! for every move request. A timeout and a network error both store
-//! `latency_ms = NULL, timed_out = true`, so percentiles only cover answered
-//! moves and timeouts are counted separately — folding them in as NULLs
-//! would silently hide a snake's worst turns.
+//! for every move request. A direct-path timeout stores its real elapsed
+//! latency with `timed_out = true`; proxied timeouts and transport failures
+//! store `NULL`. The query keeps every timeout out of the answered count and
+//! percentiles with an explicit `FILTER (WHERE NOT st.timed_out)`, so
+//! percentiles cover answered moves only and timeouts are counted separately.
 
 use chrono::{DateTime, Utc};
 use color_eyre::eyre::Context as _;
@@ -110,10 +111,12 @@ pub async fn get_recent_latency_for_battlesnake(
         SELECT
             r.game_id AS "game_id?",
             MAX(r.created_at) AS "game_created_at?",
-            COUNT(st.latency_ms) AS "answered!",
+            COUNT(st.latency_ms) FILTER (WHERE NOT st.timed_out) AS "answered!",
             COUNT(*) FILTER (WHERE st.timed_out) AS "timeouts!",
-            percentile_cont(0.5) WITHIN GROUP (ORDER BY st.latency_ms::float8) AS p50_ms,
-            percentile_cont(0.95) WITHIN GROUP (ORDER BY st.latency_ms::float8) AS p95_ms
+            percentile_cont(0.5) WITHIN GROUP (ORDER BY st.latency_ms::float8)
+                FILTER (WHERE NOT st.timed_out) AS p50_ms,
+            percentile_cont(0.95) WITHIN GROUP (ORDER BY st.latency_ms::float8)
+                FILTER (WHERE NOT st.timed_out) AS p95_ms
         FROM recent r
         JOIN snake_turns st ON st.game_battlesnake_id = r.game_battlesnake_id
         WHERE st.latency_ms IS NOT NULL OR st.timed_out
@@ -183,8 +186,8 @@ mod tests {
     impl Seed {
         async fn new(pool: PgPool) -> cja::Result<Self> {
             let user_id = sqlx::query_scalar!(
-                "INSERT INTO users (external_github_id, github_login, github_access_token)
-                 VALUES (4242, 'latency-owner', 'test-token')
+                "INSERT INTO users (external_github_id, github_login)
+                 VALUES (4242, 'latency-owner')
                  RETURNING user_id"
             )
             .fetch_one(&pool)
@@ -284,11 +287,14 @@ mod tests {
             latency_ms: Option<i32>,
             timed_out: bool,
         ) -> cja::Result<()> {
+            // DEV-2178: frame_data must be non-NULL for the real archiver/pruner
+            // (latency_chart_empty_after_prune) to treat this as a real game.
             let turn_id = sqlx::query_scalar!(
-                "INSERT INTO turns (game_id, turn_number)
-                 VALUES ($1, (SELECT COUNT(*)::int FROM turns WHERE game_id = $1))
-                 RETURNING turn_id",
-                game_id
+                r#"INSERT INTO turns (game_id, turn_number, frame_data)
+                 VALUES ($1, (SELECT COUNT(*)::int FROM turns WHERE game_id = $1), $2)
+                 RETURNING turn_id"#,
+                game_id,
+                serde_json::json!({"Turn": 0, "Snakes": []})
             )
             .fetch_one(&self.pool)
             .await?;
@@ -350,6 +356,33 @@ mod tests {
 
         assert_eq!(recent.games.len(), 1);
         assert_stats(recent.games[0].stats, 0, 3, None, None);
+        assert_eq!(recent.overall, recent.games[0].stats);
+
+        Ok(())
+    }
+
+    /// DEV-2184: timeouts now persist a real elapsed latency alongside
+    /// `timed_out = true`. Those rows must stay out of `answered` and the
+    /// percentiles — the FILTER is the guard now, not NULL latency (the
+    /// `moves` fixture's timed-out rows are NULL-latency, so this needs a
+    /// `raw_move`).
+    #[sqlx::test(migrations = "../migrations")]
+    async fn timed_out_moves_with_recorded_latency_stay_out_of_percentiles(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        let seed = Seed::new(pool).await?;
+        let game = seed.game("finished", 5).await?;
+        let gb = seed.join_direct(game, seed.battlesnake_id).await?;
+        seed.moves(game, gb, &[Some(100), Some(200)]).await?;
+        // A timed-out turn WITH a recorded latency (the new shape).
+        seed.raw_move(game, gb, Some(500), true).await?;
+
+        let recent = seed.fetch(RECENT_GAMES_LIMIT).await?;
+
+        assert_eq!(recent.games.len(), 1);
+        // Percentiles from [100, 200] only; the 500ms timeout is counted,
+        // not folded in.
+        assert_stats(recent.games[0].stats, 2, 1, Some(150.0), Some(195.0));
         assert_eq!(recent.overall, recent.games[0].stats);
 
         Ok(())

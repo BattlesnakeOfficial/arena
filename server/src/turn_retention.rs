@@ -37,16 +37,23 @@
 //!   NULL`, so no archive ever contained them, and every reader of old
 //!   games' frames requires `frame_data`, so such rows are invisible to
 //!   all of them.
-//! - **Fail-closed retention**: a game whose object is missing or
-//!   content-mismatched keeps `turns_pruned_at IS NULL`, stays in
-//!   `games_turns_prunable_idx`, is re-enqueued hourly, re-fails, and
-//!   re-logs the ERROR hourly. `PRUNE_DISCOVERY_CAP`+ such games stall
-//!   pruning entirely (visible as discovery candidates that never
-//!   shrink); the remedy is clearing the archive pointers
+//! - **Fail-closed retention**: a game whose object is missing,
+//!   undecodable, wrong-version, wrong-id, or content-diverged keeps
+//!   `turns_pruned_at IS NULL`, stays in `games_turns_prunable_idx`, is
+//!   re-enqueued hourly, re-fails, and re-logs the ERROR hourly. The
+//!   remedy for permanently stuck games is clearing the archive pointers
 //!   (`UPDATE games SET archived_at = NULL, gcs_path = NULL,
 //!   archive_version = NULL WHERE game_id = …`) so DEV-1980 discovery
 //!   re-archives — `native_gcs_path` is deterministic, so the re-archive
-//!   overwrites the bad object at the same key.
+//!   overwrites the bad object at the same key. On a pruned game that
+//!   UPDATE is rejected by the `games_pruned_requires_archive_check`
+//!   CHECK (DEV-2178: pruned ⇒ archive pointers set) — correctly, since
+//!   those pointers name the game's only surviving frame copy. The one
+//!   self-healing exception: a prefix-confirmed count mismatch (stale
+//!   archive — the sweeper race left the object holding a strict PREFIX
+//!   of the DB's frames) auto-clears the pointers via
+//!   `clear_stale_archive_pointers`, so discovery re-archives the
+//!   complete game and the next prune confirms and deletes.
 //! - **Cache discipline**: the confirm decodes via
 //!   `archive::decode_archive_object` directly and never touches the
 //!   `ArchiveReader` cache (routing 2000 cold games/hour through
@@ -162,6 +169,12 @@ pub(crate) enum PruneOutcome {
     /// Turns retained on purpose (fail-closed) — see RetainReason.
     /// Always logged at ERROR.
     Retained { reason: RetainReason },
+    /// Turns retained; the archive object held a strict prefix of the
+    /// DB's frames (stale archive — the sweeper race), so archive
+    /// pointers were cleared via a guarded UPDATE and native backup
+    /// discovery will re-archive the complete game. Logged at WARN.
+    /// Not a failure.
+    StaleArchiveCleared,
 }
 
 /// Why turns were retained (log discrimination + test assertions).
@@ -176,7 +189,11 @@ pub(crate) enum RetainReason {
     /// Self-declared game_id != games.game_id.
     WrongGameId,
     /// Frame count differs from turns (stale/incomplete archive — e.g.
-    /// the sweeper race).
+    /// the sweeper race). When the DB holds MORE frames than the
+    /// object, the confirm first proves the object is a strict PREFIX
+    /// of the DB frames (divergence surfaces as FrameContentMismatch,
+    /// a parse failure as Undecodable); only a proven prefix reaches
+    /// this reason, which is what the prune's auto-clear keys on.
     FrameCountMismatch,
     /// Frame content differs from turns at equal count.
     FrameContentMismatch,
@@ -188,6 +205,12 @@ enum PruneConfirm {
     Confirmed,
     /// Retain turns and log loudly. `reason` is the test-facing
     /// discriminator; `detail` is the specifics for the ERROR log line.
+    /// Prefix semantics (DEV-2178): `FrameCountMismatch` with
+    /// `db_frames > archived_frames` means the archive was PROVEN a
+    /// strict prefix of the DB frames — the caller's auto-clear depends
+    /// on that guarantee; a divergent prefix surfaces as
+    /// `FrameContentMismatch` and an unparseable one as `Undecodable`,
+    /// both fail-closed.
     Mismatch {
         reason: RetainReason,
         detail: String,
@@ -247,7 +270,58 @@ fn confirm_archive_content(game_id: Uuid, compressed: &[u8], db_texts: &[String]
             archived.frame_count(),
         );
     }
+    // DEV-2178: shared per-pair comparison — parse one raw archived frame
+    // and one DB frame text as Value and compare. Err carries the
+    // retain reason plus its log detail, so the equal-count loop and the
+    // stale-archive prefix check share parse-error (Undecodable) and
+    // divergence (FrameContentMismatch) semantics without duplication.
+    let frame_pair_equal =
+        |raw: &serde_json::value::RawValue, text: &str| -> Result<bool, (RetainReason, String)> {
+            let archived_frame: serde_json::Value = match serde_json::from_str(raw.get()) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Err((
+                        RetainReason::Undecodable,
+                        format!("archived frame does not parse: {e}"),
+                    ));
+                }
+            };
+            let db_frame: serde_json::Value = match serde_json::from_str(text) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Err((
+                        RetainReason::Undecodable,
+                        format!("turns frame does not parse: {e}"),
+                    ));
+                }
+            };
+            Ok(archived_frame == db_frame)
+        };
     if archived.frame_count() != db_texts.len() {
+        // DEV-2178: a count mismatch where the DB holds more frames is
+        // only safe to self-heal if the archive is a strict PREFIX of
+        // the DB frames. Divergence (or a parse failure) is
+        // FrameContentMismatch/Undecodable — fail-closed; the caller's
+        // auto-clear never fires on it. The reverse direction (archive
+        // longer than DB) stays FrameCountMismatch, also fail-closed.
+        if archived.frame_count() < db_texts.len() {
+            for (raw, text) in archived.frames().iter().zip(db_texts.iter()) {
+                match frame_pair_equal(raw, text) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        return mismatch(
+                            RetainReason::FrameContentMismatch,
+                            "frame content differs from turns (archive prefix diverges)"
+                                .to_string(),
+                            archived.frame_count(),
+                        );
+                    }
+                    Err((reason, detail)) => {
+                        return mismatch(reason, detail, archived.frame_count());
+                    }
+                }
+            }
+        }
         return mismatch(
             RetainReason::FrameCountMismatch,
             "frame count differs from turns (stale or incomplete archive)".to_string(),
@@ -255,32 +329,16 @@ fn confirm_archive_content(game_id: Uuid, compressed: &[u8], db_texts: &[String]
         );
     }
     for (raw, text) in archived.frames().iter().zip(db_texts.iter()) {
-        let archived_frame: serde_json::Value = match serde_json::from_str(raw.get()) {
-            Ok(v) => v,
-            Err(e) => {
+        match frame_pair_equal(raw, text) {
+            Ok(true) => {}
+            Ok(false) => {
                 return mismatch(
-                    RetainReason::Undecodable,
-                    format!("archived frame does not parse: {e}"),
+                    RetainReason::FrameContentMismatch,
+                    "frame content differs from turns".to_string(),
                     archived.frame_count(),
                 );
             }
-        };
-        let db_frame: serde_json::Value = match serde_json::from_str(text) {
-            Ok(v) => v,
-            Err(e) => {
-                return mismatch(
-                    RetainReason::Undecodable,
-                    format!("turns frame does not parse: {e}"),
-                    archived.frame_count(),
-                );
-            }
-        };
-        if archived_frame != db_frame {
-            return mismatch(
-                RetainReason::FrameContentMismatch,
-                "frame content differs from turns".to_string(),
-                archived.frame_count(),
-            );
+            Err((reason, detail)) => return mismatch(reason, detail, archived.frame_count()),
         }
     }
     PruneConfirm::Confirmed
@@ -303,6 +361,35 @@ async fn pruned_elsewhere(db: &sqlx::PgPool, game_id: Uuid) -> cja::Result<bool>
     .await
     .wrap_err("Failed to re-check turns_pruned_at after count mismatch")?;
     Ok(marker.is_some())
+}
+
+/// Clear a stale archive's pointers so native backup discovery
+/// re-archives the game (the GCS key is deterministic, so the
+/// re-archive overwrites the stale object). Guarded: `archived_at`
+/// must equal the value this job read under the slot (a concurrent
+/// re-archive stamps a fresh one and wins), and `turns_pruned_at`
+/// must still be NULL (never strip a pruned game's pointers — the
+/// `games_pruned_requires_archive_check` CHECK also enforces this).
+/// The UPDATE bumps `updated_at` (trigger), which is what makes the
+/// row hit discovery's recent tier within the hour.
+async fn clear_stale_archive_pointers(
+    db: &sqlx::PgPool,
+    game_id: Uuid,
+    archived_at_read: chrono::DateTime<chrono::Utc>,
+) -> cja::Result<u64> {
+    let result = sqlx::query!(
+        r#"UPDATE games
+           SET archived_at = NULL, gcs_path = NULL, archive_version = NULL
+           WHERE game_id = $1
+             AND archived_at = $2
+             AND turns_pruned_at IS NULL"#,
+        game_id,
+        archived_at_read
+    )
+    .execute(db)
+    .await
+    .wrap_err("Failed to clear stale archive pointers")?;
+    Ok(result.rows_affected())
 }
 
 /// Prune one archived native game's `turns` rows (its `snake_turns`
@@ -340,10 +427,11 @@ async fn prune_game_turns_with_lock_timeout(
         .wrap_err("Backup slot semaphore closed")?;
 
     // 2. Re-check the full prune predicate for this one game, UNDER the
-    //    slot. gcs_path is non-NULL by the predicate, so "!" is safe.
-    let Some(gcs_path) = sqlx::query_scalar!(
+    //    slot. gcs_path/archived_at are non-NULL by the predicate, so
+    //    "!" is safe.
+    let Some(row) = sqlx::query!(
         r#"
-        SELECT gcs_path AS "gcs_path!"
+        SELECT gcs_path AS "gcs_path!", archived_at AS "archived_at!"
         FROM games
         WHERE game_id = $1
           AND engine_game_id IS NULL
@@ -373,6 +461,11 @@ async fn prune_game_turns_with_lock_timeout(
              terminal-native, too young, no object path, or cursor behind)");
         return Ok(PruneOutcome::Skipped);
     };
+    let gcs_path = row.gcs_path;
+    // The `archived_at` this job read under the slot — the guard value
+    // for the stale-archive pointer clear below (a concurrent
+    // re-archive stamps a fresh one and wins the race).
+    let archived_at_read = row.archived_at;
 
     // 3. What the archiver would write NOW, then the stored object.
     //    fetch_native_frame_texts is the writer's own selection, so the
@@ -427,6 +520,25 @@ async fn prune_game_turns_with_lock_timeout(
                 tracing::debug!(%game_id,
                     "Prune skipped: another instance pruned this game between \
                      the re-check and the frame fetch");
+                return Ok(PruneOutcome::Skipped);
+            }
+            // DEV-2178: the DB is a superset of the archive and the confirm
+            // proved the archive is a strict prefix (sweeper race: archived
+            // mid-run, straggler turns after). The stale object blocks
+            // pruning forever; clear the pointers so discovery re-archives
+            // the complete game, then a later prune confirms and deletes.
+            // Only this direction: an archive holding MORE frames than the
+            // DB, or a divergent prefix, stays fail-closed above.
+            if reason == RetainReason::FrameCountMismatch && db_frames > archived_frames {
+                let cleared =
+                    clear_stale_archive_pointers(&app_state.db, game_id, archived_at_read).await?;
+                if cleared == 1 {
+                    tracing::warn!(%game_id, path = %gcs_path, archived_frames, db_frames,
+                        "Stale archive (DB has more frames); cleared pointers for re-archival");
+                    return Ok(PruneOutcome::StaleArchiveCleared);
+                }
+                tracing::debug!(%game_id,
+                    "Concurrent re-archive won the race; leaving archive pointers alone");
                 return Ok(PruneOutcome::Skipped);
             }
             tracing::error!(
@@ -512,8 +624,8 @@ mod tests {
     ) -> cja::Result<Uuid> {
         let login = format!("prune-user-{}", Uuid::new_v4().simple());
         let user_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES ($1, $2, '') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES ($1, $2) RETURNING user_id",
         )
         .bind(Uuid::new_v4().as_u128() as i64)
         .bind(&login)
@@ -611,6 +723,24 @@ mod tests {
             .fetch_one(pool)
             .await?;
         Ok(value)
+    }
+
+    /// The game's archive pointer columns.
+    async fn archive_pointers(
+        pool: &sqlx::PgPool,
+        game_id: Uuid,
+    ) -> cja::Result<(
+        Option<chrono::DateTime<chrono::Utc>>,
+        Option<String>,
+        Option<i32>,
+    )> {
+        let row = sqlx::query_as(
+            "SELECT archived_at, gcs_path, archive_version FROM games WHERE game_id = $1",
+        )
+        .bind(game_id)
+        .fetch_one(pool)
+        .await?;
+        Ok(row)
     }
 
     /// The shared fixture: an archived old native game with framed turns +
@@ -868,15 +998,83 @@ mod tests {
         Ok(())
     }
 
-    /// SC: the sweeper race (game archived mid-run, more turns written
-    /// after) leaves a stale object — the count mismatch retains ALL
-    /// turns, including the new one.
+    /// SC (DEV-2178): the sweeper race (game archived mid-run, more turns
+    /// written after) leaves a stale object holding a strict prefix — the
+    /// prune auto-clears the archive pointers (discovery will re-archive
+    /// the complete game) and retains ALL turns, including the new one.
     #[sqlx::test(migrations = "../migrations")]
-    async fn prune_retains_turns_on_frame_count_mismatch(pool: PgPool) -> cja::Result<()> {
+    async fn prune_clears_stale_archive_pointers_when_db_has_more_frames(
+        pool: PgPool,
+    ) -> cja::Result<()> {
         let state = AppState::test_from_pool(pool.clone());
         let (game_id, gb) = archived_old_native_game(&state, 40, 2).await?;
         // The straggler turn lands after the archive was written.
         fixture_turn(&pool, game_id, 2, frame(2, &gb.to_string())).await?;
+
+        let outcome = prune_game_turns_with_lock_timeout(&state, game_id, 30, "5s").await?;
+        assert_eq!(outcome, PruneOutcome::StaleArchiveCleared);
+        assert_eq!(turn_count(&pool, game_id).await?, 3, "no turn is deleted");
+        assert!(turns_pruned_at(&pool, game_id).await?.is_none());
+        let (archived_at, gcs_path, archive_version) = archive_pointers(&pool, game_id).await?;
+        assert!(archived_at.is_none(), "stale archive pointers cleared");
+        assert!(gcs_path.is_none());
+        assert!(archive_version.is_none());
+        Ok(())
+    }
+
+    /// SC (DEV-2178): the full self-heal loop — stale archive auto-clears
+    /// the pointers, the real archiver re-archives the complete game, and
+    /// the next prune confirms and deletes.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn stale_archive_rearchives_then_prunes(pool: PgPool) -> cja::Result<()> {
+        let state = AppState::test_from_pool(pool.clone());
+        let (game_id, gb) = archived_old_native_game(&state, 40, 2).await?;
+        fixture_turn(&pool, game_id, 2, frame(2, &gb.to_string())).await?;
+
+        // Prune 1: stale archive → pointers cleared, turns retained.
+        let outcome = prune_game_turns_with_lock_timeout(&state, game_id, 30, "5s").await?;
+        assert_eq!(outcome, PruneOutcome::StaleArchiveCleared);
+        assert_eq!(turn_count(&pool, game_id).await?, 3);
+        assert!(turns_pruned_at(&pool, game_id).await?.is_none());
+
+        // Re-archive (discovery's job, run inline): the COMPLETE game.
+        crate::native_backup::archive_native_game(&state, game_id).await?;
+        let (archived_at, gcs_path, archive_version) = archive_pointers(&pool, game_id).await?;
+        assert!(archived_at.is_some(), "game re-archived");
+        assert_eq!(archive_version, Some(2));
+        let gcs_path = gcs_path.expect("re-archive records gcs_path");
+        let bytes = state
+            .object_store
+            .get(&gcs_path)
+            .await?
+            .expect("re-archived object exists");
+        let json = zstd::decode_all(bytes.as_slice())?;
+        let export: serde_json::Value = serde_json::from_slice(&json)?;
+        assert_eq!(
+            export["frames"].as_array().expect("frames array").len(),
+            3,
+            "re-archived object holds every frame"
+        );
+
+        // Prune 2: confirms the complete archive and deletes.
+        let outcome = prune_game_turns_with_lock_timeout(&state, game_id, 30, "5s").await?;
+        assert_eq!(outcome, PruneOutcome::Pruned { turns_deleted: 3 });
+        assert_eq!(turn_count(&pool, game_id).await?, 0);
+        assert!(turns_pruned_at(&pool, game_id).await?.is_some());
+        Ok(())
+    }
+
+    /// SC (DEV-2178): fail-closed direction — an archive holding MORE
+    /// frames than the DB is NOT a stale prefix and never auto-clears.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn prune_retains_when_archive_has_more_frames_than_db(pool: PgPool) -> cja::Result<()> {
+        let state = AppState::test_from_pool(pool.clone());
+        let (game_id, _gb) = archived_old_native_game(&state, 40, 3).await?;
+        // The DB loses a frame: archive (3) > DB (2).
+        sqlx::query("DELETE FROM turns WHERE game_id = $1 AND turn_number = 2")
+            .bind(game_id)
+            .execute(&pool)
+            .await?;
 
         let outcome = prune_game_turns_with_lock_timeout(&state, game_id, 30, "5s").await?;
         assert_eq!(
@@ -885,8 +1083,165 @@ mod tests {
                 reason: RetainReason::FrameCountMismatch
             }
         );
-        assert_eq!(turn_count(&pool, game_id).await?, 3, "no turn is deleted");
+        assert_eq!(turn_count(&pool, game_id).await?, 2);
         assert!(turns_pruned_at(&pool, game_id).await?.is_none());
+        let (archived_at, gcs_path, _) = archive_pointers(&pool, game_id).await?;
+        assert!(
+            archived_at.is_some(),
+            "archive pointers stay set (fail-closed)"
+        );
+        assert!(gcs_path.is_some());
+        Ok(())
+    }
+
+    /// SC (DEV-2178): a count mismatch whose prefix DIVERGES surfaces as
+    /// FrameContentMismatch — the auto-clear never fires on it.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn prune_retains_when_archive_prefix_diverges(pool: PgPool) -> cja::Result<()> {
+        let state = AppState::test_from_pool(pool.clone());
+        let (game_id, gb) = archived_old_native_game(&state, 40, 2).await?;
+        rewrite_object(&state, game_id, &|object| {
+            object["frames"][0]["Turn"] = serde_json::json!(99);
+        })
+        .await?;
+        // The straggler makes DB (3) > archive (2) — but the archive's
+        // prefix no longer matches the DB.
+        fixture_turn(&pool, game_id, 2, frame(2, &gb.to_string())).await?;
+
+        let outcome = prune_game_turns_with_lock_timeout(&state, game_id, 30, "5s").await?;
+        assert_eq!(
+            outcome,
+            PruneOutcome::Retained {
+                reason: RetainReason::FrameContentMismatch
+            }
+        );
+        assert_eq!(turn_count(&pool, game_id).await?, 3);
+        assert!(turns_pruned_at(&pool, game_id).await?.is_none());
+        let (archived_at, gcs_path, _) = archive_pointers(&pool, game_id).await?;
+        assert!(
+            archived_at.is_some(),
+            "archive pointers stay set (fail-closed)"
+        );
+        assert!(gcs_path.is_some());
+        Ok(())
+    }
+
+    /// SC (DEV-2178): the pointer-clear's guards — only the exact
+    /// `archived_at` this job read clears (a concurrent re-archive wins),
+    /// and never a pruned game (the helper's own
+    /// `turns_pruned_at IS NULL` WHERE guard).
+    #[sqlx::test(migrations = "../migrations")]
+    async fn clear_stale_archive_pointers_guards(pool: PgPool) -> cja::Result<()> {
+        let old = chrono::Utc::now() - chrono::Duration::days(40);
+        let game_id = fixture_game(&pool, "finished", old, None).await?;
+        async fn read_archived_at(
+            pool: &sqlx::PgPool,
+            game_id: Uuid,
+        ) -> cja::Result<chrono::DateTime<chrono::Utc>> {
+            Ok(
+                sqlx::query_scalar("SELECT archived_at FROM games WHERE game_id = $1")
+                    .bind(game_id)
+                    .fetch_one(pool)
+                    .await?,
+            )
+        }
+        let set_pointers = "UPDATE games SET archived_at = NOW(), gcs_path = 'native/2026/11/07/x.json.zst', archive_version = 2 WHERE game_id = $1";
+
+        // (a) matching archived_at → 1 row, pointers cleared.
+        sqlx::query(set_pointers)
+            .bind(game_id)
+            .execute(&pool)
+            .await?;
+        let read = read_archived_at(&pool, game_id).await?;
+        assert_eq!(clear_stale_archive_pointers(&pool, game_id, read).await?, 1);
+        let (archived_at, gcs_path, archive_version) = archive_pointers(&pool, game_id).await?;
+        assert!(archived_at.is_none());
+        assert!(gcs_path.is_none());
+        assert!(archive_version.is_none());
+
+        // (b) different archived_at (concurrent re-archive stamped a fresh
+        // one) → 0 rows, pointers intact.
+        sqlx::query(set_pointers)
+            .bind(game_id)
+            .execute(&pool)
+            .await?;
+        let read = read_archived_at(&pool, game_id).await?;
+        let stale = read - chrono::Duration::seconds(1);
+        assert_eq!(
+            clear_stale_archive_pointers(&pool, game_id, stale).await?,
+            0
+        );
+        let (archived_at, gcs_path, _) = archive_pointers(&pool, game_id).await?;
+        assert!(archived_at.is_some(), "race loser must not clear pointers");
+        assert!(gcs_path.is_some());
+
+        // (c) pruned game → 0 rows even with a matching archived_at (the
+        // query's own turns_pruned_at IS NULL guard).
+        sqlx::query(
+            "UPDATE games SET turns_pruned_at = NOW(), archived_at = NOW(),
+             gcs_path = 'native/2026/11/07/x.json.zst', archive_version = 2
+             WHERE game_id = $1",
+        )
+        .bind(game_id)
+        .execute(&pool)
+        .await?;
+        let read = read_archived_at(&pool, game_id).await?;
+        assert_eq!(clear_stale_archive_pointers(&pool, game_id, read).await?, 0);
+        let (archived_at, gcs_path, _) = archive_pointers(&pool, game_id).await?;
+        assert!(archived_at.is_some(), "pruned game keeps its pointers");
+        assert!(gcs_path.is_some());
+        Ok(())
+    }
+
+    /// SC (DEV-2178): the `games` CHECK rejects clearing archive pointers
+    /// on a pruned game — raw SQL and the gap-#1 writer
+    /// (`mark_game_finished_tx` on a pruned failed-era game) both.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn check_constraint_rejects_clearing_pointers_on_pruned_game(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        let old = chrono::Utc::now() - chrono::Duration::days(40);
+        let game_id = fixture_game(&pool, "failed", old, None).await?;
+        // Valid: pruned WITH pointers.
+        sqlx::query(
+            "UPDATE games SET turns_pruned_at = NOW(), archived_at = NOW(),
+             gcs_path = 'native/2026/11/07/x.json.zst', archive_version = 2
+             WHERE game_id = $1",
+        )
+        .bind(game_id)
+        .execute(&pool)
+        .await?;
+
+        // Raw pointer clear: rejected by the CHECK.
+        let err = sqlx::query(
+            "UPDATE games SET archived_at = NULL, gcs_path = NULL, archive_version = NULL
+             WHERE game_id = $1",
+        )
+        .bind(game_id)
+        .execute(&pool)
+        .await
+        .expect_err("CHECK must reject clearing pointers on a pruned game");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("games_pruned_requires_archive_check"),
+            "error must name the constraint, got: {msg}"
+        );
+
+        // The gap-#1 writer: mark_game_finished_tx passes its
+        // status guard on a 'failed' pruned game and would clear the
+        // pointers — the CHECK is the backstop. `{:#}` is required:
+        // the sqlx error is wrapped, so `{}` would drop the constraint
+        // name from the chain.
+        let mut tx = pool.begin().await?;
+        let err = crate::models::game::mark_game_finished_tx(&mut tx, game_id, chrono::Utc::now())
+            .await
+            .expect_err("mark_game_finished_tx must be rejected on a pruned game");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("games_pruned_requires_archive_check"),
+            "error must name the constraint, got: {msg}"
+        );
+        tx.rollback().await?;
         Ok(())
     }
 
@@ -1231,6 +1586,7 @@ mod tests {
             PruneOutcome::Pruned { .. } => 0,
             PruneOutcome::Skipped => 1,
             PruneOutcome::Retained { .. } => 2,
+            PruneOutcome::StaleArchiveCleared => 3,
         });
         assert_eq!(
             outcomes,
@@ -1258,10 +1614,16 @@ mod tests {
     ) -> cja::Result<()> {
         let old = chrono::Utc::now() - chrono::Duration::days(40);
         let winner = fixture_game(&pool, "finished", old, None).await?;
-        sqlx::query("UPDATE games SET turns_pruned_at = NOW() WHERE game_id = $1")
-            .bind(winner)
-            .execute(&pool)
-            .await?;
+        // One statement: mark pruned WITH pointers (a bare
+        // turns_pruned_at mark now violates games_pruned_requires_archive_check).
+        sqlx::query(
+            "UPDATE games SET turns_pruned_at = NOW(), archived_at = NOW(),
+             gcs_path = 'native/2026/11/07/x.json.zst', archive_version = 2
+             WHERE game_id = $1",
+        )
+        .bind(winner)
+        .execute(&pool)
+        .await?;
         let stale = fixture_game(&pool, "finished", old, None).await?;
 
         assert!(pruned_elsewhere(&pool, winner).await?);

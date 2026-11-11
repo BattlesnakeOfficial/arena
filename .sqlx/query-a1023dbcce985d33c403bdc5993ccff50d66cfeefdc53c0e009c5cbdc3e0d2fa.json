@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT status as \"status: MatchStatus\", winner_id FROM tournament_matches WHERE match_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "status: MatchStatus",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "winner_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "a1023dbcce985d33c403bdc5993ccff50d66cfeefdc53c0e009c5cbdc3e0d2fa"
+}

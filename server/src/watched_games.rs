@@ -381,7 +381,7 @@ async fn poll_batch(
         }
         let Some(row) = row else { continue };
         match GameStatus::from_str(&row.status) {
-            Ok(status @ (GameStatus::Finished | GameStatus::Failed)) => {
+            Ok(status) if status.is_terminal() => {
                 let _ = entry.updates.send(WatchedGameUpdate::Terminal(status));
                 entry.readiness.send_replace(Readiness::Retired);
                 registry.entries.remove(&id);
@@ -699,8 +699,8 @@ mod tests {
             .unwrap();
             let login = format!("prune-notify-{}", Uuid::new_v4().simple());
             let user_id: Uuid = sqlx::query_scalar(
-                "INSERT INTO users (external_github_id, github_login, github_access_token)
-                 VALUES ($1, $2, '') RETURNING user_id",
+                "INSERT INTO users (external_github_id, github_login)
+                 VALUES ($1, $2) RETURNING user_id",
             )
             .bind(Uuid::new_v4().as_u128() as i64)
             .bind(&login)

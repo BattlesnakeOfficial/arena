@@ -8,7 +8,7 @@ use axum::{
     response::IntoResponse,
 };
 use chrono::{DateTime, Utc};
-use color_eyre::eyre::{Context as _, eyre};
+use color_eyre::eyre::eyre;
 use maud::{Markup, html};
 
 use crate::{
@@ -202,8 +202,13 @@ pub async fn send_test(
     page_factory: PageFactory,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
     let wave = parse_wave(wave)?;
-    let mut tx = state.db.begin().await?;
-    let address = notification_email::resolved_recipient(&mut tx, user.user_id).await?;
+    // Scope the connection so it is released before the Mailgun call (which
+    // takes up to 10s and acquires its own pool connection for the log
+    // transaction inside `send_limited`).
+    let address = {
+        let mut connection = state.db.acquire().await?;
+        notification_email::resolved_recipient(&mut connection, user.user_id).await?
+    };
     let mut outcome = "No notification address is available; no test was sent.".to_string();
     if let Some(to) = &address {
         let mut message = sample_message(wave, to, &state.config.base_url);
@@ -213,7 +218,7 @@ pub async fn send_test(
         outcome = match state
             .mailer
             .send_limited(
-                &mut tx,
+                &state.db,
                 state.config.email_per_recipient_hourly_limit,
                 email_log::ADMIN_TEST_PURPOSE,
                 &message,
@@ -223,15 +228,16 @@ pub async fn send_test(
             Ok(SendOutcome::Sent) => format!("Sent wave {} test to {to}", wave.number()),
             Ok(SendOutcome::Disabled) => "Disabled (no Mailgun config)".into(),
             Ok(SendOutcome::RateLimited) => "RateLimited".into(),
+            Ok(SendOutcome::Failed) => {
+                "Failed (Mailgun rejected the message; see server logs, event_type=email_rejected)"
+                    .into()
+            }
             Err(err) => {
                 tracing::error!(error = %format!("{err:#}"), "Shutdown notice test email failed");
                 format!("{err:#}")
             }
         };
     }
-    tx.commit()
-        .await
-        .wrap_err("Failed to commit shutdown notice test attempt")?;
     let content = admin_content(&state, address.as_deref(), Some(&outcome)).await?;
     Ok(page_factory.create_page("Play shutdown notices".into(), Box::new(content)))
 }
