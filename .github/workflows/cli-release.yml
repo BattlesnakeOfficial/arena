@@ -38,9 +38,49 @@ jobs:
           echo "tag=${TAG_VERSION} crate=${CRATE_VERSION}"
           test "${TAG_VERSION}" = "${CRATE_VERSION}"
 
+  # DEV-2306: one generation of the third-party licence notices per tag,
+  # shared by all 8 archives. cargo-about reads each crate's licence file
+  # from the registry cache (cold runs download them, hence the cache).
+  # --fail turns `accepted` in cli/about.toml into a gate: an
+  # unsatisfiable licence fails this job and the release.
+  notices:
+    name: generate THIRD_PARTY_LICENSES.md
+    needs: version-gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cli-notices-${{ hashFiles('Cargo.lock') }}
+
+      - name: Install cargo-about
+        run: cargo install --locked --version 0.9.3 --features cli cargo-about
+
+      - name: Generate third-party licence notices
+        run: |
+          cargo about generate --locked --fail \
+            -m cli/Cargo.toml \
+            -o THIRD_PARTY_LICENSES.md \
+            cli/about.hbs
+          test -s THIRD_PARTY_LICENSES.md
+          head -n 20 THIRD_PARTY_LICENSES.md
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-notices
+          path: THIRD_PARTY_LICENSES.md
+          if-no-files-found: error
+
   build:
     name: build ${{ matrix.target }}
-    needs: version-gate
+    needs: [version-gate, notices]
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -185,15 +225,20 @@ jobs:
           "$BIN" play -g standard -n Smokey -u http://127.0.0.1:8085 2>&1 | tee game.log
           grep -q "Game completed after" game.log
 
+      - name: Download THIRD_PARTY_LICENSES.md
+        uses: actions/download-artifact@v4
+        with:
+          name: cli-notices
+
       - name: Package archive (tar.gz)
         if: matrix.osname != 'Windows'
         run: |
           VERSION="${GITHUB_REF_NAME#cli-v}"
           mkdir stage
           cp "target/${{ matrix.target }}/release/battlesnake" stage/
-          cp LICENSE cli/ATTRIBUTION.md stage/
+          cp LICENSE cli/ATTRIBUTION.md THIRD_PARTY_LICENSES.md stage/
           tar czf "battlesnake_${VERSION}_${{ matrix.osname }}_${{ matrix.arch }}.tar.gz" \
-            -C stage battlesnake LICENSE ATTRIBUTION.md
+            -C stage battlesnake LICENSE ATTRIBUTION.md THIRD_PARTY_LICENSES.md
 
       - name: Package archive (zip)
         if: matrix.osname == 'Windows'
@@ -204,7 +249,8 @@ jobs:
           Copy-Item "target/${{ matrix.target }}/release/battlesnake.exe" stage/
           Copy-Item LICENSE stage/
           Copy-Item cli/ATTRIBUTION.md stage/
-          Compress-Archive -Path stage/battlesnake.exe, stage/LICENSE, stage/ATTRIBUTION.md `
+          Copy-Item THIRD_PARTY_LICENSES.md stage/
+          Compress-Archive -Path stage/battlesnake.exe, stage/LICENSE, stage/ATTRIBUTION.md, stage/THIRD_PARTY_LICENSES.md `
             -DestinationPath "battlesnake_${version}_${{ matrix.osname }}_${{ matrix.arch }}.zip"
 
       - name: Write exec report
@@ -251,13 +297,13 @@ jobs:
           test "$(find . -maxdepth 1 \( -name 'battlesnake_*.tar.gz' -o -name 'battlesnake_*.zip' \) | wc -l)" -eq 8
           for a in battlesnake_*_Linux_*.tar.gz battlesnake_*_Darwin_*.tar.gz; do
             tar tzf "$a"
-            for f in battlesnake LICENSE ATTRIBUTION.md; do
+            for f in battlesnake LICENSE ATTRIBUTION.md THIRD_PARTY_LICENSES.md; do
               tar tzf "$a" | grep -qx "$f" || { echo "::error::$a missing $f"; exit 1; }
             done
           done
           for z in battlesnake_*_Windows_*.zip; do
             unzip -l "$z"
-            for f in battlesnake.exe LICENSE ATTRIBUTION.md; do
+            for f in battlesnake.exe LICENSE ATTRIBUTION.md THIRD_PARTY_LICENSES.md; do
               unzip -l "$z" | awk '{print $4}' | grep -qx "$f" || { echo "::error::$z missing $f"; exit 1; }
             done
           done

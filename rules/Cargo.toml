@@ -1,6 +1,7 @@
 [package]
 name = "rules"
 version.workspace = true
+license = "MIT"
 edition.workspace = true
 
 [dependencies]

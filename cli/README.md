@@ -17,7 +17,7 @@ Download an archive from [GitHub Releases](https://github.com/BattlesnakeOfficia
 | Windows (arm64) | `battlesnake_<version>_Windows_arm64.zip` |
 | Windows (i386) | `battlesnake_<version>_Windows_i386.zip` |
 
-Each archive contains the `battlesnake` binary (`battlesnake.exe` on Windows), the repository's `LICENSE`, and `ATTRIBUTION.md`. The Linux binaries are statically linked, so one archive runs on any Linux distribution.
+Each archive contains the `battlesnake` binary (`battlesnake.exe` on Windows), the repository's `LICENSE`, `ATTRIBUTION.md`, and `THIRD_PARTY_LICENSES.md` — the generated licence notices covering every crate compiled into the binary. The Linux binaries are statically linked, so one archive runs on any Linux distribution.
 
 macOS/Linux:
 
