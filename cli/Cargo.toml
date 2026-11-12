@@ -1,0 +1,61 @@
+[package]
+name = "battlesnake"
+# Own version, not the workspace's: `cli-v<semver>` tags release this crate
+# on its own cadence (DEV-2149); the workspace version keeps versioning the
+# server crates.
+version = "0.1.1"
+edition.workspace = true
+license = "MIT"
+description = "Battlesnake Arena CLI"
+
+[lib]
+name = "battlesnake_cli"
+
+[[bin]]
+name = "battlesnake"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1.21", features = ["full"] }
+color-eyre = "0.6.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+reqwest = { version = "0.12.12", features = ["json", "rustls-tls"], default-features = false }
+uuid = "1.6.1"
+chrono = { version = "0.4.23", default-features = false, features = ["serde", "clock"] }
+clap = { version = "4", features = ["derive", "env"] }
+# CLI human-readable output
+dirs = "5"
+toml = "0.8"
+open = "5"
+hostname = "0.4"
+is-terminal = "0.4"
+tabled = "0.17"
+colored = "2"
+chrono-humanize = "0.2"
+arena-api-scope = { path = "../arena-api-scope" }
+# Shared game engine (DEV-2143): the play subcommand (DEV-2144) runs
+# offline games through it; depending now keeps its tree under this crate's
+# dependency-hygiene test in CI.
+engine-core = { path = "../engine-core" }
+# Needed directly for StandardSettings, Direction, and fixture board types
+# (engine-core does not re-export `rules`).
+rules = { path = "../rules" }
+# join_all for concurrent /move requests in play.
+futures = "0.3"
+# ~4.5: keep the server's clap pinned at 4.5.x. clap_complete 4.6 requires
+# clap ^4.6.6, which would drag the server and engine-proxy off 4.5.54 in
+# the shared lockfile — a server dependency change this PR must not carry.
+clap_complete = "~4.5"
+# play's missing-name namer shuffles a pool; engine-core already pulls rand.
+rand = "0.8"
+# play --browser (DEV-2146): serves the legacy-engine board API on
+# 127.0.0.1. Same version/features the server uses; adds no new crates to
+# the workspace lockfile.
+axum = { version = "0.8", features = ["ws"] }
+
+[dev-dependencies]
+wiremock = "0.6"
+tempfile = "3"
+# ws client for board-server tests (same version as the server's dev-dep)
+tokio-tungstenite = "0.28"

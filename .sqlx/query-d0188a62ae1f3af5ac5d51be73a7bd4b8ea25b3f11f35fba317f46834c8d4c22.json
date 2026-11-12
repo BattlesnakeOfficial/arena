@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT frame_data AS \"frame_data!: serde_json::Value\"\n           FROM turns\n           WHERE game_id = $1\n             AND frame_data IS NOT NULL\n             AND turn_number BETWEEN $2 AND $3\n           ORDER BY turn_number ASC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "frame_data!: serde_json::Value",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "d0188a62ae1f3af5ac5d51be73a7bd4b8ea25b3f11f35fba317f46834c8d4c22"
+}

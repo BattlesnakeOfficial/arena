@@ -135,9 +135,9 @@ impl AdminMetrics {
         let games_created = sqlx::query!(
             r#"
             SELECT
-                COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '1 hour') as "last_hour!: i64",
-                COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '24 hours') as "last_24h!: i64",
-                COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '7 days') as "last_7d!: i64"
+                COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '1 hour' AND engine_game_id IS NULL) as "last_hour!: i64",
+                COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '24 hours' AND engine_game_id IS NULL) as "last_24h!: i64",
+                COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '7 days' AND engine_game_id IS NULL) as "last_7d!: i64"
             FROM games
             "#
         )
@@ -153,9 +153,9 @@ impl AdminMetrics {
         let games_finished = sqlx::query!(
             r#"
             SELECT
-                COUNT(*) FILTER (WHERE updated_at > NOW() - INTERVAL '1 hour' AND status = 'finished') as "last_hour!: i64",
-                COUNT(*) FILTER (WHERE updated_at > NOW() - INTERVAL '24 hours' AND status = 'finished') as "last_24h!: i64",
-                COUNT(*) FILTER (WHERE updated_at > NOW() - INTERVAL '7 days' AND status = 'finished') as "last_7d!: i64"
+                COUNT(*) FILTER (WHERE updated_at > NOW() - INTERVAL '1 hour' AND status = 'finished' AND engine_game_id IS NULL) as "last_hour!: i64",
+                COUNT(*) FILTER (WHERE updated_at > NOW() - INTERVAL '24 hours' AND status = 'finished' AND engine_game_id IS NULL) as "last_24h!: i64",
+                COUNT(*) FILTER (WHERE updated_at > NOW() - INTERVAL '7 days' AND status = 'finished' AND engine_game_id IS NULL) as "last_7d!: i64"
             FROM games
             "#
         )
@@ -172,6 +172,7 @@ impl AdminMetrics {
             r#"
             SELECT AVG(EXTRACT(EPOCH FROM (updated_at - created_at))) as "avg_duration_secs: f64"
             FROM games WHERE status = 'finished' AND updated_at > NOW() - INTERVAL '24 hours'
+              AND engine_game_id IS NULL
             "#
         )
         .fetch_one(db)
@@ -521,15 +522,20 @@ pub async fn send_test_email(
     page_factory: PageFactory,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
     let kind = email_kind(&key)?;
-    let mut tx = state.db.begin().await?;
-    let address = notification_email::resolved_recipient(&mut tx, user.user_id).await?;
+    // Scope the connection so it is released before the Mailgun call (which
+    // takes up to 10s and acquires its own pool connection for the log
+    // transaction inside `send_limited`).
+    let address = {
+        let mut connection = state.db.acquire().await?;
+        notification_email::resolved_recipient(&mut connection, user.user_id).await?
+    };
     let mut outcome = "No notification address is available; no test was sent.".to_string();
     if let Some(to) = &address {
         let message = sample_message(kind, &state.config.base_url, to)?;
         outcome = match state
             .mailer
             .send_limited(
-                &mut tx,
+                &state.db,
                 state.config.email_per_recipient_hourly_limit,
                 email_log::ADMIN_TEST_PURPOSE,
                 &message,
@@ -539,24 +545,16 @@ pub async fn send_test_email(
             Ok(SendOutcome::Sent) => "Sent".into(),
             Ok(SendOutcome::Disabled) => "Disabled (no Mailgun config)".into(),
             Ok(SendOutcome::RateLimited) => "RateLimited".into(),
+            Ok(SendOutcome::Failed) => {
+                "Failed (Mailgun rejected the message; see server logs, event_type=email_rejected)"
+                    .into()
+            }
             Err(err) => {
                 tracing::error!(error = %format!("{err:#}"), "Admin test email failed");
                 format!("{err:#}")
             }
         };
     }
-    let status = match tx.commit().await {
-        Ok(()) => StatusCode::OK,
-        Err(err) => {
-            tracing::error!(error = %format!("{err:#}"), "Admin test email attempt commit failed");
-            outcome = if outcome == "Sent" {
-                format!("Mailgun accepted the email, but recording the attempt failed: {err:#}")
-            } else {
-                format!("{outcome}; recording the attempt failed: {err:#}")
-            };
-            StatusCode::INTERNAL_SERVER_ERROR
-        }
-    };
     let message = sample_message(kind, &state.config.base_url, "sample@example.com")?;
     let page = page_factory.create_page(
         kind.name().into(),
@@ -567,7 +565,7 @@ pub async fn send_test_email(
             Some(&outcome),
         )),
     );
-    Ok((status, [(header::CACHE_CONTROL, "no-store")], page))
+    Ok((StatusCode::OK, [(header::CACHE_CONTROL, "no-store")], page))
 }
 
 /// GET /admin/moderation — unreviewed moderation flags, newest first.
@@ -1939,10 +1937,12 @@ mod email_tests {
         sqlx::query!("CREATE CONSTRAINT TRIGGER reject_admin_test_commit AFTER INSERT ON email_log DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION reject_admin_test_commit()")
             .execute(&pool).await?;
         let mock = MockServer::start().await;
+        // Under the log-before-send flow, a failing log commit aborts the
+        // send before any HTTP attempt: the mock must see zero requests.
         Mock::given(method("POST"))
             .and(path("/v3/example.test/messages"))
             .respond_with(ResponseTemplate::new(200))
-            .expect(1)
+            .expect(0)
             .mount(&mock)
             .await;
         state.mailer = Mailer::new(
@@ -1962,13 +1962,15 @@ mod email_tests {
             "",
         )
         .await;
-        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        // The commit error surfaces as a transient send error, rendered on
+        // the (200) result page — never as a claim that the email was sent.
+        assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
             response.headers().get(header::CACHE_CONTROL).unwrap(),
             "no-store"
         );
         let html = body(response).await;
-        assert!(html.contains("Mailgun accepted the email, but recording the attempt failed"));
+        assert!(html.contains("Failed to commit email log transaction"));
         assert!(html.contains("commit &lt;blocked&gt;"));
         assert!(!html.contains("commit <blocked>"));
         assert!(!html.contains(">Sent<"));

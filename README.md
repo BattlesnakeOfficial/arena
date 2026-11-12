@@ -51,7 +51,7 @@ and pushed to the [`screenshots` branch](https://github.com/BattlesnakeOfficial/
 - **Play migration** — players from the old play.battlesnake.com can claim their accounts
   by password or email recovery, bringing snakes and unlocks with them.
 - **API + CLI** — token-authenticated REST API for snakes, games, and leaderboards
-  (used by `arena-cli`).
+  (used by the `battlesnake` CLI in `cli/`: `cargo install --locked --path cli`).
 
 ## Setup
 

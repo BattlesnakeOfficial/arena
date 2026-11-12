@@ -525,9 +525,7 @@ fn advance(
         };
         (id.clone(), scripted)
     }));
-    crate::engine::apply_turn(game, &moves)?;
-    game.board.turn += 1;
-    crate::engine::spawn_food(game);
+    crate::engine::advance_turn(game, &moves)?;
     Ok(())
 }
 
@@ -992,7 +990,7 @@ mod tests {
                 spec.game_type.clone(),
                 &[],
             );
-            assert_eq!(game.engine_game.meta.ruleset_name, real.meta.ruleset_name);
+            assert_eq!(game.engine_game.meta.mode, real.meta.mode);
             let (ours, theirs) = (&game.engine_game.meta.settings, &real.meta.settings);
             assert_eq!(ours.food_spawn_chance, theirs.food_spawn_chance);
             assert_eq!(ours.minimum_food, theirs.minimum_food);

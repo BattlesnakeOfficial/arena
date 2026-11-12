@@ -246,7 +246,7 @@ mod tests {
     use std::time::Duration;
 
     async fn user(pool: &PgPool, github_id: i64) -> cja::Result<Uuid> {
-        Ok(sqlx::query_scalar("INSERT INTO users (external_github_id, github_login, github_access_token) VALUES ($1, $2, '') RETURNING user_id")
+        Ok(sqlx::query_scalar("INSERT INTO users (external_github_id, github_login) VALUES ($1, $2) RETURNING user_id")
             .bind(github_id).bind(format!("code-{github_id}"))
             .fetch_one(pool).await?)
     }

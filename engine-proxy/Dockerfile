@@ -17,20 +17,24 @@ COPY server/Cargo.toml ./server/
 COPY server/build.rs ./server/
 COPY mock-github-oauth/Cargo.toml ./mock-github-oauth/
 COPY rules/Cargo.toml ./rules/
+COPY engine-core/Cargo.toml ./engine-core/
 COPY engine-proxy/Cargo.toml ./engine-proxy/
+COPY arena-api-scope/Cargo.toml ./arena-api-scope/
+COPY cli/Cargo.toml ./cli/
 
-RUN mkdir -p server/src/bin server/src/cli mock-github-oauth/src rules/src engine-proxy/src && \
+RUN mkdir -p server/src/bin mock-github-oauth/src rules/src engine-proxy/src arena-api-scope/src cli/src engine-core/src && \
     echo "fn main() {}" > server/src/main.rs && \
-    echo "pub mod cli;" > server/src/lib.rs && \
-    echo "pub mod config;" > server/src/cli/mod.rs && \
-    echo "pub struct AuthConfig { pub token: Option<String> } pub struct CliConfig { pub auth: Option<AuthConfig> } impl CliConfig { pub fn load() -> color_eyre::Result<Self> { todo!() } pub fn api_url(&self) -> &str { todo!() } pub fn save(&self) -> color_eyre::Result<()> { todo!() } }" > server/src/cli/config.rs && \
-    echo "fn main() {}" > server/src/bin/arena-cli.rs && \
+    echo "" > server/src/lib.rs && \
     echo "fn main() {}" > server/src/bin/stress_test.rs && \
     echo "fn main() {}" > mock-github-oauth/src/main.rs && \
     echo "" > mock-github-oauth/src/lib.rs && \
     echo "" > rules/src/lib.rs && \
     echo "fn main() {}" > engine-proxy/src/main.rs && \
-    echo "" > engine-proxy/src/lib.rs
+    echo "" > engine-proxy/src/lib.rs && \
+    echo "" > arena-api-scope/src/lib.rs && \
+    echo "" > cli/src/lib.rs && \
+    echo "fn main() {}" > cli/src/main.rs && \
+    echo "" > engine-core/src/lib.rs
 
 # Package-scoped: never compiles arena's sqlx::query! macros, so no
 # DATABASE_URL / .sqlx / SQLX_OFFLINE involved. No secrets needed.

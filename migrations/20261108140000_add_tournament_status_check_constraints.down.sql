@@ -1,0 +1,3 @@
+ALTER TABLE tournament_matches DROP CONSTRAINT tournament_matches_status_check;
+ALTER TABLE tournaments DROP CONSTRAINT tournaments_registration_status_check;
+ALTER TABLE tournaments DROP CONSTRAINT tournaments_status_check;

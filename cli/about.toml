@@ -1,0 +1,44 @@
+# Configuration for `cargo about generate` (DEV-2306): the release
+# workflow renders cli/about.hbs into THIRD_PARTY_LICENSES.md, the
+# third-party notices file shipped inside every battlesnake release
+# archive.
+#
+# `accepted` is the gate: a crate whose licence expression cannot be
+# satisfied from this list fails generation (with --fail), failing the
+# release. Adding a licence here is a deliberate policy decision.
+#
+# Priority order: for OR-expressions the first accepted arm wins, so
+# MIT/Apache-2.0 are picked for the ecosystem-standard dual licences.
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "ISC",
+    "Unicode-3.0",
+    "BSD-3-Clause",
+    "MPL-2.0",
+    "CDLA-Permissive-2.0",
+]
+
+# Only crates compiled into the release binaries' targets are listed;
+# crates reachable only via other cfg() targets (wasm, android, ...) drop
+# out. Evaluated as a union: every archive ships the same file, which
+# covers every crate compiled into that target's binary.
+# Keep in sync with the build matrix in cli-release.yml.
+targets = [
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+    "i686-unknown-linux-musl",
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
+    "i686-pc-windows-msvc",
+]
+
+# The archives distribute binaries, not test suites: dev-dependencies are
+# never compiled into them.
+ignore-dev-dependencies = true
+
+# Keep build-dependency licences (proc-macro crates, cc, ...) — they are
+# part of the build, though not the binary. Deliberately no
+# ignore-build-dependencies entry.

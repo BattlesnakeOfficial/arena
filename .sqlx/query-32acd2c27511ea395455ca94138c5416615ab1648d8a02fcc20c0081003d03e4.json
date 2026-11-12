@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT last_run_at FROM crons WHERE name = 'SessionPruneJob'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "last_run_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "32acd2c27511ea395455ca94138c5416615ab1648d8a02fcc20c0081003d03e4"
+}

@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO leaderboard_games (leaderboard_game_id, leaderboard_id, game_id)\n             VALUES ($1, $2, $3)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a9102691dca661b1dc6a68f1dfa25cc6a3bf4f7bdf5a705ffeb7db6e2dc8f56f"
+}

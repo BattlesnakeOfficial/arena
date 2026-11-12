@@ -17,6 +17,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
+use engine_core::{GameMode, GameOverRule};
+
 use crate::{
     errors::ServerResult,
     models::game::{
@@ -147,8 +149,9 @@ fn engine_rules(
     game_type: GameType,
     game_id: Uuid,
 ) -> (BTreeMap<String, String>, String, String, Vec<String>) {
-    let (internal, settings, royale) = crate::engine::mode_rules(game_type, game_id);
-    let (ruleset_name, map) = crate::wire::wire_ruleset_and_map(internal);
+    let mode = crate::engine::game_mode(&game_type);
+    let (settings, royale) = crate::engine::mode_rules(game_type.clone(), game_id);
+    let (ruleset_name, map) = crate::wire::wire_ruleset_and_map(mode);
 
     let mut ruleset = BTreeMap::from([
         ("name".to_string(), ruleset_name.to_string()),
@@ -170,13 +173,13 @@ fn engine_rules(
     }
 
     // Stage pipelines from play `core/game_stages.py`: the game-over stage
-    // depends on the snake count (Solo is the single-snake mode), and only
-    // Constrictor adds a stage to the standard pipeline; Royale's shrinking
-    // and Snail Mode's trails came from their maps.
-    let game_over = if internal == "solo" {
-        "game_over.solo_snake"
-    } else {
-        "game_over.standard"
+    // follows the rule this game will actually run (one source:
+    // default_game_over_rule), and only Constrictor adds a stage to the
+    // standard pipeline; Royale's shrinking and Snail Mode's trails came
+    // from their maps.
+    let game_over = match mode.default_game_over_rule() {
+        GameOverRule::AllSnakesDead => "game_over.solo_snake",
+        GameOverRule::LastSnakeStanding => "game_over.standard",
     };
     let mut stages = vec![
         game_over,
@@ -185,8 +188,9 @@ fn engine_rules(
         "hazard_damage.standard",
         "feed_snakes.standard",
     ];
-    if ruleset_name == "constrictor" {
-        stages.push("modify_snakes.always_grow");
+    match mode {
+        GameMode::Constrictor => stages.push("modify_snakes.always_grow"),
+        GameMode::Standard | GameMode::Royale | GameMode::SnailMode | GameMode::Solo => {}
     }
     stages.push("elimination.standard");
 
@@ -249,7 +253,7 @@ impl From<&BoardViewerGame> for GameEndGame {
     }
 }
 
-fn archive_row_kind(record: &GameRow) -> ArchiveRowKind {
+pub(crate) fn archive_row_kind(record: &GameRow) -> ArchiveRowKind {
     if record.engine_game_id.is_some() {
         ArchiveRowKind::Play
     } else {
@@ -264,12 +268,7 @@ fn archive_row_kind(record: &GameRow) -> ArchiveRowKind {
 /// websocket even if they carry a stale `gcs_path`. The `turns` probe runs
 /// only for archived-looking rows, so live games pay nothing.
 pub(crate) async fn serves_from_archive(db: &sqlx::PgPool, record: &GameRow) -> cja::Result<bool> {
-    if record.gcs_path.is_none()
-        || !matches!(
-            record.game.status,
-            GameStatus::Finished | GameStatus::Failed
-        )
-    {
+    if record.gcs_path.is_none() || !record.game.status.is_terminal() {
         return Ok(false);
     }
     Ok(!has_frames(db, record.game.game_id).await?)
@@ -340,6 +339,7 @@ fn board_viewer_game_from_record(
 fn board_viewer_game_from_archived(
     record_game_id: Uuid,
     arena_status: GameStatus,
+    row_created_at: chrono::DateTime<chrono::Utc>,
     archived: &crate::engine_models::EngineGame,
 ) -> BoardViewerGame {
     BoardViewerGame {
@@ -353,7 +353,14 @@ fn board_viewer_game_from_archived(
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect(),
-        ruleset_name: archived.ruleset_name.clone().unwrap_or_default(),
+        // Pre-2022 headers carry no RulesetName; Ruleset.name is the real
+        // type (same lowercase-literal format the DB path serves via
+        // wire_ruleset_and_map). DEV-1984.
+        ruleset_name: archived
+            .ruleset_name
+            .clone()
+            .or_else(|| archived.ruleset.get("name").cloned())
+            .unwrap_or_default(),
         rules_stages: archived.rules_stages.clone().unwrap_or_default(),
         map: archived.map.clone().unwrap_or_default(),
         source: archived.source.clone().unwrap_or_default(),
@@ -370,8 +377,15 @@ fn board_viewer_game_from_archived(
             .map(|p| serde_json::to_value(p).unwrap_or_default())
             .collect(),
         // Unix microseconds as a string, like the engine (and like the DB
-        // path's created_at.timestamp_micros()).
-        created: archived.created.to_string(),
+        // path's created_at.timestamp_micros()). A header with Created 0
+        // (pre-2023 games whose value lacked the key; objects are never
+        // rewritten) serves the arena row's corrected created_at instead.
+        // DEV-1984.
+        created: if archived.created != 0 {
+            archived.created.to_string()
+        } else {
+            row_created_at.timestamp_micros().to_string()
+        },
     }
 }
 
@@ -392,6 +406,7 @@ async fn board_viewer_game_for_record(
         Ok(board_viewer_game_from_archived(
             record.game.game_id,
             record.game.status,
+            record.game.created_at,
             &engine_game,
         ))
     } else {
@@ -725,7 +740,7 @@ async fn send_terminal(
         return;
     }
     match status {
-        GameStatus::Finished | GameStatus::Failed => {
+        status if status.is_terminal() => {
             if matches!(status, GameStatus::Failed) {
                 let _ = send_message(
                     sender,
@@ -932,7 +947,7 @@ async fn handle_game_websocket(
         return;
     }
     match get_game_by_id(&state.db, game_id).await {
-        Ok(Some(game)) if matches!(game.status, GameStatus::Finished | GameStatus::Failed) => {
+        Ok(Some(game)) if game.status.is_terminal() => {
             send_terminal(
                 &mut sender,
                 &mut receiver,
@@ -1086,15 +1101,21 @@ pub(crate) mod fixtures {
     pub(crate) fn v2_archive(play_id: &str) -> Vec<u8> {
         let game: crate::engine_models::EngineGame =
             serde_json::from_value(archived_engine_game_json(play_id)).unwrap();
-        crate::backup::build_compressed_export(game, vec![frame_json(0, true), frame_json(1, true)])
-            .unwrap()
+        crate::backup::build_compressed_export(
+            game,
+            vec![frame_json(0, true), frame_json(1, true)],
+            chrono::DateTime::parse_from_rfc3339("2026-11-05T00:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        )
+        .unwrap()
     }
 
     /// A native frame (raw `turns.frame_data` shape): engine::frame
     /// PascalCase keys, URL already blank (native frames persist blanks),
     /// EMPTY Author whose snake ID is the `game_battlesnake_id` — the key
     /// `fill_frame_authors` matches.
-    fn native_frame_json(turn: i32, snake_id: &str) -> serde_json::Value {
+    pub(crate) fn native_frame_json(turn: i32, snake_id: &str) -> serde_json::Value {
         serde_json::json!({
             "Turn": turn,
             "Snakes": [{
@@ -2178,6 +2199,116 @@ mod tests {
         assert_archived_game_shape(&json["Game"], game_id);
         assert_eq!(json["LastFrame"]["Turn"], 1);
         assert_snake_public_shape(&json["LastFrame"]["Snakes"][0]);
+        Ok(())
+    }
+
+    /// A v1 object whose header carries NUMERIC Created 0 (the pre-2023
+    /// missing-key shape) serves the arena row's corrected created_at;
+    /// a nonzero header value still wins (DEV-1984).
+    #[sqlx::test(migrations = "../migrations")]
+    async fn created_zero_header_serves_row_date(pool: PgPool) -> cja::Result<()> {
+        fn v1_with(game: serde_json::Value) -> Vec<u8> {
+            let object = serde_json::json!({
+                "game": game,
+                "frames": [fx::frame_json(0, true), fx::frame_json(1, true)],
+                "exported_at": "2021-05-05T00:00:00Z",
+            });
+            fx::zstd_json(&object, 3)
+        }
+
+        let (state, game_id, play_id, _store) = archived_play_fixture(&pool, |engine_id| {
+            let mut game = fx::archived_engine_game_json(engine_id);
+            game["Created"] = serde_json::json!(0i64);
+            v1_with(game)
+        })
+        .await?;
+        let row_created_at = chrono::DateTime::parse_from_rfc3339("2020-03-10T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        sqlx::query("UPDATE games SET created_at = $1 WHERE game_id = $2")
+            .bind(row_created_at)
+            .bind(game_id)
+            .execute(&pool)
+            .await?;
+
+        let response = get_game_info(State(state), Path(play_id))
+            .await
+            .unwrap()
+            .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
+        assert_eq!(
+            json["Game"]["Created"],
+            row_created_at.timestamp_micros().to_string(),
+            "Created 0 header must serve the row's corrected date"
+        );
+
+        // Control: a nonzero header value still wins over the row.
+        let (state, game_id, play_id, _store) = archived_play_fixture(&pool, |engine_id| {
+            v1_with(fx::archived_engine_game_json(engine_id))
+        })
+        .await?;
+        sqlx::query("UPDATE games SET created_at = $1 WHERE game_id = $2")
+            .bind(row_created_at)
+            .bind(game_id)
+            .execute(&pool)
+            .await?;
+        let response = get_game_info(State(state), Path(play_id))
+            .await
+            .unwrap()
+            .into_response();
+        let json = response_json(response).await;
+        assert_eq!(json["Game"]["Created"], "1735689600000000");
+        Ok(())
+    }
+
+    /// A header without RulesetName serves Ruleset.name; with both keys,
+    /// RulesetName wins (DEV-1984).
+    #[sqlx::test(migrations = "../migrations")]
+    async fn ruleset_name_falls_back_to_ruleset_name_key(pool: PgPool) -> cja::Result<()> {
+        let (state, _game_id, play_id, _store) = archived_play_fixture(&pool, |engine_id| {
+            let mut game = fx::archived_engine_game_json(engine_id);
+            game.as_object_mut()
+                .expect("fixture is an object")
+                .remove("RulesetName");
+            let object = serde_json::json!({
+                "game": game,
+                "frames": [fx::frame_json(0, true), fx::frame_json(1, true)],
+                "exported_at": "2021-05-05T00:00:00Z",
+            });
+            fx::zstd_json(&object, 3)
+        })
+        .await?;
+
+        let response = get_game_info(State(state), Path(play_id))
+            .await
+            .unwrap()
+            .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
+        assert_eq!(
+            json["Game"]["RulesetName"], "royale",
+            "Ruleset.name must be served when RulesetName is absent"
+        );
+
+        // Control: RulesetName present beats Ruleset.name.
+        let (state, _game_id, play_id, _store) = archived_play_fixture(&pool, |engine_id| {
+            let mut game = fx::archived_engine_game_json(engine_id);
+            game["RulesetName"] = serde_json::json!("standard");
+            let object = serde_json::json!({
+                "game": game,
+                "frames": [fx::frame_json(0, true), fx::frame_json(1, true)],
+                "exported_at": "2021-05-05T00:00:00Z",
+            });
+            fx::zstd_json(&object, 3)
+        })
+        .await?;
+        let response = get_game_info(State(state), Path(play_id))
+            .await
+            .unwrap()
+            .into_response();
+        let json = response_json(response).await;
+        assert_eq!(json["Game"]["RulesetName"], "standard");
         Ok(())
     }
 
@@ -3614,8 +3745,8 @@ mod live_tests {
         for (github, name) in [(9_980_001, "Replay One"), (9_980_002, "Replay Two")] {
             let login = format!("replay-{github}");
             let user_id: Uuid = sqlx::query_scalar(
-                "INSERT INTO users (external_github_id, github_login, github_access_token)
-                 VALUES ($1, $2, '') RETURNING user_id",
+                "INSERT INTO users (external_github_id, github_login)
+                 VALUES ($1, $2) RETURNING user_id",
             )
             .bind(github)
             .bind(&login)

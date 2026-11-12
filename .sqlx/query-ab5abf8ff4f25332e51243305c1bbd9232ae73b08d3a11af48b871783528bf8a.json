@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT EXISTS (\n                SELECT 1 FROM achievement_clips ac\n                WHERE ac.achievement_earn_id = (\n                    SELECT achievement_earn_id FROM achievement_earns ae\n                    WHERE ae.user_id = $1 AND ae.achievement = $2\n                ) AND ac.status = 'rendered'\n            ) AS \"clip_ready!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "clip_ready!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "ab5abf8ff4f25332e51243305c1bbd9232ae73b08d3a11af48b871783528bf8a"
+}

@@ -11,6 +11,7 @@ use color_eyre::eyre::{Context as _, eyre};
 use state::AppState;
 use tracing::info;
 
+mod achievement_clips;
 mod activity;
 mod archive;
 mod backup;
@@ -42,6 +43,7 @@ mod object_store;
 mod observability;
 mod og;
 mod placement;
+mod play_history_walk;
 mod play_import;
 mod play_shutdown_notices;
 mod routes;

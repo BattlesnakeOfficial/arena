@@ -8,7 +8,7 @@
 use color_eyre::eyre::Context as _;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
-use sqlx::{PgConnection, PgPool};
+use sqlx::PgConnection;
 use uuid::Uuid;
 
 /// How long a recovery link stays valid. Short on purpose: the owner is
@@ -57,8 +57,14 @@ pub async fn create(
 /// account it unlocks. `None` when the token is unknown, expired, already
 /// used, or was requested by a different user — the caller shows one
 /// uniform "invalid or expired" message for all four, so the response
-/// doesn't reveal which check failed.
-pub async fn consume(pool: &PgPool, secret: &str, user_id: Uuid) -> cja::Result<Option<Uuid>> {
+/// doesn't reveal which check failed. Runs on a caller-owned
+/// connection/transaction, so a failure after the consume rolls it back
+/// with the caller's work (DEV-2185).
+pub async fn consume(
+    connection: &mut PgConnection,
+    secret: &str,
+    user_id: Uuid,
+) -> cja::Result<Option<Uuid>> {
     let imported_account_id = sqlx::query_scalar!(
         r#"UPDATE claim_email_tokens
          SET used_at = NOW()
@@ -70,7 +76,7 @@ pub async fn consume(pool: &PgPool, secret: &str, user_id: Uuid) -> cja::Result<
         hash_secret(secret),
         user_id,
     )
-    .fetch_optional(pool)
+    .fetch_optional(connection)
     .await
     .wrap_err("Failed to consume claim email token")?;
 
@@ -80,11 +86,12 @@ pub async fn consume(pool: &PgPool, secret: &str, user_id: Uuid) -> cja::Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sqlx::PgPool;
 
     async fn create_user(pool: &PgPool, github_id: i64) -> cja::Result<Uuid> {
         let row = sqlx::query!(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES ($1, $2, 'test-token')
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES ($1, $2)
              RETURNING user_id",
             github_id,
             format!("gh-user-{github_id}"),
@@ -124,9 +131,15 @@ mod tests {
         .await?;
         assert_eq!(stored, 0);
 
-        assert_eq!(consume(&pool, &secret, user).await?, Some(account));
+        assert_eq!(
+            consume(&mut *pool.acquire().await?, &secret, user).await?,
+            Some(account)
+        );
         // Single-use: the CAS refuses a replay.
-        assert_eq!(consume(&pool, &secret, user).await?, None);
+        assert_eq!(
+            consume(&mut *pool.acquire().await?, &secret, user).await?,
+            None
+        );
 
         Ok(())
     }
@@ -140,9 +153,15 @@ mod tests {
         let secret = create(&mut *pool.acquire().await?, account, requester).await?;
 
         // A different logged-in user can't redeem a forwarded link…
-        assert_eq!(consume(&pool, &secret, someone_else).await?, None);
+        assert_eq!(
+            consume(&mut *pool.acquire().await?, &secret, someone_else).await?,
+            None
+        );
         // …and the failed attempt didn't burn it for the real requester.
-        assert_eq!(consume(&pool, &secret, requester).await?, Some(account));
+        assert_eq!(
+            consume(&mut *pool.acquire().await?, &secret, requester).await?,
+            Some(account)
+        );
 
         Ok(())
     }
@@ -156,9 +175,15 @@ mod tests {
         sqlx::query!("UPDATE claim_email_tokens SET expires_at = NOW() - INTERVAL '1 minute'",)
             .execute(&pool)
             .await?;
-        assert_eq!(consume(&pool, &secret, user).await?, None);
+        assert_eq!(
+            consume(&mut *pool.acquire().await?, &secret, user).await?,
+            None
+        );
 
-        assert_eq!(consume(&pool, "not-a-real-token", user).await?, None);
+        assert_eq!(
+            consume(&mut *pool.acquire().await?, "not-a-real-token", user).await?,
+            None
+        );
 
         Ok(())
     }

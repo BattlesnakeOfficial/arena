@@ -1,0 +1,82 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT game_battlesnake_id, health, eliminated_cause, eliminated_by,\n                  eliminated_on_turn, last_move, context_present, latency_ms, shout,\n                  food_eaten, body\n           FROM game_resume_snakes WHERE game_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "game_battlesnake_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "health",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 2,
+        "name": "eliminated_cause",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "eliminated_by",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "eliminated_on_turn",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 5,
+        "name": "last_move",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "context_present",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 7,
+        "name": "latency_ms",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 8,
+        "name": "shout",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "food_eaten",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 10,
+        "name": "body",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "f10155b579c8eca4cf34db6ec409d09319f4d8439dff85a9470cbebe02a840ed"
+}

@@ -1450,22 +1450,39 @@ pub async fn get_matches_for_round(
     Ok(matches)
 }
 
+/// Compare-and-swap update of a match's status: only applies while the
+/// match is still in `expected`, so a transition can't clobber a concurrent
+/// state change (e.g. a cancel bulk-canceled the match between the caller's
+/// read and this write). Errors when the row is missing or its status
+/// moved — callers must fail their transaction on a lost race rather than
+/// commit work for a match that is no longer live.
 pub async fn set_match_status<'e, E>(
     executor: E,
     match_id: Uuid,
     status: MatchStatus,
+    expected: MatchStatus,
 ) -> cja::Result<()>
 where
     E: Executor<'e, Database = Postgres>,
 {
-    sqlx::query!(
-        "UPDATE tournament_matches SET status = $2 WHERE match_id = $1",
+    let result = sqlx::query!(
+        "UPDATE tournament_matches SET status = $2 WHERE match_id = $1 AND status = $3",
         match_id,
         status.as_str(),
+        expected.as_str(),
     )
     .execute(executor)
     .await
     .wrap_err("Failed to update match status")?;
+
+    if result.rows_affected() != 1 {
+        return Err(color_eyre::eyre::eyre!(
+            "Failed to update match {} status to {}: match not found or status is no longer {}",
+            match_id,
+            status.as_str(),
+            expected.as_str(),
+        ));
+    }
 
     Ok(())
 }
@@ -1511,22 +1528,59 @@ pub async fn round_exists(pool: &PgPool, tournament_id: Uuid, round: i32) -> cja
     Ok(exists)
 }
 
-pub async fn set_tournament_current_round<'e, E>(
+/// Compare-and-swap: advances `current_round` only if it currently equals
+/// `expected_round` and the tournament is still `in_progress`. Returns
+/// `false` when the tournament is missing, the round moved, or the status
+/// changed — losing that race is benign (a concurrent progression job or a
+/// cancel/resume owns the counter now).
+pub async fn try_set_tournament_current_round<'e, E>(
     executor: E,
     tournament_id: Uuid,
     current_round: i32,
-) -> cja::Result<()>
+    expected_round: i32,
+) -> cja::Result<bool>
 where
     E: Executor<'e, Database = Postgres>,
 {
-    sqlx::query!(
-        "UPDATE tournaments SET current_round = $2 WHERE tournament_id = $1",
+    let result = sqlx::query!(
+        "UPDATE tournaments SET current_round = $2
+         WHERE tournament_id = $1 AND current_round = $3 AND status = 'in_progress'",
         tournament_id,
         current_round,
+        expected_round,
     )
     .execute(executor)
     .await
     .wrap_err("Failed to update tournament current round")?;
+
+    Ok(result.rows_affected() == 1)
+}
+
+/// Erroring wrapper over [`try_set_tournament_current_round`] for callers
+/// whose round write must succeed (start, reset). `expected_round` comes
+/// from the locked tournament row those callers already hold.
+pub async fn set_tournament_current_round<'e, E>(
+    executor: E,
+    tournament_id: Uuid,
+    current_round: i32,
+    expected_round: i32,
+) -> cja::Result<()>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    let updated =
+        try_set_tournament_current_round(executor, tournament_id, current_round, expected_round)
+            .await?;
+
+    if !updated {
+        return Err(color_eyre::eyre::eyre!(
+            "Failed to update tournament {} current round to {}: tournament not found, \
+             current round is no longer {}, or status is not in_progress",
+            tournament_id,
+            current_round,
+            expected_round,
+        ));
+    }
 
     Ok(())
 }
@@ -1561,6 +1615,13 @@ pub async fn find_match_game_by_game_id(
 ///
 /// Executor-generic so the game runner can write the result inside the same
 /// transaction that marks the game finished.
+///
+/// Write-once: the winner is recorded exactly once, atomically with the
+/// game's finish (`mark_game_finished_tx`) in the caller's transaction. A
+/// second write means a double finish raced the bracket forward and is an
+/// error, never a silent overwrite (DEV-2175). A tie re-write `NULL → NULL`
+/// still matches `winner_id IS NULL` and succeeds — the tie path is not
+/// guarded away.
 pub async fn set_match_game_winner<'e, E>(
     executor: E,
     match_game_id: Uuid,
@@ -1569,14 +1630,21 @@ pub async fn set_match_game_winner<'e, E>(
 where
     E: Executor<'e, Database = Postgres>,
 {
-    sqlx::query!(
-        "UPDATE match_games SET winner_id = $2 WHERE match_game_id = $1",
+    let updated = sqlx::query!(
+        "UPDATE match_games SET winner_id = $2
+         WHERE match_game_id = $1 AND winner_id IS NULL",
         match_game_id,
         winner_id,
     )
     .execute(executor)
     .await
     .wrap_err("Failed to set match game winner")?;
+
+    if updated.rows_affected() != 1 {
+        return Err(color_eyre::eyre::eyre!(
+            "Match game {match_game_id} already has a winner recorded; refusing to overwrite"
+        ));
+    }
 
     Ok(())
 }
@@ -1607,6 +1675,104 @@ pub async fn find_stale_in_progress_matches(
     .fetch_all(pool)
     .await
     .wrap_err("Failed to find stale in-progress matches")?;
+
+    Ok(match_ids)
+}
+
+/// In-progress tournaments whose `current_round` matches are all
+/// completed/canceled and whose newest match change is older than `cutoff`.
+/// Normal progression enqueues `UpdateTournamentStatusJob` within
+/// milliseconds of the last match's completion, so a round in this state
+/// means that enqueue was lost (killed between commit and enqueue, or the
+/// job dead-lettered). The stuck-match sweeper re-enqueues progression;
+/// `update_tournament_progress` is idempotent, so duplicates are harmless.
+///
+/// Groups by tournament: a finished round yields one id, not one per match.
+/// `canceled` counts as finished, matching `count_unfinished_matches_in_round`.
+pub async fn find_in_progress_tournaments_with_finished_round(
+    pool: &PgPool,
+    cutoff: chrono::DateTime<chrono::Utc>,
+) -> cja::Result<Vec<Uuid>> {
+    let tournament_ids = sqlx::query_scalar!(
+        r#"
+        SELECT t.tournament_id
+        FROM tournaments t
+        JOIN tournament_matches m ON m.tournament_id = t.tournament_id AND m.round = t.current_round
+        WHERE t.status = 'in_progress'
+        GROUP BY t.tournament_id
+        HAVING bool_and(m.status IN ('completed', 'canceled'))
+           AND max(m.updated_at) < $1
+        ORDER BY t.tournament_id
+        "#,
+        cutoff,
+    )
+    .fetch_all(pool)
+    .await
+    .wrap_err("Failed to find in-progress tournaments with a finished round")?;
+
+    Ok(tournament_ids)
+}
+
+/// `scheduled` matches stranded in an already-started round: the match is in
+/// an in-progress tournament's `current_round`, both participant slots are
+/// filled, and a non-bye sibling in the same round is `in_progress` or
+/// `completed` **with its last state change older than `cutoff`** — evidence
+/// the owner started the round (Run Round) at least `cutoff` ago and this
+/// match's `RunMatchJob` was lost (killed between `run_round`'s per-match
+/// enqueues, or the job died before its first-game transaction committed).
+///
+/// The age gate lives on the *sibling*, not on this match: nothing writes a
+/// `scheduled` match's row between bracket creation and `run_match`, so its
+/// `updated_at` is bracket-creation time — for round 2 onward (and any round
+/// 1 run more than the cutoff after Start) that is always older than the
+/// cutoff, and only the sibling's flip/completion timestamp can measure
+/// "the round was started a while ago". `m.updated_at < cutoff` below is a
+/// defensive redundancy implied by the sibling gate in production.
+///
+/// Byes are excluded as evidence: a bye has exactly one `match_participants`
+/// row and is `completed` at bracket creation, before the round was started.
+/// Rounds with no eligible started sibling are never auto-started — Run
+/// Round stays an owner action. That includes every lone-match round (each
+/// final; e.g. a 5-snake round 1 has one real match plus byes): if the only
+/// real match's job is lost there is no witness, and the owner's Run Round
+/// recovers it.
+pub async fn find_stale_scheduled_matches_in_started_rounds(
+    pool: &PgPool,
+    cutoff: chrono::DateTime<chrono::Utc>,
+) -> cja::Result<Vec<Uuid>> {
+    let match_ids = sqlx::query_scalar!(
+        r#"
+        SELECT m.match_id
+        FROM tournament_matches m
+        JOIN tournaments t ON t.tournament_id = m.tournament_id
+        WHERE t.status = 'in_progress'
+          AND m.round = t.current_round
+          AND m.status = 'scheduled'
+          AND m.updated_at < $1
+          AND (
+              SELECT count(*) FROM match_participants mp
+              WHERE mp.match_id = m.match_id AND mp.battlesnake_id IS NOT NULL
+          ) = 2
+          AND EXISTS (
+              SELECT 1
+              FROM tournament_matches s
+              WHERE s.tournament_id = m.tournament_id
+                AND s.round = m.round
+                AND s.match_id <> m.match_id
+                AND s.status IN ('in_progress', 'completed')
+                AND s.updated_at < $1
+                AND (
+                    SELECT count(*) FROM match_participants sp
+                    WHERE sp.match_id = s.match_id
+                ) = 2
+          )
+        ORDER BY m.updated_at ASC
+        "#,
+        cutoff,
+    )
+    .fetch_all(pool)
+    .await
+    .wrap_err("Failed to find stale scheduled matches in started rounds")?;
 
     Ok(match_ids)
 }
@@ -1679,6 +1845,31 @@ pub async fn get_match_games_for_tournament(
     .wrap_err("Failed to fetch tournament match games")?;
 
     Ok(match_games)
+}
+
+/// Cancel every scheduled/in_progress match of a tournament. Runs inside
+/// the cancel handler's transaction so the tournament status flip and the
+/// match cancellations commit atomically. Completed matches (including
+/// byes resolved at bracket generation) are untouched. Returns how many
+/// matches were canceled.
+pub async fn cancel_unfinished_matches_for_tournament<'e, E>(
+    executor: E,
+    tournament_id: Uuid,
+) -> cja::Result<u64>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    let result = sqlx::query!(
+        "UPDATE tournament_matches SET status = $2
+         WHERE tournament_id = $1 AND status IN ('scheduled', 'in_progress')",
+        tournament_id,
+        MatchStatus::Canceled.as_str(),
+    )
+    .execute(executor)
+    .await
+    .wrap_err("Failed to cancel unfinished tournament matches")?;
+
+    Ok(result.rows_affected())
 }
 
 /// Delete every match for a tournament. `match_participants` and
@@ -1834,8 +2025,8 @@ mod tests {
     // fixtures don't need entries in the sqlx offline cache.
     async fn fixture_user_and_snake(pool: &PgPool) -> cja::Result<(Uuid, Uuid)> {
         let user_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES ($1, $2, $3) RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES ($1, $2) RETURNING user_id",
         )
         .bind(424_242_i64)
         .bind("test-user")
@@ -2048,5 +2239,313 @@ mod tests {
             serde_json::from_str::<MatchStyle>(r#""best_of_3""#).unwrap(),
             MatchStyle::BestOf3
         );
+    }
+
+    /// Insert a bare game + match_games row, returning the match_game_id
+    /// (stuck_game_sweeper fixture shape; non-macro so no .sqlx entry).
+    async fn insert_match_game(
+        pool: &PgPool,
+        match_id: Uuid,
+        game_number: i32,
+    ) -> cja::Result<Uuid> {
+        let game_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO games (board_size, game_type) VALUES ('11x11', 'Standard') RETURNING game_id",
+        )
+        .fetch_one(pool)
+        .await?;
+        Ok(sqlx::query_scalar(
+            "INSERT INTO match_games (match_id, game_id, game_number)
+                 VALUES ($1, $2, $3) RETURNING match_game_id",
+        )
+        .bind(match_id)
+        .bind(game_id)
+        .bind(game_number)
+        .fetch_one(pool)
+        .await?)
+    }
+
+    /// DEV-2175: the match_games winner is write-once — a second write (a
+    /// double finish racing the bracket forward) errors instead of
+    /// overwriting. Uses a real second snake because winner_id carries an FK
+    /// to battlesnakes, so an arbitrary UUID would fail the FK and make the
+    /// guard look like it works when it doesn't. A tie write (NULL) on a
+    /// fresh row still succeeds.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn match_game_winner_is_write_once(pool: PgPool) -> cja::Result<()> {
+        let (user_id, _) = fixture_user_and_snake(&pool).await?;
+        let snake_a: Uuid = sqlx::query_scalar(
+            "INSERT INTO battlesnakes (user_id, name, url)
+             VALUES ($1, 'snake-a', 'http://example.com') RETURNING battlesnake_id",
+        )
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await?;
+        let snake_b: Uuid = sqlx::query_scalar(
+            "INSERT INTO battlesnakes (user_id, name, url)
+             VALUES ($1, 'snake-b', 'http://example.com') RETURNING battlesnake_id",
+        )
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await?;
+
+        let tournament = create_tournament(&pool, user_id, fixture_tournament()).await?;
+        let match_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO tournament_matches (tournament_id, round, position, visual_column, visual_row)
+             VALUES ($1, 1, 0, 0, 0) RETURNING match_id",
+        )
+        .bind(tournament.tournament_id)
+        .fetch_one(&pool)
+        .await?;
+
+        let mg = insert_match_game(&pool, match_id, 1).await?;
+        let mg2 = insert_match_game(&pool, match_id, 2).await?;
+
+        let read_winner = |match_game_id: Uuid| {
+            sqlx::query_scalar::<_, Option<Uuid>>(
+                "SELECT winner_id FROM match_games WHERE match_game_id = $1",
+            )
+            .bind(match_game_id)
+            .fetch_one(&pool)
+        };
+
+        // First write records the winner.
+        set_match_game_winner(&pool, mg, Some(snake_a)).await?;
+        assert_eq!(read_winner(mg).await?, Some(snake_a));
+
+        // Second write with a different snake: refused, winner unchanged.
+        assert!(
+            set_match_game_winner(&pool, mg, Some(snake_b))
+                .await
+                .is_err()
+        );
+        assert_eq!(read_winner(mg).await?, Some(snake_a));
+
+        // Tie path on a fresh row: recording NULL is fine and stays NULL.
+        set_match_game_winner(&pool, mg2, None).await?;
+        assert_eq!(read_winner(mg2).await?, None);
+
+        Ok(())
+    }
+
+    /// DEV-2180: `set_match_status` is a compare-and-swap — a lost race (the
+    /// match was canceled between read and write) errors instead of
+    /// clobbering the new state.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn set_match_status_is_a_compare_and_swap(pool: PgPool) -> cja::Result<()> {
+        let (user_id, _) = fixture_user_and_snake(&pool).await?;
+        let tournament = create_tournament(&pool, user_id, fixture_tournament()).await?;
+        let match_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO tournament_matches (tournament_id, round, position, visual_column, visual_row)
+             VALUES ($1, 1, 0, 0, 0) RETURNING match_id",
+        )
+        .bind(tournament.tournament_id)
+        .fetch_one(&pool)
+        .await?;
+
+        let status_of = |match_id: Uuid| {
+            sqlx::query_scalar::<_, String>(
+                "SELECT status FROM tournament_matches WHERE match_id = $1",
+            )
+            .bind(match_id)
+            .fetch_one(&pool)
+        };
+
+        // scheduled -> in_progress: applies.
+        set_match_status(
+            &pool,
+            match_id,
+            MatchStatus::InProgress,
+            MatchStatus::Scheduled,
+        )
+        .await?;
+        assert_eq!(status_of(match_id).await?, "in_progress");
+
+        // Same CAS again: the match is no longer scheduled, so it errors and
+        // leaves the status alone.
+        assert!(
+            set_match_status(
+                &pool,
+                match_id,
+                MatchStatus::InProgress,
+                MatchStatus::Scheduled
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(status_of(match_id).await?, "in_progress");
+
+        // A canceled match can't be driven to in_progress either.
+        sqlx::query("UPDATE tournament_matches SET status = 'canceled' WHERE match_id = $1")
+            .bind(match_id)
+            .execute(&pool)
+            .await?;
+        assert!(
+            set_match_status(
+                &pool,
+                match_id,
+                MatchStatus::InProgress,
+                MatchStatus::Scheduled
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(status_of(match_id).await?, "canceled");
+
+        Ok(())
+    }
+
+    /// DEV-2180: the current_round write is guarded — a stale progression
+    /// job must not move the counter, and a status change freezes it.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn current_round_write_is_guarded(pool: PgPool) -> cja::Result<()> {
+        let (user_id, _) = fixture_user_and_snake(&pool).await?;
+        let tournament = create_tournament(&pool, user_id, fixture_tournament()).await?;
+        let tid = tournament.tournament_id;
+        set_tournament_status(
+            &pool,
+            tid,
+            TournamentStatus::Registration,
+            TournamentStatus::Created,
+        )
+        .await?;
+        set_tournament_status(
+            &pool,
+            tid,
+            TournamentStatus::InProgress,
+            TournamentStatus::Registration,
+        )
+        .await?;
+
+        let round_of = |tid: Uuid| {
+            sqlx::query_scalar::<_, i32>(
+                "SELECT current_round FROM tournaments WHERE tournament_id = $1",
+            )
+            .bind(tid)
+            .fetch_one(&pool)
+        };
+
+        // Start-style write: 0 -> 1 applies.
+        set_tournament_current_round(&pool, tid, 1, 0).await?;
+        assert_eq!(round_of(tid).await?, 1);
+
+        // Progression-style CAS: 1 -> 2 applies.
+        assert!(try_set_tournament_current_round(&pool, tid, 2, 1).await?);
+        assert_eq!(round_of(tid).await?, 2);
+
+        // Stale write (expected 1, actual 2): loses, does nothing.
+        assert!(!try_set_tournament_current_round(&pool, tid, 3, 1).await?);
+        assert_eq!(round_of(tid).await?, 2);
+
+        // Status guard: a canceled tournament freezes the counter.
+        set_tournament_status(
+            &pool,
+            tid,
+            TournamentStatus::Canceled,
+            TournamentStatus::InProgress,
+        )
+        .await?;
+        assert!(!try_set_tournament_current_round(&pool, tid, 3, 2).await?);
+        assert_eq!(round_of(tid).await?, 2);
+
+        Ok(())
+    }
+
+    /// DEV-2180: the bulk cancel touches only scheduled/in_progress
+    /// matches — completed matches (including byes) are never re-canceled.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn cancel_unfinished_matches_only_touches_live_matches(pool: PgPool) -> cja::Result<()> {
+        let (user_id, _) = fixture_user_and_snake(&pool).await?;
+        let tournament = create_tournament(&pool, user_id, fixture_tournament()).await?;
+        let tid = tournament.tournament_id;
+
+        let insert_match = |position: i32| {
+            sqlx::query_scalar::<_, Uuid>(
+                "INSERT INTO tournament_matches (tournament_id, round, position, visual_column, visual_row)
+                 VALUES ($1, 1, $2, 0, 0) RETURNING match_id",
+            )
+            .bind(tid)
+            .bind(position)
+            .fetch_one(&pool)
+        };
+        let scheduled = insert_match(0).await?; // default scheduled
+        let in_progress = insert_match(1).await?;
+        let completed = insert_match(2).await?;
+        sqlx::query("UPDATE tournament_matches SET status = 'in_progress' WHERE match_id = $1")
+            .bind(in_progress)
+            .execute(&pool)
+            .await?;
+        sqlx::query("UPDATE tournament_matches SET status = 'completed' WHERE match_id = $1")
+            .bind(completed)
+            .execute(&pool)
+            .await?;
+
+        let canceled = cancel_unfinished_matches_for_tournament(&pool, tid).await?;
+        assert_eq!(canceled, 2);
+
+        let status_of = |match_id: Uuid| {
+            sqlx::query_scalar::<_, String>(
+                "SELECT status FROM tournament_matches WHERE match_id = $1",
+            )
+            .bind(match_id)
+            .fetch_one(&pool)
+        };
+        assert_eq!(status_of(scheduled).await?, "canceled");
+        assert_eq!(status_of(in_progress).await?, "canceled");
+        assert_eq!(status_of(completed).await?, "completed");
+
+        Ok(())
+    }
+
+    /// DEV-2180: the CHECK constraints from migration 20261108140000 pin
+    /// the free-TEXT status columns to their enum value sets.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn tournament_status_check_constraint_rejects_unknown_values(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        let (user_id, _) = fixture_user_and_snake(&pool).await?;
+        let tournament = create_tournament(&pool, user_id, fixture_tournament()).await?;
+        let tid = tournament.tournament_id;
+        let match_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO tournament_matches (tournament_id, round, position, visual_column, visual_row)
+             VALUES ($1, 1, 0, 0, 0) RETURNING match_id",
+        )
+        .bind(tid)
+        .fetch_one(&pool)
+        .await?;
+
+        let err = sqlx::query("UPDATE tournaments SET status = 'bogus' WHERE tournament_id = $1")
+            .bind(tid)
+            .execute(&pool)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("tournaments_status_check"),
+            "got: {err}"
+        );
+
+        let err = sqlx::query(
+            "UPDATE tournaments SET registration_status = 'bogus' WHERE tournament_id = $1",
+        )
+        .bind(tid)
+        .execute(&pool)
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("tournaments_registration_status_check"),
+            "got: {err}"
+        );
+
+        let err = sqlx::query("UPDATE tournament_matches SET status = 'bogus' WHERE match_id = $1")
+            .bind(match_id)
+            .execute(&pool)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("tournament_matches_status_check"),
+            "got: {err}"
+        );
+
+        Ok(())
     }
 }

@@ -1,188 +1,57 @@
-//! Game engine module using the `rules` crate for game simulation
-//!
-//! This module provides game simulation using the rules crate's standard mode.
-//! Internal state is `rules::BoardState`; conversion to JSON wire format for
-//! the Battlesnake API happens at the HTTP boundary (see `wire.rs` and
-//! `snake_client.rs`).
+//! Façade over `engine-core`: re-exports the shared game engine and adapts
+//! server DB models (GameType/GameBoardSize/GameBattlesnakeWithDetails) to
+//! it. Prod randomness (thread_rng) is supplied here; the shared code is
+//! seedable for the battlesnake CLI.
 
 pub mod frame;
+pub mod resume;
 
-use color_eyre::eyre::eyre;
-use rules::{BoardState, Direction, Point, RoyaleSettings, SnakeMove, StandardSettings};
+pub use engine_core::{
+    EngineGame, GameMeta, GameResult, GameSource, MAX_TURNS, MOVE_TIMEOUT_MS, StopReason,
+    is_game_over, stop_reason,
+};
+
+// The untouched test module below drives apply_turn directly (its loops
+// manage the turn counter and food themselves), so only test code reaches
+// it through this path.
+#[cfg(test)]
+use engine_core::apply_turn;
+
+use rules::{Direction, RoyaleSettings, StandardSettings};
 use uuid::Uuid;
+
+// The untouched test module below reaches BoardState and Point through
+// `use super::*` (they arrive via the parent's imports today). Only test
+// code needs them, so they must be cfg(test) or clippy -D warnings fails
+// on unused imports (main.rs allows only dead_code). Direction is a normal
+// import because the advance_turn wrapper's signature names it.
+#[cfg(test)]
+use rules::{BoardState, Point};
 
 use crate::models::game::{GameBoardSize, GameType};
 use crate::models::game_battlesnake::GameBattlesnakeWithDetails;
 
-pub const MAX_TURNS: i32 = 5000;
-
-/// Per-request budget every game gives a snake to answer `/move`, in ms.
-pub const MOVE_TIMEOUT_MS: i64 = 500;
-
-/// Metadata about the game that lives alongside the board state.
-///
-/// This replaces the `NestedGame` / `Game` wrapper from `battlesnake-game-types`.
-#[derive(Debug, Clone)]
-pub struct GameMeta {
-    pub game_id: String,
-    pub ruleset_name: String,
-    pub timeout: i64,
-    pub settings: StandardSettings,
-    /// `Some` when this is a Royale game; drives hazard population each turn
-    /// and the `royale` block of the wire-protocol ruleset settings.
-    pub royale: Option<RoyaleSettings>,
-    /// Where the game came from; sent to snakes as `game.source`.
-    pub source: GameSource,
-}
-
-/// Origin of a game, sent to snakes as `game.source` (and as the engine
-/// API's `Game.Source`).
-///
-/// Values come from the documented set (docs.battlesnake.com, Game object:
-/// `tournament`, `league`, `arena`, `challenge`, `custom`), NOT what Play
-/// actually sent: Play sent an undocumented `"ladder"` for ladder games, and
-/// strict doc-following parsers (e.g. `battlesnake-game-types`' `Source`
-/// enum) reject it with a 400 on every request (DEV-1505).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum GameSource {
-    /// A leaderboard (ladder) matchmaker game; documented as `arena`.
-    Ladder,
-    /// A tournament match game.
-    Tournament,
-    /// Anything a user created directly (game builder, API, rematch).
-    #[default]
-    Custom,
-}
-
-impl GameSource {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            GameSource::Ladder => "arena",
-            GameSource::Tournament => "tournament",
-            GameSource::Custom => "custom",
-        }
-    }
-
-    /// Analytics label for Eyes product events. Matches
-    /// `StatsSnapshot::fetch`'s precedence (tournament before ladder) but uses
-    /// product vocabulary: `ladder`, not the stats page's `leaderboard` column
-    /// label. Distinct from [`Self::as_str`], the documented engine wire value
-    /// (`arena`), which must not change.
-    pub fn analytics_label(self) -> &'static str {
-        match self {
-            GameSource::Ladder => "ladder",
-            GameSource::Tournament => "tournament",
-            GameSource::Custom => "custom",
-        }
+/// The single `GameType → GameMode` conversion point. `Other(_)` keeps its
+/// arm: `GameType::Other(String)` is an open DB-facing enum, and running
+/// standard rules is the defined meaning there.
+pub fn game_mode(game_type: &GameType) -> engine_core::GameMode {
+    match game_type {
+        GameType::Royale => engine_core::GameMode::Royale,
+        GameType::Constrictor => engine_core::GameMode::Constrictor,
+        GameType::SnailMode => engine_core::GameMode::SnailMode,
+        GameType::Solo => engine_core::GameMode::Solo,
+        // Standard and Other(_) run standard rules (today's catch-all).
+        GameType::Standard | GameType::Other(_) => engine_core::GameMode::Standard,
     }
 }
 
-/// Full engine game state: board + metadata.
-#[derive(Debug, Clone)]
-pub struct EngineGame {
-    pub board: BoardState,
-    pub meta: GameMeta,
-    /// Snake names keyed by snake ID (needed for wire format).
-    pub snake_names: std::collections::HashMap<String, String>,
-}
-
-/// Result of running a game
-#[derive(Debug)]
-pub struct GameResult {
-    /// Snake IDs in order of placement (index 0 = winner/last alive)
-    pub placements: Vec<String>,
-    /// Final turn number
-    pub final_turn: i32,
-}
-
-/// Derive a deterministic RNG seed from the game's UUID.
-///
-/// Royale hazard placement must be reproducible from stored game data (see
-/// the determinism notes in `rules::royale`), so the seed is a pure function
-/// of the game ID rather than a fresh random value.
-fn game_seed(game_id: Uuid) -> u64 {
-    let bytes = game_id.as_bytes();
-    u64::from_le_bytes(bytes[..8].try_into().expect("uuid has 16 bytes"))
-}
-
-/// Per-mode rules: the internal ruleset name (drives engine dispatch), the
-/// standard settings, and Royale's shrink settings. Single source for both
-/// game creation and everything that describes a game's rules (snake
-/// payloads via `GameMeta`, the engine-compatible game API).
 pub fn mode_rules(
     game_type: GameType,
     game_id: Uuid,
-) -> (&'static str, StandardSettings, Option<RoyaleSettings>) {
-    // Hazard damage: the arena has historically used 15 for standard games
-    // (where it is inert -- standard boards never spawn hazards), and we keep
-    // that unchanged. Royale and Snail Mode use 14, the default in the
-    // canonical Go rules (`hazardDamagePerTurn` in BattlesnakeOfficial/rules
-    // cli, which is what map-driven hazards like snail_mode ran with on
-    // play.battlesnake.com). Constrictor advertises no food spawning
-    // (chance 0 / minimum 0) on the wire; its hazard damage is inert like
-    // standard's.
-    match game_type {
-        GameType::Royale => (
-            "royale",
-            StandardSettings {
-                food_spawn_chance: 15,
-                minimum_food: 1,
-                hazard_damage_per_turn: 14,
-            },
-            Some(RoyaleSettings {
-                shrink_every_n_turns: 25,
-                seed: game_seed(game_id),
-            }),
-        ),
-        // Internal name only: on the wire snakes see ruleset "standard" with
-        // game.map = "snail_mode", matching play.battlesnake.com where Snail
-        // Mode was a community map on the standard ruleset (see wire.rs).
-        GameType::SnailMode => (
-            "snail_mode",
-            StandardSettings {
-                food_spawn_chance: 15,
-                minimum_food: 1,
-                hazard_damage_per_turn: 14,
-            },
-            None,
-        ),
-        GameType::Constrictor => (
-            "constrictor",
-            StandardSettings {
-                food_spawn_chance: 0,
-                minimum_food: 0,
-                hazard_damage_per_turn: 15,
-            },
-            None,
-        ),
-        // Solo: single-snake survival. Runs the standard pipeline with
-        // standard food settings; only the game-over predicate differs
-        // (see `is_game_over` and `rules::solo`). Kept as an explicit arm --
-        // folding it into the catch-all below would silently give it
-        // "standard" rules and the standard game-over check.
-        GameType::Solo => (
-            "solo",
-            StandardSettings {
-                food_spawn_chance: 15,
-                minimum_food: 1,
-                hazard_damage_per_turn: 15,
-            },
-            None,
-        ),
-        // Other currently runs standard rules.
-        _ => (
-            "standard",
-            StandardSettings {
-                food_spawn_chance: 15,
-                minimum_food: 1,
-                hazard_damage_per_turn: 15,
-            },
-            None,
-        ),
-    }
+) -> (StandardSettings, Option<RoyaleSettings>) {
+    engine_core::mode_rules(game_mode(&game_type), game_id)
 }
 
-/// Create the initial game state from database models
 pub fn create_initial_game(
     game_id: Uuid,
     board_size: GameBoardSize,
@@ -190,256 +59,38 @@ pub fn create_initial_game(
     battlesnakes: &[GameBattlesnakeWithDetails],
 ) -> EngineGame {
     let (w, h) = board_size.dimensions();
-    let (width, height) = (w as i32, h as i32);
-
-    let snake_ids: Vec<String> = battlesnakes
+    let snakes: Vec<engine_core::InitialSnake> = battlesnakes
         .iter()
-        .map(|bs| bs.game_battlesnake_id.to_string())
+        .map(|bs| engine_core::InitialSnake {
+            id: bs.game_battlesnake_id.to_string(),
+            name: bs.name.clone(),
+        })
         .collect();
-
-    let mut rng = rand::thread_rng();
-    let mut board = rules::board::create_default_board_state(&mut rng, width, height, &snake_ids)
-        .expect("Failed to create initial board state");
-
-    let mut snake_names = std::collections::HashMap::new();
-    for bs in battlesnakes {
-        snake_names.insert(bs.game_battlesnake_id.to_string(), bs.name.clone());
-    }
-
-    let (ruleset_name, settings, royale) = mode_rules(game_type, game_id);
-
-    if ruleset_name == "constrictor" {
-        // Match the Go engine's initialization pass (the constrictor
-        // pipeline runs once with no moves at game start): strip all food
-        // and pin snakes at max health. Initial bodies are stacked, so no
-        // growth happens here.
-        rules::constrictor::modify_initial_board(&mut board)
-            .expect("constrictor initial board modification failed: zero-length snake");
-    }
-
-    EngineGame {
-        board,
-        meta: GameMeta {
-            game_id: game_id.to_string(),
-            ruleset_name: ruleset_name.to_string(),
-            timeout: MOVE_TIMEOUT_MS,
-            settings,
-            royale,
-            source: GameSource::default(),
-        },
-        snake_names,
-    }
+    engine_core::create_initial_game(
+        &mut rand::thread_rng(),
+        game_id,
+        w as i32,
+        h as i32,
+        game_mode(&game_type),
+        &snakes,
+    )
+    .expect("Failed to create initial board state")
 }
 
-fn royale_settings(game: &EngineGame) -> cja::Result<RoyaleSettings> {
-    game.meta
-        .royale
-        .clone()
-        .ok_or_else(|| eyre!("missing Royale settings for royale game"))
-}
-
-/// Run a complete game with random moves, returning placements
-pub fn run_game_with_random_moves(mut game: EngineGame) -> cja::Result<GameResult> {
-    let royale = (game.meta.ruleset_name == "royale")
-        .then(|| royale_settings(&game))
-        .transpose()?;
-    let mut rng = rand::thread_rng();
-    let mut elimination_order: Vec<String> = Vec::new();
-
-    while !is_game_over(&game) && game.board.turn < MAX_TURNS {
-        // Build random moves for each alive snake
-        let moves: Vec<SnakeMove> = game
-            .board
-            .snakes
-            .iter()
-            .filter(|s| !s.eliminated_cause.is_eliminated())
-            .map(|s| {
-                let head = s.head();
-                // Pick a random reasonable direction (not back into neck)
-                let all_dirs = [
-                    Direction::Up,
-                    Direction::Down,
-                    Direction::Left,
-                    Direction::Right,
-                ];
-                let neck = s.body.get(1);
-                let reasonable: Vec<Direction> = all_dirs
-                    .iter()
-                    .copied()
-                    .filter(|d| {
-                        let (dx, dy) = d.to_delta();
-                        let new_head = Point::new(head.x + dx, head.y + dy);
-                        // Don't move into neck
-                        if let Some(n) = neck {
-                            new_head != *n
-                        } else {
-                            true
-                        }
-                    })
-                    .collect();
-
-                use rand::seq::SliceRandom;
-                let dir = if reasonable.is_empty() {
-                    *all_dirs.choose(&mut rng).unwrap()
-                } else {
-                    *reasonable.choose(&mut rng).unwrap()
-                };
-
-                SnakeMove {
-                    id: s.id.clone(),
-                    direction: dir,
-                }
-            })
-            .collect();
-
-        // Apply the turn. Dispatch on the ruleset name so each mode's arm
-        // stays independent (parallel game-mode PRs union their arms here).
-        let _game_over = match game.meta.ruleset_name.as_str() {
-            "royale" => {
-                let Some(settings) = royale.as_ref() else {
-                    unreachable!("royale settings were validated before game execution")
-                };
-                rules::royale::execute_turn(&mut game.board, &moves, &game.meta.settings, settings)
-            }
-            "constrictor" => {
-                rules::constrictor::execute_turn(&mut game.board, &moves, &game.meta.settings)
-            }
-            "snail_mode" => {
-                rules::snail::execute_turn(&mut game.board, &moves, &game.meta.settings)
-            }
-            "solo" => rules::solo::execute_turn(&mut game.board, &moves, &game.meta.settings),
-            _ => rules::standard::execute_turn(&mut game.board, &moves, &game.meta.settings),
-        }
-        .map_err(|error| {
-            eyre!(
-                "execute_turn failed for ruleset {}: {error:?}",
-                game.meta.ruleset_name
-            )
-        })?;
-
-        // Spawn food after turn. Constrictor games never spawn food (their
-        // settings are food_spawn_chance=0 / minimum_food=0, which would make
-        // this a no-op anyway, but skip it outright to keep the invariant
-        // explicit).
-        if game.meta.ruleset_name != "constrictor" {
-            rules::food::maybe_spawn_food(&mut rng, &mut game.board, &game.meta.settings);
-        }
-
-        // Track newly eliminated snakes
-        for snake in &game.board.snakes {
-            if snake.eliminated_cause.is_eliminated() && !elimination_order.contains(&snake.id) {
-                elimination_order.push(snake.id.clone());
-            }
-        }
-    }
-
-    // Build placements: last eliminated = winner (placement 1)
-    // Snakes still alive at the end go first
-    let mut placements: Vec<String> = game
-        .board
-        .snakes
-        .iter()
-        .filter(|s| !s.eliminated_cause.is_eliminated())
-        .map(|s| s.id.clone())
-        .collect();
-
-    // Then add eliminated snakes in reverse order (last eliminated = better placement)
-    elimination_order.reverse();
-    placements.extend(elimination_order);
-
-    Ok(GameResult {
-        placements,
-        final_turn: game.board.turn,
-    })
-}
-
-/// Check if the game is over.
-///
-/// Mode-aware: Solo games (ruleset "solo") end only when no snake is alive;
-/// every other mode ends when 1 or fewer snakes remain alive.
-pub fn is_game_over(game: &EngineGame) -> bool {
-    match game.meta.ruleset_name.as_str() {
-        "solo" => rules::solo::is_game_over(&game.board),
-        _ => rules::standard::is_game_over(&game.board),
-    }
-}
-
-/// Apply a single turn: move snakes, reduce health, feed, eliminate
-///
-/// Returns the IDs of the snakes that ate food this turn. This is the only
-/// reliable food signal: body growth isn't, because Constrictor grows every
-/// snake every turn without any food on the board.
-///
-/// Note: Unlike the rules crate's `execute_turn`, this does NOT increment
-/// `board.turn` internally -- the caller must do that (for compatibility with
-/// game_runner.rs which increments after recording frames).
-pub fn apply_turn(
+/// One full turn (moves, turn counter, food) with prod randomness.
+pub fn advance_turn(
     game: &mut EngineGame,
     moves: &[(String, Direction)],
 ) -> cja::Result<Vec<String>> {
-    let royale = (game.meta.ruleset_name == "royale")
-        .then(|| royale_settings(game))
-        .transpose()?;
-    let snake_moves: Vec<SnakeMove> = moves
-        .iter()
-        .map(|(id, dir)| SnakeMove {
-            id: id.clone(),
-            direction: *dir,
-        })
-        .collect();
-
-    // Run the standard pipeline steps individually (so we can control turn increment)
-    let _ = rules::standard::move_snakes(&mut game.board, &snake_moves);
-    rules::standard::reduce_snake_health(&mut game.board);
-    rules::standard::damage_hazards(&mut game.board, &game.meta.settings);
-    let fed = rules::standard::feed_snakes(&mut game.board);
-    let _ = rules::standard::eliminate_snakes(&mut game.board);
-
-    // Mode-specific post-elimination stages. Dispatch on the ruleset name so
-    // each mode's arm stays independent (parallel game-mode PRs union their
-    // arms here).
-    match game.meta.ruleset_name.as_str() {
-        // Royale: spawn/grow hazards for the next turn (matches Go's
-        // StageSpawnHazardsShrinkMap, which runs after elimination). Uses
-        // `board.turn + 1` internally, so this must run before the caller
-        // increments `board.turn`.
-        "royale" => {
-            let Some(settings) = royale.as_ref() else {
-                unreachable!("royale settings were validated before turn application")
-            };
-            rules::royale::populate_hazards(&mut game.board, settings)
-                .map_err(|error| eyre!("royale hazard population failed: {error:?}"))?;
-        }
-        // Constrictor: clear all food and grow every snake (matches Go's
-        // StageSpawnFoodNoFood + StageModifySnakesAlwaysGrow, which run after
-        // elimination).
-        "constrictor" => {
-            rules::constrictor::remove_food(&mut game.board);
-            rules::constrictor::grow_snakes(&mut game.board)
-                .expect("constrictor growth failed: zero-length snake");
-        }
-        // Snail Mode: decay hazard trails and record vacated tail squares
-        // (matches Go's SnailModeMap.PostUpdateBoard, which runs after all
-        // ruleset stages).
-        "snail_mode" => rules::snail::post_update_board(&mut game.board),
-        _ => {}
-    }
-
-    Ok(fed)
+    engine_core::advance_turn(game, moves, &mut rand::thread_rng())
 }
 
-/// Spawn food for the next turn in modes that spawn food.
-///
-/// Food spawning lives outside the per-turn rules pipeline (matching the Go
-/// engine, where the game loop spawns food between turns), so every caller of
-/// `apply_turn` must also call this. Constrictor games never spawn food; all
-/// other modes use the standard chance/minimum settings.
 pub fn spawn_food(game: &mut EngineGame) {
-    if game.meta.ruleset_name == "constrictor" {
-        return;
-    }
-    let mut rng = rand::thread_rng();
-    rules::food::maybe_spawn_food(&mut rng, &mut game.board, &game.meta.settings);
+    engine_core::spawn_food(game, &mut rand::thread_rng());
+}
+
+pub fn run_game_with_random_moves(game: EngineGame) -> cja::Result<GameResult> {
+    engine_core::run_game_with_random_moves(game, &mut rand::thread_rng())
 }
 
 #[cfg(test)]
@@ -538,7 +189,9 @@ mod tests {
                         },
                         meta: GameMeta {
                             game_id: "prop-test".to_string(),
-                            ruleset_name: "standard".to_string(),
+                            mode: engine_core::GameMode::Standard,
+                            game_over_rule: engine_core::GameMode::Standard
+                                .default_game_over_rule(),
                             timeout: 500,
                             settings: StandardSettings::default(),
                             royale: None,
@@ -1461,7 +1114,8 @@ mod tests {
             },
             meta: GameMeta {
                 game_id: "test-game".to_string(),
-                ruleset_name: "standard".to_string(),
+                mode: engine_core::GameMode::Standard,
+                game_over_rule: engine_core::GameMode::Standard.default_game_over_rule(),
                 timeout: 500,
                 settings: StandardSettings::default(),
                 royale: None,
@@ -1474,7 +1128,7 @@ mod tests {
     #[test]
     fn apply_turn_rejects_missing_royale_settings_before_mutation() {
         let mut game = create_test_game(2);
-        game.meta.ruleset_name = "royale".to_string();
+        game.meta.mode = engine_core::GameMode::Royale;
         let before = game.board.clone();
 
         let error = apply_turn(&mut game, &[]).expect_err("missing settings must fail");
@@ -1486,7 +1140,7 @@ mod tests {
     #[test]
     fn random_game_rejects_missing_royale_settings() {
         let mut game = create_test_game(2);
-        game.meta.ruleset_name = "royale".to_string();
+        game.meta.mode = engine_core::GameMode::Royale;
 
         let error = run_game_with_random_moves(game).expect_err("missing settings must fail");
 
@@ -1502,7 +1156,7 @@ mod tests {
     #[test]
     fn apply_turn_preserves_royale_rules_error_details() {
         let mut game = create_test_game(2);
-        game.meta.ruleset_name = "royale".to_string();
+        game.meta.mode = engine_core::GameMode::Royale;
         game.meta.royale = Some(RoyaleSettings {
             shrink_every_n_turns: 0,
             seed: 0,
@@ -1533,7 +1187,7 @@ mod tests {
     #[test]
     fn test_spawn_food_constrictor_never_spawns() {
         let mut game = create_test_game(2);
-        game.meta.ruleset_name = "constrictor".to_string();
+        game.meta.mode = engine_core::GameMode::Constrictor;
         game.board.food.clear();
 
         // food_spawn_chance is probabilistic; run enough iterations that a
@@ -1663,7 +1317,7 @@ mod tests {
             &battlesnakes,
         );
 
-        assert_eq!(game.meta.ruleset_name, "royale");
+        assert_eq!(game.meta.mode, engine_core::GameMode::Royale);
         assert_eq!(
             game.meta.settings.hazard_damage_per_turn, 14,
             "royale uses the Go rules default hazard damage"
@@ -1691,7 +1345,7 @@ mod tests {
             &battlesnakes,
         );
 
-        assert_eq!(game.meta.ruleset_name, "standard");
+        assert_eq!(game.meta.mode, engine_core::GameMode::Standard);
         assert_eq!(game.meta.settings.hazard_damage_per_turn, 15);
         assert!(game.meta.royale.is_none());
         assert!(game.board.hazards.is_empty());
@@ -1717,7 +1371,7 @@ mod tests {
             apply_turn(&mut game, &[]).expect("apply_turn on a valid fixture");
             game.board.turn += 1;
 
-            let frame = frame::game_to_frame(&game, &[], &[], &std::collections::HashMap::new());
+            let frame = frame::game_to_frame(&game, &[], &std::collections::HashMap::new());
             assert_eq!(
                 frame.hazards.len(),
                 game.board.hazards.len(),
@@ -1775,7 +1429,7 @@ mod tests {
             apply_turn(&mut game, &[]).expect("apply_turn on a valid fixture");
             game.board.turn += 1;
 
-            let frame = frame::game_to_frame(&game, &[], &[], &std::collections::HashMap::new());
+            let frame = frame::game_to_frame(&game, &[], &std::collections::HashMap::new());
             assert!(
                 frame.hazards.is_empty(),
                 "standard game must never have hazards (turn {})",
@@ -1822,7 +1476,7 @@ mod tests {
             &battlesnakes,
         );
 
-        assert_eq!(game.meta.ruleset_name, "constrictor");
+        assert_eq!(game.meta.mode, engine_core::GameMode::Constrictor);
         assert_eq!(
             game.meta.settings.food_spawn_chance, 0,
             "constrictor never spawns food"
@@ -1898,7 +1552,7 @@ mod tests {
                 i + 1
             );
 
-            let frame = frame::game_to_frame(&game, &[], &[], &std::collections::HashMap::new());
+            let frame = frame::game_to_frame(&game, &[], &std::collections::HashMap::new());
             assert!(
                 frame.food.is_empty(),
                 "constrictor frames must never contain food (turn {})",
@@ -2010,7 +1664,7 @@ mod tests {
             &battlesnakes,
         );
 
-        assert_eq!(game.meta.ruleset_name, "snail_mode");
+        assert_eq!(game.meta.mode, engine_core::GameMode::SnailMode);
         assert_eq!(
             game.meta.settings.hazard_damage_per_turn, 14,
             "snail mode uses the Go rules default hazard damage"
@@ -2057,7 +1711,7 @@ mod tests {
             apply_turn(&mut game, &moves).expect("apply_turn on a valid fixture");
             game.board.turn += 1;
 
-            let frame = frame::game_to_frame(&game, &[], &[], &std::collections::HashMap::new());
+            let frame = frame::game_to_frame(&game, &[], &std::collections::HashMap::new());
             for h in &frame.hazards {
                 assert!(
                     h.x >= 0 && h.x < 11 && h.y >= 0 && h.y < 11,
@@ -2134,7 +1788,7 @@ mod tests {
             &battlesnakes,
         );
 
-        assert_eq!(game.meta.ruleset_name, "solo");
+        assert_eq!(game.meta.mode, engine_core::GameMode::Solo);
         // Standard food settings: spawning behavior identical to Standard.
         assert_eq!(game.meta.settings.food_spawn_chance, 15);
         assert_eq!(game.meta.settings.minimum_food, 1);
@@ -2192,7 +1846,7 @@ mod tests {
     #[test]
     fn test_standard_one_alive_snake_still_over() {
         let mut game = create_test_game(2);
-        assert_eq!(game.meta.ruleset_name, "standard");
+        assert_eq!(game.meta.mode, engine_core::GameMode::Standard);
         game.board.snakes[0].eliminated_cause = EliminationCause::OutOfHealth;
         assert!(is_game_over(&game));
     }

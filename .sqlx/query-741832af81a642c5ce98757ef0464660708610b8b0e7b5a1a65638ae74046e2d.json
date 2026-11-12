@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT error_count AS \"error_count!\" FROM jobs\n           WHERE name = 'GameRunnerJob'\n             AND payload->>'game_id' = $1\n             AND locked_by IS NOT NULL\n           ORDER BY locked_at DESC LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "error_count!",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "741832af81a642c5ce98757ef0464660708610b8b0e7b5a1a65638ae74046e2d"
+}

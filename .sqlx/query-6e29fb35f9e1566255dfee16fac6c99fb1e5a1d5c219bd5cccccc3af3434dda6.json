@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT 1 AS one FROM achievement_clips\n         WHERE achievement_earn_id = $1 AND status = 'rendered'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "one",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "6e29fb35f9e1566255dfee16fac6c99fb1e5a1d5c219bd5cccccc3af3434dda6"
+}

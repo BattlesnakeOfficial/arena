@@ -951,7 +951,9 @@ table.data.test-results pre { margin-top: 8px; font-family: var(--mono); font-si
 .ach-share { max-width: 680px; font-size: 16px; }
 .ach-share-head { display: flex; gap: 22px; align-items: flex-start; }
 .ach-share-art { display: flex; gap: 6px; flex-shrink: 0; }
-.ach-share-art img { width: 88px; height: 88px; }
+/* Fixed light tile like .cz-swatch: the head/tail art has no fill of its own
+   and would sit black-on-transparent (near-invisible) in the dark theme. */
+.ach-share-art img { width: 88px; height: 88px; background: #F4F1EB; padding: 8px; border-radius: 10px; object-fit: contain; }
 .ach-share-head h1 { margin: 6px 0; }
 .ach-share .badge { font-size: 16px; }
 .ach-share-owner { display: flex; gap: 12px; align-items: center; margin-top: 20px; font-size: 16px; }
@@ -968,6 +970,9 @@ table.data.test-results pre { margin-top: 8px; font-family: var(--mono); font-si
 .ach-share-snake .ach-share-snake-name { min-width: 0; overflow-wrap: anywhere; }
 .ach-share-game { margin-top: 14px; font-size: 16px; overflow-wrap: anywhere; }
 .ach-share-game a { display: inline-flex; align-items: center; min-height: 44px; color: var(--pink); font-weight: 600; }
+.ach-share-clip { margin: 28px 0 0; }
+.ach-share-clip img { display: block; width: 100%; max-width: 504px; height: auto; border: 1px solid var(--hairline-dark); border-radius: 16px; }
+.ach-share-clip .btn { margin-top: 14px; min-height: 44px; font-size: 16px; display: inline-flex; align-items: center; }
 .share-actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-top: 30px; }
 .share-actions .btn { min-height: 44px; font-size: 16px; display: inline-flex; align-items: center; }
 /* .btn sets display, which would otherwise override [hidden] */
@@ -1973,3 +1978,20 @@ html[data-app-theme="dark"] .guide-board .studio-board .grid { fill: #393939; }
   #notification-drawer { width: 100vw; height: 100dvh; }
   .notification-bell { flex-basis: 44px; }
 }
+
+/* Earned achievements on public profiles */
+.profile-achievements-list { list-style: none; margin: 12px 0 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr)); gap: 12px; }
+.profile-achievements-list li { min-width: 0; }
+.profile-achievement {
+  display: flex; align-items: center; gap: 14px; min-height: 44px; height: 100%;
+  padding: 12px 14px; border: 1px solid var(--hairline); border-radius: 14px;
+  background: var(--card); color: inherit; text-decoration: none;
+}
+.profile-achievement:hover, .profile-achievement:focus-visible { border-color: var(--pink); }
+.profile-achievement-art { display: flex; gap: 4px; flex: none; min-width: 92px; }
+/* Snake art is dark line-work on transparent: a fixed light tile, the same
+   colour as .cz-swatch, keeps it legible in both site themes. */
+.profile-achievement-art img { width: 44px; height: 44px; padding: 5px; background: #F4F1EB; border-radius: 8px; object-fit: contain; }
+.profile-achievement-copy { display: flex; flex-direction: column; min-width: 0; font-size: 16px; }
+.profile-achievement-name { font-weight: 600; overflow-wrap: anywhere; }
+.profile-achievement-date { color: var(--muted); font-size: 16px; }

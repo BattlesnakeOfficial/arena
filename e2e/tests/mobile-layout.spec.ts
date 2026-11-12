@@ -1,4 +1,4 @@
-import type { Page } from '@playwright/test';
+import type { Locator, Page } from '@playwright/test';
 import { test, expect, createMockUser } from '../fixtures/test';
 import { query } from '../fixtures/db';
 
@@ -17,8 +17,8 @@ async function assertNoHorizontalOverflow(page: Page, path: string) {
 test.describe('Mobile layout (375px)', () => {
   test('snake editing and game building have readable inputs and tappable controls', async ({ authenticatedPage, mockUser }) => {
     const [snake] = await query<{ battlesnake_id: string }>(
-      `INSERT INTO battlesnakes (user_id, name, url)
-       SELECT user_id, 'Mobile target test', 'https://example.com/mobile'
+      `INSERT INTO battlesnakes (user_id, name, url, visibility)
+       SELECT user_id, 'Mobile target test', 'https://example.com/mobile', 'private'
        FROM users WHERE github_login = $1 RETURNING battlesnake_id`,
       [mockUser.login],
     );
@@ -32,13 +32,29 @@ test.describe('Mobile layout (375px)', () => {
       }
     }
     await authenticatedPage.goto('/games/new');
-    await authenticatedPage.getByRole('button', { name: 'Add to Game' }).click();
+    // Public snakes from other specs get their own Add to Game buttons.
+    await authenticatedPage.locator('.card', { hasText: 'Mobile target test' }).getByRole('button', { name: 'Add to Game' }).click();
+    // The page script re-submits the form itself, so the click can return before the page it
+    // navigates to, which can be slow under CI. Create Game is the last button on that page, and
+    // needs a snake in the lineup.
+    await expect(authenticatedPage.locator('.gc-x')).toHaveCount(1, { timeout: 15_000 });
+    await expect(authenticatedPage.getByRole('button', { name: 'Create Game' })).toBeVisible();
     // Includes both row actions, the small lineup X, Search, Reset, and Create Game.
-    for (const button of await authenticatedPage.locator('main button').all()) {
+    const buttons = authenticatedPage.locator('main button:visible');
+    expect(await buttons.count(), 'rendered buttons to measure').toBeGreaterThanOrEqual(6);
+    const assertTappable = async (button: Locator) => {
       const box = await button.boundingBox();
       expect(box?.height, await button.innerText()).toBeGreaterThanOrEqual(44);
       expect(box?.width, await button.innerText()).toBeGreaterThanOrEqual(44);
+    };
+    for (const button of await buttons.all()) {
+      await assertTappable(button);
     }
+    // Retry and Cancel stay hidden until settings fail to save, but a user still has to tap them.
+    const configureError = authenticatedPage.locator('#configure-error');
+    await configureError.evaluate((el) => el.removeAttribute('hidden'));
+    await assertTappable(configureError.getByRole('button', { name: 'Retry' }));
+    await assertTappable(configureError.getByRole('button', { name: 'Cancel' }));
     await authenticatedPage.locator('.gc-x').click();
     await expect(authenticatedPage.locator('.gc-x')).toHaveCount(0);
     expect(await authenticatedPage.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(PHONE.width);

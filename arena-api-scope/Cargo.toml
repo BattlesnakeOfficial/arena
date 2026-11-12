@@ -1,0 +1,19 @@
+[package]
+name = "arena-api-scope"
+version.workspace = true
+license = "MIT"
+edition.workspace = true
+description = "API token scope vocabulary (Permission, SnakeAccess) shared by the arena server and the battlesnake CLI"
+
+[features]
+# Enables the sqlx::Type derives (DB column <-> enum decoding). The server
+# enables this; the battlesnake CLI never does, keeping sqlx out of its tree.
+sqlx = ["dep:sqlx"]
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+color-eyre = "0.6.2"
+sqlx = { version = "0.8", default-features = false, features = ["derive", "postgres"], optional = true }
+
+[dev-dependencies]
+serde_json = "1.0"

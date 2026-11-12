@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO achievement_clips (achievement_earn_id, status)\n               VALUES ($1, 'pending')\n               ON CONFLICT (achievement_earn_id) DO NOTHING\n               RETURNING achievement_earn_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "achievement_earn_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "a7c43c07e5d45ec3f84807cc44ad2919de95bf6e9e376f9996632c902bb4967d"
+}

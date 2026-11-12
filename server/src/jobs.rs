@@ -166,7 +166,7 @@ impl Job<AppState> for SendNotificationEmailJob {
                 let outcome = state
                     .mailer
                     .send_limited(
-                        &mut tx,
+                        &state.db,
                         state.config.email_per_recipient_hourly_limit,
                         kind.key(),
                         &message,
@@ -177,7 +177,7 @@ impl Job<AppState> for SendNotificationEmailJob {
                         SendOutcome::Sent => {
                             sqlx::query!("UPDATE notification_email_requests SET sent_at = NOW() WHERE request_id = $1", request_id).execute(&mut *tx).await?;
                         }
-                        SendOutcome::RateLimited | SendOutcome::Disabled => {
+                        SendOutcome::RateLimited | SendOutcome::Disabled | SendOutcome::Failed => {
                             sqlx::query!("UPDATE notification_email_requests SET token_hash = NULL, expires_at = NULL WHERE request_id = $1", request_id).execute(&mut *tx).await?;
                         }
                     }
@@ -186,6 +186,7 @@ impl Job<AppState> for SendNotificationEmailJob {
                     SendOutcome::Sent => "sent",
                     SendOutcome::RateLimited => "rate_limited",
                     SendOutcome::Disabled => "transport_disabled",
+                    SendOutcome::Failed => "failed",
                 });
             }
         }
@@ -264,6 +265,30 @@ impl Job<AppState> for GameRunnerJob {
     }
 }
 
+/// True when a `GameRunnerJob` for `game_id` still exists in the queue —
+/// queued, locked/running, or waiting out retry backoff. Recovery paths use
+/// this to avoid enqueuing a second runner for a game one job already owns
+/// (DEV-2175). cja moves jobs that exhaust their retries to
+/// dead_letter_jobs, and panic/OOM-killed jobs are lease-reclaimed and stay
+/// in the queue, so a missing row means no runner will ever pick this game
+/// up again.
+pub async fn game_runner_job_exists<'e, E>(executor: E, game_id: Uuid) -> cja::Result<bool>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let exists = sqlx::query_scalar!(
+        r#"SELECT EXISTS(
+            SELECT 1 FROM jobs
+            WHERE name = 'GameRunnerJob' AND payload->>'game_id' = $1
+        ) AS "exists!""#,
+        game_id.to_string(),
+    )
+    .fetch_one(executor)
+    .await
+    .wrap_err("Failed to check for outstanding GameRunnerJob")?;
+    Ok(exists)
+}
+
 /// Job to discover games that need backup and enqueue individual backup jobs.
 /// Runs as a cron job every hour, checking games from the last 4 hours.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -339,6 +364,39 @@ impl Job<AppState> for ReconcileRecentAchievementsJob {
     }
 }
 
+/// Cron job: terminally fail stranded clips, re-drive stale pending
+/// clips, and enqueue renders for new public live earns. See
+/// [`crate::achievement_clips`].
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AchievementClipsSweepJob;
+
+#[async_trait::async_trait]
+impl Job<AppState> for AchievementClipsSweepJob {
+    const NAME: &'static str = "AchievementClipsSweepJob";
+
+    async fn run(&self, app_state: AppState) -> cja::Result<()> {
+        crate::achievement_clips::run_clip_sweep(&app_state).await
+    }
+}
+
+/// Render one earn's clip GIF. Enqueued by the sweep at
+/// CLIP_JOB_PRIORITY; idempotent (a duplicate run is refused by the
+/// attempt claim and no-ops).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RenderAchievementClipJob {
+    pub achievement_earn_id: Uuid,
+}
+
+#[async_trait::async_trait]
+impl Job<AppState> for RenderAchievementClipJob {
+    const NAME: &'static str = "RenderAchievementClipJob";
+
+    async fn run(&self, app_state: AppState) -> cja::Result<()> {
+        crate::achievement_clips::render_achievement_clip(&app_state, self.achievement_earn_id)
+            .await
+    }
+}
+
 #[async_trait::async_trait]
 impl Job<AppState> for CustomizationActiveWeekBackfillJob {
     const NAME: &'static str = "CustomizationActiveWeekBackfillJob";
@@ -368,14 +426,11 @@ impl Job<AppState> for GameBackupJob {
 }
 
 /// Job to backup a single game from the Engine database to GCS.
-/// Enqueued by GameBackupJob for each game that needs archiving.
+/// Enqueued by GameBackupJob and the play-history walk (DEV-1984) for each
+/// game that needs archiving.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BackupSingleGameJob {
     pub engine_game_id: String,
-    /// Optional batch ID for historical backfill tracking.
-    /// When set, completing this job will increment the batch's completed count.
-    #[serde(default)]
-    pub batch_id: Option<i32>,
 }
 
 #[async_trait::async_trait]
@@ -383,7 +438,7 @@ impl Job<AppState> for BackupSingleGameJob {
     const NAME: &'static str = "BackupSingleGameJob";
 
     async fn run(&self, app_state: AppState) -> cja::Result<()> {
-        crate::backup::backup_single_game(&app_state, &self.engine_game_id, self.batch_id).await?;
+        crate::backup::backup_single_game(&app_state, &self.engine_game_id).await?;
         Ok(())
     }
 }
@@ -455,27 +510,20 @@ impl Job<AppState> for PruneGameTurnsJob {
     }
 }
 
-/// Job to discover historical games and enqueue backup jobs in batches.
-/// Uses fork-join pattern: enqueues a batch, waits for completion, then enqueues next batch.
+/// Cron job: one tick of the play-history archive walk (DEV-1984) —
+/// pages engine games oldest-first past a durable cursor, trickles backup
+/// jobs for unarchived ones (in-flight-capped, below game-runner priority),
+/// corrects imported rows' created_at/game_type, and advances only past
+/// games that are archived or permanently excepted. See [`crate::play_history_walk`].
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct HistoricalBackupDiscoveryJob {
-    /// Cursor: only process games created after this timestamp
-    pub after_created: Option<chrono::NaiveDateTime>,
-    /// Cursor: for tie-breaking when created timestamps match
-    pub after_id: Option<String>,
-}
+pub struct PlayHistoryWalkJob;
 
 #[async_trait::async_trait]
-impl Job<AppState> for HistoricalBackupDiscoveryJob {
-    const NAME: &'static str = "HistoricalBackupDiscoveryJob";
+impl Job<AppState> for PlayHistoryWalkJob {
+    const NAME: &'static str = "PlayHistoryWalkJob";
 
     async fn run(&self, app_state: AppState) -> cja::Result<()> {
-        crate::backup::run_historical_backup_discovery(
-            &app_state,
-            self.after_created,
-            self.after_id.as_deref(),
-        )
-        .await?;
+        crate::play_history_walk::run_walk_tick(&app_state).await?;
         Ok(())
     }
 }
@@ -571,10 +619,12 @@ impl Job<AppState> for UpdateTournamentStatusJob {
     }
 }
 
-/// Cron job that re-enqueues evaluation for tournament matches whose driving
-/// jobs died (the job system deletes jobs that exhaust their retries, so a
-/// match can otherwise get stuck in progress forever). Runs every couple of
-/// minutes; see [`crate::tournament_match::sweep_stuck_matches`].
+/// Cron job that re-enqueues evaluation for stuck tournament matches whose
+/// driving jobs died — stale in-progress matches, scheduled matches
+/// stranded in a started round — and recovers lost round progression (the
+/// job system deletes jobs that exhaust their retries, so a tournament can
+/// otherwise get stuck forever). Runs every couple of minutes; see
+/// [`crate::tournament_match::sweep_stuck_matches`].
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct StuckMatchSweeperJob;
 
@@ -601,6 +651,28 @@ impl Job<AppState> for RateLimitPruneJob {
 
     async fn run(&self, app_state: AppState) -> cja::Result<()> {
         crate::models::rate_limit::prune_old_attempts(&app_state.db).await?;
+        Ok(())
+    }
+}
+
+/// Cron job: batched prune of expired `sessions` rows (DEV-2185). Every
+/// request without a cookie creates a row and nothing deleted them before;
+/// see [`crate::models::session::clean_expired_sessions`].
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SessionPruneJob;
+
+#[async_trait::async_trait]
+impl Job<AppState> for SessionPruneJob {
+    const NAME: &'static str = "SessionPruneJob";
+
+    async fn run(&self, app_state: AppState) -> cja::Result<()> {
+        let deleted = crate::models::session::clean_expired_sessions(
+            &app_state.db,
+            crate::models::session::SESSION_PRUNE_BATCH_ROWS,
+            crate::models::session::SESSION_PRUNE_MAX_BATCHES,
+        )
+        .await?;
+        tracing::info!(deleted, "Expired session prune completed");
         Ok(())
     }
 }
@@ -668,8 +740,10 @@ cja::impl_job_registry!(
     AwardAchievementsForGameJob,
     BackfillAchievementsJob,
     ReconcileRecentAchievementsJob,
+    AchievementClipsSweepJob,
+    RenderAchievementClipJob,
     BackupSingleGameJob,
-    HistoricalBackupDiscoveryJob,
+    PlayHistoryWalkJob,
     NativeGameBackupJob,
     NativeBackupSingleGameJob,
     TurnRetentionJob,
@@ -681,6 +755,7 @@ cja::impl_job_registry!(
     UpdateTournamentStatusJob,
     StuckMatchSweeperJob,
     RateLimitPruneJob,
+    SessionPruneJob,
     SnakeHealthSweeperJob,
     StuckGameSweeperJob,
     ScreenShoutsJob,

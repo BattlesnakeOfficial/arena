@@ -57,19 +57,15 @@ thiserror = "1"
 hex = "0.4"
 serde_urlencoded = "0.7"
 clap = { version = "4", features = ["derive", "env"] }
-dirs = "5"
-toml = "0.8"
-open = "5"
-hostname = "0.4"
-
-# CLI human-readable output
-is-terminal = "0.4"
-tabled = "0.17"
-colored = "2"
+# Relative-time labels in notifications and leaderboard feeds.
 chrono-humanize = "0.2"
 
 skillratings = "0.28"
 rules = { path = "../rules" }
+engine-core = { path = "../engine-core" }
+# Shared API scope vocabulary (Permission, SnakeAccess) — see arena-api-scope/.
+# The sqlx feature enables the DB column <-> enum derives.
+arena-api-scope = { path = "../arena-api-scope", features = ["sqlx"] }
 tokio-util = { version = "0.7.14", features = ["rt"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 
@@ -82,6 +78,8 @@ rustybuzz = "0.20.1"
 # Tracing engine behind vtracer 0.6.x binary mode.
 visioncortex = "0.8.10"
 png = "0.18.1"
+# Achievement earn clips: animated GIF encoding (pure Rust; no ffmpeg).
+gif = "0.14.1"
 # Pinned: design_kit::raster_in mirrors 0.5.15 internals (`first_scan_components` walks
 # markers like its header parser; `buffers_coefficients` and `buffered_max_pixels` copy
 # when and how much it buffers). Re-check those, and the JPEG memory caps, before bumping.
@@ -116,10 +114,6 @@ path = "src/lib.rs"
 [[bin]]
 name = "arena"
 path = "src/main.rs"
-
-[[bin]]
-name = "arena-cli"
-path = "src/bin/arena-cli.rs"
 
 [[bin]]
 name = "stress-test"

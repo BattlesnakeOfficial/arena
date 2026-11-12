@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT reason FROM play_archive_exceptions WHERE engine_game_id = 'bad-header'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "reason",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "4f0ac1beadf6a2790bc493b616eb84791ffa24272d328aded26390d12fa103d4"
+}

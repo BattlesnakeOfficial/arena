@@ -143,10 +143,7 @@ pub async fn rematch_game(
             StatusCode::FORBIDDEN,
         ));
     }
-    if !matches!(
-        game.status,
-        game::GameStatus::Finished | game::GameStatus::Failed
-    ) {
+    if !game.status.is_terminal() {
         return Err(crate::errors::ServerError(
             color_eyre::eyre::eyre!("Only terminal games can be rematched"),
             StatusCode::CONFLICT,

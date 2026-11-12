@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO users (external_github_id, github_login)\n             VALUES (9910710, 'feed-owner') RETURNING user_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "0f8e3f8e9d9c26866692ea3375bf487ee81ac25c6b337f771338d8c6bc5727e2"
+}

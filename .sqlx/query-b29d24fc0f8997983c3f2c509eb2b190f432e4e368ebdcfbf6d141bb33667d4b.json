@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE leaderboard_entries SET games_played = games_played + 1, non_first_finishes = non_first_finishes + 1 WHERE leaderboard_entry_id = ANY($1)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b29d24fc0f8997983c3f2c509eb2b190f432e4e368ebdcfbf6d141bb33667d4b"
+}

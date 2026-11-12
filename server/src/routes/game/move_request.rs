@@ -21,7 +21,7 @@ use crate::{
     engine_models::{EngineGameFrame, EngineSnake},
     errors::{ServerError, ServerResult},
     models::{
-        game::{GameStatus, get_game_by_id, get_game_source},
+        game::{get_game_by_id, get_game_source},
         turn::get_turn_frame,
     },
     state::AppState,
@@ -229,7 +229,7 @@ pub async fn get_move_request(
         // DEV-1981: a pruned terminal native game's frame comes from the
         // archive; a live game's turn miss is just a turn that hasn't
         // happened yet.
-        None if matches!(game.status, GameStatus::Finished | GameStatus::Failed) => {
+        None if game.status.is_terminal() => {
             match archived_turn_frame(&state, game_id, query.turn).await? {
                 Some(frame) => frame,
                 None => {
@@ -259,10 +259,12 @@ pub async fn get_move_request(
     let frame: EngineGameFrame =
         serde_json::from_value(frame).wrap_err("Failed to parse turn frame")?;
 
-    let (ruleset_name, settings, royale) = crate::engine::mode_rules(game.game_type, game_id);
+    let mode = crate::engine::game_mode(&game.game_type);
+    let (settings, royale) = crate::engine::mode_rules(game.game_type, game_id);
     let meta = GameMeta {
         game_id: game_id.to_string(),
-        ruleset_name: ruleset_name.to_string(),
+        mode,
+        game_over_rule: mode.default_game_over_rule(),
         timeout: MOVE_TIMEOUT_MS,
         settings,
         royale,
@@ -309,7 +311,7 @@ mod tests {
     use tower::ServiceExt as _;
 
     use crate::engine::GameSource;
-    use crate::engine::frame::{DeathInfo, game_to_frame, normalize_public_frame};
+    use crate::engine::frame::{game_to_frame, normalize_public_frame};
     use crate::models::game::GameType;
     use crate::snake_client::MoveResult;
 
@@ -325,12 +327,14 @@ mod tests {
         let game_id = Uuid::from_u128(rng.r#gen());
         let ids: Vec<String> = (0..snakes).map(|i| format!("snake-{i}")).collect();
         let board = rules::board::create_default_board_state(rng, 11, 11, &ids).unwrap();
-        let (ruleset_name, settings, royale) = crate::engine::mode_rules(game_type, game_id);
+        let mode = crate::engine::game_mode(&game_type);
+        let (settings, royale) = crate::engine::mode_rules(game_type, game_id);
         EngineGame {
             board,
             meta: GameMeta {
                 game_id: game_id.to_string(),
-                ruleset_name: ruleset_name.to_string(),
+                mode,
+                game_over_rule: mode.default_game_over_rule(),
                 timeout: MOVE_TIMEOUT_MS,
                 settings,
                 royale,
@@ -395,10 +399,9 @@ mod tests {
             .collect();
         let mut contexts: HashMap<String, SnakeContext> = HashMap::new();
         let mut results: Vec<MoveResult> = Vec::new();
-        let mut deaths: Vec<DeathInfo> = Vec::new();
 
         loop {
-            let frame = persisted(&game_to_frame(&game, &deaths, &results, &customizations));
+            let frame = persisted(&game_to_frame(&game, &results, &customizations));
             let size = (game.board.width, game.board.height);
             for snake in &game.board.snakes {
                 let rebuilt = move_request_from_frame(&frame, game.meta.clone(), size, &snake.id);
@@ -435,12 +438,14 @@ mod tests {
                     snake_id: s.id.clone(),
                     direction: pick_move(s, &game.board, &mut rng),
                     latency_ms: rng.gen_bool(0.8).then(|| rng.gen_range(0..700)),
-                    timed_out: rng.gen_bool(0.1),
+                    outcome: if rng.gen_bool(0.1) {
+                        crate::snake_client::MoveOutcome::TimedOut
+                    } else {
+                        crate::snake_client::MoveOutcome::Ok { status_code: 200 }
+                    },
                     shout: rng
                         .gen_bool(0.5)
                         .then(|| format!("turn {}", game.board.turn)),
-                    status_code: Some(200),
-                    errored: false,
                 })
                 .collect();
             contexts = results
@@ -451,7 +456,7 @@ mod tests {
                         SnakeContext {
                             latency_ms: wire::reported_latency_ms(
                                 r.latency_ms,
-                                r.timed_out,
+                                r.outcome.timed_out(),
                                 game.meta.timeout,
                             ),
                             shout: r.shout.clone(),
@@ -463,21 +468,7 @@ mod tests {
                 .iter()
                 .map(|r| (r.snake_id.clone(), r.direction))
                 .collect();
-            crate::engine::apply_turn(&mut game, &moves).unwrap();
-            game.board.turn += 1;
-            crate::engine::spawn_food(&mut game);
-            for snake in &game.board.snakes {
-                if snake.eliminated_cause.is_eliminated()
-                    && !deaths.iter().any(|d| d.snake_id == snake.id)
-                {
-                    deaths.push(DeathInfo {
-                        snake_id: snake.id.clone(),
-                        turn: game.board.turn,
-                        cause: "test".to_string(),
-                        eliminated_by: snake.eliminated_by.clone(),
-                    });
-                }
-            }
+            crate::engine::advance_turn(&mut game, &moves).unwrap();
         }
     }
 
@@ -506,11 +497,12 @@ mod tests {
     }
 
     fn standard_meta() -> GameMeta {
-        let (ruleset_name, settings, royale) =
-            crate::engine::mode_rules(GameType::Standard, Uuid::nil());
+        let mode = crate::engine::game_mode(&GameType::Standard);
+        let (settings, royale) = crate::engine::mode_rules(GameType::Standard, Uuid::nil());
         GameMeta {
             game_id: Uuid::nil().to_string(),
-            ruleset_name: ruleset_name.to_string(),
+            mode,
+            game_over_rule: mode.default_game_over_rule(),
             timeout: MOVE_TIMEOUT_MS,
             settings,
             royale,
@@ -941,8 +933,8 @@ mod tests {
 
     async fn user(pool: &PgPool, github_id: i64) -> Uuid {
         sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES ($1, $2, '') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES ($1, $2) RETURNING user_id",
         )
         .bind(github_id)
         .bind(format!("move-req-{github_id}"))

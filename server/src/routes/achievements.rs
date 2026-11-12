@@ -50,6 +50,10 @@ pub(crate) struct AchievementShareView {
     /// hiding route (private leaderboard link, private entry, non-public
     /// tournament match) covers.
     pub game: Option<PublicGame>,
+    /// A rendered clip exists and its game is public: the page may show
+    /// and link it. False for pending/failed/no-clip and every hidden-game
+    /// case alike — the page can't tell them apart.
+    pub clip_ready: bool,
 }
 
 pub(crate) struct PublicGame {
@@ -122,25 +126,42 @@ pub(crate) async fn load_share_view(
         Some(game_id) => public_game(pool, game_id, user_id, refs.battlesnake_id).await?,
         None => None,
     };
-    Ok(Some(AchievementShareView { earn, game }))
+    // Separate from load_earn_row on purpose: EarnView is shared with the
+    // card path and stays card-safe; this costs one round trip only on
+    // public-game pages.
+    let clip_ready = match &game {
+        Some(_) => {
+            sqlx::query!(
+                r#"SELECT EXISTS (
+                SELECT 1 FROM achievement_clips ac
+                WHERE ac.achievement_earn_id = (
+                    SELECT achievement_earn_id FROM achievement_earns ae
+                    WHERE ae.user_id = $1 AND ae.achievement = $2
+                ) AND ac.status = 'rendered'
+            ) AS "clip_ready!""#,
+                user_id,
+                achievement.slug(),
+            )
+            .fetch_one(pool)
+            .await
+            .wrap_err("Failed to check achievement clip")?
+            .clip_ready
+        }
+        None => false,
+    };
+    Ok(Some(AchievementShareView {
+        earn,
+        game,
+        clip_ready,
+    }))
 }
 
-/// The game's replay context, or None when the game is gone or any hiding
-/// route covers it: a leaderboard link, a participant entry, or a
-/// non-public tournament match. Over-hiding is the safe direction.
-async fn public_game(
-    pool: &sqlx::PgPool,
-    game_id: Uuid,
-    owner_id: Uuid,
-    earning_snake_id: Option<Uuid>,
-) -> cja::Result<Option<PublicGame>> {
-    if get_game_by_id(pool, game_id)
-        .await
-        .wrap_err("Failed to get earn game")?
-        .is_none()
-    {
-        return Ok(None);
-    }
+/// True when any hiding route covers this game: a private leaderboard
+/// link, a participant entry, or a non-public tournament match.
+/// Over-hiding is the safe direction. Shared by the page loader, the
+/// clip render job, and the clip route; the sweep's candidate query
+/// carries the same three clauses in SQL (pinned by test).
+pub(crate) async fn game_is_hidden(pool: &sqlx::PgPool, game_id: Uuid) -> cja::Result<bool> {
     let hidden = sqlx::query!(
         r#"SELECT (
             EXISTS (
@@ -167,6 +188,26 @@ async fn public_game(
     .await
     .wrap_err("Failed to check game visibility")?
     .hidden;
+    Ok(hidden)
+}
+
+/// The game's replay context, or None when the game is gone or any hiding
+/// route covers it: a leaderboard link, a participant entry, or a
+/// non-public tournament match. Over-hiding is the safe direction.
+async fn public_game(
+    pool: &sqlx::PgPool,
+    game_id: Uuid,
+    owner_id: Uuid,
+    earning_snake_id: Option<Uuid>,
+) -> cja::Result<Option<PublicGame>> {
+    if get_game_by_id(pool, game_id)
+        .await
+        .wrap_err("Failed to get earn game")?
+        .is_none()
+    {
+        return Ok(None);
+    }
+    let hidden = game_is_hidden(pool, game_id).await?;
     if hidden {
         return Ok(None);
     }
@@ -293,6 +334,7 @@ pub async fn share_page(
     let owner_name = view.earn.owner.public_name().to_string();
     let earned = view.earn.earned_at.format("%b %-d, %Y").to_string();
     let card_path = crate::routes::og::achievement_card_path(achievement.slug(), user_id);
+    let clip_path = share_clip_path(achievement.slug(), user_id);
     let description = match &view.earn.snake {
         Some(snake) => format!(
             "{owner_name} unlocked {} with {} in Battlesnake.",
@@ -346,12 +388,26 @@ pub async fn share_page(
                     a href=(format!("/games/{}", game.game_id)) { "Watch the replay" }
                 }
             }
+            // The stored clip, streamed as bytes by share_clip — never
+            // rendered on request. Shown only when a rendered clip exists
+            // AND the game is public (clip_ready folds both together).
+            @if view.clip_ready {
+                figure class="ach-share-clip" {
+                    img src=(clip_path) alt=(format!("Replay clip of the game that earned {}", def.name))
+                        width="504" height="504" loading="lazy";
+                    @if is_owner {
+                        a class="btn" href=(clip_path)
+                           download=(format!("{}-clip.gif", achievement.slug()))
+                           data-share-download { "Download Clip" }
+                    }
+                }
+            }
             @if is_owner {
                 div class="share-actions" {
                     button #share-native class="btn" type="button" hidden { "Share" }
                     input #share-url type="text" readonly value=(page_url) aria-label="Shareable achievement link";
                     button #share-copy class="btn sm" type="button" { "Copy Link" }
-                    a #share-download class="btn" href=(card_path)
+                    a #share-download class="btn" href=(card_path) data-share-download
                        download=(format!("{}-{}.png", achievement.slug(), view.earn.owner.github_login)) { "Download Card" }
                 }
             } @else {
@@ -376,6 +432,11 @@ pub async fn share_page(
             format!("{} unlocked by {}", def.name, owner_name),
         )
         .into_response())
+}
+
+/// The stored-clip URL for one earned achievement. Earn-keyed: no game id.
+pub(crate) fn share_clip_path(slug: &str, user_id: Uuid) -> String {
+    format!("/achievements/{slug}/{user_id}/clip.gif")
 }
 
 /// Up to three opponent names, then "and N more" for longer rosters.
@@ -491,6 +552,76 @@ async fn valid_share_target(
     }
 }
 
+/// GET /achievements/{slug}/{user_id}/clip.gif — the stored clip for one
+/// earned achievement. Streams stored bytes only: no render, no exporter.
+/// Unknown slug/user, missing/pending/failed clips, and games that are
+/// gone or not public all 404 alike, with no body differences.
+pub async fn share_clip(
+    State(state): State<AppState>,
+    Path((slug, user_id)): Path<(String, String)>,
+) -> ServerResult<Response, StatusCode> {
+    let Some(achievement) = Achievement::from_slug(&slug) else {
+        return Err(not_found_error());
+    };
+    let Ok(user_id) = Uuid::parse_str(&user_id) else {
+        return Err(not_found_error());
+    };
+    let earn = sqlx::query!(
+        "SELECT achievement_earn_id, game_id
+         FROM achievement_earns WHERE user_id = $1 AND achievement = $2",
+        user_id,
+        achievement.slug(),
+    )
+    .fetch_optional(&state.db)
+    .await
+    .wrap_err("Failed to read achievement earn for clip")?
+    .ok_or_else(not_found_error)?;
+    let Some(game_id) = earn.game_id else {
+        return Err(not_found_error());
+    };
+    let clip = sqlx::query!(
+        "SELECT 1 AS one FROM achievement_clips
+         WHERE achievement_earn_id = $1 AND status = 'rendered'",
+        earn.achievement_earn_id,
+    )
+    .fetch_optional(&state.db)
+    .await
+    .wrap_err("Failed to read achievement clip row")?;
+    if clip.is_none() {
+        return Err(not_found_error());
+    }
+    // Serve-time privacy re-check. No existence check is needed: the FK
+    // sets game_id NULL when the game row is deleted, so a non-NULL id
+    // always references an existing game.
+    if game_is_hidden(&state.db, game_id).await? {
+        return Err(not_found_error());
+    }
+    let path = crate::achievement_clips::clip_object_path(earn.achievement_earn_id);
+    let bytes = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        state.object_store.get(&path),
+    )
+    .await
+    .wrap_err("Clip object fetch timed out")?
+    .wrap_err_with(|| format!("Failed to fetch achievement clip object at {path}"))?
+    .ok_or_else(|| {
+        // ServerError with NOT_FOUND logs at debug only — say it loudly.
+        tracing::error!(%path, "Rendered clip object missing from bucket");
+        ServerError(
+            eyre!("Rendered clip object missing at {path}"),
+            StatusCode::NOT_FOUND,
+        )
+    })?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "image/gif".to_string()),
+            (header::CACHE_CONTROL, "private, max-age=300".to_string()),
+        ],
+        bytes,
+    )
+        .into_response())
+}
+
 fn not_found_error() -> ServerError<StatusCode> {
     ServerError(
         eyre!("Achievement share page not found"),
@@ -516,7 +647,7 @@ mod tests {
 
     async fn user(pool: &PgPool, github_id: i64) -> Uuid {
         sqlx::query_scalar::<_, Uuid>(
-            "INSERT INTO users (external_github_id, github_login, github_access_token) VALUES ($1, $2, '') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login) VALUES ($1, $2) RETURNING user_id",
         )
         .bind(github_id)
         .bind(format!("share-{github_id}"))
@@ -836,6 +967,7 @@ mod tests {
         let entry = crate::models::leaderboard::get_or_create_entry(&pool, private_lb, rival_snake)
             .await
             .unwrap()
+            .expect("live snake joins")
             .leaderboard_entry_id;
         participant(&pool, game_id, owner_snake, 1, None).await;
         participant(&pool, game_id, rival_snake, 2, Some(entry)).await;

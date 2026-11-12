@@ -136,6 +136,33 @@ pub async fn earned_slugs(pool: &PgPool, user_id: Uuid) -> cja::Result<HashSet<S
     Ok(rows.into_iter().map(|row| row.achievement).collect())
 }
 
+/// The user's earned achievements for their public profile: newest first,
+/// with a stable slug tie-break because grant-dated rows can share an
+/// earned_at. Rows whose slug no longer resolves to a defined achievement
+/// are skipped, so an unknown value can never break a public page. This is
+/// the section's only query — names, art, and descriptions come from the
+/// in-process Achievement definitions.
+pub async fn earned_for_profile(
+    pool: &PgPool,
+    user_id: Uuid,
+) -> cja::Result<Vec<(Achievement, chrono::DateTime<chrono::Utc>)>> {
+    let rows = sqlx::query!(
+        "SELECT achievement, earned_at FROM achievement_earns
+         WHERE user_id = $1
+         ORDER BY earned_at DESC, achievement",
+        user_id,
+    )
+    .fetch_all(pool)
+    .await
+    .wrap_err("Failed to read earned achievements")?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| {
+            Achievement::from_slug(&row.achievement).map(|achievement| (achievement, row.earned_at))
+        })
+        .collect())
+}
+
 /// The game and snake that produced a rule fire, recorded on live earns.
 /// `battlesnake_id` is the winning/linked snake's id; the participants
 /// query inner-joins `battlesnakes` on the coalesced id, so it is never
@@ -1103,7 +1130,7 @@ mod tests {
 
     async fn user(pool: &PgPool, number: i64) -> Uuid {
         sqlx::query_scalar::<_, Uuid>(
-            "INSERT INTO users (external_github_id, github_login, github_access_token) VALUES ($1, $2, '') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login) VALUES ($1, $2) RETURNING user_id",
         )
         .bind(number)
         .bind(format!("achievement-{number}"))

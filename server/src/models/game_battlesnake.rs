@@ -23,12 +23,6 @@ pub struct AddBattlesnakeToGame {
     pub battlesnake_id: Uuid,
 }
 
-// For setting the result of a game for a battlesnake
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct SetGameResult {
-    pub placement: i32,
-}
-
 // Extended GameBattlesnake with battlesnake details
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct GameBattlesnakeWithDetails {
@@ -96,7 +90,7 @@ pub async fn get_battlesnakes_by_game_id(
             ON COALESCE(gb.battlesnake_id, le.battlesnake_id) = b.battlesnake_id
         JOIN users u ON b.user_id = u.user_id
         WHERE gb.game_id = $1
-        ORDER BY gb.placement NULLS LAST, gb.created_at ASC
+        ORDER BY gb.placement NULLS LAST, gb.created_at ASC, gb.game_battlesnake_id
         "#,
     )
     .bind(game_id)
@@ -229,46 +223,6 @@ pub async fn remove_battlesnake_from_game(
     .wrap_err("Failed to remove battlesnake from game")?;
 
     Ok(())
-}
-
-// Set the result of a game for a battlesnake (by battlesnake_id)
-// Note: This may not work correctly with duplicate snakes in a game
-pub async fn set_game_result(
-    pool: &PgPool,
-    game_id: Uuid,
-    battlesnake_id: Uuid,
-    data: SetGameResult,
-) -> cja::Result<GameBattlesnake> {
-    // Validate placement is between 1 and 4
-    if data.placement < 1 || data.placement > 4 {
-        return Err(cja::color_eyre::eyre::eyre!(
-            "Placement must be between 1 and 4"
-        ));
-    }
-
-    let game_battlesnake = sqlx::query_as!(
-        GameBattlesnake,
-        r#"
-        UPDATE game_battlesnakes
-        SET placement = $3
-        WHERE game_id = $1 AND battlesnake_id = $2
-        RETURNING
-            game_battlesnake_id,
-            game_id,
-            battlesnake_id,
-            placement,
-            created_at,
-            updated_at
-        "#,
-        game_id,
-        battlesnake_id,
-        data.placement
-    )
-    .fetch_one(pool)
-    .await
-    .wrap_err("Failed to set game result")?;
-
-    Ok(game_battlesnake)
 }
 
 // Set the result for a specific game_battlesnake (supports duplicate snakes).
@@ -443,11 +397,12 @@ pub struct GameHistoryStats {
 /// 27.8k such probes timed out at 15s on prod, while a participant-only
 /// aggregate took 10.1ms warm. Leaderboard type comes from `leaderboards`;
 /// NULL placement means unfinished for these rows, verified on prod 2026-09-30.
-/// `set_game_result` keys on `battlesnake_id`, so it cannot place ladder rows
-/// (whose `battlesnake_id` is NULL); the ladder finisher writes placements via
-/// `set_game_result_by_id` and status='finished' in one transaction. Revisit
-/// this aggregate if another writer can place ladder rows. Direct rows still
-/// join `games` because placed failed games exist there.
+/// The dead `set_game_result` (keyed by `battlesnake_id`, so it could not
+/// place ladder rows) was removed in DEV-2177; the ladder finisher writes
+/// placements via `set_game_result_by_id` and status='finished' in one
+/// transaction. Revisit this aggregate if another writer can place ladder
+/// rows. Direct rows still join `games` because placed failed games exist
+/// there.
 pub async fn get_game_stats_for_battlesnake(
     pool: &PgPool,
     battlesnake_id: Uuid,
@@ -545,8 +500,8 @@ mod tests {
     #[sqlx::test(migrations = "../migrations")]
     async fn game_projection_carries_engine_region(pool: PgPool) -> cja::Result<()> {
         let user_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (1480001, 'region-owner', 'test') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (1480001, 'region-owner') RETURNING user_id",
         )
         .fetch_one(&pool)
         .await?;
@@ -638,8 +593,8 @@ mod tests {
     #[sqlx::test(migrations = "../migrations")]
     async fn profile_membership_winner_and_stat_semantics(pool: PgPool) -> cja::Result<()> {
         let user_id = sqlx::query_scalar::<_, Uuid>(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (1482001, 'profile-model', 'test') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (1482001, 'profile-model') RETURNING user_id",
         )
         .fetch_one(&pool)
         .await?;
@@ -776,8 +731,8 @@ mod tests {
     #[sqlx::test(migrations = "../migrations")]
     async fn shared_first_place_is_a_draw_on_the_profile(pool: PgPool) -> cja::Result<()> {
         let user_id = sqlx::query_scalar::<_, Uuid>(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (1640001, 'profile-draw', 'test') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (1640001, 'profile-draw') RETURNING user_id",
         )
         .fetch_one(&pool)
         .await?;
@@ -812,8 +767,8 @@ mod tests {
     #[sqlx::test(migrations = "../migrations")]
     async fn profile_paging_keeps_full_history_stats(pool: PgPool) -> cja::Result<()> {
         let user_id = sqlx::query_scalar::<_, Uuid>(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (1482002, 'profile-paging', 'test') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (1482002, 'profile-paging') RETURNING user_id",
         )
         .fetch_one(&pool)
         .await?;

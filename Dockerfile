@@ -20,34 +20,44 @@ COPY server/frontend ./server/frontend
 COPY server/static ./server/static
 COPY mock-github-oauth/Cargo.toml ./mock-github-oauth/
 COPY rules/Cargo.toml ./rules/
+COPY engine-core/Cargo.toml ./engine-core/
 COPY engine-proxy/Cargo.toml ./engine-proxy/
+COPY arena-api-scope/Cargo.toml ./arena-api-scope/
+COPY cli/Cargo.toml ./cli/
 
 # Create dummy files for dependency caching
-# Note: arena has both lib.rs and main.rs, plus bin/arena-cli.rs and bin/stress_test.rs
-# The dummy lib.rs needs cli::config module stub since arena-cli imports it
-RUN mkdir -p server/src/bin server/src/cli mock-github-oauth/src rules/src engine-proxy/src && \
+# Note: arena has both lib.rs and main.rs, plus bin/stress_test.rs; every
+# workspace member's targets must exist for manifest parsing. cli keeps
+# its dummy sources through the final build (like mock-github-oauth):
+# -p arena only parses its manifest. arena-api-scope gets real sources
+# later because arena compiles it.
+RUN mkdir -p server/src/bin mock-github-oauth/src rules/src engine-proxy/src arena-api-scope/src cli/src engine-core/src && \
     echo "fn main() {}" > server/src/main.rs && \
-    echo "pub mod cli;" > server/src/lib.rs && \
-    echo "pub mod config;" > server/src/cli/mod.rs && \
-    echo "pub struct AuthConfig { pub token: Option<String> } pub struct CliConfig { pub auth: Option<AuthConfig> } impl CliConfig { pub fn load() -> color_eyre::Result<Self> { todo!() } pub fn api_url(&self) -> &str { todo!() } pub fn save(&self) -> color_eyre::Result<()> { todo!() } }" > server/src/cli/config.rs && \
-    echo "fn main() {}" > server/src/bin/arena-cli.rs && \
+    echo "" > server/src/lib.rs && \
     echo "fn main() {}" > server/src/bin/stress_test.rs && \
     echo "fn main() {}" > mock-github-oauth/src/main.rs && \
     echo "" > mock-github-oauth/src/lib.rs && \
     echo "" > rules/src/lib.rs && \
     echo "fn main() {}" > engine-proxy/src/main.rs && \
-    echo "" > engine-proxy/src/lib.rs
+    echo "" > engine-proxy/src/lib.rs && \
+    echo "" > arena-api-scope/src/lib.rs && \
+    echo "" > cli/src/lib.rs && \
+    echo "fn main() {}" > cli/src/main.rs && \
+    echo "" > engine-core/src/lib.rs
 
 # Build dependencies only (for caching)
 # VERGEN_IDEMPOTENT allows build without .git directory (uses placeholder values)
 RUN VERGEN_IDEMPOTENT=1 cargo build --release --package arena
 
 # Remove dummy files
-RUN rm -rf server/src rules/src
+RUN rm -rf server/src rules/src arena-api-scope/src engine-core/src
 
-# Copy actual source code (only arena and rules, not mock-github-oauth)
+# Copy actual source code (arena and rules, not mock-github-oauth or cli;
+# arena-api-scope is compiled by arena so it needs real sources too)
 COPY server/src ./server/src
 COPY rules/src ./rules/src
+COPY engine-core/src ./engine-core/src
+COPY arena-api-scope/src ./arena-api-scope/src
 COPY migrations ./migrations
 COPY .sqlx ./.sqlx
 
@@ -58,7 +68,7 @@ COPY .git ./.git
 ENV SQLX_OFFLINE=true
 
 # Touch source files to ensure rebuild with actual source
-RUN touch server/src/main.rs rules/src/lib.rs
+RUN touch server/src/main.rs rules/src/lib.rs arena-api-scope/src/lib.rs engine-core/src/lib.rs
 
 # Build the application (with real git info from .git)
 RUN cargo build --release --package arena

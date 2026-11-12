@@ -1,0 +1,438 @@
+# Prebuilt binaries for the battlesnake CLI (DEV-2149). Pushing a tag
+# `cli-v<semver>` builds 8 targets and creates a DRAFT release; a human
+# publishing the draft is what makes it public.
+#
+# Deliberately not part of ci.yml and in its own concurrency group: this
+# workflow triggers only on tags, and every other workflow's push trigger
+# is filtered to branches: [main] — a tag push can neither deploy arena,
+# cancel a main run, nor restart games.
+name: CLI Release
+
+on:
+  push:
+    tags:
+      - "cli-v*"
+
+concurrency:
+  group: cli-release-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  version-gate:
+    name: tag version == crate version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Compare tag with the battlesnake crate version
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#cli-v}"
+          CRATE_VERSION=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "battlesnake") | .version')
+          echo "tag=${TAG_VERSION} crate=${CRATE_VERSION}"
+          test "${TAG_VERSION}" = "${CRATE_VERSION}"
+
+  # DEV-2306: one generation of the third-party licence notices per tag,
+  # shared by all 8 archives. cargo-about reads each crate's licence file
+  # from the registry cache (cold runs download them, hence the cache).
+  # --fail turns `accepted` in cli/about.toml into a gate: an
+  # unsatisfiable licence fails this job and the release.
+  notices:
+    name: generate THIRD_PARTY_LICENSES.md
+    needs: version-gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cli-notices-${{ hashFiles('Cargo.lock') }}
+
+      - name: Install cargo-about
+        run: cargo install --locked --version 0.9.3 --features cli cargo-about
+
+      - name: Generate third-party licence notices
+        run: |
+          cargo about generate --locked --fail \
+            -m cli/Cargo.toml \
+            -o THIRD_PARTY_LICENSES.md \
+            cli/about.hbs
+          test -s THIRD_PARTY_LICENSES.md
+          head -n 20 THIRD_PARTY_LICENSES.md
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-notices
+          path: THIRD_PARTY_LICENSES.md
+          if-no-files-found: error
+
+  build:
+    name: build ${{ matrix.target }}
+    needs: [version-gate, notices]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      # One target failing must not cancel the others' evidence
+      # (same rationale as cli-platform-tests.yml).
+      fail-fast: false
+      matrix:
+        # exec: can this runner execute the produced binary?
+        # game: does this job play a real local game against a snake?
+        include:
+          - { target: x86_64-unknown-linux-musl,  os: ubuntu-latest,   osname: Linux,   arch: x86_64, cross: true,  native_musl: false, exec: true, game: false }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm, osname: Linux,  arch: arm64,  cross: false, native_musl: true,  exec: true, game: false }
+          - { target: i686-unknown-linux-musl,    os: ubuntu-latest,   osname: Linux,   arch: i386,   cross: true,  native_musl: false, exec: true, game: false }
+          - { target: aarch64-apple-darwin,       os: macos-latest,    osname: Darwin,  arch: arm64,  cross: false, native_musl: false, exec: true, game: true  }
+          - { target: x86_64-apple-darwin,        os: macos-latest,    osname: Darwin,  arch: x86_64, cross: false, native_musl: false, exec: true, game: false }  # Rosetta 2
+          - { target: x86_64-pc-windows-msvc,     os: windows-latest,  osname: Windows, arch: x86_64, cross: false, native_musl: false, exec: true, game: true  }
+          - { target: aarch64-pc-windows-msvc,    os: windows-11-arm,  osname: Windows, arch: arm64,  cross: false, native_musl: false, exec: true, game: false }
+          - { target: i686-pc-windows-msvc,       os: windows-latest,  osname: Windows, arch: i386,   cross: false, native_musl: false, exec: true, game: false }  # WOW64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.cross
+        run: cargo install cross --locked
+
+      # Native arm64-musl build on the arm runner (ubuntu-24.04-arm is free
+      # for public repos). Validated end-to-end on an arm64 Linux host:
+      # musl-tools' musl-gcc targets the host arch, and CC_*=musl-gcc keeps
+      # ring's C code on musl headers.
+      - name: Install musl tools (native arm64 musl build)
+        if: matrix.native_musl
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
+
+      # ring 0.17 build.rs: "On Windows AArch64 we currently must use Clang
+      # to compile C code" — LLVM ships on the hosted images but is not
+      # always on PATH.
+      - name: Ensure clang is on PATH (ring needs it for aarch64 Windows C code)
+        if: matrix.target == 'aarch64-pc-windows-msvc'
+        run: |
+          if [ -d "/c/Program Files/LLVM/bin" ]; then
+            echo 'C:\Program Files\LLVM\bin' >> "$GITHUB_PATH"
+          elif ! command -v clang >/dev/null 2>&1; then
+            choco install llvm -y --no-progress
+          fi
+
+      # Deterministic python on the game legs: bare `python3` in git-bash can
+      # resolve to the Microsoft Store WindowsApps stub, which exits nonzero
+      # without running anything.
+      - uses: actions/setup-python@v5
+        if: matrix.game
+        with:
+          python-version: "3.13"
+
+      # Cache ONLY the registry/git: 8 per-target `target/` caches (~1-2GB
+      # each) would thrash the 10GB repo cache quota and can LRU-evict e2e's
+      # ~3GB cache (arena#303 skipped a deploy that way). Release runs are
+      # rare; cold CLI-only builds are minutes.
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cli-release-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Build (cross)
+        if: matrix.cross
+        run: cross build --release --locked --target ${{ matrix.target }} -p battlesnake
+
+      - name: Build (native musl)
+        if: matrix.native_musl
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
+        run: cargo build --release --locked --target ${{ matrix.target }} -p battlesnake
+
+      - name: Build
+        if: ${{ !matrix.cross && !matrix.native_musl }}
+        run: cargo build --release --locked --target ${{ matrix.target }} -p battlesnake
+
+      # The GATE is structural: no PT_INTERP and no DT_NEEDED. Never gate on
+      # `file`'s string — x86_64-musl builds are static-PIE and `file` says
+      # "static-pie linked" for them, while aarch64/i686 say "statically
+      # linked". `file` output + rustc -vV are recorded for the release
+      # notes as provenance. (Capture-first: under this job's
+      # `shell: bash` = `-eo pipefail`, `readelf | grep -q` inside `if` can
+      # false-PASS via SIGPIPE.)
+      - name: Linux binaries must be statically linked
+        if: matrix.osname == 'Linux'
+        run: |
+          BIN="target/${{ matrix.target }}/release/battlesnake"
+          { echo "### ${{ matrix.target }}"; file "$BIN"; rustc -vV | sed -n '1,2p'; } \
+            > "static-report-${{ matrix.target }}.txt"
+          INTERP="$(readelf -lW "$BIN" | grep INTERP || true)"
+          [ -z "$INTERP" ] || { echo "::error::$BIN has PT_INTERP: $INTERP"; exit 1; }
+          NEEDED="$(readelf -d "$BIN" 2>/dev/null | grep NEEDED || true)"
+          [ -z "$NEEDED" ] || { echo "::error::$BIN has NEEDED libs: $NEEDED"; exit 1; }
+
+      # The x86_64 macOS binary executes on the arm64 runner through
+      # Rosetta 2. `|| true` on purpose: never fail the release over
+      # Rosetta — if exec then fails anyway, flip this leg's exec to false
+      # and record it in the PR (Edge Cases).
+      - name: Ensure Rosetta 2 (x86_64 binary on the arm64 runner)
+        if: matrix.target == 'x86_64-apple-darwin'
+        run: softwareupdate --install-rosetta --agree-to-license || true
+
+      - name: Exec check (--version and --help)
+        if: matrix.exec
+        run: |
+          BIN="target/${{ matrix.target }}/release/battlesnake"
+          if [[ "${{ matrix.osname }}" == "Windows" ]]; then BIN="${BIN}.exe"; fi
+          "$BIN" --version
+          "$BIN" --help > /dev/null
+          test "$("$BIN" --version)" = "battlesnake ${GITHUB_REF_NAME#cli-v}"
+
+      - name: Play a real local game (release binary vs local snake)
+        if: matrix.game
+        run: |
+          python cli/examples/minimal_snake.py &
+          SNAKE_PID=$!
+          # Any exit path must take the snake down — a failed game would
+          # otherwise leave the listener running for the rest of the job
+          # (worst on Windows, where a stray python.exe holds the port).
+          trap 'kill "$SNAKE_PID" 2>/dev/null || true' EXIT
+          # Poll for readiness — never sleep-and-connect (PR #312: a Windows
+          # localhost refusal can outlast short waits; the race also
+          # reproduced live on Linux).
+          i=0
+          until curl -fsS -o /dev/null http://127.0.0.1:8085/ 2>/dev/null; do
+            i=$((i+1)); [ $i -lt 30 ] || { echo "snake never became ready"; exit 1; }
+            sleep 1
+          done
+          BIN="target/${{ matrix.target }}/release/battlesnake"
+          if [[ "${{ matrix.osname }}" == "Windows" ]]; then BIN="${BIN}.exe"; fi
+          "$BIN" play -g standard -n Smokey -u http://127.0.0.1:8085 2>&1 | tee game.log
+          grep -q "Game completed after" game.log
+
+      - name: Download THIRD_PARTY_LICENSES.md
+        uses: actions/download-artifact@v4
+        with:
+          name: cli-notices
+
+      - name: Package archive (tar.gz)
+        if: matrix.osname != 'Windows'
+        run: |
+          VERSION="${GITHUB_REF_NAME#cli-v}"
+          mkdir stage
+          cp "target/${{ matrix.target }}/release/battlesnake" stage/
+          cp LICENSE cli/ATTRIBUTION.md THIRD_PARTY_LICENSES.md stage/
+          tar czf "battlesnake_${VERSION}_${{ matrix.osname }}_${{ matrix.arch }}.tar.gz" \
+            -C stage battlesnake LICENSE ATTRIBUTION.md THIRD_PARTY_LICENSES.md
+
+      - name: Package archive (zip)
+        if: matrix.osname == 'Windows'
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME -replace '^cli-v', ''
+          New-Item -ItemType Directory -Force -Path stage | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/battlesnake.exe" stage/
+          Copy-Item LICENSE stage/
+          Copy-Item cli/ATTRIBUTION.md stage/
+          Copy-Item THIRD_PARTY_LICENSES.md stage/
+          Compress-Archive -Path stage/battlesnake.exe, stage/LICENSE, stage/ATTRIBUTION.md, stage/THIRD_PARTY_LICENSES.md `
+            -DestinationPath "battlesnake_${version}_${{ matrix.osname }}_${{ matrix.arch }}.zip"
+
+      - name: Write exec report
+        run: |
+          { echo "| ${{ matrix.target }} | ${{ matrix.osname }}_${{ matrix.arch }} | ${{ matrix.os }} | \
+            ${{ matrix.exec && 'yes' || 'no' }} | ${{ matrix.game && 'yes' || 'no' }} |"; } \
+            > "exec-report-${{ matrix.target }}.md"
+
+      # static-report-*.txt matches nothing on non-Linux legs; that is fine —
+      # if-no-files-found fires only when NOTHING in the path set matches,
+      # and the archive + exec report always exist. Per-target filenames
+      # avoid collisions under download-artifact's merge-multiple.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-release-${{ matrix.target }}
+          path: |
+            battlesnake_*
+            exec-report-${{ matrix.target }}.md
+            static-report-*.txt
+          if-no-files-found: error
+
+  release:
+    name: draft GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: cli-release-*
+          merge-multiple: true
+
+      # NOTE: this job intentionally does NOT set defaults.run.shell: bash.
+      # The default Linux shell is `bash -e` (no pipefail), so the
+      # `producer | grep -q` pipelines here report grep's status. Under
+      # `shell: bash` (pipefail) they would need capture-first rewrites
+      # (SIGPIPE hazard) — do not "tidy" them.
+      - name: Verify archives (count, contents, checksums.txt)
+        run: |
+          ls -l
+          test "$(find . -maxdepth 1 \( -name 'battlesnake_*.tar.gz' -o -name 'battlesnake_*.zip' \) | wc -l)" -eq 8
+          for a in battlesnake_*_Linux_*.tar.gz battlesnake_*_Darwin_*.tar.gz; do
+            tar tzf "$a"
+            for f in battlesnake LICENSE ATTRIBUTION.md THIRD_PARTY_LICENSES.md; do
+              tar tzf "$a" | grep -qx "$f" || { echo "::error::$a missing $f"; exit 1; }
+            done
+          done
+          for z in battlesnake_*_Windows_*.zip; do
+            unzip -l "$z"
+            for f in battlesnake.exe LICENSE ATTRIBUTION.md THIRD_PARTY_LICENSES.md; do
+              unzip -l "$z" | awk '{print $4}' | grep -qx "$f" || { echo "::error::$z missing $f"; exit 1; }
+            done
+          done
+          sha256sum battlesnake_* | tee checksums.txt
+
+      # Notes are written to be publish-appropriate as-is (no "draft"
+      # phrasing); Corey may still edit them when publishing.
+      - name: Build release notes
+        run: |
+          VERSION="${GITHUB_REF_NAME#cli-v}"
+          {
+            echo "battlesnake CLI ${VERSION}"
+            echo
+            echo "Install instructions: [\`cli/README.md\`](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/blob/${GITHUB_REF_NAME}/cli/README.md)."
+            echo
+            echo "Built by workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo
+            echo "## Smoke evidence (this run)"
+            echo
+            echo "| target | archive | runner | --version/--help executed | real game |"
+            echo "|---|---|---|---|---|"
+            cat exec-report-*.md
+            echo
+            echo "Linux targets verified statically linked (no PT_INTERP, no NEEDED):"
+            echo
+            echo '```'
+            cat static-report-*.txt
+            echo '```'
+          } > notes.md
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # A re-pushed tag re-runs this workflow; replace only leftover
+          # DRAFTS for this tag — resolved through the API LISTING (drafts
+          # appear there for tokens with push access) and deleted BY ID.
+          # Never rely on `gh release view`/by-tag lookups to resolve a
+          # draft. A published release is not a draft, so it is never
+          # matched — and `gh release create` failing loudly on a published
+          # release is the intended safety property.
+          DRAFT_IDS="$(gh api "repos/${GITHUB_REPOSITORY}/releases" --paginate \
+            --jq ".[] | select(.draft and .tag_name == \"${GITHUB_REF_NAME}\") | .id")"
+          for id in ${DRAFT_IDS}; do
+            gh api -X DELETE "repos/${GITHUB_REPOSITORY}/releases/${id}"
+          done
+          gh release create "$GITHUB_REF_NAME" --draft \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file notes.md \
+            battlesnake_* checksums.txt
+
+  smoke-docker:
+    name: clean-container game (debian / alpine)
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      # contents: write makes this job's GITHUB_TOKEN count as "push access"
+      # — GitHub hides draft releases from callers without it ("Only users
+      # with push access will receive listings for draft releases"). This
+      # job writes nothing; the scope is needed only to SEE the draft.
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # Exactly one draft must carry this tag: 0 means the draft is
+      # invisible to this token (scope problem) or the release job failed;
+      # more than one is ambiguity. awk sums across --paginate pages
+      # (--jq runs per page).
+      - name: Verify exactly one draft release carries this tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          DRAFT_COUNT="$(gh api "repos/${GITHUB_REPOSITORY}/releases" --paginate \
+            --jq "[.[] | select(.draft and .tag_name == \"${GITHUB_REF_NAME}\")] | length" \
+            | awk '{s += $1} END {print s+0}')"
+          echo "drafts tagged ${GITHUB_REF_NAME}: ${DRAFT_COUNT}"
+          test "$DRAFT_COUNT" -eq 1
+
+      - name: Download archives from the draft release and verify checksums
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download "$GITHUB_REF_NAME" \
+            --pattern 'battlesnake_*' --pattern 'checksums.txt'
+          sha256sum -c checksums.txt
+          tar xzf battlesnake_*_Linux_x86_64.tar.gz
+
+      # Both container scripts are live-validated. The one-line python poll:
+      # a refused connection raises inside urlopen → nonzero exit → the
+      # `until` loop continues; no try/except needed. Single quotes are
+      # impossible inside the single-quoted bash -c payload — hence the
+      # escaped \" in the python string.
+      - name: Real game in debian:stable-slim
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work debian:stable-slim bash -c '
+          set -e
+          export DEBIAN_FRONTEND=noninteractive
+          command -v rustc >/dev/null && exit 9 || echo "clean: no rust toolchain"
+          command -v psql  >/dev/null && exit 9 || echo "clean: no postgres"
+          apt-get update -qq >/dev/null && apt-get install -y -qq python3 >/dev/null
+          ldd ./battlesnake || true
+          python3 cli/examples/minimal_snake.py &
+          i=0
+          until python3 -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen(\"http://127.0.0.1:8085/\").status==200 else 1)" 2>/dev/null; do
+            i=$((i+1)); [ $i -lt 30 ] || { echo "snake never became ready"; exit 1; }
+            sleep 1
+          done
+          ./battlesnake --version
+          ./battlesnake play -g standard -n Smokey -u http://127.0.0.1:8085 >game.log 2>&1
+          grep -q "Game completed after" game.log
+          tail -5 game.log
+          '
+
+      - name: Real game in alpine
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work alpine sh -c '
+          set -e
+          command -v rustc >/dev/null && exit 9 || echo "clean: no rust toolchain"
+          command -v psql  >/dev/null && exit 9 || echo "clean: no postgres"
+          apk add --no-cache python3 >/dev/null
+          ldd ./battlesnake || true
+          python3 cli/examples/minimal_snake.py &
+          i=0
+          until python3 -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen(\"http://127.0.0.1:8085/\").status==200 else 1)" 2>/dev/null; do
+            i=$((i+1)); [ $i -lt 30 ] || { echo "snake never became ready"; exit 1; }
+            sleep 1
+          done
+          ./battlesnake --version
+          ./battlesnake play -g standard -n Smokey -u http://127.0.0.1:8085 >game.log 2>&1
+          grep -q "Game completed after" game.log
+          tail -5 game.log
+          '

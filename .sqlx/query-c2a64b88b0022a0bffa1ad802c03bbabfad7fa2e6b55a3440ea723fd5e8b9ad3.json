@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM game_resume_states WHERE game_id = ANY($1)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c2a64b88b0022a0bffa1ad802c03bbabfad7fa2e6b55a3440ea723fd5e8b9ad3"
+}

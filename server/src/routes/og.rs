@@ -24,7 +24,7 @@ use crate::{
     errors::{ServerError, ServerResult},
     models::{
         battlesnake,
-        game::{GameStatus, get_game_by_id},
+        game::{GameBoardSize, GameStatus, get_game_by_id},
         game_battlesnake::{
             GameBattlesnakeWithDetails, get_battlesnakes_by_game_id,
             get_game_stats_for_battlesnake, join_order_key,
@@ -234,7 +234,7 @@ async fn load_game_card(
     // DEV-1981: a pruned terminal native game has no `turns` rows, so its
     // card's frame comes from the archive. Terminal-gated: a live game's
     // empty frame is just a game that hasn't produced turns yet.
-    if frame.is_none() && matches!(game.status, GameStatus::Finished | GameStatus::Failed) {
+    if frame.is_none() && game.status.is_terminal() {
         frame = archived_card_frame(state, game_id, spoilers).await?;
     }
     // A frame that doesn't parse (an old import) just means an empty board.
@@ -245,12 +245,7 @@ async fn load_game_card(
         snakes.sort_by_key(join_order_key);
     }
 
-    let (width, height) = game.board_size.dimensions();
-    let side = |n: u32| {
-        i32::try_from(n)
-            .unwrap_or(MAX_BOARD_SIDE)
-            .clamp(1, MAX_BOARD_SIDE)
-    };
+    let (width, height) = board_sides(&game.board_size);
     Ok(Some(GameCard {
         status: match game.status {
             GameStatus::Waiting => cards::GameStatus::Waiting,
@@ -259,13 +254,26 @@ async fn load_game_card(
             GameStatus::Failed => cards::GameStatus::Failed,
         },
         mode: game.game_type.as_str().to_string(),
-        width: side(width),
-        height: side(height),
+        width,
+        height,
         roster: roster(&snakes, frame.as_ref(), spoilers),
-        board: board(side(width), side(height), frame.as_ref(), spoilers),
+        board: board(width, height, frame.as_ref(), spoilers),
         spoilers,
         turns: frame.as_ref().filter(|_| spoilers).map(|f| f.turn),
     }))
+}
+
+/// Board sides for rendering, clamped to MAX_BOARD_SIDE: real boards top
+/// out at 25×25, and a malformed or hostile custom size must not turn
+/// into a million grid cells.
+pub(crate) fn board_sides(size: &GameBoardSize) -> (i32, i32) {
+    let side = |n: u32| {
+        i32::try_from(n)
+            .unwrap_or(MAX_BOARD_SIDE)
+            .clamp(1, MAX_BOARD_SIDE)
+    };
+    let (w, h) = size.dimensions();
+    (side(w), side(h))
 }
 
 /// DEV-1981: a pruned native game has no `turns` rows, so the social
@@ -346,7 +354,12 @@ fn roster(
         .collect()
 }
 
-fn board(width: i32, height: i32, frame: Option<&EngineGameFrame>, spoilers: bool) -> BoardArt {
+pub(crate) fn board(
+    width: i32,
+    height: i32,
+    frame: Option<&EngineGameFrame>,
+    spoilers: bool,
+) -> BoardArt {
     let cells = |points: &[crate::engine_models::Point]| -> Vec<(i32, i32)> {
         points.iter().map(|p| (p.x, p.y)).collect()
     };
@@ -979,9 +992,9 @@ mod tests {
     /// turn 3; "Late Comer" won. Frames for turns 0-4.
     async fn fixture_duel(pool: &PgPool, status: &str) -> (Uuid, [Uuid; 2]) {
         let user_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
+            "INSERT INTO users (external_github_id, github_login)
              VALUES ((SELECT COALESCE(MAX(external_github_id), 777000) + 1 FROM users),
-                     'og-owner-' || gen_random_uuid(), '')
+                     'og-owner-' || gen_random_uuid())
              RETURNING user_id",
         )
         .fetch_one(pool)
@@ -1061,8 +1074,8 @@ mod tests {
 
     async fn fixture_world(pool: &PgPool) -> World {
         let user_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token, display_name)
-             VALUES (888001, 'og-player', '', 'OG Player') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login, display_name)
+             VALUES (888001, 'og-player', 'OG Player') RETURNING user_id",
         )
         .fetch_one(pool)
         .await
@@ -1226,7 +1239,8 @@ mod tests {
         .unwrap();
         let entry = leaderboard::get_or_create_entry(&pool, private, w.snake_id)
             .await
-            .unwrap();
+            .unwrap()
+            .expect("live snake joins");
         sqlx::query!(
             "UPDATE leaderboard_entries SET games_played = 50, display_score = 99
              WHERE leaderboard_entry_id = $1",
@@ -1566,8 +1580,8 @@ mod tests {
         .await
         .unwrap();
         let user_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (888901, 'og-prune', '') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (888901, 'og-prune') RETURNING user_id",
         )
         .fetch_one(&pool)
         .await
@@ -1660,7 +1674,7 @@ mod tests {
 
     async fn share_user(pool: &PgPool, github_id: i64) -> Uuid {
         sqlx::query_scalar::<_, Uuid>(
-            "INSERT INTO users (external_github_id, github_login, github_access_token) VALUES ($1, $2, '') RETURNING user_id",
+            "INSERT INTO users (external_github_id, github_login) VALUES ($1, $2) RETURNING user_id",
         )
         .bind(github_id)
         .bind(format!("og-earn-{github_id}"))

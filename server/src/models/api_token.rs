@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 use sqlx::{Executor, FromRow, PgPool, Postgres};
 use uuid::Uuid;
 
-pub use arena::api_scope::{Permission, SnakeAccess};
+pub use arena_api_scope::{Permission, SnakeAccess};
 
 /// API token stored in the database (hashed)
 #[derive(Debug, Serialize, Deserialize, FromRow)]
@@ -532,8 +532,8 @@ mod tests {
     #[sqlx::test(migrations = "../migrations")]
     async fn authenticate_token_loads_scope(pool: sqlx::PgPool) {
         let user_id: Uuid = sqlx::query_scalar!(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (9917001, 'token-scope', '') RETURNING user_id"
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (9917001, 'token-scope') RETURNING user_id"
         )
         .fetch_one(&pool)
         .await
@@ -589,8 +589,8 @@ mod tests {
     #[sqlx::test(migrations = "../migrations")]
     async fn add_snake_to_token_is_idempotent_and_scoped(pool: sqlx::PgPool) {
         let user_id: Uuid = sqlx::query_scalar!(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (9917002, 'token-add', '') RETURNING user_id"
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (9917002, 'token-add') RETURNING user_id"
         )
         .fetch_one(&pool)
         .await
@@ -635,8 +635,8 @@ mod tests {
     #[sqlx::test(migrations = "../migrations")]
     async fn list_user_tokens_returns_scope(pool: sqlx::PgPool) {
         let user_id: Uuid = sqlx::query_scalar!(
-            "INSERT INTO users (external_github_id, github_login, github_access_token)
-             VALUES (9917003, 'token-list', '') RETURNING user_id"
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (9917003, 'token-list') RETURNING user_id"
         )
         .fetch_one(&pool)
         .await

@@ -5,3 +5,7 @@ e2e/node_modules
 e2e/test-results/
 e2e/playwright-report/
 e2e/.playwright/
+
+# Generated third-party licence notices (DEV-2306): produced by
+# `cargo about` in the release workflow, never committed.
+THIRD_PARTY_LICENSES.md

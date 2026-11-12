@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
+#[cfg(test)]
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize, de};
 
@@ -71,7 +72,7 @@ where
 
 /// Normalize an engine game type string to its canonical form.
 /// Known types are mapped to PascalCase; unknown types are passed through as-is.
-fn normalize_game_type(engine_type: &str) -> String {
+pub(crate) fn normalize_game_type(engine_type: &str) -> String {
     match engine_type.to_lowercase().as_str() {
         "standard" => "Standard".to_string(),
         "royale" => "Royale".to_string(),
@@ -117,19 +118,20 @@ pub struct EngineGame {
 }
 
 impl EngineGame {
-    /// Convert the Created timestamp (microseconds) to a DateTime
-    pub fn created_at(&self) -> DateTime<Utc> {
-        DateTime::from_timestamp_micros(self.created).unwrap_or(DateTime::UNIX_EPOCH)
-    }
-
     /// Get the board size as a string like "11x11"
     pub fn board_size(&self) -> String {
         format!("{}x{}", self.width, self.height)
     }
 
-    /// Get the game type from the ruleset name, normalized to canonical form
+    /// Get the game type from the ruleset name, normalized to canonical form.
+    /// `RulesetName` wins when present; pre-2022 games usually carry only
+    /// `Ruleset.name` (e.g. Eric's solo run), so fall back to that (DEV-1984).
     pub fn game_type(&self) -> String {
-        let raw = self.ruleset_name.as_deref().unwrap_or("standard");
+        let raw = self
+            .ruleset_name
+            .as_deref()
+            .or_else(|| self.ruleset.get("name").map(String::as_str))
+            .unwrap_or("standard");
         normalize_game_type(raw)
     }
 }
@@ -260,6 +262,11 @@ pub const ARCHIVE_VERSION: i32 = 2;
 /// `archive_version` and `game_id` are declared first so they serialize
 /// first: a reader that has only decompressed the object can identify the
 /// format and the game before interpreting anything else.
+///
+/// Test-only since DEV-1984: production writes through the streamed
+/// [`crate::backup::ExportWriter`], which must stay byte-identical to
+/// `serde_json::to_vec(&GameExport{..})` (pinned by a byte-equality test).
+#[cfg(test)]
 #[derive(Debug, Clone, Serialize)]
 pub struct GameExport {
     pub archive_version: i32,
@@ -288,5 +295,55 @@ mod tests {
     fn normalize_game_type_unknown_preserved() {
         assert_eq!(normalize_game_type("wrapped"), "wrapped");
         assert_eq!(normalize_game_type("custom_ruleset"), "custom_ruleset");
+    }
+
+    fn game_from_json(ruleset_name: Option<&str>, ruleset: serde_json::Value) -> EngineGame {
+        serde_json::from_value(serde_json::json!({
+            "ID": "g-type",
+            "Status": "complete",
+            "Width": 11,
+            "Height": 11,
+            "Source": null,
+            "RulesetName": ruleset_name,
+            "Ruleset": ruleset,
+            "RulesStages": null,
+            "Map": "standard",
+        }))
+        .unwrap()
+    }
+
+    /// DEV-1984: `RulesetName` is absent on nearly all games before 2022,
+    /// while `Ruleset.name` is usually present — the game type must fall
+    /// back to it instead of defaulting everything to "Standard".
+    #[test]
+    fn game_type_falls_back_to_ruleset_name() {
+        // (a) RulesetName absent, Ruleset.name present.
+        let game = game_from_json(None, serde_json::json!({"name": "solo"}));
+        assert_eq!(game.game_type(), "Solo");
+
+        // (b) Both present: RulesetName wins (same precedence as the walk
+        // tick's SQL COALESCE).
+        let game = game_from_json(Some("standard"), serde_json::json!({"name": "solo"}));
+        assert_eq!(game.game_type(), "Standard");
+
+        // (c) Neither key: default.
+        let game = game_from_json(None, serde_json::json!({}));
+        assert_eq!(game.game_type(), "Standard");
+
+        // (d) Unknown value passes through, like normalize_game_type.
+        let game = game_from_json(None, serde_json::json!({"name": "wrapped"}));
+        assert_eq!(game.game_type(), "wrapped");
+    }
+
+    /// Go's `omitempty` omits zero coordinates, so archived frames look like
+    /// `{"X":1}` or `{}`. `Point`'s `#[serde(default)]` handles it — pinned
+    /// here because every frame comparison depends on it.
+    #[test]
+    fn point_omitted_y_parses_as_zero() {
+        let point: Point = serde_json::from_str(r#"{"X":1}"#).unwrap();
+        assert_eq!((point.x, point.y), (1, 0));
+
+        let point: Point = serde_json::from_str("{}").unwrap();
+        assert_eq!((point.x, point.y), (0, 0));
     }
 }

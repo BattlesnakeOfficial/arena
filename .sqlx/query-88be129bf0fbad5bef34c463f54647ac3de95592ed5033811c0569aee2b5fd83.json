@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO play_archive_exceptions (engine_game_id, reason) VALUES ('X', 'no_frames')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "88be129bf0fbad5bef34c463f54647ac3de95592ed5033811c0569aee2b5fd83"
+}

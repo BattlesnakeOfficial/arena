@@ -79,6 +79,31 @@ pub async fn get_turn_frames_page(
     Ok(turns)
 }
 
+/// The renderable frames whose turn falls in the inclusive range
+/// [from_turn, to_turn], ascending — the clip renderer's DB window.
+pub async fn get_turn_frames_range(
+    pool: &PgPool,
+    game_id: Uuid,
+    from_turn: i32,
+    to_turn: i32,
+) -> cja::Result<Vec<serde_json::Value>> {
+    let rows = sqlx::query!(
+        r#"SELECT frame_data AS "frame_data!: serde_json::Value"
+           FROM turns
+           WHERE game_id = $1
+             AND frame_data IS NOT NULL
+             AND turn_number BETWEEN $2 AND $3
+           ORDER BY turn_number ASC"#,
+        game_id,
+        from_turn,
+        to_turn,
+    )
+    .fetch_all(pool)
+    .await
+    .wrap_err("Failed to fetch turn frames range from database")?;
+    Ok(rows.into_iter().map(|r| r.frame_data).collect())
+}
+
 /// The most recent persisted frame of a game (the engine API's `LastFrame`),
 /// or `None` before turn 0 is stored.
 pub async fn get_latest_frame(
@@ -275,58 +300,151 @@ pub struct SnakeTurn {
     pub errored: bool,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
-/// Create a snake turn record
-pub async fn create_snake_turn(
+/// One snake move to persist with a turn.
+#[derive(Debug, Clone)]
+pub struct SnakeMoveRecord {
+    pub game_battlesnake_id: Uuid,
+    pub direction: String,
+    pub latency_ms: Option<i64>,
+    pub timed_out: bool,
+    pub errored: bool,
+}
+
+/// Persist one complete turn atomically: the turns row, every snake move,
+/// and the live resume state in a single transaction, so a committed turn
+/// is always complete and a killed worker leaves either all of turn N or
+/// none of it — with resume state pointing at the last whole turn.
+///
+/// The caller wraps this in its `Phase::PersistTurn` span; the per-step
+/// phases inside (`acquire_frame_connection`, `insert_frame`,
+/// `insert_snake`) keep today's eyes vocabulary.
+pub async fn persist_turn(
     pool: &PgPool,
-    turn: &Turn,
-    game_battlesnake_id: Uuid,
-    direction: &str,
-    latency_ms: Option<i64>,
-    timed_out: bool,
-    errored: bool,
-) -> cja::Result<SnakeTurn> {
-    let turn_id = turn.turn_id;
-    let latency_i32 = latency_ms.map(|ms| ms as i32);
-    let mut connection = phase(
-        turn.game_id,
-        Phase::PersistTurnAcquireSnakeConnection,
-        Some(turn.turn_number),
+    game_id: Uuid,
+    turn_number: i32,
+    frame_data: serde_json::Value,
+    resume: &crate::engine::resume::ResumeStateData,
+    moves: &[SnakeMoveRecord],
+) -> cja::Result<()> {
+    // Acquiring the tx connection is the same pool wait this phase already
+    // measures.
+    let mut tx = phase(
+        game_id,
+        Phase::PersistTurnAcquireFrameConnection,
+        Some(turn_number),
         async {
-            pool.acquire()
+            pool.begin()
                 .await
-                .wrap_err("Failed to acquire snake turn connection")
+                .wrap_err("Failed to acquire turn connection")
         },
     )
     .await?;
-    let row = phase(turn.game_id, Phase::PersistTurnInsertSnake, Some(turn.turn_number), async {
-        sqlx::query!(
-        r#"
+
+    let turn_id: Uuid = phase(
+        game_id,
+        Phase::PersistTurnInsertFrame,
+        Some(turn_number),
+        async {
+            sqlx::query_scalar!(
+                r#"
+        INSERT INTO turns (game_id, turn_number, frame_data)
+        VALUES ($1, $2, $3)
+        RETURNING turn_id
+        "#,
+                game_id,
+                turn_number,
+                frame_data
+            )
+            .fetch_one(&mut *tx)
+            .await
+            .wrap_err("Failed to create turn")
+        },
+    )
+    .await?;
+
+    // Per-move phase receipts (not a batched insert) preserve today's eyes
+    // vocabulary; each statement runs on the same tx connection.
+    for mv in moves {
+        let latency_i32 = mv.latency_ms.map(|ms| ms as i32);
+        phase(
+            game_id,
+            Phase::PersistTurnInsertSnake,
+            Some(turn_number),
+            async {
+                sqlx::query!(
+                    r#"
         INSERT INTO snake_turns (turn_id, game_battlesnake_id, direction, latency_ms, timed_out, errored)
         VALUES ($1, $2, $3, $4, $5, $6)
-        RETURNING snake_turn_id, turn_id, game_battlesnake_id, direction, latency_ms, timed_out, errored, created_at
         "#,
-        turn_id,
-        game_battlesnake_id,
-        direction,
-        latency_i32,
-        timed_out,
-        errored
-    )
-    .fetch_one(&mut *connection)
-    .await
-    .wrap_err("Failed to create snake turn")
-    }).await?;
+                    turn_id,
+                    mv.game_battlesnake_id,
+                    mv.direction,
+                    latency_i32,
+                    mv.timed_out,
+                    mv.errored
+                )
+                .execute(&mut *tx)
+                .await
+                .wrap_err("Failed to create snake turn")
+            },
+        )
+        .await?;
+    }
 
-    Ok(SnakeTurn {
-        snake_turn_id: row.snake_turn_id,
-        turn_id: row.turn_id,
-        game_battlesnake_id: row.game_battlesnake_id,
-        direction: row.direction,
-        latency_ms: row.latency_ms,
-        timed_out: row.timed_out,
-        errored: row.errored,
-        created_at: row.created_at,
-    })
+    // Inside the same PersistTurn span: on any error the tx drops and the
+    // resume upserts roll back with the frame and moves, so the stored
+    // state always points at the last whole turn.
+    crate::models::resume_state::upsert_resume_state(&mut tx, game_id, resume).await?;
+
+    tx.commit()
+        .await
+        .wrap_err("Failed to commit turn persistence")?;
+
+    Ok(())
+}
+
+/// Whether the game has any turns rows at all — distinguishes the "died
+/// before turn 0" fallback reason from "turns exist but no state row".
+pub async fn game_has_turns(pool: &PgPool, game_id: Uuid) -> cja::Result<bool> {
+    let exists = sqlx::query_scalar!(
+        r#"SELECT EXISTS(SELECT 1 FROM turns WHERE game_id = $1) AS "exists!""#,
+        game_id
+    )
+    .fetch_one(pool)
+    .await
+    .wrap_err("Failed to probe game turns")?;
+    Ok(exists)
+}
+
+/// Whether a turns row exists at exactly `turn_number` — the resume state
+/// points at it; a missing row means hand-corrupted state → fallback.
+pub async fn turn_row_exists(pool: &PgPool, game_id: Uuid, turn_number: i32) -> cja::Result<bool> {
+    let exists = sqlx::query_scalar!(
+        r#"SELECT EXISTS(
+            SELECT 1 FROM turns WHERE game_id = $1 AND turn_number = $2
+        ) AS "exists!""#,
+        game_id,
+        turn_number
+    )
+    .fetch_one(pool)
+    .await
+    .wrap_err("Failed to probe game turn row")?;
+    Ok(exists)
+}
+
+/// Delete every turns row above `turn_number` (the incomplete tail a kill
+/// or a foreign writer left behind). Fires the watched_game_reset trigger —
+/// intended.
+pub async fn delete_turns_above(pool: &PgPool, game_id: Uuid, turn_number: i32) -> cja::Result<()> {
+    sqlx::query!(
+        "DELETE FROM turns WHERE game_id = $1 AND turn_number > $2",
+        game_id,
+        turn_number
+    )
+    .execute(pool)
+    .await
+    .wrap_err("Failed to delete turns above the resume point")?;
+    Ok(())
 }
 
 /// Get all snake turns for a specific turn
