@@ -23,8 +23,10 @@ attempts/failures. It uses existing tracing fields. Request counts include
 `/health` checks; failure-event counts include retry attempts, not unique jobs.
 HTTP duration metrics are microseconds; game timings are milliseconds.
 
-The `arena-product` dashboard defaults to a 30-day range and reads events only
-(fields present at emission). Per-source and new-user series start at deploy:
+The `arena-product` dashboard defaults to a 30-day range. Most of its
+metrics read events (fields present at emission); the owner and snake
+tiles read `snake.lifecycle` span rows, on the row written when the span
+opens. Per-source and new-user series start at deploy:
 pre-deploy events carry no `source` or `new_user` fields, so those charts and
 the filtered tiles cover post-deploy data only. `user_id` and `auth_type`
 (`session` or `token`) for authenticated requests are queryable: auth code
@@ -68,6 +70,37 @@ event means the attempt bailed out before any render work ran. A
 climbing `failed` rate or `ms` trend there is the signal to investigate clip
 rendering; the share page and clip route emit nothing.
 
+The dashboard also carries fixed-window tiles (DEV-2062): both active-user
+definitions — distinct users with an authenticated request and distinct
+owners whose snake played a game — plus active snakes and games played,
+each over its own trailing 1-, 7-, or 28-day window, with the definition
+and window in the tile's title so the numbers never depend on the page
+range. Stickiness tiles show the 1-day and 7-day actives as a percentage
+of the 28-day actives for each definition, and source-share tiles show
+each source's 7-day share of games played. The 90-day daily and 364-day
+Monday-week charts live on the separate `arena-product-history`
+dashboard, so the product page never pays for year-long lake scans.
+The Monday-week charts run over a trailing window, so the first bucket
+starts mid-week or at the lake's history start and has a partial count,
+and the current week's bucket at the end is partial too — the last point
+reading low is not a drop.
+History windows clamp to the lake's history start and show a `data from`
+chip until coverage grows (about 2027-09-24 for a full 364 days); a first
+load after idle can 503 near 50 s and answers on reload; and the year
+charts are projected to outgrow the ~50 s lake call budget around
+2027-01..2027-03. Raising that budget is an Eyes code change, tracked in
+DEV-2087 (trigger: any 364-day chart over 35 s warm, or 2026-12-31,
+whichever comes first). Each active definition's 28-day numbers are only
+meaningful about 28 days after its source went live — close-event
+`user_id` from DEV-2076's deploy and `snake.lifecycle` from 2026-11-03
+(owners ≈ 2026-12-01) — and until then the 28-day tiles read low and
+stickiness reads high while still reporting `complete: true`. By-source
+numbers start at DEV-2061's deploy on 2026-11-03 (pre-deploy
+`game_completed` rows carry a null `source`), so source shares read low
+until 2026-11-10 and the by-source weekly charts are empty before that
+week; the `data from` chip overstates the active and source fields'
+coverage in the same period.
+
 Processing overhead measures elapsed turn-loop time minus elapsed time awaiting
 parallel move requests, including persistence and scheduling. The old event
 subtracted summed snake latencies, double-counting overlapping requests and
@@ -93,13 +126,16 @@ under query budgets; Eyes exposes that state instead of claiming an exact result
 
 ## Release sequence
 
-1. Publish `eyes-query` 0.1.0, then `eyes-subscriber` 0.8.0 from the Eyes repo
-   (its server already accepts these contracts).
-2. Merge cja's subscriber bump / `TracingConfig` process-identity support.
-3. Update Arena's lockfile to that cja commit and published subscriber. Confirm
-   only one subscriber version with `cargo tree -i eyes-subscriber`.
-4. Deploy Arena, then verify its process role, heartbeat, run-health declarations,
-   all 28 named metrics, both thresholds, and both dashboards in production Eyes.
+1. Deploy the Eyes server carrying DEV-2058 (`count_distinct`), DEV-2059
+   (per-item windows, history clamping), DEV-2060 (Monday weeks), and
+   DEV-2065 (ratio metrics).
+2. Publish `eyes-subscriber` 0.10.x from the Eyes repo.
+3. Bump cja's subscriber requirement to `0.10` and release cja.
+4. Update Arena's lockfile to the published subscriber and released cja
+   (confirm exactly one subscriber version with `cargo tree -i
+   eyes-subscriber`), then deploy Arena and verify the process role,
+   heartbeat, and run-health declarations, all named metrics, both
+   thresholds, and all three dashboards in production Eyes.
 
 Local validation before publication uses an uncommitted Cargo patch file for
 cja, eyes-query, and eyes-subscriber. Those path overrides must not ship. Live
