@@ -1,6 +1,7 @@
 [package]
 name = "arena-api-scope"
 version.workspace = true
+license = "MIT"
 edition.workspace = true
 description = "API token scope vocabulary (Permission, SnakeAccess) shared by the arena server and the battlesnake CLI"
 
