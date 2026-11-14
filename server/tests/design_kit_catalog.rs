@@ -423,10 +423,11 @@ fn paint_colours(inner: &str) -> Vec<[u8; 3]> {
                     let after = &rest[key.len()..];
                     let end = after.find([';', '"', '\'', '}']).unwrap_or(after.len());
                     let v = after[..end].trim().to_ascii_lowercase();
-                    if let Some((rgb, _)) = parse_colour(&v) {
-                        if rgb != SNAKE_PLACEHOLDER && !out.contains(&rgb) {
-                            out.push(rgb);
-                        }
+                    if let Some((rgb, _)) = parse_colour(&v)
+                        && rgb != SNAKE_PLACEHOLDER
+                        && !out.contains(&rgb)
+                    {
+                        out.push(rgb);
                     }
                     rest = &after[end..];
                     continue 'scan;
