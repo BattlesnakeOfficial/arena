@@ -182,7 +182,10 @@ pub(crate) fn decode_archive_object(
 
 /// Cache state guarded by a `std::sync::Mutex` with poison recovery.
 struct CacheState {
-    entries: HashMap<Uuid, (Arc<ArchivedGame>, usize)>,
+    /// A cached object is valid only for the exact `gcs_path` that fetched
+    /// it (DEV-2344: a repointed row must never be served the old path's
+    /// bytes) — the third tuple element is that fetch path.
+    entries: HashMap<Uuid, (Arc<ArchivedGame>, usize, Arc<str>)>,
     /// Insertion order; front = oldest = evicted first (FIFO).
     order: std::collections::VecDeque<Uuid>,
     /// Per-key async mutexes for singleflight. Removed by
@@ -219,28 +222,61 @@ impl ArchiveCache {
         self.max_bytes > 0
     }
 
-    pub fn peek(&self, game_id: Uuid) -> Option<Arc<ArchivedGame>> {
+    /// A hit requires the stored fetch path to equal the requested one:
+    /// an entry cached under an old `gcs_path` is a miss (DEV-2344 — a
+    /// repointed row can never be served the old path's bytes).
+    pub fn peek(&self, game_id: Uuid, gcs_path: &str) -> Option<Arc<ArchivedGame>> {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        state.entries.get(&game_id).map(|(value, _)| value.clone())
+        state
+            .entries
+            .get(&game_id)
+            .filter(|(_, _, cached_path)| **cached_path == *gcs_path)
+            .map(|(value, _, _)| value.clone())
     }
 
     /// Insert + evict FIFO while `bytes > max_bytes` (an entry heavier than
-    /// the whole cap evicts itself: served now, not retained).
-    fn insert(&self, game_id: Uuid, value: Arc<ArchivedGame>, weight: usize) {
+    /// the whole cap evicts itself: served now, not retained). An existing
+    /// entry for the same path is left alone (singleflight won); an
+    /// existing entry for a DIFFERENT path is replaced — the row was
+    /// repointed, so the new object wins, at the back of the eviction
+    /// order.
+    fn insert(&self, game_id: Uuid, gcs_path: &str, value: Arc<ArchivedGame>, weight: usize) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if state.entries.contains_key(&game_id) {
+        if state
+            .entries
+            .get(&game_id)
+            .is_some_and(|(_, _, cached_path)| &**cached_path == gcs_path)
+        {
             return;
         }
-        state.entries.insert(game_id, (value, weight));
+        if let Some((_, old_weight, _)) = state.entries.remove(&game_id) {
+            state.bytes -= old_weight;
+            state.order.retain(|id| *id != game_id);
+        }
+        state
+            .entries
+            .insert(game_id, (value, weight, Arc::from(gcs_path)));
         state.order.push_back(game_id);
         state.bytes += weight;
         while state.bytes > self.max_bytes {
             let Some(oldest) = state.order.pop_front() else {
                 break;
             };
-            if let Some((_, weight)) = state.entries.remove(&oldest) {
+            if let Some((_, weight, _)) = state.entries.remove(&oldest) {
                 state.bytes -= weight;
             }
+        }
+    }
+
+    /// Remove one entry (weight and FIFO slot) if present. Correctness
+    /// after a repoint does NOT depend on this — peek/insert are
+    /// path-aware — it just frees the weight promptly
+    /// (see [`ArchiveReader::invalidate`]).
+    fn remove(&self, game_id: Uuid) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, weight, _)) = state.entries.remove(&game_id) {
+            state.bytes -= weight;
+            state.order.retain(|id| *id != game_id);
         }
     }
 
@@ -271,6 +307,14 @@ impl ArchiveCache {
     fn in_flight_len(&self) -> usize {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.in_flight.len()
+    }
+
+    /// Tests only: whether ANY entry exists for this game, whatever path
+    /// cached it (the path-blind probe `cached()` builds on).
+    #[cfg(test)]
+    fn peek_any(&self, game_id: Uuid) -> bool {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.entries.contains_key(&game_id)
     }
 
     #[cfg(test)]
@@ -342,7 +386,7 @@ impl ArchiveReader {
         gcs_path: &str,
         kind: ArchiveRowKind,
     ) -> Result<Arc<ArchivedGame>, LoadArchiveError> {
-        if let Some(hit) = self.cache.peek(game_id) {
+        if let Some(hit) = self.cache.peek(game_id, gcs_path) {
             return Ok(hit);
         }
         if !self.cache.is_enabled() {
@@ -350,14 +394,28 @@ impl ArchiveReader {
             return Ok(Arc::new(archived));
         }
         let _guard = self.cache.lock_key(game_id).await;
-        if let Some(hit) = self.cache.peek(game_id) {
+        if let Some(hit) = self.cache.peek(game_id, gcs_path) {
             return Ok(hit);
         }
         let archived = self.fetch_and_decode(game_id, gcs_path, kind).await?;
         let weight = archived.cached_bytes();
         let archived = Arc::new(archived);
-        self.cache.insert(game_id, archived.clone(), weight);
+        self.cache
+            .insert(game_id, gcs_path, archived.clone(), weight);
         Ok(archived)
+    }
+
+    /// Drop a game's cached entry after a repoint (DEV-2344). Correctness
+    /// does not depend on this — peek/insert are path-aware, so an
+    /// old-path entry can never satisfy a new-path load — it just frees
+    /// the cache weight promptly. Takes the per-key in-flight lock first
+    /// so a concurrent load of the same game settles before the removal.
+    pub(crate) async fn invalidate(&self, game_id: Uuid) {
+        if !self.cache.is_enabled() {
+            return;
+        }
+        let _guard = std::sync::Arc::clone(&self.cache).lock_key(game_id).await;
+        self.cache.remove(game_id);
     }
 
     async fn fetch_and_decode(
@@ -435,10 +493,11 @@ impl ArchiveReader {
     }
 
     /// Tests only: whether a decoded object for this game sits in the cache
-    /// (DEV-1981 asserts the prune confirm never populates it).
+    /// (DEV-1981 asserts the prune confirm never populates it). Path-blind
+    /// by design — "any entry for this game".
     #[cfg(test)]
     pub(crate) fn cached(&self, game_id: Uuid) -> bool {
-        self.cache.peek(game_id).is_some()
+        self.cache.peek_any(game_id)
     }
 
     /// Parse + prep a page of frames (<= 100, up to a few hundred KB of
@@ -736,10 +795,10 @@ mod tests {
 
         let r = reader(store.clone(), weight);
         r.load(id_a, "a", ArchiveRowKind::Play).await.unwrap();
-        assert!(r.cache.peek(id_a).is_some());
+        assert!(r.cache.peek(id_a, "a").is_some());
         r.load(id_b, "b", ArchiveRowKind::Play).await.unwrap();
-        assert!(r.cache.peek(id_a).is_none(), "oldest entry evicted");
-        assert!(r.cache.peek(id_b).is_some());
+        assert!(r.cache.peek(id_a, "a").is_none(), "oldest entry evicted");
+        assert!(r.cache.peek(id_b, "b").is_some());
         assert!(r.cache.bytes() <= weight);
     }
 
@@ -774,6 +833,10 @@ mod tests {
     impl crate::object_store::ObjectStore for PendStore {
         async fn put(&self, _path: &str, _bytes: Vec<u8>) -> cja::Result<()> {
             Ok(())
+        }
+
+        async fn put_if_absent(&self, _path: &str, _bytes: Vec<u8>) -> cja::Result<bool> {
+            Ok(true)
         }
 
         async fn get(&self, _path: &str) -> cja::Result<Option<Vec<u8>>> {
@@ -816,6 +879,9 @@ mod tests {
             async fn put(&self, _path: &str, _bytes: Vec<u8>) -> cja::Result<()> {
                 Ok(())
             }
+            async fn put_if_absent(&self, _path: &str, _bytes: Vec<u8>) -> cja::Result<bool> {
+                Ok(true)
+            }
             async fn get(&self, _path: &str) -> cja::Result<Option<Vec<u8>>> {
                 std::future::pending().await
             }
@@ -841,6 +907,81 @@ mod tests {
         assert!(ARCHIVE_DECODE_SLOT.try_acquire().is_ok());
     }
 
+    /// DEV-2344: an entry cached under an old `gcs_path` can never satisfy
+    /// a new-path load. Repoint the row mid-flight: the new-path load
+    /// fetches the new bytes, the second new-path load is a cache hit, and
+    /// a straggler old-path load (a request that read the row before the
+    /// repoint) can still serve the old object without ever poisoning a
+    /// later new-path load.
+    #[tokio::test]
+    async fn stale_path_entry_is_a_miss() {
+        let store = Arc::new(InMemoryObjectStore::default());
+        let id = Uuid::new_v4();
+        // Two objects whose headers differ in a visible way (Width).
+        let old = fx::v1_archive("cccccccc-3333-3333-3333-333333333333");
+        let new = {
+            let json = zstd::decode_all(old.as_slice()).unwrap();
+            let mut value: serde_json::Value = serde_json::from_slice(&json).unwrap();
+            value["game"]["Width"] = serde_json::json!(19);
+            let text = serde_json::to_vec(&value).unwrap();
+            zstd::stream::encode_all(text.as_slice(), 3).unwrap()
+        };
+        let width_of = |bytes: &[u8]| {
+            let json = zstd::decode_all(bytes).unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&json).unwrap();
+            value["game"]["Width"].as_i64().unwrap()
+        };
+        let (old_w, new_w) = (width_of(&old), width_of(&new));
+        assert_ne!(old_w, new_w);
+        store.put("old", old).await.unwrap();
+        store.put("new", new).await.unwrap();
+
+        let r = reader(store.clone(), DEFAULT_ARCHIVE_CACHE_MAX_BYTES);
+        // Prime the cache under the old path (the row before the repoint).
+        let served = r.load(id, "old", ArchiveRowKind::Play).await.unwrap();
+        assert_eq!(served.parse_game().unwrap().width as i64, old_w);
+        assert_eq!(store.get_count(), 1);
+
+        // Repoint: a new-path load must NOT hit the old-path entry.
+        let served = r.load(id, "new", ArchiveRowKind::Play).await.unwrap();
+        assert_eq!(served.parse_game().unwrap().width as i64, new_w);
+        assert_eq!(store.get_count(), 2, "old-path entry was a miss");
+        // And it is now cached under the new path.
+        r.load(id, "new", ArchiveRowKind::Play).await.unwrap();
+        assert_eq!(store.get_count(), 2, "new-path entry is a hit");
+
+        // A straggler request that read the row before the repoint can
+        // serve the old object once (inherent linearization)...
+        let served = r.load(id, "old", ArchiveRowKind::Play).await.unwrap();
+        assert_eq!(served.parse_game().unwrap().width as i64, old_w);
+        // ...but it cannot poison the cache for the new path.
+        let served = r.load(id, "new", ArchiveRowKind::Play).await.unwrap();
+        assert_eq!(served.parse_game().unwrap().width as i64, new_w);
+    }
+
+    /// DEV-2344: `invalidate` drops a cached entry after a repoint — the
+    /// next load re-fetches instead of keeping the weight around.
+    #[tokio::test]
+    async fn invalidate_drops_cached_entry() {
+        let store = Arc::new(InMemoryObjectStore::default());
+        store
+            .put("z", fx::v1_archive("dddddddd-4444-4444-4444-444444444444"))
+            .await
+            .unwrap();
+        let r = reader(store.clone(), DEFAULT_ARCHIVE_CACHE_MAX_BYTES);
+        let id = Uuid::new_v4();
+        r.load(id, "z", ArchiveRowKind::Play).await.unwrap();
+        r.load(id, "z", ArchiveRowKind::Play).await.unwrap();
+        assert_eq!(store.get_count(), 1, "second load was a cache hit");
+        assert!(r.cache.peek_any(id));
+
+        r.invalidate(id).await;
+
+        assert!(!r.cache.peek_any(id), "invalidate dropped the entry");
+        r.load(id, "z", ArchiveRowKind::Play).await.unwrap();
+        assert_eq!(store.get_count(), 2, "next load re-fetches");
+    }
+
     #[tokio::test]
     async fn zero_cap_disables_caching_but_still_serves() {
         let store = Arc::new(InMemoryObjectStore::default());
@@ -852,7 +993,7 @@ mod tests {
         let id = Uuid::new_v4();
         let first = r.load(id, "z", ArchiveRowKind::Play).await.unwrap();
         assert_eq!(first.frame_count(), 2);
-        assert!(r.cache.peek(id).is_none());
+        assert!(r.cache.peek(id, "z").is_none());
         r.load(id, "z", ArchiveRowKind::Play).await.unwrap();
         assert_eq!(store.get_count(), 2, "no cache: every load re-fetches");
     }

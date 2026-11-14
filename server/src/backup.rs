@@ -68,13 +68,13 @@ pub(crate) async fn enqueue_backup_job(
 
 /// Row from Engine's games table
 #[derive(FromRow)]
-struct EngineGameRow {
-    id: String,
-    value: serde_json::Value,
+pub(crate) struct EngineGameRow {
+    pub(crate) id: String,
+    pub(crate) value: serde_json::Value,
     /// Engine DB uses TIMESTAMP (no timezone), not TIMESTAMPTZ. sqlx pins
     /// pooled sessions' TimeZone to UTC, so the naive value decodes as UTC
     /// deterministically.
-    created: chrono::NaiveDateTime,
+    pub(crate) created: chrono::NaiveDateTime,
 }
 
 /// Fetch completed games from the Engine database within the given time window.
@@ -107,7 +107,10 @@ async fn fetch_completed_games(
 }
 
 /// Fetch a single game from the Engine database by ID.
-async fn fetch_game_by_id(engine_db: &PgPool, game_id: &str) -> cja::Result<Option<EngineGameRow>> {
+pub(crate) async fn fetch_game_by_id(
+    engine_db: &PgPool,
+    game_id: &str,
+) -> cja::Result<Option<EngineGameRow>> {
     let row: Option<EngineGameRow> = sqlx::query_as(
         r#"
         SELECT id, value, created
@@ -130,17 +133,17 @@ pub(crate) const EXPORT_FRAME_PAGE_SIZE: i64 = 200;
 
 #[derive(FromRow)]
 pub(crate) struct FrameTextRow {
-    turn: i32,
+    pub(crate) turn: i32,
     /// `game_frames.value` is nullable in the engine schema: NULL maps to
     /// None here and is classified Permanent ("frame_null_value"), never
     /// a transient fetch error.
-    value_text: Option<String>,
+    pub(crate) value_text: Option<String>,
 }
 
 /// One page of a game's frames as raw JSON text (keyset on turn). `::text`
 /// makes Postgres render the JSONB server-side; the String decode is a
 /// memcpy. No serde work on the async worker.
-async fn fetch_game_frame_texts_page(
+pub(crate) async fn fetch_game_frame_texts_page(
     engine_db: &PgPool,
     game_id: &str,
     after_turn: i32,
@@ -186,7 +189,7 @@ async fn is_already_archived(db: &PgPool, engine_game_id: &str) -> cja::Result<b
 /// Generate the GCS path for a game based on its creation date. The date is
 /// the engine `created` COLUMN (DEV-1984): pre-2023 `value` rows often lack
 /// a `Created` key, which used to date every such object 1970-01-01.
-fn gcs_path(game_id: &str, created_at: DateTime<Utc>) -> String {
+pub(crate) fn gcs_path(game_id: &str, created_at: DateTime<Utc>) -> String {
     format!(
         "games/{}/{:02}/{:02}/{}.json.zst",
         created_at.format("%Y"),
@@ -341,7 +344,7 @@ pub(crate) enum ExportBuildError {
 /// OOM-correlated shape on the 1 GiB prod box). Parse/serialize/compress
 /// runs on the blocking pool under the backup slot; only the slot holder
 /// reaches this function.
-async fn build_export_streamed(
+pub(crate) async fn build_export_streamed(
     engine_db: &PgPool,
     game: EngineGame,
 ) -> Result<Vec<u8>, ExportBuildError> {
@@ -837,16 +840,17 @@ mod tests {
     fn v2_export_is_self_describing_and_strips_snake_urls() {
         let game: EngineGame = serde_json::from_value(fixture_game_json("g-v2", 0)).unwrap();
 
-        // Frame 0: MUST list every one of EngineSnake's 20 fields in canonical
+        // Frame 0: MUST list every one of EngineSnake's 21 fields in canonical
         // serialized form — ID, Name, URL, Body, Health, Death, Color, HeadType,
-        // TailType, Latency (string), Shout, Squad, APIVersion (string), Author,
-        // StatusCode, Error, TimingMicros, IsBot, IsEnvironment, ProxyURL — plus
-        // every EngineGameFrame field (Turn, Snakes, Food, Hazards, GameState,
-        // PointState). Only a complete canonical fixture survives the typed
-        // round-trip unchanged, so "input minus the three stripped keys == output"
-        // is an exact Value equality below. The equality doubles as a canary: if a
-        // field is later added to EngineSnake without updating this fixture, the
-        // round-trip materializes it (null/default) and the assert fails loudly.
+        // TailType, Latency (string), Shout, Squad, Team, APIVersion (string),
+        // Author, StatusCode, Error, TimingMicros, IsBot, IsEnvironment,
+        // ProxyURL — plus every EngineGameFrame field (Turn, Snakes, Food,
+        // Hazards, GameState, PointState). Only a complete canonical fixture
+        // survives the typed round-trip unchanged, so "input minus the three
+        // stripped keys == output" is an exact Value equality below. The
+        // equality doubles as a canary: if a field is later added to
+        // EngineSnake without updating this fixture, the round-trip
+        // materializes it (null/default) and the assert fails loudly.
         // Note GameState values MUST be strings — the field is a
         // HashMap<String, String> (engine_models.rs) and non-string values fail
         // deserialization.
@@ -866,6 +870,7 @@ mod tests {
                     "Latency": "12",
                     "Shout": "hello",
                     "Squad": "alpha",
+                    "Team": "Orb Weavers",
                     "APIVersion": "1",
                     "Author": "coreyja",
                     "StatusCode": 200,
