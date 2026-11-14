@@ -16,10 +16,10 @@ use crate::{
         avatar::user_avatar,
         live_refresh::{LiveRefreshConfig, live_page_refresh},
         page_factory::PageFactory,
+        snake_avatar::snake_avatar,
         snake_tags::snake_tag_chips,
     },
     cron::MATCHMAKER_INTERVAL_SECS,
-    customizations::chip_color,
     errors::{ServerResult, WithRedirect},
     models::leaderboard_entry_health,
     models::{
@@ -399,7 +399,7 @@ pub async fn show_leaderboard(
                                             td class="rank" { (format!("{rank:02}")) }
                                             td {
                                                 div class="snake-cell" {
-                                                    span class="chip" style={"background:"(chip_color(&entry.snake_color))} {}
+                                                    (snake_avatar(&entry.snake_head, &entry.snake_tail, &entry.snake_color))
                                                     div class="snake-details" {
                                                         a class="name" href={"/leaderboards/"(leaderboard_id)"/entries/"(entry.leaderboard_entry_id)} {
                                                             (entry.snake_name)
@@ -465,7 +465,7 @@ pub async fn show_leaderboard(
                                         tr {
                                             td {
                                                 div class="snake-cell" {
-                                                    span class="chip" style={"background:"(chip_color(&entry.snake_color))} {}
+                                                    (snake_avatar(&entry.snake_head, &entry.snake_tail, &entry.snake_color))
                                                     div class="snake-details" {
                                                         a class="name" href={"/leaderboards/"(leaderboard_id)"/entries/"(entry.leaderboard_entry_id)} {
                                                             (entry.snake_name)
@@ -518,7 +518,7 @@ pub async fn show_leaderboard(
                             @for entry in &user_entries {
                                 @if let Some(snake) = user_snakes.iter().find(|s| s.battlesnake_id == entry.battlesnake_id) {
                                     div class="mine" {
-                                        span class="chip" style={"background:"(chip_color(&snake.color))} {}
+                                        (snake_avatar(&snake.head, &snake.tail, &snake.color))
                                         span class="mname" { (snake.name) }
                                         @if entry.disabled_at.is_some() {
                                             @if entry.disabled_reason.as_deref() == Some(leaderboard_entry_health::DISABLED_REASON_HEALTH) {
@@ -1804,5 +1804,171 @@ mod column_route_tests {
             assert_eq!(body.contains("Food Eaten"), has_food, "{name} entry scores");
             assert!(body.contains("Win Rate"), "{name} entry scores");
         }
+    }
+}
+
+#[cfg(test)]
+mod cosmetics_route_tests {
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode},
+    };
+    use sqlx::PgPool;
+    use tower::ServiceExt as _;
+    use uuid::Uuid;
+
+    use crate::models::leaderboard::{self, MIN_GAMES_FOR_RANKING};
+    use crate::state::AppState;
+
+    async fn get(pool: &PgPool, path: &str) -> (StatusCode, String) {
+        let app = crate::routes::routes(AppState::test_from_pool(pool.clone()))
+            .expect("asset router")
+            .into_router();
+        let response = app
+            .oneshot(Request::get(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        (status, String::from_utf8_lossy(&body).into_owned())
+    }
+
+    async fn owner(pool: &PgPool, github_id: i64, login: &str) -> Uuid {
+        sqlx::query_scalar!(
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES ($1, $2) RETURNING user_id",
+            github_id,
+            login
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    /// Adds a snake with the given cosmetic look (color, head, tail) to the
+    /// leaderboard at the given games played, returning its entry id.
+    async fn entry(
+        pool: &PgPool,
+        leaderboard_id: Uuid,
+        user_id: Uuid,
+        name: &str,
+        games_played: i32,
+        look: (&str, &str, &str),
+    ) -> Uuid {
+        let battlesnake_id = sqlx::query_scalar!(
+            "INSERT INTO battlesnakes (user_id, name, url, color, head, tail)
+             VALUES ($1, $2, 'http://snake', $3, $4, $5) RETURNING battlesnake_id",
+            user_id,
+            name,
+            look.0,
+            look.1,
+            look.2
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        let entry_id = leaderboard::get_or_create_entry(pool, leaderboard_id, battlesnake_id)
+            .await
+            .unwrap()
+            .expect("live snake joins")
+            .leaderboard_entry_id;
+        sqlx::query!(
+            "UPDATE leaderboard_entries SET games_played = $2 WHERE leaderboard_entry_id = $1",
+            entry_id,
+            games_played
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        entry_id
+    }
+
+    /// Ranked and placement rows each show their own snake's head and tail
+    /// art (the mini avatar that replaced the plain colour chip), and the
+    /// declared colour flows through `--snake`.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn ranked_and_placement_rows_show_their_own_head_and_tail(pool: PgPool) {
+        let leaderboard_id = leaderboard::get_active_leaderboards(&pool)
+            .await
+            .unwrap()
+            .first()
+            .expect("migrations seed an active leaderboard")
+            .leaderboard_id;
+
+        let user = owner(&pool, 9931001, "gh-cosmetic").await;
+        entry(
+            &pool,
+            leaderboard_id,
+            user,
+            "cosmetic-ranked",
+            MIN_GAMES_FOR_RANKING,
+            ("#FF4F86", "alligator", "bolt"),
+        )
+        .await;
+        entry(
+            &pool,
+            leaderboard_id,
+            user,
+            "cosmetic-placement",
+            MIN_GAMES_FOR_RANKING - 1,
+            ("", "", ""),
+        )
+        .await;
+
+        let (status, body) = get(&pool, &format!("/leaderboards/{leaderboard_id}")).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let head_d = crate::og::board::shape(arena::design_kit::AssetKind::Head, "alligator")
+            .expect("alligator in catalog")
+            .d;
+        let tail_d = crate::og::board::shape(arena::design_kit::AssetKind::Tail, "bolt")
+            .expect("bolt in catalog")
+            .d;
+        let default_d = crate::og::board::shape(arena::design_kit::AssetKind::Head, "default")
+            .expect("default in catalog")
+            .d;
+
+        // Exactly once each: a regression that gives every row the same art
+        // trips these, and the default shape doubling as the fallback means
+        // only an exact count distinguishes "default snake rendered" from
+        // "custom slug ignored".
+        assert_eq!(body.matches(head_d).count(), 1, "alligator head once");
+        assert_eq!(body.matches(tail_d).count(), 1, "bolt tail once");
+        assert_eq!(body.matches(default_d).count(), 1, "default head once");
+
+        assert!(
+            body.contains(r#"style="--snake: #ff4f86""#),
+            "declared colour not lowered into --snake"
+        );
+        assert!(body.contains(r#"class="snake-avatar""#), "{body}");
+    }
+
+    /// The home page's "Top of the ladder" preview shows the same avatar.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn home_ladder_preview_shows_head_and_tail(pool: PgPool) {
+        let leaderboard_id = leaderboard::get_active_leaderboards(&pool)
+            .await
+            .unwrap()
+            .first()
+            .expect("migrations seed an active leaderboard")
+            .leaderboard_id;
+
+        let user = owner(&pool, 9931002, "gh-home-cosmetic").await;
+        entry(
+            &pool,
+            leaderboard_id,
+            user,
+            "home-cosmetic-ranked",
+            MIN_GAMES_FOR_RANKING,
+            ("#FF4F86", "alligator", "bolt"),
+        )
+        .await;
+
+        let (status, body) = get(&pool, "/").await;
+        assert_eq!(status, StatusCode::OK);
+        let head_d = crate::og::board::shape(arena::design_kit::AssetKind::Head, "alligator")
+            .expect("alligator in catalog")
+            .d;
+        assert!(body.contains(head_d), "home ladder avatar missing");
     }
 }

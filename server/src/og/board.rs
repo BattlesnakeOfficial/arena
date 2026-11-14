@@ -158,6 +158,20 @@ pub fn is_dark(color: Color) -> bool {
     0.2126 * color.red() + 0.7152 * color.green() + 0.0722 * color.blue() < DARK_LUMINANCE
 }
 
+/// `is_dark` for a normalized `#rrggbb` hex (as `normalize_color` returns).
+/// Used by the HTML `snake_avatar` component; near-black declared colours
+/// get a faint light outline on the dark theme.
+pub fn is_dark_hex(hex: &str) -> bool {
+    let Some(h) = hex.strip_prefix('#').filter(|h| h.len() == 6) else {
+        return false;
+    };
+    let chan = |range: std::ops::Range<usize>| u8::from_str_radix(&h[range], 16).ok();
+    match (chan(0..2), chan(2..4), chan(4..6)) {
+        (Some(r), Some(g), Some(b)) => is_dark(Color::from_rgba8(r, g, b, 255)),
+        _ => false,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct BoardSnake {
     /// Head first, as in the game API.

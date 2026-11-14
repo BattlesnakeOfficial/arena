@@ -977,7 +977,7 @@ fn home_ladder_grid(
                                     td class="rank" { "#" (i + 1) }
                                     td {
                                         div class="snake-cell" {
-                                            span class="chip" style={"background:"(chip_color(&entry.snake_color))} {}
+                                            (crate::components::snake_avatar::snake_avatar(&entry.snake_head, &entry.snake_tail, &entry.snake_color))
                                             span {
                                                 @if let Some(lb) = featured {
                                                     a class="name" href={"/leaderboards/"(lb.leaderboard_id)"/entries/"(entry.leaderboard_entry_id)} { (entry.snake_name) }
