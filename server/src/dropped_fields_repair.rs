@@ -1175,17 +1175,27 @@ mod tests {
         let header_number = fixture_game_header("game-h", 0, Some("team"), Some(12));
         insert_engine_game(&engine_pool, "game-h", header_number.clone(), created).await?;
         let frame = serde_json::json!({"Turn": 0, "Snakes": [], "Food": []});
-        insert_engine_frame(&engine_pool, "game-h", 0, Some(frame.clone())).await?;
-        let object = v1_shaped_object(&header_number, &[frame]);
+        insert_engine_frame(&engine_pool, "game-h", 0, Some(frame)).await?;
+        // Build the sanity object as a REAL v2 export (the repair's own
+        // build path), not a v1-shaped fixture: v1 objects carry no game
+        // id, which would surface an unrelated `game_id` problem.
+        let mut game: crate::engine_models::EngineGame =
+            serde_json::from_value(header_number.clone())?;
+        if game.created == 0 {
+            game.created = created.and_utc().timestamp_micros();
+        }
+        let object = crate::backup::build_export_streamed(&engine_pool, game)
+            .await
+            .map_err(|e| match e {
+                crate::backup::ExportBuildError::Permanent(reason) => eyre!(reason),
+                crate::backup::ExportBuildError::Transient(error) => error,
+            })?;
         let decoded = decode(&object);
 
         // Sanity: the number-typed engine header matches the object.
         let problems =
             verify_object_against_engine(&engine_pool, "game-h", &header_number, &decoded).await?;
-        assert!(
-            problems.iter().all(|p| p.starts_with("archive_version")),
-            "only the (expected) v1-marker problem: {problems:?}"
-        );
+        assert!(problems.is_empty(), "problems: {problems:?}");
 
         // The engine header with a STRING 12 vs the object's NUMBER 12 is
         // a header mismatch.
