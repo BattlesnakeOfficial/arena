@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT q.engine_game_id AS \"engine_game_id!\"\n           FROM dropped_fields_repair_queue q\n           WHERE q.status = 'pending'\n             AND NOT EXISTS (\n                 SELECT 1 FROM jobs j\n                 WHERE j.name = 'DroppedFieldsRepairGameJob'\n                   AND j.payload->>'engine_game_id' = q.engine_game_id\n             )\n           ORDER BY q.engine_game_id\n           LIMIT $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "engine_game_id!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "07765f411363930f7ce5d41fb1b9715d3e77688aa189c7c4fc6774a41fcf0761"
+}

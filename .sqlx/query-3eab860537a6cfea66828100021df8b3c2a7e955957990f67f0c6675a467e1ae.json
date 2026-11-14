@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE dropped_fields_repair_queue\n         SET status = $2, reason = $3, updated_at = NOW()\n         WHERE engine_game_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "3eab860537a6cfea66828100021df8b3c2a7e955957990f67f0c6675a467e1ae"
+}

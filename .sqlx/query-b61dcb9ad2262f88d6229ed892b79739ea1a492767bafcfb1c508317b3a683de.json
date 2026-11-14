@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT gcs_path, archive_version FROM games WHERE engine_game_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "gcs_path",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "archive_version",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      true,
+      true
+    ]
+  },
+  "hash": "b61dcb9ad2262f88d6229ed892b79739ea1a492767bafcfb1c508317b3a683de"
+}

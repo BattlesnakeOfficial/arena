@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM dropped_fields_repair_queue",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "d6eff7752a2176ffaf050f65c09f6b80ad7550fce57569d13ce051611cb0b33a"
+}
