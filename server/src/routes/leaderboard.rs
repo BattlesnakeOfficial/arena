@@ -1914,6 +1914,15 @@ mod cosmetics_route_tests {
             ("", "", ""),
         )
         .await;
+        entry(
+            &pool,
+            leaderboard_id,
+            user,
+            "cosmetic-puffin",
+            MIN_GAMES_FOR_RANKING,
+            ("#da8a1a", "beach-puffin-special", "beach-puffin-special"),
+        )
+        .await;
 
         let (status, body) = get(&pool, &format!("/leaderboards/{leaderboard_id}")).await;
         assert_eq!(status, StatusCode::OK);
@@ -1941,6 +1950,13 @@ mod cosmetics_route_tests {
             "declared colour not lowered into --snake"
         );
         assert!(body.contains(r#"class="snake-avatar""#), "{body}");
+
+        // Multi-colour special art keeps its fixed accents end to end
+        // (DB slug -> avatar markup): the puffin's orange beak.
+        assert!(
+            body.contains(r#"style="fill: #e84600""#),
+            "puffin beak layer missing from the leaderboard page"
+        );
     }
 
     /// The home page's "Top of the ladder" preview shows the same avatar.

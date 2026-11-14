@@ -4,7 +4,12 @@
 //! design-kit catalog via `og::board::shape` (same source as the social
 //! cards), colour flows through the `--snake` CSS variable like the studio
 //! board, and near-black colours get a `dim` class whose CSS adds a faint
-//! light outline so they stay visible on the dark theme.
+//! light outline so they stay visible on the dark theme. Multi-colour
+//! special art (beach-puffin-special, pirate-special, trans-rights-scarf, …)
+//! also draws its fixed-colour layers (`design_kit::catalog_layers`) over
+//! the base path, so accents keep their true colours as on the real board.
+//! Layers carry an inline `fill` style because the stylesheet's
+//! `--snake` fill rule beats presentation attributes.
 
 use arena::design_kit::AssetKind;
 use maud::{Markup, html};
@@ -35,6 +40,10 @@ pub fn snake_avatar(head: &str, tail: &str, color: &str) -> Markup {
                     svg class="tail" viewBox="0 0 100 100" x="0" y="0" width="100" height="100" {
                         g transform="scale(-1,1) translate(-100,0)" {
                             path d=(tail.d) fill-rule=(tail.fill_rule.as_svg()) {}
+                            @for layer in crate::og::board::layers(tail) {
+                                path d=(layer.d) fill-rule=(layer.fill_rule.as_svg())
+                                    style=(format!("fill: {}", layer.fill)) {}
+                            }
                         }
                     }
                 }
@@ -43,6 +52,10 @@ pub fn snake_avatar(head: &str, tail: &str, color: &str) -> Markup {
                     // Head art faces right and attaches on its left edge — identity.
                     svg class="head" viewBox="0 0 100 100" x="200" y="0" width="100" height="100" {
                         path d=(head.d) fill-rule=(head.fill_rule.as_svg()) {}
+                        @for layer in crate::og::board::layers(head) {
+                            path d=(layer.d) fill-rule=(layer.fill_rule.as_svg())
+                                style=(format!("fill: {}", layer.fill)) {}
+                        }
                     }
                 }
             }
@@ -134,12 +147,79 @@ mod tests {
         // then nests every following sibling inside it and each shape
         // collapses to 0×0 with no error anywhere else. This string count
         // is the only guard.
-        for html in [body("alligator", "bolt", "#FF4F86"), body("", "", "")] {
+        for html in [
+            body("alligator", "bolt", "#FF4F86"),
+            body("", "", ""),
+            body("beach-puffin-special", "beach-puffin-special", "#da8a1a"),
+        ] {
             for tag in ["path", "rect"] {
                 let open = html.matches(&format!("<{tag}")).count();
                 let close = html.matches(&format!("</{tag}>")).count();
                 assert!(open > 0, "no <{tag}> rendered");
                 assert_eq!(open, close, "unbalanced <{tag}> tags: {html}");
+            }
+        }
+    }
+
+    #[test]
+    fn multi_colour_catalog_art_keeps_its_fixed_colours() {
+        // Acceptance pins, not observations: the puffin's orange beak and
+        // white face, and the scarf's blue stripe. If the generated table
+        // lacks one, fix the extractor — never relax these colours.
+        let puffin = body("beach-puffin-special", "beach-puffin-special", "#da8a1a");
+        assert!(
+            puffin.contains(r#"style="--snake: #da8a1a""#),
+            "base colour lost: {puffin}"
+        );
+        assert!(
+            puffin.contains(r#"style="fill: #e84600""#),
+            "puffin beak #e84600 missing: {puffin}"
+        );
+        assert!(
+            puffin.contains(r#"style="fill: #ffffff""#),
+            "puffin white face missing: {puffin}"
+        );
+
+        let scarf = body("trans-rights-scarf", "", "#25272b");
+        assert!(
+            scarf.contains(r#"style="fill: #75cdfd""#),
+            "scarf stripe #75cdfd missing: {scarf}"
+        );
+        assert!(
+            scarf.contains(r#"class="snake dim""#),
+            "dim lost with layers: {scarf}"
+        );
+    }
+
+    #[test]
+    fn single_colour_catalog_art_gets_no_layers() {
+        // cat is white-only (the white-composite gate); alligator/bolt are
+        // plain single-colour art. Both render exactly as before.
+        for html in [
+            body("cat", "", "#da8a1a"),
+            body("alligator", "bolt", "#ff4f86"),
+        ] {
+            assert!(
+                !html.contains("style=\"fill: #"),
+                "single-colour art grew a layer: {html}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_layer_path_is_emitted() {
+        let html = body("beach-puffin-special", "beach-puffin-special", "#da8a1a");
+        for kind in [AssetKind::Head, AssetKind::Tail] {
+            let shape = crate::og::board::shape(kind, "beach-puffin-special")
+                .expect("beach-puffin-special in catalog");
+            let layers = crate::og::board::layers(shape);
+            assert!(!layers.is_empty(), "{kind:?} has no layers");
+            for layer in layers {
+                assert!(
+                    html.contains(layer.d),
+                    "{kind:?} {} layer path missing",
+                    layer.fill
+                );
             }
         }
     }

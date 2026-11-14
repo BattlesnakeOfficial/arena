@@ -33,6 +33,8 @@ pub struct CatalogLayerArt {
     pub layers: &'static [CatalogLayer],
 }
 
+// The generator's layout, not rustfmt's: regenerating must not leave a fmt diff.
+#[rustfmt::skip]
 pub const CATALOG_LAYER_ART: &[CatalogLayerArt] = &[
     // @generated begin
     CatalogLayerArt {

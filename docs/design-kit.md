@@ -487,6 +487,38 @@ Findings from the corpus changed the pipeline, not the thresholds:
   front opposite, and a front is never that full, so when both are full neither counts
   as a turned neck, and the gap is reported as `neck_gap`.
 
+#### Fixed-colour layers (`catalog_layers`)
+
+`catalog_shapes` flattens each asset to one silhouette, which the leaderboard avatars and
+the OG cards tint with the snake's colour. That loses the accents of the multi-colour
+specials (the beach-puffin-special beak, the trans-rights-scarf stripes, the pirate hats).
+`design_kit::catalog_layers::CATALOG_LAYER_ART` is a second generated static table of the
+fixed-colour layers drawn over the base path: `snake_avatar` emits each as a `path` with an
+inline `fill` style (the stylesheet's `--snake` fill rule beats presentation attributes),
+and `og::board` paints them after the base fill. Nothing is fetched or parsed at runtime.
+
+The colour rule is the official board's: it injects the media SVG under
+`<svg fill={snake.color}>`, so unfilled elements and `#0f0` take the snake colour and every
+explicit fill keeps its own. The generator recolours one isolate per accent colour (luma
+under 230) and runs it through `process_upload`, so clips, strokes, opacity and occlusion
+are resolved by rendering; each layer is checked against an independent render of its
+isolate (outline error at most 1 unit, no lost or added details). Near-whites
+become one `#ffffff` composite, emitted only for assets that keep at least one accent
+(single-colour art keeps its white details as cut-outs and renders exactly as before); an
+off-white too tinted to flatten is fatal.
+
+An accent may be absent for exactly two reasons: its isolate renders nothing (`Empty`, an
+element fully covered by later paint) or it covers under 0.5% of the box (`BelowFloor`).
+Everything else, including a layer that fails the oracle, fails the generator and the
+corpus test. Every drop is pinned with its reason in the test's `EXPECTED_ACCENT_DROPS`,
+checked in both directions, and the test pins the 14 assets with accent candidates
+(`MULTI_COLOUR_CANDIDATES`) and the 10 that end up layered (`LAYERED_ASSETS`), and checks
+that the table equals a fresh extraction. To regenerate:
+
+```text
+cargo test -p arena --test design_kit_catalog -- --ignored write_catalog_layers
+```
+
 ### Reference shapes
 
 `design_kit::refs::REFS` is a static table of the 9 heads and 9 tails the studio pairs

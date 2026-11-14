@@ -612,19 +612,19 @@ fn extract_layers(asset: &Asset) -> ExtractionOutcome {
     let inner = catalog_inner(asset.kind, &asset.slug);
     let all = paint_colours(&inner);
     let accents = all.iter().copied().filter(|&c| luma(c) < LIGHT_LUMA);
-    let whites: Vec<[u8; 3]> = all.iter().copied().filter(|&c| luma(c) >= LIGHT_LUMA).collect();
+    let whites: Vec<[u8; 3]> = all
+        .iter()
+        .copied()
+        .filter(|&c| luma(c) >= LIGHT_LUMA)
+        .collect();
     let mut layers = Vec::new();
     let mut drops = Vec::new();
     let mut fatals = Vec::new();
 
     for colour in accents {
-        if let Some(shape) = attempt_layer(
-            asset,
-            colour,
-            &|rgb| rgb == colour,
-            &mut drops,
-            &mut fatals,
-        ) {
+        if let Some(shape) =
+            attempt_layer(asset, colour, &|rgb| rgb == colour, &mut drops, &mut fatals)
+        {
             layers.push((colour, shape));
         }
     }
@@ -830,7 +830,8 @@ fn check(asset: &Asset, rows: &[Row]) -> Result<Checked, String> {
         .map(|(_, _, c, r, _)| (*c, *r))
         .collect();
     if outcome.drops != expected_drops {
-        let fmt_drop = |(c, r): &([u8; 3], DropReason)| format!("#{:02x}{:02x}{:02x}/{r:?}", c[0], c[1], c[2]);
+        let fmt_drop =
+            |(c, r): &([u8; 3], DropReason)| format!("#{:02x}{:02x}{:02x}/{r:?}", c[0], c[1], c[2]);
         problems.push(format!(
             "accent drops [{}] != inventory [{}]: a new drop means fix the extraction \
              (or extend EXPECTED_ACCENT_DROPS with a justification if genuinely correct), a \
@@ -851,17 +852,27 @@ fn check(asset: &Asset, rows: &[Row]) -> Result<Checked, String> {
     let table = catalog_layers::find(asset.kind, &asset.slug);
     for entry in table {
         let hex = entry.fill.strip_prefix('#').unwrap_or_default();
-        if hex.len() != 6 || !hex.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+        if hex.len() != 6
+            || !hex
+                .chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
         {
-            problems.push(format!("layer fill {:?} is not lowercase #rrggbb", entry.fill));
+            problems.push(format!(
+                "layer fill {:?} is not lowercase #rrggbb",
+                entry.fill
+            ));
         }
     }
     if table.len() != outcome.layers.len()
-        || outcome.layers.iter().zip(table).any(|((colour, shape), entry)| {
-            entry.fill != format!("#{:02x}{:02x}{:02x}", colour[0], colour[1], colour[2])
-                || entry.d != shape.path_d()
-                || entry.fill_rule != shape.fill_rule()
-        })
+        || outcome
+            .layers
+            .iter()
+            .zip(table)
+            .any(|((colour, shape), entry)| {
+                entry.fill != format!("#{:02x}{:02x}{:02x}", colour[0], colour[1], colour[2])
+                    || entry.d != shape.path_d()
+                    || entry.fill_rule != shape.fill_rule()
+            })
     {
         problems.push(format!(
             "layer table {} design_kit/catalog_layers.rs (regenerate: cargo test -p arena \
@@ -945,7 +956,9 @@ fn every_catalog_asset_is_processed_cleanly() {
         assert!(
             paint_colours(&catalog_inner(*kind, slug)).contains(colour),
             "drop colour #{:02x}{:02x}{:02x} does not appear in {slug}'s source",
-            colour[0], colour[1], colour[2]
+            colour[0],
+            colour[1],
+            colour[2]
         );
     }
     // Pinned sets: the accent candidates and the layered assets.
@@ -1144,7 +1157,14 @@ fn write_catalog_layers() {
     let stop = source.find(end).expect("end marker");
     let updated = format!("{}{table}{}", &source[..start], &source[stop..]);
     std::fs::write(&path, updated).expect("write catalog_layers.rs");
-    println!("wrote {} layered assets to {}", outcomes.iter().filter(|(_, o)| !o.layers.is_empty()).count(), path.display());
+    println!(
+        "wrote {} layered assets to {}",
+        outcomes
+            .iter()
+            .filter(|(_, o)| !o.layers.is_empty())
+            .count(),
+        path.display()
+    );
     println!("inventory (EXPECTED_ACCENT_DROPS entries need justifications):\n{inventory}");
 }
 
