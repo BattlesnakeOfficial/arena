@@ -23,6 +23,7 @@ mod cron;
 mod customizations;
 mod discord;
 mod django_password;
+mod dropped_fields_repair;
 mod email;
 mod engine;
 mod engine_models;

@@ -9,9 +9,10 @@ use tokio_util::sync::CancellationToken;
 use crate::config::AppConfig;
 use crate::jobs::{
     AchievementClipsSweepJob, BackfillAchievementsJob, CustomizationActiveWeekBackfillJob,
-    GameBackupJob, LeaderboardMatchmakerJob, NativeGameBackupJob, PlayGrantReconcileJob,
-    PlayHistoryWalkJob, RateLimitPruneJob, ReconcileRecentAchievementsJob, SessionPruneJob,
-    SnakeHealthSweeperJob, StuckGameSweeperJob, StuckMatchSweeperJob, TurnRetentionJob,
+    DroppedFieldsRepairSweepJob, GameBackupJob, LeaderboardMatchmakerJob, NativeGameBackupJob,
+    PlayGrantReconcileJob, PlayHistoryWalkJob, RateLimitPruneJob, ReconcileRecentAchievementsJob,
+    SessionPruneJob, SnakeHealthSweeperJob, StuckGameSweeperJob, StuckMatchSweeperJob,
+    TurnRetentionJob,
 };
 use crate::state::AppState;
 
@@ -59,6 +60,11 @@ pub const HIGHLIGHTS_CRON_INTERVAL_SECS: u64 = 60 * 60;
 /// here.
 pub const PLAY_HISTORY_WALK_INTERVAL_SECS: u64 = 5 * 60;
 
+/// Dropped-fields repair sweep cadence (DEV-2344): same 5-minute cadence
+/// as the walk; the RATE lives on
+/// `dropped_fields_repair::DROPPED_FIELDS_INFLIGHT_CEILING`, not here.
+pub const DROPPED_FIELDS_REPAIR_INTERVAL_SECS: u64 = 5 * 60;
+
 pub(crate) fn cron_registry(config: &AppConfig) -> CronRegistry<AppState> {
     let mut registry = CronRegistry::new();
 
@@ -84,6 +90,16 @@ pub(crate) fn cron_registry(config: &AppConfig) -> CronRegistry<AppState> {
         PlayHistoryWalkJob,
         Some("Play history archive walk: backfill engine games oldest-first"),
         Duration::from_secs(PLAY_HISTORY_WALK_INTERVAL_SECS),
+    );
+    // Dropped-fields repair sweep (DEV-2344): re-archive the 1,024 v1
+    // Play objects that dropped snake Team / header Mode /
+    // MaxTurnsToNextFoodSpawn. The crons row is seeded by a migration
+    // (20261114230000) so the first tick runs one interval after the
+    // migration applies, not at boot.
+    registry.register_job(
+        DroppedFieldsRepairSweepJob,
+        Some("DEV-2344: re-archive v1 Play objects that dropped Team/Mode/MaxTurnsToNextFoodSpawn"),
+        Duration::from_secs(DROPPED_FIELDS_REPAIR_INTERVAL_SECS),
     );
     // Turn retention: hourly, prunes archived native games' turns past
     // retention (DEV-1981), oldest-first. The crons row is seeded by a

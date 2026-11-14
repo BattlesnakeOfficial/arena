@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO dropped_fields_repair_queue (engine_game_id) VALUES ($1)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "8bf4595f706b97170ba1b4fb673e1c3cfe910a02e059b370a329ba2c7b7b99bf"
+}

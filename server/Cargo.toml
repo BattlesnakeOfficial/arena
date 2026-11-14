@@ -143,3 +143,6 @@ engine-proxy = { path = "../engine-proxy" }
 # and a JPEG encoder for JPEG round-trip fixtures.
 resvg = { version = "=0.48.1", default-features = false }
 jpeg-encoder = "0.7.1"
+# DEV-2344: the real-data rehearsal test parses psql `CSV` output, which
+# quotes JSON values per RFC 4180 (commas and `"` inside `value` fields).
+csv = "1"

@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                INSERT INTO jobs (job_id, name, payload, priority, context)\n                VALUES (gen_random_uuid(), 'DroppedFieldsRepairGameJob', $1::jsonb, -10, 'fake backlog')\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a6d17edbe8b5c2e5d7e788cf4e65f4d3eb29f9ee7921d84c6eb7c5b08655d5b4"
+}

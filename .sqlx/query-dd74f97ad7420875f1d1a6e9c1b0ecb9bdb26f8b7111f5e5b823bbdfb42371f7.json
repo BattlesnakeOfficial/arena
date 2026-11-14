@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT gcs_path FROM games WHERE engine_game_id = 'game-d'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "gcs_path",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "dd74f97ad7420875f1d1a6e9c1b0ecb9bdb26f8b7111f5e5b823bbdfb42371f7"
+}

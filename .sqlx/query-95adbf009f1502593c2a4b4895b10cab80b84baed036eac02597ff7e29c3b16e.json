@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                    INSERT INTO games (board_size, game_type, status, engine_game_id, created_at, archived_at, gcs_path, archive_version)\n                    VALUES ('11x11', 'Standard', 'finished', $1, '2020-03-15T12:00:00Z', NOW(), $2, 1)\n                    ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "95adbf009f1502593c2a4b4895b10cab80b84baed036eac02597ff7e29c3b16e"
+}

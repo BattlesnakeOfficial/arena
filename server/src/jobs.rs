@@ -528,6 +528,39 @@ impl Job<AppState> for PlayHistoryWalkJob {
     }
 }
 
+/// Cron (5 min): fill the dropped-fields repair queue once from the
+/// census list, then trickle DroppedFieldsRepairGameJob under the shared
+/// in-flight ceiling. See [`crate::dropped_fields_repair`].
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DroppedFieldsRepairSweepJob;
+
+#[async_trait::async_trait]
+impl Job<AppState> for DroppedFieldsRepairSweepJob {
+    const NAME: &'static str = "DroppedFieldsRepairSweepJob";
+
+    async fn run(&self, app_state: AppState) -> cja::Result<()> {
+        crate::dropped_fields_repair::run_sweep_tick(&app_state).await
+    }
+}
+
+/// Repair one game: new v2 object (create-only) with Team/Mode/
+/// MaxTurnsToNextFoodSpawn restored, verify the built export BEFORE any
+/// write, repoint the row, invalidate the archive cache. See
+/// [`crate::dropped_fields_repair`].
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DroppedFieldsRepairGameJob {
+    pub engine_game_id: String,
+}
+
+#[async_trait::async_trait]
+impl Job<AppState> for DroppedFieldsRepairGameJob {
+    const NAME: &'static str = "DroppedFieldsRepairGameJob";
+
+    async fn run(&self, app_state: AppState) -> cja::Result<()> {
+        crate::dropped_fields_repair::repair_game(&app_state, &self.engine_game_id).await
+    }
+}
+
 /// Cron job to create leaderboard match games.
 /// Runs once per nominal matchmaker interval, creating one round for each active ladder.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -744,6 +777,8 @@ cja::impl_job_registry!(
     RenderAchievementClipJob,
     BackupSingleGameJob,
     PlayHistoryWalkJob,
+    DroppedFieldsRepairSweepJob,
+    DroppedFieldsRepairGameJob,
     NativeGameBackupJob,
     NativeBackupSingleGameJob,
     TurnRetentionJob,

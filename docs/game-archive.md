@@ -104,6 +104,73 @@ The `backup_batches` TABLE remains for DEV-1545.
   (max 5,567) can't OOM the 1 GiB box the way the old whole-game fetch
   correlated with.
 
+## Dropped-fields repair (DEV-2344)
+
+The January 2026 fork-join backfill exported through typed structs that
+lacked three engine JSON keys — serde ignores unknown fields — so **1,024
+v1 objects under `games/1970/01/01/` are missing them**: snake `Team` (a
+string; non-empty in **403** team-mode games, 2020-03-27 to 2020-07-17),
+header `Mode` (a string; **994** games), and header
+`MaxTurnsToNextFoodSpawn` (a JSON **number**, always 12; **815** games).
+All are 2019-11 to 2020-07 games; the DEV-1984 walk's v2 objects are
+unaffected. The engine DB is the only remaining copy, so the repair must
+finish before the engine DB teardown after Play closes 2026-11-30.
+
+- **Flow**: `DroppedFieldsRepairSweepJob` (cron, 5 min) fills the
+  `dropped_fields_repair_queue` table ONCE from the checked-in census
+  list (`server/src/dropped_fields_repair_ids.txt`, 1,024 engine game
+  ids = `team_games.txt` ∪ `mode_ids.txt` from the coordinator's
+  evidence), filtered to arena rows still on the v1 1970 path — no
+  engine-DB query during fill. It then trickles
+  `DroppedFieldsRepairGameJob`s (one game each, `BACKUP_JOB_PRIORITY`)
+  under an in-flight ceiling of 25; with no pending rows left the sweep
+  is a cheap no-op that still emits its done line every tick. Queue rows
+  are never deleted, so "empty" means "never filled".
+- **Per game**: fix the structs (`engine_models.rs` gained
+  `EngineSnake.team`, `EngineGame.mode`,
+  `EngineGame.max_turns_to_next_food_spawn`, all `Option` +
+  `skip_serializing_if` so other games' bytes don't change) → re-export
+  through the normal v2 writer under `BACKUP_SLOT` → **verify the built
+  bytes against the engine BEFORE any write** (every frame normalized
+  and Value-equal, header fields compared as JSON Values) → create-only
+  put (`put_if_absent`, GCS `ifGenerationMatch=0`) at the correct date
+  path → read back → one predicate-guarded UPDATE repoints
+  `gcs_path`/`archive_version` → the archive cache entry is invalidated
+  (peek/insert are path-aware, so correctness never depended on it).
+- **Never overwrite**: no existing object is ever overwritten or deleted
+  (the bucket has no versioning, DEV-2128) and the old v1 objects under
+  `games/1970/01/01/` stay. An object already at the target (crash
+  recovery) is verified and reused, never rewritten.
+- **Failure semantics**: `Err` retries (GCS 5xx, timeouts, read-back
+  anomalies); a `failed` queue row is terminal (missing rows,
+  unparseable headers, verify mismatches) and **blocks engine-DB
+  teardown sign-off**. Re-arm after fixing the cause (no cursor to
+  rewind): `UPDATE dropped_fields_repair_queue SET status = 'pending',
+  reason = NULL WHERE engine_game_id = '…';`
+- **Reconciliation from logs**: fill line "queue filled from census
+  list" (`filled` = 1,024 expected; an `error` "listed games not queued"
+  line lists any missing ids); per-game lines "Re-archived game with
+  dropped fields restored" — count `mode: Some(` → 994,
+  `max_turns_to_next_food_spawn: Some(` → 815, `team_frames: N > 0` →
+  403; done line "dropped-fields repair complete" fires on every tick
+  once no pending rows remain (the `error`-level "complete with
+  failures" variant means failed rows exist). Count convergence from
+  `SELECT status, COUNT(*) FROM dropped_fields_repair_queue GROUP BY
+  status`, not from `games.archived_at`/`updated_at` bins.
+- **Rollback**: restore each row's pre-repair pointers, captured at fill
+  time (`updated_at` bumps via the trigger):
+
+  ```sql
+  UPDATE games g
+  SET gcs_path = q.old_gcs_path, archive_version = q.old_archive_version
+  FROM dropped_fields_repair_queue q
+  WHERE g.engine_game_id = q.engine_game_id
+    AND q.status = 'done';
+  ```
+
+  (scope per game or run for all `done` rows — the old v1 objects are
+  still in place.)
+
 ## Who reads
 
 - `archive.rs` reads through the same `AppState.object_store` Arc (`get`)
