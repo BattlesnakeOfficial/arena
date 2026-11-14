@@ -385,20 +385,23 @@ table.data td.rating { font-family: var(--mono); font-weight: 600; font-size: 15
 .snake-avatar .snake path, .snake-avatar .snake rect { fill: var(--snake, #888888); }
 /* Near-black snake colours (relative luminance < 0.2, the OG cards'
    DARK_LUMINANCE) vanish on the dark theme; snake_avatar sets `dim` at
-   render time. stroke-width 5 is in the shapes' 100-unit space ≈ 1.1px at
-   22px tall (the avatar scales uniformly: 66/300 = 22/100 = 0.22; ~0.8px
-   at the 16px mobile size). var(--ink) is light on the dark theme (the
-   halo) and near-ink on light (invisible over a dark fill). */
-.snake-avatar .snake.dim path, .snake-avatar .snake.dim rect {
-  stroke: color-mix(in srgb, var(--ink) 45%, transparent);
-  stroke-width: 5;
+   render time. A drop-shadow on the outer <svg> outlines the whole
+   tail + body + head silhouette. A per-shape stroke drew seams where the
+   body rect overlaps the head and tail, and ringed the eye cut-outs. The
+   light theme needs nothing: a dark fill already reads on a light page. */
+html[data-app-theme="dark"] .snake-avatar:has(> .snake.dim) {
+  filter: drop-shadow(0 0 1px var(--ink));
 }
 /* Only the ranked table scrolls inside .table-scroll; the placement table
-   and the home ladder preview are width:100% tables — step the avatar down
-   on phones so the name column keeps room (same breakpoint pattern as
-   .global-rankings' avatar sizing). */
+   and the home ladder preview are width:100% tables whose name column
+   already wraps on phones. Keep avatar + gap at the old chip's footprint
+   (34px chip + 12px gap = 46px) so names wrap exactly as before: at 375px a
+   48px avatar with the 12px gap cost the placement rows an extra line and
+   broke owner logins mid-word. Same tightened-gap pattern as
+   .global-rankings on phones. */
 @media (max-width: 640px) {
-  .snake-avatar { width: 48px; height: 16px; }
+  .snake-avatar { width: 40px; height: 13.333px; }
+  .snake-cell:has(> .snake-avatar) { gap: 6px; }
 }
 .snake-cell .name { font-weight: 600; letter-spacing: -.01em; }
 .snake-cell .name:hover { color: var(--pink); }

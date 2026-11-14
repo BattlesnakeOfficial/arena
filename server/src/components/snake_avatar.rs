@@ -4,7 +4,7 @@
 //! design-kit catalog via `og::board::shape` (same source as the social
 //! cards), colour flows through the `--snake` CSS variable like the studio
 //! board, and near-black colours get a `dim` class whose CSS adds a faint
-//! light stroke so they stay visible on the dark theme.
+//! light outline so they stay visible on the dark theme.
 
 use arena::design_kit::AssetKind;
 use maud::{Markup, html};
