@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT u.github_login, u.user_id\n        FROM imported_accounts ia\n        JOIN users u ON u.user_id = ia.claimed_by_user_id\n        WHERE lower(ia.username) = lower($1)\n        ORDER BY (ia.username = $1) DESC, ia.claimed_at\n        LIMIT 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "github_login",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "user_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "26cbaf43cb79b48dedbe41043ee04857af2f23eb851c204ed14cbfff99c7713f"
+}

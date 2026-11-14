@@ -829,6 +829,30 @@ pub async fn should_show_claim_prompt(pool: &PgPool, user_id: Uuid) -> cja::Resu
     Ok(show.unwrap_or(false))
 }
 
+/// The arena user (GitHub login, user id) who claimed the play account named
+/// `username`, for resolving old play profile links. Play usernames are
+/// matched case-insensitively, preferring an exact-case match.
+pub async fn claimant_of_play_username(
+    pool: &PgPool,
+    username: &str,
+) -> cja::Result<Option<(String, Uuid)>> {
+    let row = sqlx::query!(
+        r#"
+        SELECT u.github_login, u.user_id
+        FROM imported_accounts ia
+        JOIN users u ON u.user_id = ia.claimed_by_user_id
+        WHERE lower(ia.username) = lower($1)
+        ORDER BY (ia.username = $1) DESC, ia.claimed_at
+        LIMIT 1
+        "#,
+        username,
+    )
+    .fetch_optional(pool)
+    .await
+    .wrap_err("Failed to look up the claimant of a play username")?;
+    Ok(row.map(|row| (row.github_login, row.user_id)))
+}
+
 /// The play username this user claimed, if they claimed one.
 pub async fn claimed_username(pool: &PgPool, user_id: Uuid) -> cja::Result<Option<String>> {
     sqlx::query_scalar!(
