@@ -88,6 +88,12 @@ pub struct RankedEntry {
     pub sigma: f64,
     pub snake_name: String,
     pub snake_color: String,
+    /// The snake's declared head/tail cosmetic slugs ('' when never
+    /// customized). Display-only; unknown slugs render as the default shape.
+    #[serde(skip)]
+    pub snake_head: String,
+    #[serde(skip)]
+    pub snake_tail: String,
     /// Owner's GitHub login — the `/users/{login}` URL key, not display text.
     pub owner_login: String,
     /// Owner's public name: `display_name` when set, else the GitHub login.
@@ -334,6 +340,8 @@ pub async fn get_ranked_entries(
                     le.sigma,
                     b.name as snake_name,
                     b.color as snake_color,
+                    b.head as snake_head,
+                    b.tail as snake_tail,
                     u.github_login as owner_login,
                     COALESCE(NULLIF(u.display_name, ''), u.github_login) AS "owner_name!",
                     u.country as owner_country
@@ -366,6 +374,8 @@ pub async fn get_ranked_entries(
                     le.sigma,
                     b.name as snake_name,
                     b.color as snake_color,
+                    b.head as snake_head,
+                    b.tail as snake_tail,
                     u.github_login as owner_login,
                     COALESCE(NULLIF(u.display_name, ''), u.github_login) AS "owner_name!",
                     u.country as owner_country
@@ -409,6 +419,8 @@ pub async fn get_placement_entries(
             le.sigma,
             b.name as snake_name,
             b.color as snake_color,
+            b.head as snake_head,
+            b.tail as snake_tail,
             u.github_login as owner_login,
             COALESCE(NULLIF(u.display_name, ''), u.github_login) AS "owner_name!",
             u.country as owner_country
@@ -755,6 +767,8 @@ pub async fn get_ranked_entries_paginated(
                     le.sigma,
                     b.name as snake_name,
                     b.color as snake_color,
+                    b.head as snake_head,
+                    b.tail as snake_tail,
                     u.github_login as owner_login,
                     COALESCE(NULLIF(u.display_name, ''), u.github_login) AS "owner_name!",
                     u.country as owner_country
@@ -789,6 +803,8 @@ pub async fn get_ranked_entries_paginated(
                     le.sigma,
                     b.name as snake_name,
                     b.color as snake_color,
+                    b.head as snake_head,
+                    b.tail as snake_tail,
                     u.github_login as owner_login,
                     COALESCE(NULLIF(u.display_name, ''), u.github_login) AS "owner_name!",
                     u.country as owner_country
