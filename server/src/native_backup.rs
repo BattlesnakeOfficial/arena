@@ -31,7 +31,10 @@ use color_eyre::eyre::{Context as _, eyre};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::backup::{BACKUP_JOB_PRIORITY, BACKUP_SLOT, BackupError, ZSTD_COMPRESSION_LEVEL};
+use crate::backup::{
+    BACKUP_JOB_PRIORITY, BACKUP_SLOT, BackupError, ZSTD_COMPRESSION_LEVEL,
+    with_backup_slot_deadline,
+};
 use crate::engine_models::ARCHIVE_VERSION;
 use crate::jobs::NativeBackupSingleGameJob;
 use crate::state::AppState;
@@ -232,6 +235,20 @@ pub(crate) async fn archive_native_game(
         .await
         .wrap_err("Backup slot semaphore closed")?;
 
+    with_backup_slot_deadline(
+        game_id,
+        archive_native_game_holding_slot(app_state, game_id, permit),
+    )
+    .await
+}
+
+/// The body of [`archive_native_game`], run while holding `permit` (the
+/// [`BACKUP_SLOT`] permit).
+async fn archive_native_game_holding_slot(
+    app_state: &AppState,
+    game_id: Uuid,
+    permit: tokio::sync::OwnedSemaphorePermit,
+) -> Result<(), BackupError> {
     let row: Option<NativeGameHeaderRow> = sqlx::query_as!(
         NativeGameHeaderRow,
         r#"
