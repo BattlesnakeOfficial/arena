@@ -32,6 +32,37 @@ use cja::jobs::Job;
 pub(crate) static BACKUP_SLOT: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
     std::sync::LazyLock::new(|| std::sync::Arc::new(tokio::sync::Semaphore::new(1)));
 
+/// Longest one archive may hold [`BACKUP_SLOT`]. A claimed backup waits on
+/// the slot while holding its job worker, so a holder stuck forever on an
+/// I/O await with no timeout of its own (a dead engine-DB socket, a GCS
+/// request) parks every worker that claims a backup behind it. On
+/// 2026-11-16 one hung holder parked 98 of 100 workers for hours, which
+/// left game runners unclaimed and stopped ladder matchmaking. A real
+/// archive takes seconds, so this only trips on a wedged one, which then
+/// fails and retries through cja's backoff.
+pub(crate) const BACKUP_SLOT_HOLD_LIMIT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Run `work` (everything done while holding [`BACKUP_SLOT`]) under
+/// [`BACKUP_SLOT_HOLD_LIMIT`]. On timeout the work future is dropped, which
+/// releases a permit it owns; a permit moved into `spawn_blocking` stays held
+/// until that bounded CPU work returns.
+pub(crate) async fn with_backup_slot_deadline<T>(
+    game: impl std::fmt::Display,
+    work: impl std::future::Future<Output = Result<T, BackupError>>,
+) -> Result<T, BackupError> {
+    run_under_slot_deadline(BACKUP_SLOT_HOLD_LIMIT, game, work).await
+}
+
+async fn run_under_slot_deadline<T>(
+    limit: std::time::Duration,
+    game: impl std::fmt::Display,
+    work: impl std::future::Future<Output = Result<T, BackupError>>,
+) -> Result<T, BackupError> {
+    tokio::time::timeout(limit, work).await.map_err(|_| {
+        eyre!("Backup of {game} held the backup slot for over {limit:?}; abandoned so it can retry")
+    })?
+}
+
 /// Job priority for [`BackupSingleGameJob`], below the default 0 that game
 /// runners use. cja claims `ORDER BY priority DESC, run_at, created_at`, and a
 /// claimed backup holds its worker while it waits for [`BACKUP_SLOT`], so an
@@ -623,6 +654,19 @@ pub async fn backup_single_game(
         .await
         .wrap_err("Backup slot semaphore closed")?;
 
+    with_backup_slot_deadline(
+        engine_game_id,
+        backup_single_game_holding_slot(app_state, engine_db, engine_game_id),
+    )
+    .await
+}
+
+/// The body of [`backup_single_game`]; the caller holds [`BACKUP_SLOT`].
+async fn backup_single_game_holding_slot(
+    app_state: &AppState,
+    engine_db: &PgPool,
+    engine_game_id: &str,
+) -> Result<(), BackupError> {
     // Req 6 (DEV-1984): re-check archived state under the slot — no put
     // for an already-archived game, ever.
     if is_already_archived(&app_state.db, engine_game_id).await? {
@@ -1553,6 +1597,46 @@ mod tests {
             "a game runner must out-rank queued backups"
         );
         Ok(())
+    }
+
+    /// A backup wedged on an await that never resolves gives up the slot
+    /// after the hold limit and errors (so cja retries it) instead of
+    /// pinning every worker queued behind it.
+    #[tokio::test]
+    async fn wedged_backup_errors_after_slot_hold_limit() {
+        let limit = std::time::Duration::from_millis(50);
+        let started = std::time::Instant::now();
+        let result = run_under_slot_deadline(
+            limit,
+            "wedged",
+            std::future::pending::<Result<(), BackupError>>(),
+        )
+        .await;
+        let error = result.expect_err("a wedged backup must time out");
+        assert!(
+            error
+                .message
+                .contains("Backup of wedged held the backup slot"),
+            "{}",
+            error.message
+        );
+        assert!(started.elapsed() >= limit);
+    }
+
+    #[tokio::test]
+    async fn backup_within_slot_hold_limit_passes_its_result_through() {
+        let result = run_under_slot_deadline(std::time::Duration::from_secs(10), "quick", async {
+            Ok::<_, BackupError>(7)
+        })
+        .await;
+        assert_eq!(result.ok(), Some(7));
+    }
+
+    #[test]
+    fn slot_hold_limit_leaves_room_for_real_archives() {
+        // The largest observed archive is ~2.65 MB and takes seconds; the
+        // limit must stay well above that so it only trips on a wedge.
+        assert!(BACKUP_SLOT_HOLD_LIMIT >= std::time::Duration::from_secs(120));
     }
 
     /// Backups are serialized process-wide so an hourly burst can't
