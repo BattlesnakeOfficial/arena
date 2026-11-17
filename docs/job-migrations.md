@@ -10,7 +10,19 @@ renaming an upstream `.sql` file to `.up.sql` and adding a corresponding
 `.down.sql`. The `cja_migrations_are_present_and_unchanged` test locates the pinned
 dependency through `cargo metadata` and checks the copies. The two upstream
 `AddSessions` migrations are intentionally excluded: Arena has its own session
-schema and does not use cja's AppSession.
+schema and does not use cja's AppSession. Current cja-owned copies include
+`cron_pauses` (with its down migration) and the `jobs_lock_pair_check` pair
+(`AddJobsLockPairCheck` NOT VALID + `ValidateJobsLockPairCheck`), all kept
+byte-identical to the upstream versions.
+
+## cja pin
+
+Arena holds cja at `1f796fbd` until DEV-2427 moves arena onto the new job
+limits. Do not run a bare `cargo update` or `cargo update -p cja` in this repo
+until then: cja main past cja#93 carries a 15-minute default `MAX_RUNTIME` that
+drops long `GameRunnerJob` and `GameBackupJob` runs (the observed max game
+attempt is 14.6 minutes), and the per-job overrides arrive with DEV-2427.
+Arena has no dependabot/renovate, so this note is the only guard.
 
 The job migrations include `dead_letter_jobs`, which retains the payload and
 failure details after a job exhausts its retries, and `idx_jobs_fetch_next`, which
@@ -51,6 +63,24 @@ Watch Cloud Logging for `Job lease watchdog expired`, `Job lease ownership lost`
 pressure, and the configured reclaim window. A prolonged database outage can
 delay reclaim and cause a game to replay from turn zero.
 
+## Cron and dispatch behavior
+
+Since cja #84, a cron tick error is logged and survived: the cron worker keeps
+running and the process is not restarted. Since cja #87, a job whose `name` is
+not in this binary's registry is released UNCHARGED on an age-scaled delay
+(about 30 seconds while the row is young, hourly after an hour, dead-letter
+past 14 days) instead of climbing `error_count` — queries that drift on
+`error_count` no longer match unknown names during rolling deploys. Since
+cja #89, cron due decisions use the database clock, and a future-stamped
+`crons.last_run_at` now FIRES the cron immediately instead of pausing it.
+Future-stamping was the documented emergency pause lever before #89 — for
+`TurnRetentionJob` (a destructive prune) a future stamp would immediately
+enqueue a prune batch. Never future-stamp; pause with `cron_pauses` instead:
+
+```sql
+INSERT INTO cron_pauses (name, paused_until) SELECT name, now() + interval '4 hours' FROM crons WHERE name = '<JobName>' ON CONFLICT (name) DO UPDATE SET paused_until = EXCLUDED.paused_until, paused_at = clock_timestamp()
+```
+
 ## Deployment and rollback
 
 Normal startup applies pending migrations before starting workers. The original
@@ -71,13 +101,18 @@ read-only database transaction to check both objects and their migration records
 ```sql
 BEGIN READ ONLY;
 SELECT to_regclass('public.dead_letter_jobs'),
-       to_regclass('public.idx_jobs_fetch_next');
+       to_regclass('public.idx_jobs_fetch_next'),
+       to_regclass('public.cron_pauses');
 SELECT version, success FROM _sqlx_migrations
-WHERE version IN (20260206200552, 20260703120000);
+WHERE version IN (20260206200552, 20260703120000,
+                  20261107120000, 20261107120001, 20261110120000);
 ROLLBACK;
 ```
 
 The isolated `exhausted_job_is_archived_and_worker_continues` test runs the real
 cja worker against Arena's migrations. It verifies that an exhausted failing job
 leaves the active queue, retains its diagnostic fields in the dead-letter table,
-and does not prevent the following healthy job from completing.
+and does not prevent the following healthy job from completing. It now uses a
+registered failing job (`LeaderboardRatingUpdateJob` against a nonexistent
+game), and `unknown_job_name_is_released_uncharged_and_worker_continues` covers
+cja #87's uncharged release of unknown job names.

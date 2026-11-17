@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO jobs (job_id, name, payload, context, priority)\n         VALUES ($1, 'JobTypeFromANewerBinary', '{}', 'unknown-name-test', 10)\n         RETURNING created_at",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "86614c042b69fe99d6a3b6a872ce74adef00cdd06e7768aa8a12aa90f79bbe17"
+}

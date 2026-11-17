@@ -254,14 +254,15 @@ pub(crate) async fn run_cron(
     registry: CronRegistry<AppState>,
     shutdown: CancellationToken,
 ) -> cja::Result<()> {
-    Ok(Worker::new_with_timezone(
+    Worker::new_with_timezone(
         app_state,
         registry,
         cja::chrono_tz::UTC,
         Duration::from_secs(CRON_POLL_SECS),
     )
     .run(shutdown)
-    .await?)
+    .await;
+    Ok(())
 }
 
 #[cfg(test)]
