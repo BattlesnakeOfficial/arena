@@ -30,13 +30,13 @@ use crate::state::AppState;
 /// stacking on the hourly/native drains. A CODE CONSTANT by design
 /// (coordinator DEV-1984): env/Terraform
 /// changes are outside this PR's authority; ramping is a one-line PR, and 0
-/// pauses the walk (tick no-ops before any work). A claimed backup job
-/// holds its worker while waiting on `BACKUP_SLOT` and prod has 100
-/// workers, so this ceiling — not the enqueue count alone — is what keeps
-/// at least 75 workers free for game runners. Shipped at 5 so the first prod
-/// run was a small batch, then ramped after checking it. Math at 25:
-/// 25 x 12 ticks/h = 300/h theoretical; at 5, the hourly drains zeroed the
-/// budget for 1 tick in 12 -> ~275/h during the backlog.
+/// pauses the walk (tick no-ops before any work). Since DEV-2427 the
+/// per-type `PerProcess(1)` caps (cja, enforced at claim) bound worker
+/// pinning to ≤1 waiter per backup type, so this ceiling's remaining role
+/// is queue depth / enqueue rate, not worker counts. Shipped at 5 so the
+/// first prod run was a small batch, then ramped after checking it. Math
+/// at 25: 25 x 12 ticks/h = 300/h theoretical; at 5, the hourly drains
+/// zeroed the budget for 1 tick in 12 -> ~275/h during the backlog.
 pub(crate) const PLAY_WALK_INFLIGHT_CEILING: i64 = 25;
 /// Engine rows examined per tick — far above the ceiling so done rows
 /// advance the cursor well past the enqueue frontier each tick.

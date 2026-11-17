@@ -30,7 +30,7 @@ const CLIP_QUANT_SPEED: i32 = 10;
 pub(crate) const CLIP_MAX_ATTEMPTS: i32 = 3;
 /// Render jobs enqueue below game runners and above backups/prunes.
 pub(crate) const CLIP_JOB_PRIORITY: i32 = -5;
-/// Attempt lease: longer than any render + slot wait (≤ ~30 s), shorter
+/// Attempt lease: longer than any render (observed max ~2.2 s), shorter
 /// than the sweep's stale window (300 s), aligned with cja's reclaim
 /// window (240 s) so a reclaimed re-run can always re-claim.
 pub(crate) const CLIP_ATTEMPT_LEASE_SECS: f64 = 240.0;
@@ -39,16 +39,22 @@ pub(crate) const CLIP_STALE_AFTER_SECS: f64 = 300.0;
 /// New clip rows per sweep tick (bounds render arrivals; see the
 /// starvation arithmetic in the PR description).
 pub(crate) const SWEEP_BATCH: i64 = 5;
-/// The sweep inserts nothing new while this many rows are pending
-/// (bounds workers parked on the render slot).
+/// The sweep inserts nothing new while this many rows are pending.
+/// Bounds queue depth only — since DEV-2427 renders serialize via
+/// `RenderAchievementClipJob::CONCURRENCY = PerProcess(1)` (cja, enforced
+/// at claim), so a saturated render row is invisible to every worker and
+/// parks nobody; this cap just keeps the backlog from growing unbounded.
 pub(crate) const CLIP_MAX_PENDING: i64 = 10;
 
-/// One clip renders at a time per process: the shared instance runs
-/// games, backups and social cards on one vCPU, so clip painting and GIF
-/// encoding run on the blocking pool under this single permit. Never
-/// shared with `backup.rs`'s `BACKUP_SLOT` or `routes/og.rs`'s
-/// `RENDER_PERMITS`.
-static CLIP_RENDER_SLOT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+// Rendering is serialized per process by
+// `RenderAchievementClipJob::CONCURRENCY = PerProcess(1)` (cja, enforced
+// at claim, DEV-2427) — this replaced the old in-body `CLIP_RENDER_SLOT`
+// semaphore. Accepted residual (vs the old permit-in-closure slot): cja
+// counts attempts, not blocking threads, so an attempt dropped at
+// `MAX_RUNTIME` expiry or on lease loss while the paint/encode
+// `spawn_blocking` closure is still running can let a second clip start
+// on the 1 vCPU. Observed max render is ~2.2 s against a 15 m budget,
+// so this is accepted; no replacement semaphore.
 
 /// The stored-object key for one earn's clip. Earn-keyed, never
 /// game-keyed, so objects (and their URLs) carry no game id.
@@ -425,10 +431,10 @@ async fn load_clip_frames(
 }
 
 /// Paint + encode + store. Returns (bytes, render_ms), where render_ms
-/// measures encode + object put only (the clock starts at the render
-/// slot, not at job start). On failure the error carries the same
-/// measure: `ClipRenderFailure::ms` is the time spent past the render
-/// slot, or 0 when the failure predates it (no paint or encode ran).
+/// measures encode + object put only (the clock starts just before the
+/// paint, not at job start). On failure the error carries the same
+/// measure: `ClipRenderFailure::ms` is the time spent past that clock,
+/// or 0 when the failure predates it (no paint or encode ran).
 async fn render_and_store(
     state: &AppState,
     earn_id: Uuid,
@@ -448,22 +454,14 @@ async fn render_and_store(
             "No frames in the achievement clip window"
         )));
     }
-    // One clip at a time per process; the permit moves into the blocking
-    // closure so no cancellation path frees the slot mid-render.
-    let permit = CLIP_RENDER_SLOT
-        .acquire()
-        .await
-        .wrap_err("Clip render slot closed")
-        .map_err(ClipRenderFailure::before_render)?;
     #[cfg(test)]
     clip_seam_handoff(earn_id).map_err(ClipRenderFailure::before_render)?;
-    // The clock starts at the render slot: on success and failure alike,
+    // The clock starts at the render: on success and failure alike,
     // ms reports the paint/encode/put work that actually ran, so Eyes can
     // tell an expensive failure from an early bail-out.
     let started = std::time::Instant::now();
     let (width, height) = crate::routes::og::board_sides(&record.game.board_size);
     let rendered = tokio::task::spawn_blocking(move || {
-        let _permit = permit;
         #[cfg(test)]
         clip_seam_in_render(earn_id);
         let arts: Vec<BoardArt> = frames
@@ -495,9 +493,9 @@ async fn render_and_store(
 }
 
 /// Why a clip render attempt failed, with the milliseconds the attempt
-/// spent past the render slot (paint, encode, object put). `ms = 0`
-/// means no render work ran: the failure predates the slot, exactly like
-/// the sweep cleanups that also carry `ms = 0`.
+/// spent in the render itself (paint, encode, object put). `ms = 0`
+/// means no render work ran: the failure predates the render, exactly
+/// like the sweep cleanups that also carry `ms = 0`.
 struct ClipRenderFailure {
     report: cja::color_eyre::Report,
     ms: i32,
@@ -537,8 +535,8 @@ pub(crate) struct ClipSeam {
 pub(crate) static CLIP_SEAM: std::sync::LazyLock<std::sync::Mutex<ClipSeam>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(ClipSeam::default()));
 
-/// Runs in `render_and_store` right after the render permit: counts the
-/// handoff, then optionally panics or fails, for tests.
+/// Runs in `render_and_store` right before the blocking render: counts
+/// the handoff, then optionally panics or fails, for tests.
 #[cfg(test)]
 fn clip_seam_handoff(earn_id: Uuid) -> cja::Result<()> {
     let mut seam = CLIP_SEAM.lock().unwrap_or_else(|e| e.into_inner());
