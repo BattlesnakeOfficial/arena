@@ -267,6 +267,318 @@ async fn free_worker_takes_game_before_backup_backlog(pool: PgPool) -> cja::Resu
     result
 }
 
+/// Poll every 20 ms until `cond` is true, erroring after `timeout`.
+/// Test helper for behavior probes against live workers.
+async fn poll_until<F>(timeout: Duration, mut cond: impl FnMut() -> F) -> cja::Result<()>
+where
+    F: std::future::Future<Output = cja::Result<bool>>,
+{
+    tokio::time::timeout(timeout, async {
+        loop {
+            if cond().await? {
+                return Ok::<(), cja::color_eyre::Report>(());
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .map_err(|_| cja::color_eyre::eyre::eyre!("condition not met within {timeout:?}"))??;
+    Ok(())
+}
+
+/// Spawn `count` job workers through the REAL `crate::job_worker_future`
+/// path — i.e. the real `JobConfig::worker_config`, whose
+/// `type_concurrency` must be `ConcurrencyTracker::process_shared()`
+/// (DEV-2427). The short drain is deliberate: probe bodies only sleep,
+/// so a dropped body is the cheap shutdown path.
+async fn spawn_real_workers<R>(
+    state: &AppState,
+    make_registry: impl Fn() -> R,
+    shutdown: CancellationToken,
+    count: usize,
+) -> tokio::task::JoinSet<cja::Result<()>>
+where
+    R: cja::jobs::registry::JobRegistry<AppState> + std::marker::Send + Sync + 'static,
+{
+    let mut workers = tokio::task::JoinSet::new();
+    for _ in 0..count {
+        workers.spawn(crate::job_worker_future(
+            state.clone(),
+            make_registry(),
+            shutdown.clone(),
+            Duration::from_millis(500),
+        ));
+    }
+    workers
+}
+
+/// Cancel, join (8 s cap, abort on timeout), and assert every lock was
+/// released — the `run_idle_gate_burst` teardown, shared so a failed
+/// assertion still drains its workers before propagating.
+async fn drain_workers_and_assert_unlocked(
+    mut workers: tokio::task::JoinSet<cja::Result<()>>,
+    shutdown: CancellationToken,
+    pool: &PgPool,
+) -> cja::Result<()> {
+    shutdown.cancel();
+    let drained = tokio::time::timeout(Duration::from_secs(8), async {
+        while let Some(worker) = workers.join_next().await {
+            worker??;
+        }
+        Ok::<(), cja::color_eyre::Report>(())
+    })
+    .await;
+    if drained.is_err() {
+        workers.abort_all();
+    }
+    drained??;
+    let locked: i64 = sqlx::query_scalar("SELECT count(*) FROM jobs WHERE locked_by IS NOT NULL")
+        .fetch_one(pool)
+        .await?;
+    cja::color_eyre::eyre::ensure!(locked == 0, "worker shutdown left {locked} locks");
+    Ok(())
+}
+
+async fn count_locked(pool: &PgPool, name: &str) -> cja::Result<i64> {
+    let locked: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM jobs WHERE name = $1 AND locked_by IS NOT NULL")
+            .bind(name)
+            .fetch_one(pool)
+            .await?;
+    Ok(locked)
+}
+
+mod concurrency_probes {
+    //! Probe job types for the DEV-2427 concurrency-cap tests. Names are
+    //! unique to this module so the process-wide `ConcurrencyTracker`
+    //! (keyed by job name) can never couple with another test's workers.
+
+    use super::AppState;
+    use cja::jobs::{Concurrency, Job};
+    use serde::{Deserialize, Serialize};
+    use std::num::NonZeroUsize;
+    use std::time::Duration;
+
+    /// Cap-1 probe: marks its start, sleeps 3 s, marks its finish.
+    /// `PerProcess(1)` means only one attempt of this type may be claimed
+    /// at a time across ALL workers sharing the process-wide tracker.
+    #[derive(Clone, Debug, Deserialize, Serialize)]
+    pub struct CapOneProbeJob {
+        pub id: uuid::Uuid,
+    }
+
+    #[async_trait::async_trait]
+    impl Job<AppState> for CapOneProbeJob {
+        const NAME: &'static str = "CapOneProbeJob";
+        const CONCURRENCY: Concurrency = Concurrency::PerProcess(NonZeroUsize::MIN);
+
+        async fn run(&self, state: AppState) -> cja::Result<()> {
+            sqlx::query("INSERT INTO cap_probe_markers (id, kind) VALUES ($1, 'cap')")
+                .bind(self.id)
+                .execute(&state.db)
+                .await?;
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            sqlx::query("UPDATE cap_probe_markers SET finished = TRUE WHERE id = $1")
+                .bind(self.id)
+                .execute(&state.db)
+                .await?;
+            Ok(())
+        }
+    }
+
+    /// Uncapped probe: proves workers never starve on other types while
+    /// a capped type is saturated (saturated rows are invisible at claim).
+    #[derive(Clone, Debug, Deserialize, Serialize)]
+    pub struct FastProbeJob {
+        pub id: uuid::Uuid,
+    }
+
+    #[async_trait::async_trait]
+    impl Job<AppState> for FastProbeJob {
+        const NAME: &'static str = "FastProbeJob";
+
+        async fn run(&self, state: AppState) -> cja::Result<()> {
+            sqlx::query("INSERT INTO cap_probe_markers (id, kind) VALUES ($1, 'fast')")
+                .bind(self.id)
+                .execute(&state.db)
+                .await?;
+            Ok(())
+        }
+    }
+
+    cja::impl_job_registry!(AppState, CapOneProbeJob, FastProbeJob);
+}
+
+/// DEV-2427: a job type declaring `PerProcess(1)` is claimed once at a
+/// time across workers sharing the process-wide tracker wired by
+/// `JobConfig::worker_config` — the tracker must be
+/// `ConcurrencyTracker::process_shared()`, or every worker counts alone
+/// and the cap silently becomes "one per worker" (100 concurrent
+/// backups on prod's worker count). Bypass probe: temporarily swap in
+/// `ConcurrencyTracker::isolated()` and this test fails.
+#[sqlx::test(migrations = "../migrations")]
+async fn capped_type_is_claimed_once_through_worker_config(pool: PgPool) -> cja::Result<()> {
+    use concurrency_probes::{CapOneProbeJob, FastProbeJob};
+
+    let markers = |kind: &'static str| {
+        let pool = pool.clone();
+        async move {
+            let count: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM cap_probe_markers WHERE kind = $1")
+                    .bind(kind)
+                    .fetch_one(&pool)
+                    .await?;
+            Ok::<i64, cja::color_eyre::Report>(count)
+        }
+    };
+
+    sqlx::query(
+        "CREATE TABLE cap_probe_markers (id uuid PRIMARY KEY, kind text NOT NULL, finished boolean NOT NULL DEFAULT FALSE)",
+    )
+    .execute(&pool)
+    .await?;
+    let mut state = AppState::test_from_pool(pool.clone());
+    Arc::make_mut(&mut state.config).job.poll_interval_ms = 200;
+
+    for _ in 0..2 {
+        CapOneProbeJob {
+            id: uuid::Uuid::new_v4(),
+        }
+        .enqueue(state.clone(), "cap-probe".into(), None)
+        .await?;
+    }
+    FastProbeJob {
+        id: uuid::Uuid::new_v4(),
+    }
+    .enqueue(state.clone(), "cap-probe".into(), None)
+    .await?;
+
+    let shutdown = CancellationToken::new();
+    let workers =
+        spawn_real_workers(&state, || concurrency_probes::Jobs, shutdown.clone(), 3).await;
+
+    let result: cja::Result<()> = async {
+        // All three attempt starts happen (fast types never starve) ...
+        poll_until(Duration::from_secs(3), || async {
+            Ok(markers("cap").await? == 1 && markers("fast").await? == 1)
+        })
+        .await?;
+        // ... but while the first cap attempt sleeps its 3 s, the second
+        // cap row stays unclaimed: the type is saturated at claim.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let started = markers("cap").await?;
+        cja::color_eyre::eyre::ensure!(
+            started == 1,
+            "second cap started concurrently: {started} markers"
+        );
+        let locked = count_locked(&pool, "CapOneProbeJob").await?;
+        cja::color_eyre::eyre::ensure!(locked == 1, "expected 1 locked cap row, found {locked}");
+        // After the first finishes, the second starts — the cap releases;
+        // no deadlock.
+        poll_until(Duration::from_secs(6), || async {
+            Ok(markers("cap").await? == 2)
+        })
+        .await?;
+        Ok(())
+    }
+    .await;
+
+    drain_workers_and_assert_unlocked(workers, shutdown, &pool).await?;
+    result
+}
+
+/// DEV-2427 incident regression (2026-11-16: 98/100 workers parked
+/// behind one hung backup holding `BACKUP_SLOT`; game runners went
+/// unclaimed and matchmaking froze ~3 h). With `PerProcess(1)` on
+/// `BackupSingleGameJob`, a wedged slot holder parks at most ONE worker;
+/// the other backup rows are invisible at claim, so a game enqueued
+/// AFTER the backups are parked is still claimed and run.
+///
+/// INVARIANT: the cja type-concurrency tracker is process-wide and keyed
+/// by job name, so this is the ONLY test in the arena bin allowed to
+/// spawn workers that claim a real capped type (`BackupSingleGameJob`,
+/// `NativeBackupSingleGameJob`, `PruneGameTurnsJob`,
+/// `DroppedFieldsRepairGameJob`, `RenderAchievementClipJob`). Any future
+/// worker test needing one of them must use a probe type with a unique
+/// `NAME` instead.
+///
+/// `BACKUP_SLOT` is process-wide and shared with every parallel test in
+/// this binary (e.g. `backup_slot_admits_one_backup_at_a_time` waits up
+/// to 10 s for re-admission): keep the hold under ~5 s (tight poll
+/// timeouts, ~1 s stability window) and drop the permit before shutdown.
+/// Never widen the timeouts; a longer-holding variant should use a shared
+/// test-only async mutex instead.
+#[sqlx::test(migrations = "../migrations")]
+async fn wedged_backup_slot_does_not_starve_game_runners(pool: PgPool) -> cja::Result<()> {
+    let (mut state, _store, _engine) = crate::backup::test_support::engine_fixture(&pool).await?;
+    Arc::make_mut(&mut state.config).job.poll_interval_ms = 200;
+
+    // Wedge the slot exactly like the incident: one holder that never
+    // releases until the assertions are done.
+    let held = std::sync::Arc::clone(&crate::backup::BACKUP_SLOT)
+        .acquire_owned()
+        .await
+        .unwrap();
+
+    // More backups than workers, enqueued BEFORE any worker runs (the
+    // incident's order: backups park first, the game arrives after).
+    for i in 0..5 {
+        crate::backup::enqueue_backup_job(&state, &format!("wedged-game-{i}")).await?;
+    }
+
+    let shutdown = CancellationToken::new();
+    let workers = spawn_real_workers(&state, || crate::jobs::Jobs, shutdown.clone(), 3).await;
+
+    let result: cja::Result<()> = async {
+        // Exactly one worker claims a backup and parks on the held slot;
+        // the cap makes the other four rows invisible to every worker.
+        poll_until(Duration::from_secs(3), || async {
+            Ok(count_locked(&pool, "BackupSingleGameJob").await? == 1)
+        })
+        .await?;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let locked = count_locked(&pool, "BackupSingleGameJob").await?;
+        cja::color_eyre::eyre::ensure!(locked == 1, "cap leaked: {locked} backups locked");
+
+        // The game arrives AFTER the backups parked — and must still be
+        // claimed and run. Its lookup fails ("Game not found"); that
+        // error IS the proof a worker was free.
+        crate::jobs::GameRunnerJob { game_id: Uuid::new_v4() }
+            .enqueue(state.clone(), "game".into(), None)
+            .await?;
+        poll_until(Duration::from_secs(3), || async {
+            let row: Option<(i32, Option<String>)> = sqlx::query_as(
+                "SELECT error_count, last_error_message FROM jobs WHERE name = 'GameRunnerJob'",
+            )
+            .fetch_optional(&pool)
+            .await?;
+            Ok(matches!(&row, Some((count, Some(msg))) if *count >= 1 && msg.contains("Game not found")))
+        })
+        .await?;
+        let locked = count_locked(&pool, "BackupSingleGameJob").await?;
+        cja::color_eyre::eyre::ensure!(locked == 1, "{locked} backups locked while the game ran");
+        Ok(())
+    }
+    .await;
+
+    // Release the wedge BEFORE shutdown: the parked backup then acquires
+    // the slot and fast-no-ops (its engine row is missing → permanent
+    // failure recorded → `Ok`), and the remaining four do the same in
+    // turn — bounded by the cap, within seconds.
+    drop(held);
+    poll_until(Duration::from_secs(5), || async {
+        let queued: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM jobs WHERE name = 'BackupSingleGameJob'")
+                .fetch_one(&pool)
+                .await?;
+        Ok(queued == 0)
+    })
+    .await?;
+
+    drain_workers_and_assert_unlocked(workers, shutdown, &pool).await?;
+    result
+}
+
 /// Run manually against an isolated PostgreSQL cluster with at least 200
 /// available connections. This measures the same table counters used in prod.
 #[sqlx::test(migrations = "../migrations")]

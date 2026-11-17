@@ -13,7 +13,8 @@
 use std::time::Duration;
 
 use cja::jobs::worker::{
-    DEFAULT_HEARTBEAT_INTERVAL, DEFAULT_MAX_RETRIES, IdlePollGate, JobWorkerConfig,
+    ConcurrencyTracker, DEFAULT_HEARTBEAT_INTERVAL, DEFAULT_MAX_RETRIES, IdlePollGate,
+    JobWorkerConfig,
 };
 
 use crate::email::MailgunConfig;
@@ -67,6 +68,12 @@ impl JobConfig {
             reclaim_window: Duration::from_secs(self.reclaim_window_secs),
             shutdown_drain_timeout: job_drain,
             idle_poll_gate: Some(idle_poll_gate),
+            // MUST be process-shared: a per-worker tracker would turn every
+            // `Concurrency::PerProcess(n)` cap into n-per-worker (100
+            // workers => 100 concurrent backups). `process_shared()` is a
+            // `LazyLock` static, so constructing it here per call is safe.
+            // `ConcurrencyTracker::isolated()` is for cja's tests only.
+            type_concurrency: ConcurrencyTracker::process_shared(),
         }
     }
 }

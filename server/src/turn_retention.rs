@@ -18,7 +18,10 @@
 //!   `watched_games.rs` turns that into `WatchedGameUpdate::Reset` — a
 //!   no-op for unwatched games, the correct signal for a viewer on an
 //!   archive-served page. The shared 1-permit `BACKUP_SLOT` keeps at most
-//!   one prune commit in flight.
+//!   one prune commit in flight; since DEV-2427 each slot-family job type
+//!   also declares `CONCURRENCY = PerProcess(1)` (cja, enforced at claim)
+//!   and everything under the slot runs inside the 5m hold limit, so a
+//!   hung prune can park at most one worker.
 //! - **`updated_at` bump**: the `turns_pruned_at` UPDATE bumps
 //!   `games.updated_at` via the `update_games_updated_at` trigger, exposed
 //!   by public list/detail APIs — a pruned month-old game reports
@@ -407,6 +410,10 @@ async fn clear_stale_archive_pointers(
 /// permit rides into the confirm's `spawn_blocking` and back out, so a
 /// dropped future cannot free the slot while the CPU work runs.
 ///
+/// Everything under the slot runs inside `with_backup_slot_deadline`
+/// (the 5m hold limit, extended to prunes by DEV-2427), so a hung prune
+/// fails and retries instead of parking other slot-family workers.
+///
 /// Never deletes without a content-confirmed object (fail-closed: the
 /// turns are the only complete copy otherwise). The delete and the
 /// `turns_pruned_at` mark commit in one transaction, so a crash can never
@@ -426,6 +433,22 @@ async fn prune_game_turns_with_lock_timeout(
         .await
         .wrap_err("Backup slot semaphore closed")?;
 
+    crate::backup::with_backup_slot_deadline(
+        game_id,
+        prune_holding_slot(app_state, game_id, days, lock_timeout, permit),
+    )
+    .await
+}
+
+/// The body of [`prune_game_turns_with_lock_timeout`]; the caller holds
+/// [`crate::backup::BACKUP_SLOT`].
+async fn prune_holding_slot(
+    app_state: &AppState,
+    game_id: Uuid,
+    days: i32,
+    lock_timeout: &str,
+    permit: tokio::sync::OwnedSemaphorePermit,
+) -> cja::Result<PruneOutcome> {
     // 2. Re-check the full prune predicate for this one game, UNDER the
     //    slot. gcs_path/archived_at are non-NULL by the predicate, so
     //    "!" is safe.

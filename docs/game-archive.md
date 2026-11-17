@@ -102,7 +102,15 @@ The `backup_batches` TABLE remains for DEV-1545.
   `BACKUP_SLOT`) — byte-identical to the one-shot reference builder and
   bounded to ~one page of memory, so the 285 games over 1,000 frames
   (max 5,567) can't OOM the 1 GiB box the way the old whole-game fetch
-  correlated with.
+  correlated with. Since DEV-2427 each slot-using job type also declares
+  `CONCURRENCY = PerProcess(1)` (cja, enforced at claim), so a wedged
+  slot holder parks at most one worker per type and game runners always
+  stay claimable; the 5-minute slot hold limit now covers prune and
+  dropped-fields repair too. Achievement-clip renders moved to a per-type
+  cap (`RenderAchievementClipJob`, replacing the old
+  `CLIP_RENDER_SLOT`). The slot itself stays: cja caps are per job type
+  and the slot serializes all four backup-family types, which is what the
+  shared vCPU needs.
 
 ## Dropped-fields repair (DEV-2344)
 
@@ -269,9 +277,12 @@ or a divergent prefix, stays fail-closed.
 **Concurrency**: per-game prune jobs (`PruneGameTurnsJob`, priority −20,
 below backup jobs' −10) serialize on the shared 1-permit `BACKUP_SLOT`
 (one heavy archive-family op per instance; never concurrent with a
-backup). The slot is acquired BEFORE the eligibility re-check, so
-duplicate jobs on one instance are silent no-ops; the slot is
-per-process, so a duplicate racing another INSTANCE's prune is caught
+backup). Since DEV-2427 the job type also declares
+`CONCURRENCY = PerProcess(1)` (cja, enforced at claim), so a prune can
+park at most one worker, and everything under the slot runs inside the
+5-minute hold limit. The slot is acquired BEFORE the eligibility
+re-check, so duplicate jobs on one instance are silent no-ops; the slot
+is per-process, so a duplicate racing another INSTANCE's prune is caught
 after the content confirm instead (a 0-frame count mismatch re-reads
 `turns_pruned_at` and skips silently when the other instance already
 committed). The DELETE + `turns_pruned_at` mark
