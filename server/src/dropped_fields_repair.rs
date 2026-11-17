@@ -153,7 +153,7 @@ fn header_field_matches(
 ///
 /// Engine-DB queries are runtime `sqlx::query_as`/`query` on purpose —
 /// the engine schema is unknown to the compile-time macros (same reason
-/// `fetch_completed_games` is non-macro).
+/// `fetch_completed_game_ids` is non-macro).
 pub(crate) async fn verify_object_against_engine(
     engine_db: &sqlx::PgPool,
     engine_game_id: &str,
