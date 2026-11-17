@@ -358,14 +358,19 @@ async fn idle_claim_scan_rate_before_and_after_gate(pool: PgPool) -> cja::Result
 async fn exhausted_job_is_archived_and_worker_continues(pool: PgPool) -> cja::Result<()> {
     let failed_id = uuid::Uuid::new_v4();
     let healthy_id = uuid::Uuid::new_v4();
-    // An unknown job deterministically fails without making external calls.
-    // Higher priority guarantees it runs before the healthy control job.
+    // A registered job whose first fetch deterministically fails: the
+    // leaderboard game does not exist, so `update_ratings` errors before
+    // any side effect. (An unknown job NAME no longer works for this:
+    // cja #87 releases unknown names uncharged on an age-scaled delay
+    // instead of charging them toward dead-letter.) Higher priority
+    // guarantees it runs before the healthy control job.
     let created_at = sqlx::query_scalar!(
         "INSERT INTO jobs (job_id, name, payload, context, priority, error_count)
-         VALUES ($1, 'MigrationTestFailure', '{\"reference\":713}', 'migration-test', 10, $2)
+         VALUES ($1, 'LeaderboardRatingUpdateJob', $3, 'migration-test', 10, $2)
          RETURNING created_at",
         failed_id,
         DEFAULT_MAX_RETRIES,
+        serde_json::json!({"leaderboard_game_id": failed_id}),
     )
     .fetch_one(&pool)
     .await?;
@@ -419,17 +424,112 @@ async fn exhausted_job_is_archived_and_worker_continues(pool: PgPool) -> cja::Re
     assert_eq!(archived.len(), 1, "only the exhausted job is archived");
     let archived = &archived[0];
     assert_eq!(archived.original_job_id, failed_id);
-    assert_eq!(archived.name, "MigrationTestFailure");
-    assert_eq!(archived.payload, serde_json::json!({"reference": 713}));
+    assert_eq!(archived.name, "LeaderboardRatingUpdateJob");
+    assert_eq!(
+        archived.payload,
+        serde_json::json!({"leaderboard_game_id": failed_id})
+    );
     assert_eq!(archived.context, "migration-test");
     assert_eq!(archived.priority, 10);
     assert_eq!(archived.error_count, DEFAULT_MAX_RETRIES + 1);
-    assert_eq!(
-        archived.last_error_message.as_deref(),
-        Some("Unknown job type: MigrationTestFailure")
+    assert!(
+        archived
+            .last_error_message
+            .as_deref()
+            .is_some_and(|message| message.contains("Failed to fetch leaderboard game")),
+        "unexpected dead-letter message: {:?}",
+        archived.last_error_message
     );
     assert_eq!(archived.created_at, created_at);
     assert!(archived.failed_at >= created_at);
+    Ok(())
+}
+
+/// cja #87: a job whose `name` is not in this binary's registry is released
+/// UNCHARGED on an age-scaled delay (30s while the row is young) instead of
+/// climbing the retry ladder — so a newer binary's job type survives a
+/// rolling deploy where an old replica claims it. Assert that behaviour:
+/// the row stays in `jobs` with `error_count` untouched, nothing lands in
+/// `dead_letter_jobs`, and a healthy job in the same queue still completes.
+#[sqlx::test(migrations = "../migrations")]
+async fn unknown_job_name_is_released_uncharged_and_worker_continues(
+    pool: PgPool,
+) -> cja::Result<()> {
+    let unknown_id = uuid::Uuid::new_v4();
+    let healthy_id = uuid::Uuid::new_v4();
+    let created_at = sqlx::query_scalar!(
+        "INSERT INTO jobs (job_id, name, payload, context, priority)
+         VALUES ($1, 'JobTypeFromANewerBinary', '{}', 'unknown-name-test', 10)
+         RETURNING created_at",
+        unknown_id,
+    )
+    .fetch_one(&pool)
+    .await?;
+    sqlx::query!(
+        "INSERT INTO jobs (job_id, name, payload, context, priority)
+         VALUES ($1, 'NoopJob', 'null', 'unknown-name-test', 0)",
+        healthy_id,
+    )
+    .execute(&pool)
+    .await?;
+
+    let shutdown = CancellationToken::new();
+    let state = AppState::test_from_pool(pool.clone());
+    let worker = job_worker(
+        state.clone(),
+        Jobs,
+        Duration::from_millis(10),
+        DEFAULT_MAX_RETRIES,
+        shutdown.clone(),
+        AppConfig::test_default().job.worker_config(
+            Duration::from_secs(DEFAULT_JOB_SHUTDOWN_DRAIN_SECS),
+            state.idle_poll_gate.clone(),
+        ),
+    );
+    let observe = async {
+        let _cancel = shutdown.drop_guard();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                // Only the unknown-name row remains once NoopJob completes.
+                let remaining =
+                    sqlx::query_scalar!("SELECT COUNT(*) FROM jobs WHERE name = 'NoopJob'")
+                        .fetch_one(&pool)
+                        .await?;
+                if remaining == Some(0) {
+                    return Ok::<_, cja::color_eyre::Report>(());
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await?
+    };
+    let (worker_result, observed) = tokio::join!(worker, observe);
+    worker_result?;
+    observed?;
+
+    let released = sqlx::query!(
+        "SELECT error_count, locked_by, locked_at, run_at FROM jobs WHERE job_id = $1",
+        unknown_id,
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        released.error_count, 0,
+        "unknown names are released uncharged"
+    );
+    assert!(released.locked_by.is_none());
+    assert!(released.locked_at.is_none());
+    assert!(
+        released.run_at > created_at,
+        "run_at is pushed into the future by the age-scaled release"
+    );
+    let archived = sqlx::query_scalar!(
+        "SELECT COUNT(*) FROM dead_letter_jobs WHERE original_job_id = $1",
+        unknown_id,
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(archived, Some(0));
     Ok(())
 }
 
