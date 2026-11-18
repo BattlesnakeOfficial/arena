@@ -822,7 +822,7 @@ dependencies = [
 [[package]]
 name = "cja"
 version = "0.0.0"
-source = "git+https://github.com/coreyja/cja?branch=main#10c36482a60865e960ef61e29510ab3b5ec94a42"
+source = "git+https://github.com/coreyja/cja?rev=10c36482a60865e960ef61e29510ab3b5ec94a42#10c36482a60865e960ef61e29510ab3b5ec94a42"
 dependencies = [
  "async-trait",
  "axum",
@@ -855,7 +855,7 @@ dependencies = [
 [[package]]
 name = "cja-build"
 version = "0.0.0"
-source = "git+https://github.com/coreyja/cja?branch=main#10c36482a60865e960ef61e29510ab3b5ec94a42"
+source = "git+https://github.com/coreyja/cja?rev=10c36482a60865e960ef61e29510ab3b5ec94a42#10c36482a60865e960ef61e29510ab3b5ec94a42"
 dependencies = [
  "anyhow",
  "flate2",
@@ -876,7 +876,7 @@ dependencies = [
 [[package]]
 name = "cja-secret"
 version = "0.0.0"
-source = "git+https://github.com/coreyja/cja?branch=main#10c36482a60865e960ef61e29510ab3b5ec94a42"
+source = "git+https://github.com/coreyja/cja?rev=10c36482a60865e960ef61e29510ab3b5ec94a42#10c36482a60865e960ef61e29510ab3b5ec94a42"
 dependencies = [
  "cja",
  "cja-secret-macros",
@@ -891,7 +891,7 @@ dependencies = [
 [[package]]
 name = "cja-secret-macros"
 version = "0.0.0"
-source = "git+https://github.com/coreyja/cja?branch=main#10c36482a60865e960ef61e29510ab3b5ec94a42"
+source = "git+https://github.com/coreyja/cja?rev=10c36482a60865e960ef61e29510ab3b5ec94a42#10c36482a60865e960ef61e29510ab3b5ec94a42"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -901,7 +901,7 @@ dependencies = [
 [[package]]
 name = "cja-tailnet"
 version = "0.0.0"
-source = "git+https://github.com/coreyja/cja?branch=main#10c36482a60865e960ef61e29510ab3b5ec94a42"
+source = "git+https://github.com/coreyja/cja?rev=10c36482a60865e960ef61e29510ab3b5ec94a42#10c36482a60865e960ef61e29510ab3b5ec94a42"
 dependencies = [
  "reqwest 0.13.5",
  "rustls",
@@ -6679,7 +6679,7 @@ dependencies = [
 [[package]]
 name = "setec"
 version = "0.0.0"
-source = "git+https://github.com/coreyja/cja?branch=main#10c36482a60865e960ef61e29510ab3b5ec94a42"
+source = "git+https://github.com/coreyja/cja?rev=10c36482a60865e960ef61e29510ab3b5ec94a42#10c36482a60865e960ef61e29510ab3b5ec94a42"
 dependencies = [
  "base64 0.23.1",
  "bytes",
