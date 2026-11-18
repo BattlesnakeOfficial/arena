@@ -29,9 +29,10 @@ const MAX_ARCHIVE_DECOMPRESSED_BYTES: usize = 64 * 1024 * 1024;
 /// allocator rounding per allocation.
 const RAW_ENTRY_OVERHEAD: usize = 16;
 
-/// Caps concurrent archive CPU work (decode + page parse) on the 1-vCPU
-/// prod box. Never shared with `backup.rs`'s `BACKUP_SLOT`, never held
-/// across the storage fetch.
+/// Caps concurrent archive decode/parse CPU on the 1-vCPU prod box for
+/// the HTTP archive read paths (game pages). Why it stays: guards work
+/// outside the job worker, which cja's job concurrency cannot see. Never
+/// held across the storage fetch.
 static ARCHIVE_DECODE_SLOT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 
 /// How a `games` row's archive object is shaped. Computed from the row —

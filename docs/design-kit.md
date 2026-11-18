@@ -966,7 +966,7 @@ strategy, lint codes, fixes, size and duration, never content or IPs. In order:
 | Global token bucket (header-free: `X-Forwarded-For` can be spoofed on `run.app`) | burst 20, 1/s | 429 `rate_limited` |
 | Body (`DefaultBodyLimit`) | 4 MiB | 413 `too_large` |
 | Body pace (`BodyPace`): all of it within 30 s, and after 5 s at least 16 KiB/s on average, so a stalled or trickling client is cut off in seconds instead of holding an upload slot | | 408 `upload_timeout` |
-| Processing slot (like `BACKUP_SLOT` in `backup.rs`), held until the worker exits | 1, waited for up to 3 s | 503 `busy` |
+| Processing slot, held until the worker exits | 1, waited for up to 3 s | 503 `busy` |
 | The worker: CPU, memory, wall clock (below) | | 422 `too_complex` or 503 `busy` |
 
 | Outcome | Response |

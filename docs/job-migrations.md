@@ -17,12 +17,23 @@ byte-identical to the upstream versions.
 
 ## cja pin
 
-Arena holds cja at `1f796fbd` until DEV-2427 moves arena onto the new job
-limits. Do not run a bare `cargo update` or `cargo update -p cja` in this repo
-until then: cja main past cja#93 carries a 15-minute default `MAX_RUNTIME` that
-drops long `GameRunnerJob` and `GameBackupJob` runs (the observed max game
-attempt is 14.6 minutes), and the per-job overrides arrive with DEV-2427.
-Arena has no dependabot/renovate, so this note is the only guard.
+Arena holds cja at `10c3648` (the shared per-process concurrency keys of
+cja #97 / DEV-2431, adopted by DEV-2432). Bumping cja must always be a
+precise pin, never a bare `cargo update` or `cargo update -p cja`:
+
+```
+cargo update -p cja --precise <full-sha>
+```
+
+After any bump, check whether cja main gained new migrations, run
+`cja sync-migrations` (or copy by hand, following the byte-identical
+`.up.sql`/`.down.sql` convention above), and commit any new migration
+files in the same PR — the `cja_migrations_are_present_and_unchanged`
+test validates the copies against the new rev automatically. Arena has
+no dependabot/renovate, so this note is the only guard. Standing rule:
+reverting code past a cja bump that added migrations fails boot with
+`VersionMissing` — to roll back, revert the code and keep the migration
+files.
 
 The job migrations include `dead_letter_jobs`, which retains the payload and
 failure details after a job exhausts its retries, and `idx_jobs_fetch_next`, which

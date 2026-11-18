@@ -1,25 +1,34 @@
 use crate::state::AppState;
 
-use cja::jobs::{Concurrency, Job};
+use cja::jobs::{Concurrency, ConcurrencySlot, Job};
 use color_eyre::eyre::Context as _;
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroUsize;
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::notifications::{NotificationChannel, NotificationKind};
 use crate::play_shutdown_notices::PlayShutdownNoticeJob;
 
-/// One attempt of any backup-slot family job type at a time per process:
-/// with the shared in-body `BACKUP_SLOT` this bounds slot waiters to
-/// at most one per type, so a wedged holder can never park the fleet
-/// (DEV-2427; the 2026-11-16 incident parked 98/100 workers behind one
-/// hung backup).
-const BACKUP_FAMILY_CONCURRENCY: Concurrency = Concurrency::PerProcess(NonZeroUsize::MIN);
-/// Wait (≤3 other types × the 5m `BACKUP_SLOT_HOLD_LIMIT`) plus own hold
-/// (≤5m) plus margin for permits that outlive a dropped attempt inside
-/// `spawn_blocking`; see DEV-2427.
-const BACKUP_FAMILY_MAX_RUNTIME: Duration = Duration::from_secs(30 * 60);
+/// The shared budget name: one archive operation at a time per process,
+/// across ALL FOUR archive job types (`BackupSingleGameJob`,
+/// `NativeBackupSingleGameJob`, `PruneGameTurnsJob`,
+/// `DroppedFieldsRepairGameJob`) via cja's `Concurrency::PerProcessShared`
+/// (cja #97 / DEV-2431, adopted here in DEV-2432). The wait happens at
+/// claim — while the key is saturated, every archive row is invisible to
+/// the claim query, so a wedged holder parks ZERO workers. All four types
+/// MUST reference this same const: cja fails worker startup on
+/// conflicting limits for one key, but same-limit-different-key is silent.
+const BACKUP_ARCHIVE_KEY: &str = "archive";
+const BACKUP_ARCHIVE_CONCURRENCY: Concurrency = Concurrency::PerProcessShared {
+    key: BACKUP_ARCHIVE_KEY,
+    limit: NonZeroUsize::MIN,
+};
+/// Hold-time bound for one archive attempt (was `BACKUP_SLOT_HOLD_LIMIT`,
+/// the 2026-11-16 incident-fix wedge bound). The wait no longer counts:
+/// it happens at claim, outside the attempt.
+const BACKUP_ARCHIVE_MAX_RUNTIME: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SendNotificationEmailJob {
@@ -453,9 +462,12 @@ impl Job<AppState> for GameBackupJob {
 
 /// Job to backup a single game from the Engine database to GCS.
 /// Enqueued by GameBackupJob and the play-history walk (DEV-1984) for each
-/// game that needs archiving. `PerProcess(1)` (cja, at claim) so a wedged
-/// slot holder parks at most ONE worker; the shared in-body `BACKUP_SLOT`
-/// still serializes all four backup-family types (DEV-2427).
+/// game that needs archiving. Member of the shared `"archive"` cja
+/// concurrency key (DEV-2432): one archive operation at a time per
+/// process across all four archive types, enforced at claim, so a wedged
+/// holder parks zero workers. The attempt's `ConcurrencySlot` rides into
+/// `spawn_blocking` closures, keeping the budget held while bounded CPU
+/// work runs even if the attempt is dropped (arena#221).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BackupSingleGameJob {
     pub engine_game_id: String,
@@ -464,11 +476,21 @@ pub struct BackupSingleGameJob {
 #[async_trait::async_trait]
 impl Job<AppState> for BackupSingleGameJob {
     const NAME: &'static str = "BackupSingleGameJob";
-    const CONCURRENCY: Concurrency = BACKUP_FAMILY_CONCURRENCY;
-    const MAX_RUNTIME: Duration = BACKUP_FAMILY_MAX_RUNTIME;
+    const CONCURRENCY: Concurrency = BACKUP_ARCHIVE_CONCURRENCY;
+    const MAX_RUNTIME: Duration = BACKUP_ARCHIVE_MAX_RUNTIME;
 
     async fn run(&self, app_state: AppState) -> cja::Result<()> {
         crate::backup::backup_single_game(&app_state, &self.engine_game_id).await?;
+        Ok(())
+    }
+
+    async fn run_with_cancellation(
+        &self,
+        app_state: AppState,
+        _cancellation_token: CancellationToken,
+        slot: ConcurrencySlot,
+    ) -> cja::Result<()> {
+        crate::backup::backup_single_game_with_slot(&app_state, &self.engine_game_id, slot).await?;
         Ok(())
     }
 }
@@ -490,9 +512,11 @@ impl Job<AppState> for NativeGameBackupJob {
 }
 
 /// Archive one arena-native game to GCS. Enqueued by NativeGameBackupJob;
-/// idempotent (re-checks archived_at under the backup slot before any work).
-/// `PerProcess(1)` (cja, at claim); member of the backup-slot family
-/// (DEV-2427).
+/// idempotent (re-checks archived_at inside the attempt before any work).
+/// Member of the shared `"archive"` cja concurrency key (DEV-2432): one
+/// archive operation at a time per process across all four archive types,
+/// enforced at claim; the attempt's slot rides into the compress
+/// `spawn_blocking` closure (arena#221).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct NativeBackupSingleGameJob {
     pub game_id: Uuid,
@@ -501,11 +525,21 @@ pub struct NativeBackupSingleGameJob {
 #[async_trait::async_trait]
 impl Job<AppState> for NativeBackupSingleGameJob {
     const NAME: &'static str = "NativeBackupSingleGameJob";
-    const CONCURRENCY: Concurrency = BACKUP_FAMILY_CONCURRENCY;
-    const MAX_RUNTIME: Duration = BACKUP_FAMILY_MAX_RUNTIME;
+    const CONCURRENCY: Concurrency = BACKUP_ARCHIVE_CONCURRENCY;
+    const MAX_RUNTIME: Duration = BACKUP_ARCHIVE_MAX_RUNTIME;
 
     async fn run(&self, app_state: AppState) -> cja::Result<()> {
         crate::native_backup::archive_native_game(&app_state, self.game_id).await?;
+        Ok(())
+    }
+
+    async fn run_with_cancellation(
+        &self,
+        app_state: AppState,
+        _cancellation_token: CancellationToken,
+        slot: ConcurrencySlot,
+    ) -> cja::Result<()> {
+        crate::native_backup::archive_native_game_with_slot(&app_state, self.game_id, slot).await?;
         Ok(())
     }
 }
@@ -528,9 +562,12 @@ impl Job<AppState> for TurnRetentionJob {
 /// Prune one archived native game's `turns` rows (snake_turns cascade)
 /// after confirming the archive object's content (version, id, frames).
 /// Enqueued by TurnRetentionJob; idempotent — the prune predicate is
-/// re-checked under the backup slot and `turns_pruned_at` is set inside
-/// the delete transaction. `PerProcess(1)` (cja, at claim); member of the
-/// backup-slot family (DEV-2427).
+/// re-checked inside the attempt and `turns_pruned_at` is set inside
+/// the delete transaction. Member of the shared `"archive"` cja
+/// concurrency key (DEV-2432): one archive operation at a time per
+/// process across all four archive types, enforced at claim; the
+/// attempt's slot rides into the confirm `spawn_blocking` closure
+/// (arena#221).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PruneGameTurnsJob {
     pub game_id: Uuid,
@@ -539,11 +576,22 @@ pub struct PruneGameTurnsJob {
 #[async_trait::async_trait]
 impl Job<AppState> for PruneGameTurnsJob {
     const NAME: &'static str = "PruneGameTurnsJob";
-    const CONCURRENCY: Concurrency = BACKUP_FAMILY_CONCURRENCY;
-    const MAX_RUNTIME: Duration = BACKUP_FAMILY_MAX_RUNTIME;
+    const CONCURRENCY: Concurrency = BACKUP_ARCHIVE_CONCURRENCY;
+    const MAX_RUNTIME: Duration = BACKUP_ARCHIVE_MAX_RUNTIME;
 
     async fn run(&self, app_state: AppState) -> cja::Result<()> {
         crate::turn_retention::prune_game_turns(&app_state, self.game_id).await
+    }
+
+    async fn run_with_cancellation(
+        &self,
+        app_state: AppState,
+        _cancellation_token: CancellationToken,
+        slot: ConcurrencySlot,
+    ) -> cja::Result<()> {
+        crate::turn_retention::prune_game_turns_with_slot(&app_state, self.game_id, slot)
+            .await
+            .map(|_| ())
     }
 }
 
@@ -583,8 +631,11 @@ impl Job<AppState> for DroppedFieldsRepairSweepJob {
 /// Repair one game: new v2 object (create-only) with Team/Mode/
 /// MaxTurnsToNextFoodSpawn restored, verify the built export BEFORE any
 /// write, repoint the row, invalidate the archive cache. See
-/// [`crate::dropped_fields_repair`]. `PerProcess(1)` (cja, at claim);
-/// member of the backup-slot family (DEV-2427).
+/// [`crate::dropped_fields_repair`]. Member of the shared `"archive"` cja
+/// concurrency key (DEV-2432): one archive operation at a time per
+/// process across all four archive types, enforced at claim; the
+/// attempt's slot rides into the decode `spawn_blocking` closures
+/// (arena#221).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DroppedFieldsRepairGameJob {
     pub engine_game_id: String,
@@ -593,11 +644,21 @@ pub struct DroppedFieldsRepairGameJob {
 #[async_trait::async_trait]
 impl Job<AppState> for DroppedFieldsRepairGameJob {
     const NAME: &'static str = "DroppedFieldsRepairGameJob";
-    const CONCURRENCY: Concurrency = BACKUP_FAMILY_CONCURRENCY;
-    const MAX_RUNTIME: Duration = BACKUP_FAMILY_MAX_RUNTIME;
+    const CONCURRENCY: Concurrency = BACKUP_ARCHIVE_CONCURRENCY;
+    const MAX_RUNTIME: Duration = BACKUP_ARCHIVE_MAX_RUNTIME;
 
     async fn run(&self, app_state: AppState) -> cja::Result<()> {
         crate::dropped_fields_repair::repair_game(&app_state, &self.engine_game_id).await
+    }
+
+    async fn run_with_cancellation(
+        &self,
+        app_state: AppState,
+        _cancellation_token: CancellationToken,
+        slot: ConcurrencySlot,
+    ) -> cja::Result<()> {
+        crate::dropped_fields_repair::repair_game_with_slot(&app_state, &self.engine_game_id, slot)
+            .await
     }
 }
 

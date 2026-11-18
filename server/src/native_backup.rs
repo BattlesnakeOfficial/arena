@@ -24,17 +24,12 @@
 //! would overwrite with nothing; the latter have nothing to archive and
 //! are kept out of discovery's enqueue set entirely.
 
-use std::sync::Arc;
-
 use chrono::Utc;
 use color_eyre::eyre::{Context as _, eyre};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::backup::{
-    BACKUP_JOB_PRIORITY, BACKUP_SLOT, BackupError, ZSTD_COMPRESSION_LEVEL,
-    with_backup_slot_deadline,
-};
+use crate::backup::{BACKUP_JOB_PRIORITY, BackupError, ZSTD_COMPRESSION_LEVEL};
 use crate::engine_models::ARCHIVE_VERSION;
 use crate::jobs::NativeBackupSingleGameJob;
 use crate::state::AppState;
@@ -162,8 +157,9 @@ fn build_native_compressed_export(
 /// partial-frames archive would be re-recorded on the finished row. A
 /// zero-row result is Ok: the game stays unarchived and the next discovery
 /// run re-archives it, overwriting the stale object at the same key. (The
-/// slot serializes all native marks against each other, so status — the
-/// dimension the finish changes — is the only guard needed.)
+/// shared "archive" budget serializes all native marks against each
+/// other, so status — the dimension the finish changes — is the only
+/// guard needed.)
 async fn mark_native_game_archived(
     db: &PgPool,
     game_id: Uuid,
@@ -196,9 +192,10 @@ async fn mark_native_game_archived(
 }
 
 /// Header row as fetched for archival. `archived_at` is read fresh here —
-/// under the slot — so the job's idempotency skip uses current state and a
-/// duplicate queued behind this job sees the completed mark. TEXT and
-/// timestamp columns only: nothing JSON-shaped is decoded on the async side.
+/// inside the shared "archive" budget's attempt — so the job's
+/// idempotency skip uses current state and a duplicate queued behind this
+/// job sees the completed mark. TEXT and timestamp columns only: nothing
+/// JSON-shaped is decoded on the async side.
 #[derive(sqlx::FromRow)]
 struct NativeGameHeaderRow {
     game_type: String,
@@ -209,45 +206,34 @@ struct NativeGameHeaderRow {
     archived_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-/// Archive one native game to GCS: acquire the backup slot, fetch its header
-/// and frame TEXTS, then parse/compress/upload/record. Idempotent: `archived_at` is
-/// re-checked from the DB WHILE HOLDING the slot, so a duplicate enqueued
-/// behind this job no-ops after this job's mark instead of uploading again.
-/// Games that are missing or no longer terminal-native (e.g. reset for
-/// retry) also no-op. No serde_json work runs on the async worker: the
-/// frame texts are fetched as `::text` (a memcpy) and parsed inside the
-/// spawn_blocking closure below.
+/// Test/direct-call entry: no shared-budget serialization (the worker
+/// path goes through `NativeBackupSingleGameJob::run_with_cancellation`,
+/// which passes the attempt's tracked slot). A future production caller
+/// must enqueue a job or accept untracked semantics.
+///
+/// Archive one native game to GCS: fetch its header and frame TEXTS,
+/// then parse/compress/upload/record. Idempotent: `archived_at` is
+/// re-checked from the DB INSIDE the attempt, so a duplicate enqueued
+/// behind this job no-ops after this job's mark instead of uploading
+/// again. Games that are missing or no longer terminal-native (e.g.
+/// reset for retry) also no-op. No serde_json work runs on the async
+/// worker: the frame texts are fetched as `::text` (a memcpy) and parsed
+/// inside the spawn_blocking closure below.
 pub(crate) async fn archive_native_game(
     app_state: &AppState,
     game_id: Uuid,
 ) -> Result<(), BackupError> {
-    // Acquire FIRST, before any per-game data is fetched:
-    // - memory: up to 100 workers can hold queued native jobs; fetching
-    //   before acquiring would leave every blocked worker holding a full
-    //   game's frame data — only the slot holder ever holds per-game data.
-    // - dedup: the archived_at check below runs under the slot, so a
-    //   duplicate sees this job's completed mark.
-    // - drain safety: the owned permit moves into spawn_blocking below, so
-    //   a deploy dropping this future mid-parse/compress cannot free the
-    //   slot while the CPU work still runs.
-    let permit = Arc::clone(&BACKUP_SLOT)
-        .acquire_owned()
-        .await
-        .wrap_err("Backup slot semaphore closed")?;
-
-    with_backup_slot_deadline(
-        game_id,
-        archive_native_game_holding_slot(app_state, game_id, permit),
-    )
-    .await
+    archive_native_game_with_slot(app_state, game_id, cja::jobs::ConcurrencySlot::untracked()).await
 }
 
-/// The body of [`archive_native_game`], run while holding `permit` (the
-/// [`BACKUP_SLOT`] permit).
-async fn archive_native_game_holding_slot(
+/// The worker path. `slot` is the attempt's handle on the shared
+/// "archive" budget (see `jobs.rs`, DEV-2432); it MOVES into the
+/// compress `spawn_blocking` closure, keeping the budget held through
+/// the CPU work even if this future is dropped mid-drain (arena#221).
+pub(crate) async fn archive_native_game_with_slot(
     app_state: &AppState,
     game_id: Uuid,
-    permit: tokio::sync::OwnedSemaphorePermit,
+    slot: cja::jobs::ConcurrencySlot,
 ) -> Result<(), BackupError> {
     let row: Option<NativeGameHeaderRow> = sqlx::query_as!(
         NativeGameHeaderRow,
@@ -283,7 +269,7 @@ async fn archive_native_game_holding_slot(
 
     // One game at a time through the game_id index — never a turns scan.
     // ::text => Vec<String>: a memcpy, NO parse on the async worker.
-    // Only the slot holder reaches this line.
+    // Only the archive-budget holder reaches this line.
     let frame_texts = fetch_native_frame_texts(&app_state.db, game_id).await?;
 
     // DEV-2178: a zero-frame export is never a legitimate archive (a
@@ -306,14 +292,17 @@ async fn archive_native_game_holding_slot(
         finished_at: row.finished_at,
     };
 
-    // The frame texts AND the permit ride INTO the closure (slot held for
-    // the CPU work even if this future is dropped mid-drain) and the permit
-    // comes back OUT (slot held through upload + mark). ALL JSON work —
-    // parse, serialize, zstd-9 — happens inside, on the blocking pool.
-    // Panics in the closure surface as the JoinError that `?` converts to Err.
-    let (_permit, build_result) = tokio::task::spawn_blocking(move || {
-        let result = build_native_compressed_export(game_id, header, frame_texts);
-        (permit, result)
+    // The frame texts AND the slot ride INTO the closure — the budget is
+    // held for the CPU work even if this future is dropped mid-drain
+    // (arena#221) — while the worker keeps its own handle for the whole
+    // attempt, so the post-closure put + mark stay covered too. ALL JSON
+    // work — parse, serialize, zstd-9 — happens inside, on the blocking
+    // pool. Panics in the closure surface as the JoinError that `?`
+    // converts to Err.
+    let build_result = tokio::task::spawn_blocking(move || {
+        // arena#221: named binding, first statement — NEVER `let _ = slot;`.
+        let _held = slot;
+        build_native_compressed_export(game_id, header, frame_texts)
     })
     .await
     .wrap_err("Native backup compression task panicked")?;
@@ -865,7 +854,7 @@ mod tests {
     }
 
     /// SC: a duplicate job queued behind a completed archive no-ops at the
-    /// under-slot archived_at re-check (in the misconfigured env, reaching
+    /// in-attempt archived_at re-check (in the misconfigured env, reaching
     /// the upload would have errored — Ok(()) proves the skip).
     #[sqlx::test(migrations = "../migrations")]
     async fn archive_native_game_is_idempotent_after_a_completed_archive(

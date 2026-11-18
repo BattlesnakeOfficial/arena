@@ -49,8 +49,10 @@ use crate::{errors::ServerResult, state::AppState};
 /// memory.
 pub const UPLOAD_SLOTS: usize = 3;
 
-/// Uploads processed at once. Like `BACKUP_SLOT` in `backup.rs`: production has one
-/// vCPU shared with live games, and processing is CPU-bound, so it runs one at a time.
+/// Uploads processed at once. Production has one vCPU shared with live
+/// games, and processing is CPU-bound, so it runs one at a time. This
+/// guards the HTTP route, outside the job worker — cja's job concurrency
+/// cannot see it.
 pub const STUDIO_SLOTS: usize = 1;
 
 /// Largest request body: the largest per-format cap (PNG/JPEG; SVGs stop at 512 KiB).

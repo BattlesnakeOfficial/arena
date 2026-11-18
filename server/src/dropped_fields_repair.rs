@@ -73,11 +73,11 @@ pub(crate) fn census_ids() -> Vec<String> {
 }
 
 /// Ceiling on pending (queued + running) `DroppedFieldsRepairGameJob`
-/// rows — bounds the repair queue depth / enqueue rate. Since DEV-2427 the
-/// `PerProcess(1)` cap (cja, enforced at claim) is what bounds worker
-/// pinning: at most ONE worker waits on `BACKUP_SLOT` for this type, so
-/// the ceiling no longer has a worker-count role. 0 pauses the sweep
-/// (pause lever).
+/// rows — bounds the repair queue depth / enqueue rate. Since DEV-2432
+/// the shared `"archive"` key (cja, enforced at claim) bounds worker
+/// pinning: a saturated repair row is invisible at claim and parks
+/// nobody, so the ceiling no longer has a worker-count role.
+/// 0 pauses the sweep (pause lever).
 pub(crate) const DROPPED_FIELDS_INFLIGHT_CEILING: i64 = 25;
 
 /// The v2 export strips these snake keys on purpose (backup.rs
@@ -292,14 +292,32 @@ async fn mark_queue_row(
     Ok(())
 }
 
+/// Test/direct-call entry: no shared-budget serialization (the worker
+/// path goes through `DroppedFieldsRepairGameJob::run_with_cancellation`,
+/// which passes the attempt's tracked slot). A future production caller
+/// must enqueue a job or accept untracked semantics.
+///
 /// Repair one game: new v2 object (create-only) with
 /// Team/Mode/MaxTurnsToNextFoodSpawn restored, the built export verified
 /// against the engine BEFORE any write, the arena row repointed with one
-/// predicate-guarded UPDATE, the archive cache invalidated. Slot-first,
-/// mirroring `backup_single_game`; everything under the slot runs inside
-/// `with_backup_slot_deadline` (the 5m hold limit, extended to the repair
-/// family by DEV-2427).
+/// predicate-guarded UPDATE, the archive cache invalidated.
 pub(crate) async fn repair_game(app_state: &AppState, engine_game_id: &str) -> cja::Result<()> {
+    repair_game_with_slot(
+        app_state,
+        engine_game_id,
+        cja::jobs::ConcurrencySlot::untracked(),
+    )
+    .await
+}
+
+/// The worker path. `slot` is the attempt's handle on the shared
+/// "archive" budget (see `jobs.rs`, DEV-2432); clones move into the
+/// decode `spawn_blocking` closures (arena#221).
+pub(crate) async fn repair_game_with_slot(
+    app_state: &AppState,
+    engine_game_id: &str,
+    slot: cja::jobs::ConcurrencySlot,
+) -> cja::Result<()> {
     let engine_db = app_state
         .engine_db
         .as_ref()
@@ -307,36 +325,20 @@ pub(crate) async fn repair_game(app_state: &AppState, engine_game_id: &str) -> c
     if !app_state.object_store.is_configured() {
         return Err(eyre!("GCS bucket not configured"));
     }
-
-    // SLOT FIRST — the repair MUST finish before engine-DB teardown, and
-    // this serializes against all other backup-family work process-wide.
-    // The `Arc` wrapper lets blocking closures keep the slot while their
-    // bounded CPU work runs even if this future is dropped (arena#221).
-    let permit = std::sync::Arc::new(
-        std::sync::Arc::clone(&crate::backup::BACKUP_SLOT)
-            .acquire_owned()
-            .await
-            .wrap_err("Backup slot semaphore closed")?,
-    );
-
-    crate::backup::with_backup_slot_deadline(
-        engine_game_id,
-        repair_game_holding_slot(app_state, engine_db, engine_game_id, permit),
-    )
-    .await
+    repair_body(app_state, engine_db, engine_game_id, slot).await
 }
 
-/// The body of [`repair_game`]; the caller holds [`crate::backup::BACKUP_SLOT`]
-/// (the `Arc` around the owned permit travels into blocking closures).
-/// An early `Ok(())` inside returns from this body — the queue-row marks
-/// happen under the deadline, like `backup_single_game_holding_slot`.
-async fn repair_game_holding_slot(
+/// The body of [`repair_game_with_slot`]. The repair serializes against
+/// all other archive-family work per process via the shared "archive"
+/// key; an early `Ok(())` inside returns from this body — the queue-row
+/// marks happen inside the attempt.
+async fn repair_body(
     app_state: &AppState,
     engine_db: &sqlx::PgPool,
     engine_game_id: &str,
-    permit: std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
+    slot: cja::jobs::ConcurrencySlot,
 ) -> cja::Result<()> {
-    // Idempotency re-check under the slot: the arena row decides.
+    // Idempotency re-check inside the attempt: the arena row decides.
     let arena_row = sqlx::query!(
         "SELECT game_id, gcs_path, archive_version FROM games WHERE engine_game_id = $1",
         engine_game_id
@@ -397,20 +399,15 @@ async fn repair_game_holding_slot(
         game.created = created_at.timestamp_micros();
     }
 
-    let bytes = match crate::backup::build_export_streamed(
-        engine_db,
-        game.clone(),
-        std::sync::Arc::clone(&permit),
-    )
-    .await
-    {
-        Ok(bytes) => bytes,
-        Err(crate::backup::ExportBuildError::Permanent(reason)) => {
-            mark_queue_row(&app_state.db, engine_game_id, "failed", Some(&reason)).await?;
-            return Ok(());
-        }
-        Err(crate::backup::ExportBuildError::Transient(error)) => return Err(error),
-    };
+    let bytes =
+        match crate::backup::build_export_streamed(engine_db, game.clone(), slot.clone()).await {
+            Ok(bytes) => bytes,
+            Err(crate::backup::ExportBuildError::Permanent(reason)) => {
+                mark_queue_row(&app_state.db, engine_game_id, "failed", Some(&reason)).await?;
+                return Ok(());
+            }
+            Err(crate::backup::ExportBuildError::Transient(error)) => return Err(error),
+        };
 
     let new_path = crate::backup::gcs_path(engine_game_id, created_at);
 
@@ -419,9 +416,11 @@ async fn repair_game_holding_slot(
     // from the bucket (the bucket has no versioning, DEV-2128).
     let decoded = tokio::task::spawn_blocking({
         let bytes = bytes.clone();
-        let permit_decode = std::sync::Arc::clone(&permit);
+        let slot_decode = slot.clone();
         move || {
-            let _permit = permit_decode;
+            // arena#221: named binding, first statement — NEVER
+            // `let _ = slot;`.
+            let _held = slot_decode;
             crate::archive::decode_archive_object(&bytes, crate::archive::ArchiveRowKind::Play)
         }
     })
@@ -479,9 +478,10 @@ async fn repair_game_holding_slot(
                 eyre!("put_if_absent reported an existing object but get found none: {new_path}")
             })?;
         let decoded = tokio::task::spawn_blocking({
-            let permit_existing = std::sync::Arc::clone(&permit);
+            let slot_existing = slot.clone();
             move || {
-                let _permit = permit_existing;
+                // arena#221: named binding, first statement.
+                let _held = slot_existing;
                 crate::archive::decode_archive_object(
                     &existing,
                     crate::archive::ArchiveRowKind::Play,
@@ -1225,17 +1225,16 @@ mod tests {
         if game.created == 0 {
             game.created = created.and_utc().timestamp_micros();
         }
-        let permit = std::sync::Arc::new(
-            std::sync::Arc::clone(&crate::backup::BACKUP_SLOT)
-                .acquire_owned()
-                .await?,
-        );
-        let object = crate::backup::build_export_streamed(&engine_pool, game, permit)
-            .await
-            .map_err(|e| match e {
-                crate::backup::ExportBuildError::Permanent(reason) => eyre!(reason),
-                crate::backup::ExportBuildError::Transient(error) => error,
-            })?;
+        let object = crate::backup::build_export_streamed(
+            &engine_pool,
+            game,
+            cja::jobs::ConcurrencySlot::untracked(),
+        )
+        .await
+        .map_err(|e| match e {
+            crate::backup::ExportBuildError::Permanent(reason) => eyre!(reason),
+            crate::backup::ExportBuildError::Transient(error) => error,
+        })?;
         let decoded = decode(&object);
 
         // Sanity: the number-typed engine header matches the object.
