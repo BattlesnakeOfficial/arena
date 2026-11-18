@@ -99,18 +99,20 @@ The `backup_batches` TABLE remains for DEV-1545.
 - **Streamed writer**: production builds v2 objects through the
   incremental `ExportWriter` (frames paged 200 at a time through one
   zstd stream, parse/serialize/compress on the blocking pool under the
-  `BACKUP_SLOT`) — byte-identical to the one-shot reference builder and
-  bounded to ~one page of memory, so the 285 games over 1,000 frames
-  (max 5,567) can't OOM the 1 GiB box the way the old whole-game fetch
-  correlated with. Since DEV-2427 each slot-using job type also declares
-  `CONCURRENCY = PerProcess(1)` (cja, enforced at claim), so a wedged
-  slot holder parks at most one worker per type and game runners always
-  stay claimable; the 5-minute slot hold limit now covers prune and
-  dropped-fields repair too. Achievement-clip renders moved to a per-type
-  cap (`RenderAchievementClipJob`, replacing the old
-  `CLIP_RENDER_SLOT`). The slot itself stays: cja caps are per job type
-  and the slot serializes all four backup-family types, which is what the
-  shared vCPU needs.
+  shared `"archive"` concurrency key) — byte-identical to the one-shot
+  reference builder and bounded to ~one page of memory, so the 285 games
+  over 1,000 frames (max 5,567) can't OOM the 1 GiB box the way the old
+  whole-game fetch correlated with. Since DEV-2432 all four archive job
+  types (`BackupSingleGameJob`, `NativeBackupSingleGameJob`,
+  `PruneGameTurnsJob`, `DroppedFieldsRepairGameJob`) share one cja
+  `PerProcessShared` key (limit 1, enforced at claim), so a wedged
+  holder parks zero workers and game runners always stay claimable;
+  each attempt is bounded by a 5-minute `MAX_RUNTIME`. The attempt's
+  `ConcurrencySlot` moves into the `spawn_blocking` closures, keeping
+  the budget held while bounded CPU work runs even if the attempt is
+  dropped (arena#221). Achievement-clip renders use a per-type cap
+  (`RenderAchievementClipJob`, replacing the old `CLIP_RENDER_SLOT`
+  since DEV-2427).
 
 ## Dropped-fields repair (DEV-2344)
 
@@ -138,7 +140,7 @@ finish before the engine DB teardown after Play closes 2026-11-30.
   `EngineSnake.team`, `EngineGame.mode`,
   `EngineGame.max_turns_to_next_food_spawn`, all `Option` +
   `skip_serializing_if` so other games' bytes don't change) → re-export
-  through the normal v2 writer under `BACKUP_SLOT` → **verify the built
+  through the normal v2 writer inside the shared `"archive"` budget → **verify the built
   bytes against the engine BEFORE any write** (every frame normalized
   and Value-equal, header fields compared as JSON Values) → create-only
   put (`put_if_absent`, GCS `ifGenerationMatch=0`) at the correct date
@@ -275,14 +277,14 @@ prune confirms and deletes. An archive holding MORE frames than the DB,
 or a divergent prefix, stays fail-closed.
 
 **Concurrency**: per-game prune jobs (`PruneGameTurnsJob`, priority −20,
-below backup jobs' −10) serialize on the shared 1-permit `BACKUP_SLOT`
-(one heavy archive-family op per instance; never concurrent with a
-backup). Since DEV-2427 the job type also declares
-`CONCURRENCY = PerProcess(1)` (cja, enforced at claim), so a prune can
-park at most one worker, and everything under the slot runs inside the
-5-minute hold limit. The slot is acquired BEFORE the eligibility
-re-check, so duplicate jobs on one instance are silent no-ops; the slot
-is per-process, so a duplicate racing another INSTANCE's prune is caught
+below backup jobs' −10) serialize with every other archive-family type
+on the shared `"archive"` cja concurrency key (limit 1, per process;
+never concurrent with a backup). Since DEV-2432 the key is enforced at
+claim — a saturated key makes archive rows invisible, so a hung prune
+parks zero workers — and each attempt is bounded by the 5-minute
+`MAX_RUNTIME`. The predicate re-check runs inside the attempt, so
+duplicate jobs on one instance are silent no-ops; the key is
+per-process, so a duplicate racing another INSTANCE's prune is caught
 after the content confirm instead (a 0-frame count mismatch re-reads
 `turns_pruned_at` and skips silently when the other instance already
 committed). The DELETE + `turns_pruned_at` mark

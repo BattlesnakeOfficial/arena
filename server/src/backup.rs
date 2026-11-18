@@ -8,10 +8,18 @@
 //! completion arithmetic could never be satisfied once a job's count was
 //! lost (batch 11 stalled 2026-01-27 with `jobs_enqueued = 501` against a
 //! discovery `LIMIT 500`).
+//!
+//! Archive jobs serialize via the shared `"archive"` cja concurrency key
+//! declared in `jobs.rs` (DEV-2432): one archive operation at a time per
+//! process, enforced at claim, so a wedged holder parks zero workers. The
+//! attempt's `ConcurrencySlot` moves into the `spawn_blocking` closures so
+//! bounded CPU work keeps holding the budget even if its attempt future
+//! is dropped (arena#221).
 
 use std::io::Write;
 
 use chrono::{DateTime, Duration, Utc};
+use cja::jobs::ConcurrencySlot;
 use color_eyre::eyre::{Context as _, eyre};
 use sqlx::{FromRow, PgPool};
 
@@ -20,74 +28,8 @@ use crate::jobs::BackupSingleGameJob;
 use crate::state::AppState;
 use cja::jobs::Job;
 
-/// Backups run one at a time per process. Discovery enqueues a burst of
-/// jobs every hour, and prod has a single vCPU shared with live games: a
-/// burst of concurrent frame parsing + zstd stalled every running game for
-/// ~300ms, long enough to time out snakes mid-turn.
-///
-/// Shared by Play (backup.rs) and native (native_backup.rs) archive jobs,
-/// turn-retention prunes, and dropped-fields repairs — one backup at a
-/// time process-wide. Held as an `Arc` so native jobs can take owned
-/// permits into `spawn_blocking` (a borrowed permit would be freed early
-/// if a deploy drains the job future mid-compress).
-///
-/// cja's per-type `CONCURRENCY` caps (DEV-2427) bound how many workers can
-/// park waiting on this slot to at most one per slot-using type (max 4 of
-/// 100), so a wedged holder can never starve `GameRunnerJob`s — that is
-/// the 2026-11-16 incident fix. The slot itself STAYS: cja caps are per
-/// job type and the slot is shared by four types, so caps alone would
-/// allow 4 concurrent archive operations where prod has exactly 1 on the
-/// shared vCPU. Removing it needs a shared concurrency key across job
-/// types (cja DEV-2431), a later phase-3 bump.
-pub(crate) static BACKUP_SLOT: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
-    std::sync::LazyLock::new(|| std::sync::Arc::new(tokio::sync::Semaphore::new(1)));
-
-/// Longest one archive may hold [`BACKUP_SLOT`]. A claimed backup waits on
-/// the slot while holding its job worker, so a holder stuck forever on an
-/// I/O await with no timeout of its own (a dead engine-DB socket, a GCS
-/// request) parks every worker that claims a backup behind it. On
-/// 2026-11-16 one hung holder parked 98 of 100 workers for hours, which
-/// left game runners unclaimed and stopped ladder matchmaking. A real
-/// archive takes seconds, so this only trips on a wedged one, which then
-/// fails and retries through cja's backoff.
-pub(crate) const BACKUP_SLOT_HOLD_LIMIT: std::time::Duration = std::time::Duration::from_secs(300);
-
-/// Run `work` (everything done while holding [`BACKUP_SLOT`]) under
-/// [`BACKUP_SLOT_HOLD_LIMIT`]. On timeout the work future is dropped, which
-/// releases a permit it owns; a permit moved into `spawn_blocking` stays held
-/// until that bounded CPU work returns. Generic over the error type so the
-/// prune (`cja::Result`), repair, and Play-backup (`BackupError`) bodies all
-/// wrap under the same deadline.
-pub(crate) async fn with_backup_slot_deadline<T, E>(
-    game: impl std::fmt::Display,
-    work: impl std::future::Future<Output = Result<T, E>>,
-) -> Result<T, E>
-where
-    E: From<color_eyre::Report>,
-{
-    run_under_slot_deadline(BACKUP_SLOT_HOLD_LIMIT, game, work).await
-}
-
-async fn run_under_slot_deadline<T, E>(
-    limit: std::time::Duration,
-    game: impl std::fmt::Display,
-    work: impl std::future::Future<Output = Result<T, E>>,
-) -> Result<T, E>
-where
-    E: From<color_eyre::Report>,
-{
-    tokio::time::timeout(limit, work).await.map_err(|_| {
-        E::from(eyre!(
-            "Backup of {game} held the backup slot for over {limit:?}; abandoned so it can retry"
-        ))
-    })?
-}
-
 /// Job priority for [`BackupSingleGameJob`], below the default 0 that game
-/// runners use. cja claims `ORDER BY priority DESC, run_at, created_at`.
-/// Since DEV-2427 the per-type `PerProcess(1)` cap means only ONE worker
-/// per slot-family type can hold or wait on [`BACKUP_SLOT`] at a time, so
-/// an hourly burst can no longer pin the fleet; the -10 priority remains
+/// runners use. cja claims `ORDER BY priority DESC, run_at, created_at`,
 /// so claims prefer game runners when both are runnable.
 pub(crate) const BACKUP_JOB_PRIORITY: i32 = -10;
 
@@ -394,15 +336,15 @@ pub(crate) enum ExportBuildError {
 /// [`ExportWriter`] — peak memory is ~one page regardless of game length
 /// (the max 5,567-frame game is 28 pages; the old whole-game fetch was the
 /// OOM-correlated shape on the 1 GiB prod box). Parse/serialize/compress
-/// runs on the blocking pool under the backup slot; only the slot holder
-/// reaches this function. The caller's `Arc<OwnedSemaphorePermit>` keeps
-/// the slot for the rest of the body (upload + record); each blocking
-/// closure gets an `Arc` clone bound for its duration, so a dropped
-/// future never frees the slot while CPU work runs (arena#221).
+/// runs on the blocking pool under the shared "archive" budget: the
+/// caller's `ConcurrencySlot` keeps the budget for the rest of the body
+/// (upload + record); each blocking closure gets a slot CLONE bound with a
+/// NAMED `let _held = …;` as its first statement, so a dropped attempt
+/// never frees the budget while CPU work runs (arena#221).
 pub(crate) async fn build_export_streamed(
     engine_db: &PgPool,
     game: EngineGame,
-    permit: std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
+    slot: ConcurrencySlot,
 ) -> Result<Vec<u8>, ExportBuildError> {
     // The game header just parsed, so only an internal serialize/zstd
     // failure lands here — never bad data. That is transient by
@@ -424,9 +366,12 @@ pub(crate) async fn build_export_streamed(
         if page.iter().any(|row| row.value_text.is_none()) {
             return Err(ExportBuildError::Permanent("frame_null_value".to_string()));
         }
-        let permit_page = std::sync::Arc::clone(&permit);
+        let slot_page = slot.clone();
         let (returned_writer, result) = tokio::task::spawn_blocking(move || {
-            let _permit = permit_page;
+            // arena#221: named binding holds the shared budget for the
+            // CPU work even if the attempt future is dropped. NEVER
+            // `let _ = slot;` — that drops the clone and releases it.
+            let _held = slot_page;
             let mut writer = writer;
             let result = writer.push_frame_texts(&page);
             (writer, result)
@@ -449,9 +394,10 @@ pub(crate) async fn build_export_streamed(
     if writer.frame_count() == 0 {
         return Err(ExportBuildError::Permanent("no_frames".to_string()));
     }
-    let permit_finish = std::sync::Arc::clone(&permit);
+    let slot_finish = slot.clone();
     let bytes = tokio::task::spawn_blocking(move || {
-        let _permit = permit_finish;
+        // arena#221: same named-binding rule as the per-page closure.
+        let _held = slot_finish;
         writer.finish(Utc::now())
     })
     .await
@@ -700,54 +646,48 @@ pub async fn run_backup_discovery(app_state: &AppState) -> Result<(), BackupErro
     Ok(())
 }
 
-/// Backup a single game from the Engine database to GCS.
+/// Test/direct-call entry: no shared-budget serialization (the worker
+/// path goes through `BackupSingleGameJob::run_with_cancellation`, which
+/// passes the attempt's tracked slot). A future production caller must
+/// enqueue a job or accept untracked semantics.
 ///
-/// Called by `BackupSingleGameJob`, shared by the hourly discovery and the
-/// play-history walk (DEV-1984). Slot-first (like native backup): only the
-/// slot holder fetches per-game data, the already-archived re-check happens
-/// UNDER the slot (a duplicate job no-ops instead of double-putting), and a
-/// game that can never be archived is recorded in `play_archive_exceptions`
-/// and returns `Ok` so the walk moves on. Transient failures return `Err`
-/// and retry through cja's backoff.
+/// A game that can never be archived is recorded in
+/// `play_archive_exceptions` and returns `Ok` so the walk moves on;
+/// transient failures return `Err` and retry through cja's backoff.
 pub async fn backup_single_game(
     app_state: &AppState,
     engine_game_id: &str,
+) -> Result<(), BackupError> {
+    backup_single_game_with_slot(app_state, engine_game_id, ConcurrencySlot::untracked()).await
+}
+
+/// The worker path. `slot` is the attempt's handle on the shared
+/// "archive" budget; clones moved into `spawn_blocking` closures keep the
+/// budget held until that bounded CPU work returns, even if this future
+/// is dropped (arena#221).
+pub(crate) async fn backup_single_game_with_slot(
+    app_state: &AppState,
+    engine_game_id: &str,
+    slot: ConcurrencySlot,
 ) -> Result<(), BackupError> {
     let engine_db = match &app_state.engine_db {
         Some(db) => db,
         None => return Err(eyre!("Engine database not configured").into()),
     };
-
-    // SLOT FIRST — only the holder fetches per-game data, and the archived
-    // re-check below runs under the slot so a duplicate enqueued behind
-    // this job sees its completed mark. The permit lives to the end of the
-    // function (slot held through upload + record, like native backup),
-    // wrapped in an `Arc` so blocking closures keep the slot while their
-    // bounded CPU work runs even if this future is dropped (arena#221).
-    let permit = std::sync::Arc::new(
-        std::sync::Arc::clone(&BACKUP_SLOT)
-            .acquire_owned()
-            .await
-            .wrap_err("Backup slot semaphore closed")?,
-    );
-
-    with_backup_slot_deadline(
-        engine_game_id,
-        backup_single_game_holding_slot(app_state, engine_db, engine_game_id, permit),
-    )
-    .await
+    backup_single_game_body(app_state, engine_db, engine_game_id, slot).await
 }
 
-/// The body of [`backup_single_game`]; the caller holds [`BACKUP_SLOT`]
-/// (the `Arc` around the owned permit travels into blocking closures).
-async fn backup_single_game_holding_slot(
+/// The body of [`backup_single_game_with_slot`], run inside the attempt
+/// (the predicate re-check happens inside the attempt: a duplicate
+/// enqueued behind this one sees its completed mark).
+async fn backup_single_game_body(
     app_state: &AppState,
     engine_db: &PgPool,
     engine_game_id: &str,
-    permit: std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
+    slot: ConcurrencySlot,
 ) -> Result<(), BackupError> {
-    // Req 6 (DEV-1984): re-check archived state under the slot — no put
-    // for an already-archived game, ever.
+    // Req 6 (DEV-1984): re-check archived state inside the attempt — no
+    // put for an already-archived game, ever.
     if is_already_archived(&app_state.db, engine_game_id).await? {
         tracing::debug!(game_id = %engine_game_id, "Game already archived, skipping");
         return Ok(());
@@ -786,13 +726,7 @@ async fn backup_single_game_holding_slot(
         game.created = created_at.timestamp_micros();
     }
 
-    let compressed = match build_export_streamed(
-        engine_db,
-        game.clone(),
-        std::sync::Arc::clone(&permit),
-    )
-    .await
-    {
+    let compressed = match build_export_streamed(engine_db, game.clone(), slot.clone()).await {
         Ok(bytes) => bytes,
         Err(ExportBuildError::Permanent(reason)) => {
             record_permanent_failure(&app_state.db, engine_game_id, &reason).await?;
@@ -1650,8 +1584,8 @@ mod tests {
         Ok(())
     }
 
-    /// A claimed backup waits on BACKUP_SLOT while holding its worker, so a
-    /// burst must sort below game runners or new games queue behind it.
+    /// Backups sort below the default priority game runners use, so
+    /// claims prefer runners when both are runnable.
     #[sqlx::test(migrations = "../migrations")]
     async fn backups_queue_below_default_priority_jobs(pool: sqlx::PgPool) -> cja::Result<()> {
         let app_state = AppState::test_from_pool(pool.clone());
@@ -1682,64 +1616,5 @@ mod tests {
             "a game runner must out-rank queued backups"
         );
         Ok(())
-    }
-
-    /// A backup wedged on an await that never resolves gives up the slot
-    /// after the hold limit and errors (so cja retries it) instead of
-    /// pinning every worker queued behind it.
-    #[tokio::test]
-    async fn wedged_backup_errors_after_slot_hold_limit() {
-        let limit = std::time::Duration::from_millis(50);
-        let started = std::time::Instant::now();
-        let result = run_under_slot_deadline(
-            limit,
-            "wedged",
-            std::future::pending::<Result<(), BackupError>>(),
-        )
-        .await;
-        let error = result.expect_err("a wedged backup must time out");
-        assert!(
-            error
-                .message
-                .contains("Backup of wedged held the backup slot"),
-            "{}",
-            error.message
-        );
-        assert!(started.elapsed() >= limit);
-    }
-
-    #[tokio::test]
-    async fn backup_within_slot_hold_limit_passes_its_result_through() {
-        let result = run_under_slot_deadline(std::time::Duration::from_secs(10), "quick", async {
-            Ok::<_, BackupError>(7)
-        })
-        .await;
-        assert_eq!(result.ok(), Some(7));
-    }
-
-    #[test]
-    fn slot_hold_limit_leaves_room_for_real_archives() {
-        // The largest observed archive is ~2.65 MB and takes seconds; the
-        // limit must stay well above that so it only trips on a wedge.
-        assert!(BACKUP_SLOT_HOLD_LIMIT >= std::time::Duration::from_secs(120));
-    }
-
-    /// Backups are serialized process-wide so an hourly burst can't
-    /// monopolize the CPU live games run on.
-    #[tokio::test]
-    async fn backup_slot_admits_one_backup_at_a_time() {
-        let held = BACKUP_SLOT.acquire().await.unwrap();
-        assert!(BACKUP_SLOT.try_acquire().is_err());
-        drop(held);
-        // Race-free re-admission: the slot is shared process-wide with
-        // native_backup's tests, which may hold a permit at this instant —
-        // so await one under a timeout instead of asserting try_acquire
-        // (which flakes when another test holds the slot right after drop).
-        let readmitted =
-            tokio::time::timeout(std::time::Duration::from_secs(10), BACKUP_SLOT.acquire())
-                .await
-                .expect("backup slot stayed busy for 10s")
-                .unwrap();
-        drop(readmitted);
     }
 }

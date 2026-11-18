@@ -195,6 +195,14 @@ impl Mailer {
         self.config.is_some()
     }
 
+    /// Why it stays: this rate-limits Mailgun sends from the
+    /// `SendNotificationEmailJob` / `PlayShutdownNoticeJob` BODIES (one
+    /// send at a time per instance); waiters are bounded by the 10 s
+    /// client timeout, so it can never wedge a worker. Deliberately NOT
+    /// converted to a cja shared key before the Nov 29 shutdown-email
+    /// send wave — DEV-2453 carries the conversion to
+    /// `PerProcessShared { key: "mail-delivery", limit: 1 }` on both
+    /// types afterward.
     pub async fn acquire_delivery_permit(&self) -> cja::Result<tokio::sync::OwnedSemaphorePermit> {
         Ok(self.semaphore.clone().acquire_owned().await?)
     }

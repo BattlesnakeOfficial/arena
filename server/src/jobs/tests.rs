@@ -409,6 +409,133 @@ mod concurrency_probes {
     cja::impl_job_registry!(AppState, CapOneProbeJob, FastProbeJob);
 }
 
+mod shared_key_probes {
+    //! Probe job types for the DEV-2432 shared-key tests. Every probe has
+    //! a unique `NAME` AND a unique shared key (never the real `"archive"`
+    //! key — only `wedged_archive_key_does_not_starve_game_runners` may
+    //! contend that), so the process-wide `ConcurrencyTracker` can never
+    //! couple with another test's workers.
+
+    use super::AppState;
+    use cja::jobs::{Concurrency, Job};
+    use serde::{Deserialize, Serialize};
+    use std::num::NonZeroUsize;
+    use std::time::Duration;
+
+    /// Inserts a start marker, sleeps, stamps `finished_at` — so marker
+    /// intervals expose exactly when each attempt held the key.
+    async fn mark_start_finish(state: &AppState, kind: &'static str) -> cja::Result<()> {
+        sqlx::query("INSERT INTO shared_key_probe_markers (id, kind) VALUES ($1, $2)")
+            .bind(uuid::Uuid::new_v4())
+            .bind(kind)
+            .execute(&state.db)
+            .await?;
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        sqlx::query(
+            "UPDATE shared_key_probe_markers SET finished_at = NOW() \
+             WHERE id = (SELECT id FROM shared_key_probe_markers WHERE kind = $1 ORDER BY started_at DESC LIMIT 1)",
+        )
+        .bind(kind)
+        .execute(&state.db)
+        .await?;
+        Ok(())
+    }
+
+    pub mod serial {
+        //! Two types sharing one limit-1 key: their attempts must never
+        //! overlap.
+        use super::*;
+
+        #[derive(Clone, Debug, Deserialize, Serialize)]
+        pub struct SerialAProbeJob;
+
+        #[async_trait::async_trait]
+        impl Job<AppState> for SerialAProbeJob {
+            const NAME: &'static str = "SerialAProbeJob";
+            const CONCURRENCY: Concurrency = Concurrency::PerProcessShared {
+                key: "test-archive-serial",
+                limit: NonZeroUsize::MIN,
+            };
+
+            async fn run(&self, state: AppState) -> cja::Result<()> {
+                mark_start_finish(&state, "serial-a").await
+            }
+        }
+
+        #[derive(Clone, Debug, Deserialize, Serialize)]
+        pub struct SerialBProbeJob;
+
+        #[async_trait::async_trait]
+        impl Job<AppState> for SerialBProbeJob {
+            const NAME: &'static str = "SerialBProbeJob";
+            const CONCURRENCY: Concurrency = Concurrency::PerProcessShared {
+                key: "test-archive-serial",
+                limit: NonZeroUsize::MIN,
+            };
+
+            async fn run(&self, state: AppState) -> cja::Result<()> {
+                mark_start_finish(&state, "serial-b").await
+            }
+        }
+
+        cja::impl_job_registry!(AppState, SerialAProbeJob, SerialBProbeJob);
+    }
+
+    pub mod runtime {
+        //! A hung holder bounded by `MAX_RUNTIME` plus a fast sibling on
+        //! the same key: the expiry must free the key so the sibling is
+        //! claimed.
+        use super::*;
+
+        #[derive(Clone, Debug, Deserialize, Serialize)]
+        pub struct HungRuntimeProbeJob;
+
+        #[async_trait::async_trait]
+        impl Job<AppState> for HungRuntimeProbeJob {
+            const NAME: &'static str = "HungRuntimeProbeJob";
+            const CONCURRENCY: Concurrency = Concurrency::PerProcessShared {
+                key: "test-archive-runtime",
+                limit: NonZeroUsize::MIN,
+            };
+            const MAX_RUNTIME: Duration = Duration::from_secs(2);
+
+            async fn run(&self, state: AppState) -> cja::Result<()> {
+                sqlx::query("INSERT INTO shared_key_probe_markers (id, kind) VALUES ($1, 'hung')")
+                    .bind(uuid::Uuid::new_v4())
+                    .execute(&state.db)
+                    .await?;
+                // Hang: the claim commits before the body runs, so the
+                // start marker (not `locked_by`) is the reliable signal.
+                std::future::pending().await
+            }
+        }
+
+        #[derive(Clone, Debug, Deserialize, Serialize)]
+        pub struct FastSiblingProbeJob;
+
+        #[async_trait::async_trait]
+        impl Job<AppState> for FastSiblingProbeJob {
+            const NAME: &'static str = "FastSiblingProbeJob";
+            const CONCURRENCY: Concurrency = Concurrency::PerProcessShared {
+                key: "test-archive-runtime",
+                limit: NonZeroUsize::MIN,
+            };
+
+            async fn run(&self, state: AppState) -> cja::Result<()> {
+                sqlx::query(
+                    "INSERT INTO shared_key_probe_markers (id, kind) VALUES ($1, 'fast-sibling')",
+                )
+                .bind(uuid::Uuid::new_v4())
+                .execute(&state.db)
+                .await?;
+                Ok(())
+            }
+        }
+
+        cja::impl_job_registry!(AppState, HungRuntimeProbeJob, FastSiblingProbeJob);
+    }
+}
+
 /// DEV-2427: a job type declaring `PerProcess(1)` is claimed once at a
 /// time across workers sharing the process-wide tracker wired by
 /// `JobConfig::worker_config` — the tracker must be
@@ -487,65 +614,110 @@ async fn capped_type_is_claimed_once_through_worker_config(pool: PgPool) -> cja:
     result
 }
 
-/// DEV-2427 incident regression (2026-11-16: 98/100 workers parked
-/// behind one hung backup holding `BACKUP_SLOT`; game runners went
-/// unclaimed and matchmaking froze ~3 h). With `PerProcess(1)` on
-/// `BackupSingleGameJob`, a wedged slot holder parks at most ONE worker;
-/// the other backup rows are invisible at claim, so a game enqueued
-/// AFTER the backups are parked is still claimed and run.
+/// DEV-2432 incident regression (2026-11-16: 98/100 workers parked
+/// behind one hung archive holding the old in-body `BACKUP_SLOT`; game
+/// runners went unclaimed and matchmaking froze ~3 h). The four archive
+/// types share one cja `PerProcessShared` key (`"archive"`, limit 1):
+/// while the key is saturated — here held from OUTSIDE the worker, the
+/// wedge shape — every archive row is invisible at claim, so a wedged
+/// holder parks ZERO workers and a game enqueued alongside the archive
+/// rows is still claimed and run.
+///
+/// Worst-case external hold time: the runner-error poll (≤3 s) plus the
+/// ~1 s exclusion stability window ≈ ≤4 s from `try_acquire` to
+/// `drop(held)`; the ≤10 s drain runs AFTER the hold is released.
+///
+/// Division of proof: this test's exclusion + drain steps prove the real
+/// four types' WIRING (excluded at claim while the "archive" key is
+/// held, claimed and serialized once it is released — summed locked
+/// count ≤1 on every drain poll); `shared_key_types_never_run_concurrently`
+/// proves NON-OVERLAP via marker intervals. `Worker::new` also runs
+/// cja's `validate_shared_limits` on spawn, so a same-key-conflicting-
+/// limits registry fails here immediately.
 ///
 /// INVARIANT: the cja type-concurrency tracker is process-wide and keyed
-/// by job name, so this is the ONLY test in the arena bin allowed to
-/// spawn workers that claim a real capped type (`BackupSingleGameJob`,
-/// `NativeBackupSingleGameJob`, `PruneGameTurnsJob`,
-/// `DroppedFieldsRepairGameJob`, `RenderAchievementClipJob`). Any future
-/// worker test needing one of them must use a probe type with a unique
-/// `NAME` instead.
-///
-/// `BACKUP_SLOT` is process-wide and shared with every parallel test in
-/// this binary (e.g. `backup_slot_admits_one_backup_at_a_time` waits up
-/// to 10 s for re-admission): keep the hold under ~5 s (tight poll
-/// timeouts, ~1 s stability window) and drop the permit before shutdown.
-/// Never widen the timeouts; a longer-holding variant should use a shared
-/// test-only async mutex instead.
+/// by `ConcurrencyScope` (type name or shared key), so this is the ONLY
+/// test in the arena bin allowed to contend the real `"archive"` key and
+/// spawn workers through the real `crate::jobs::Jobs` registry (it
+/// enqueues exactly the four archive rows + one `GameRunnerJob`). Every
+/// other worker test must use probe types with unique `NAME`s AND
+/// unique shared keys, never the real `"archive"` key.
 #[sqlx::test(migrations = "../migrations")]
-async fn wedged_backup_slot_does_not_starve_game_runners(pool: PgPool) -> cja::Result<()> {
+async fn wedged_archive_key_does_not_starve_game_runners(pool: PgPool) -> cja::Result<()> {
+    const ARCHIVE_JOB_NAMES: [&str; 4] = [
+        "BackupSingleGameJob",
+        "NativeBackupSingleGameJob",
+        "PruneGameTurnsJob",
+        "DroppedFieldsRepairGameJob",
+    ];
+
     let (mut state, _store, _engine) = crate::backup::test_support::engine_fixture(&pool).await?;
     Arc::make_mut(&mut state.config).job.poll_interval_ms = 200;
 
-    // Wedge the slot exactly like the incident: one holder that never
-    // releases until the assertions are done.
-    let held = std::sync::Arc::clone(&crate::backup::BACKUP_SLOT)
-        .acquire_owned()
-        .await
-        .unwrap();
+    // Hold the REAL "archive" key from outside, before any worker runs —
+    // exactly the wedge shape (a hung holder that has not yet hit its
+    // MAX_RUNTIME). `try_acquire` takes the scope by value.
+    let held = cja::jobs::ConcurrencyTracker::process_shared()
+        .try_acquire(
+            cja::jobs::ConcurrencyScope::Shared(super::BACKUP_ARCHIVE_KEY.to_owned()),
+            NonZeroUsize::MIN,
+        )
+        .expect("the shared archive key must be free before any worker runs");
 
-    // More backups than workers, enqueued BEFORE any worker runs (the
-    // incident's order: backups park first, the game arrives after).
-    for i in 0..5 {
-        crate::backup::enqueue_backup_job(&state, &format!("wedged-game-{i}")).await?;
+    // All five rows enqueued together, BEFORE any worker runs (the
+    // incident's order: archive rows parked first, the game alongside).
+    crate::backup::enqueue_backup_job(&state, "wedged-archive-game").await?;
+    crate::jobs::NativeBackupSingleGameJob {
+        game_id: Uuid::new_v4(),
     }
+    .enqueue(state.clone(), "test".into(), None)
+    .await?;
+    crate::jobs::PruneGameTurnsJob {
+        game_id: Uuid::new_v4(),
+    }
+    .enqueue(state.clone(), "test".into(), None)
+    .await?;
+    crate::jobs::DroppedFieldsRepairGameJob {
+        engine_game_id: "wedged-archive-game".into(),
+    }
+    .enqueue(state.clone(), "test".into(), None)
+    .await?;
+    crate::jobs::GameRunnerJob {
+        game_id: Uuid::new_v4(),
+    }
+    .enqueue(state.clone(), "game".into(), None)
+    .await?;
 
     let shutdown = CancellationToken::new();
     let workers = spawn_real_workers(&state, || crate::jobs::Jobs, shutdown.clone(), 3).await;
 
-    let result: cja::Result<()> = async {
-        // Exactly one worker claims a backup and parks on the held slot;
-        // the cap makes the other four rows invisible to every worker.
-        poll_until(Duration::from_secs(3), || async {
-            Ok(count_locked(&pool, "BackupSingleGameJob").await? == 1)
-        })
-        .await?;
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        let locked = count_locked(&pool, "BackupSingleGameJob").await?;
-        cja::color_eyre::eyre::ensure!(locked == 1, "cap leaked: {locked} backups locked");
-
-        // The game arrives AFTER the backups parked — and must still be
-        // claimed and run. Its lookup fails ("Game not found"); that
-        // error IS the proof a worker was free.
-        crate::jobs::GameRunnerJob { game_id: Uuid::new_v4() }
-            .enqueue(state.clone(), "game".into(), None)
+    // Each of the four archive rows is still queued, unclaimed, and never
+    // attempted while the key is held. Deliberately stronger than
+    // `count_locked == 0`: cja DELETES successful attempts and failed
+    // attempts return with `error_count >= 1`, so a miswired type gets
+    // its row claimed and completes, collapsing this count to 0.
+    let archive_rows_never_attempted = || async {
+        for name in ARCHIVE_JOB_NAMES {
+            let queued: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM jobs WHERE name = $1 AND locked_by IS NULL AND error_count = 0",
+            )
+            .bind(name)
+            .fetch_one(&pool)
             .await?;
+            cja::color_eyre::eyre::ensure!(
+                queued == 1,
+                "archive row for {name} must sit unclaimed and never-attempted \
+                 while the shared archive key is held (found {queued})"
+            );
+        }
+        Ok::<(), cja::color_eyre::Report>(())
+    };
+
+    let result: cja::Result<()> = async {
+        // FIRST the liveness proof: the runner is claimed and fails fast
+        // ("Game not found" — a fresh UUID has no game row); that error IS
+        // the proof a worker was free and actively claiming DURING the
+        // exclusion window.
         poll_until(Duration::from_secs(3), || async {
             let row: Option<(i32, Option<String>)> = sqlx::query_as(
                 "SELECT error_count, last_error_message FROM jobs WHERE name = 'GameRunnerJob'",
@@ -555,25 +727,230 @@ async fn wedged_backup_slot_does_not_starve_game_runners(pool: PgPool) -> cja::R
             Ok(matches!(&row, Some((count, Some(msg))) if *count >= 1 && msg.contains("Game not found")))
         })
         .await?;
-        let locked = count_locked(&pool, "BackupSingleGameJob").await?;
-        cja::color_eyre::eyre::ensure!(locked == 1, "{locked} backups locked while the game ran");
+
+        // THEN the exclusion stability window: assert, sleep ~1 s, assert
+        // again — the four archive rows never moved while the key was held.
+        archive_rows_never_attempted().await?;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        archive_rows_never_attempted().await?;
         Ok(())
     }
     .await;
 
-    // Release the wedge BEFORE shutdown: the parked backup then acquires
-    // the slot and fast-no-ops (its engine row is missing → permanent
-    // failure recorded → `Ok`), and the remaining four do the same in
-    // turn — bounded by the cap, within seconds.
+    // Release the wedge; all four archive rows must now drain. On EVERY
+    // poll iteration the summed locked count across the four names must
+    // be ≤ 1 — never two archive types claimed at once — and drain-to-zero
+    // proves each row WAS claimed (rows only disappear through a claim).
+    // Expected outcomes: backup — engine row missing → permanent failure
+    // recorded → Ok; native — skips missing game → Ok; prune — predicate
+    // no match → Skipped → Ok; repair — engine row missing → queue row
+    // marked failed → Ok. Releasing an external hold wakes no idle worker;
+    // at 200 ms polling the 10 s drain window is ample.
     drop(held);
-    poll_until(Duration::from_secs(5), || async {
-        let queued: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM jobs WHERE name = 'BackupSingleGameJob'")
-                .fetch_one(&pool)
-                .await?;
-        Ok(queued == 0)
-    })
+    let drain_result: cja::Result<()> = async {
+        poll_until(Duration::from_secs(10), || async {
+            let mut remaining = 0i64;
+            let mut locked_sum = 0i64;
+            for name in ARCHIVE_JOB_NAMES {
+                let queued: i64 = sqlx::query_scalar("SELECT count(*) FROM jobs WHERE name = $1")
+                    .bind(name)
+                    .fetch_one(&pool)
+                    .await?;
+                remaining += queued;
+                locked_sum += count_locked(&pool, name).await?;
+            }
+            cja::color_eyre::eyre::ensure!(
+                locked_sum <= 1,
+                "{locked_sum} archive rows locked at once across the four archive \
+                 types; the shared archive key must serialize them"
+            );
+            Ok(remaining == 0)
+        })
+        .await?;
+        Ok(())
+    }
+    .await;
+
+    drain_workers_and_assert_unlocked(workers, shutdown, &pool).await?;
+    result?;
+    drain_result?;
+    Ok(())
+}
+
+/// DEV-2432: two job types sharing one `PerProcessShared` key never run
+/// concurrently — attempts across BOTH types are serialized on one
+/// budget. Asserted via pairwise-disjoint marker intervals (stronger
+/// than lock counts: an overlap that starts and finishes between polls
+/// still shows in the intervals), plus the summed locked count ≤1 on
+/// every poll iteration while waiting.
+#[sqlx::test(migrations = "../migrations")]
+async fn shared_key_types_never_run_concurrently(pool: PgPool) -> cja::Result<()> {
+    use shared_key_probes::serial::{SerialAProbeJob, SerialBProbeJob};
+
+    sqlx::query(
+        "CREATE TABLE shared_key_probe_markers (id uuid PRIMARY KEY, kind text NOT NULL, started_at timestamptz NOT NULL DEFAULT NOW(), finished_at timestamptz)",
+    )
+    .execute(&pool)
     .await?;
+    let mut state = AppState::test_from_pool(pool.clone());
+    Arc::make_mut(&mut state.config).job.poll_interval_ms = 200;
+
+    for _ in 0..2 {
+        SerialAProbeJob
+            .enqueue(state.clone(), "probe".into(), None)
+            .await?;
+        SerialBProbeJob
+            .enqueue(state.clone(), "probe".into(), None)
+            .await?;
+    }
+
+    let shutdown = CancellationToken::new();
+    let workers = spawn_real_workers(
+        &state,
+        || shared_key_probes::serial::Jobs,
+        shutdown.clone(),
+        3,
+    )
+    .await;
+
+    let result: cja::Result<()> = async {
+        poll_until(Duration::from_secs(10), || async {
+            let finished: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM shared_key_probe_markers WHERE finished_at IS NOT NULL",
+            )
+            .fetch_one(&pool)
+            .await?;
+            let locked_sum = count_locked(&pool, "SerialAProbeJob").await?
+                + count_locked(&pool, "SerialBProbeJob").await?;
+            cja::color_eyre::eyre::ensure!(
+                locked_sum <= 1,
+                "{locked_sum} probe rows locked at once on key test-archive-serial; \
+                 the shared key must serialize them"
+            );
+            Ok(finished == 4)
+        })
+        .await?;
+
+        let intervals: Vec<(
+            String,
+            chrono::DateTime<chrono::Utc>,
+            chrono::DateTime<chrono::Utc>,
+        )> = sqlx::query_as(
+            "SELECT kind, started_at, finished_at FROM shared_key_probe_markers \
+                 ORDER BY started_at",
+        )
+        .fetch_all(&pool)
+        .await?;
+        cja::color_eyre::eyre::ensure!(
+            intervals.len() == 4,
+            "expected 4 probe markers, found {}",
+            intervals.len()
+        );
+        for (i, (kind_a, start_a, end_a)) in intervals.iter().enumerate() {
+            for (kind_b, start_b, end_b) in intervals.iter().skip(i + 1) {
+                let disjoint = end_a <= start_b || end_b <= start_a;
+                cja::color_eyre::eyre::ensure!(
+                    disjoint,
+                    "probe intervals overlapped on key test-archive-serial: \
+                     {kind_a} [{start_a:?}..{end_a:?}] vs {kind_b} [{start_b:?}..{end_b:?}]"
+                );
+            }
+        }
+        Ok(())
+    }
+    .await;
+
+    drain_workers_and_assert_unlocked(workers, shutdown, &pool).await?;
+    result
+}
+
+/// DEV-2432: a holder hung past its `MAX_RUNTIME` frees the shared key —
+/// the expiry drops the attempt future, which releases the worker's slot
+/// handle, so a sibling on the same key becomes claimable. The hung row
+/// retries with backoff (its terminal state is NOT asserted); the
+/// load-bearing assertions are the sibling's completion and the
+/// "max runtime" error on the hung row.
+#[sqlx::test(migrations = "../migrations")]
+async fn hung_holder_frees_shared_key_at_max_runtime(pool: PgPool) -> cja::Result<()> {
+    use shared_key_probes::runtime::{FastSiblingProbeJob, HungRuntimeProbeJob};
+
+    sqlx::query(
+        "CREATE TABLE shared_key_probe_markers (id uuid PRIMARY KEY, kind text NOT NULL, started_at timestamptz NOT NULL DEFAULT NOW(), finished_at timestamptz)",
+    )
+    .execute(&pool)
+    .await?;
+    let mut state = AppState::test_from_pool(pool.clone());
+    Arc::make_mut(&mut state.config).job.poll_interval_ms = 200;
+
+    HungRuntimeProbeJob
+        .enqueue(state.clone(), "probe".into(), None)
+        .await?;
+
+    let shutdown = CancellationToken::new();
+    let workers = spawn_real_workers(
+        &state,
+        || shared_key_probes::runtime::Jobs,
+        shutdown.clone(),
+        3,
+    )
+    .await;
+
+    let result: cja::Result<()> = async {
+        // Wait for the hung probe's START MARKER (the claim commits before
+        // the body runs; `locked_by` alone can miss it), then enqueue the
+        // sibling: it is invisible at claim while the key is held.
+        poll_until(Duration::from_secs(3), || async {
+            let hung_started: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM shared_key_probe_markers WHERE kind = 'hung'",
+            )
+            .fetch_one(&pool)
+            .await?;
+            Ok(hung_started == 1)
+        })
+        .await?;
+        FastSiblingProbeJob
+            .enqueue(state.clone(), "probe".into(), None)
+            .await?;
+
+        // Best-effort only: at ~1 s the hung attempt (2 s budget) still
+        // holds the key, so the sibling should not have started. Soft on
+        // purpose — scheduler starvation can compress this window; the
+        // load-bearing assertions below are the sibling completing and
+        // the "max runtime" error text.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let early: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM shared_key_probe_markers WHERE kind = 'fast-sibling'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        if early == 0 {
+            tracing::info!(
+                "sibling not started while the hung probe held the key test-archive-runtime"
+            );
+        }
+
+        // The hung attempt dies at its 2 s MAX_RUNTIME → the worker's slot
+        // handle releases → the key frees → the sibling is claimed and
+        // completes; the hung row carries the "max runtime" error.
+        poll_until(Duration::from_secs(10), || async {
+            let sibling_done: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM shared_key_probe_markers WHERE kind = 'fast-sibling'",
+            )
+            .fetch_one(&pool)
+            .await?;
+            let max_runtime_error: Option<String> = sqlx::query_scalar(
+                "SELECT last_error_message FROM jobs WHERE name = 'HungRuntimeProbeJob'",
+            )
+            .fetch_optional(&pool)
+            .await?
+            .flatten();
+            Ok(sibling_done == 1
+                && max_runtime_error.is_some_and(|msg| msg.contains("max runtime")))
+        })
+        .await?;
+        Ok(())
+    }
+    .await;
 
     drain_workers_and_assert_unlocked(workers, shutdown, &pool).await?;
     result
