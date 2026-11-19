@@ -457,7 +457,16 @@ fn opponent_list(opponents: &[String]) -> String {
 }
 
 fn emit_page_view(achievement: Achievement, owner_id: Uuid, referrer: &str) {
-    cja::product_event!(name: "share_page_view", user_id: None, message: "Achievement share page viewed", properties: { slug = achievement.slug(), owner_id = %owner_id, referrer = referrer });
+    cja::product_event!(
+        name: "share_page_view",
+        user_id: None,
+        message: "Achievement share page viewed",
+        properties: {
+            slug = achievement.slug(),
+            owner_id = %owner_id,
+            referrer = referrer,
+        }
+    );
 }
 
 #[derive(Deserialize)]
@@ -478,7 +487,16 @@ pub async fn share_action(
     if !matches!(form.channel.as_str(), "native" | "copy" | "download") {
         return Ok(StatusCode::BAD_REQUEST);
     }
-    cja::product_event!(name: "share_action", user_id: None, message: "Achievement share action", properties: { slug = achievement.slug(), owner_id = %user_id, channel = %form.channel });
+    cja::product_event!(
+        name: "share_action",
+        user_id: None,
+        message: "Achievement share action",
+        properties: {
+            slug = achievement.slug(),
+            owner_id = %user_id,
+            channel = %form.channel,
+        }
+    );
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -498,7 +516,16 @@ pub async fn share_cta_click(
     if !matches!(form.cta.as_str(), "achievements" | "get_started") {
         return Ok(StatusCode::BAD_REQUEST);
     }
-    cja::product_event!(name: "share_cta_click", user_id: None, message: "Achievement share CTA click", properties: { slug = achievement.slug(), owner_id = %user_id, cta = %form.cta });
+    cja::product_event!(
+        name: "share_cta_click",
+        user_id: None,
+        message: "Achievement share CTA click",
+        properties: {
+            slug = achievement.slug(),
+            owner_id = %user_id,
+            cta = %form.cta,
+        }
+    );
     Ok(StatusCode::NO_CONTENT)
 }
 

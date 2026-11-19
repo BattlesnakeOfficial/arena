@@ -716,7 +716,15 @@ fn log_claim_completed(user_id: Uuid, completed: &ClaimCompleted) {
     completed.receipt.log_enqueued();
 
     for battlesnake_id in &completed.created_snake_ids {
-        cja::product_event!(name: "battlesnake_created", user_id: Some(&user_id), message: "battlesnake created via play claim", properties: { battlesnake_id = %battlesnake_id, source = "play_claim" });
+        cja::product_event!(
+            name: "battlesnake_created",
+            user_id: Some(&user_id),
+            message: "battlesnake created via play claim",
+            properties: {
+                battlesnake_id = %battlesnake_id,
+                source = "play_claim",
+            }
+        );
     }
 }
 

@@ -420,6 +420,24 @@ async fn spawn_application_tasks(
 mod tests {
     use super::*;
 
+    #[sqlx::test(migrations = "../migrations")]
+    async fn real_inventory_passes_posthog_boot_manifest_validation(pool: sqlx::PgPool) {
+        let state = AppState::test_from_pool(pool);
+        let registry = cron::cron_registry(&state.config);
+        cja::posthog_manifest::emit_boot_manifest::<jobs::Jobs, AppState>(
+            &state,
+            &cja::posthog_manifest::BootManifest::new(
+                "arena",
+                &registry,
+                &cja::jiff::tz::TimeZone::UTC,
+                observability::CRITICAL_JOBS,
+                &[],
+            )
+            .git_sha(env!("VERGEN_GIT_SHA")),
+        )
+        .expect("arena's real job, cron, and monitor inventory must validate");
+    }
+
     #[test]
     fn process_roles_schedule_only_their_components() {
         let flags = |server, jobs, cron| config::FeatureFlags { server, jobs, cron };

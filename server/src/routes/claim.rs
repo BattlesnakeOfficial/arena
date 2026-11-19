@@ -257,7 +257,15 @@ pub async fn submit_claim(
             .into_response());
     };
 
-    cja::product_event!(name: "play_claim_succeeded", user_id: Some(&user.user_id), message: "play account claimed via password", properties: { snakes = summary.snakes_created, grants = summary.grants_created });
+    cja::product_event!(
+        name: "play_claim_succeeded",
+        user_id: Some(&user.user_id),
+        message: "play account claimed via password",
+        properties: {
+            snakes = summary.snakes_created,
+            grants = summary.grants_created,
+        }
+    );
 
     state
         .discord
@@ -529,7 +537,15 @@ pub async fn complete_email_claim(
         imported_account::EmailClaimOutcome::Claimed(summary) => summary,
     };
 
-    cja::product_event!(name: "play_claim_succeeded", user_id: Some(&user.user_id), message: "play account claimed via email link", properties: { snakes = summary.snakes_created, grants = summary.grants_created });
+    cja::product_event!(
+        name: "play_claim_succeeded",
+        user_id: Some(&user.user_id),
+        message: "play account claimed via email link",
+        properties: {
+            snakes = summary.snakes_created,
+            grants = summary.grants_created,
+        }
+    );
 
     state
         .discord

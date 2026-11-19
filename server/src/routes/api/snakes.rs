@@ -236,7 +236,15 @@ pub async fn create_snake(
         )
     })?;
 
-    cja::product_event!(name: "battlesnake_created", user_id: Some(&auth.user_id), message: "battlesnake created", properties: { battlesnake_id = %snake.battlesnake_id, source = "api" });
+    cja::product_event!(
+        name: "battlesnake_created",
+        user_id: Some(&auth.user_id),
+        message: "battlesnake created",
+        properties: {
+            battlesnake_id = %snake.battlesnake_id,
+            source = "api",
+        }
+    );
 
     // The scope was loaded at auth time; mirror the row just committed so
     // the response below sees the freshly created snake.

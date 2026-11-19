@@ -18,6 +18,10 @@ An acting user's opaque account ID is the PostHog distinct ID; anonymous share
 visitors get an anonymous distinct ID. New Eyes and Cloud Logging copies of
 the sign-in and Play-claim events omit GitHub and Play usernames. Existing
 Eyes telemetry, manifest registration, and heartbeat continue during the trial.
+PostHog redaction removes the enqueue `jobs.enqueue` span's Debug `self` field
+and the run `jobs.run_from_value` span's serialized `value` field. These
+fields can contain background-job payloads; the PostHog copy omits them while
+Eyes keeps its existing stream.
 
 The GitHub Actions sync job needs `POSTHOG_PROJECT_ID` as a repo variable and
 `POSTHOG_PERSONAL_API_KEY` as a repo secret. They are never runtime settings.

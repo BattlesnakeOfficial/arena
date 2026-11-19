@@ -52,11 +52,7 @@ pub fn manifest(
     .retention(RetentionPolicy::new().level(tracing::Level::DEBUG, DEBUG_RETENTION_DAYS))
     .process(identity)
     .expected_process_roles(vec![ExpectedProcessRole::new(ROLE).min_instances(1)])
-    .monitors(if features.server {
-        http_monitors(true)
-    } else {
-        http_monitors(false)
-    });
+    .monitors(http_monitors(features.server));
     if features.jobs {
         manifest =
             manifest.critical_jobs(CRITICAL_JOBS.iter().copied().map(str::to_owned).collect());

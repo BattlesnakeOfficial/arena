@@ -48,8 +48,8 @@ pub struct JobConfig {
     pub reclaim_window_secs: u64,
     /// How long an in-flight job may keep running after a shutdown signal
     /// before it is dropped and its lock released. Cloud Run sends SIGKILL
-    /// 10 seconds after SIGTERM, so this plus [`crate::SHUTDOWN_EXIT_GRACE`]
-    /// plus the 2-second exit grace and up to 3 seconds of telemetry flush
+    /// 10 seconds after SIGTERM, so this plus the 2-second exit grace
+    /// ([`crate::SHUTDOWN_EXIT_GRACE`]) and up to 3 seconds of telemetry flush
     /// must stay under that. Increasing this override can exceed the limit.
     pub shutdown_drain_secs: u64,
     pub max_retries: i32,
@@ -294,8 +294,8 @@ pub struct AppConfig {
     pub gcp_logging: bool,
     pub gcp_project_id: Option<String>,
     /// `ARENA_STDOUT_LOG`: extra `EnvFilter` directives for the JSON stdout
-    /// layer only (`GCP_LOGGING` path), e.g. `warn` or `off`. `RUST_LOG` still
-    /// governs Eyes. Unset leaves stdout at `RUST_LOG`.
+    /// layer only (`GCP_LOGGING` path), e.g. `warn` or `off`. `RUST_LOG`
+    /// governs all sinks. Unset leaves stdout at `RUST_LOG`.
     pub stdout_log: Option<String>,
     /// Eyes telemetry, enabled when `EYES_ORG_ID` + `EYES_APP_ID` are set.
     pub eyes: Option<EyesConfig>,

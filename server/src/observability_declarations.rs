@@ -287,16 +287,19 @@ fn metrics() -> Result<Vec<NamedMetric>, String> {
         .filter_eq("fields.source", "custom")?
         .unit("games")
         .build()?,
-        ProductMetricBuilder::count("product.play_claims.daily", "play_claim_succeeded").display_name("Play claims")
+        ProductMetricBuilder::count("product.play_claims.daily", "play_claim_succeeded")
+        .display_name("Play claims")
         .unit("claims")
         .bucket_seconds(86_400)
         .build()?,
-        ProductMetricBuilder::count("product.new_users.daily", "user_authenticated").display_name("New users")
+        ProductMetricBuilder::count("product.new_users.daily", "user_authenticated")
+        .display_name("New users")
         .filter("new_user", FilterOperator::Eq, true)
         .unit("users")
         .bucket_seconds(86_400)
         .build()?,
-        ProductMetricBuilder::count("product.new_snakes.daily", "battlesnake_created").display_name("New snakes")
+        ProductMetricBuilder::count("product.new_snakes.daily", "battlesnake_created")
+        .display_name("New snakes")
         .unit("snakes")
         .bucket_seconds(86_400)
         .build()?,
@@ -425,12 +428,14 @@ fn metrics() -> Result<Vec<NamedMetric>, String> {
         .unit("games")
         .time_bucket_weeks(1)
         .build()?,
-        ProductMetricBuilder::count("product.new_users.weekly", "user_authenticated").display_name("New users, per week")
+        ProductMetricBuilder::count("product.new_users.weekly", "user_authenticated")
+        .display_name("New users, per week")
         .filter("new_user", FilterOperator::Eq, true)
         .unit("users")
         .bucket_weeks(1)
         .build()?,
-        ProductMetricBuilder::count("product.new_snakes.weekly", "battlesnake_created").display_name("New snakes, per week")
+        ProductMetricBuilder::count("product.new_snakes.weekly", "battlesnake_created")
+        .display_name("New snakes, per week")
         .unit("snakes")
         .bucket_weeks(1)
         .build()?,
@@ -510,38 +515,47 @@ fn metrics() -> Result<Vec<NamedMetric>, String> {
         .as_percentage()
         .display_name("Tournament share of games played")
         .build()?,
-        ProductMetricBuilder::count("product.achievements.earned", "achievement_earned").display_name("Achievements earned")
+        ProductMetricBuilder::count("product.achievements.earned", "achievement_earned")
+        .display_name("Achievements earned")
         .unit("earns")
         .build()?,
-        ProductMetricBuilder::count("product.achievements.earned.daily", "achievement_earned").display_name("Achievements earned")
+        ProductMetricBuilder::count("product.achievements.earned.daily", "achievement_earned")
+        .display_name("Achievements earned")
         .unit("earns")
         .bucket_seconds(86_400)
         .build()?,
-        ProductMetricBuilder::count("product.achievements.firsts.daily", "achievement_earned").display_name("First achievement earns")
+        ProductMetricBuilder::count("product.achievements.firsts.daily", "achievement_earned")
+        .display_name("First achievement earns")
         .filter("first", FilterOperator::Eq, true)
         .unit("earns")
         .bucket_seconds(86_400)
         .build()?,
-        ProductMetricBuilder::count("product.achievements.by_slug", "achievement_earned").display_name("Achievements earned by achievement")
+        ProductMetricBuilder::count("product.achievements.by_slug", "achievement_earned")
+        .display_name("Achievements earned by achievement")
         .breakdown("slug")
         .unit("earns")
         .build()?,
-        ProductMetricBuilder::count("product.shares.page_views", "share_page_view").display_name("Achievement share page views")
+        ProductMetricBuilder::count("product.shares.page_views", "share_page_view")
+        .display_name("Achievement share page views")
         .unit("views")
         .build()?,
-        ProductMetricBuilder::count("product.shares.page_views.daily", "share_page_view").display_name("Achievement share page views")
+        ProductMetricBuilder::count("product.shares.page_views.daily", "share_page_view")
+        .display_name("Achievement share page views")
         .unit("views")
         .bucket_seconds(86_400)
         .build()?,
-        ProductMetricBuilder::count("product.shares.page_views.by_referrer", "share_page_view").display_name("Achievement share page views by referrer")
+        ProductMetricBuilder::count("product.shares.page_views.by_referrer", "share_page_view")
+        .display_name("Achievement share page views by referrer")
         .breakdown("referrer")
         .unit("views")
         .build()?,
-        ProductMetricBuilder::count("product.shares.actions", "share_action").display_name("Achievement share actions")
+        ProductMetricBuilder::count("product.shares.actions", "share_action")
+        .display_name("Achievement share actions")
         .breakdown("channel")
         .unit("actions")
         .build()?,
-        ProductMetricBuilder::count("product.shares.cta_clicks", "share_cta_click").display_name("Achievement share CTA clicks")
+        ProductMetricBuilder::count("product.shares.cta_clicks", "share_cta_click")
+        .display_name("Achievement share CTA clicks")
         .breakdown("cta")
         .unit("clicks")
         .build()?,

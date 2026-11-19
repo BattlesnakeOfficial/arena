@@ -128,8 +128,8 @@ fn privacy_content() -> Markup {
                 "URL paths and query strings, referrers, IP addresses, user agents, "
                 "account IDs, gameplay and snake IDs, and usernames embedded in URL "
                 "paths. For PostHog only, credential values in query strings, "
-                "authorization and cookie headers, and job payload copies in both "
-                "enqueue Debug self and run value fields are redacted. Our own "
+                "authorization and cookie headers, and copies of background-job "
+                "data (which can include account details) are redacted. Our own "
                 "observability system continues to receive its existing stream. "
                 "At process boot, PostHog receives a manifest of app configuration, "
                 "scheduled jobs, and health monitors without user data."
@@ -310,7 +310,7 @@ mod tests {
             "user agents",
             "credential values in query strings",
             "authorization and cookie headers",
-            "enqueue Debug self and run value fields",
+            "copies of background-job data",
             "manifest of app configuration",
             "without user data",
             "no fixed deletion date",
