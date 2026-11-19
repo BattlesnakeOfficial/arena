@@ -852,15 +852,16 @@ mod tests {
         .execute(pool)
         .await
         .unwrap();
-        let updated: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+        let updated: jiff::Timestamp = sqlx::query_scalar::<_, cja::jiff_sqlx::Timestamp>(
             "SELECT updated_at FROM achievement_clips WHERE achievement_earn_id = $1",
         )
         .bind(earn_id)
         .fetch_one(pool)
         .await
-        .unwrap();
+        .unwrap()
+        .to_jiff();
         assert!(
-            updated < chrono::Utc::now() - chrono::Duration::minutes(5),
+            updated < jiff::Timestamp::now() - jiff::SignedDuration::from_mins(5),
             "backdate must take (trigger disabled)"
         );
         sqlx::query(

@@ -28,7 +28,6 @@ pub fn snake_tag_chips(tags: &[Tag]) -> Markup {
 mod tests {
     use super::*;
     use crate::models::tag::TagCategory;
-    use chrono::Utc;
     use uuid::Uuid;
 
     fn tag(name: &str, category: TagCategory) -> Tag {
@@ -36,8 +35,8 @@ mod tests {
             tag_id: Uuid::new_v4(),
             name: name.into(),
             category,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: jiff::Timestamp::now(),
+            updated_at: jiff::Timestamp::now(),
         }
     }
 

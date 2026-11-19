@@ -16,12 +16,10 @@
 //! bounded CPU work keeps holding the budget even if its attempt future
 //! is dropped (arena#221).
 
-use std::io::Write;
-
-use chrono::{DateTime, Duration, Utc};
 use cja::jobs::ConcurrencySlot;
 use color_eyre::eyre::{Context as _, eyre};
 use sqlx::{FromRow, PgPool};
+use std::io::Write;
 
 use crate::engine_models::{ARCHIVE_VERSION, EngineGame, EngineGameFrame};
 use crate::jobs::BackupSingleGameJob;
@@ -66,7 +64,8 @@ pub(crate) struct EngineGameRow {
     /// Engine DB uses TIMESTAMP (no timezone), not TIMESTAMPTZ. sqlx pins
     /// pooled sessions' TimeZone to UTC, so the naive value decodes as UTC
     /// deterministically.
-    pub(crate) created: chrono::NaiveDateTime,
+    #[sqlx(try_from = "cja::jiff_sqlx::DateTime")]
+    pub(crate) created: jiff::civil::DateTime,
 }
 
 /// Fetch the IDs of completed games from the Engine database within the
@@ -75,8 +74,10 @@ pub(crate) struct EngineGameRow {
 /// the arena DB, and per-game rows are fetched by the jobs themselves under
 /// the slot.
 async fn fetch_completed_game_ids(engine_db: &PgPool, hours_ago: i64) -> cja::Result<Vec<String>> {
-    // Engine DB uses TIMESTAMP (no timezone), so use NaiveDateTime
-    let since = (Utc::now() - Duration::hours(hours_ago)).naive_utc();
+    // Engine DB uses TIMESTAMP (no timezone), so use jiff::civil::DateTime
+    let since = (jiff::Timestamp::now() - jiff::SignedDuration::from_hours(hours_ago))
+        .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+        .datetime();
 
     // Note: We use query (not the macro) because this is a different database
     // with a different schema that sqlx doesn't know about at compile time.
@@ -92,7 +93,7 @@ async fn fetch_completed_game_ids(engine_db: &PgPool, hours_ago: i64) -> cja::Re
         LIMIT 5000
         "#,
     )
-    .bind(since)
+    .bind(cja::jiff_sqlx::DateTime::from(since))
     .fetch_all(engine_db)
     .await
     .wrap_err("Failed to fetch completed game ids from Engine")?;
@@ -183,12 +184,12 @@ async fn is_already_archived(db: &PgPool, engine_game_id: &str) -> cja::Result<b
 /// Generate the GCS path for a game based on its creation date. The date is
 /// the engine `created` COLUMN (DEV-1984): pre-2023 `value` rows often lack
 /// a `Created` key, which used to date every such object 1970-01-01.
-pub(crate) fn gcs_path(game_id: &str, created_at: DateTime<Utc>) -> String {
+pub(crate) fn gcs_path(game_id: &str, created_at: jiff::Timestamp) -> String {
     format!(
         "games/{}/{:02}/{:02}/{}.json.zst",
-        created_at.format("%Y"),
-        created_at.format("%m"),
-        created_at.format("%d"),
+        created_at.strftime("%Y"),
+        created_at.strftime("%m"),
+        created_at.strftime("%d"),
         game_id
     )
 }
@@ -298,7 +299,7 @@ impl ExportWriter {
     /// Close the frames array and the export, finish the zstd stream.
     /// `exported_at` is a parameter so the byte-equality test can pin both
     /// builders to one timestamp.
-    pub(crate) fn finish(mut self, exported_at: DateTime<Utc>) -> cja::Result<Vec<u8>> {
+    pub(crate) fn finish(mut self, exported_at: jiff::Timestamp) -> cja::Result<Vec<u8>> {
         self.write_json_fragment(b"],\"exported_at\":")?;
         self.write_json_fragment(&serde_json::to_vec(&exported_at)?)?;
         self.write_json_fragment(b"}")?;
@@ -398,7 +399,7 @@ pub(crate) async fn build_export_streamed(
     let bytes = tokio::task::spawn_blocking(move || {
         // arena#221: same named-binding rule as the per-page closure.
         let _held = slot_finish;
-        writer.finish(Utc::now())
+        writer.finish(jiff::Timestamp::now())
     })
     .await
     .wrap_err("Export finish task panicked")
@@ -449,7 +450,7 @@ async fn record_permanent_failure(
 pub(crate) fn build_compressed_export(
     game: EngineGame,
     frame_values: Vec<serde_json::Value>,
-    exported_at: DateTime<Utc>,
+    exported_at: jiff::Timestamp,
 ) -> cja::Result<Vec<u8>> {
     let mut frames: Vec<EngineGameFrame> = frame_values
         .into_iter()
@@ -503,10 +504,10 @@ pub(crate) fn build_compressed_export(
 async fn upsert_game_record(
     db: &PgPool,
     game: &EngineGame,
-    created_at: DateTime<Utc>,
+    created_at: jiff::Timestamp,
     gcs_path: &str,
 ) -> cja::Result<()> {
-    let now = Utc::now();
+    let now = jiff::Timestamp::now();
     let board_size = game.board_size();
     let game_type = game.game_type();
 
@@ -525,8 +526,8 @@ async fn upsert_game_record(
         game.id,
         board_size,
         game_type,
-        created_at,
-        now,
+        cja::jiff_sqlx::Timestamp::from(created_at),
+        cja::jiff_sqlx::Timestamp::from(now),
         gcs_path,
         ARCHIVE_VERSION
     )
@@ -721,9 +722,13 @@ async fn backup_single_game_body(
     // Dates come from the engine `created` column (DEV-1984): the JSON
     // `Created` key is absent on pre-2023 rows and used to date everything
     // 1970-01-01.
-    let created_at = game_row.created.and_utc();
+    let created_at = game_row
+        .created
+        .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+        .expect("in range")
+        .timestamp();
     if game.created == 0 {
-        game.created = created_at.timestamp_micros();
+        game.created = created_at.as_microsecond();
     }
 
     let compressed = match build_export_streamed(engine_db, game.clone(), slot.clone()).await {
@@ -803,12 +808,12 @@ pub(crate) mod test_support {
         engine_pool: &sqlx::PgPool,
         id: &str,
         value: serde_json::Value,
-        created: chrono::NaiveDateTime,
+        created: jiff::civil::DateTime,
     ) -> cja::Result<()> {
         sqlx::query("INSERT INTO games (id, value, created) VALUES ($1, $2, $3)")
             .bind(id)
             .bind(value)
-            .bind(created)
+            .bind(cja::jiff_sqlx::DateTime::from(created))
             .execute(engine_pool)
             .await?;
         Ok(())
@@ -836,7 +841,6 @@ mod tests {
     use super::*;
     use crate::backup::test_support::{engine_fixture, insert_engine_frame, insert_engine_game};
     use crate::object_store::ObjectStore as _;
-    use chrono::SubsecRound as _;
 
     fn fixture_game_json(id: &str, created_micros: i64) -> serde_json::Value {
         serde_json::json!({
@@ -867,10 +871,8 @@ mod tests {
 
     const FIXED_EXPORTED_AT: &str = "2026-11-05T00:00:00Z";
 
-    fn fixed_exported_at() -> DateTime<Utc> {
-        DateTime::parse_from_rfc3339(FIXED_EXPORTED_AT)
-            .expect("fixed timestamp parses")
-            .with_timezone(&Utc)
+    fn fixed_exported_at() -> jiff::Timestamp {
+        FIXED_EXPORTED_AT.parse().expect("fixed timestamp parses")
     }
 
     /// The off-thread export step must produce exactly what the old inline
@@ -1145,14 +1147,18 @@ mod tests {
             "games/2026/10/31/g-upsert-fresh.json.zst",
         )
         .await?;
-        let row = sqlx::query_as::<_, (i32, chrono::DateTime<chrono::Utc>)>(
+        let row = sqlx::query_as::<_, (i32, cja::jiff_sqlx::Timestamp)>(
             "SELECT archive_version, created_at FROM games WHERE engine_game_id = $1",
         )
         .bind(&fresh.id)
         .fetch_one(&pool)
         .await?;
         assert_eq!(row.0, 2);
-        assert_eq!(row.1, created_at, "created_at comes from the engine column");
+        assert_eq!(
+            row.1,
+            cja::jiff_sqlx::Timestamp::from(created_at),
+            "created_at comes from the engine column"
+        );
 
         // ON CONFLICT branch: a v1-era row (archive_version = 1) is bumped to 2
         // when the game is re-archived.
@@ -1172,7 +1178,7 @@ mod tests {
             "games/2026/10/31/g-upsert-v1.json.zst",
         )
         .await?;
-        let row = sqlx::query_as::<_, (i32, chrono::DateTime<chrono::Utc>)>(
+        let row = sqlx::query_as::<_, (i32, cja::jiff_sqlx::Timestamp)>(
             "SELECT archive_version, created_at FROM games WHERE engine_game_id = $1",
         )
         .bind(&conflicted.id)
@@ -1180,7 +1186,8 @@ mod tests {
         .await?;
         assert_eq!(row.0, 2);
         assert_eq!(
-            row.1, created_at,
+            row.1,
+            cja::jiff_sqlx::Timestamp::from(created_at),
             "ON CONFLICT rewrites created_at from the column"
         );
 
@@ -1206,17 +1213,25 @@ mod tests {
     #[sqlx::test(migrations = "../migrations")]
     async fn archived_game_is_not_rewritten(pool: sqlx::PgPool) -> cja::Result<()> {
         let (state, store, engine_pool) = engine_fixture(&pool).await?;
-        let created = chrono::NaiveDate::from_ymd_opt(2020, 3, 10)
+        let created = jiff::civil::Date::new(2020, 3, 10)
             .expect("date")
-            .and_hms_opt(0, 0, 0)
-            .expect("time");
-        let archived_at = (Utc::now() - Duration::hours(3)).trunc_subsecs(6);
+            .at(0, 0, 0, 0);
+        let archived_at = (jiff::Timestamp::now() - jiff::SignedDuration::from_hours(3))
+            .round(jiff::Unit::Microsecond)
+            .unwrap();
 
         for id in ["A-archived", "B-fresh"] {
             insert_engine_game(
                 &engine_pool,
                 id,
-                fixture_game_json(id, created.and_utc().timestamp_micros()),
+                fixture_game_json(
+                    id,
+                    created
+                        .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+                        .expect("in range")
+                        .timestamp()
+                        .as_microsecond(),
+                ),
                 created,
             )
             .await?;
@@ -1230,7 +1245,7 @@ mod tests {
             INSERT INTO games (board_size, game_type, status, engine_game_id, created_at, archived_at, gcs_path, archive_version)
             VALUES ('11x11', 'Standard', 'finished', 'A-archived', '1970-01-01T00:00:00Z', $1, $2, 1)
             "#,
-            archived_at,
+            cja::jiff_sqlx::Timestamp::from(archived_at),
             a_path
         )
         .execute(&pool)
@@ -1255,7 +1270,10 @@ mod tests {
             sqlx::query!("SELECT archived_at FROM games WHERE engine_game_id = 'A-archived'")
                 .fetch_one(&pool)
                 .await?;
-        assert_eq!(a_row.archived_at, Some(archived_at));
+        assert_eq!(
+            a_row.archived_at,
+            Some(cja::jiff_sqlx::Timestamp::from(archived_at))
+        );
 
         // Control: the unarchived twin takes the full path.
         backup_single_game(&state, "B-fresh").await?;
@@ -1279,10 +1297,9 @@ mod tests {
     #[sqlx::test(migrations = "../migrations")]
     async fn bad_game_recorded_as_exception_and_passed(pool: sqlx::PgPool) -> cja::Result<()> {
         let (state, _store, engine_pool) = engine_fixture(&pool).await?;
-        let created = chrono::NaiveDate::from_ymd_opt(2021, 5, 5)
+        let created = jiff::civil::Date::new(2021, 5, 5)
             .expect("date")
-            .and_hms_opt(12, 34, 56)
-            .expect("time");
+            .at(12, 34, 56, 0);
 
         let mut bad = fixture_game_json("bad-header", 0);
         bad["Width"] = serde_json::json!("not-a-number");
@@ -1292,7 +1309,14 @@ mod tests {
         insert_engine_game(
             &engine_pool,
             "good-twin",
-            fixture_game_json("good-twin", created.and_utc().timestamp_micros()),
+            fixture_game_json(
+                "good-twin",
+                created
+                    .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+                    .expect("in range")
+                    .timestamp()
+                    .as_microsecond(),
+            ),
             created,
         )
         .await?;
@@ -1332,15 +1356,21 @@ mod tests {
     #[sqlx::test(migrations = "../migrations")]
     async fn null_frame_value_is_permanent_not_transient(pool: sqlx::PgPool) -> cja::Result<()> {
         let (state, store, engine_pool) = engine_fixture(&pool).await?;
-        let created = chrono::NaiveDate::from_ymd_opt(2020, 6, 1)
+        let created = jiff::civil::Date::new(2020, 6, 1)
             .expect("date")
-            .and_hms_opt(0, 0, 0)
-            .expect("time");
+            .at(0, 0, 0, 0);
 
         insert_engine_game(
             &engine_pool,
             "null-frame",
-            fixture_game_json("null-frame", created.and_utc().timestamp_micros()),
+            fixture_game_json(
+                "null-frame",
+                created
+                    .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+                    .expect("in range")
+                    .timestamp()
+                    .as_microsecond(),
+            ),
             created,
         )
         .await?;
@@ -1384,15 +1414,21 @@ mod tests {
     #[sqlx::test(migrations = "../migrations")]
     async fn unparseable_frame_is_permanent_not_transient(pool: sqlx::PgPool) -> cja::Result<()> {
         let (state, store, engine_pool) = engine_fixture(&pool).await?;
-        let created = chrono::NaiveDate::from_ymd_opt(2020, 6, 15)
+        let created = jiff::civil::Date::new(2020, 6, 15)
             .expect("date")
-            .and_hms_opt(0, 0, 0)
-            .expect("time");
+            .at(0, 0, 0, 0);
 
         insert_engine_game(
             &engine_pool,
             "bad-frame",
-            fixture_game_json("bad-frame", created.and_utc().timestamp_micros()),
+            fixture_game_json(
+                "bad-frame",
+                created
+                    .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+                    .expect("in range")
+                    .timestamp()
+                    .as_microsecond(),
+            ),
             created,
         )
         .await?;
@@ -1473,11 +1509,13 @@ mod tests {
         pool: sqlx::PgPool,
     ) -> cja::Result<()> {
         let (state, store, engine_pool) = engine_fixture(&pool).await?;
-        let created = chrono::NaiveDate::from_ymd_opt(2021, 5, 5)
+        let created = jiff::civil::Date::new(2021, 5, 5)
             .expect("date")
-            .and_hms_opt(12, 34, 56)
-            .expect("time");
-        let created_utc = created.and_utc();
+            .at(12, 34, 56, 0);
+        let created_utc = created
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+            .expect("in range")
+            .timestamp();
 
         // No Created key at all (pre-2023 shape).
         let mut no_created = fixture_game_json("no-created", 0);
@@ -1495,7 +1533,7 @@ mod tests {
         )
         .fetch_one(&pool)
         .await?;
-        assert_eq!(row.created_at, created_utc);
+        assert_eq!(row.created_at, cja::jiff_sqlx::Timestamp::from(created_utc));
         assert_eq!(
             row.gcs_path.as_deref(),
             Some("games/2021/05/05/no-created.json.zst")
@@ -1511,17 +1549,17 @@ mod tests {
         assert_eq!(export["archive_version"], 2);
         assert_eq!(
             export["game"]["Created"].as_i64(),
-            Some(created_utc.timestamp_micros()),
+            Some(created_utc.as_microsecond()),
             "header Created is the engine column value"
         );
 
         // Control: Created present and different — the column still wins
         // for row and path, and the header keeps its JSON value.
-        let different_created = created_utc - Duration::hours(48);
+        let different_created = created_utc - jiff::SignedDuration::from_hours(48);
         insert_engine_game(
             &engine_pool,
             "with-created",
-            fixture_game_json("with-created", different_created.timestamp_micros()),
+            fixture_game_json("with-created", different_created.as_microsecond()),
             created,
         )
         .await?;
@@ -1534,7 +1572,7 @@ mod tests {
         )
         .fetch_one(&pool)
         .await?;
-        assert_eq!(row.created_at, created_utc);
+        assert_eq!(row.created_at, cja::jiff_sqlx::Timestamp::from(created_utc));
         assert_eq!(
             row.gcs_path.as_deref(),
             Some("games/2021/05/05/with-created.json.zst")
@@ -1547,7 +1585,7 @@ mod tests {
         let export: serde_json::Value = serde_json::from_slice(&json)?;
         assert_eq!(
             export["game"]["Created"].as_i64(),
-            Some(different_created.timestamp_micros()),
+            Some(different_created.as_microsecond()),
             "header keeps its JSON value when both are present"
         );
         Ok(())
@@ -1557,15 +1595,21 @@ mod tests {
     #[sqlx::test(migrations = "../migrations")]
     async fn zero_frames_is_permanent(pool: sqlx::PgPool) -> cja::Result<()> {
         let (state, store, engine_pool) = engine_fixture(&pool).await?;
-        let created = chrono::NaiveDate::from_ymd_opt(2020, 7, 4)
+        let created = jiff::civil::Date::new(2020, 7, 4)
             .expect("date")
-            .and_hms_opt(0, 0, 0)
-            .expect("time");
+            .at(0, 0, 0, 0);
 
         insert_engine_game(
             &engine_pool,
             "no-frames",
-            fixture_game_json("no-frames", created.and_utc().timestamp_micros()),
+            fixture_game_json(
+                "no-frames",
+                created
+                    .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+                    .expect("in range")
+                    .timestamp()
+                    .as_microsecond(),
+            ),
             created,
         )
         .await?;

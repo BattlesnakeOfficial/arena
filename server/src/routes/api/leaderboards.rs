@@ -28,7 +28,7 @@ pub struct LeaderboardResponse {
     pub board_size: String,
     pub match_size: i32,
     pub active: bool,
-    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub created_at: jiff::Timestamp,
 }
 
 #[derive(Debug, Serialize)]
@@ -375,7 +375,7 @@ pub async fn delete_entry(
     leaderboard::set_disabled(
         &state.db,
         entry.leaderboard_entry_id,
-        Some(chrono::Utc::now()),
+        Some(jiff::Timestamp::now()),
     )
     .await
     .map_err(|e| {

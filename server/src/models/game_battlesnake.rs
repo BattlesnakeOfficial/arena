@@ -13,8 +13,8 @@ pub struct GameBattlesnake {
     pub game_id: Uuid,
     pub battlesnake_id: Option<Uuid>,
     pub placement: Option<i32>,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub created_at: jiff::Timestamp,
+    pub updated_at: jiff::Timestamp,
 }
 
 // For adding a battlesnake to a game
@@ -30,8 +30,10 @@ pub struct GameBattlesnakeWithDetails {
     pub game_id: Uuid,
     pub battlesnake_id: Uuid,
     pub placement: Option<i32>,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
+    #[sqlx(try_from = "cja::jiff_sqlx::Timestamp")]
+    pub created_at: jiff::Timestamp,
+    #[sqlx(try_from = "cja::jiff_sqlx::Timestamp")]
+    pub updated_at: jiff::Timestamp,
     // Battlesnake details
     pub name: String,
     pub url: String,
@@ -51,7 +53,7 @@ pub struct GameBattlesnakeWithDetails {
 /// viewer opts into spoilers (link-preview titles, social cards) lists snakes
 /// this way: the placement order `get_battlesnakes_by_game_id` returns would
 /// give the result away.
-pub fn join_order_key(snake: &GameBattlesnakeWithDetails) -> (chrono::DateTime<chrono::Utc>, Uuid) {
+pub fn join_order_key(snake: &GameBattlesnakeWithDetails) -> (jiff::Timestamp, Uuid) {
     (snake.created_at, snake.game_battlesnake_id)
 }
 
@@ -142,9 +144,9 @@ pub async fn get_games_by_battlesnake_id(
                 board_size,
                 game_type,
                 status,
-                enqueued_at: row.enqueued_at,
-                created_at: row.created_at,
-                updated_at: row.updated_at,
+                enqueued_at: row.enqueued_at.map(Into::into),
+                created_at: row.created_at.to_jiff(),
+                updated_at: row.updated_at.to_jiff(),
             })
         })
         .collect::<cja::Result<Vec<_>>>()?;
@@ -276,7 +278,7 @@ pub struct GameHistoryEntry {
     pub placement: Option<i32>,
     pub snake_count: i64,
     pub winner_name: Option<String>,
-    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub created_at: jiff::Timestamp,
 }
 
 impl GameHistoryEntry {
@@ -371,7 +373,7 @@ pub async fn get_game_history_for_battlesnake(
                 placement: row.placement,
                 snake_count: row.snake_count,
                 winner_name: row.winner_name,
-                created_at: row.created_at,
+                created_at: row.created_at.to_jiff(),
             })
         })
         .collect::<cja::Result<Vec<_>>>()?;

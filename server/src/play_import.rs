@@ -496,7 +496,9 @@ async fn read_play_accounts<'e, E: sqlx::PgExecutor<'e>>(
                 points: row.try_get("points")?,
                 points_high_score: row.try_get("points_high_score")?,
                 is_staff: row.try_get("is_staff")?,
-                play_created_at: row.try_get("play_created_at")?,
+                play_created_at: row
+                    .try_get::<Option<cja::jiff_sqlx::Timestamp>, _>("play_created_at")?
+                    .map(Into::into),
             })
         })
         .collect::<cja::Result<_>>()

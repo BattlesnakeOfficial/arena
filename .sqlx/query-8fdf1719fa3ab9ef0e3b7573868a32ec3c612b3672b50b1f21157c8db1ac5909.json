@@ -1,0 +1,31 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT date_trunc('week', day::timestamp)::date AS \"week_start!: cja::jiff_sqlx::Date\", COUNT(DISTINCT user_id) AS \"count!: i64\" FROM user_activity_days WHERE day >= $1 AND day < $2 GROUP BY 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "week_start!: cja::jiff_sqlx::Date",
+        "type_info": "Date",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "count!: i64",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Date",
+        "Date"
+      ]
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "8fdf1719fa3ab9ef0e3b7573868a32ec3c612b3672b50b1f21157c8db1ac5909"
+}

@@ -6,42 +6,90 @@
       {
         "ordinal": 0,
         "name": "snake_turn_id",
-        "type_info": "Uuid"
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "snake_turns",
+            "name": "snake_turn_id"
+          }
+        }
       },
       {
         "ordinal": 1,
         "name": "turn_id",
-        "type_info": "Uuid"
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "snake_turns",
+            "name": "turn_id"
+          }
+        }
       },
       {
         "ordinal": 2,
         "name": "game_battlesnake_id",
-        "type_info": "Uuid"
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "snake_turns",
+            "name": "game_battlesnake_id"
+          }
+        }
       },
       {
         "ordinal": 3,
         "name": "direction",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "snake_turns",
+            "name": "direction"
+          }
+        }
       },
       {
         "ordinal": 4,
         "name": "latency_ms",
-        "type_info": "Int4"
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "snake_turns",
+            "name": "latency_ms"
+          }
+        }
       },
       {
         "ordinal": 5,
         "name": "timed_out",
-        "type_info": "Bool"
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "snake_turns",
+            "name": "timed_out"
+          }
+        }
       },
       {
         "ordinal": 6,
         "name": "errored",
-        "type_info": "Bool"
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "snake_turns",
+            "name": "errored"
+          }
+        }
       },
       {
         "ordinal": 7,
         "name": "created_at",
-        "type_info": "Timestamptz"
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "snake_turns",
+            "name": "created_at"
+          }
+        }
       }
     ],
     "parameters": {

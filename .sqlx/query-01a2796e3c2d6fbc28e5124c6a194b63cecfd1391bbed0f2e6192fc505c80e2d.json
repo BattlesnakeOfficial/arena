@@ -6,47 +6,101 @@
       {
         "ordinal": 0,
         "name": "email",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "imported_accounts",
+            "name": "email"
+          }
+        }
       },
       {
         "ordinal": 1,
         "name": "username",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "imported_accounts",
+            "name": "username"
+          }
+        }
       },
       {
         "ordinal": 2,
         "name": "display_name",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "imported_accounts",
+            "name": "display_name"
+          }
+        }
       },
       {
         "ordinal": 3,
         "name": "pronouns",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "imported_accounts",
+            "name": "pronouns"
+          }
+        }
       },
       {
         "ordinal": 4,
         "name": "github_uid",
-        "type_info": "Int8"
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "imported_accounts",
+            "name": "github_uid"
+          }
+        }
       },
       {
         "ordinal": 5,
         "name": "github_login",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "imported_accounts",
+            "name": "github_login"
+          }
+        }
       },
       {
         "ordinal": 6,
         "name": "points",
-        "type_info": "Int4"
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "imported_accounts",
+            "name": "points"
+          }
+        }
       },
       {
         "ordinal": 7,
         "name": "is_staff",
-        "type_info": "Bool"
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "imported_accounts",
+            "name": "is_staff"
+          }
+        }
       },
       {
         "ordinal": 8,
         "name": "is_email_verified",
-        "type_info": "Bool"
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "imported_accounts",
+            "name": "is_email_verified"
+          }
+        }
       }
     ],
     "parameters": {

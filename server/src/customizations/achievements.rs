@@ -145,7 +145,7 @@ pub async fn earned_slugs(pool: &PgPool, user_id: Uuid) -> cja::Result<HashSet<S
 pub async fn earned_for_profile(
     pool: &PgPool,
     user_id: Uuid,
-) -> cja::Result<Vec<(Achievement, chrono::DateTime<chrono::Utc>)>> {
+) -> cja::Result<Vec<(Achievement, jiff::Timestamp)>> {
     let rows = sqlx::query!(
         "SELECT achievement, earned_at FROM achievement_earns
          WHERE user_id = $1
@@ -158,7 +158,8 @@ pub async fn earned_for_profile(
     Ok(rows
         .into_iter()
         .filter_map(|row| {
-            Achievement::from_slug(&row.achievement).map(|achievement| (achievement, row.earned_at))
+            Achievement::from_slug(&row.achievement)
+                .map(|achievement| (achievement, row.earned_at.to_jiff()))
         })
         .collect())
 }
@@ -448,7 +449,7 @@ struct ExistingGrant {
     customization_type: String,
     slug: String,
     source: String,
-    created_at: chrono::DateTime<chrono::Utc>,
+    created_at: jiff::Timestamp,
 }
 
 /// Insert a live earn record with game/snake/turn provenance. `earned_at`
@@ -502,7 +503,7 @@ async fn record_grant_earn(
     conn: &mut PgConnection,
     user_id: Uuid,
     achievement: Achievement,
-    earned_at: chrono::DateTime<chrono::Utc>,
+    earned_at: jiff::Timestamp,
 ) -> cja::Result<()> {
     sqlx::query!(
         r#"INSERT INTO achievement_earns (user_id, achievement, earned_at, live)
@@ -510,7 +511,7 @@ async fn record_grant_earn(
            ON CONFLICT (user_id, achievement) DO NOTHING"#,
         user_id,
         achievement.slug(),
-        earned_at,
+        cja::jiff_sqlx::Timestamp::from(earned_at),
     )
     .execute(&mut *conn)
     .await
@@ -768,7 +769,8 @@ async fn record_earns(
                     // fired over history: the fresh achievement-source
                     // grant is the earn proof, and the job-top statement
                     // would write this same row on the next tick anyway.
-                    record_grant_earn(&mut *conn, user_id, achievement, chrono::Utc::now()).await?;
+                    record_grant_earn(&mut *conn, user_id, achievement, jiff::Timestamp::now())
+                        .await?;
                 }
             }
             continue;
@@ -1941,7 +1943,7 @@ mod tests {
             .bind(full).execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO customization_grants (user_id, customization_type, slug, source) VALUES ($1, 'head', 'turtle', 'achievement'), ($1, 'head', 'judge', 'achievement')")
             .bind(partial).execute(&pool).await.unwrap();
-        let before: Vec<(Uuid, Uuid, String, String, String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+        let before: Vec<(Uuid, Uuid, String, String, String, cja::jiff_sqlx::Timestamp)> = sqlx::query_as(
             "SELECT customization_grant_id, user_id, customization_type, slug, source, created_at FROM customization_grants WHERE user_id IN ($1, $2) ORDER BY user_id, customization_type, slug"
         ).bind(full).bind(partial).fetch_all(&pool).await.unwrap();
         let full_win = game(&pool, "Standard", "finished", Some(3)).await;
@@ -1957,7 +1959,7 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(inserted, 2);
-        let after_live: Vec<(Uuid, Uuid, String, String, String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+        let after_live: Vec<(Uuid, Uuid, String, String, String, cja::jiff_sqlx::Timestamp)> = sqlx::query_as(
             "SELECT customization_grant_id, user_id, customization_type, slug, source, created_at FROM customization_grants WHERE user_id IN ($1, $2) AND slug IN ('turtle', 'judge') ORDER BY user_id, customization_type, slug"
         ).bind(full).bind(partial).fetch_all(&pool).await.unwrap();
         assert_eq!(after_live, before);
@@ -1966,7 +1968,7 @@ mod tests {
         sqlx::query("UPDATE achievement_backfill_cursor SET after_user_id = NULL, completed_at = NULL WHERE singleton = TRUE")
             .execute(&pool).await.unwrap();
         assert!(backfill_achievement_page(&pool).await.unwrap().complete);
-        let after_backfill: Vec<(Uuid, Uuid, String, String, String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+        let after_backfill: Vec<(Uuid, Uuid, String, String, String, cja::jiff_sqlx::Timestamp)> = sqlx::query_as(
             "SELECT customization_grant_id, user_id, customization_type, slug, source, created_at FROM customization_grants WHERE user_id IN ($1, $2) AND slug IN ('turtle', 'judge') ORDER BY user_id, customization_type, slug"
         ).bind(full).bind(partial).fetch_all(&pool).await.unwrap();
         assert_eq!(after_backfill, before);
@@ -2437,12 +2439,14 @@ mod tests {
                 .unwrap(),
             1
         );
-        let finished_at: chrono::DateTime<chrono::Utc> =
-            sqlx::query_scalar("SELECT finished_at FROM games WHERE game_id = $1")
-                .bind(game_id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+        let finished_at: jiff::Timestamp = sqlx::query_scalar::<_, cja::jiff_sqlx::Timestamp>(
+            "SELECT finished_at FROM games WHERE game_id = $1",
+        )
+        .bind(game_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+        .to_jiff();
         let row = sqlx::query!(
             "SELECT achievement, battlesnake_id, game_id, turn_number, live, earned_at FROM achievement_earns WHERE user_id = $1",
             owner,
@@ -2455,7 +2459,7 @@ mod tests {
         assert_eq!(row.game_id, Some(game_id));
         assert_eq!(row.turn_number, Some(7));
         assert!(row.live);
-        assert_eq!(row.earned_at, finished_at);
+        assert_eq!(row.earned_at, cja::jiff_sqlx::Timestamp::from(finished_at));
         let events = crate::test_capture::Capture::shared().events("achievement_earned", owner);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0]["slug"], "first_win");
@@ -2621,13 +2625,13 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(backfill_earns_from_grants(&pool).await.unwrap(), 2);
-        let full_grant_at: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+        let full_grant_at: jiff::Timestamp = sqlx::query_scalar::<_, cja::jiff_sqlx::Timestamp>(
             "SELECT MIN(created_at) FROM customization_grants WHERE user_id = $1 AND slug = 'turtle'",
         )
         .bind(full)
         .fetch_one(&pool)
         .await
-        .unwrap();
+        .unwrap().to_jiff();
         let full_row = sqlx::query!(
             "SELECT achievement, battlesnake_id, game_id, turn_number, live, earned_at FROM achievement_earns WHERE user_id = $1",
             full,
@@ -2640,14 +2644,18 @@ mod tests {
         assert!(full_row.battlesnake_id.is_none());
         assert!(full_row.game_id.is_none());
         assert!(full_row.turn_number.is_none());
-        assert_eq!(full_row.earned_at, full_grant_at);
-        let partial_grant_at: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+        assert_eq!(
+            full_row.earned_at,
+            cja::jiff_sqlx::Timestamp::from(full_grant_at)
+        );
+        let partial_grant_at: jiff::Timestamp = sqlx::query_scalar::<_, cja::jiff_sqlx::Timestamp>(
             "SELECT created_at FROM customization_grants WHERE user_id = $1 AND slug = 'judge'",
         )
         .bind(partial)
         .fetch_one(&pool)
         .await
-        .unwrap();
+        .unwrap()
+        .to_jiff();
         let partial_row = sqlx::query!(
             "SELECT achievement, earned_at FROM achievement_earns WHERE user_id = $1",
             partial,
@@ -2656,7 +2664,10 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(partial_row.achievement, "ladder_regular");
-        assert_eq!(partial_row.earned_at, partial_grant_at);
+        assert_eq!(
+            partial_row.earned_at,
+            cja::jiff_sqlx::Timestamp::from(partial_grant_at)
+        );
         let partial_tails: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM customization_grants WHERE user_id = $1 AND customization_type = 'tail'",
         )
@@ -2723,12 +2734,14 @@ mod tests {
         .unwrap();
         assert_eq!(row.achievement, "slow_and_steady");
         assert!(!row.live);
-        let completed_at: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
-            "SELECT completed_at FROM achievement_backfill_cursor WHERE singleton = TRUE",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let completed_at: Option<jiff::Timestamp> =
+            sqlx::query_scalar::<_, Option<cja::jiff_sqlx::Timestamp>>(
+                "SELECT completed_at FROM achievement_backfill_cursor WHERE singleton = TRUE",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .map(Into::into);
         assert!(completed_at.is_some());
     }
 
@@ -2861,14 +2874,19 @@ mod tests {
         assert!(row.battlesnake_id.is_none());
         assert!(row.game_id.is_none());
         assert!(row.turn_number.is_none());
-        let tail_grant_at: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+        let tail_grant_at: jiff::Timestamp = sqlx::query_scalar::<_, cja::jiff_sqlx::Timestamp>(
             "SELECT created_at FROM customization_grants WHERE user_id = $1 AND customization_type = 'tail' AND slug = 'monkey'",
         )
         .bind(partial)
         .fetch_one(&pool)
         .await
-        .unwrap();
-        let delta = (row.earned_at - tail_grant_at).num_milliseconds().abs();
+        .unwrap().to_jiff();
+        let delta = row
+            .earned_at
+            .to_jiff()
+            .duration_since(tail_grant_at)
+            .as_millis()
+            .abs();
         assert!(
             delta < 5_000,
             "crowd_pleaser earned_at {delta}ms from tail grant"
@@ -2903,7 +2921,7 @@ mod tests {
             }
         }
         assert_eq!(backfill_earns_from_grants(&pool).await.unwrap(), 0);
-        let rows_after: Vec<(String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+        let rows_after: Vec<(String, cja::jiff_sqlx::Timestamp)> = sqlx::query_as(
             "SELECT achievement, earned_at FROM achievement_earns WHERE user_id = $1 ORDER BY achievement",
         )
         .bind(partial)
@@ -3223,12 +3241,14 @@ mod tests {
             .run(state)
             .await
             .unwrap();
-        let completed_at: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
-            "SELECT completed_at FROM achievement_backfill_cursor WHERE singleton = TRUE",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let completed_at: Option<jiff::Timestamp> =
+            sqlx::query_scalar::<_, Option<cja::jiff_sqlx::Timestamp>>(
+                "SELECT completed_at FROM achievement_backfill_cursor WHERE singleton = TRUE",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .map(Into::into);
         assert!(completed_at.is_some());
         assert!(has(&grants(&pool, c).await, Head::KIND, "frog"));
         let earns: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM achievement_earns")
@@ -3259,14 +3279,15 @@ mod tests {
             assert!(!row.live);
             assert!(row.game_id.is_none());
             assert!(row.turn_number.is_none());
-            let grant_at: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+            let grant_at: jiff::Timestamp = sqlx::query_scalar::<_, cja::jiff_sqlx::Timestamp>(
                 "SELECT created_at FROM customization_grants WHERE user_id = $1 AND slug = 'frog'",
             )
             .bind(owner)
             .fetch_one(&pool)
             .await
-            .unwrap();
-            assert_eq!(row.earned_at, grant_at);
+            .unwrap()
+            .to_jiff();
+            assert_eq!(row.earned_at, cja::jiff_sqlx::Timestamp::from(grant_at));
         }
     }
 }

@@ -31,14 +31,14 @@ reqwest = { version = "0.12.12", features = [
   "multipart",
 ], default-features = false }
 
-cja = { version = "0.0.0", git = "https://github.com/coreyja/cja", rev = "10c36482a60865e960ef61e29510ab3b5ec94a42" }
+cja = { version = "0.0.0", git = "https://github.com/coreyja/cja", rev = "3765c6f80841a1ed821c008cba04fb3d44d293d8" }
 # Secrets from setec over an in-process tailnet node (DEV-1919).
-cja-secret = { git = "https://github.com/coreyja/cja", rev = "10c36482a60865e960ef61e29510ab3b5ec94a42", features = ["tailnet"] }
-sqlx = "0.8"
+cja-secret = { git = "https://github.com/coreyja/cja", rev = "3765c6f80841a1ed821c008cba04fb3d44d293d8", features = ["tailnet"] }
+sqlx = { version = "0.9", features = ["sqlx-toml"] }
 uuid = { version = "1.6.1", features = ["v4"] }
 time = "0.3.9"
 futures = "0.3.30"
-chrono = { version = "0.4.23", default-features = false, features = ["serde", "clock"] }
+jiff = { version = "1", features = ["serde"] }
 base64 = "0.21"
 base64ct = { version = "1.6", features = ["alloc"] }
 ring = "0.17"
@@ -57,8 +57,6 @@ thiserror = "1"
 hex = "0.4"
 serde_urlencoded = "0.7"
 clap = { version = "4", features = ["derive", "env"] }
-# Relative-time labels in notifications and leaderboard feeds.
-chrono-humanize = "0.2"
 
 skillratings = "0.28"
 rules = { path = "../rules" }
@@ -120,7 +118,7 @@ name = "stress-test"
 path = "src/bin/stress_test.rs"
 
 [build-dependencies]
-cja-build = { git = "https://github.com/coreyja/cja", rev = "10c36482a60865e960ef61e29510ab3b5ec94a42" }
+cja-build = { git = "https://github.com/coreyja/cja", rev = "3765c6f80841a1ed821c008cba04fb3d44d293d8" }
 vergen = { version = "8.3.1", features = [
   "build",
   "cargo",
@@ -130,7 +128,7 @@ vergen = { version = "8.3.1", features = [
 ] }
 
 [dev-dependencies]
-cja-secret = { git = "https://github.com/coreyja/cja", rev = "10c36482a60865e960ef61e29510ab3b5ec94a42", features = ["testing"] }
+cja-secret = { git = "https://github.com/coreyja/cja", rev = "3765c6f80841a1ed821c008cba04fb3d44d293d8", features = ["testing"] }
 tower = { version = "0.4.13", features = ["util"] }
 proptest = "1"
 wiremock = "0.6"

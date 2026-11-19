@@ -6,57 +6,123 @@
       {
         "ordinal": 0,
         "name": "match_id",
-        "type_info": "Uuid"
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "tournament_matches",
+            "name": "match_id"
+          }
+        }
       },
       {
         "ordinal": 1,
         "name": "tournament_id",
-        "type_info": "Uuid"
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "tournament_matches",
+            "name": "tournament_id"
+          }
+        }
       },
       {
         "ordinal": 2,
         "name": "round",
-        "type_info": "Int4"
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "tournament_matches",
+            "name": "round"
+          }
+        }
       },
       {
         "ordinal": 3,
         "name": "position",
-        "type_info": "Int4"
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "tournament_matches",
+            "name": "position"
+          }
+        }
       },
       {
         "ordinal": 4,
         "name": "status: MatchStatus",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "tournament_matches",
+            "name": "status"
+          }
+        }
       },
       {
         "ordinal": 5,
         "name": "next_match_id",
-        "type_info": "Uuid"
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "tournament_matches",
+            "name": "next_match_id"
+          }
+        }
       },
       {
         "ordinal": 6,
         "name": "winner_id",
-        "type_info": "Uuid"
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "tournament_matches",
+            "name": "winner_id"
+          }
+        }
       },
       {
         "ordinal": 7,
         "name": "visual_column",
-        "type_info": "Int4"
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "tournament_matches",
+            "name": "visual_column"
+          }
+        }
       },
       {
         "ordinal": 8,
         "name": "visual_row",
-        "type_info": "Int4"
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "tournament_matches",
+            "name": "visual_row"
+          }
+        }
       },
       {
         "ordinal": 9,
         "name": "created_at",
-        "type_info": "Timestamptz"
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "tournament_matches",
+            "name": "created_at"
+          }
+        }
       },
       {
         "ordinal": 10,
         "name": "updated_at",
-        "type_info": "Timestamptz"
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "tournament_matches",
+            "name": "updated_at"
+          }
+        }
       }
     ],
     "parameters": {

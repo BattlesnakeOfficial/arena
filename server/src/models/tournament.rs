@@ -287,8 +287,8 @@ pub struct Tournament {
     pub max_snakes_per_user: i32,
     pub required_participants: i32,
     pub current_round: i32,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub created_at: jiff::Timestamp,
+    pub updated_at: jiff::Timestamp,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -298,7 +298,7 @@ pub struct TournamentRegistration {
     pub battlesnake_id: Uuid,
     pub user_id: Uuid,
     pub seed: i32,
-    pub registered_at: chrono::DateTime<chrono::Utc>,
+    pub registered_at: jiff::Timestamp,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -312,8 +312,8 @@ pub struct TournamentMatch {
     pub winner_id: Option<Uuid>,
     pub visual_column: i32,
     pub visual_row: i32,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub created_at: jiff::Timestamp,
+    pub updated_at: jiff::Timestamp,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -327,7 +327,7 @@ pub struct MatchParticipant {
     pub source_match_id: Option<Uuid>,
     pub participant_type: ParticipantType,
     pub seed_position: Option<i32>,
-    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub created_at: jiff::Timestamp,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -338,7 +338,7 @@ pub struct MatchGame {
     pub game_number: i32,
     /// None while the game is running, or for a tie.
     pub winner_id: Option<Uuid>,
-    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub created_at: jiff::Timestamp,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -373,8 +373,8 @@ struct TournamentRow {
     max_snakes_per_user: i32,
     required_participants: i32,
     current_round: i32,
-    created_at: chrono::DateTime<chrono::Utc>,
-    updated_at: chrono::DateTime<chrono::Utc>,
+    created_at: jiff::Timestamp,
+    updated_at: jiff::Timestamp,
 }
 
 impl TryFrom<TournamentRow> for Tournament {
@@ -681,7 +681,7 @@ pub struct TournamentListItem {
     pub status: TournamentStatus,
     pub game_type: GameType,
     pub registration_count: i64,
-    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub created_at: jiff::Timestamp,
 }
 
 /// List tournaments visible to a viewer: all public tournaments, plus the
@@ -698,7 +698,7 @@ pub async fn list_visible_tournaments(
         status: TournamentStatus,
         game_type: String,
         registration_count: i64,
-        created_at: chrono::DateTime<chrono::Utc>,
+        created_at: jiff::Timestamp,
     }
 
     let rows = sqlx::query_as!(
@@ -1658,7 +1658,7 @@ where
 /// matches of canceled or otherwise ended tournaments.
 pub async fn find_stale_in_progress_matches(
     pool: &PgPool,
-    cutoff: chrono::DateTime<chrono::Utc>,
+    cutoff: jiff::Timestamp,
 ) -> cja::Result<Vec<Uuid>> {
     let match_ids = sqlx::query_scalar!(
         r#"
@@ -1670,7 +1670,7 @@ pub async fn find_stale_in_progress_matches(
           AND m.updated_at < $1
         ORDER BY m.updated_at ASC
         "#,
-        cutoff,
+        cja::jiff_sqlx::Timestamp::from(cutoff),
     )
     .fetch_all(pool)
     .await
@@ -1691,7 +1691,7 @@ pub async fn find_stale_in_progress_matches(
 /// `canceled` counts as finished, matching `count_unfinished_matches_in_round`.
 pub async fn find_in_progress_tournaments_with_finished_round(
     pool: &PgPool,
-    cutoff: chrono::DateTime<chrono::Utc>,
+    cutoff: jiff::Timestamp,
 ) -> cja::Result<Vec<Uuid>> {
     let tournament_ids = sqlx::query_scalar!(
         r#"
@@ -1704,7 +1704,7 @@ pub async fn find_in_progress_tournaments_with_finished_round(
            AND max(m.updated_at) < $1
         ORDER BY t.tournament_id
         "#,
-        cutoff,
+        cja::jiff_sqlx::Timestamp::from(cutoff),
     )
     .fetch_all(pool)
     .await
@@ -1738,7 +1738,7 @@ pub async fn find_in_progress_tournaments_with_finished_round(
 /// recovers it.
 pub async fn find_stale_scheduled_matches_in_started_rounds(
     pool: &PgPool,
-    cutoff: chrono::DateTime<chrono::Utc>,
+    cutoff: jiff::Timestamp,
 ) -> cja::Result<Vec<Uuid>> {
     let match_ids = sqlx::query_scalar!(
         r#"
@@ -1768,7 +1768,7 @@ pub async fn find_stale_scheduled_matches_in_started_rounds(
           )
         ORDER BY m.updated_at ASC
         "#,
-        cutoff,
+        cja::jiff_sqlx::Timestamp::from(cutoff),
     )
     .fetch_all(pool)
     .await

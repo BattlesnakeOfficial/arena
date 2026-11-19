@@ -6,42 +6,90 @@
       {
         "ordinal": 0,
         "name": "title",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "notifications",
+            "name": "title"
+          }
+        }
       },
       {
         "ordinal": 1,
         "name": "body",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "notifications",
+            "name": "body"
+          }
+        }
       },
       {
         "ordinal": 2,
         "name": "link",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "notifications",
+            "name": "link"
+          }
+        }
       },
       {
         "ordinal": 3,
         "name": "recipient_user",
-        "type_info": "Bool"
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "notification_emails",
+            "name": "recipient_user"
+          }
+        }
       },
       {
         "ordinal": 4,
         "name": "recipient_override",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "notification_emails",
+            "name": "recipient_override"
+          }
+        }
       },
       {
         "ordinal": 5,
         "name": "battlesnake_id",
-        "type_info": "Uuid"
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "notification_emails",
+            "name": "battlesnake_id"
+          }
+        }
       },
       {
         "ordinal": 6,
         "name": "text",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "notification_emails",
+            "name": "text"
+          }
+        }
       },
       {
         "ordinal": 7,
         "name": "html_body",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "notification_emails",
+            "name": "html_body"
+          }
+        }
       }
     ],
     "parameters": {

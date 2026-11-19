@@ -14,9 +14,9 @@ pub struct Session {
     pub flash_message: Option<String>,
     pub flash_type: Option<String>,
     pub is_cli_auth: bool,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
-    pub expires_at: chrono::DateTime<chrono::Utc>,
+    pub created_at: jiff::Timestamp,
+    pub updated_at: jiff::Timestamp,
+    pub expires_at: jiff::Timestamp,
 }
 
 // Constant for session cookie name
@@ -367,9 +367,9 @@ pub async fn get_session_with_user(
                 flash_message: row.flash_message,
                 flash_type: row.flash_type,
                 is_cli_auth: row.is_cli_auth,
-                created_at: row.created_at,
-                updated_at: row.updated_at,
-                expires_at: row.expires_at,
+                created_at: row.created_at.to_jiff(),
+                updated_at: row.updated_at.to_jiff(),
+                expires_at: row.expires_at.to_jiff(),
             };
 
             let user = if let Some(user_id) = row.user_user_id {
@@ -401,8 +401,8 @@ pub async fn get_session_with_user(
                     is_admin: row.is_admin.unwrap_or(false),
                     site_theme: row.site_theme.unwrap_or_else(|| "system".to_string()),
                     theater_theme: row.theater_theme.unwrap_or_else(|| "dark".to_string()),
-                    created_at: user_created_at,
-                    updated_at: user_updated_at,
+                    created_at: user_created_at.to_jiff(),
+                    updated_at: user_updated_at.to_jiff(),
                 })
             } else {
                 None

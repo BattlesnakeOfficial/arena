@@ -8,7 +8,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use chrono::Utc;
 use clap::Parser;
 use color_eyre::eyre::{Context as _, eyre};
 use reqwest::StatusCode;
@@ -648,7 +647,7 @@ impl CompletionDb {
             "INSERT INTO runs (run_id, started_at, base_url, pattern, duration_secs) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 run_id.to_string(),
-                Utc::now().to_rfc3339(),
+                jiff::Timestamp::now().to_string(),
                 base_url,
                 pattern,
                 duration_secs as i64,
@@ -683,7 +682,7 @@ impl CompletionDb {
             params![
                 game_id.to_string(),
                 run_id.to_string(),
-                Utc::now().to_rfc3339()
+                jiff::Timestamp::now().to_string()
             ],
         )?;
         Ok(())
@@ -734,11 +733,11 @@ impl CompletionDb {
         conn: &rusqlite::Connection,
         statuses: &[PollGameStatus],
     ) -> Result<(), rusqlite::Error> {
-        let now = Utc::now().to_rfc3339();
+        let now = jiff::Timestamp::now().to_string();
         for status in statuses {
-            let server_updated_at = status.updated_at.map(|dt| dt.to_rfc3339());
-            let enqueued_at = status.enqueued_at.map(|dt| dt.to_rfc3339());
-            let server_created_at = status.created_at.map(|dt| dt.to_rfc3339());
+            let server_updated_at = status.updated_at.map(|dt| dt.to_string());
+            let enqueued_at = status.enqueued_at.map(|dt| dt.to_string());
+            let server_created_at = status.created_at.map(|dt| dt.to_string());
 
             // Set first_seen_finished_at only on first transition to finished
             if status.status == "finished" {
@@ -793,7 +792,7 @@ impl CompletionDb {
             "INSERT INTO admin_stats_snapshots (run_id, captured_at, phase, jobs_ready, jobs_running, jobs_scheduled, jobs_total, games_waiting, games_running, games_finished, games_total, games_created_last_hour, games_finished_last_hour, avg_game_duration_secs, raw_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 run_id.to_string(),
-                Utc::now().to_rfc3339(),
+                jiff::Timestamp::now().to_string(),
                 phase,
                 stats.job_queue.ready,
                 stats.job_queue.running,
@@ -916,10 +915,10 @@ impl CompletionDb {
                 })?
                 .filter_map(|r| r.ok())
                 .filter_map(|(updated, enqueued)| {
-                    let updated = chrono::DateTime::parse_from_rfc3339(&updated).ok()?;
-                    let enqueued = chrono::DateTime::parse_from_rfc3339(&enqueued).ok()?;
-                    let diff = updated.signed_duration_since(enqueued);
-                    Some(diff.num_milliseconds() as f64)
+                    let updated = updated.parse::<jiff::Timestamp>().ok()?;
+                    let enqueued = enqueued.parse::<jiff::Timestamp>().ok()?;
+                    let diff = updated.duration_since(enqueued);
+                    Some(diff.as_millis() as f64)
                 })
                 .collect();
             (TimingSource::ServerSide, times)
@@ -936,10 +935,10 @@ impl CompletionDb {
                 })?
                 .filter_map(|r| r.ok())
                 .filter_map(|(finished, created)| {
-                    let finished = chrono::DateTime::parse_from_rfc3339(&finished).ok()?;
-                    let created = chrono::DateTime::parse_from_rfc3339(&created).ok()?;
-                    let diff = finished.signed_duration_since(created);
-                    Some(diff.num_milliseconds() as f64)
+                    let finished = finished.parse::<jiff::Timestamp>().ok()?;
+                    let created = created.parse::<jiff::Timestamp>().ok()?;
+                    let diff = finished.duration_since(created);
+                    Some(diff.as_millis() as f64)
                 })
                 .collect();
             (TimingSource::ClientObserved { poll_interval_secs }, times)
@@ -980,12 +979,10 @@ impl CompletionDb {
 
         let overall_duration_secs = match (&first_game_created, &last_game_finished) {
             (Some(first), Some(last)) => {
-                let first = chrono::DateTime::parse_from_rfc3339(first).ok();
-                let last = chrono::DateTime::parse_from_rfc3339(last).ok();
+                let first = (first).parse::<jiff::Timestamp>().ok();
+                let last = (last).parse::<jiff::Timestamp>().ok();
                 match (first, last) {
-                    (Some(f), Some(l)) => {
-                        Some(l.signed_duration_since(f).num_milliseconds() as f64 / 1000.0)
-                    }
+                    (Some(f), Some(l)) => Some(l.duration_since(f).as_millis() as f64 / 1000.0),
                     _ => None,
                 }
             }
@@ -1115,9 +1112,9 @@ impl CompletionDb {
 struct PollGameStatus {
     id: Uuid,
     status: String,
-    updated_at: Option<chrono::DateTime<chrono::Utc>>,
-    enqueued_at: Option<chrono::DateTime<chrono::Utc>>,
-    created_at: Option<chrono::DateTime<chrono::Utc>>,
+    updated_at: Option<jiff::Timestamp>,
+    enqueued_at: Option<jiff::Timestamp>,
+    created_at: Option<jiff::Timestamp>,
 }
 
 // ============================================================================
@@ -1782,9 +1779,9 @@ mod tests {
         let statuses = vec![PollGameStatus {
             id: game1,
             status: "running".to_string(),
-            updated_at: Some(Utc::now()),
-            enqueued_at: Some(Utc::now()),
-            created_at: Some(Utc::now()),
+            updated_at: Some(jiff::Timestamp::now()),
+            enqueued_at: Some(jiff::Timestamp::now()),
+            created_at: Some(jiff::Timestamp::now()),
         }];
         CompletionDb::update_game_statuses_sync(&conn, &statuses).unwrap();
 
@@ -1810,9 +1807,9 @@ mod tests {
         let statuses = vec![PollGameStatus {
             id: game1,
             status: "finished".to_string(),
-            updated_at: Some(Utc::now()),
-            enqueued_at: Some(Utc::now()),
-            created_at: Some(Utc::now()),
+            updated_at: Some(jiff::Timestamp::now()),
+            enqueued_at: Some(jiff::Timestamp::now()),
+            created_at: Some(jiff::Timestamp::now()),
         }];
         CompletionDb::update_game_statuses_sync(&conn, &statuses).unwrap();
 
@@ -1830,9 +1827,9 @@ mod tests {
         let statuses = vec![PollGameStatus {
             id: game1,
             status: "finished".to_string(),
-            updated_at: Some(Utc::now()),
-            enqueued_at: Some(Utc::now()),
-            created_at: Some(Utc::now()),
+            updated_at: Some(jiff::Timestamp::now()),
+            enqueued_at: Some(jiff::Timestamp::now()),
+            created_at: Some(jiff::Timestamp::now()),
         }];
         CompletionDb::update_game_statuses_sync(&conn, &statuses).unwrap();
 
@@ -1859,9 +1856,9 @@ mod tests {
         let statuses = vec![PollGameStatus {
             id: game1,
             status: "finished".to_string(),
-            updated_at: Some(Utc::now()),
-            enqueued_at: Some(Utc::now() - chrono::Duration::seconds(5)),
-            created_at: Some(Utc::now() - chrono::Duration::seconds(10)),
+            updated_at: Some(jiff::Timestamp::now()),
+            enqueued_at: Some(jiff::Timestamp::now() - jiff::SignedDuration::from_secs(5)),
+            created_at: Some(jiff::Timestamp::now() - jiff::SignedDuration::from_secs(10)),
         }];
         CompletionDb::update_game_statuses_sync(&conn, &statuses).unwrap();
 
@@ -1890,7 +1887,7 @@ mod tests {
             &[PollGameStatus {
                 id: game1,
                 status: "finished".to_string(),
-                updated_at: Some(Utc::now()),
+                updated_at: Some(jiff::Timestamp::now()),
                 enqueued_at: None,
                 created_at: None,
             }],

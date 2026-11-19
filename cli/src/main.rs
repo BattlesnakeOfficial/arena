@@ -685,15 +685,15 @@ fn print_snake_details(snake: &serde_json::Value) {
     print_field("Visibility", &status_colored(visibility));
 
     if let Some(created) = snake["created_at"].as_str()
-        && let Ok(dt) = chrono::DateTime::parse_from_rfc3339(created)
+        && let Ok(dt) = (created).parse::<jiff::Timestamp>()
     {
-        print_field("Created", &format_timestamp(dt.with_timezone(&chrono::Utc)));
+        print_field("Created", &format_timestamp(dt));
     }
 
     if let Some(updated) = snake["updated_at"].as_str()
-        && let Ok(dt) = chrono::DateTime::parse_from_rfc3339(updated)
+        && let Ok(dt) = (updated).parse::<jiff::Timestamp>()
     {
-        print_field("Updated", &format_timestamp(dt.with_timezone(&chrono::Utc)));
+        print_field("Updated", &format_timestamp(dt));
     }
 }
 

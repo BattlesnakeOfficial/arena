@@ -13,15 +13,13 @@
 //! `play_shutdown_notices` row is written before the email goes out. Nothing
 //! sends unless `PLAY_SHUTDOWN_NOTICES_ENABLED=true`.
 
-use std::collections::HashMap;
-
-use chrono::{DateTime, Utc};
 use cja::jobs::Job;
 use color_eyre::eyre::Context as _;
 use maud::html;
 use ring::hmac;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
+use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::{
@@ -81,7 +79,7 @@ impl Wave {
 
     /// 10:00 ET on Mon Nov 2, Mon Nov 16 and Sun Nov 29, 2026 (15:00 UTC; ET is UTC-5 after
     /// Nov 1).
-    pub fn starts_at(self) -> DateTime<Utc> {
+    pub fn starts_at(self) -> jiff::Timestamp {
         at_unix(match self {
             Wave::First => 1_793_631_600,  // 2026-11-02T15:00:00Z
             Wave::Second => 1_794_841_200, // 2026-11-16T15:00:00Z
@@ -91,7 +89,7 @@ impl Wave {
 
     /// Each wave sends until the next one starts; the final wave stops when
     /// play.battlesnake.com starts redirecting.
-    pub fn ends_at(self) -> DateTime<Utc> {
+    pub fn ends_at(self) -> jiff::Timestamp {
         match self {
             Wave::First => Wave::Second.starts_at(),
             Wave::Second => Wave::Final.starts_at(),
@@ -100,7 +98,7 @@ impl Wave {
     }
 
     /// The wave being sent at `now`, if any.
-    pub fn current(now: DateTime<Utc>) -> Option<Wave> {
+    pub fn current(now: jiff::Timestamp) -> Option<Wave> {
         Wave::ALL
             .into_iter()
             .find(|wave| wave.starts_at() <= now && now < wave.ends_at())
@@ -127,12 +125,12 @@ impl Wave {
 
 /// Midnight ET on Nov 30, 2026, when play.battlesnake.com starts
 /// redirecting.
-pub fn redirect_at() -> DateTime<Utc> {
+pub fn redirect_at() -> jiff::Timestamp {
     at_unix(1_796_014_800) // 2026-11-30T05:00:00Z
 }
 
-fn at_unix(seconds: i64) -> DateTime<Utc> {
-    DateTime::UNIX_EPOCH + chrono::TimeDelta::seconds(seconds)
+fn at_unix(seconds: i64) -> jiff::Timestamp {
+    jiff::Timestamp::UNIX_EPOCH + jiff::SignedDuration::from_secs(seconds)
 }
 
 /// One of a player's snakes that is on at least one active play leaderboard.
@@ -656,7 +654,7 @@ impl Job<AppState> for PlayShutdownNoticeJob {
         if !app_state.config.play_shutdown_notices_enabled {
             return Ok(());
         }
-        let Some(wave) = Wave::current(Utc::now()) else {
+        let Some(wave) = Wave::current(jiff::Timestamp::now()) else {
             return Ok(());
         };
         let Some(play) =
@@ -705,7 +703,7 @@ mod tests {
 
     #[test]
     fn waves_run_from_nov_2_until_the_redirect() {
-        let at = |s: &str| s.parse::<DateTime<Utc>>().unwrap();
+        let at = |s: &str| s.parse::<jiff::Timestamp>().unwrap();
         assert_eq!(Wave::current(at("2026-11-02T14:59:59Z")), None);
         assert_eq!(Wave::current(at("2026-11-02T15:00:00Z")), Some(Wave::First));
         assert_eq!(Wave::current(at("2026-11-16T14:59:59Z")), Some(Wave::First));
@@ -718,16 +716,20 @@ mod tests {
         assert_eq!(Wave::current(at("2026-11-30T05:00:00Z")), None);
 
         // Every wave starts at 10:00 Eastern, and the redirect is midnight.
-        let eastern = |t: DateTime<Utc>| t.with_timezone(&cja::chrono_tz::America::New_York);
+        let eastern = |t: jiff::Timestamp| {
+            t.to_zoned_datetime(jiff::tz::TimeZone::get("America/New_York").expect("bundled tzdb"))
+        };
         for wave in Wave::ALL {
             assert_eq!(
-                eastern(wave.starts_at()).format("%H:%M").to_string(),
+                eastern(wave.starts_at()).strftime("%H:%M").to_string(),
                 "10:00"
             );
             assert_eq!(Wave::from_number(wave.number()), Some(wave));
         }
         assert_eq!(
-            eastern(redirect_at()).format("%Y-%m-%d %H:%M").to_string(),
+            eastern(redirect_at())
+                .strftime("%Y-%m-%d %H:%M")
+                .to_string(),
             "2026-11-30 00:00"
         );
     }
@@ -1285,13 +1287,13 @@ mod tests {
 
         assert_eq!(send(Method::POST, token.clone()).await, StatusCode::OK);
         assert_eq!(send(Method::GET, token).await, StatusCode::OK);
-        let unsubscribed: Option<DateTime<Utc>> = sqlx::query_scalar(
+        let unsubscribed: Option<jiff::Timestamp> = sqlx::query_scalar::<_, Option<cja::jiff_sqlx::Timestamp>>(
             "SELECT shutdown_notices_unsubscribed_at FROM imported_accounts WHERE imported_account_id = $1",
         )
         .bind(id)
         .fetch_one(&pool)
         .await
-        .unwrap();
+        .unwrap().map(Into::into);
         assert!(unsubscribed.is_some());
     }
 

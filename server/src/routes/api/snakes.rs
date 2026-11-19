@@ -29,8 +29,8 @@ pub struct SnakeResponse {
     url: Option<String>,
     is_public: bool,
     engine_region: EngineRegion,
-    created_at: chrono::DateTime<chrono::Utc>,
-    updated_at: chrono::DateTime<chrono::Utc>,
+    created_at: jiff::Timestamp,
+    updated_at: jiff::Timestamp,
 }
 
 impl SnakeResponse {

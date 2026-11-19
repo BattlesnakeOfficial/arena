@@ -24,8 +24,8 @@ pub struct Tag {
     pub tag_id: Uuid,
     pub name: String,
     pub category: TagCategory,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub created_at: jiff::Timestamp,
+    pub updated_at: jiff::Timestamp,
 }
 
 // The full catalog, grouped by category for form rendering
@@ -130,8 +130,8 @@ pub async fn get_tags_for_battlesnakes(
             tag_id: r.tag_id,
             name: r.name,
             category: r.category,
-            created_at: r.created_at,
-            updated_at: r.updated_at,
+            created_at: r.created_at.to_jiff(),
+            updated_at: r.updated_at.to_jiff(),
         });
     }
     Ok(map)

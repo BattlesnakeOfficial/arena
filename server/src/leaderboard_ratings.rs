@@ -1015,7 +1015,9 @@ mod tests {
         );
 
         // The REAL migration file — not a copy.
-        sqlx::raw_sql(migration_sql).execute(pool).await?;
+        sqlx::raw_sql(sqlx::AssertSqlSafe(migration_sql.to_owned()))
+            .execute(pool)
+            .await?;
 
         let after = read_counters(pool, &ids).await?;
         assert_eq!(
@@ -1024,7 +1026,9 @@ mod tests {
         );
 
         // Idempotent: a second run changes nothing.
-        sqlx::raw_sql(migration_sql).execute(pool).await?;
+        sqlx::raw_sql(sqlx::AssertSqlSafe(migration_sql.to_owned()))
+            .execute(pool)
+            .await?;
         let again = read_counters(pool, &ids).await?;
         assert_eq!(again, before, "repair is idempotent");
 

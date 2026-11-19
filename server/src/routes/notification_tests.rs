@@ -3,7 +3,6 @@ use axum::{
     http::{Request, StatusCode, header},
     response::Response,
 };
-use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use tower::ServiceExt as _;
 use uuid::Uuid;
@@ -78,12 +77,12 @@ impl Fixture {
         kind: &str,
         visible: bool,
         link: Option<&str>,
-        created_at: DateTime<Utc>,
+        created_at: jiff::Timestamp,
     ) -> Uuid {
         sqlx::query_scalar(
             "INSERT INTO notifications (user_id, kind, title, body, link, in_app_visible, created_at) VALUES ($1, $2, $3, 'A test body', $4, $5, $6) RETURNING notification_id"
         )
-        .bind(owner).bind(kind).bind(title).bind(link).bind(visible).bind(created_at)
+        .bind(owner).bind(kind).bind(title).bind(link).bind(visible).bind(cja::jiff_sqlx::Timestamp::from(created_at))
         .fetch_one(&self.state.db).await.unwrap()
     }
 
@@ -101,8 +100,8 @@ impl Fixture {
     }
 }
 
-fn now() -> DateTime<Utc> {
-    Utc::now()
+fn now() -> jiff::Timestamp {
+    jiff::Timestamp::now()
 }
 
 #[sqlx::test(migrations = "../migrations")]
@@ -308,7 +307,7 @@ async fn pagination_and_no_js_actions(pool: PgPool) {
     let base = now();
     let mut ids = Vec::new();
     for index in 0..22 {
-        let created_at = base - chrono::Duration::seconds(i64::from(index / 2));
+        let created_at = base - jiff::SignedDuration::from_secs(i64::from(index / 2));
         ids.push(
             fx.seed(
                 fx.user_id,
@@ -415,7 +414,7 @@ async fn pagination_and_no_js_actions(pool: PgPool) {
         "snake_matchmaking_paused",
         true,
         None,
-        base + chrono::Duration::seconds(1),
+        base + jiff::SignedDuration::from_secs(1),
     )
     .await;
     let next = fx.get_html(&href).await;
@@ -432,17 +431,16 @@ async fn pagination_and_no_js_actions(pool: PgPool) {
         assert!(next.contains(&format!("/notifications/{id}/open")));
     }
     let oldest = expected.last().unwrap().1;
-    let oldest_at: DateTime<Utc> =
-        sqlx::query_scalar("SELECT created_at FROM notifications WHERE notification_id = $1")
-            .bind(oldest)
-            .fetch_one(&fx.state.db)
-            .await
-            .unwrap();
+    let oldest_at: jiff::Timestamp = sqlx::query_scalar::<_, cja::jiff_sqlx::Timestamp>(
+        "SELECT created_at FROM notifications WHERE notification_id = $1",
+    )
+    .bind(oldest)
+    .fetch_one(&fx.state.db)
+    .await
+    .unwrap()
+    .to_jiff();
     let exhausted_query = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair(
-            "before",
-            &oldest_at.to_rfc3339_opts(chrono::SecondsFormat::Micros, true),
-        )
+        .append_pair("before", &format!("{:.6}", oldest_at))
         .append_pair("before_id", &oldest.to_string())
         .finish();
     let exhausted_page = fx
@@ -481,24 +479,30 @@ async fn pagination_and_no_js_actions(pool: PgPool) {
         .await;
     assert_eq!(response.status(), StatusCode::SEE_OTHER);
     assert_eq!(response.headers()[header::LOCATION], "/me");
-    let first_read: Option<DateTime<Utc>> =
-        sqlx::query_scalar("SELECT read_at FROM notifications WHERE notification_id = $1")
-            .bind(ids[0])
-            .fetch_one(&fx.state.db)
-            .await
-            .unwrap();
+    let first_read: Option<jiff::Timestamp> =
+        sqlx::query_scalar::<_, Option<cja::jiff_sqlx::Timestamp>>(
+            "SELECT read_at FROM notifications WHERE notification_id = $1",
+        )
+        .bind(ids[0])
+        .fetch_one(&fx.state.db)
+        .await
+        .unwrap()
+        .map(Into::into);
     assert!(first_read.is_some());
     let after_open: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM notifications WHERE user_id = $1 AND in_app_visible AND read_at IS NULL AND kind = 'snake_matchmaking_paused'")
         .bind(fx.user_id).fetch_one(&fx.state.db).await.unwrap();
     assert_eq!(after_open, before_open - 1);
     fx.request("POST", &format!("/notifications/{}/open", ids[0]), true, "")
         .await;
-    let second_read: Option<DateTime<Utc>> =
-        sqlx::query_scalar("SELECT read_at FROM notifications WHERE notification_id = $1")
-            .bind(ids[0])
-            .fetch_one(&fx.state.db)
-            .await
-            .unwrap();
+    let second_read: Option<jiff::Timestamp> =
+        sqlx::query_scalar::<_, Option<cja::jiff_sqlx::Timestamp>>(
+            "SELECT read_at FROM notifications WHERE notification_id = $1",
+        )
+        .bind(ids[0])
+        .fetch_one(&fx.state.db)
+        .await
+        .unwrap()
+        .map(Into::into);
     assert_eq!(first_read, second_read);
     for id in [foreign, hidden, disabled] {
         assert_eq!(
@@ -509,12 +513,15 @@ async fn pagination_and_no_js_actions(pool: PgPool) {
         );
     }
     for id in [hidden, disabled] {
-        let read_at: Option<DateTime<Utc>> =
-            sqlx::query_scalar("SELECT read_at FROM notifications WHERE notification_id = $1")
-                .bind(id)
-                .fetch_one(&fx.state.db)
-                .await
-                .unwrap();
+        let read_at: Option<jiff::Timestamp> =
+            sqlx::query_scalar::<_, Option<cja::jiff_sqlx::Timestamp>>(
+                "SELECT read_at FROM notifications WHERE notification_id = $1",
+            )
+            .bind(id)
+            .fetch_one(&fx.state.db)
+            .await
+            .unwrap()
+            .map(Into::into);
         assert!(read_at.is_none());
     }
     assert_eq!(
@@ -529,26 +536,35 @@ async fn pagination_and_no_js_actions(pool: PgPool) {
     assert_eq!(response.status(), StatusCode::SEE_OTHER);
     assert_eq!(response.headers()[header::LOCATION], "/notifications");
     assert_eq!(fx.badge().await, 0);
-    let foreign_read: Option<DateTime<Utc>> =
-        sqlx::query_scalar("SELECT read_at FROM notifications WHERE notification_id = $1")
-            .bind(foreign)
-            .fetch_one(&fx.state.db)
-            .await
-            .unwrap();
+    let foreign_read: Option<jiff::Timestamp> =
+        sqlx::query_scalar::<_, Option<cja::jiff_sqlx::Timestamp>>(
+            "SELECT read_at FROM notifications WHERE notification_id = $1",
+        )
+        .bind(foreign)
+        .fetch_one(&fx.state.db)
+        .await
+        .unwrap()
+        .map(Into::into);
     assert!(foreign_read.is_none());
-    let hidden_read: Option<DateTime<Utc>> =
-        sqlx::query_scalar("SELECT read_at FROM notifications WHERE notification_id = $1")
-            .bind(hidden)
-            .fetch_one(&fx.state.db)
-            .await
-            .unwrap();
+    let hidden_read: Option<jiff::Timestamp> =
+        sqlx::query_scalar::<_, Option<cja::jiff_sqlx::Timestamp>>(
+            "SELECT read_at FROM notifications WHERE notification_id = $1",
+        )
+        .bind(hidden)
+        .fetch_one(&fx.state.db)
+        .await
+        .unwrap()
+        .map(Into::into);
     assert!(hidden_read.is_some());
-    let disabled_read: Option<DateTime<Utc>> =
-        sqlx::query_scalar("SELECT read_at FROM notifications WHERE notification_id = $1")
-            .bind(disabled)
-            .fetch_one(&fx.state.db)
-            .await
-            .unwrap();
+    let disabled_read: Option<jiff::Timestamp> =
+        sqlx::query_scalar::<_, Option<cja::jiff_sqlx::Timestamp>>(
+            "SELECT read_at FROM notifications WHERE notification_id = $1",
+        )
+        .bind(disabled)
+        .fetch_one(&fx.state.db)
+        .await
+        .unwrap()
+        .map(Into::into);
     assert!(disabled_read.is_some());
     fx.request(
         "POST",
@@ -666,12 +682,15 @@ async fn current_preference_filters_every_surface(pool: PgPool) {
             .status(),
         StatusCode::SEE_OTHER
     );
-    let first_read: Option<DateTime<Utc>> =
-        sqlx::query_scalar("SELECT read_at FROM notifications WHERE notification_id = $1")
-            .bind(id)
-            .fetch_one(&fx.state.db)
-            .await
-            .unwrap();
+    let first_read: Option<jiff::Timestamp> =
+        sqlx::query_scalar::<_, Option<cja::jiff_sqlx::Timestamp>>(
+            "SELECT read_at FROM notifications WHERE notification_id = $1",
+        )
+        .bind(id)
+        .fetch_one(&fx.state.db)
+        .await
+        .unwrap()
+        .map(Into::into);
     assert!(first_read.is_some());
     assert_eq!(fx.badge().await, 1);
     let response = fx
@@ -701,12 +720,15 @@ async fn current_preference_filters_every_surface(pool: PgPool) {
             .status(),
         StatusCode::NOT_FOUND
     );
-    let while_disabled: Option<DateTime<Utc>> =
-        sqlx::query_scalar("SELECT read_at FROM notifications WHERE notification_id = $1")
-            .bind(id)
-            .fetch_one(&fx.state.db)
-            .await
-            .unwrap();
+    let while_disabled: Option<jiff::Timestamp> =
+        sqlx::query_scalar::<_, Option<cja::jiff_sqlx::Timestamp>>(
+            "SELECT read_at FROM notifications WHERE notification_id = $1",
+        )
+        .bind(id)
+        .fetch_one(&fx.state.db)
+        .await
+        .unwrap()
+        .map(Into::into);
     assert_eq!(while_disabled, first_read);
     let snapshot_hidden = notifications::record(
         &fx.state.db,
@@ -740,12 +762,15 @@ async fn current_preference_filters_every_surface(pool: PgPool) {
     let page = fx.get_html("/notifications").await;
     assert!(page.contains("Toggleable notice"));
     assert!(!page.contains("Recorded while off"));
-    let after_enable: Option<DateTime<Utc>> =
-        sqlx::query_scalar("SELECT read_at FROM notifications WHERE notification_id = $1")
-            .bind(id)
-            .fetch_one(&fx.state.db)
-            .await
-            .unwrap();
+    let after_enable: Option<jiff::Timestamp> =
+        sqlx::query_scalar::<_, Option<cja::jiff_sqlx::Timestamp>>(
+            "SELECT read_at FROM notifications WHERE notification_id = $1",
+        )
+        .bind(id)
+        .fetch_one(&fx.state.db)
+        .await
+        .unwrap()
+        .map(Into::into);
     assert_eq!(after_enable, first_read);
     assert_eq!(
         fx.request(

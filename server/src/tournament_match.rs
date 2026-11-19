@@ -201,8 +201,8 @@ pub async fn run_match(app_state: &AppState, match_id: Uuid) -> cja::Result<()> 
         let last_activity = crate::models::game::get_game_last_activity(pool, match_game.game_id)
             .await?
             .unwrap_or(game.updated_at);
-        let stalled = chrono::Utc::now() - last_activity
-            > chrono::Duration::minutes(GAME_STALL_THRESHOLD_MINUTES);
+        let stalled = jiff::Timestamp::now() - last_activity
+            > jiff::SignedDuration::from_mins(GAME_STALL_THRESHOLD_MINUTES);
 
         if stalled {
             // A live job still owns this game — including one parked deep in
@@ -355,7 +355,7 @@ pub async fn run_match(app_state: &AppState, match_id: Uuid) -> cja::Result<()> 
         })?;
     }
 
-    crate::models::game::set_game_enqueued_at_tx(&mut tx, game.game_id, chrono::Utc::now())
+    crate::models::game::set_game_enqueued_at_tx(&mut tx, game.game_id, jiff::Timestamp::now())
         .await
         .wrap_err("Failed to set enqueued_at")?;
 
@@ -675,9 +675,9 @@ pub(crate) fn is_unique_violation(err: &color_eyre::eyre::Report, constraint: &s
 /// rate-limit window exactly like the original job would (see
 /// `record_game_creation_attempt`) — no new behavior.
 pub async fn sweep_stuck_matches(app_state: &AppState) -> cja::Result<()> {
-    let now = chrono::Utc::now();
-    let match_cutoff = now - chrono::Duration::minutes(MATCH_STALE_MINUTES);
-    let round_cutoff = now - chrono::Duration::minutes(ROUND_STALE_MINUTES);
+    let now = jiff::Timestamp::now();
+    let match_cutoff = now - jiff::SignedDuration::from_mins(MATCH_STALE_MINUTES);
+    let round_cutoff = now - jiff::SignedDuration::from_mins(ROUND_STALE_MINUTES);
 
     let match_ids = find_stale_in_progress_matches(&app_state.db, match_cutoff).await?;
     for match_id in match_ids {
@@ -861,7 +861,7 @@ mod tests {
             source_match_id: None,
             participant_type: crate::models::tournament::ParticipantType::Seed,
             seed_position: Some(i32::from(slot)),
-            created_at: chrono::Utc::now(),
+            created_at: jiff::Timestamp::now(),
         }
     }
 
@@ -1381,11 +1381,12 @@ mod tests {
         )
         .await?;
 
-        let cutoff = chrono::Utc::now() - chrono::Duration::minutes(MATCH_STALE_MINUTES);
+        let cutoff = jiff::Timestamp::now() - jiff::SignedDuration::from_mins(MATCH_STALE_MINUTES);
         let stale = find_stale_in_progress_matches(&pool, cutoff).await?;
         assert_eq!(stale, vec![stale_match.match_id]);
 
-        let round_cutoff = chrono::Utc::now() - chrono::Duration::minutes(ROUND_STALE_MINUTES);
+        let round_cutoff =
+            jiff::Timestamp::now() - jiff::SignedDuration::from_mins(ROUND_STALE_MINUTES);
         assert!(
             find_stale_scheduled_matches_in_started_rounds(&pool, round_cutoff)
                 .await?
@@ -1714,7 +1715,8 @@ mod tests {
         // status filter is the finished-round query's only exclusion. The
         // scheduled query skips this match on its own `completed` status;
         // the next test pins that query's status filter.
-        let round_cutoff = chrono::Utc::now() - chrono::Duration::minutes(ROUND_STALE_MINUTES);
+        let round_cutoff =
+            jiff::Timestamp::now() - jiff::SignedDuration::from_mins(ROUND_STALE_MINUTES);
         assert!(
             find_in_progress_tournaments_with_finished_round(&pool, round_cutoff)
                 .await?
@@ -1762,7 +1764,8 @@ mod tests {
         backdate_match_updated_at(&pool, a.match_id).await?;
         backdate_match_updated_at(&pool, b.match_id).await?;
 
-        let round_cutoff = chrono::Utc::now() - chrono::Duration::minutes(ROUND_STALE_MINUTES);
+        let round_cutoff =
+            jiff::Timestamp::now() - jiff::SignedDuration::from_mins(ROUND_STALE_MINUTES);
         assert!(
             find_stale_scheduled_matches_in_started_rounds(&pool, round_cutoff)
                 .await?

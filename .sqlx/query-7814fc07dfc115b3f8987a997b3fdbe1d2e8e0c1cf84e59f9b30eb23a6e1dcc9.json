@@ -6,12 +6,19 @@
       {
         "ordinal": 0,
         "name": "display_score_after!",
-        "type_info": "Float8"
+        "type_info": "Float8",
+        "origin": "Expression"
       },
       {
         "ordinal": 1,
         "name": "game_created_at!",
-        "type_info": "Timestamptz"
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_games",
+            "name": "created_at"
+          }
+        }
       }
     ],
     "parameters": {

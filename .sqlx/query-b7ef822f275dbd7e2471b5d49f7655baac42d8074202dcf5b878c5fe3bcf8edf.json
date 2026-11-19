@@ -6,7 +6,13 @@
       {
         "ordinal": 0,
         "name": "archived_at",
-        "type_info": "Timestamptz"
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "games",
+            "name": "archived_at"
+          }
+        }
       }
     ],
     "parameters": {

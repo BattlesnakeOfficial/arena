@@ -55,7 +55,7 @@ async fn run_matchmaker_for_leaderboard(app_state: &AppState, lb: &Leaderboard) 
     if backlog.backlog_count > 0 {
         tracing::warn!(leaderboard_id = %leaderboard_id, leaderboard_name = %lb.name,
             backlog_count = backlog.backlog_count,
-            oldest_unclaimed_job_age_secs = backlog.oldest_job_at.map(|at| (chrono::Utc::now() - at).num_seconds().max(0)).unwrap_or(0),
+            oldest_unclaimed_job_age_secs = backlog.oldest_job_at.map(|at| jiff::Timestamp::now().duration_since(at.to_jiff()).as_secs().max(0)).unwrap_or(0),
             "Skipping matchmaker round: old unclaimed runner jobs remain");
         return Ok(());
     }
@@ -165,10 +165,7 @@ pub async fn dispatch_pending_ladder_games(app_state: &AppState) -> cja::Result<
         .iter()
         .filter(|g| g.status == "waiting" && g.leaderboard_id.is_some() && g.disabled_at.is_none())
     {
-        let held_age = snapshot
-            .at
-            .signed_duration_since(waiting.created_at)
-            .num_seconds();
+        let held_age = snapshot.at.duration_since(waiting.created_at).as_secs();
         if held_age < app_state.config.ladder_start_deadline_secs {
             continue;
         }
@@ -256,7 +253,8 @@ pub async fn dispatch_pending_ladder_games(app_state: &AppState) -> cja::Result<
             )
             .fetch_one(&mut *tx)
             .await
-            .wrap_err("Failed to record ladder dispatch")?;
+            .wrap_err("Failed to record ladder dispatch")?
+            .to_jiff();
             tx.commit().await.wrap_err("Failed to commit ladder dispatch")?;
             tracing::info!(event_type = "ladder_game_eligible", game_id = %candidate.game_id,
                 leaderboard_id = ?candidate.leaderboard_id,
@@ -409,8 +407,8 @@ mod tests {
             non_first_finishes: 0,
             disabled_at: None,
             disabled_reason: None,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
+            created_at: jiff::Timestamp::now(),
+            updated_at: jiff::Timestamp::now(),
         }
     }
 
@@ -581,8 +579,8 @@ mod tests {
         name: &str,
         snake_count: usize,
     ) -> cja::Result<(Leaderboard, std::collections::HashSet<Uuid>)> {
-        let lb = sqlx::query_as!(
-            Leaderboard,
+        let lb: Leaderboard = sqlx::query_as!(
+            crate::models::leaderboard::LeaderboardRow,
             r#"SELECT leaderboard_id, name, game_type, board_size, match_size,
                       visibility as "visibility: crate::models::battlesnake::Visibility",
                       disabled_at, created_at, updated_at
@@ -590,7 +588,8 @@ mod tests {
             name,
         )
         .fetch_one(pool)
-        .await?;
+        .await?
+        .into();
         let user_id = sqlx::query_scalar!(
             "INSERT INTO users (external_github_id, github_login)
              VALUES (88010, 'mode-owner') RETURNING user_id",
@@ -766,11 +765,11 @@ mod tests {
     async fn old_waiting_game_does_not_block_round(pool: sqlx::PgPool) -> cja::Result<()> {
         let (lb, ids) = seeded_mode(&pool, "Standard 11x11", 4).await?;
         let game_id = insert_backlog_game(&pool, lb.leaderboard_id, true).await?;
-        let old_enqueued_at = chrono::Utc::now()
-            - chrono::Duration::seconds((2 * MATCHMAKER_INTERVAL_SECS + 1) as i64);
+        let old_enqueued_at = jiff::Timestamp::now()
+            - jiff::SignedDuration::from_secs((2 * MATCHMAKER_INTERVAL_SECS + 1) as i64);
         sqlx::query!(
             "UPDATE games SET enqueued_at = $1 WHERE game_id = $2",
-            old_enqueued_at,
+            cja::jiff_sqlx::Timestamp::from(old_enqueued_at),
             game_id,
         )
         .execute(&pool)
@@ -1076,7 +1075,10 @@ mod tests {
         .fetch_one(&pool)
         .await?;
         assert!(
-            row.enqueued_at - row.created_at >= chrono::Duration::seconds(299),
+            row.enqueued_at
+                .to_jiff()
+                .duration_since(row.created_at.to_jiff())
+                >= jiff::SignedDuration::from_secs(299),
             "enqueued_at must be the dispatch time, not round creation"
         );
         match game::claim_game_start(&pool, game_id, 480).await? {
@@ -1085,7 +1087,7 @@ mod tests {
                 wait_ms,
                 ..
             } => {
-                assert_eq!(enqueued_at, Some(row.enqueued_at));
+                assert_eq!(enqueued_at, Some(row.enqueued_at.to_jiff()));
                 assert!(wait_ms >= 300_000, "wait_ms still carries the whole hold");
             }
             other => panic!("expected a start, got {other:?}"),
@@ -1169,7 +1171,7 @@ mod tests {
             start: Option<i64>,
             end: Option<i64>,
         }
-        let origin = chrono::Utc::now();
+        let origin = jiff::Timestamp::now();
         let mut games: Vec<Sim> = Vec::new();
         let mut next_id = 10_000_u128;
         let mut next_round = 0_i64;
@@ -1197,7 +1199,7 @@ mod tests {
                             schedule: ScheduleGame {
                                 game_id: Uuid::from_u128(next_id),
                                 status: "waiting".into(),
-                                created_at: origin + chrono::Duration::seconds(tick),
+                                created_at: origin + jiff::SignedDuration::from_secs(tick),
                                 leaderboard_id: Some(ladders[mode]),
                                 disabled_at: None,
                                 participants: group.iter().map(|e| e.battlesnake_id).collect(),
@@ -1215,7 +1217,7 @@ mod tests {
             // sharing one with an older base-eligible game isn't a candidate),
             // so the claims all succeed.
             let snapshot = ScheduleSnapshot {
-                at: origin + chrono::Duration::seconds(tick),
+                at: origin + jiff::SignedDuration::from_secs(tick),
                 games: games
                     .iter()
                     .filter(|g| g.schedule.status != "finished")
@@ -1245,8 +1247,8 @@ mod tests {
                 let created = games[index]
                     .schedule
                     .created_at
-                    .signed_duration_since(origin)
-                    .num_seconds();
+                    .duration_since(origin)
+                    .as_secs();
                 waits.push((tick - created) * 1000);
                 games[index].schedule.status = "running".into();
                 games[index].start = Some(tick);

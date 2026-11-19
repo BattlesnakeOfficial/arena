@@ -7,8 +7,6 @@
 //! store `NULL`. The query keeps every timeout out of the answered count and
 //! percentiles with an explicit `FILTER (WHERE NOT st.timed_out)`, so
 //! percentiles cover answered moves only and timeouts are counted separately.
-
-use chrono::{DateTime, Utc};
 use color_eyre::eyre::Context as _;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -34,7 +32,7 @@ pub struct LatencyStats {
 #[derive(Debug, Clone, PartialEq)]
 pub struct GameLatency {
     pub game_id: Uuid,
-    pub game_created_at: DateTime<Utc>,
+    pub game_created_at: jiff::Timestamp,
     pub stats: LatencyStats,
 }
 
@@ -141,7 +139,7 @@ pub async fn get_recent_latency_for_battlesnake(
         match (row.game_id, row.game_created_at) {
             (Some(game_id), Some(game_created_at)) => recent.games.push(GameLatency {
                 game_id,
-                game_created_at,
+                game_created_at: game_created_at.to_jiff(),
                 stats,
             }),
             _ => recent.overall = stats,

@@ -6,7 +6,13 @@
       {
         "ordinal": 0,
         "name": "github_uid",
-        "type_info": "Int8"
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "imported_accounts",
+            "name": "github_uid"
+          }
+        }
       }
     ],
     "parameters": {

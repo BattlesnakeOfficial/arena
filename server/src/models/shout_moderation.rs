@@ -27,7 +27,8 @@ pub struct ShoutScreening {
     pub model: Option<String>,
     pub latency_ms: Option<f64>,
     pub input_tokens: Option<i64>,
-    pub created_at: chrono::DateTime<chrono::Utc>,
+    #[sqlx(try_from = "cja::jiff_sqlx::Timestamp")]
+    pub created_at: jiff::Timestamp,
 }
 
 /// Idempotency check: has this game been through shout screening?

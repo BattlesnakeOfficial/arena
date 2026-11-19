@@ -15,8 +15,6 @@
 //! the call that actually flipped it. That is what gates the owner emails to
 //! once per transition no matter how often the job retries, and why there's no
 //! second "deactivated" stamp to drift out of sync (the DEV-710 bugs).
-
-use chrono::{DateTime, Utc};
 use color_eyre::eyre::Context as _;
 use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
@@ -40,7 +38,7 @@ const PROBE_COUNT_SPACING_MINUTES: i32 = 15;
 pub struct HealthPausedEntry {
     pub leaderboard_entry_id: Uuid,
     pub leaderboard_name: String,
-    pub paused_at: DateTime<Utc>,
+    pub paused_at: jiff::Timestamp,
     pub consecutive_failures: i32,
     pub last_failure: Option<String>,
 }
@@ -51,7 +49,7 @@ pub struct HealthPausedEntry {
 pub async fn record_success(
     connection: &mut PgConnection,
     leaderboard_entry_id: Uuid,
-    checked_at: DateTime<Utc>,
+    checked_at: jiff::Timestamp,
 ) -> cja::Result<()> {
     sqlx::query!(
         r#"UPDATE leaderboard_entries
@@ -60,7 +58,7 @@ pub async fn record_success(
              health_last_checked_at = $2
          WHERE leaderboard_entry_id = $1 AND disabled_at IS NULL"#,
         leaderboard_entry_id,
-        checked_at,
+        cja::jiff_sqlx::Timestamp::from(checked_at),
     )
     .execute(connection)
     .await
@@ -82,7 +80,7 @@ pub async fn record_failure(
     connection: &mut PgConnection,
     leaderboard_entry_id: Uuid,
     failure_summary: &str,
-    checked_at: DateTime<Utc>,
+    checked_at: jiff::Timestamp,
 ) -> cja::Result<Option<i32>> {
     sqlx::query_scalar!(
         r#"UPDATE leaderboard_entries
@@ -98,7 +96,7 @@ pub async fn record_failure(
          RETURNING health_consecutive_failures"#,
         leaderboard_entry_id,
         failure_summary,
-        checked_at,
+        cja::jiff_sqlx::Timestamp::from(checked_at),
         PROBE_COUNT_SPACING_MINUTES,
     )
     .fetch_optional(connection)
@@ -113,7 +111,7 @@ pub async fn record_failure(
 pub async fn record_recovery_success(
     connection: &mut PgConnection,
     leaderboard_entry_id: Uuid,
-    checked_at: DateTime<Utc>,
+    checked_at: jiff::Timestamp,
 ) -> cja::Result<Option<i32>> {
     sqlx::query_scalar!(
         r#"UPDATE leaderboard_entries
@@ -127,7 +125,7 @@ pub async fn record_recovery_success(
          WHERE leaderboard_entry_id = $1 AND disabled_reason = $4
          RETURNING health_consecutive_successes"#,
         leaderboard_entry_id,
-        checked_at,
+        cja::jiff_sqlx::Timestamp::from(checked_at),
         PROBE_COUNT_SPACING_MINUTES,
         DISABLED_REASON_HEALTH,
     )
@@ -142,7 +140,7 @@ pub async fn record_recovery_failure(
     connection: &mut PgConnection,
     leaderboard_entry_id: Uuid,
     failure_summary: &str,
-    checked_at: DateTime<Utc>,
+    checked_at: jiff::Timestamp,
 ) -> cja::Result<()> {
     sqlx::query!(
         r#"UPDATE leaderboard_entries
@@ -152,7 +150,7 @@ pub async fn record_recovery_failure(
          WHERE leaderboard_entry_id = $1 AND disabled_reason = $4"#,
         leaderboard_entry_id,
         failure_summary,
-        checked_at,
+        cja::jiff_sqlx::Timestamp::from(checked_at),
         DISABLED_REASON_HEALTH,
     )
     .execute(connection)
@@ -294,7 +292,6 @@ pub async fn owner_notification_email(
 mod tests {
     use super::*;
     use crate::models::leaderboard;
-    use chrono::Duration;
 
     async fn create_user(pool: &PgPool, github_id: i64) -> cja::Result<Uuid> {
         let row = sqlx::query!(
@@ -363,8 +360,8 @@ mod tests {
     }
 
     /// A sweep 30 minutes after `t`, i.e. a real next sweep.
-    fn next_sweep(t: DateTime<Utc>) -> DateTime<Utc> {
-        t + Duration::minutes(30)
+    fn next_sweep(t: jiff::Timestamp) -> jiff::Timestamp {
+        t + jiff::SignedDuration::from_mins(30)
     }
 
     #[sqlx::test(migrations = "../migrations")]
@@ -372,14 +369,14 @@ mod tests {
         let user_id = create_user(&pool, 9001).await?;
         let snake_id = create_snake(&pool, user_id, "streaky").await?;
         let entry = create_entry(&pool, snake_id, "standard").await?;
-        let t0 = Utc::now();
+        let t0 = jiff::Timestamp::now();
 
         assert_eq!(
             record_failure(&mut *pool.acquire().await?, entry, "timeout", t0).await?,
             Some(1)
         );
         // A piled-up sweep minutes later must not inflate the streak.
-        let piled = t0 + Duration::minutes(2);
+        let piled = t0 + jiff::SignedDuration::from_mins(2);
         assert_eq!(
             record_failure(&mut *pool.acquire().await?, entry, "refused", piled).await?,
             Some(1)
@@ -407,9 +404,9 @@ mod tests {
         let user_id = create_user(&pool, 9002).await?;
         let snake_id = create_snake(&pool, user_id, "paused").await?;
         let entry = create_entry(&pool, snake_id, "standard").await?;
-        leaderboard::set_disabled(&pool, entry, Some(Utc::now())).await?;
+        leaderboard::set_disabled(&pool, entry, Some(jiff::Timestamp::now())).await?;
 
-        let now = Utc::now();
+        let now = jiff::Timestamp::now();
         assert_eq!(
             record_failure(&mut *pool.acquire().await?, entry, "down", now).await?,
             None
@@ -450,7 +447,7 @@ mod tests {
         let user_id = create_user(&pool, 9004).await?;
         let snake_id = create_snake(&pool, user_id, "recovering").await?;
         let entry = create_entry(&pool, snake_id, "standard").await?;
-        let t0 = Utc::now();
+        let t0 = jiff::Timestamp::now();
         record_failure(&mut *pool.acquire().await?, entry, "down", t0).await?;
         assert!(deactivate(&mut *pool.acquire().await?, entry).await?);
 
@@ -459,7 +456,7 @@ mod tests {
             record_recovery_success(&mut *pool.acquire().await?, entry, t1).await?,
             Some(1)
         );
-        let piled = t1 + Duration::minutes(1);
+        let piled = t1 + jiff::SignedDuration::from_mins(1);
         assert_eq!(
             record_recovery_success(&mut *pool.acquire().await?, entry, piled).await?,
             Some(1)
@@ -490,7 +487,8 @@ mod tests {
 
         // Owner resumed meanwhile: a late recovery probe doesn't count.
         assert_eq!(
-            record_recovery_success(&mut *pool.acquire().await?, entry, Utc::now()).await?,
+            record_recovery_success(&mut *pool.acquire().await?, entry, jiff::Timestamp::now())
+                .await?,
             None
         );
         Ok(())
@@ -502,8 +500,14 @@ mod tests {
         let snake_id = create_snake(&pool, user_id, "mixed").await?;
         let pulled = create_entry(&pool, snake_id, "standard").await?;
         let paused = create_entry(&pool, snake_id, "royale").await?;
-        leaderboard::set_disabled(&pool, paused, Some(Utc::now())).await?;
-        record_failure(&mut *pool.acquire().await?, pulled, "down", Utc::now()).await?;
+        leaderboard::set_disabled(&pool, paused, Some(jiff::Timestamp::now())).await?;
+        record_failure(
+            &mut *pool.acquire().await?,
+            pulled,
+            "down",
+            jiff::Timestamp::now(),
+        )
+        .await?;
         assert!(deactivate(&mut *pool.acquire().await?, pulled).await?);
 
         assert_eq!(health_paused_entries(&pool, snake_id).await?.len(), 1);
@@ -532,7 +536,13 @@ mod tests {
         .fetch_one(&pool)
         .await?;
 
-        record_failure(&mut *pool.acquire().await?, entry, "down", Utc::now()).await?;
+        record_failure(
+            &mut *pool.acquire().await?,
+            entry,
+            "down",
+            jiff::Timestamp::now(),
+        )
+        .await?;
         leaderboard::get_or_create_entry(&pool, leaderboard_id, snake_id)
             .await?
             .expect("live snake joins");
@@ -564,7 +574,7 @@ mod tests {
                 &mut *pool.acquire().await?,
                 entry,
                 "POST /move (turn 0): boom",
-                Utc::now(),
+                jiff::Timestamp::now(),
             )
             .await?;
             assert!(deactivate(&mut *pool.acquire().await?, entry).await?);

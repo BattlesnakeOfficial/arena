@@ -6,7 +6,6 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Redirect},
 };
-use chrono_humanize::HumanTime;
 use color_eyre::eyre::Context as _;
 use maud::{Markup, html};
 use uuid::Uuid;
@@ -216,8 +215,8 @@ pub async fn show_leaderboard(
         None
     } else {
         status.last_game_created_at.map(|last| {
-            let next_run = last + chrono::Duration::seconds(MATCHMAKER_INTERVAL_SECS as i64);
-            HumanTime::from(next_run).to_string()
+            let next_run = last + jiff::SignedDuration::from_secs(MATCHMAKER_INTERVAL_SECS as i64);
+            crate::human_time::human_time(next_run, jiff::Timestamp::now())
         })
     };
 
@@ -349,7 +348,7 @@ pub async fn show_leaderboard(
                         status.games_in_progress,
                         status.last_game_created_at.map_or_else(
                             || "none".to_string(),
-                            |timestamp| timestamp.timestamp().to_string(),
+                            |timestamp| timestamp.as_second().to_string(),
                         ),
                     ),
                 }))
@@ -734,8 +733,8 @@ pub async fn show_leaderboard_entry(
         let y_min = min_score - padding;
         let y_max = max_score + padding;
 
-        let first_ts = rating_points.first().unwrap().game_created_at.timestamp() as f64;
-        let last_ts = rating_points.last().unwrap().game_created_at.timestamp() as f64;
+        let first_ts = rating_points.first().unwrap().game_created_at.as_second() as f64;
+        let last_ts = rating_points.last().unwrap().game_created_at.as_second() as f64;
         let ts_range = if (last_ts - first_ts).abs() < 1.0 {
             1.0
         } else {
@@ -745,7 +744,7 @@ pub async fn show_leaderboard_entry(
         let points: Vec<String> = rating_points
             .iter()
             .map(|p| {
-                let x = 40.0 + (p.game_created_at.timestamp() as f64 - first_ts) / ts_range * 560.0;
+                let x = 40.0 + (p.game_created_at.as_second() as f64 - first_ts) / ts_range * 560.0;
                 let y = 210.0 - (p.display_score_after - y_min) / (y_max - y_min) * 200.0;
                 format!("{x:.0},{y:.0}")
             })
@@ -972,7 +971,7 @@ pub async fn show_leaderboard_entry(
                             tbody {
                                 @for game in &history {
                                     tr {
-                                        td { (game.game_created_at.format("%Y-%m-%d %H:%M")) }
+                                        td { (game.game_created_at.strftime("%Y-%m-%d %H:%M")) }
                                         td {
                                             @if let Some(opps) = opponents_map.get(&game.game_id) {
                                                 @for (j, opp) in opps.iter().enumerate() {
@@ -1204,7 +1203,7 @@ pub async fn leave_leaderboard(
     leaderboard::set_disabled(
         &state.db,
         entry.leaderboard_entry_id,
-        Some(chrono::Utc::now()),
+        Some(jiff::Timestamp::now()),
     )
     .await
     .wrap_err("Failed to pause entry")
@@ -1214,8 +1213,8 @@ pub async fn leave_leaderboard(
 }
 
 /// Compact relative time for rail feeds ("2m ago"), where HumanTime is too wordy.
-fn fmt_ago(t: chrono::DateTime<chrono::Utc>) -> String {
-    let secs = (chrono::Utc::now() - t).num_seconds().max(0);
+fn fmt_ago(t: jiff::Timestamp) -> String {
+    let secs = (jiff::Timestamp::now() - t).as_secs().max(0);
     match secs {
         0..=59 => format!("{secs}s ago"),
         60..=3599 => format!("{}m ago", secs / 60),

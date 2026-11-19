@@ -883,19 +883,19 @@ mod tests {
     /// (state, game_id, gb_a).
     async fn prunable_game(pool: &PgPool) -> (AppState, Uuid, Uuid) {
         let state = AppState::test_from_pool(pool.clone());
-        let old = chrono::Utc::now() - chrono::Duration::days(40);
+        let old = jiff::Timestamp::now() - jiff::SignedDuration::from_hours(960);
         let game_id: Uuid = sqlx::query_scalar(
             "INSERT INTO games (board_size, game_type, status, created_at, updated_at)
              VALUES ('11x11', 'Standard', 'finished', $1, $1) RETURNING game_id",
         )
-        .bind(old)
+        .bind(cja::jiff_sqlx::Timestamp::from(old))
         .fetch_one(pool)
         .await
         .unwrap();
         let gb_a = join(pool, game_id, user(pool, 9_970_001).await, "Prune Alpha").await;
         let gb_b = join(pool, game_id, user(pool, 9_970_002).await, "Prune Beta").await;
         sqlx::query("UPDATE game_battlesnakes SET created_at = $1 WHERE game_id = $2")
-            .bind(old)
+            .bind(cja::jiff_sqlx::Timestamp::from(old))
             .bind(game_id)
             .execute(pool)
             .await

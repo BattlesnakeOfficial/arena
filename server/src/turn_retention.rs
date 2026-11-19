@@ -392,7 +392,7 @@ async fn pruned_elsewhere(db: &sqlx::PgPool, game_id: Uuid) -> cja::Result<bool>
 async fn clear_stale_archive_pointers(
     db: &sqlx::PgPool,
     game_id: Uuid,
-    archived_at_read: chrono::DateTime<chrono::Utc>,
+    archived_at_read: jiff::Timestamp,
 ) -> cja::Result<u64> {
     let result = sqlx::query!(
         r#"UPDATE games
@@ -401,7 +401,7 @@ async fn clear_stale_archive_pointers(
              AND archived_at = $2
              AND turns_pruned_at IS NULL"#,
         game_id,
-        archived_at_read
+        cja::jiff_sqlx::Timestamp::from(archived_at_read)
     )
     .execute(db)
     .await
@@ -552,8 +552,12 @@ async fn prune_body(
             // Only this direction: an archive holding MORE frames than the
             // DB, or a divergent prefix, stays fail-closed above.
             if reason == RetainReason::FrameCountMismatch && db_frames > archived_frames {
-                let cleared =
-                    clear_stale_archive_pointers(&app_state.db, game_id, archived_at_read).await?;
+                let cleared = clear_stale_archive_pointers(
+                    &app_state.db,
+                    game_id,
+                    archived_at_read.to_jiff(),
+                )
+                .await?;
                 if cleared == 1 {
                     tracing::warn!(%game_id, path = %gcs_path, archived_frames, db_frames,
                         "Stale archive (DB has more frames); cleared pointers for re-archival");
@@ -618,7 +622,7 @@ mod tests {
     async fn fixture_game(
         pool: &sqlx::PgPool,
         status: &str,
-        created_at: chrono::DateTime<chrono::Utc>,
+        created_at: jiff::Timestamp,
         engine_game_id: Option<&str>,
     ) -> cja::Result<Uuid> {
         let id: Uuid = sqlx::query_scalar(
@@ -626,7 +630,7 @@ mod tests {
                VALUES ('11x11', 'Standard', $1, $2, $2, $3) RETURNING game_id"#,
         )
         .bind(status)
-        .bind(created_at)
+        .bind(cja::jiff_sqlx::Timestamp::from(created_at))
         .bind(engine_game_id)
         .fetch_one(pool)
         .await?;
@@ -641,7 +645,7 @@ mod tests {
         pool: &sqlx::PgPool,
         game_id: Uuid,
         name: &str,
-        link_created_at: chrono::DateTime<chrono::Utc>,
+        link_created_at: jiff::Timestamp,
     ) -> cja::Result<Uuid> {
         let login = format!("prune-user-{}", Uuid::new_v4().simple());
         let user_id: Uuid = sqlx::query_scalar(
@@ -666,7 +670,7 @@ mod tests {
         )
         .bind(game_id)
         .bind(snake_id)
-        .bind(link_created_at)
+        .bind(cja::jiff_sqlx::Timestamp::from(link_created_at))
         .fetch_one(pool)
         .await?;
         Ok(gb_id)
@@ -738,30 +742,31 @@ mod tests {
     async fn turns_pruned_at(
         pool: &sqlx::PgPool,
         game_id: Uuid,
-    ) -> cja::Result<Option<chrono::DateTime<chrono::Utc>>> {
-        let value = sqlx::query_scalar("SELECT turns_pruned_at FROM games WHERE game_id = $1")
-            .bind(game_id)
-            .fetch_one(pool)
-            .await?;
-        Ok(value)
+    ) -> cja::Result<Option<jiff::Timestamp>> {
+        let value: Option<cja::jiff_sqlx::Timestamp> =
+            sqlx::query_scalar("SELECT turns_pruned_at FROM games WHERE game_id = $1")
+                .bind(game_id)
+                .fetch_one(pool)
+                .await?;
+        Ok(value.map(Into::into))
     }
 
     /// The game's archive pointer columns.
     async fn archive_pointers(
         pool: &sqlx::PgPool,
         game_id: Uuid,
-    ) -> cja::Result<(
-        Option<chrono::DateTime<chrono::Utc>>,
-        Option<String>,
-        Option<i32>,
-    )> {
-        let row = sqlx::query_as(
+    ) -> cja::Result<(Option<jiff::Timestamp>, Option<String>, Option<i32>)> {
+        let (archived_at, gcs_path, archive_version): (
+            Option<cja::jiff_sqlx::Timestamp>,
+            Option<String>,
+            Option<i32>,
+        ) = sqlx::query_as(
             "SELECT archived_at, gcs_path, archive_version FROM games WHERE game_id = $1",
         )
         .bind(game_id)
         .fetch_one(pool)
         .await?;
-        Ok(row)
+        Ok((archived_at.map(Into::into), gcs_path, archive_version))
     }
 
     /// The shared fixture: an archived old native game with framed turns +
@@ -776,7 +781,7 @@ mod tests {
         turn_count: usize,
     ) -> cja::Result<(Uuid, Uuid)> {
         let pool = &state.db;
-        let old = chrono::Utc::now() - chrono::Duration::days(days_old);
+        let old = jiff::Timestamp::now() - jiff::SignedDuration::from_hours(24 * (days_old));
         let game_id = fixture_game(pool, "finished", old, None).await?;
         let gb_id = join_snake(pool, game_id, &format!("Snek {game_id}"), old).await?;
         for turn in 0..turn_count {
@@ -827,11 +832,11 @@ mod tests {
                 "game_type": "Standard",
                 "board_size": "11x11",
                 "status": "finished",
-                "created_at": chrono::Utc::now(),
+                "created_at": jiff::Timestamp::now(),
                 "finished_at": null,
             },
             "frames": rows,
-            "exported_at": chrono::Utc::now(),
+            "exported_at": jiff::Timestamp::now(),
         });
         mutate(&mut object);
         let compressed = zstd::stream::encode_all(
@@ -853,15 +858,12 @@ mod tests {
     }
 
     /// Set the active-week backfill cursor explicitly.
-    async fn set_cursor(
-        pool: &sqlx::PgPool,
-        scanned_through: chrono::DateTime<chrono::Utc>,
-    ) -> cja::Result<()> {
+    async fn set_cursor(pool: &sqlx::PgPool, scanned_through: jiff::Timestamp) -> cja::Result<()> {
         sqlx::query(
             "UPDATE customization_active_week_backfill_cursor
              SET scanned_through = $1 WHERE singleton = TRUE",
         )
-        .bind(scanned_through)
+        .bind(cja::jiff_sqlx::Timestamp::from(scanned_through))
         .execute(pool)
         .await?;
         Ok(())
@@ -902,24 +904,41 @@ mod tests {
         pool: PgPool,
     ) -> cja::Result<()> {
         let state = AppState::test_from_pool(pool.clone());
-        let now = chrono::Utc::now();
+        let now = jiff::Timestamp::now();
 
         // (a) archived but only 29 days old (1 full day from the boundary).
-        let young = fixture_game(&pool, "finished", now - chrono::Duration::days(29), None).await?;
-        join_snake(&pool, young, "Young Snek", now - chrono::Duration::days(29)).await?;
+        let young = fixture_game(
+            &pool,
+            "finished",
+            now - jiff::SignedDuration::from_hours(696),
+            None,
+        )
+        .await?;
+        join_snake(
+            &pool,
+            young,
+            "Young Snek",
+            now - jiff::SignedDuration::from_hours(696),
+        )
+        .await?;
         for turn in 0..2 {
             fixture_turn(&pool, young, turn, frame(turn, "any")).await?;
         }
         crate::native_backup::archive_native_game(&state, young).await?;
 
         // (b) 40 days old but never archived.
-        let unarchived =
-            fixture_game(&pool, "finished", now - chrono::Duration::days(40), None).await?;
+        let unarchived = fixture_game(
+            &pool,
+            "finished",
+            now - jiff::SignedDuration::from_hours(960),
+            None,
+        )
+        .await?;
         join_snake(
             &pool,
             unarchived,
             "Unarchived Snek",
-            now - chrono::Duration::days(40),
+            now - jiff::SignedDuration::from_hours(960),
         )
         .await?;
         fixture_turn(&pool, unarchived, 0, frame(0, "any")).await?;
@@ -929,7 +948,7 @@ mod tests {
         let imported = fixture_game(
             &pool,
             "finished",
-            now - chrono::Duration::days(40),
+            now - jiff::SignedDuration::from_hours(960),
             Some("55555555-5555-5555-5555-555555555555"),
         )
         .await?;
@@ -943,13 +962,18 @@ mod tests {
         fixture_turn(&pool, imported, 0, frame(0, "any")).await?;
 
         // (d) 40 days old, archived, but still running.
-        let running =
-            fixture_game(&pool, "running", now - chrono::Duration::days(40), None).await?;
+        let running = fixture_game(
+            &pool,
+            "running",
+            now - jiff::SignedDuration::from_hours(960),
+            None,
+        )
+        .await?;
         join_snake(
             &pool,
             running,
             "Running Snek",
-            now - chrono::Duration::days(40),
+            now - jiff::SignedDuration::from_hours(960),
         )
         .await?;
         sqlx::query(
@@ -962,13 +986,18 @@ mod tests {
 
         // (e) 40 days old, archived v2, but gcs_path NULL — the filter
         // that makes the re-check's "gcs_path!" override safe.
-        let pathless =
-            fixture_game(&pool, "finished", now - chrono::Duration::days(40), None).await?;
+        let pathless = fixture_game(
+            &pool,
+            "finished",
+            now - jiff::SignedDuration::from_hours(960),
+            None,
+        )
+        .await?;
         join_snake(
             &pool,
             pathless,
             "Pathless Snek",
-            now - chrono::Duration::days(40),
+            now - jiff::SignedDuration::from_hours(960),
         )
         .await?;
         sqlx::query("UPDATE games SET archived_at = NOW(), archive_version = 2 WHERE game_id = $1")
@@ -1209,18 +1238,19 @@ mod tests {
     /// `turns_pruned_at IS NULL` WHERE guard).
     #[sqlx::test(migrations = "../migrations")]
     async fn clear_stale_archive_pointers_guards(pool: PgPool) -> cja::Result<()> {
-        let old = chrono::Utc::now() - chrono::Duration::days(40);
+        let old = jiff::Timestamp::now() - jiff::SignedDuration::from_hours(960);
         let game_id = fixture_game(&pool, "finished", old, None).await?;
         async fn read_archived_at(
             pool: &sqlx::PgPool,
             game_id: Uuid,
-        ) -> cja::Result<chrono::DateTime<chrono::Utc>> {
-            Ok(
-                sqlx::query_scalar("SELECT archived_at FROM games WHERE game_id = $1")
-                    .bind(game_id)
-                    .fetch_one(pool)
-                    .await?,
+        ) -> cja::Result<jiff::Timestamp> {
+            Ok(sqlx::query_scalar::<_, cja::jiff_sqlx::Timestamp>(
+                "SELECT archived_at FROM games WHERE game_id = $1",
             )
+            .bind(game_id)
+            .fetch_one(pool)
+            .await?
+            .to_jiff())
         }
         let set_pointers = "UPDATE games SET archived_at = NOW(), gcs_path = 'native/2026/11/07/x.json.zst', archive_version = 2 WHERE game_id = $1";
 
@@ -1243,7 +1273,7 @@ mod tests {
             .execute(&pool)
             .await?;
         let read = read_archived_at(&pool, game_id).await?;
-        let stale = read - chrono::Duration::seconds(1);
+        let stale = read - jiff::SignedDuration::from_secs(1);
         assert_eq!(
             clear_stale_archive_pointers(&pool, game_id, stale).await?,
             0
@@ -1277,7 +1307,7 @@ mod tests {
     async fn check_constraint_rejects_clearing_pointers_on_pruned_game(
         pool: PgPool,
     ) -> cja::Result<()> {
-        let old = chrono::Utc::now() - chrono::Duration::days(40);
+        let old = jiff::Timestamp::now() - jiff::SignedDuration::from_hours(960);
         let game_id = fixture_game(&pool, "failed", old, None).await?;
         // Valid: pruned WITH pointers.
         sqlx::query(
@@ -1310,9 +1340,10 @@ mod tests {
         // the sqlx error is wrapped, so `{}` would drop the constraint
         // name from the chain.
         let mut tx = pool.begin().await?;
-        let err = crate::models::game::mark_game_finished_tx(&mut tx, game_id, chrono::Utc::now())
-            .await
-            .expect_err("mark_game_finished_tx must be rejected on a pruned game");
+        let err =
+            crate::models::game::mark_game_finished_tx(&mut tx, game_id, jiff::Timestamp::now())
+                .await
+                .expect_err("mark_game_finished_tx must be rejected on a pruned game");
         let msg = format!("{err:#}");
         assert!(
             msg.contains("games_pruned_requires_archive_check"),
@@ -1504,7 +1535,7 @@ mod tests {
         pool: PgPool,
     ) -> cja::Result<()> {
         let state = AppState::test_from_pool(pool.clone());
-        let now = chrono::Utc::now();
+        let now = jiff::Timestamp::now();
         let (game_id, _gb) = archived_old_native_game(&state, 40, 1).await?;
 
         // Cursor at 39.5 days ago: threshold = scanned_through - 1 day =
@@ -1512,7 +1543,7 @@ mod tests {
         // → the rescan would re-read it → guard blocks.
         set_cursor(
             &pool,
-            now - chrono::Duration::minutes(39 * 24 * 60 + 12 * 60),
+            now - jiff::SignedDuration::from_mins(39 * 24 * 60 + 12 * 60),
         )
         .await?;
         run_discovery_with_cap(&state, 30, 100).await?;
@@ -1535,7 +1566,7 @@ mod tests {
 
         // Cursor at 38 days ago: threshold 39 days ago; the 40-day link is
         // older than the whole rescan window → prune proceeds.
-        set_cursor(&pool, now - chrono::Duration::days(38)).await?;
+        set_cursor(&pool, now - jiff::SignedDuration::from_hours(912)).await?;
         assert_eq!(
             prune_game_turns_with_lock_timeout(
                 &state,
@@ -1770,7 +1801,7 @@ mod tests {
     async fn count_mismatch_recheck_distinguishes_cross_instance_prune(
         pool: PgPool,
     ) -> cja::Result<()> {
-        let old = chrono::Utc::now() - chrono::Duration::days(40);
+        let old = jiff::Timestamp::now() - jiff::SignedDuration::from_hours(960);
         let winner = fixture_game(&pool, "finished", old, None).await?;
         // One statement: mark pruned WITH pointers (a bare
         // turns_pruned_at mark now violates games_pruned_requires_archive_check).

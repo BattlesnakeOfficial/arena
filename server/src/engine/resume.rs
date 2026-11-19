@@ -352,8 +352,8 @@ mod tests {
             game_type,
             status: GameStatus::Running,
             enqueued_at: None,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
+            created_at: jiff::Timestamp::now(),
+            updated_at: jiff::Timestamp::now(),
         }
     }
 
@@ -365,8 +365,8 @@ mod tests {
                 game_id: Uuid::new_v4(),
                 battlesnake_id: Uuid::new_v4(),
                 placement: None,
-                created_at: chrono::Utc::now(),
-                updated_at: chrono::Utc::now(),
+                created_at: jiff::Timestamp::now(),
+                updated_at: jiff::Timestamp::now(),
                 name: format!("Snake {i}"),
                 url: String::new(),
                 engine_region: crate::models::battlesnake::EngineRegion::UsWest1,

@@ -6,57 +6,123 @@
       {
         "ordinal": 0,
         "name": "game_battlesnake_id",
-        "type_info": "Uuid"
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "game_resume_snakes",
+            "name": "game_battlesnake_id"
+          }
+        }
       },
       {
         "ordinal": 1,
         "name": "health",
-        "type_info": "Int4"
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "game_resume_snakes",
+            "name": "health"
+          }
+        }
       },
       {
         "ordinal": 2,
         "name": "eliminated_cause",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "game_resume_snakes",
+            "name": "eliminated_cause"
+          }
+        }
       },
       {
         "ordinal": 3,
         "name": "eliminated_by",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "game_resume_snakes",
+            "name": "eliminated_by"
+          }
+        }
       },
       {
         "ordinal": 4,
         "name": "eliminated_on_turn",
-        "type_info": "Int4"
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "game_resume_snakes",
+            "name": "eliminated_on_turn"
+          }
+        }
       },
       {
         "ordinal": 5,
         "name": "last_move",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "game_resume_snakes",
+            "name": "last_move"
+          }
+        }
       },
       {
         "ordinal": 6,
         "name": "context_present",
-        "type_info": "Bool"
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "game_resume_snakes",
+            "name": "context_present"
+          }
+        }
       },
       {
         "ordinal": 7,
         "name": "latency_ms",
-        "type_info": "Int4"
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "game_resume_snakes",
+            "name": "latency_ms"
+          }
+        }
       },
       {
         "ordinal": 8,
         "name": "shout",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "game_resume_snakes",
+            "name": "shout"
+          }
+        }
       },
       {
         "ordinal": 9,
         "name": "food_eaten",
-        "type_info": "Int4"
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "game_resume_snakes",
+            "name": "food_eaten"
+          }
+        }
       },
       {
         "ordinal": 10,
         "name": "body",
-        "type_info": "Jsonb"
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "game_resume_snakes",
+            "name": "body"
+          }
+        }
       }
     ],
     "parameters": {

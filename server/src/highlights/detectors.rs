@@ -7,8 +7,6 @@
 //! "(house)". Every "win" means a unique placement-1.
 
 use std::collections::{BTreeMap, BTreeSet};
-
-use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use super::types::{
@@ -125,8 +123,8 @@ fn how_died(game: &WindowGame, snake: &WindowSnake) -> String {
 }
 
 /// `%a %H:%MZ` timestamp, like the prototype.
-fn short_time(at: DateTime<Utc>) -> String {
-    at.format("%a %H:%MZ").to_string()
+fn short_time(at: jiff::Timestamp) -> String {
+    at.strftime("%a %H:%MZ").to_string()
 }
 
 /// Thousands-grouped integer, like Python's `{:,}` (Rust's format!
@@ -293,7 +291,7 @@ pub struct ThroneOutcome {
     pub held: Vec<(Uuid, String, f64)>,
     /// (new leader name, old leader name, at, game) for the last change
     /// whose new == final leader.
-    pub crowning: Option<(String, Option<String>, DateTime<Utc>, Uuid)>,
+    pub crowning: Option<(String, Option<String>, jiff::Timestamp, Uuid)>,
     pub rank0: BTreeMap<Uuid, i32>,
     pub rank1: BTreeMap<Uuid, i32>,
     pub names: BTreeMap<Uuid, String>,
@@ -308,8 +306,8 @@ pub struct ThroneOutcome {
 pub fn replay_ladder(
     data: &WindowData,
     ladder_index: usize,
-    w0: DateTime<Utc>,
-    w1: DateTime<Utc>,
+    w0: jiff::Timestamp,
+    w1: jiff::Timestamp,
 ) -> ThroneOutcome {
     let ladder = &data.ladders[ladder_index];
     let games = data.games_on_ladder(ladder_index);
@@ -329,7 +327,7 @@ pub fn replay_ladder(
         }
     }
 
-    let active = |entry: Uuid, at: DateTime<Utc>| -> bool {
+    let active = |entry: Uuid, at: jiff::Timestamp| -> bool {
         data.entries
             .get(&entry)
             .and_then(|info| info.disabled_at)
@@ -337,7 +335,7 @@ pub fn replay_ladder(
     };
 
     let rank_at =
-        |order: &[Uuid], score: &BTreeMap<Uuid, f64>, at: DateTime<Utc>| -> BTreeMap<Uuid, i32> {
+        |order: &[Uuid], score: &BTreeMap<Uuid, f64>, at: jiff::Timestamp| -> BTreeMap<Uuid, i32> {
             let mut alive: Vec<Uuid> = order
                 .iter()
                 .copied()
@@ -353,7 +351,7 @@ pub fn replay_ladder(
     let rank0 = rank_at(&order, &score, w0);
 
     let argmax_leader =
-        |order: &[Uuid], score: &BTreeMap<Uuid, f64>, at: DateTime<Utc>| -> Option<Uuid> {
+        |order: &[Uuid], score: &BTreeMap<Uuid, f64>, at: jiff::Timestamp| -> Option<Uuid> {
             let mut best: Option<Uuid> = None;
             for entry in order {
                 let Some(s) = score.get(entry) else { continue };
@@ -371,7 +369,7 @@ pub fn replay_ladder(
     let mut since = w0;
     let mut held: BTreeMap<Uuid, f64> = BTreeMap::new();
     // (at, old, new, game); old None = the ladder's first-ever leader.
-    let mut changes: Vec<(DateTime<Utc>, Option<Uuid>, Uuid, Uuid)> = Vec::new();
+    let mut changes: Vec<(jiff::Timestamp, Option<Uuid>, Uuid, Uuid)> = Vec::new();
 
     for game in &games {
         for snake in &game.snakes {
@@ -385,7 +383,7 @@ pub fn replay_ladder(
         let new = argmax_leader(&order, &score, game.created_at);
         if new != leader {
             if let Some(old) = leader {
-                *held.entry(old).or_insert(0.0) += (game.created_at - since).num_seconds() as f64;
+                *held.entry(old).or_insert(0.0) += (game.created_at - since).as_secs() as f64;
             }
             if let Some(new_leader) = new {
                 changes.push((game.created_at, leader, new_leader, game.game_id));
@@ -395,7 +393,7 @@ pub fn replay_ladder(
         }
     }
     if let Some(final_leader) = leader {
-        *held.entry(final_leader).or_insert(0.0) += (w1 - since).num_seconds() as f64;
+        *held.entry(final_leader).or_insert(0.0) += (w1 - since).as_secs() as f64;
     }
     let rank1 = rank_at(&order, &score, w1);
 
@@ -535,10 +533,10 @@ fn newcomers_section(data: &WindowData, thrones: &[ThroneOutcome]) -> Section {
     struct Stats {
         entry: Uuid,
         ladder_index: usize,
-        debut: DateTime<Utc>,
+        debut: jiff::Timestamp,
         games: i64,
         wins: i64,
-        first_win_at: Option<DateTime<Utc>>,
+        first_win_at: Option<jiff::Timestamp>,
         first_win_game: Option<Uuid>,
     }
     let mut per: BTreeMap<(String, String), Vec<Stats>> = BTreeMap::new();
@@ -588,7 +586,7 @@ fn newcomers_section(data: &WindowData, thrones: &[ThroneOutcome]) -> Section {
     if per.is_empty() {
         return section;
     }
-    type NewcomerRow<'a> = (DateTime<Utc>, &'a (String, String), &'a Vec<Stats>);
+    type NewcomerRow<'a> = (jiff::Timestamp, &'a (String, String), &'a Vec<Stats>);
     let mut rows: Vec<NewcomerRow> = per
         .iter()
         .filter_map(|(key, stats)| {
@@ -1024,7 +1022,7 @@ fn streaks_section(ladder: &Ladder, games: &[&WindowGame], throne: &ThroneOutcom
     let mut beaten_label: BTreeMap<Uuid, Vec<String>> = BTreeMap::new();
     // entry -> (length, through, best scalp label); first run of a given
     // max length wins (strict >, like the prototype).
-    let mut best: BTreeMap<Uuid, (i32, DateTime<Utc>, String)> = BTreeMap::new();
+    let mut best: BTreeMap<Uuid, (i32, jiff::Timestamp, String)> = BTreeMap::new();
     for game in games {
         let winner = game.unique_winner();
         for snake in &game.snakes {
@@ -1059,7 +1057,7 @@ fn streaks_section(ladder: &Ladder, games: &[&WindowGame], throne: &ThroneOutcom
         }
     }
     let mut section = Section::empty(SectionKind::Streaks, Some(ladder.clone()));
-    let mut rows: Vec<(i32, DateTime<Utc>, String, Uuid)> = best
+    let mut rows: Vec<(i32, jiff::Timestamp, String, Uuid)> = best
         .into_iter()
         .filter(|(entry, _)| !throne.house.get(entry).copied().unwrap_or(false))
         .map(|(entry, run)| (run.0, run.1, run.2, entry))
@@ -1307,8 +1305,8 @@ pub fn candidate_game_ids(data: &WindowData, duel_k: f64, four_snake_k: f64) -> 
 /// omitted (with a warn) when no public ladder has `match_size == 2`.
 pub fn compute_sections(
     data: &WindowData,
-    w0: DateTime<Utc>,
-    w1: DateTime<Utc>,
+    w0: jiff::Timestamp,
+    w1: jiff::Timestamp,
     duel_k: f64,
     four_snake_k: f64,
 ) -> (Vec<Section>, DiscordPicks) {
@@ -1411,8 +1409,8 @@ pub fn compute_sections(
 /// double the grid cost over the window's games).
 pub fn assemble_digest(
     data: &WindowData,
-    w0: DateTime<Utc>,
-    w1: DateTime<Utc>,
+    w0: jiff::Timestamp,
+    w1: jiff::Timestamp,
     duel_k: f64,
     four_snake_k: f64,
 ) -> ComputedDigest {
@@ -1450,7 +1448,6 @@ mod tests {
     use crate::highlights::types::{
         EntryInfo, FinalFrame, Ladder, WindowData, WindowGame, WindowSnake,
     };
-    use chrono::TimeZone;
 
     // ------------------------------------------------------------ fixtures
 
@@ -1500,7 +1497,10 @@ mod tests {
     }
 
     fn game(ladder_index: usize, hour: u32, snakes: Vec<WindowSnake>) -> WindowGame {
-        let created = Utc.with_ymd_and_hms(2026, 10, 26, hour, 0, 0).unwrap();
+        let created = jiff::civil::datetime(2026, 10, 26, i8::try_from(hour).unwrap(), 0, 0, 0)
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+            .unwrap()
+            .timestamp();
         WindowGame {
             game_id: Uuid::new_v4(),
             ladder_index,
@@ -1538,12 +1538,18 @@ mod tests {
         }
     }
 
-    fn w0() -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(2026, 10, 24, 12, 0, 0).unwrap()
+    fn w0() -> jiff::Timestamp {
+        jiff::civil::datetime(2026, 10, 24, 12, 0, 0, 0)
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+            .unwrap()
+            .timestamp()
     }
 
-    fn w1() -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(2026, 10, 31, 12, 0, 0).unwrap()
+    fn w1() -> jiff::Timestamp {
+        jiff::civil::datetime(2026, 10, 31, 12, 0, 0, 0)
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+            .unwrap()
+            .timestamp()
     }
 
     // ------------------------------------------------------------ fit_k

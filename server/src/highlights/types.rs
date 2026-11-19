@@ -2,9 +2,9 @@
 //! layers (DEV-1993). See `highlights.py` in the byte-scratch prototype for
 //! the detector semantics these types carry.
 
+use jiff::civil::Date;
+use jiff::civil::Time;
 use std::collections::{BTreeMap, BTreeSet};
-
-use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
 use uuid::Uuid;
 
 /// skillratings-style beta used by the arena rating system.
@@ -24,12 +24,14 @@ pub const LADDER_ORDER: [&str; 4] = [
 const WEEK_SECS: i64 = 7 * 24 * 60 * 60;
 
 /// 12:00:00 UTC on `date`. Built without any panicking constructor: noon
-/// is always a valid time of day (`from_hms_opt(12, 0, 0)` is always
-/// `Some`; the `NaiveTime::MIN` fallback is inert), and a plain
-/// `NaiveDateTime::new` cannot fail.
-fn noon_utc(date: NaiveDate) -> DateTime<Utc> {
-    let noon = NaiveTime::from_hms_opt(12, 0, 0).unwrap_or(NaiveTime::MIN);
-    Utc.from_utc_datetime(&NaiveDateTime::new(date, noon))
+/// is checked at compile time (`Time::constant`), and the UTC conversion
+/// can only fail at the edge of jiff's range, where the `Timestamp::MIN`
+/// fallback is inert.
+fn noon_utc(date: Date) -> jiff::Timestamp {
+    let noon = Time::constant(12, 0, 0, 0);
+    date.to_datetime(noon)
+        .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+        .map_or(jiff::Timestamp::MIN, |zoned| zoned.timestamp())
 }
 
 /// A stored digest's window: 7 days ending Saturday 12:00:00 UTC.
@@ -38,35 +40,37 @@ fn noon_utc(date: NaiveDate) -> DateTime<Utc> {
 /// guarantee alignment, so stored windows always satisfy the table CHECKs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Week {
-    pub start: DateTime<Utc>,
-    pub end: DateTime<Utc>,
+    pub start: jiff::Timestamp,
+    pub end: jiff::Timestamp,
 }
 
 impl Week {
     /// The most recent 7-day window ending Saturday 12:00 UTC at or before
     /// `now`.
-    pub fn latest_completed(now: DateTime<Utc>) -> Week {
+    pub fn latest_completed(now: jiff::Timestamp) -> Week {
         // Snap to the most recent 12:00 UTC boundary at or before `now`...
-        let noon = noon_utc(now.date_naive());
+        let noon = noon_utc(now.to_zoned_datetime(jiff::tz::TimeZone::UTC).date());
         let mut end = if now >= noon {
             noon
         } else {
-            noon - chrono::Duration::days(1)
+            noon - jiff::SignedDuration::from_hours(24)
         };
         // ...then roll back to Saturday.
-        while end.weekday() != chrono::Weekday::Sat {
-            end -= chrono::Duration::days(1);
+        while end.to_zoned_datetime(jiff::tz::TimeZone::UTC).weekday()
+            != jiff::civil::Weekday::Saturday
+        {
+            end -= jiff::SignedDuration::from_hours(24);
         }
         Week {
-            start: end - chrono::Duration::seconds(WEEK_SECS),
+            start: end - jiff::SignedDuration::from_secs(WEEK_SECS),
             end,
         }
     }
 
     /// The week ending on `saturday` at 12:00 UTC. `None` when the date is
     /// not a Saturday or the window is not fully in the past.
-    pub fn ending(saturday: NaiveDate, now: DateTime<Utc>) -> Option<Week> {
-        if saturday.weekday() != chrono::Weekday::Sat {
+    pub fn ending(saturday: Date, now: jiff::Timestamp) -> Option<Week> {
+        if saturday.weekday() != jiff::civil::Weekday::Saturday {
             return None;
         }
         let end = noon_utc(saturday);
@@ -74,7 +78,7 @@ impl Week {
             return None;
         }
         Some(Week {
-            start: end - chrono::Duration::seconds(WEEK_SECS),
+            start: end - jiff::SignedDuration::from_secs(WEEK_SECS),
             end,
         })
     }
@@ -178,7 +182,7 @@ pub struct WindowGame {
     pub game_id: Uuid,
     /// Index into [`WindowData::ladders`].
     pub ladder_index: usize,
-    pub created_at: DateTime<Utc>,
+    pub created_at: jiff::Timestamp,
     pub snakes: Vec<WindowSnake>,
     pub final_turn: Option<i32>,
 }
@@ -230,7 +234,7 @@ pub struct EntryInfo {
     pub leaderboard_id: Uuid,
     pub snake_name: String,
     pub owner_login: Option<String>,
-    pub disabled_at: Option<DateTime<Utc>>,
+    pub disabled_at: Option<jiff::Timestamp>,
     pub house: bool,
 }
 
@@ -439,8 +443,8 @@ pub struct DiscordPicks {
 /// display order plus the Discord picks.
 #[derive(Debug, Clone)]
 pub struct ComputedDigest {
-    pub window_start: DateTime<Utc>,
-    pub window_end: DateTime<Utc>,
+    pub window_start: jiff::Timestamp,
+    pub window_end: jiff::Timestamp,
     pub games_count: i64,
     /// Games whose final frame is missing (retention) — drives the banner.
     pub games_without_frames: i64,
@@ -473,10 +477,13 @@ pub const SECTION_DISPLAY_ORDER: [SectionKind; 14] = [
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
 
-    fn at(y: i32, m: u32, d: u32, h: u32, min: u32) -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(y, m, d, h, min, 0).unwrap()
+    fn at(y: i16, m: i8, d: i8, h: i8, min: i8) -> jiff::Timestamp {
+        jiff::civil::date(y, m, d)
+            .at(h, min, 0, 0)
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+            .unwrap()
+            .timestamp()
     }
 
     #[test]
@@ -508,7 +515,7 @@ mod tests {
 
     #[test]
     fn ending_on_past_saturday_is_some() {
-        let saturday = chrono::NaiveDate::from_ymd_opt(2026, 10, 31).unwrap();
+        let saturday = jiff::civil::Date::new(2026, 10, 31).unwrap();
         let week = Week::ending(saturday, at(2026, 11, 1, 0, 0)).unwrap();
         assert_eq!(week.end, at(2026, 10, 31, 12, 0));
         assert_eq!(week.start, at(2026, 10, 24, 12, 0));
@@ -516,20 +523,20 @@ mod tests {
 
     #[test]
     fn ending_on_friday_is_none() {
-        let friday = chrono::NaiveDate::from_ymd_opt(2026, 10, 30).unwrap();
+        let friday = jiff::civil::Date::new(2026, 10, 30).unwrap();
         assert!(Week::ending(friday, at(2026, 11, 1, 0, 0)).is_none());
     }
 
     #[test]
     fn ending_on_future_saturday_is_none() {
-        let saturday = chrono::NaiveDate::from_ymd_opt(2026, 11, 7).unwrap();
+        let saturday = jiff::civil::Date::new(2026, 11, 7).unwrap();
         assert!(Week::ending(saturday, at(2026, 10, 31, 12, 0)).is_none());
     }
 
     #[test]
     fn ending_at_exact_window_end_is_some() {
         // The window ending exactly now is complete.
-        let saturday = chrono::NaiveDate::from_ymd_opt(2026, 10, 31).unwrap();
+        let saturday = jiff::civil::Date::new(2026, 10, 31).unwrap();
         assert!(Week::ending(saturday, at(2026, 10, 31, 12, 0)).is_some());
     }
 

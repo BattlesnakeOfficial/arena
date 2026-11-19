@@ -6,87 +6,189 @@
       {
         "ordinal": 0,
         "name": "moderation_flag_id",
-        "type_info": "Uuid"
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "moderation_flags",
+            "name": "moderation_flag_id"
+          }
+        }
       },
       {
         "ordinal": 1,
         "name": "field_kind",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "moderation_flags",
+            "name": "field_kind"
+          }
+        }
       },
       {
         "ordinal": 2,
         "name": "text",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "moderation_flags",
+            "name": "text"
+          }
+        }
       },
       {
         "ordinal": 3,
         "name": "subject_id",
-        "type_info": "Uuid"
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "moderation_flags",
+            "name": "subject_id"
+          }
+        }
       },
       {
         "ordinal": 4,
         "name": "user_id",
-        "type_info": "Uuid"
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "moderation_flags",
+            "name": "user_id"
+          }
+        }
       },
       {
         "ordinal": 5,
         "name": "user_login",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "github_login"
+          }
+        }
       },
       {
         "ordinal": 6,
         "name": "decision",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "moderation_flags",
+            "name": "decision"
+          }
+        }
       },
       {
         "ordinal": 7,
         "name": "hate_or_slur",
-        "type_info": "Float8"
+        "type_info": "Float8",
+        "origin": {
+          "Table": {
+            "table": "moderation_flags",
+            "name": "hate_or_slur"
+          }
+        }
       },
       {
         "ordinal": 8,
         "name": "sexual_or_graphic",
-        "type_info": "Float8"
+        "type_info": "Float8",
+        "origin": {
+          "Table": {
+            "table": "moderation_flags",
+            "name": "sexual_or_graphic"
+          }
+        }
       },
       {
         "ordinal": 9,
         "name": "harassment_or_threat",
-        "type_info": "Float8"
+        "type_info": "Float8",
+        "origin": {
+          "Table": {
+            "table": "moderation_flags",
+            "name": "harassment_or_threat"
+          }
+        }
       },
       {
         "ordinal": 10,
         "name": "impersonates_staff_or_platform",
-        "type_info": "Float8"
+        "type_info": "Float8",
+        "origin": {
+          "Table": {
+            "table": "moderation_flags",
+            "name": "impersonates_staff_or_platform"
+          }
+        }
       },
       {
         "ordinal": 11,
         "name": "disguised_evasion",
-        "type_info": "Float8"
+        "type_info": "Float8",
+        "origin": {
+          "Table": {
+            "table": "moderation_flags",
+            "name": "disguised_evasion"
+          }
+        }
       },
       {
         "ordinal": 12,
         "name": "action_choice",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "moderation_flags",
+            "name": "action_choice"
+          }
+        }
       },
       {
         "ordinal": 13,
         "name": "action_confidence",
-        "type_info": "Float8"
+        "type_info": "Float8",
+        "origin": {
+          "Table": {
+            "table": "moderation_flags",
+            "name": "action_confidence"
+          }
+        }
       },
       {
         "ordinal": 14,
         "name": "action_block_mass",
-        "type_info": "Float8"
+        "type_info": "Float8",
+        "origin": {
+          "Table": {
+            "table": "moderation_flags",
+            "name": "action_block_mass"
+          }
+        }
       },
       {
         "ordinal": 15,
         "name": "model",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "moderation_flags",
+            "name": "model"
+          }
+        }
       },
       {
         "ordinal": 16,
         "name": "created_at",
-        "type_info": "Timestamptz"
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "moderation_flags",
+            "name": "created_at"
+          }
+        }
       }
     ],
     "parameters": {

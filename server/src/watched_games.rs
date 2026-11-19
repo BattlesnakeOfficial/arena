@@ -286,8 +286,8 @@ async fn poll_batch(
         #[cfg(test)]
         watched.stats.status_reads.fetch_add(1, Ordering::Relaxed);
         Some(sqlx::query!(
-            r#"SELECT g.game_id, g.status, (SELECT MAX(t.turn_number) FROM turns t WHERE t.game_id = g.game_id) AS latest_turn,
-                      c.turn_id AS cursor_turn_id
+            r#"SELECT g.game_id AS "game_id!", g.status AS "status!", (SELECT MAX(t.turn_number) FROM turns t WHERE t.game_id = g.game_id) AS latest_turn,
+                      c.turn_id AS "cursor_turn_id?"
                FROM unnest($1::uuid[], $2::int[]) AS w(game_id, last_turn)
                JOIN games g ON g.game_id = w.game_id
                LEFT JOIN turns c ON c.game_id = w.game_id AND c.turn_number = w.last_turn"#,
@@ -682,18 +682,18 @@ mod tests {
     #[sqlx::test(migrations = "../migrations")]
     async fn prune_notify_resets_watched_game_and_listener_survives_unwatched(pool: sqlx::PgPool) {
         let state = crate::state::AppState::test_from_pool(pool.clone());
-        let now = chrono::Utc::now();
+        let now = jiff::Timestamp::now();
 
         async fn archived_old_native_game(
             state: &crate::state::AppState,
             pool: &sqlx::PgPool,
-            old: chrono::DateTime<chrono::Utc>,
+            old: jiff::Timestamp,
         ) -> Uuid {
             let game_id: Uuid = sqlx::query_scalar(
                 "INSERT INTO games (board_size, game_type, status, created_at, updated_at)
                  VALUES ('11x11', 'Standard', 'finished', $1, $1) RETURNING game_id",
             )
-            .bind(old)
+            .bind(cja::jiff_sqlx::Timestamp::from(old))
             .fetch_one(pool)
             .await
             .unwrap();
@@ -722,7 +722,7 @@ mod tests {
             )
             .bind(game_id)
             .bind(snake_id)
-            .bind(old)
+            .bind(cja::jiff_sqlx::Timestamp::from(old))
             .execute(pool)
             .await
             .unwrap();
@@ -744,7 +744,7 @@ mod tests {
             game_id
         }
 
-        let old = now - chrono::Duration::days(40);
+        let old = now - jiff::SignedDuration::from_hours(960);
         let game_a = archived_old_native_game(&state, &pool, old).await; // watched
         let game_b = archived_old_native_game(&state, &pool, old).await; // unwatched
 

@@ -21,8 +21,8 @@ pub struct User {
     pub is_admin: bool,
     pub site_theme: String,
     pub theater_theme: String,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub created_at: jiff::Timestamp,
+    pub updated_at: jiff::Timestamp,
 }
 
 impl User {
@@ -460,13 +460,13 @@ mod tests {
         leaderboard_name: &str,
         disabled: bool,
     ) -> cja::Result<()> {
-        let disabled_at = disabled.then(chrono::Utc::now);
+        let disabled_at = disabled.then(jiff::Timestamp::now);
         sqlx::query!(
             "INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id, disabled_at)
              SELECT leaderboard_id, $2, $3 FROM leaderboards WHERE name = $1",
             leaderboard_name,
             battlesnake_id,
-            disabled_at,
+            disabled_at.map(cja::jiff_sqlx::Timestamp::from),
         )
         .execute(pool)
         .await?;

@@ -325,7 +325,7 @@ fn board_viewer_game_from_record(
         max_turns: crate::engine::MAX_TURNS,
         food_spawns: Vec::new(),
         hazard_spawns: Vec::new(),
-        created: game.created_at.timestamp_micros().to_string(),
+        created: game.created_at.as_microsecond().to_string(),
     }
 }
 
@@ -339,7 +339,7 @@ fn board_viewer_game_from_record(
 fn board_viewer_game_from_archived(
     record_game_id: Uuid,
     arena_status: GameStatus,
-    row_created_at: chrono::DateTime<chrono::Utc>,
+    row_created_at: jiff::Timestamp,
     archived: &crate::engine_models::EngineGame,
 ) -> BoardViewerGame {
     BoardViewerGame {
@@ -377,14 +377,14 @@ fn board_viewer_game_from_archived(
             .map(|p| serde_json::to_value(p).unwrap_or_default())
             .collect(),
         // Unix microseconds as a string, like the engine (and like the DB
-        // path's created_at.timestamp_micros()). A header with Created 0
+        // path's created_at.as_microsecond()). A header with Created 0
         // (pre-2023 games whose value lacked the key; objects are never
         // rewritten) serves the arena row's corrected created_at instead.
         // DEV-1984.
         created: if archived.created != 0 {
             archived.created.to_string()
         } else {
-            row_created_at.timestamp_micros().to_string()
+            row_created_at.as_microsecond().to_string()
         },
     }
 }
@@ -1104,9 +1104,7 @@ pub(crate) mod fixtures {
         crate::backup::build_compressed_export(
             game,
             vec![frame_json(0, true), frame_json(1, true)],
-            chrono::DateTime::parse_from_rfc3339("2026-11-05T00:00:00Z")
-                .unwrap()
-                .with_timezone(&chrono::Utc),
+            "2026-11-05T00:00:00Z".parse::<jiff::Timestamp>().unwrap(),
         )
         .unwrap()
     }
@@ -2222,11 +2220,9 @@ mod tests {
             v1_with(game)
         })
         .await?;
-        let row_created_at = chrono::DateTime::parse_from_rfc3339("2020-03-10T12:00:00Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc);
+        let row_created_at = "2020-03-10T12:00:00Z".parse::<jiff::Timestamp>().unwrap();
         sqlx::query("UPDATE games SET created_at = $1 WHERE game_id = $2")
-            .bind(row_created_at)
+            .bind(cja::jiff_sqlx::Timestamp::from(row_created_at))
             .bind(game_id)
             .execute(&pool)
             .await?;
@@ -2239,7 +2235,7 @@ mod tests {
         let json = response_json(response).await;
         assert_eq!(
             json["Game"]["Created"],
-            row_created_at.timestamp_micros().to_string(),
+            row_created_at.as_microsecond().to_string(),
             "Created 0 header must serve the row's corrected date"
         );
 
@@ -2249,7 +2245,7 @@ mod tests {
         })
         .await?;
         sqlx::query("UPDATE games SET created_at = $1 WHERE game_id = $2")
-            .bind(row_created_at)
+            .bind(cja::jiff_sqlx::Timestamp::from(row_created_at))
             .bind(game_id)
             .execute(&pool)
             .await?;
@@ -2983,9 +2979,9 @@ mod live_tests {
         let (admin_pool, quoted_name) = outage_admin(&pool).await;
         let mut admin = admin_pool.acquire().await.unwrap();
         let mut writer = pool.acquire().await.unwrap();
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "ALTER DATABASE \"{quoted_name}\" WITH ALLOW_CONNECTIONS false"
-        ))
+        )))
         .execute(&mut *admin)
         .await
         .unwrap();
@@ -3018,9 +3014,9 @@ mod live_tests {
         }
         .await;
         // Restore even when an outage operation fails. No assertions occur above.
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "ALTER DATABASE \"{quoted_name}\" WITH ALLOW_CONNECTIONS true"
-        ))
+        )))
         .execute(&mut *admin)
         .await
         .unwrap();
@@ -3061,9 +3057,9 @@ mod live_tests {
         let mut writer = pool.acquire().await.unwrap();
         let spare = pool.acquire().await.unwrap();
         drop(spare);
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "ALTER DATABASE \"{quoted_name}\" WITH ALLOW_CONNECTIONS false"
-        ))
+        )))
         .execute(&mut *admin)
         .await
         .unwrap();
@@ -3093,9 +3089,9 @@ mod live_tests {
             Ok::<(), color_eyre::Report>(())
         }
         .await;
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "ALTER DATABASE \"{quoted_name}\" WITH ALLOW_CONNECTIONS true"
-        ))
+        )))
         .execute(&mut *admin)
         .await
         .unwrap();
@@ -3729,13 +3725,13 @@ mod live_tests {
         use tower::ServiceExt as _;
 
         let state = AppState::test_from_pool(pool.clone());
-        let old = chrono::Utc::now() - chrono::Duration::days(40);
+        let old = jiff::Timestamp::now() - jiff::SignedDuration::from_hours(960);
 
         let game_id: Uuid = sqlx::query_scalar(
             "INSERT INTO games (board_size, game_type, status, created_at, updated_at)
              VALUES ('11x11', 'Standard', 'finished', $1, $1) RETURNING game_id",
         )
-        .bind(old)
+        .bind(cja::jiff_sqlx::Timestamp::from(old))
         .fetch_one(&pool)
         .await
         .unwrap();
@@ -3768,7 +3764,7 @@ mod live_tests {
             )
             .bind(game_id)
             .bind(snake_id)
-            .bind(old)
+            .bind(cja::jiff_sqlx::Timestamp::from(old))
             .fetch_one(&pool)
             .await
             .unwrap();

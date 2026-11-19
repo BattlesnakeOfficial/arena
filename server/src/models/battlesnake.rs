@@ -98,8 +98,8 @@ pub struct Battlesnake {
     pub color: String,
     pub head: String,
     pub tail: String,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub created_at: jiff::Timestamp,
+    pub updated_at: jiff::Timestamp,
 }
 
 /// Return the requested snakes that are selectable by this user. Missing,

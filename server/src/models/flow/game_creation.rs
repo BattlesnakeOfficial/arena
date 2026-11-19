@@ -19,8 +19,8 @@ pub struct GameCreationFlow {
     pub selected_battlesnake_ids: Vec<Uuid>,
     pub search_query: Option<String>,
     pub user_id: Uuid,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub created_at: jiff::Timestamp,
+    pub updated_at: jiff::Timestamp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -410,7 +410,7 @@ impl GameCreationFlow {
                 .wrap_err("Failed to create game")?;
 
         // Set enqueued_at timestamp before enqueueing the job
-        game::set_game_enqueued_at(&app_state.db, game.game_id, chrono::Utc::now())
+        game::set_game_enqueued_at(&app_state.db, game.game_id, jiff::Timestamp::now())
             .instrument(tracing::info_span!("game_builder.create.mark_enqueued"))
             .await
             .wrap_err("Failed to set enqueued_at")?;
@@ -514,8 +514,8 @@ struct GameCreationFlowRaw {
     pub selected_battlesnakes: Vec<Uuid>,
     pub search_query: Option<String>,
     pub user_id: Uuid,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub created_at: jiff::Timestamp,
+    pub updated_at: jiff::Timestamp,
 }
 
 // Convert raw database model to domain model
@@ -551,8 +551,8 @@ mod tests {
             selected_battlesnake_ids: Vec::new(),
             search_query: None,
             user_id: Uuid::new_v4(),
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
+            created_at: jiff::Timestamp::now(),
+            updated_at: jiff::Timestamp::now(),
         }
     }
 

@@ -7,7 +7,6 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
-use chrono::{DateTime, Utc};
 use color_eyre::eyre::eyre;
 use maud::{Markup, html};
 
@@ -61,13 +60,13 @@ pub async fn unsubscribe_post(
     Ok(StatusCode::OK)
 }
 
-fn eastern(at: DateTime<Utc>) -> String {
-    at.with_timezone(&cja::chrono_tz::America::New_York)
-        .format("%a %b %-d, %-I:%M %p ET")
+fn eastern(at: jiff::Timestamp) -> String {
+    at.to_zoned_datetime(jiff::tz::TimeZone::get("America/New_York").expect("bundled tzdb"))
+        .strftime("%a %b %-d, %-I:%M %p ET")
         .to_string()
 }
 
-fn wave_state(wave: Wave, now: DateTime<Utc>) -> &'static str {
+fn wave_state(wave: Wave, now: jiff::Timestamp) -> &'static str {
     if now < wave.starts_at() {
         "upcoming"
     } else if now < wave.ends_at() {
@@ -98,7 +97,7 @@ async fn admin_content(
     address: Option<&str>,
     outcome: Option<&str>,
 ) -> ServerResult<Markup, StatusCode> {
-    let now = Utc::now();
+    let now = jiff::Timestamp::now();
     let counts = notices::wave_status_counts(&state.db).await?;
     let unsubscribed = notices::unsubscribed_count(&state.db).await?;
     let eligible = match crate::play_import::connect_play(&state.config.database_url, "play").await

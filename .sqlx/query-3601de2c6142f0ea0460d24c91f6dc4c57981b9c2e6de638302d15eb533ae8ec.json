@@ -6,42 +6,60 @@
       {
         "ordinal": 0,
         "name": "game_id",
-        "type_info": "Uuid"
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_games",
+            "name": "game_id"
+          }
+        }
       },
       {
         "ordinal": 1,
         "name": "final_turn",
-        "type_info": "Int4"
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "turns",
+            "name": "turn_number"
+          }
+        }
       },
       {
         "ordinal": 2,
         "name": "game_battlesnake_id",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": "Expression"
       },
       {
         "ordinal": 3,
         "name": "length",
-        "type_info": "Int4"
+        "type_info": "Int4",
+        "origin": "Expression"
       },
       {
         "ordinal": 4,
         "name": "health",
-        "type_info": "Int4"
+        "type_info": "Int4",
+        "origin": "Expression"
       },
       {
         "ordinal": 5,
         "name": "death_cause",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": "Expression"
       },
       {
         "ordinal": 6,
         "name": "death_turn",
-        "type_info": "Int4"
+        "type_info": "Int4",
+        "origin": "Expression"
       },
       {
         "ordinal": 7,
         "name": "eliminated_by",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": "Expression"
       }
     ],
     "parameters": {

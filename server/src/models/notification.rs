@@ -1,4 +1,3 @@
-use chrono::{DateTime, Utc};
 use color_eyre::eyre::Context as _;
 use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
@@ -12,13 +11,39 @@ pub struct NotificationRecord {
     pub title: String,
     pub body: String,
     pub link: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub read_at: Option<DateTime<Utc>>,
+    pub created_at: jiff::Timestamp,
+    pub read_at: Option<jiff::Timestamp>,
+}
+
+/// `NotificationRecord` as `query_as!` decodes it: nullable date/time columns come back as
+/// `Option<cja::jiff_sqlx::*>`, which has no `Into<Option<jiff::*>>`.
+pub(crate) struct NotificationRecordRow {
+    pub(crate) notification_id: Uuid,
+    pub(crate) kind: String,
+    pub(crate) title: String,
+    pub(crate) body: String,
+    pub(crate) link: Option<String>,
+    pub(crate) created_at: jiff::Timestamp,
+    pub(crate) read_at: Option<cja::jiff_sqlx::Timestamp>,
+}
+
+impl From<NotificationRecordRow> for NotificationRecord {
+    fn from(row: NotificationRecordRow) -> Self {
+        Self {
+            notification_id: row.notification_id,
+            kind: row.kind,
+            title: row.title,
+            body: row.body,
+            link: row.link,
+            created_at: row.created_at,
+            read_at: row.read_at.map(Into::into),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct NotificationCursor {
-    pub created_at: DateTime<Utc>,
+    pub created_at: jiff::Timestamp,
     pub notification_id: Uuid,
 }
 
@@ -54,7 +79,7 @@ pub async fn list_visible(
 ) -> cja::Result<NotificationPage> {
     let mut items = if let Some(before) = before {
         sqlx::query_as!(
-            NotificationRecord,
+            NotificationRecordRow,
             r#"SELECT n.notification_id, n.kind, n.title, n.body, n.link, n.created_at, n.read_at
                FROM notifications AS n
                WHERE n.user_id = $1 AND n.in_app_visible
@@ -66,7 +91,7 @@ pub async fn list_visible(
                  AND (n.created_at, n.notification_id) < ($2, $3)
                ORDER BY n.created_at DESC, n.notification_id DESC LIMIT 21"#,
             user_id,
-            before.created_at,
+            cja::jiff_sqlx::Timestamp::from(before.created_at),
             before.notification_id
         )
         .fetch_all(pool)
@@ -74,7 +99,7 @@ pub async fn list_visible(
         .wrap_err("Failed to list notifications after cursor")?
     } else {
         sqlx::query_as!(
-            NotificationRecord,
+            NotificationRecordRow,
             r#"SELECT n.notification_id, n.kind, n.title, n.body, n.link, n.created_at, n.read_at
                FROM notifications AS n
                WHERE n.user_id = $1 AND n.in_app_visible
@@ -100,7 +125,10 @@ pub async fn list_visible(
     } else {
         None
     };
-    Ok(NotificationPage { items, next })
+    Ok(NotificationPage {
+        items: items.into_iter().map(Into::into).collect(),
+        next,
+    })
 }
 
 pub async fn mark_one_read(

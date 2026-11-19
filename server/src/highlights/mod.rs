@@ -15,8 +15,6 @@ pub mod detectors;
 pub mod extract;
 pub mod render;
 pub mod types;
-
-use chrono::{DateTime, Utc};
 use color_eyre::eyre::Context as _;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -31,14 +29,14 @@ pub use extract::compute_digest;
 #[derive(Debug, Clone)]
 pub struct DigestSummary {
     pub digest_id: Uuid,
-    pub window_start: DateTime<Utc>,
-    pub window_end: DateTime<Utc>,
+    pub window_start: jiff::Timestamp,
+    pub window_end: jiff::Timestamp,
     pub games_count: i32,
     pub duel_k: f64,
     pub four_snake_k: f64,
     pub discord_status: String,
-    pub discord_posted_at: Option<DateTime<Utc>>,
-    pub computed_at: DateTime<Utc>,
+    pub discord_posted_at: Option<jiff::Timestamp>,
+    pub computed_at: jiff::Timestamp,
 }
 
 /// A stored section with its items.
@@ -64,11 +62,11 @@ pub struct StoredItem {
 /// new week: games still running at window close land their results for
 /// several minutes after 12:00Z (prod landed 12:07:20Z for the
 /// 2026-10-31 week), and a stored digest is never recomputed.
-pub const HIGHLIGHTS_SETTLE: chrono::Duration = chrono::Duration::minutes(30);
+pub const HIGHLIGHTS_SETTLE: jiff::SignedDuration = jiff::SignedDuration::from_mins(30);
 
 /// The week a cron tick at `tick` resolves: the latest completed week,
 /// held back [`HIGHLIGHTS_SETTLE`] so straggler results are in.
-pub fn week_for_tick(tick: DateTime<Utc>) -> Week {
+pub fn week_for_tick(tick: jiff::Timestamp) -> Week {
     Week::latest_completed(tick - HIGHLIGHTS_SETTLE)
 }
 
@@ -77,7 +75,7 @@ pub fn week_for_tick(tick: DateTime<Utc>) -> Week {
 /// the week resolves only after [`HIGHLIGHTS_SETTLE`] lets results for games
 /// still running at window close land.
 pub async fn run_weekly(app_state: &AppState) -> cja::Result<()> {
-    let week = week_for_tick(Utc::now());
+    let week = week_for_tick(jiff::Timestamp::now());
     if digest_for_week(&app_state.db, &week).await?.is_none() {
         let started = std::time::Instant::now();
         let house = app_state.config.highlights_house();
@@ -86,7 +84,7 @@ pub async fn run_weekly(app_state: &AppState) -> cja::Result<()> {
             &app_state.db,
             &digest,
             &app_state.config.base_url,
-            Utc::now(),
+            jiff::Timestamp::now(),
         )
         .await?;
         tracing::info!(
@@ -111,11 +109,11 @@ pub async fn store_digest(
     db: &PgPool,
     digest: &ComputedDigest,
     base_url: &str,
-    now: DateTime<Utc>,
+    now: jiff::Timestamp,
 ) -> cja::Result<Option<Uuid>> {
     let digest_id = Uuid::new_v4();
     let message = render::discord_message(digest, &digest.picks, digest_id, base_url);
-    let announcement_deadline = digest.window_end + chrono::Duration::days(7);
+    let announcement_deadline = digest.window_end + jiff::SignedDuration::from_hours(168);
     let initial_status = if now >= announcement_deadline {
         "abandoned"
     } else {
@@ -134,8 +132,8 @@ pub async fn store_digest(
         RETURNING digest_id
         "#,
         digest_id,
-        digest.window_start,
-        digest.window_end,
+        cja::jiff_sqlx::Timestamp::from(digest.window_start),
+        cja::jiff_sqlx::Timestamp::from(digest.window_end),
         digest.games_count as i32,
         digest.duel_k,
         digest.four_snake_k,
@@ -200,21 +198,21 @@ fn row_to_summary(row: DigestRow) -> DigestSummary {
         duel_k: row.duel_calibration_k,
         four_snake_k: row.four_snake_calibration_k,
         discord_status: row.discord_status,
-        discord_posted_at: row.discord_posted_at,
+        discord_posted_at: row.discord_posted_at.map(Into::into),
         computed_at: row.computed_at,
     }
 }
 
 struct DigestRow {
     digest_id: Uuid,
-    window_start: DateTime<Utc>,
-    window_end: DateTime<Utc>,
+    window_start: jiff::Timestamp,
+    window_end: jiff::Timestamp,
     games_count: i32,
     duel_calibration_k: f64,
     four_snake_calibration_k: f64,
     discord_status: String,
-    discord_posted_at: Option<DateTime<Utc>>,
-    computed_at: DateTime<Utc>,
+    discord_posted_at: Option<cja::jiff_sqlx::Timestamp>,
+    computed_at: jiff::Timestamp,
 }
 
 pub async fn digest_for_week(db: &PgPool, week: &Week) -> cja::Result<Option<DigestSummary>> {
@@ -227,7 +225,7 @@ pub async fn digest_for_week(db: &PgPool, week: &Week) -> cja::Result<Option<Dig
         FROM highlight_digests
         WHERE window_end = $1
         "#,
-        week.end
+        cja::jiff_sqlx::Timestamp::from(week.end)
     )
     .fetch_optional(db)
     .await
@@ -382,8 +380,8 @@ pub async fn process_discord_posts(app_state: &AppState) -> cja::Result<()> {
 
         // The row is locked: the plain UPDATE below cannot race another
         // status flip, so no predicate guard is needed.
-        let deadline = row.window_end + chrono::Duration::days(7);
-        if Utc::now() >= deadline {
+        let deadline = row.window_end.to_jiff() + jiff::SignedDuration::from_hours(168);
+        if jiff::Timestamp::now() >= deadline {
             sqlx::query!(
                 "UPDATE highlight_digests SET discord_status = 'abandoned' WHERE digest_id = $1",
                 digest_id
@@ -396,7 +394,7 @@ pub async fn process_discord_posts(app_state: &AppState) -> cja::Result<()> {
                 .wrap_err("highlights: failed to commit digest abandonment")?;
             tracing::error!(
                 digest_id = %digest_id,
-                window_end = %row.window_end,
+                window_end = %row.window_end.to_jiff(),
                 "Highlights Discord post abandoned: announcement deadline passed"
             );
             continue;
@@ -414,7 +412,7 @@ pub async fn process_discord_posts(app_state: &AppState) -> cja::Result<()> {
                 .wrap_err("highlights: failed to commit digest skip")?;
             tracing::info!(
                 digest_id = %digest_id,
-                window_end = %row.window_end,
+                window_end = %row.window_end.to_jiff(),
                 "No highlights webhook configured; weekly post skipped"
             );
             continue;
@@ -475,9 +473,9 @@ pub async fn preview_main() -> cja::Result<()> {
             "usage: arena highlights-preview <start> <end>   (RFC 3339, e.g. 2026-10-24T12:00:00Z)"
         ));
     };
-    let parse = |value: String, label: &str| -> cja::Result<DateTime<Utc>> {
-        DateTime::parse_from_rfc3339(&value)
-            .map(|dt| dt.with_timezone(&Utc))
+    let parse = |value: String, label: &str| -> cja::Result<jiff::Timestamp> {
+        value
+            .parse::<jiff::Timestamp>()
             .wrap_err_with(|| format!("invalid {label} timestamp {value:?}"))
     };
     let start = parse(start, "start")?;
@@ -525,17 +523,19 @@ mod tests {
 
     // ------------------------------------------------------------ helpers
 
-    fn w0() -> DateTime<Utc> {
-        Week::latest_completed(Utc::now()).start
+    fn w0() -> jiff::Timestamp {
+        Week::latest_completed(jiff::Timestamp::now()).start
     }
 
-    fn w1() -> DateTime<Utc> {
-        Week::latest_completed(Utc::now()).end
+    fn w1() -> jiff::Timestamp {
+        Week::latest_completed(jiff::Timestamp::now()).end
     }
 
-    fn at(y: i32, m: u32, d: u32, h: u32, min: u32) -> DateTime<Utc> {
-        use chrono::TimeZone;
-        Utc.with_ymd_and_hms(y, m, d, h, min, 0).unwrap()
+    fn at(y: i16, m: i8, d: i8, h: i8, min: i8) -> jiff::Timestamp {
+        jiff::civil::datetime(y, m, d, h, min, 0, 0)
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+            .unwrap()
+            .timestamp()
     }
 
     // ------------------------------------------ week-resolution (settle)
@@ -589,7 +589,7 @@ mod tests {
         ladder_name: &str,
         owner_login: &str,
         snake_names: [&str; 2],
-        created_at: DateTime<Utc>,
+        created_at: jiff::Timestamp,
         winner: usize,
         mus: [f64; 2],
         final_turn: i32,
@@ -600,7 +600,7 @@ mod tests {
             "INSERT INTO games (board_size, game_type, status, created_at)
              VALUES ('11x11', 'standard', 'finished', $1) RETURNING game_id",
         )
-        .bind(created_at)
+        .bind(cja::jiff_sqlx::Timestamp::from(created_at))
         .fetch_one(pool)
         .await
         .unwrap();
@@ -610,7 +610,7 @@ mod tests {
         )
         .bind(ladder)
         .bind(game_id)
-        .bind(created_at)
+        .bind(cja::jiff_sqlx::Timestamp::from(created_at))
         .fetch_one(pool)
         .await
         .unwrap();
@@ -660,7 +660,7 @@ mod tests {
             .bind(mus[i] + 0.5)
             .bind(25.0 / 6.0)
             .bind(25.0 / 6.0)
-            .bind(created_at)
+            .bind(cja::jiff_sqlx::Timestamp::from(created_at))
             .execute(pool)
             .await
             .unwrap();
@@ -710,10 +710,15 @@ mod tests {
         // Fitted k over zero games: every ll equal → highest grid k.
         assert!((digest.duel_k - 4.0).abs() < 1e-9);
 
-        let id = store_digest(&pool, &digest, "https://arena.example.com", Utc::now())
-            .await
-            .unwrap()
-            .expect("stored");
+        let id = store_digest(
+            &pool,
+            &digest,
+            "https://arena.example.com",
+            jiff::Timestamp::now(),
+        )
+        .await
+        .unwrap()
+        .expect("stored");
         let (summary, sections) = load_digest(&pool, id).await.unwrap().unwrap();
         assert_eq!(summary.games_count, 0);
         assert_eq!(summary.discord_status, "pending");
@@ -789,24 +794,34 @@ mod tests {
         let digest = compute_digest(&pool, &HouseSnakeConfig::default(), w0(), w1())
             .await
             .unwrap();
-        let first = store_digest(&pool, &digest, "https://arena.example.com", Utc::now())
-            .await
-            .unwrap();
+        let first = store_digest(
+            &pool,
+            &digest,
+            "https://arena.example.com",
+            jiff::Timestamp::now(),
+        )
+        .await
+        .unwrap();
         assert!(first.is_some());
-        let second = store_digest(&pool, &digest, "https://arena.example.com", Utc::now())
-            .await
-            .unwrap();
+        let second = store_digest(
+            &pool,
+            &digest,
+            "https://arena.example.com",
+            jiff::Timestamp::now(),
+        )
+        .await
+        .unwrap();
         assert!(second.is_none());
         assert_eq!(count_digests(&pool).await, 1);
 
         // A misaligned window trips the schema backstop.
         let misaligned = types::ComputedDigest {
-            window_start: w0() + chrono::Duration::hours(1),
-            window_end: w1() + chrono::Duration::hours(1),
+            window_start: w0() + jiff::SignedDuration::from_hours(1),
+            window_end: w1() + jiff::SignedDuration::from_hours(1),
             ..digest.clone()
         };
         assert!(
-            store_digest(&pool, &misaligned, "https://x", Utc::now())
+            store_digest(&pool, &misaligned, "https://x", jiff::Timestamp::now())
                 .await
                 .is_err()
         );
@@ -831,7 +846,7 @@ mod tests {
 
     #[sqlx::test(migrations = "../migrations")]
     async fn discord_message_snapshot_has_link_week_and_photo_finish(pool: PgPool) {
-        let mid = w0() + chrono::Duration::hours(12);
+        let mid = w0() + jiff::SignedDuration::from_hours(12);
         let (game_id, _) = seed_duel(
             &pool,
             "Duels 11x11",
@@ -851,10 +866,15 @@ mod tests {
             digest.picks.duel_photo_finish.is_some(),
             "seeded duel must be a photo finish"
         );
-        let id = store_digest(&pool, &digest, "https://arena.example.com", Utc::now())
-            .await
-            .unwrap()
-            .expect("stored");
+        let id = store_digest(
+            &pool,
+            &digest,
+            "https://arena.example.com",
+            jiff::Timestamp::now(),
+        )
+        .await
+        .unwrap()
+        .expect("stored");
         let message: String = sqlx::query_scalar(
             "SELECT discord_message FROM highlight_digests WHERE digest_id = $1",
         )
@@ -879,7 +899,7 @@ mod tests {
 
     async fn insert_pending_digest(
         pool: &PgPool,
-        window_end: DateTime<Utc>,
+        window_end: jiff::Timestamp,
         message: &str,
     ) -> Uuid {
         sqlx::query_scalar(
@@ -889,7 +909,7 @@ mod tests {
              VALUES ($1 - INTERVAL '7 days', $1, 0, 1.0, 1.0, 'pending', $2)
              RETURNING digest_id",
         )
-        .bind(window_end)
+        .bind(cja::jiff_sqlx::Timestamp::from(window_end))
         .bind(message)
         .fetch_one(pool)
         .await
@@ -925,13 +945,15 @@ mod tests {
         let digest_id = insert_pending_digest(&pool, w1(), "snapshot text").await;
         process_discord_posts(&state).await.unwrap();
         assert_eq!(status_of(&pool, digest_id).await, "posted");
-        let posted_at: Option<DateTime<Utc>> = sqlx::query_scalar(
-            "SELECT discord_posted_at FROM highlight_digests WHERE digest_id = $1",
-        )
-        .bind(digest_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let posted_at: Option<jiff::Timestamp> =
+            sqlx::query_scalar::<_, Option<cja::jiff_sqlx::Timestamp>>(
+                "SELECT discord_posted_at FROM highlight_digests WHERE digest_id = $1",
+            )
+            .bind(digest_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .map(Into::into);
         assert!(posted_at.is_some());
         // A second pass sends nothing more.
         process_discord_posts(&state).await.unwrap();
@@ -1031,9 +1053,9 @@ mod tests {
         );
 
         // Window ended 8 days ago: past the 7-day announcement deadline.
-        let old_end = Utc::now() - chrono::Duration::days(8);
+        let old_end = jiff::Timestamp::now() - jiff::SignedDuration::from_hours(192);
         // Align to a Saturday noon so the CHECK passes.
-        let old_week = Week::ending(old_week_saturday(old_end), Utc::now()).unwrap();
+        let old_week = Week::ending(old_week_saturday(old_end), jiff::Timestamp::now()).unwrap();
         let digest_id = insert_pending_digest(&pool, old_week.end, "old snapshot").await;
         process_discord_posts(&state).await.unwrap();
         assert_eq!(status_of(&pool, digest_id).await, "abandoned");
@@ -1044,15 +1066,19 @@ mod tests {
     }
 
     /// The most recent Saturday-noon boundary at or before `at`.
-    fn old_week_saturday(at: DateTime<Utc>) -> chrono::NaiveDate {
-        Week::latest_completed(at).end.date_naive()
+    fn old_week_saturday(at: jiff::Timestamp) -> jiff::civil::Date {
+        Week::latest_completed(at)
+            .end
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+            .date()
     }
 
     #[sqlx::test(migrations = "../migrations")]
     async fn past_deadline_backfill_lands_abandoned_at_insert(pool: PgPool) {
         // A week whose announcement deadline already passed stores directly
         // as abandoned — no error, no post attempt.
-        let old = Week::latest_completed(Utc::now() - chrono::Duration::days(14));
+        let old =
+            Week::latest_completed(jiff::Timestamp::now() - jiff::SignedDuration::from_hours(336));
         let digest = types::ComputedDigest {
             window_start: old.start,
             window_end: old.end,
@@ -1064,7 +1090,7 @@ mod tests {
             sections: vec![],
             picks: DiscordPicks::default(),
         };
-        let id = store_digest(&pool, &digest, "https://x", Utc::now())
+        let id = store_digest(&pool, &digest, "https://x", jiff::Timestamp::now())
             .await
             .unwrap()
             .expect("stored");
@@ -1108,7 +1134,7 @@ mod tests {
             "Duels 11x11",
             "malformed-frame-owner",
             ["Malformed Winner", "Malformed Loser"],
-            w0() + chrono::Duration::hours(1),
+            w0() + jiff::SignedDuration::from_hours(1),
             0,
             [25.0, 25.0],
             10,

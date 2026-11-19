@@ -6,7 +6,13 @@
       {
         "ordinal": 0,
         "name": "status: MatchStatus",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "tournament_matches",
+            "name": "status"
+          }
+        }
       }
     ],
     "parameters": {

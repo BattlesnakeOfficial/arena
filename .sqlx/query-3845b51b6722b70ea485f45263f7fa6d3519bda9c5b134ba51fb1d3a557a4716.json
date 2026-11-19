@@ -6,57 +6,118 @@
       {
         "ordinal": 0,
         "name": "leaderboard_game_id",
-        "type_info": "Uuid"
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_game_results",
+            "name": "leaderboard_game_id"
+          }
+        }
       },
       {
         "ordinal": 1,
         "name": "game_id",
-        "type_info": "Uuid"
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_games",
+            "name": "game_id"
+          }
+        }
       },
       {
         "ordinal": 2,
         "name": "placement",
-        "type_info": "Int4"
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_game_results",
+            "name": "placement"
+          }
+        }
       },
       {
         "ordinal": 3,
         "name": "is_draw!",
-        "type_info": "Bool"
+        "type_info": "Bool",
+        "origin": "Expression"
       },
       {
         "ordinal": 4,
         "name": "display_score_change",
-        "type_info": "Float8"
+        "type_info": "Float8",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_game_results",
+            "name": "display_score_change"
+          }
+        }
       },
       {
         "ordinal": 5,
         "name": "mu_before",
-        "type_info": "Float8"
+        "type_info": "Float8",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_game_results",
+            "name": "mu_before"
+          }
+        }
       },
       {
         "ordinal": 6,
         "name": "mu_after",
-        "type_info": "Float8"
+        "type_info": "Float8",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_game_results",
+            "name": "mu_after"
+          }
+        }
       },
       {
         "ordinal": 7,
         "name": "sigma_before",
-        "type_info": "Float8"
+        "type_info": "Float8",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_game_results",
+            "name": "sigma_before"
+          }
+        }
       },
       {
         "ordinal": 8,
         "name": "sigma_after",
-        "type_info": "Float8"
+        "type_info": "Float8",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_game_results",
+            "name": "sigma_after"
+          }
+        }
       },
       {
         "ordinal": 9,
         "name": "food_eaten",
-        "type_info": "Int4"
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_game_results",
+            "name": "food_eaten"
+          }
+        }
       },
       {
         "ordinal": 10,
         "name": "game_created_at",
-        "type_info": "Timestamptz"
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_games",
+            "name": "created_at"
+          }
+        }
       }
     ],
     "parameters": {

@@ -3,11 +3,9 @@
 //! ladder (matchmaking, ratings, health sweeps). Joining takes the invite
 //! code unless the user already has a snake on it.
 
-use std::ops::RangeInclusive;
-
-use chrono::{DateTime, Utc};
 use color_eyre::eyre::Context as _;
 use sqlx::PgPool;
+use std::ops::RangeInclusive;
 use uuid::Uuid;
 
 use crate::models::{
@@ -43,8 +41,40 @@ pub struct AdminLeaderboardListing {
     pub visibility: Visibility,
     pub invite_code: Option<String>,
     pub active_entries: i64,
-    pub disabled_at: Option<DateTime<Utc>>,
-    pub created_at: DateTime<Utc>,
+    pub disabled_at: Option<jiff::Timestamp>,
+    pub created_at: jiff::Timestamp,
+}
+
+/// `AdminLeaderboardListing` as `query_as!` decodes it: nullable date/time columns come back as
+/// `Option<cja::jiff_sqlx::*>`, which has no `Into<Option<jiff::*>>`.
+pub(crate) struct AdminLeaderboardListingRow {
+    pub(crate) leaderboard_id: Uuid,
+    pub(crate) name: String,
+    pub(crate) game_type: String,
+    pub(crate) board_size: String,
+    pub(crate) match_size: i32,
+    pub(crate) visibility: Visibility,
+    pub(crate) invite_code: Option<String>,
+    pub(crate) active_entries: i64,
+    pub(crate) disabled_at: Option<cja::jiff_sqlx::Timestamp>,
+    pub(crate) created_at: jiff::Timestamp,
+}
+
+impl From<AdminLeaderboardListingRow> for AdminLeaderboardListing {
+    fn from(row: AdminLeaderboardListingRow) -> Self {
+        Self {
+            leaderboard_id: row.leaderboard_id,
+            name: row.name,
+            game_type: row.game_type,
+            board_size: row.board_size,
+            match_size: row.match_size,
+            visibility: row.visibility,
+            invite_code: row.invite_code,
+            active_entries: row.active_entries,
+            disabled_at: row.disabled_at.map(Into::into),
+            created_at: row.created_at,
+        }
+    }
 }
 
 /// Invite codes are typed by hand, so accept stray whitespace and lowercase.
@@ -148,7 +178,7 @@ pub async fn regenerate_invite_code(pool: &PgPool, leaderboard_id: Uuid) -> cja:
 /// Every leaderboard, public and private, for the admin list.
 pub async fn list_for_admin(pool: &PgPool) -> cja::Result<Vec<AdminLeaderboardListing>> {
     sqlx::query_as!(
-        AdminLeaderboardListing,
+        AdminLeaderboardListingRow,
         r#"SELECT l.leaderboard_id, l.name, l.game_type, l.board_size, l.match_size,
                   l.visibility as "visibility: Visibility",
                   l.invite_code, l.disabled_at, l.created_at,
@@ -160,5 +190,6 @@ pub async fn list_for_admin(pool: &PgPool) -> cja::Result<Vec<AdminLeaderboardLi
     )
     .fetch_all(pool)
     .await
+    .map(|rows| rows.into_iter().map(Into::into).collect())
     .wrap_err("Failed to list leaderboards for admin")
 }

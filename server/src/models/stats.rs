@@ -1,15 +1,14 @@
-use std::collections::BTreeMap;
-
-use chrono::{Datelike, Duration, NaiveDate, Utc};
 use color_eyre::eyre::{Context as _, eyre};
+use jiff::civil::Date;
 use serde::Serialize;
 use sqlx::PgPool;
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct StatsSnapshot {
-    pub as_of_utc_date: NaiveDate,
-    pub tracking_started_on: NaiveDate,
-    pub live_tracking_started_on: NaiveDate,
+    pub as_of_utc_date: Date,
+    pub tracking_started_on: Date,
+    pub live_tracking_started_on: Date,
     pub headlines: StatsHeadlines,
     pub daily_active_users: Vec<DailyCount>,
     pub weekly_active_users: Vec<WeeklyCount>,
@@ -22,13 +21,13 @@ pub struct StatsSnapshot {
 #[derive(Debug, Clone, Serialize)]
 pub struct StatsHeadlines {
     pub dau: Option<i64>,
-    pub dau_available_on: NaiveDate,
+    pub dau_available_on: Date,
     pub wau: Option<i64>,
-    pub wau_available_on: NaiveDate,
+    pub wau_available_on: Date,
     pub mau: Option<i64>,
-    pub mau_available_on: NaiveDate,
+    pub mau_available_on: Date,
     pub dau_mau_percent: Option<f64>,
-    pub dau_mau_percent_available_on: NaiveDate,
+    pub dau_mau_percent_available_on: Date,
     pub games_7d: i64,
     pub active_snakes_7d: i64,
     pub registered_users: i64,
@@ -37,63 +36,63 @@ pub struct StatsHeadlines {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DailyCount {
-    pub date: NaiveDate,
+    pub date: Date,
     pub count: i64,
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct WeeklyCount {
-    pub week_start: NaiveDate,
+    pub week_start: Date,
     pub count: i64,
 }
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct DailyGames {
-    pub date: NaiveDate,
+    pub date: Date,
     pub custom: i64,
     pub leaderboard: i64,
     pub tournament: i64,
 }
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct WeeklyGames {
-    pub week_start: NaiveDate,
+    pub week_start: Date,
     pub custom: i64,
     pub leaderboard: i64,
     pub tournament: i64,
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct WeeklyGrowth {
-    pub week_start: NaiveDate,
+    pub week_start: Date,
     pub new_users: i64,
     pub new_snakes: i64,
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct WeeklySnakes {
-    pub week_start: NaiveDate,
+    pub week_start: Date,
     pub count: i64,
 }
 
-fn midnight(day: NaiveDate) -> cja::Result<chrono::DateTime<Utc>> {
+fn midnight(day: Date) -> cja::Result<jiff::Timestamp> {
     Ok(day
-        .and_hms_opt(0, 0, 0)
-        .ok_or_else(|| eyre!("Invalid UTC day"))?
-        .and_utc())
+        .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+        .map_err(|_| eyre!("Invalid UTC day"))?
+        .timestamp())
 }
 
-fn days_before(day: NaiveDate, n: i64) -> cja::Result<NaiveDate> {
-    day.checked_sub_signed(Duration::days(n))
-        .ok_or_else(|| eyre!("Stats date out of range"))
+fn days_before(day: Date, n: i64) -> cja::Result<Date> {
+    day.checked_sub(jiff::ToSpan::days(n))
+        .map_err(|_| eyre!("Stats date out of range"))
 }
 
-fn days_after(day: NaiveDate, n: i64) -> cja::Result<NaiveDate> {
-    day.checked_add_signed(Duration::days(n))
-        .ok_or_else(|| eyre!("Stats date out of range"))
+fn days_after(day: Date, n: i64) -> cja::Result<Date> {
+    day.checked_add(jiff::ToSpan::days(n))
+        .map_err(|_| eyre!("Stats date out of range"))
 }
 
-fn monday(day: NaiveDate) -> cja::Result<NaiveDate> {
-    days_before(day, i64::from(day.weekday().num_days_from_monday()))
+fn monday(day: Date) -> cja::Result<Date> {
+    days_before(day, i64::from(day.weekday().to_monday_zero_offset()))
 }
 
 impl StatsSnapshot {
-    pub async fn fetch(db: &PgPool, today_utc: NaiveDate) -> cja::Result<Self> {
+    pub async fn fetch(db: &PgPool, today_utc: Date) -> cja::Result<Self> {
         let as_of_utc_date = days_before(today_utc, 1)?;
         let daily_start = days_before(today_utc, 90)?;
         let seven_start = days_before(today_utc, 7)?;
@@ -105,13 +104,14 @@ impl StatsSnapshot {
         let seven_start_ts = midnight(seven_start)?;
 
         let tracking = sqlx::query!(
-            "SELECT (tracking_started_at AT TIME ZONE 'UTC')::date AS \"start_day!: NaiveDate\" FROM stats_tracking_start WHERE singleton = TRUE"
+            "SELECT (tracking_started_at AT TIME ZONE 'UTC')::date AS \"start_day!: cja::jiff_sqlx::Date\" FROM stats_tracking_start WHERE singleton = TRUE"
         ).fetch_optional(db).await.wrap_err("Failed to read stats tracking epoch")?
          .ok_or_else(|| eyre!("Missing stats tracking singleton"))?;
         let live_tracking_started_on = tracking
             .start_day
-            .succ_opt()
-            .ok_or_else(|| eyre!("Invalid tracking epoch"))?;
+            .to_jiff()
+            .tomorrow()
+            .map_err(|_| eyre!("Invalid tracking epoch"))?;
         let dau_available_on = days_after(live_tracking_started_on, 1)?;
         let wau_available_on = days_after(live_tracking_started_on, 7)?;
         let mau_available_on = days_after(live_tracking_started_on, 28)?;
@@ -119,15 +119,15 @@ impl StatsSnapshot {
         let activity_rows = sqlx::query!(
             // The (user_id, day) primary key makes COUNT(*) a distinct-user count for each day.
             "SELECT day, COUNT(*) AS \"count!: i64\" FROM user_activity_days WHERE day >= $1 AND day < $2 GROUP BY day",
-            daily_start, today_utc
+            cja::jiff_sqlx::Date::from(daily_start), cja::jiff_sqlx::Date::from(today_utc)
         ).fetch_all(db).await.wrap_err("Failed to fetch daily account activity")?;
         let activity_map: BTreeMap<_, _> = activity_rows
             .into_iter()
-            .map(|row| (row.day, row.count))
+            .map(|row| (row.day.to_jiff(), row.count))
             .collect();
         let daily_active_users: Vec<_> = (0..90)
             .map(|offset| {
-                let date = daily_start + Duration::days(offset);
+                let date = daily_start + jiff::SignedDuration::from_hours(24 * (offset));
                 DailyCount {
                     date,
                     count: *activity_map.get(&date).unwrap_or(&0),
@@ -137,16 +137,16 @@ impl StatsSnapshot {
             .collect();
 
         let weekly_activity_rows = sqlx::query!(
-            "SELECT date_trunc('week', day::timestamp)::date AS \"week_start!: NaiveDate\", COUNT(DISTINCT user_id) AS \"count!: i64\" FROM user_activity_days WHERE day >= $1 AND day < $2 GROUP BY 1",
-            weekly_start, current_monday
+            "SELECT date_trunc('week', day::timestamp)::date AS \"week_start!: cja::jiff_sqlx::Date\", COUNT(DISTINCT user_id) AS \"count!: i64\" FROM user_activity_days WHERE day >= $1 AND day < $2 GROUP BY 1",
+            cja::jiff_sqlx::Date::from(weekly_start), cja::jiff_sqlx::Date::from(current_monday)
         ).fetch_all(db).await.wrap_err("Failed to fetch weekly account activity")?;
         let weekly_activity_map: BTreeMap<_, _> = weekly_activity_rows
             .into_iter()
-            .map(|row| (row.week_start, row.count))
+            .map(|row| (row.week_start.to_jiff(), row.count))
             .collect();
         let weekly_active_users: Vec<_> = (0..52)
             .map(|offset| {
-                let week_start = weekly_start + Duration::weeks(offset);
+                let week_start = weekly_start + jiff::SignedDuration::from_hours(24 * 7 * (offset));
                 WeeklyCount {
                     week_start,
                     count: *weekly_activity_map.get(&week_start).unwrap_or(&0),
@@ -157,7 +157,7 @@ impl StatsSnapshot {
 
         let active_headlines = sqlx::query!(
             "SELECT COUNT(DISTINCT user_id) FILTER (WHERE day = $1) AS \"dau!: i64\", COUNT(DISTINCT user_id) FILTER (WHERE day >= $2) AS \"wau!: i64\", COUNT(DISTINCT user_id) FILTER (WHERE day >= $3) AS \"mau!: i64\" FROM user_activity_days WHERE day >= $3 AND day < $4",
-            as_of_utc_date, seven_start, mau_start, today_utc
+            cja::jiff_sqlx::Date::from(as_of_utc_date), cja::jiff_sqlx::Date::from(seven_start), cja::jiff_sqlx::Date::from(mau_start), cja::jiff_sqlx::Date::from(today_utc)
         ).fetch_one(db).await.wrap_err("Failed to fetch activity headlines")?;
         let average_dau = daily_active_users
             .iter()
@@ -173,7 +173,7 @@ impl StatsSnapshot {
         };
 
         let game_rows = sqlx::query!(
-            r#"SELECT (g.created_at AT TIME ZONE 'UTC')::date AS "day!: NaiveDate",
+            r#"SELECT (g.created_at AT TIME ZONE 'UTC')::date AS "day!: cja::jiff_sqlx::Date",
                CASE WHEN mg.game_id IS NOT NULL THEN 'tournament'
                     WHEN lg.game_id IS NOT NULL THEN 'leaderboard'
                     ELSE 'custom' END AS "source!: String",
@@ -184,18 +184,20 @@ impl StatsSnapshot {
                WHERE g.status = 'finished' AND g.engine_game_id IS NULL
                  AND g.created_at >= $1 AND g.created_at < $2
                GROUP BY 1, 2"#,
-            weekly_start_ts,
-            today_ts
+            cja::jiff_sqlx::Timestamp::from(weekly_start_ts),
+            cja::jiff_sqlx::Timestamp::from(today_ts)
         )
         .fetch_all(db)
         .await
         .wrap_err("Failed to fetch played games")?;
-        let mut games_by_day: BTreeMap<NaiveDate, DailyGames> = BTreeMap::new();
+        let mut games_by_day: BTreeMap<Date, DailyGames> = BTreeMap::new();
         for row in game_rows {
-            let entry = games_by_day.entry(row.day).or_insert_with(|| DailyGames {
-                date: row.day,
-                ..DailyGames::default()
-            });
+            let entry = games_by_day
+                .entry(row.day.to_jiff())
+                .or_insert_with(|| DailyGames {
+                    date: row.day.to_jiff(),
+                    ..DailyGames::default()
+                });
             match row.source.as_str() {
                 "custom" => entry.custom = row.count,
                 "leaderboard" => entry.leaderboard = row.count,
@@ -205,7 +207,7 @@ impl StatsSnapshot {
         }
         let daily_games: Vec<_> = (0..90)
             .map(|offset| {
-                let date = daily_start + Duration::days(offset);
+                let date = daily_start + jiff::SignedDuration::from_hours(24 * (offset));
                 games_by_day.get(&date).cloned().unwrap_or(DailyGames {
                     date,
                     ..DailyGames::default()
@@ -214,13 +216,14 @@ impl StatsSnapshot {
             .collect();
         let weekly_games: Vec<_> = (0..52)
             .map(|offset| {
-                let week_start = weekly_start + Duration::weeks(offset);
+                let week_start = weekly_start + jiff::SignedDuration::from_hours(24 * 7 * (offset));
                 let mut total = WeeklyGames {
                     week_start,
                     ..WeeklyGames::default()
                 };
                 for day_offset in 0..7 {
-                    if let Some(row) = games_by_day.get(&(week_start + Duration::days(day_offset)))
+                    if let Some(row) = games_by_day
+                        .get(&(week_start + jiff::SignedDuration::from_hours(24 * (day_offset))))
                     {
                         total.custom += row.custom;
                         total.leaderboard += row.leaderboard;
@@ -236,7 +239,7 @@ impl StatsSnapshot {
             .sum();
 
         let weekly_snake_rows = sqlx::query!(
-            r#"SELECT (date_trunc('week', g.created_at AT TIME ZONE 'UTC'))::date AS "week_start!: NaiveDate",
+            r#"SELECT (date_trunc('week', g.created_at AT TIME ZONE 'UTC'))::date AS "week_start!: cja::jiff_sqlx::Date",
                COUNT(DISTINCT COALESCE(gb.battlesnake_id, le.battlesnake_id)) AS "count!: i64"
                FROM games g
                JOIN game_battlesnakes gb ON gb.game_id = g.game_id
@@ -244,15 +247,15 @@ impl StatsSnapshot {
                WHERE g.status = 'finished' AND g.engine_game_id IS NULL
                  AND g.created_at >= $1 AND g.created_at < $2
                GROUP BY 1"#,
-            weekly_start_ts, midnight(current_monday)?
+            cja::jiff_sqlx::Timestamp::from(weekly_start_ts), cja::jiff_sqlx::Timestamp::from(midnight(current_monday)?)
         ).fetch_all(db).await.wrap_err("Failed to fetch weekly active snakes")?;
         let weekly_snake_map: BTreeMap<_, _> = weekly_snake_rows
             .into_iter()
-            .map(|row| (row.week_start, row.count))
+            .map(|row| (row.week_start.to_jiff(), row.count))
             .collect();
         let weekly_active_snakes: Vec<_> = (0..52)
             .map(|offset| {
-                let week_start = weekly_start + Duration::weeks(offset);
+                let week_start = weekly_start + jiff::SignedDuration::from_hours(24 * 7 * (offset));
                 WeeklySnakes {
                     week_start,
                     count: *weekly_snake_map.get(&week_start).unwrap_or(&0),
@@ -266,28 +269,28 @@ impl StatsSnapshot {
                LEFT JOIN leaderboard_entries le ON le.leaderboard_entry_id = gb.leaderboard_entry_id
                WHERE g.status = 'finished' AND g.engine_game_id IS NULL
                  AND g.created_at >= $1 AND g.created_at < $2"#,
-            seven_start_ts, today_ts
+            cja::jiff_sqlx::Timestamp::from(seven_start_ts), cja::jiff_sqlx::Timestamp::from(today_ts)
         ).fetch_one(db).await.wrap_err("Failed to fetch seven-day active snakes")?;
 
         let user_growth_rows = sqlx::query!(
-            "SELECT (date_trunc('week', created_at AT TIME ZONE 'UTC'))::date AS \"week_start!: NaiveDate\", COUNT(*) AS \"count!: i64\" FROM users WHERE created_at >= $1 AND created_at < $2 GROUP BY 1",
-            weekly_start_ts, midnight(current_monday)?
+            "SELECT (date_trunc('week', created_at AT TIME ZONE 'UTC'))::date AS \"week_start!: cja::jiff_sqlx::Date\", COUNT(*) AS \"count!: i64\" FROM users WHERE created_at >= $1 AND created_at < $2 GROUP BY 1",
+            cja::jiff_sqlx::Timestamp::from(weekly_start_ts), cja::jiff_sqlx::Timestamp::from(midnight(current_monday)?)
         ).fetch_all(db).await.wrap_err("Failed to fetch user growth")?;
         let snake_growth_rows = sqlx::query!(
-            "SELECT (date_trunc('week', created_at AT TIME ZONE 'UTC'))::date AS \"week_start!: NaiveDate\", COUNT(*) AS \"count!: i64\" FROM battlesnakes WHERE created_at >= $1 AND created_at < $2 GROUP BY 1",
-            weekly_start_ts, midnight(current_monday)?
+            "SELECT (date_trunc('week', created_at AT TIME ZONE 'UTC'))::date AS \"week_start!: cja::jiff_sqlx::Date\", COUNT(*) AS \"count!: i64\" FROM battlesnakes WHERE created_at >= $1 AND created_at < $2 GROUP BY 1",
+            cja::jiff_sqlx::Timestamp::from(weekly_start_ts), cja::jiff_sqlx::Timestamp::from(midnight(current_monday)?)
         ).fetch_all(db).await.wrap_err("Failed to fetch snake growth")?;
         let user_growth: BTreeMap<_, _> = user_growth_rows
             .into_iter()
-            .map(|row| (row.week_start, row.count))
+            .map(|row| (row.week_start.to_jiff(), row.count))
             .collect();
         let snake_growth: BTreeMap<_, _> = snake_growth_rows
             .into_iter()
-            .map(|row| (row.week_start, row.count))
+            .map(|row| (row.week_start.to_jiff(), row.count))
             .collect();
         let weekly_growth: Vec<_> = (0..52)
             .map(|offset| {
-                let week_start = weekly_start + Duration::weeks(offset);
+                let week_start = weekly_start + jiff::SignedDuration::from_hours(24 * 7 * (offset));
                 WeeklyGrowth {
                     week_start,
                     new_users: *user_growth.get(&week_start).unwrap_or(&0),
@@ -298,12 +301,12 @@ impl StatsSnapshot {
 
         let totals = sqlx::query!(
             "SELECT (SELECT COUNT(*) FROM users WHERE created_at < $1) AS \"users!: i64\", (SELECT COUNT(*) FROM battlesnakes WHERE created_at < $1) AS \"snakes!: i64\"",
-            today_ts
+            cja::jiff_sqlx::Timestamp::from(today_ts)
         ).fetch_one(db).await.wrap_err("Failed to fetch community totals")?;
 
         Ok(Self {
             as_of_utc_date,
-            tracking_started_on: tracking.start_day,
+            tracking_started_on: tracking.start_day.to_jiff(),
             live_tracking_started_on,
             headlines: StatsHeadlines {
                 dau: (today_utc >= dau_available_on).then_some(active_headlines.dau),
@@ -338,7 +341,7 @@ mod tests {
     async fn empty_database_collects_activity_and_zero_fills_other_calendars(db: PgPool) {
         sqlx::query!("UPDATE stats_tracking_start SET tracking_started_at = '2026-09-28 00:00+00' WHERE singleton = TRUE")
             .execute(&db).await.unwrap();
-        let today = NaiveDate::from_ymd_opt(2026, 9, 28).unwrap();
+        let today = jiff::civil::Date::new(2026, 9, 28).unwrap();
         let stats = StatsSnapshot::fetch(&db, today).await.unwrap();
         assert!(stats.daily_active_users.is_empty());
         assert!(stats.weekly_active_users.is_empty());
@@ -352,15 +355,15 @@ mod tests {
         assert_eq!(stats.headlines.dau_mau_percent, None);
         assert_eq!(
             stats.headlines.dau_available_on,
-            stats.live_tracking_started_on + Duration::days(1)
+            stats.live_tracking_started_on + jiff::SignedDuration::from_hours(24)
         );
         assert_eq!(
             stats.headlines.wau_available_on,
-            stats.live_tracking_started_on + Duration::days(7)
+            stats.live_tracking_started_on + jiff::SignedDuration::from_hours(168)
         );
         assert_eq!(
             stats.headlines.mau_available_on,
-            stats.live_tracking_started_on + Duration::days(28)
+            stats.live_tracking_started_on + jiff::SignedDuration::from_hours(672)
         );
         let json = serde_json::to_value(&stats).unwrap();
         assert!(json["headlines"]["dau"].is_null());
@@ -371,7 +374,7 @@ mod tests {
     async fn active_headlines_become_available_after_complete_windows(db: PgPool) {
         sqlx::query!("UPDATE stats_tracking_start SET tracking_started_at = '2026-09-01 12:00+00' WHERE singleton = TRUE")
             .execute(&db).await.unwrap();
-        let start = NaiveDate::from_ymd_opt(2026, 9, 2).unwrap();
+        let start = jiff::civil::Date::new(2026, 9, 2).unwrap();
         for (elapsed, dau, wau, mau) in [
             (0, None, None, None),
             (1, Some(0), None, None),
@@ -380,9 +383,12 @@ mod tests {
             (27, Some(0), Some(0), None),
             (28, Some(0), Some(0), Some(0)),
         ] {
-            let stats = StatsSnapshot::fetch(&db, start + Duration::days(elapsed))
-                .await
-                .unwrap();
+            let stats = StatsSnapshot::fetch(
+                &db,
+                start + jiff::SignedDuration::from_hours(24 * (elapsed)),
+            )
+            .await
+            .unwrap();
             assert_eq!(
                 (
                     stats.headlines.dau,
@@ -392,19 +398,32 @@ mod tests {
                 (dau, wau, mau)
             );
             assert_eq!(stats.headlines.dau_mau_percent, mau.map(|_| 0.0));
-            assert_eq!(stats.headlines.dau_available_on, start + Duration::days(1));
-            assert_eq!(stats.headlines.wau_available_on, start + Duration::days(7));
-            assert_eq!(stats.headlines.mau_available_on, start + Duration::days(28));
+            assert_eq!(
+                stats.headlines.dau_available_on,
+                start + jiff::SignedDuration::from_hours(24)
+            );
+            assert_eq!(
+                stats.headlines.wau_available_on,
+                start + jiff::SignedDuration::from_hours(168)
+            );
+            assert_eq!(
+                stats.headlines.mau_available_on,
+                start + jiff::SignedDuration::from_hours(672)
+            );
         }
     }
 
     #[sqlx::test(migrations = "../migrations")]
     async fn seeded_activity_uses_only_complete_tracked_days_and_weeks(db: PgPool) {
-        let start_day = NaiveDate::from_ymd_opt(2026, 9, 27).unwrap();
-        let started_at = start_day.and_hms_opt(15, 0, 0).unwrap().and_utc();
+        let start_day = jiff::civil::Date::new(2026, 9, 27).unwrap();
+        let started_at = start_day
+            .at(15, 0, 0, 0)
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+            .expect("in range")
+            .timestamp();
         sqlx::query!(
             "UPDATE stats_tracking_start SET tracking_started_at = $1 WHERE singleton = TRUE",
-            started_at
+            cja::jiff_sqlx::Timestamp::from(started_at)
         )
         .execute(&db)
         .await
@@ -427,23 +446,23 @@ mod tests {
         .fetch_one(&db)
         .await
         .unwrap();
-        for day in [start_day - Duration::days(3), start_day] {
+        for day in [start_day - jiff::SignedDuration::from_hours(72), start_day] {
             sqlx::query!(
                 "INSERT INTO user_activity_days(user_id, day) VALUES ($1, $2)",
                 pre_tracking_only,
-                day
+                cja::jiff_sqlx::Date::from(day)
             )
             .execute(&db)
             .await
             .unwrap();
         }
         for offset in 1..=30 {
-            let day = start_day + Duration::days(offset);
+            let day = start_day + jiff::SignedDuration::from_hours(24 * (offset));
             let user_id = if offset >= 29 { second } else { first };
             sqlx::query!(
                 "INSERT INTO user_activity_days(user_id, day) VALUES ($1, $2)",
                 user_id,
-                day
+                cja::jiff_sqlx::Date::from(day)
             )
             .execute(&db)
             .await
@@ -454,13 +473,13 @@ mod tests {
         sqlx::query!(
             "INSERT INTO user_activity_days(user_id, day) VALUES ($1, $2)",
             second,
-            start_day + Duration::days(2)
+            cja::jiff_sqlx::Date::from(start_day + jiff::SignedDuration::from_hours(48))
         )
         .execute(&db)
         .await
         .unwrap();
 
-        let first_day = StatsSnapshot::fetch(&db, start_day + Duration::days(1))
+        let first_day = StatsSnapshot::fetch(&db, start_day + jiff::SignedDuration::from_hours(24))
             .await
             .unwrap();
         assert_eq!(first_day.headlines.dau, None);
@@ -470,7 +489,7 @@ mod tests {
         assert!(first_day.daily_active_users.is_empty());
         assert!(first_day.weekly_active_users.is_empty());
 
-        let next_day = StatsSnapshot::fetch(&db, start_day + Duration::days(2))
+        let next_day = StatsSnapshot::fetch(&db, start_day + jiff::SignedDuration::from_hours(48))
             .await
             .unwrap();
         assert_eq!(next_day.headlines.dau, Some(1));
@@ -478,24 +497,26 @@ mod tests {
         assert_eq!(next_day.headlines.mau, None);
         assert_eq!(
             next_day.daily_active_users[0].date,
-            start_day + Duration::days(1)
+            start_day + jiff::SignedDuration::from_hours(24)
         );
         assert_eq!(next_day.daily_active_users[0].count, 1);
 
-        let first_week = StatsSnapshot::fetch(&db, start_day + Duration::days(8))
-            .await
-            .unwrap();
+        let first_week =
+            StatsSnapshot::fetch(&db, start_day + jiff::SignedDuration::from_hours(192))
+                .await
+                .unwrap();
         assert_eq!(first_week.headlines.wau, Some(2));
         assert_eq!(first_week.weekly_active_users.len(), 1);
         assert_eq!(
             first_week.weekly_active_users[0].week_start,
-            start_day + Duration::days(1)
+            start_day + jiff::SignedDuration::from_hours(24)
         );
         assert_eq!(first_week.weekly_active_users[0].count, 2);
 
-        let first_mau = StatsSnapshot::fetch(&db, start_day + Duration::days(29))
-            .await
-            .unwrap();
+        let first_mau =
+            StatsSnapshot::fetch(&db, start_day + jiff::SignedDuration::from_hours(696))
+                .await
+                .unwrap();
         assert_eq!(first_mau.headlines.mau, Some(2));
         assert!(
             (first_mau.headlines.dau_mau_percent.unwrap() - 29.0 / 28.0 / 2.0 * 100.0).abs()
@@ -516,16 +537,20 @@ mod tests {
 
         // Start again with the first tracked day midweek. The partial ISO
         // week must be omitted even after it has ended.
-        let midweek_start = start_day + Duration::days(2);
-        let midweek_started_at = midweek_start.and_hms_opt(15, 0, 0).unwrap().and_utc();
+        let midweek_start = start_day + jiff::SignedDuration::from_hours(48);
+        let midweek_started_at = midweek_start
+            .at(15, 0, 0, 0)
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+            .expect("in range")
+            .timestamp();
         sqlx::query!(
             "UPDATE stats_tracking_start SET tracking_started_at = $1 WHERE singleton = TRUE",
-            midweek_started_at
+            cja::jiff_sqlx::Timestamp::from(midweek_started_at)
         )
         .execute(&db)
         .await
         .unwrap();
-        let midweek = StatsSnapshot::fetch(&db, start_day + Duration::days(8))
+        let midweek = StatsSnapshot::fetch(&db, start_day + jiff::SignedDuration::from_hours(192))
             .await
             .unwrap();
         assert!(midweek.weekly_active_users.is_empty());
@@ -616,7 +641,7 @@ mod tests {
             "INSERT INTO games(board_size, game_type, status, created_at, engine_game_id) VALUES ('11x11', 'Standard', 'finished', '2026-09-27 12:00+00', 'legacy'), ('11x11', 'Standard', 'failed', '2026-09-27 12:00+00', NULL), ('11x11', 'Standard', 'running', '2026-09-27 12:00+00', NULL), ('11x11', 'Standard', 'finished', '2026-09-28 00:00+00', NULL)"
         ).execute(&db).await.unwrap();
 
-        let today = NaiveDate::from_ymd_opt(2026, 9, 28).unwrap();
+        let today = jiff::civil::Date::new(2026, 9, 28).unwrap();
         let stats = StatsSnapshot::fetch(&db, today).await.unwrap();
         assert_eq!(
             (
@@ -656,19 +681,20 @@ mod tests {
     /// 90-day/52-week window would otherwise reach.
     #[sqlx::test(migrations = "../migrations")]
     async fn active_user_series_excludes_periods_before_tracking_start(db: PgPool) {
-        let today = NaiveDate::from_ymd_opt(2026, 9, 28).unwrap();
+        let today = jiff::civil::Date::new(2026, 9, 28).unwrap();
         // Tracking began 10 days before "today", so most of the fixed 90-day
         // / 52-week windows predate the tracking epoch and must be omitted
         // entirely rather than zero-filled.
         let tracking_started_at = today
-            .checked_sub_signed(Duration::days(10))
+            .checked_sub(jiff::ToSpan::days(10))
             .unwrap()
-            .and_hms_opt(3, 0, 0)
-            .unwrap()
-            .and_utc();
+            .at(3, 0, 0, 0)
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+            .expect("in range")
+            .timestamp();
         sqlx::query!(
             "UPDATE stats_tracking_start SET tracking_started_at = $1 WHERE singleton = TRUE",
-            tracking_started_at
+            cja::jiff_sqlx::Timestamp::from(tracking_started_at)
         )
         .execute(&db)
         .await
@@ -703,7 +729,7 @@ mod tests {
         sqlx::query!(
             "INSERT INTO games(board_size, game_type, status, created_at) VALUES ('11x11', 'Standard', 'finished', '2026-09-20 23:59:59+00'), ('11x11', 'Standard', 'finished', '2026-09-21 00:00:00+00')"
         ).execute(&db).await.unwrap();
-        let today = NaiveDate::from_ymd_opt(2026, 9, 28).unwrap();
+        let today = jiff::civil::Date::new(2026, 9, 28).unwrap();
         let utc = StatsSnapshot::fetch(&db, today).await.unwrap();
         let options = (*db.connect_options()).clone();
         let ny_db = PgPoolOptions::new()

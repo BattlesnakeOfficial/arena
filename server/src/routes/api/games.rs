@@ -96,9 +96,9 @@ pub struct GameListItem {
     pub snakes: Vec<SnakeInfo>,
     pub board: String,
     pub game_type: String,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
-    pub enqueued_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub created_at: jiff::Timestamp,
+    pub updated_at: jiff::Timestamp,
+    pub enqueued_at: Option<jiff::Timestamp>,
 }
 
 /// Response for full game details (with frames)
@@ -113,7 +113,7 @@ pub struct GameResponse {
     pub frames: Vec<serde_json::Value>,
     pub board: String,
     pub game_type: String,
-    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub created_at: jiff::Timestamp,
 }
 
 /// Query parameters for listing games
@@ -237,7 +237,7 @@ pub async fn create_game(
         })?;
 
     // Set enqueued_at timestamp before enqueueing the job
-    game::set_game_enqueued_at(&state.db, game.game_id, chrono::Utc::now())
+    game::set_game_enqueued_at(&state.db, game.game_id, jiff::Timestamp::now())
         .await
         .map_err(|e| {
             tracing::error!("Failed to set enqueued_at: {}", e);
@@ -360,9 +360,9 @@ pub async fn list_games(
                     board_size,
                     game_type,
                     status,
-                    enqueued_at: row.enqueued_at,
-                    created_at: row.created_at,
-                    updated_at: row.updated_at,
+                    enqueued_at: row.enqueued_at.map(Into::into),
+                    created_at: row.created_at.to_jiff(),
+                    updated_at: row.updated_at.to_jiff(),
                 })
             })
             .collect()
@@ -398,9 +398,9 @@ pub async fn list_games(
                     board_size,
                     game_type,
                     status,
-                    enqueued_at: row.enqueued_at,
-                    created_at: row.created_at,
-                    updated_at: row.updated_at,
+                    enqueued_at: row.enqueued_at.map(Into::into),
+                    created_at: row.created_at.to_jiff(),
+                    updated_at: row.updated_at.to_jiff(),
                 })
             })
             .collect()
@@ -507,9 +507,9 @@ pub struct BatchGameStatusRequest {
 pub struct GameStatusItem {
     pub id: Uuid,
     pub status: String,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
-    pub enqueued_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: jiff::Timestamp,
+    pub enqueued_at: Option<jiff::Timestamp>,
+    pub created_at: jiff::Timestamp,
 }
 
 /// POST /api/games/status - Batch lookup game statuses
@@ -560,9 +560,9 @@ pub async fn batch_game_status(
         .map(|row| GameStatusItem {
             id: row.game_id,
             status: row.status,
-            updated_at: row.updated_at,
-            enqueued_at: row.enqueued_at,
-            created_at: row.created_at,
+            updated_at: row.updated_at.to_jiff(),
+            enqueued_at: row.enqueued_at.map(Into::into),
+            created_at: row.created_at.to_jiff(),
         })
         .collect();
 
@@ -674,9 +674,7 @@ mod tests {
             frames: vec![],
             board: "11x11".to_string(),
             game_type: "Standard".to_string(),
-            created_at: chrono::DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
-                .unwrap()
-                .with_timezone(&chrono::Utc),
+            created_at: "2024-01-01T00:00:00Z".parse::<jiff::Timestamp>().unwrap(),
         };
 
         let json = serde_json::to_string(&response).unwrap();

@@ -6,27 +6,57 @@
       {
         "ordinal": 0,
         "name": "mu",
-        "type_info": "Float8"
+        "type_info": "Float8",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_entries",
+            "name": "mu"
+          }
+        }
       },
       {
         "ordinal": 1,
         "name": "games_played",
-        "type_info": "Int4"
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_entries",
+            "name": "games_played"
+          }
+        }
       },
       {
         "ordinal": 2,
         "name": "first_place_finishes",
-        "type_info": "Int4"
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_entries",
+            "name": "first_place_finishes"
+          }
+        }
       },
       {
         "ordinal": 3,
         "name": "wins",
-        "type_info": "Int4"
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "win_rate_stats",
+            "name": "wins"
+          }
+        }
       },
       {
         "ordinal": 4,
         "name": "wr_games",
-        "type_info": "Int4"
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "win_rate_stats",
+            "name": "games_played"
+          }
+        }
       }
     ],
     "parameters": {

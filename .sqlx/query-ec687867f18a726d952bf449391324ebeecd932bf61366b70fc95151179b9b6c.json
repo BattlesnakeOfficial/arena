@@ -6,7 +6,13 @@
       {
         "ordinal": 0,
         "name": "snake_access: crate::models::api_token::SnakeAccess",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "api_tokens",
+            "name": "snake_access"
+          }
+        }
       }
     ],
     "parameters": {

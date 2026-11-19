@@ -540,8 +540,8 @@ mod tests {
             is_admin: false,
             site_theme: "light".into(),
             theater_theme: "dark".into(),
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
+            created_at: jiff::Timestamp::now(),
+            updated_at: jiff::Timestamp::now(),
         });
         let html = page.render().into_string();
         assert_eq!(html.matches("id=\"notification-bell\"").count(), 1);

@@ -6,47 +6,101 @@
       {
         "ordinal": 0,
         "name": "code_id",
-        "type_info": "Uuid"
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "customization_unlock_codes",
+            "name": "code_id"
+          }
+        }
       },
       {
         "ordinal": 1,
         "name": "customization_type",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "customization_unlock_codes",
+            "name": "customization_type"
+          }
+        }
       },
       {
         "ordinal": 2,
         "name": "slug",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "customization_unlock_codes",
+            "name": "slug"
+          }
+        }
       },
       {
         "ordinal": 3,
         "name": "max_redemptions",
-        "type_info": "Int4"
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "customization_unlock_codes",
+            "name": "max_redemptions"
+          }
+        }
       },
       {
         "ordinal": 4,
         "name": "redemptions_used",
-        "type_info": "Int4"
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "customization_unlock_codes",
+            "name": "redemptions_used"
+          }
+        }
       },
       {
         "ordinal": 5,
         "name": "expires_at",
-        "type_info": "Timestamptz"
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "customization_unlock_codes",
+            "name": "expires_at"
+          }
+        }
       },
       {
         "ordinal": 6,
         "name": "note",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "customization_unlock_codes",
+            "name": "note"
+          }
+        }
       },
       {
         "ordinal": 7,
         "name": "created_at",
-        "type_info": "Timestamptz"
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "customization_unlock_codes",
+            "name": "created_at"
+          }
+        }
       },
       {
         "ordinal": 8,
         "name": "disabled_at",
-        "type_info": "Timestamptz"
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "customization_unlock_codes",
+            "name": "disabled_at"
+          }
+        }
       }
     ],
     "parameters": {

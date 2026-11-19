@@ -6,42 +6,90 @@
       {
         "ordinal": 0,
         "name": "flow_id",
-        "type_info": "Uuid"
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "game_flows",
+            "name": "flow_id"
+          }
+        }
       },
       {
         "ordinal": 1,
         "name": "board_size",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "game_flows",
+            "name": "board_size"
+          }
+        }
       },
       {
         "ordinal": 2,
         "name": "game_type",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "game_flows",
+            "name": "game_type"
+          }
+        }
       },
       {
         "ordinal": 3,
         "name": "selected_battlesnakes",
-        "type_info": "UuidArray"
+        "type_info": "UuidArray",
+        "origin": {
+          "Table": {
+            "table": "game_flows",
+            "name": "selected_battlesnakes"
+          }
+        }
       },
       {
         "ordinal": 4,
         "name": "search_query",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "game_flows",
+            "name": "search_query"
+          }
+        }
       },
       {
         "ordinal": 5,
         "name": "user_id",
-        "type_info": "Uuid"
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "game_flows",
+            "name": "user_id"
+          }
+        }
       },
       {
         "ordinal": 6,
         "name": "created_at",
-        "type_info": "Timestamptz"
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "game_flows",
+            "name": "created_at"
+          }
+        }
       },
       {
         "ordinal": 7,
         "name": "updated_at",
-        "type_info": "Timestamptz"
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "game_flows",
+            "name": "updated_at"
+          }
+        }
       }
     ],
     "parameters": {

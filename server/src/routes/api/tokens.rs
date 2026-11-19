@@ -33,7 +33,7 @@ pub struct CreateTokenResponse {
     pub id: Uuid,
     pub name: String,
     pub secret: String,
-    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub created_at: jiff::Timestamp,
     /// Canonical `Permission::ALL` order, de-duplicated (same as `GET`).
     pub permissions: BTreeSet<Permission>,
     pub snake_access: SnakeAccess,
@@ -46,8 +46,8 @@ pub struct CreateTokenResponse {
 pub struct TokenResponse {
     pub id: Uuid,
     pub name: String,
-    pub last_used_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub last_used_at: Option<jiff::Timestamp>,
+    pub created_at: jiff::Timestamp,
     /// Canonical `Permission::ALL` order (same as `POST`).
     pub permissions: BTreeSet<Permission>,
     pub snake_access: SnakeAccess,
@@ -846,7 +846,7 @@ mod tests {
 
         // The revoke lands after the request authenticated but before the copy
         // commits, as when the copy's INSERT queues behind a revoke's lock.
-        sqlx::raw_sql(&format!(
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
             r"CREATE FUNCTION revoke_creator() RETURNS trigger LANGUAGE plpgsql AS $$
               BEGIN
                 UPDATE api_tokens SET revoked_at = NOW()
@@ -856,7 +856,7 @@ mod tests {
               CREATE TRIGGER revoke_creator AFTER INSERT ON api_tokens
               FOR EACH ROW EXECUTE FUNCTION revoke_creator();",
             creator.token.id
-        ))
+        )))
         .execute(&db)
         .await
         .unwrap();

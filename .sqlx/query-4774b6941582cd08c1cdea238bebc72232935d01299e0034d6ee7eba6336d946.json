@@ -6,32 +6,68 @@
       {
         "ordinal": 0,
         "name": "username",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "imported_accounts",
+            "name": "username"
+          }
+        }
       },
       {
         "ordinal": 1,
         "name": "display_name",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "imported_accounts",
+            "name": "display_name"
+          }
+        }
       },
       {
         "ordinal": 2,
         "name": "email",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "imported_accounts",
+            "name": "email"
+          }
+        }
       },
       {
         "ordinal": 3,
         "name": "pronouns",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "imported_accounts",
+            "name": "pronouns"
+          }
+        }
       },
       {
         "ordinal": 4,
         "name": "country",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "imported_accounts",
+            "name": "country"
+          }
+        }
       },
       {
         "ordinal": 5,
         "name": "backstory",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "imported_accounts",
+            "name": "backstory"
+          }
+        }
       }
     ],
     "parameters": {

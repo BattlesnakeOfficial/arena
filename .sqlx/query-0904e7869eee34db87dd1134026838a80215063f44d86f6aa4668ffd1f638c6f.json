@@ -6,47 +6,101 @@
       {
         "ordinal": 0,
         "name": "imported_account_id",
-        "type_info": "Uuid"
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "imported_snakes",
+            "name": "imported_account_id"
+          }
+        }
       },
       {
         "ordinal": 1,
         "name": "play_snake_id",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "imported_snakes",
+            "name": "play_snake_id"
+          }
+        }
       },
       {
         "ordinal": 2,
         "name": "name",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "imported_snakes",
+            "name": "name"
+          }
+        }
       },
       {
         "ordinal": 3,
         "name": "url",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "imported_snakes",
+            "name": "url"
+          }
+        }
       },
       {
         "ordinal": 4,
         "name": "head",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "imported_snakes",
+            "name": "head"
+          }
+        }
       },
       {
         "ordinal": 5,
         "name": "tail",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "imported_snakes",
+            "name": "tail"
+          }
+        }
       },
       {
         "ordinal": 6,
         "name": "color",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "imported_snakes",
+            "name": "color"
+          }
+        }
       },
       {
         "ordinal": 7,
         "name": "is_public",
-        "type_info": "Bool"
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "imported_snakes",
+            "name": "is_public"
+          }
+        }
       },
       {
         "ordinal": 8,
         "name": "engine_region",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "imported_snakes",
+            "name": "engine_region"
+          }
+        }
       }
     ],
     "parameters": {

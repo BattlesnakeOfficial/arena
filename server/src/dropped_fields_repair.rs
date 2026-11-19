@@ -394,9 +394,13 @@ async fn repair_body(
 
     // Date handling, copied from backup_single_game: dates come from the
     // engine `created` column (the JSON `Created` key is absent pre-2023).
-    let created_at = game_row.created.and_utc();
+    let created_at = game_row
+        .created
+        .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+        .expect("in range")
+        .timestamp();
     if game.created == 0 {
-        game.created = created_at.timestamp_micros();
+        game.created = created_at.as_microsecond();
     }
 
     let bytes =
@@ -818,11 +822,10 @@ mod tests {
         })
     }
 
-    fn created_march_2020() -> chrono::NaiveDateTime {
-        chrono::NaiveDate::from_ymd_opt(2020, 3, 15)
+    fn created_march_2020() -> jiff::civil::DateTime {
+        jiff::civil::Date::new(2020, 3, 15)
             .expect("date")
-            .and_hms_opt(12, 0, 0)
-            .expect("time")
+            .at(12, 0, 0, 0)
     }
 
     async fn seed_engine_game_with_team_frames(
@@ -835,7 +838,11 @@ mod tests {
             id,
             fixture_game_header(
                 id,
-                created.and_utc().timestamp_micros(),
+                created
+                    .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+                    .expect("in range")
+                    .timestamp()
+                    .as_microsecond(),
                 Some("team"),
                 Some(12),
             ),
@@ -854,7 +861,7 @@ mod tests {
             VALUES ('11x11', 'Standard', 'finished', $1, $2, NOW(), $3, 1)
             "#,
             id,
-            created_march_2020().and_utc(),
+            cja::jiff_sqlx::Timestamp::from(created_march_2020().to_zoned_datetime(jiff::tz::TimeZone::UTC).expect("in range").timestamp()),
             format!("games/1970/01/01/{id}.json.zst")
         )
         .execute(pool)
@@ -950,7 +957,13 @@ mod tests {
         .await?;
         assert_eq!(row.gcs_path.as_deref(), Some(new_path.as_str()));
         assert_eq!(row.archive_version, Some(2));
-        assert_eq!(row.created_at, created_march_2020().and_utc());
+        assert_eq!(
+            row.created_at.to_jiff(),
+            created_march_2020()
+                .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+                .expect("in range")
+                .timestamp()
+        );
 
         // Queue done.
         assert_eq!(
@@ -1223,7 +1236,11 @@ mod tests {
         let mut game: crate::engine_models::EngineGame =
             serde_json::from_value(header_number.clone())?;
         if game.created == 0 {
-            game.created = created.and_utc().timestamp_micros();
+            game.created = created
+                .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+                .expect("in range")
+                .timestamp()
+                .as_microsecond();
         }
         let object = crate::backup::build_export_streamed(
             &engine_pool,
@@ -1542,7 +1559,7 @@ mod tests {
             .wrap_err_with(|| format!("Failed to open {}", games_path.display()))?;
         let mut engine_headers: std::collections::HashMap<String, serde_json::Value> =
             std::collections::HashMap::new();
-        let mut created_values: std::collections::HashMap<String, chrono::NaiveDateTime> =
+        let mut created_values: std::collections::HashMap<String, jiff::civil::DateTime> =
             std::collections::HashMap::new();
         for record in reader.records() {
             let record = record.wrap_err("Failed to parse games.csv record")?;
@@ -1555,7 +1572,7 @@ mod tests {
             let (id, value, created) = (&record[0], &record[1], &record[2]);
             let header: serde_json::Value =
                 serde_json::from_str(value).wrap_err("games.csv value is not JSON")?;
-            let created = chrono::NaiveDateTime::parse_from_str(created, "%Y-%m-%d %H:%M:%S%.f")
+            let created = jiff::civil::DateTime::strptime("%Y-%m-%d %H:%M:%S%.f", created)
                 .wrap_err("games.csv created does not parse")?;
             insert_engine_game(&engine_pool, id, header.clone(), created).await?;
             engine_headers.insert(id.to_string(), header);
@@ -1607,7 +1624,7 @@ mod tests {
                 VALUES ('11x11', 'Standard', 'finished', $1, $2, NOW(), $3, 1)
                 "#,
                 id,
-                created_values[id].and_utc(),
+                cja::jiff_sqlx::Timestamp::from(created_values[id].to_zoned_datetime(jiff::tz::TimeZone::UTC).expect("in range").timestamp()),
                 format!("games/1970/01/01/{id}.json.zst")
             )
             .execute(&pool)
