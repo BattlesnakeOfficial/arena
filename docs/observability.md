@@ -37,7 +37,10 @@ tagged `arena-product` dashboard, and the three Eyes dashboards plus heartbeat.
 Run an unchanged second sync and require zero creates, updates, and deletes.
 Keep deployment outside every shutdown-email send window.
 
-Arena declares its operational contract in `server/src/observability.rs`. One
+Arena declares its metrics, alerts, and dashboards in
+`server/src/observability_declarations.rs`. `server/src/observability.rs` adds
+the rest of its operational contract (process role, HTTP checks, critical jobs)
+to the boot manifest and runs the heartbeat. One
 boot-stable `ProcessIdentity` is shared by the tracing subscriber, boot manifest,
 and heartbeat in both GCP and local tracing paths. Registration is bounded and
 best effort after workers start; a registration failure is logged without
@@ -242,10 +245,12 @@ failure never ages out early. The per-turn `db_write_latency` and
 `scheduler_jitter` metric events stay at INFO because named metrics and
 thresholds read them over 24-hour and 7-day windows.
 
-Per-turn telemetry reaches Eyes and PostHog only while the tracing filter admits
-DEBUG for arena. Production pins `RUST_LOG=info`, so DEBUG per-turn phase events
-are omitted from both sinks and Cloud Logging. For a targeted diagnostic,
-`RUST_LOG=info,arena=debug` admits them to all three sinks; restore `info`
+Per-turn telemetry reaches Eyes only while the tracing filter admits DEBUG for
+arena. PostHog also needs `POSTHOG_LOG_LEVEL` (default `info`) to admit DEBUG.
+Production pins `RUST_LOG=info`, so DEBUG per-turn phase events are omitted from
+Eyes, PostHog, and Cloud Logging. For a targeted diagnostic,
+`RUST_LOG=info,arena=debug` admits them to Eyes and Cloud Logging; PostHog keeps
+dropping them unless `POSTHOG_LOG_LEVEL` is lowered too. Restore `info`
 afterward to avoid the per-turn volume.
 
 To cut stdout volume without touching Eyes, set `ARENA_STDOUT_LOG` (same

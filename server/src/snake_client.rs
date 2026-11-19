@@ -44,6 +44,27 @@ pub fn client_builder() -> reqwest::ClientBuilder {
     Client::builder().user_agent(USER_AGENT)
 }
 
+/// Logged in place of a snake URL that has no `scheme://host` form.
+const UNLOGGABLE_URL: &str = "[unparsable url]";
+
+/// A snake URL as `scheme://host[:port]/path` for logs. Snake URLs are
+/// user-supplied and can carry credentials in the userinfo, query or
+/// fragment, and logs reach PostHog. Input that does not parse, or has no
+/// host, logs as a fixed placeholder, never the raw string. Log a reqwest
+/// error from a snake call as `e.without_url()`: its Display prints the URL.
+pub(crate) fn log_safe_url(raw: &str) -> String {
+    let Ok(url) = url::Url::parse(raw) else {
+        return UNLOGGABLE_URL.to_owned();
+    };
+    let Some(host) = url.host_str() else {
+        return UNLOGGABLE_URL.to_owned();
+    };
+    match url.port() {
+        Some(port) => format!("{}://{host}:{port}{}", url.scheme(), url.path()),
+        None => format!("{}://{host}{}", url.scheme(), url.path()),
+    }
+}
+
 #[derive(Clone)]
 pub struct SnakeEndpoint {
     pub snake_id: String,
@@ -290,13 +311,14 @@ pub async fn request_move(
         // Headers arrived but the body read failed inside the budget (e.g.
         // a mid-body reset): an unusable answer, not a transport fault.
         Ok(Ok((status, Err(e)))) => {
-            invalid_move_response(snake_id, last_direction, elapsed, status, &e)
+            invalid_move_response(snake_id, last_direction, elapsed, status, &e.without_url())
         }
         Ok(Err(e)) => {
             // Network error - continue in same direction
             tracing::warn!(
                 snake_id = %snake_id,
-                error = %e,
+                url = %log_safe_url(&move_url),
+                error = %e.without_url(),
                 "Network error calling snake, using fallback"
             );
             engine_core::move_response::transport_fallback_result(
@@ -362,7 +384,12 @@ pub async fn request_start(
             tracing::debug!(snake_id = %snake_id, "Called /start successfully");
         }
         Ok(Err(e)) => {
-            tracing::warn!(snake_id = %snake_id, error = %e, "Failed to call /start");
+            tracing::warn!(
+                snake_id = %snake_id,
+                url = %log_safe_url(&start_url),
+                error = %e.without_url(),
+                "Failed to call /start"
+            );
         }
         Err(_) => {
             tracing::warn!(snake_id = %snake_id, "Timeout calling /start");
@@ -389,7 +416,12 @@ pub async fn request_end(
             tracing::debug!(snake_id = %snake_id, "Called /end successfully");
         }
         Ok(Err(e)) => {
-            tracing::warn!(snake_id = %snake_id, error = %e, "Failed to call /end");
+            tracing::warn!(
+                snake_id = %snake_id,
+                url = %log_safe_url(&end_url),
+                error = %e.without_url(),
+                "Failed to call /end"
+            );
         }
         Err(_) => {
             tracing::warn!(snake_id = %snake_id, "Timeout calling /end");
@@ -399,29 +431,55 @@ pub async fn request_end(
 
 pub async fn request_info(
     client: &Client,
-    url: &str,
+    endpoint: &SnakeEndpoint,
     timeout: Duration,
 ) -> Option<SnakeInfoResponse> {
-    match tokio::time::timeout(timeout, client.get(url).send()).await {
+    let snake_id = endpoint.snake_id.as_str();
+    let battlesnake_id = endpoint.battlesnake_id;
+    let url = log_safe_url(&endpoint.url);
+    match tokio::time::timeout(timeout, client.get(&endpoint.url).send()).await {
         Ok(Ok(response)) => match read_body_capped(response, BODY_READ_CAP_BYTES).await {
             Ok(body) => match serde_json::from_str::<SnakeInfoResponse>(&body) {
                 Ok(info) => Some(info),
                 Err(e) => {
-                    tracing::warn!(url = %url, error = %e, "Failed to parse snake info response");
+                    tracing::warn!(
+                        snake_id,
+                        %battlesnake_id,
+                        %url,
+                        error = %e,
+                        "Failed to parse snake info response"
+                    );
                     None
                 }
             },
             Err(e) => {
-                tracing::warn!(url = %url, error = %e, "Failed to parse snake info response");
+                tracing::warn!(
+                    snake_id,
+                    %battlesnake_id,
+                    %url,
+                    error = %e.without_url(),
+                    "Failed to parse snake info response"
+                );
                 None
             }
         },
         Ok(Err(e)) => {
-            tracing::warn!(url = %url, error = %e, "Network error fetching snake info");
+            tracing::warn!(
+                snake_id,
+                %battlesnake_id,
+                %url,
+                error = %e.without_url(),
+                "Network error fetching snake info"
+            );
             None
         }
         Err(_) => {
-            tracing::warn!(url = %url, "Timeout fetching snake info");
+            tracing::warn!(
+                snake_id,
+                %battlesnake_id,
+                %url,
+                "Timeout fetching snake info"
+            );
             None
         }
     }
@@ -762,7 +820,7 @@ pub async fn request_info_routed(
         timeout,
     );
     let SnakeRequestRoute::Proxied(builder) = route else {
-        return request_info(clients.direct, &endpoint.url, timeout).await;
+        return request_info(clients.direct, endpoint, timeout).await;
     };
     match execute_proxy(builder, timeout).await {
         ProxyCall::Response {
@@ -773,7 +831,9 @@ pub async fn request_info_routed(
             Ok(info) => Some(info),
             Err(error) => {
                 tracing::warn!(
-                    url = %endpoint.url,
+                    snake_id = %endpoint.snake_id,
+                    battlesnake_id = %endpoint.battlesnake_id,
+                    url = %log_safe_url(&endpoint.url),
                     region = endpoint.engine_region.as_str(),
                     %error,
                     "Failed to parse snake info response"
@@ -787,7 +847,7 @@ pub async fn request_info_routed(
             ..
         } if status == StatusCode::PROXY_AUTHENTICATION_REQUIRED => {
             log_proxy_auth_failure(endpoint.engine_region);
-            request_info(clients.direct, &endpoint.url, timeout).await
+            request_info(clients.direct, endpoint, timeout).await
         }
         ProxyCall::Response {
             class: ProxyResponseClass::ProxyFault,
@@ -820,13 +880,17 @@ pub async fn request_info_routed(
         } => {
             if timed_out {
                 tracing::warn!(
-                    url = %endpoint.url,
+                    snake_id = %endpoint.snake_id,
+                    battlesnake_id = %endpoint.battlesnake_id,
+                    url = %log_safe_url(&endpoint.url),
                     region = endpoint.engine_region.as_str(),
                     "Timeout fetching snake info"
                 );
             } else {
                 tracing::warn!(
-                    url = %endpoint.url,
+                    snake_id = %endpoint.snake_id,
+                    battlesnake_id = %endpoint.battlesnake_id,
+                    url = %log_safe_url(&endpoint.url),
                     region = endpoint.engine_region.as_str(),
                     %status,
                     "Network error fetching snake info"
@@ -1707,9 +1771,227 @@ mod tests {
             .mount(&server)
             .await;
 
-        let result = request_info(&Client::new(), &server.uri(), Duration::from_secs(2)).await;
+        let snake = test_endpoint("snake-1", server.uri(), EngineRegion::UsWest1);
+        let result = request_info(&Client::new(), &snake, Duration::from_secs(2)).await;
 
         assert!(result.is_none());
+    }
+
+    fn test_endpoint(snake_id: &str, url: String, engine_region: EngineRegion) -> SnakeEndpoint {
+        SnakeEndpoint {
+            snake_id: snake_id.to_string(),
+            url,
+            engine_region,
+            battlesnake_id: uuid::Uuid::new_v4(),
+            user_id: uuid::Uuid::new_v4(),
+        }
+    }
+
+    #[test]
+    fn log_safe_url_keeps_scheme_host_port_and_path_only() {
+        for (raw, expected) in [
+            (
+                "https://user:pass@snake.example.com:8443/api/v1?token=secret#frag",
+                "https://snake.example.com:8443/api/v1",
+            ),
+            (
+                "http://user@snake.example.com/",
+                "http://snake.example.com/",
+            ),
+            (
+                "https://snake.example.com?key=secret",
+                "https://snake.example.com/",
+            ),
+            (
+                "https://snake.example.com/x#frag",
+                "https://snake.example.com/x",
+            ),
+            (
+                "https://snake.example.com:443/x",
+                "https://snake.example.com/x",
+            ),
+            ("http://[::1]:8000/snake", "http://[::1]:8000/snake"),
+            ("http://127.0.0.1:8000", "http://127.0.0.1:8000/"),
+            ("not a url?token=secret", UNLOGGABLE_URL),
+            ("localhost:8000?token=secret", UNLOGGABLE_URL),
+            ("mailto:someone@example.com", UNLOGGABLE_URL),
+            ("http://exa mple.com/?token=secret", UNLOGGABLE_URL),
+            ("", UNLOGGABLE_URL),
+        ] {
+            assert_eq!(log_safe_url(raw), expected, "{raw}");
+        }
+    }
+
+    /// Drives every snake-URL warn with a URL that carries credentials in
+    /// its userinfo, query and fragment: none of them may reach a log line,
+    /// and each warn logs the `scheme://host:port/path` form instead.
+    #[tokio::test]
+    async fn snake_url_warns_log_scheme_host_port_and_path_only() {
+        let capture = crate::test_capture::Capture::shared();
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        let snake_id = format!("snake-{id}");
+        let urls = |origin: &str, case: &str| {
+            (
+                format!(
+                    "http://user-{id}:pass-{id}@{origin}/{case}-{id}?token=secret-{id}#frag-{id}"
+                ),
+                format!("http://{origin}/{case}-{id}"),
+            )
+        };
+        let client = Client::new();
+        let timeout = Duration::from_millis(300);
+        // (message, logged url, whether the line names the battlesnake)
+        let mut expected = Vec::new();
+
+        let garbage = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("not json"))
+            .mount(&garbage)
+            .await;
+        let slow = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(3)))
+            .mount(&slow)
+            .await;
+        // A freed port refuses the connection.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let refused = listener.local_addr().unwrap().to_string();
+        drop(listener);
+
+        for (origin, case, message) in [
+            (
+                garbage.address().to_string(),
+                "garbage",
+                "Failed to parse snake info response",
+            ),
+            (
+                slow.address().to_string(),
+                "slow",
+                "Timeout fetching snake info",
+            ),
+            (
+                refused.clone(),
+                "refused",
+                "Network error fetching snake info",
+            ),
+        ] {
+            let (url, safe) = urls(&origin, case);
+            let snake = test_endpoint(&snake_id, url, EngineRegion::UsWest1);
+            assert!(request_info(&client, &snake, timeout).await.is_none());
+            expected.push((message, safe, true));
+        }
+
+        let (url, safe) = urls(&refused, "lifecycle");
+        let game = create_test_engine_game_with_snakes(vec![snake_id.as_str()]);
+        let (contexts, customizations) = (HashMap::new(), HashMap::new());
+        request_move(
+            &client,
+            &url,
+            &game,
+            &snake_id,
+            timeout,
+            None,
+            &contexts,
+            &customizations,
+        )
+        .await;
+        request_start(
+            &client,
+            &url,
+            &game,
+            &snake_id,
+            timeout,
+            &contexts,
+            &customizations,
+        )
+        .await;
+        request_end(
+            &client,
+            &url,
+            &game,
+            &snake_id,
+            timeout,
+            &contexts,
+            &customizations,
+        )
+        .await;
+        for (path, message) in [
+            ("move", "Network error calling snake, using fallback"),
+            ("start", "Failed to call /start"),
+            ("end", "Failed to call /end"),
+        ] {
+            expected.push((message, format!("{safe}/{path}"), false));
+        }
+
+        // Proxied /info: the proxy relays an unparsable body, a snake
+        // timeout, and a snake transport error.
+        for (case, status, snake_failed, message) in [
+            (
+                "proxied-garbage",
+                200,
+                false,
+                "Failed to parse snake info response",
+            ),
+            ("proxied-timeout", 504, true, "Timeout fetching snake info"),
+            (
+                "proxied-error",
+                502,
+                true,
+                "Network error fetching snake info",
+            ),
+        ] {
+            let proxy = MockServer::start().await;
+            let mut response = ResponseTemplate::new(status)
+                .insert_header(LATENCY_HEADER, "5")
+                .set_body_string("not json");
+            if snake_failed {
+                response = response.insert_header(SERVER_ERROR_HEADER, "true");
+            }
+            Mock::given(method("GET"))
+                .respond_with(response)
+                .expect(1)
+                .mount(&proxy)
+                .await;
+            let config = EngineProxyConfig {
+                token: Some("secret".to_string()),
+                us_east4_url: proxy.uri(),
+                europe_west4_url: proxy.uri(),
+            };
+            let clients = ProxyClients {
+                direct: &client,
+                east: &client,
+                europe: &client,
+                config: &config,
+            };
+            let (url, safe) = urls(&refused, case);
+            let snake = test_endpoint(&snake_id, url, EngineRegion::UsEast4);
+            assert!(
+                request_info_routed(&clients, &snake, timeout)
+                    .await
+                    .is_none()
+            );
+            expected.push((message, safe, true));
+        }
+
+        for secret in ["user", "pass", "secret", "frag"].map(|part| format!("{part}-{id}")) {
+            let leaked = capture.log_lines_containing(&secret);
+            assert!(leaked.is_empty(), "{secret} reached a log line: {leaked:?}");
+        }
+        let lines: Vec<_> = capture
+            .log_lines()
+            .into_iter()
+            .filter(|fields| fields.get("snake_id") == Some(&snake_id))
+            .collect();
+        for (message, safe, names_battlesnake) in expected {
+            assert!(
+                lines.iter().any(|fields| {
+                    fields.get("message").map(String::as_str) == Some(message)
+                        && fields.get("url") == Some(&safe)
+                        && fields.contains_key("battlesnake_id") == names_battlesnake
+                }),
+                "no {message:?} line with url={safe}: {lines:?}"
+            );
+        }
     }
 
     #[tokio::test]

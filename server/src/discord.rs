@@ -51,9 +51,12 @@ impl DiscordNotifier {
     /// all mention parsing — prevents `@everyone`/`@here` injection from
     /// user-controlled content like snake names.
     pub async fn send(&self, content: &str) -> cja::Result<()> {
+        // Logs carry only the content's length: the text names GitHub and
+        // Play users, and logs reach PostHog.
+        let content_chars = content.chars().count();
         let Some(url) = self.webhook_url.as_ref().map(Secret::current) else {
             tracing::info!(
-                content = content,
+                content_chars,
                 "Discord disabled (no webhook URL); not sending"
             );
             return Ok(());
@@ -68,6 +71,8 @@ impl DiscordNotifier {
             }))
             .send()
             .await
+            // The webhook URL is a credential; reqwest errors print it.
+            .map_err(reqwest::Error::without_url)
             .wrap_err("Failed to send request to Discord webhook")?;
 
         let status = response.status();
@@ -78,7 +83,7 @@ impl DiscordNotifier {
             ));
         }
 
-        tracing::info!(content = content, "Discord notification sent");
+        tracing::info!(content_chars, "Discord notification sent");
         Ok(())
     }
 
@@ -254,6 +259,57 @@ mod tests {
 
         let notifier = configured_notifier(server.uri()).await;
         notifier.send("test message").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn send_logs_content_length_not_content() {
+        let capture = crate::test_capture::Capture::shared();
+        let login = format!("octocat-{}", uuid::Uuid::new_v4().simple());
+        let message = user_signup_message(&login);
+        let chars = message.chars().count().to_string();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        configured_notifier(server.uri())
+            .await
+            .send(&message)
+            .await
+            .unwrap();
+        DiscordNotifier::disabled().send(&message).await.unwrap();
+
+        let leaked = capture.log_lines_containing(&login);
+        assert!(
+            leaked.is_empty(),
+            "Discord text reached a log line: {leaked:?}"
+        );
+        for line in [
+            "Discord notification sent",
+            "Discord disabled (no webhook URL); not sending",
+        ] {
+            assert!(
+                capture.log_lines().iter().any(|fields| {
+                    fields.get("message").map(String::as_str) == Some(line)
+                        && fields.get("content_chars") == Some(&chars)
+                }),
+                "no {line:?} line with content_chars={chars}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn transport_errors_do_not_print_the_webhook_url() {
+        // A freed port refuses the connection.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let url = format!("http://127.0.0.1:{port}/api/webhooks/1/webhook-token");
+
+        let err = configured_notifier(url).await.send("x").await.unwrap_err();
+        assert!(!format!("{err:#}").contains("webhook-token"), "{err:#}");
     }
 
     #[tokio::test]

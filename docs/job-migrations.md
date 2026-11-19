@@ -49,8 +49,10 @@ remains exclusively leased while heartbeats succeed. A hard-killed worker's leas
 can be reclaimed after four minutes plus the next poll when the database is
 healthy. Polling is separate: `ARENA_JOB_POLL_INTERVAL_MS` is 200 ms in production.
 `ARENA_JOB_SHUTDOWN_DRAIN_SECS` controls graceful shutdown drain (default 4 seconds).
-Arena then allows 2 seconds of exit grace and up to 3 seconds for telemetry flush;
-increasing the drain can exceed Cloud Run's 10-second shutdown window.
+Arena then allows 2 seconds of exit grace, up to 0.5 seconds for the Eyes
+process-shutdown signal, and up to 3 seconds for telemetry flush, in sequence.
+The worst case is 9.5 seconds at the default drain; increasing the drain can
+exceed Cloud Run's 10-second shutdown window.
 
 Arena shares one cja `IdlePollGate` across its workers. With the production
 `ARENA_JOB_WORKERS=100`, `ARENA_JOB_IDLE_POLLERS=2`, and 200 ms interval, at

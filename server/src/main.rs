@@ -252,9 +252,12 @@ async fn load_secrets_before_telemetry()
 }
 
 /// Time tasks get to exit after the job drain ends: job workers release
-/// their locks, the HTTP server closes connections. Together with
-/// `JobConfig::shutdown_drain_secs` this must stay under Cloud Run's fixed
-/// 10 second SIGTERM-to-SIGKILL window, with room left to flush telemetry.
+/// their locks, the HTTP server closes connections. Cloud Run sends SIGKILL
+/// 10 seconds after SIGTERM, and the worst case runs these in sequence: the
+/// 4 second job drain (`JobConfig::shutdown_drain_secs`), this 2 second
+/// grace, the 0.5 second Eyes shutdown signal
+/// (`observability::EYES_HEARTBEAT_SHUTDOWN_TIMEOUT`), then up to 3 seconds
+/// of telemetry flush: 9.5 seconds (`worst_case_shutdown_fits_cloud_run`).
 pub(crate) const SHUTDOWN_EXIT_GRACE: Duration = Duration::from_secs(2);
 
 #[derive(Debug, PartialEq, Eq)]
@@ -436,6 +439,21 @@ mod tests {
             .git_sha(env!("VERGEN_GIT_SHA")),
         )
         .expect("arena's real job, cron, and monitor inventory must validate");
+    }
+
+    /// cja's bound on `TelemetryShutdownHandle::shutdown` (its
+    /// `TELEMETRY_SHUTDOWN_BUDGET`, which cja does not export).
+    const CJA_TELEMETRY_FLUSH_BOUND: Duration = Duration::from_secs(3);
+
+    #[test]
+    fn worst_case_shutdown_fits_cloud_run() {
+        // SIGTERM to exit with every step at its bound, in the order
+        // `run_application` runs them; Cloud Run sends SIGKILL at 10s.
+        let worst = Duration::from_secs(config::DEFAULT_JOB_SHUTDOWN_DRAIN_SECS)
+            + SHUTDOWN_EXIT_GRACE
+            + observability::EYES_HEARTBEAT_SHUTDOWN_TIMEOUT
+            + CJA_TELEMETRY_FLUSH_BOUND;
+        assert!(worst <= Duration::from_millis(9500), "{worst:?}");
     }
 
     #[test]
