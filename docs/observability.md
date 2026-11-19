@@ -242,9 +242,11 @@ failure never ages out early. The per-turn `db_write_latency` and
 `scheduler_jitter` metric events stay at INFO because named metrics and
 thresholds read them over 24-hour and 7-day windows.
 
-Per-turn telemetry reaches Eyes only while the tracing filter admits DEBUG for
-arena. Production's `RUST_LOG` is `info,arena=debug`; dropping `arena=debug`
-silently removes every per-turn phase from Eyes.
+Per-turn telemetry reaches Eyes and PostHog only while the tracing filter admits
+DEBUG for arena. Production pins `RUST_LOG=info`, so DEBUG per-turn phase events
+are omitted from both sinks and Cloud Logging. For a targeted diagnostic,
+`RUST_LOG=info,arena=debug` admits them to all three sinks; restore `info`
+afterward to avoid the per-turn volume.
 
 To cut stdout volume without touching Eyes, set `ARENA_STDOUT_LOG` (same
 directive syntax as `RUST_LOG`). It narrows only the JSON stdout layer:

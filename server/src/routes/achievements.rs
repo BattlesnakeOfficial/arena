@@ -1390,6 +1390,9 @@ mod tests {
             );
             assert!(actions.iter().all(|fields| !fields.contains_key("user_id")));
         }
+        let action_count = crate::test_capture::Capture::shared()
+            .events_with_field("share_action", "owner_id", &owner.to_string())
+            .len();
         let reply = request(
             &state,
             "POST",
@@ -1399,6 +1402,13 @@ mod tests {
         )
         .await;
         assert_eq!(reply.status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            crate::test_capture::Capture::shared()
+                .events_with_field("share_action", "owner_id", &owner.to_string())
+                .len(),
+            action_count,
+            "rejected channel must not emit a share action"
+        );
         // Unknown earn, malformed id, and GET all fail.
         let stranger = user(&pool, 2120802).await;
         let reply = request(
@@ -1445,6 +1455,9 @@ mod tests {
             );
             assert!(clicks.iter().all(|fields| !fields.contains_key("user_id")));
         }
+        let cta_count = crate::test_capture::Capture::shared()
+            .events_with_field("share_cta_click", "owner_id", &owner.to_string())
+            .len();
         let reply = request(
             &state,
             "POST",
@@ -1454,6 +1467,13 @@ mod tests {
         )
         .await;
         assert_eq!(reply.status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            crate::test_capture::Capture::shared()
+                .events_with_field("share_cta_click", "owner_id", &owner.to_string())
+                .len(),
+            cta_count,
+            "rejected CTA must not emit a click"
+        );
         let reply = get(&state, &format!("{base}/cta-click"), &[]).await;
         assert_eq!(reply.status, StatusCode::METHOD_NOT_ALLOWED);
     }
