@@ -48,9 +48,11 @@ pub struct JobConfig {
     pub reclaim_window_secs: u64,
     /// How long an in-flight job may keep running after a shutdown signal
     /// before it is dropped and its lock released. Cloud Run sends SIGKILL
-    /// 10 seconds after SIGTERM, so this plus the 2-second exit grace
-    /// ([`crate::SHUTDOWN_EXIT_GRACE`]) and up to 3 seconds of telemetry flush
-    /// must stay under that. Increasing this override can exceed the limit.
+    /// 10 seconds after SIGTERM. The worst case runs this, the 2-second exit
+    /// grace ([`crate::SHUTDOWN_EXIT_GRACE`]), the 0.5-second Eyes shutdown
+    /// signal ([`crate::observability::EYES_HEARTBEAT_SHUTDOWN_TIMEOUT`]) and
+    /// up to 3 seconds of telemetry flush in sequence: 9.5 seconds at the
+    /// 4-second default. Increasing this override can exceed the limit.
     pub shutdown_drain_secs: u64,
     pub max_retries: i32,
     pub workers: usize,

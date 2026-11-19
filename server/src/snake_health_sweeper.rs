@@ -374,13 +374,14 @@ async fn apply_probe(
         return Ok(None);
     };
     let threshold = app_state.config.snake_health_failure_threshold;
+    // No snake name or failure summary: both can hold user text (summaries
+    // quote shouts and snake URLs), and logs reach PostHog. The summary is
+    // in the entry's health row.
     tracing::info!(
         battlesnake_id = %snake.battlesnake_id,
-        snake_name = %snake.name,
         leaderboard = %candidate.spec.label,
         consecutive_failures = failures,
         threshold,
-        failure = %outcome.failure_summary,
         "Snake failed health probe"
     );
     if failures < threshold || !leaderboard_entry_health::deactivate(connection, entry_id).await? {
@@ -389,7 +390,6 @@ async fn apply_probe(
 
     tracing::warn!(
         battlesnake_id = %snake.battlesnake_id,
-        snake_name = %snake.name,
         leaderboard = %candidate.spec.label,
         consecutive_failures = failures,
         "Pulled snake from leaderboard matchmaking"
@@ -429,7 +429,6 @@ async fn apply_recovery_probe(
     let threshold = app_state.config.snake_health_recovery_threshold;
     tracing::info!(
         battlesnake_id = %snake.battlesnake_id,
-        snake_name = %snake.name,
         leaderboard = %candidate.spec.label,
         consecutive_successes = successes,
         threshold,
@@ -441,7 +440,6 @@ async fn apply_recovery_probe(
 
     tracing::info!(
         battlesnake_id = %snake.battlesnake_id,
-        snake_name = %snake.name,
         leaderboard = %candidate.spec.label,
         "Put recovered snake back into leaderboard matchmaking"
     );

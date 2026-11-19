@@ -44,7 +44,14 @@ pub(crate) struct Capture {
     /// `achievement_earned`, and the achievement share events) — never
     /// cleared; each test filters on its own unique ids.
     events: Arc<Mutex<Vec<BTreeMap<String, String>>>>,
+    /// Every event emitted from [`LOG_LINE_TARGETS`], `message` included,
+    /// for tests that assert what reaches the log sinks. Never cleared;
+    /// each test filters on its own unique values.
+    log_lines: Arc<Mutex<Vec<BTreeMap<String, String>>>>,
 }
+
+/// Modules whose log lines are captured into `log_lines`.
+const LOG_LINE_TARGETS: &[&str] = &["arena::email", "arena::discord", "arena::snake_client"];
 
 /// Extension payload tying a `server.request` span to its capture sequence.
 #[derive(Debug)]
@@ -98,6 +105,14 @@ where
     fn on_event(&self, event: &tracing::Event<'_>, ctx: tracing_subscriber::layer::Context<'_, S>) {
         let mut fields = Fields::default();
         event.record(&mut fields);
+        let target = event.metadata().target();
+        if LOG_LINE_TARGETS.iter().any(|module| {
+            target
+                .strip_prefix(module)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with("::"))
+        }) {
+            self.log_lines.lock().unwrap().push(fields.0.clone());
+        }
         match fields.0.get("event_type").map(String::as_str) {
             Some("game_phase") => self.phases.lock().unwrap().push((false, fields.0)),
             Some("battlesnake_created")
@@ -218,6 +233,20 @@ impl Capture {
                     && fields.get("user_id").map(String::as_str) == Some(&user_id.to_string())
             })
             .cloned()
+            .collect()
+    }
+
+    /// Fields of every event captured from [`LOG_LINE_TARGETS`], in emission
+    /// order. Never clears the buffer — filter on your own unique values.
+    pub(crate) fn log_lines(&self) -> Vec<BTreeMap<String, String>> {
+        self.log_lines.lock().unwrap().clone()
+    }
+
+    /// Captured log lines with `needle` in any field value or the message.
+    pub(crate) fn log_lines_containing(&self, needle: &str) -> Vec<BTreeMap<String, String>> {
+        self.log_lines()
+            .into_iter()
+            .filter(|fields| fields.values().any(|value| value.contains(needle)))
             .collect()
     }
 

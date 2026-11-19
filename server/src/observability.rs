@@ -62,6 +62,14 @@ pub fn manifest(
     arena::observability_declarations::declarations()?.attach_to_eyes_manifest(manifest)
 }
 
+/// Bound on the Eyes process-shutdown signal, sent after the supervisor stops
+/// and before the telemetry flush (`run_instrumented_application`).
+/// eyes-subscriber's 5 second default would push a SIGTERM with Eyes hanging
+/// past Cloud Run's 10 second kill: 4s job drain + 2s exit grace + this + 3s
+/// flush must stay within 9.5s (asserted in `main.rs`).
+pub const EYES_HEARTBEAT_SHUTDOWN_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_millis(500);
+
 /// Publishing and heartbeats are best effort: Eyes must not prevent Arena
 /// from serving traffic. Wait for manifest acceptance before the first beat.
 pub async fn start(
@@ -101,6 +109,7 @@ async fn register(
     let mut heartbeat =
         ProcessHeartbeatConfig::from_manifest(base_url.parse()?, org_id, app_id, manifest)?;
     heartbeat.token = token.map(str::to_owned);
+    heartbeat.shutdown_timeout = EYES_HEARTBEAT_SHUTDOWN_TIMEOUT;
     Ok(ProcessHeartbeat::spawn(heartbeat)?)
 }
 
@@ -1126,6 +1135,44 @@ mod tests {
                 authorization.is_some()
             );
         }
+    }
+
+    #[tokio::test]
+    async fn heartbeat_shutdown_is_bounded_when_eyes_hangs() {
+        let manifest = test_manifest().await;
+        // Answers the manifest and heartbeats, never the shutdown signal.
+        let router = axum::Router::new().fallback(|uri: axum::http::Uri| async move {
+            if uri.path().ends_with("/shutdown") {
+                std::future::pending::<()>().await;
+            }
+            axum::http::StatusCode::OK
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        let handle = register(
+            &base_url,
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            &manifest,
+            None,
+        )
+        .await
+        .expect("registration succeeds");
+        let started = std::time::Instant::now();
+        assert!(
+            handle.shutdown().await.is_err(),
+            "the hung signal times out"
+        );
+        let elapsed = started.elapsed();
+        server.abort();
+
+        assert!(
+            elapsed >= EYES_HEARTBEAT_SHUTDOWN_TIMEOUT
+                && elapsed < EYES_HEARTBEAT_SHUTDOWN_TIMEOUT * 4,
+            "shutdown took {elapsed:?}"
+        );
     }
 
     #[tokio::test]
