@@ -17,8 +17,8 @@ byte-identical to the upstream versions.
 
 ## cja pin
 
-Arena holds cja at `10c3648` (the shared per-process concurrency keys of
-cja #97 / DEV-2431, adopted by DEV-2432). Bumping cja must always be a
+Arena holds cja at `4409b108f75ee56d36065fdcb92ce6118b9392e3` (the PostHog
+telemetry, product events, and declaration sync adopted by DEV-2485). Bumping cja must always be a
 precise pin, never a bare `cargo update` or `cargo update -p cja`:
 
 ```
@@ -48,7 +48,9 @@ while keeping dead-worker recovery under five minutes. A roughly 42-minute game
 remains exclusively leased while heartbeats succeed. A hard-killed worker's lease
 can be reclaimed after four minutes plus the next poll when the database is
 healthy. Polling is separate: `ARENA_JOB_POLL_INTERVAL_MS` is 200 ms in production.
-`ARENA_JOB_SHUTDOWN_DRAIN_SECS` controls graceful shutdown drain (default 5 seconds).
+`ARENA_JOB_SHUTDOWN_DRAIN_SECS` controls graceful shutdown drain (default 4 seconds).
+Arena then allows 2 seconds of exit grace and up to 3 seconds for telemetry flush;
+increasing the drain can exceed Cloud Run's 10-second shutdown window.
 
 Arena shares one cja `IdlePollGate` across its workers. With the production
 `ARENA_JOB_WORKERS=100`, `ARENA_JOB_IDLE_POLLERS=2`, and 200 ms interval, at

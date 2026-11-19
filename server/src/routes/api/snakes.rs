@@ -236,12 +236,14 @@ pub async fn create_snake(
         )
     })?;
 
-    tracing::info!(
-        event_type = "battlesnake_created",
-        battlesnake_id = %snake.battlesnake_id,
-        user_id = %auth.user_id,
-        source = "api",
-        "battlesnake created"
+    cja::product_event!(
+        name: "battlesnake_created",
+        user_id: Some(&auth.user_id),
+        message: "battlesnake created",
+        properties: {
+            battlesnake_id = %snake.battlesnake_id,
+            source = "api",
+        }
     );
 
     // The scope was loaded at auth time; mirror the row just committed so

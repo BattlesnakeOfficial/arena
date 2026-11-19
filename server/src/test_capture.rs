@@ -102,6 +102,7 @@ where
             Some("game_phase") => self.phases.lock().unwrap().push((false, fields.0)),
             Some("battlesnake_created")
             | Some("user_authenticated")
+            | Some("play_claim_succeeded")
             | Some("achievement_earned")
             | Some("share_page_view")
             | Some("share_action")

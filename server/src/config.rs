@@ -29,7 +29,7 @@ pub const ARENA_PUBLIC_BASE_URL: &str = "https://arena.battlesnake.com";
 pub const DEFAULT_ENGINE_API_HOSTS: &[&str] = &["engine.battlesnake.com"];
 
 /// Default for [`JobConfig::shutdown_drain_secs`].
-pub const DEFAULT_JOB_SHUTDOWN_DRAIN_SECS: u64 = 5;
+pub const DEFAULT_JOB_SHUTDOWN_DRAIN_SECS: u64 = 4;
 /// Default for `ARENA_JOB_RECLAIM_WINDOW_SECS`: 240 seconds tolerates roughly 30-second
 /// Neon/DB stalls across several heartbeat attempts while meeting the five-minute
 /// dead-worker reclaim target; the window must be at least 3x the heartbeat.
@@ -48,8 +48,9 @@ pub struct JobConfig {
     pub reclaim_window_secs: u64,
     /// How long an in-flight job may keep running after a shutdown signal
     /// before it is dropped and its lock released. Cloud Run sends SIGKILL
-    /// 10 seconds after SIGTERM, so this plus [`crate::SHUTDOWN_EXIT_GRACE`]
-    /// must stay under that.
+    /// 10 seconds after SIGTERM, so this plus the 2-second exit grace
+    /// ([`crate::SHUTDOWN_EXIT_GRACE`]) and up to 3 seconds of telemetry flush
+    /// must stay under that. Increasing this override can exceed the limit.
     pub shutdown_drain_secs: u64,
     pub max_retries: i32,
     pub workers: usize,
@@ -292,10 +293,9 @@ pub struct AppConfig {
     pub archive_cache_max_bytes: usize,
     pub gcp_logging: bool,
     pub gcp_project_id: Option<String>,
-    pub rust_log: String,
     /// `ARENA_STDOUT_LOG`: extra `EnvFilter` directives for the JSON stdout
-    /// layer only (`GCP_LOGGING` path), e.g. `warn` or `off`. `RUST_LOG` still
-    /// governs Eyes. Unset leaves stdout at `RUST_LOG`.
+    /// layer only (`GCP_LOGGING` path), e.g. `warn` or `off`. `RUST_LOG`
+    /// governs all sinks. Unset leaves stdout at `RUST_LOG`.
     pub stdout_log: Option<String>,
     /// Eyes telemetry, enabled when `EYES_ORG_ID` + `EYES_APP_ID` are set.
     pub eyes: Option<EyesConfig>,
@@ -471,7 +471,6 @@ impl AppConfig {
             ),
             gcp_logging,
             gcp_project_id: optional_env("GCP_PROJECT_ID"),
-            rust_log: std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
             stdout_log: optional_env("ARENA_STDOUT_LOG"),
             eyes: eyes_config_from_env()?,
             highlights_house_owners: csv_env(
@@ -527,7 +526,6 @@ impl AppConfig {
             tokio_worker_multiplier: 2,
             gcp_logging: false,
             gcp_project_id: None,
-            rust_log: "info".to_string(),
             stdout_log: None,
             eyes: None,
             highlights_house_owners: vec!["byte-the-bot".to_string()],

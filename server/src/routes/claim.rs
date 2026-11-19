@@ -257,13 +257,14 @@ pub async fn submit_claim(
             .into_response());
     };
 
-    tracing::info!(
-        event_type = "play_claim_succeeded",
-        user_id = %user.user_id,
-        play_username = %summary.username,
-        snakes = summary.snakes_created,
-        grants = summary.grants_created,
-        "play account claimed via password"
+    cja::product_event!(
+        name: "play_claim_succeeded",
+        user_id: Some(&user.user_id),
+        message: "play account claimed via password",
+        properties: {
+            snakes = summary.snakes_created,
+            grants = summary.grants_created,
+        }
     );
 
     state
@@ -536,13 +537,14 @@ pub async fn complete_email_claim(
         imported_account::EmailClaimOutcome::Claimed(summary) => summary,
     };
 
-    tracing::info!(
-        event_type = "play_claim_succeeded",
-        user_id = %user.user_id,
-        play_username = %summary.username,
-        snakes = summary.snakes_created,
-        grants = summary.grants_created,
-        "play account claimed via email link"
+    cja::product_event!(
+        name: "play_claim_succeeded",
+        user_id: Some(&user.user_id),
+        message: "play account claimed via email link",
+        properties: {
+            snakes = summary.snakes_created,
+            grants = summary.grants_created,
+        }
     );
 
     state
@@ -641,6 +643,71 @@ mod tests {
         Ok(id)
     }
 
+    async fn seed_claim_assets(
+        pool: &PgPool,
+        account_id: uuid::Uuid,
+        suffix: i32,
+        snakes: usize,
+        grants: usize,
+    ) -> cja::Result<()> {
+        for index in 0..snakes {
+            sqlx::query(
+                "INSERT INTO imported_snakes (imported_account_id, play_snake_id, name, url, head, tail, color, is_public, engine_region)
+                 VALUES ($1, $2, 'Imported snake', 'https://s.example', 'default', 'default', '#123456', true, 'us-west1')",
+            )
+            .bind(account_id)
+            .bind(format!("claim-route-snake-{suffix}-{index}"))
+            .execute(pool)
+            .await?;
+        }
+        for (kind, slug) in [("head", "alligator"), ("tail", "alligator")]
+            .into_iter()
+            .take(grants)
+        {
+            sqlx::query(
+                "INSERT INTO imported_grants (imported_account_id, customization_type, slug)
+                 VALUES ($1, $2, $3)",
+            )
+            .bind(account_id)
+            .bind(kind)
+            .bind(slug)
+            .execute(pool)
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn assert_claim_materialized(
+        pool: &PgPool,
+        account_id: uuid::Uuid,
+        user_id: uuid::Uuid,
+        snakes: i64,
+        grants: i64,
+    ) -> cja::Result<()> {
+        let claimed_by: Option<uuid::Uuid> = sqlx::query_scalar(
+            "SELECT claimed_by_user_id FROM imported_accounts WHERE imported_account_id = $1",
+        )
+        .bind(account_id)
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(claimed_by, Some(user_id));
+        let materialized_snakes: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM imported_snakes WHERE imported_account_id = $1 AND materialized_battlesnake_id IS NOT NULL",
+        )
+        .bind(account_id)
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(materialized_snakes, snakes);
+        let materialized_grants: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM customization_grants WHERE user_id = $1 AND source = 'play_import'",
+        )
+        .bind(user_id)
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(materialized_grants, grants);
+        Ok(())
+    }
+
     async fn assert_claim_notice(
         pool: &PgPool,
         user_id: uuid::Uuid,
@@ -720,12 +787,14 @@ mod tests {
     async fn password_and_email_link_claim_routes_queue_original_play_address(
         pool: PgPool,
     ) -> cja::Result<()> {
+        let capture = crate::test_capture::Capture::shared();
         let state = AppState::test_from_pool(pool.clone());
         let app = app(&state);
         let session = create_user_session(&pool, 1673111, false).await;
         let user_id = session_user_id(&pool, session).await;
         let cookie = signed_session_cookie(&state, session);
-        seed_play_account(&pool, 111).await?;
+        let account_id = seed_play_account(&pool, 111).await?;
+        seed_claim_assets(&pool, account_id, 111, 2, 1).await?;
         let response = post_form(
             &app,
             "/claim",
@@ -735,11 +804,18 @@ mod tests {
         .await;
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
         assert_claim_notice(&pool, user_id, "play-111@example.com").await?;
+        assert_claim_materialized(&pool, account_id, user_id, 2, 1).await?;
+        let events = capture.events("play_claim_succeeded", user_id);
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0].get("snakes").map(String::as_str), Some("2"));
+        assert_eq!(events[0].get("grants").map(String::as_str), Some("1"));
+        assert!(!events[0].contains_key("play_username"));
 
         let session = create_user_session(&pool, 1673112, false).await;
         let user_id = session_user_id(&pool, session).await;
         let cookie = signed_session_cookie(&state, session);
         let account_id = seed_play_account(&pool, 112).await?;
+        seed_claim_assets(&pool, account_id, 112, 1, 2).await?;
         let mut connection = pool.acquire().await?;
         let token = claim_email_token::create(&mut connection, account_id, user_id).await?;
         drop(connection);
@@ -752,6 +828,12 @@ mod tests {
         .await;
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
         assert_claim_notice(&pool, user_id, "play-112@example.com").await?;
+        assert_claim_materialized(&pool, account_id, user_id, 1, 2).await?;
+        let events = capture.events("play_claim_succeeded", user_id);
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0].get("snakes").map(String::as_str), Some("1"));
+        assert_eq!(events[0].get("grants").map(String::as_str), Some("2"));
+        assert!(!events[0].contains_key("play_username"));
         Ok(())
     }
 

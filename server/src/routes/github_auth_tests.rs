@@ -476,6 +476,8 @@ async fn user_authenticated_event_carries_new_user(pool: PgPool) {
         Some("true"),
         "{events:?}"
     );
+    assert_eq!(events[0].get("auth_type").map(String::as_str), Some("web"));
+    assert!(!events[0].contains_key("github_login"));
 
     // Second callback for the same GitHub identity: a fresh session+state,
     // but an existing user.
@@ -495,4 +497,62 @@ async fn user_authenticated_event_carries_new_user(pool: PgPool) {
         Some("false"),
         "{events:?}"
     );
+    assert_eq!(events[1].get("auth_type").map(String::as_str), Some("web"));
+    assert!(!events[1].contains_key("github_login"));
+}
+
+#[sqlx::test(migrations = "../migrations")]
+async fn github_callback_auto_claim_emits_play_claim_event(pool: PgPool) {
+    let capture = crate::test_capture::Capture::shared();
+    let github = github_mocks().await;
+    let fx = Fixture::new(pool.clone(), &github, false).await;
+
+    let imported_account_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO imported_accounts (play_user_id, play_account_id, email, username, github_uid)
+         VALUES ('github-auto-claim', 'github-auto-claim', 'play-auto@example.com', 'play-auto', $1)
+         RETURNING imported_account_id",
+    )
+    .bind(MOCK_GITHUB_ID)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO imported_snakes (imported_account_id, play_snake_id, name, url)
+         VALUES ($1, 'github-auto-snake', 'Auto Snake', 'https://example.com/snake')",
+    )
+    .bind(imported_account_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO imported_grants (imported_account_id, customization_type, slug)
+         VALUES ($1, 'head', 'alligator')",
+    )
+    .bind(imported_account_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let response = fx.app.clone().oneshot(fx.callback_request()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let user_id: Uuid =
+        sqlx::query_scalar("SELECT user_id FROM users WHERE external_github_id = $1")
+            .bind(MOCK_GITHUB_ID)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let claimed_by: Option<Uuid> = sqlx::query_scalar(
+        "SELECT claimed_by_user_id FROM imported_accounts WHERE imported_account_id = $1",
+    )
+    .bind(imported_account_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(claimed_by, Some(user_id));
+
+    let events = capture.events("play_claim_succeeded", user_id);
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0].get("snakes").map(String::as_str), Some("1"));
+    assert_eq!(events[0].get("grants").map(String::as_str), Some("1"));
+    assert!(!events[0].contains_key("play_username"));
 }

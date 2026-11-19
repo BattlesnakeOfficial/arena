@@ -828,9 +828,9 @@ mod tests {
                 game, snake, start + chrono::Duration::hours(1)
             ).execute(&pool).await?;
         }
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "CREATE FUNCTION reject_poisoned_week() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.user_id = '{poisoned}'::uuid THEN RAISE EXCEPTION 'poisoned week'; END IF; RETURN NEW; END $$"
-        )).execute(&pool).await?;
+        ))).execute(&pool).await?;
         sqlx::query("CREATE TRIGGER reject_poisoned_week BEFORE INSERT ON customization_active_weeks FOR EACH ROW EXECUTE FUNCTION reject_poisoned_week()")
             .execute(&pool).await?;
         assert!(backfill_active_weeks(&pool).await.is_err());

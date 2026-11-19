@@ -43,15 +43,23 @@ async fn run() -> cja::Result<()> {
     // before block_on. "engine_proxy" with an UNDERSCORE: cja's default
     // RUST_LOG embeds "{crate_name}=trace", and a hyphenated name can never
     // match a tracing target (targets are module paths).
-    let _eyes = cja::setup::TracingConfig::new("engine_proxy").init()?;
-    let mut supervisor = cja::tasks::Supervisor::new(cja::tasks::ShutdownBudget::from_env())?;
-    let shutdown = supervisor.shutdown_token();
-    // Missing BATTLESNAKE_PROXY_AUTH_TOKEN => Err => main exits 1, like Go.
-    let state = engine_proxy::app::ProxyState::from_env(shutdown.clone())?;
-    let router = engine_proxy::app::router(state);
-    supervisor.spawn(
-        "server",
-        cja::server::run_server_until(router, shutdown.cancelled_owned()),
-    );
-    supervisor.run().await
+    let telemetry = cja::setup::TracingConfig::new("engine_proxy").init()?;
+    let result = async {
+        let mut supervisor = cja::tasks::Supervisor::new(cja::tasks::ShutdownBudget::from_env())?;
+        let shutdown = supervisor.shutdown_token();
+        // Missing BATTLESNAKE_PROXY_AUTH_TOKEN => Err => main exits 1, like Go.
+        let state = engine_proxy::app::ProxyState::from_env(shutdown.clone())?;
+        let router = engine_proxy::app::router(state);
+        supervisor.spawn(
+            "server",
+            cja::server::run_server_until(router, shutdown.cancelled_owned()),
+        );
+        supervisor.run().await
+    }
+    .await;
+    if let Err(error) = &result {
+        tracing::error!(error = %format!("{error:#}"), "Engine proxy exiting after failure");
+    }
+    telemetry.shutdown().await?;
+    result
 }

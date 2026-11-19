@@ -257,7 +257,7 @@ pub(crate) async fn run_cron(
     Worker::new_with_timezone(
         app_state,
         registry,
-        cja::chrono_tz::UTC,
+        cja::jiff::tz::TimeZone::UTC,
         Duration::from_secs(CRON_POLL_SECS),
     )
     .run(shutdown)
@@ -393,27 +393,27 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .expect("20261103210000 must seed the TurnRetentionJob cron row");
+        let last_run_at: cja::jiff::Timestamp = last_run_at.to_rfc3339().parse().unwrap();
         let registry = cron_registry(&AppConfig::test_default());
         let job = registry
             .get("TurnRetentionJob")
             .expect("turn retention registered");
         // One second after the seeded last_run_at — i.e. right after the
         // deploy that applied the migration — the tick must not fire.
-        let just_after_boot = last_run_at + chrono::Duration::seconds(1);
+        let just_after_boot = last_run_at + cja::jiff::SignedDuration::from_secs(1);
         assert!(!job.schedule.should_run(
             Some(&last_run_at),
             just_after_boot,
             just_after_boot,
-            cja::chrono_tz::UTC
+            &cja::jiff::tz::TimeZone::UTC
         ));
         // One registered interval (hourly) plus a second later, it must.
-        let one_interval_later =
-            last_run_at + chrono::Duration::hours(1) + chrono::Duration::seconds(1);
+        let one_interval_later = last_run_at + cja::jiff::SignedDuration::from_secs(3601);
         assert!(job.schedule.should_run(
             Some(&last_run_at),
             one_interval_later,
             one_interval_later,
-            cja::chrono_tz::UTC
+            &cja::jiff::tz::TimeZone::UTC
         ));
     }
 
@@ -445,24 +445,24 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .expect("20261108160000 must seed the SessionPruneJob cron row");
+        let last_run_at: cja::jiff::Timestamp = last_run_at.to_rfc3339().parse().unwrap();
         let registry = cron_registry(&AppConfig::test_default());
         let job = registry
             .get("SessionPruneJob")
             .expect("session prune registered");
-        let just_after_boot = last_run_at + chrono::Duration::seconds(1);
+        let just_after_boot = last_run_at + cja::jiff::SignedDuration::from_secs(1);
         assert!(!job.schedule.should_run(
             Some(&last_run_at),
             just_after_boot,
             just_after_boot,
-            cja::chrono_tz::UTC
+            &cja::jiff::tz::TimeZone::UTC
         ));
-        let one_interval_later =
-            last_run_at + chrono::Duration::hours(1) + chrono::Duration::seconds(1);
+        let one_interval_later = last_run_at + cja::jiff::SignedDuration::from_secs(3601);
         assert!(job.schedule.should_run(
             Some(&last_run_at),
             one_interval_later,
             one_interval_later,
-            cja::chrono_tz::UTC
+            &cja::jiff::tz::TimeZone::UTC
         ));
     }
 
@@ -496,25 +496,25 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .expect("20261105000000 must seed the PlayHistoryWalkJob cron row");
+        let last_run_at: cja::jiff::Timestamp = last_run_at.to_rfc3339().parse().unwrap();
         let registry = cron_registry(&AppConfig::test_default());
         let job = registry
             .get("PlayHistoryWalkJob")
             .expect("play history walk registered");
-        let just_after_boot = last_run_at + chrono::Duration::seconds(1);
+        let just_after_boot = last_run_at + cja::jiff::SignedDuration::from_secs(1);
         assert!(!job.schedule.should_run(
             Some(&last_run_at),
             just_after_boot,
             just_after_boot,
-            cja::chrono_tz::UTC
+            &cja::jiff::tz::TimeZone::UTC
         ));
         let one_interval_later = last_run_at
-            + chrono::Duration::seconds(PLAY_HISTORY_WALK_INTERVAL_SECS as i64)
-            + chrono::Duration::seconds(1);
+            + cja::jiff::SignedDuration::from_secs(PLAY_HISTORY_WALK_INTERVAL_SECS as i64 + 1);
         assert!(job.schedule.should_run(
             Some(&last_run_at),
             one_interval_later,
             one_interval_later,
-            cja::chrono_tz::UTC
+            &cja::jiff::tz::TimeZone::UTC
         ));
     }
 
@@ -560,17 +560,20 @@ mod tests {
             interval.0,
             Duration::from_secs(CUSTOMIZATION_ACTIVE_WEEK_BACKFILL_INTERVAL_SECS)
         );
-        let now = chrono::Utc::now();
-        assert!(job.schedule.should_run(None, now, now, cja::chrono_tz::UTC));
+        let now = cja::jiff::Timestamp::now();
+        assert!(
+            job.schedule
+                .should_run(None, now, now, &cja::jiff::tz::TimeZone::UTC)
+        );
         assert!(
             !job.schedule
-                .should_run(Some(&now), now, now, cja::chrono_tz::UTC)
+                .should_run(Some(&now), now, now, &cja::jiff::tz::TimeZone::UTC)
         );
         assert!(job.schedule.should_run(
-            Some(&(now - chrono::Duration::hours(2))),
+            Some(&(now - cja::jiff::SignedDuration::from_secs(7200))),
             now,
             now,
-            cja::chrono_tz::UTC
+            &cja::jiff::tz::TimeZone::UTC
         ));
     }
 

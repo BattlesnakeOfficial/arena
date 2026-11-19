@@ -105,10 +105,34 @@ fn privacy_content() -> Markup {
                 "the IP address, and the browser user agent. For signed-in "
                 "requests, they also store your account ID. Gameplay telemetry "
                 "in the same system ties account IDs and snake IDs to the games "
-                "they took part in. Sign-in events include your GitHub username, "
-                "and Play account claim events include your Play username. This "
+                "they took part in. Older sign-in and Play account claim events "
+                "may include GitHub and Play usernames; new product events omit "
+                "those usernames. This "
                 "data has no fixed deletion date, and deleting your account does "
                 "not remove what was already recorded there."
+            }
+            p {
+                "We also send product events to PostHog (US cloud), our analytics "
+                "processor. Events for sign-in, snake creation, Play account claims, "
+                "achievement earns, and achievement share page views, actions, and "
+                "calls to action use your Battlesnake account ID when you are the "
+                "acting user. Anonymous share visitors are not identified as the "
+                "page owner. Event properties contain authentication type, new-user "
+                "status, snake and game IDs, claim counts, achievement slug, kind, "
+                "live and first flags, share owner ID, bounded referrer, and "
+                "validated share channel or call-to-action type. They do not contain "
+                "email, GitHub or Play usernames, or free-text fields."
+            }
+            p {
+                "PostHog also receives server logs and traces. These can contain "
+                "URL paths and query strings, referrers, IP addresses, user agents, "
+                "account IDs, gameplay and snake IDs, and usernames embedded in URL "
+                "paths. For PostHog only, credential values in query strings, "
+                "authorization and cookie headers, and copies of background-job "
+                "data (which can include account details) are redacted. Our own "
+                "observability system continues to receive its existing stream. "
+                "At process boot, PostHog receives a manifest of app configuration, "
+                "scheduled jobs, and health monitors without user data."
             }
 
             h3 { "Play.battlesnake.com Migration Data" }
@@ -139,6 +163,7 @@ fn privacy_content() -> Markup {
                     "aggregate form; published statistics never identify individual accounts."
                 }
                 li { "Operate, debug, and improve Battlesnake using the technical logs described above." }
+                li { "Analyze product events and server telemetry using PostHog." }
                 li { "Send transactional email (via Mailgun) when your play account is claimed, as a security notice." }
                 li { "Notify you by email if your snake is removed from leaderboard matchmaking because its server keeps failing." }
             }
@@ -149,7 +174,8 @@ fn privacy_content() -> Markup {
                 "Mailgun for transactional email, Google Cloud for hosting and "
                 "storage, TypeSafe for automated moderation of snake names, "
                 "tournament names and descriptions, saved game titles, and snake "
-                "shouts, and the providers that host our observability system. "
+                "shouts, the providers that host our observability system, and "
+                "PostHog (US cloud) for analytics. "
                 "We also post new sign-ups, Play account claims, and newly "
                 "registered snakes to the Battlesnake community Discord, and "
                 "those posts include GitHub usernames, Play usernames, and snake "
@@ -161,7 +187,10 @@ fn privacy_content() -> Markup {
                 "Battlesnake is hosted on Google Cloud. Game data from the legacy "
                 "Battlesnake Engine may be archived to Google Cloud Storage. "
                 "Technical logs are stored with the providers that host our "
-                "observability system. Google Cloud also keeps server and load "
+                "observability system and with PostHog (US cloud). PostHog product "
+                "events and boot manifests have no fixed deletion date unless a "
+                "verified project retention setting says otherwise. Google Cloud "
+                "also keeps server and load "
                 "balancer logs for a short time, which can contain the same kinds "
                 "of technical details described above."
             }
@@ -264,6 +293,39 @@ mod tests {
         assert!(html.contains("Cookies"));
         assert!(html.contains("Contact"));
         assert!(html.contains(PRIVACY_EFFECTIVE_DATE));
+        assert_eq!(PRIVACY_EFFECTIVE_DATE, "November 2026");
+        for disclosure in [
+            "PostHog (US cloud)",
+            "account ID",
+            "snake creation",
+            "Play account claims",
+            "achievement earns",
+            "share page views",
+            "new-user status",
+            "claim counts",
+            "bounded referrer",
+            "server logs and traces",
+            "URL paths and query strings",
+            "IP addresses",
+            "user agents",
+            "credential values in query strings",
+            "authorization and cookie headers",
+            "copies of background-job data",
+            "manifest of app configuration",
+            "without user data",
+            "no fixed deletion date",
+            "our observability system",
+            "Google Cloud",
+            "analytics cookies",
+        ] {
+            assert!(
+                html.contains(disclosure),
+                "missing privacy disclosure: {disclosure}"
+            );
+        }
+        assert!(!html.contains("Sign-in events include your GitHub username"));
+        assert!(!html.contains("Play account claim events include your Play username"));
+        assert!(!html.contains("<h1>Arena"));
     }
 
     #[test]

@@ -379,10 +379,10 @@ pub async fn find_unclaimed_by_github_uid(
     pool: &PgPool,
     github_uid: i64,
 ) -> cja::Result<Option<ImportedAccount>> {
-    let account = sqlx::query_as::<_, ImportedAccount>(&format!(
+    let account = sqlx::query_as::<_, ImportedAccount>(sqlx::AssertSqlSafe(format!(
         "SELECT {IMPORTED_ACCOUNT_COLUMNS} FROM imported_accounts
          WHERE github_uid = $1 AND claimed_by_user_id IS NULL"
-    ))
+    )))
     .bind(github_uid)
     .fetch_optional(pool)
     .await
@@ -415,11 +415,11 @@ pub async fn find_unclaimed_by_email(
     pool: &PgPool,
     email: &str,
 ) -> cja::Result<Vec<ImportedAccount>> {
-    let accounts = sqlx::query_as::<_, ImportedAccount>(&format!(
+    let accounts = sqlx::query_as::<_, ImportedAccount>(sqlx::AssertSqlSafe(format!(
         "SELECT {IMPORTED_ACCOUNT_COLUMNS} FROM imported_accounts
          WHERE lower(email) = lower($1) AND claimed_by_user_id IS NULL
          ORDER BY imported_at"
-    ))
+    )))
     .bind(email)
     .fetch_all(pool)
     .await
@@ -716,12 +716,14 @@ fn log_claim_completed(user_id: Uuid, completed: &ClaimCompleted) {
     completed.receipt.log_enqueued();
 
     for battlesnake_id in &completed.created_snake_ids {
-        tracing::info!(
-            event_type = "battlesnake_created",
-            battlesnake_id = %battlesnake_id,
-            user_id = %user_id,
-            source = "play_claim",
-            "battlesnake created via play claim"
+        cja::product_event!(
+            name: "battlesnake_created",
+            user_id: Some(&user_id),
+            message: "battlesnake created via play claim",
+            properties: {
+                battlesnake_id = %battlesnake_id,
+                source = "play_claim",
+            }
         );
     }
 }

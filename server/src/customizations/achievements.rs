@@ -805,16 +805,18 @@ async fn record_earns(
 /// transaction commits, so a rolled-back award never emits. Non-live
 /// (backfill/grant-dated) records never emit.
 fn emit_earned_event(user_id: Uuid, event: &EarnedEvent) {
-    tracing::info!(
-        event_type = "achievement_earned",
-        user_id = %user_id,
-        slug = event.achievement.slug(),
-        kind = event.achievement.kind(),
-        live = true,
-        first = event.first,
-        game_id = %event.provenance.game_id,
-        battlesnake_id = %event.provenance.battlesnake_id,
-        "Achievement earned"
+    cja::product_event!(
+        name: "achievement_earned",
+        user_id: Some(&user_id),
+        message: "Achievement earned",
+        properties: {
+            slug = event.achievement.slug(),
+            kind = event.achievement.kind(),
+            live = true,
+            first = event.first,
+            game_id = %event.provenance.game_id,
+            battlesnake_id = %event.provenance.battlesnake_id,
+        }
     );
 }
 

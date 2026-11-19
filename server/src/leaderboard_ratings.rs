@@ -745,7 +745,7 @@ mod tests {
     /// can actually fail.
     async fn assert_migration_backs_out_second_application(
         pool: &PgPool,
-        migration_sql: &str,
+        migration_sql: &'static str,
         doubled_game_id: Uuid,
         specs: &[DoubledEntrySpec; 4],
     ) -> cja::Result<()> {

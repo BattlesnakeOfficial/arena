@@ -26,6 +26,7 @@ RUN mkdir -p server/src/bin mock-github-oauth/src rules/src engine-proxy/src are
     echo "fn main() {}" > server/src/main.rs && \
     echo "" > server/src/lib.rs && \
     echo "fn main() {}" > server/src/bin/stress_test.rs && \
+    echo "fn main() {}" > server/src/bin/posthog-sync.rs && \
     echo "fn main() {}" > mock-github-oauth/src/main.rs && \
     echo "" > mock-github-oauth/src/lib.rs && \
     echo "" > rules/src/lib.rs && \

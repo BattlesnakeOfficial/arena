@@ -2983,9 +2983,9 @@ mod live_tests {
         let (admin_pool, quoted_name) = outage_admin(&pool).await;
         let mut admin = admin_pool.acquire().await.unwrap();
         let mut writer = pool.acquire().await.unwrap();
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "ALTER DATABASE \"{quoted_name}\" WITH ALLOW_CONNECTIONS false"
-        ))
+        )))
         .execute(&mut *admin)
         .await
         .unwrap();
@@ -3018,9 +3018,9 @@ mod live_tests {
         }
         .await;
         // Restore even when an outage operation fails. No assertions occur above.
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "ALTER DATABASE \"{quoted_name}\" WITH ALLOW_CONNECTIONS true"
-        ))
+        )))
         .execute(&mut *admin)
         .await
         .unwrap();
@@ -3061,9 +3061,9 @@ mod live_tests {
         let mut writer = pool.acquire().await.unwrap();
         let spare = pool.acquire().await.unwrap();
         drop(spare);
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "ALTER DATABASE \"{quoted_name}\" WITH ALLOW_CONNECTIONS false"
-        ))
+        )))
         .execute(&mut *admin)
         .await
         .unwrap();
@@ -3093,9 +3093,9 @@ mod live_tests {
             Ok::<(), color_eyre::Report>(())
         }
         .await;
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "ALTER DATABASE \"{quoted_name}\" WITH ALLOW_CONNECTIONS true"
-        ))
+        )))
         .execute(&mut *admin)
         .await
         .unwrap();

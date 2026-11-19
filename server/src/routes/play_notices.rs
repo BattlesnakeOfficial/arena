@@ -62,7 +62,7 @@ pub async fn unsubscribe_post(
 }
 
 fn eastern(at: DateTime<Utc>) -> String {
-    at.with_timezone(&cja::chrono_tz::America::New_York)
+    at.with_timezone(&chrono_tz::America::New_York)
         .format("%a %b %-d, %-I:%M %p ET")
         .to_string()
 }

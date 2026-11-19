@@ -1,0 +1,881 @@
+{
+  "critical_jobs": [
+    "GameRunnerJob",
+    "RunMatchJob",
+    "RunTournamentRoundJob",
+    "UpdateTournamentStatusJob",
+    "LeaderboardRatingUpdateJob",
+    "BackupSingleGameJob"
+  ],
+  "dashboards": [
+    {
+      "default_range_seconds": 3600,
+      "description": "Requests, games, workers, and the database work between turns.",
+      "id": "arena-operations",
+      "sections": [
+        {
+          "description": null,
+          "items": [
+            {
+              "kind": "stat",
+              "label": null,
+              "query_id": "http.requests",
+              "unit": null,
+              "window_seconds": null
+            },
+            {
+              "kind": "stat",
+              "label": null,
+              "query_id": "games.completed",
+              "unit": null,
+              "window_seconds": null
+            },
+            {
+              "kind": "stat",
+              "label": null,
+              "query_id": "http.latency.p95",
+              "unit": null,
+              "window_seconds": null
+            },
+            {
+              "kind": "stat",
+              "label": null,
+              "query_id": "errors",
+              "unit": null,
+              "window_seconds": null
+            }
+          ],
+          "title": "At a glance"
+        },
+        {
+          "description": null,
+          "items": [
+            {
+              "kind": "time_series",
+              "label": null,
+              "preferred_bucket_seconds": null,
+              "query_id": "http.requests.series",
+              "unit": null,
+              "window_seconds": null
+            },
+            {
+              "kind": "time_series",
+              "label": null,
+              "preferred_bucket_seconds": null,
+              "query_id": "http.latency.series",
+              "unit": null,
+              "window_seconds": null
+            },
+            {
+              "kind": "time_series",
+              "label": null,
+              "preferred_bucket_seconds": null,
+              "query_id": "errors.series",
+              "unit": null,
+              "window_seconds": null
+            },
+            {
+              "kind": "table",
+              "label": null,
+              "query_id": "http.routes",
+              "unit": null,
+              "window_seconds": null
+            }
+          ],
+          "title": "Traffic & errors"
+        },
+        {
+          "description": null,
+          "items": [
+            {
+              "kind": "time_series",
+              "label": null,
+              "preferred_bucket_seconds": null,
+              "query_id": "games.series",
+              "unit": null,
+              "window_seconds": null
+            },
+            {
+              "kind": "stat",
+              "label": null,
+              "query_id": "game.queue_wait.p95",
+              "unit": null,
+              "window_seconds": null
+            },
+            {
+              "kind": "stat",
+              "label": null,
+              "query_id": "game.db_write.p95",
+              "unit": null,
+              "window_seconds": null
+            },
+            {
+              "kind": "stat",
+              "label": null,
+              "query_id": "game.overhead.p95",
+              "unit": null,
+              "window_seconds": null
+            }
+          ],
+          "title": "Game pipeline"
+        },
+        {
+          "description": null,
+          "items": [
+            {
+              "kind": "stat",
+              "label": null,
+              "query_id": "moderation.decisions",
+              "unit": null,
+              "window_seconds": null
+            },
+            {
+              "kind": "table",
+              "label": null,
+              "query_id": "moderation.decisions.by_field",
+              "unit": null,
+              "window_seconds": null
+            },
+            {
+              "kind": "stat",
+              "label": null,
+              "query_id": "moderation.latency.p95",
+              "unit": null,
+              "window_seconds": null
+            }
+          ],
+          "title": "Moderation"
+        },
+        {
+          "description": null,
+          "items": [
+            {
+              "kind": "health_summary",
+              "label": null
+            },
+            {
+              "kind": "table",
+              "label": null,
+              "query_id": "jobs.runs",
+              "unit": null,
+              "window_seconds": null
+            },
+            {
+              "kind": "stat",
+              "label": null,
+              "query_id": "jobs.failures",
+              "unit": null,
+              "window_seconds": null
+            }
+          ],
+          "title": "Background work"
+        }
+      ],
+      "title": "Arena operations"
+    },
+    {
+      "default_range_seconds": 2592000,
+      "description": "Games played, active users and snakes, play claims, signups, new snakes, achievements earned, and achievement shares. Long-window charts: arena-product-history.",
+      "id": "arena-product",
+      "sections": [
+        {
+          "description": null,
+          "items": [
+            {
+              "kind": "stat",
+              "label": null,
+              "query_id": "product.games.played",
+              "unit": null,
+              "window_seconds": null
+            },
+            {
+              "kind": "stat",
+              "label": null,
+              "query_id": "product.games.user_created",
+              "unit": null,
+              "window_seconds": null
+            }
+          ],
+          "title": "At a glance"
+        },
+        {
+          "description": null,
+          "items": [
+            {
+              "kind": "stat",
+              "label": "Users with an authenticated request · last 1 day",
+              "query_id": "product.users.active",
+              "unit": null,
+              "window_seconds": 86400
+            },
+            {
+              "kind": "stat",
+              "label": "Users with an authenticated request · last 7 days",
+              "query_id": "product.users.active",
+              "unit": null,
+              "window_seconds": 604800
+            },
+            {
+              "kind": "stat",
+              "label": "Users with an authenticated request · last 28 days",
+              "query_id": "product.users.active",
+              "unit": null,
+              "window_seconds": 2419200
+            },
+            {
+              "kind": "stat",
+              "label": "Owners whose snake played · last 1 day",
+              "query_id": "product.owners.active",
+              "unit": null,
+              "window_seconds": 86400
+            },
+            {
+              "kind": "stat",
+              "label": "Owners whose snake played · last 7 days",
+              "query_id": "product.owners.active",
+              "unit": null,
+              "window_seconds": 604800
+            },
+            {
+              "kind": "stat",
+              "label": "Owners whose snake played · last 28 days",
+              "query_id": "product.owners.active",
+              "unit": null,
+              "window_seconds": 2419200
+            },
+            {
+              "kind": "stat",
+              "label": "Snakes that played a game · last 7 days",
+              "query_id": "product.snakes.active",
+              "unit": null,
+              "window_seconds": 604800
+            },
+            {
+              "kind": "stat",
+              "label": "Games played · last 7 days",
+              "query_id": "product.games.played",
+              "unit": null,
+              "window_seconds": 604800
+            }
+          ],
+          "title": "Active users, owners, and snakes"
+        },
+        {
+          "description": null,
+          "items": [
+            {
+              "kind": "stat",
+              "label": null,
+              "query_id": "product.users.active.stickiness.daily",
+              "unit": null,
+              "window_seconds": null
+            },
+            {
+              "kind": "stat",
+              "label": null,
+              "query_id": "product.users.active.stickiness.weekly",
+              "unit": null,
+              "window_seconds": null
+            },
+            {
+              "kind": "stat",
+              "label": null,
+              "query_id": "product.owners.active.stickiness.daily",
+              "unit": null,
+              "window_seconds": null
+            },
+            {
+              "kind": "stat",
+              "label": null,
+              "query_id": "product.owners.active.stickiness.weekly",
+              "unit": null,
+              "window_seconds": null
+            }
+          ],
+          "title": "Stickiness (share of 28-day actives)"
+        },
+        {
+          "description": null,
+          "items": [
+            {
+              "kind": "time_series",
+              "label": null,
+              "preferred_bucket_seconds": null,
+              "query_id": "product.games.daily",
+              "unit": null,
+              "window_seconds": null
+            },
+            {
+              "kind": "time_series",
+              "label": null,
+              "preferred_bucket_seconds": null,
+              "query_id": "product.games.ladder.daily",
+              "unit": null,
+              "window_seconds": null
+            },
+            {
+              "kind": "time_series",
+              "label": null,
+              "preferred_bucket_seconds": null,
+              "query_id": "product.games.custom.daily",
+              "unit": null,
+              "window_seconds": null
+            },
+            {
+              "kind": "time_series",
+              "label": null,
+              "preferred_bucket_seconds": null,
+              "query_id": "product.games.tournament.daily",
+              "unit": null,
+              "window_seconds": null
+            }
+          ],
+          "title": "Games played"
+        },
+        {
+          "description": null,
+          "items": [
+            {
+              "kind": "stat",
+              "label": "Ladder share of games · last 7 days",
+              "query_id": "product.games.ladder.share",
+              "unit": null,
+              "window_seconds": 604800
+            },
+            {
+              "kind": "stat",
+              "label": "User-created share of games · last 7 days",
+              "query_id": "product.games.user_created.share",
+              "unit": null,
+              "window_seconds": 604800
+            },
+            {
+              "kind": "stat",
+              "label": "Tournament share of games · last 7 days",
+              "query_id": "product.games.tournament.share",
+              "unit": null,
+              "window_seconds": 604800
+            }
+          ],
+          "title": "Source share of games (last 7 days)"
+        },
+        {
+          "description": null,
+          "items": [
+            {
+              "kind": "time_series",
+              "label": null,
+              "preferred_bucket_seconds": null,
+              "query_id": "product.play_claims.daily",
+              "unit": null,
+              "window_seconds": null
+            },
+            {
+              "kind": "time_series",
+              "label": null,
+              "preferred_bucket_seconds": null,
+              "query_id": "product.new_users.daily",
+              "unit": null,
+              "window_seconds": null
+            },
+            {
+              "kind": "time_series",
+              "label": null,
+              "preferred_bucket_seconds": null,
+              "query_id": "product.new_snakes.daily",
+              "unit": null,
+              "window_seconds": null
+            }
+          ],
+          "title": "Growth"
+        },
+        {
+          "description": null,
+          "items": [
+            {
+              "kind": "stat",
+              "label": null,
+              "query_id": "product.achievements.earned",
+              "unit": null,
+              "window_seconds": null
+            },
+            {
+              "kind": "time_series",
+              "label": null,
+              "preferred_bucket_seconds": null,
+              "query_id": "product.achievements.earned.daily",
+              "unit": null,
+              "window_seconds": null
+            },
+            {
+              "kind": "time_series",
+              "label": null,
+              "preferred_bucket_seconds": null,
+              "query_id": "product.achievements.firsts.daily",
+              "unit": null,
+              "window_seconds": null
+            },
+            {
+              "kind": "table",
+              "label": null,
+              "query_id": "product.achievements.by_slug",
+              "unit": null,
+              "window_seconds": null
+            }
+          ],
+          "title": "Achievements"
+        },
+        {
+          "description": null,
+          "items": [
+            {
+              "kind": "stat",
+              "label": null,
+              "query_id": "product.shares.page_views",
+              "unit": null,
+              "window_seconds": null
+            },
+            {
+              "kind": "time_series",
+              "label": null,
+              "preferred_bucket_seconds": null,
+              "query_id": "product.shares.page_views.daily",
+              "unit": null,
+              "window_seconds": null
+            },
+            {
+              "kind": "table",
+              "label": null,
+              "query_id": "product.shares.page_views.by_referrer",
+              "unit": null,
+              "window_seconds": null
+            },
+            {
+              "kind": "table",
+              "label": null,
+              "query_id": "product.shares.actions",
+              "unit": null,
+              "window_seconds": null
+            },
+            {
+              "kind": "table",
+              "label": null,
+              "query_id": "product.shares.cta_clicks",
+              "unit": null,
+              "window_seconds": null
+            }
+          ],
+          "title": "Sharing"
+        }
+      ],
+      "title": "Arena product"
+    },
+    {
+      "default_range_seconds": 31622400,
+      "description": "Long-window engagement, games, and growth charts. Each card's window starts at the lake's history until coverage grows; every clamped card shows the date it starts from.",
+      "id": "arena-product-history",
+      "sections": [
+        {
+          "description": null,
+          "items": [
+            {
+              "kind": "time_series",
+              "label": null,
+              "preferred_bucket_seconds": null,
+              "query_id": "product.users.active.daily",
+              "unit": null,
+              "window_seconds": 7776000
+            },
+            {
+              "kind": "time_series",
+              "label": null,
+              "preferred_bucket_seconds": null,
+              "query_id": "product.owners.active.daily",
+              "unit": null,
+              "window_seconds": 7776000
+            },
+            {
+              "kind": "time_series",
+              "label": null,
+              "preferred_bucket_seconds": null,
+              "query_id": "product.users.active.weekly",
+              "unit": null,
+              "window_seconds": 31449600
+            },
+            {
+              "kind": "time_series",
+              "label": null,
+              "preferred_bucket_seconds": null,
+              "query_id": "product.owners.active.weekly",
+              "unit": null,
+              "window_seconds": 31449600
+            },
+            {
+              "kind": "time_series",
+              "label": null,
+              "preferred_bucket_seconds": null,
+              "query_id": "product.snakes.active.weekly",
+              "unit": null,
+              "window_seconds": 31449600
+            }
+          ],
+          "title": "Active users, owners, and snakes over time"
+        },
+        {
+          "description": null,
+          "items": [
+            {
+              "kind": "time_series",
+              "label": null,
+              "preferred_bucket_seconds": null,
+              "query_id": "product.games.ladder.weekly",
+              "unit": null,
+              "window_seconds": 31449600
+            },
+            {
+              "kind": "time_series",
+              "label": null,
+              "preferred_bucket_seconds": null,
+              "query_id": "product.games.custom.weekly",
+              "unit": null,
+              "window_seconds": 31449600
+            },
+            {
+              "kind": "time_series",
+              "label": null,
+              "preferred_bucket_seconds": null,
+              "query_id": "product.games.tournament.weekly",
+              "unit": null,
+              "window_seconds": 31449600
+            }
+          ],
+          "title": "Games played by source"
+        },
+        {
+          "description": null,
+          "items": [
+            {
+              "kind": "time_series",
+              "label": null,
+              "preferred_bucket_seconds": null,
+              "query_id": "product.new_users.weekly",
+              "unit": null,
+              "window_seconds": 31449600
+            },
+            {
+              "kind": "time_series",
+              "label": null,
+              "preferred_bucket_seconds": null,
+              "query_id": "product.new_snakes.weekly",
+              "unit": null,
+              "window_seconds": 31449600
+            }
+          ],
+          "title": "Growth"
+        }
+      ],
+      "title": "Arena product history"
+    }
+  ],
+  "metrics": [
+    {
+      "id": "http.requests",
+      "result_shape": "scalar"
+    },
+    {
+      "id": "http.requests.series",
+      "result_shape": "time_series"
+    },
+    {
+      "id": "http.latency.p95",
+      "result_shape": "scalar"
+    },
+    {
+      "id": "http.latency.series",
+      "result_shape": "time_series"
+    },
+    {
+      "id": "http.routes",
+      "result_shape": "table"
+    },
+    {
+      "id": "errors",
+      "result_shape": "scalar"
+    },
+    {
+      "id": "errors.series",
+      "result_shape": "time_series"
+    },
+    {
+      "id": "jobs.runs",
+      "result_shape": "table"
+    },
+    {
+      "id": "jobs.failures",
+      "result_shape": "scalar"
+    },
+    {
+      "id": "games.completed",
+      "result_shape": "scalar"
+    },
+    {
+      "id": "games.series",
+      "result_shape": "time_series"
+    },
+    {
+      "id": "game.queue_wait.p95",
+      "result_shape": "scalar"
+    },
+    {
+      "id": "moderation.decisions",
+      "result_shape": "scalar"
+    },
+    {
+      "id": "moderation.decisions.by_field",
+      "result_shape": "table"
+    },
+    {
+      "id": "moderation.latency.p95",
+      "result_shape": "scalar"
+    },
+    {
+      "id": "moderation.shouts.screened",
+      "result_shape": "scalar"
+    },
+    {
+      "id": "moderation.shouts.suppressed",
+      "result_shape": "scalar"
+    },
+    {
+      "id": "game.db_write.p95",
+      "result_shape": "scalar"
+    },
+    {
+      "id": "game.overhead.p95",
+      "result_shape": "scalar"
+    },
+    {
+      "id": "product.games.played",
+      "result_shape": "scalar"
+    },
+    {
+      "id": "product.games.daily",
+      "result_shape": "time_series"
+    },
+    {
+      "id": "product.games.ladder.daily",
+      "result_shape": "time_series"
+    },
+    {
+      "id": "product.games.custom.daily",
+      "result_shape": "time_series"
+    },
+    {
+      "id": "product.games.tournament.daily",
+      "result_shape": "time_series"
+    },
+    {
+      "id": "product.games.user_created",
+      "result_shape": "scalar"
+    },
+    {
+      "id": "product.play_claims.daily",
+      "result_shape": "time_series"
+    },
+    {
+      "id": "product.new_users.daily",
+      "result_shape": "time_series"
+    },
+    {
+      "id": "product.new_snakes.daily",
+      "result_shape": "time_series"
+    },
+    {
+      "id": "product.users.active",
+      "result_shape": "scalar"
+    },
+    {
+      "id": "product.users.active.daily",
+      "result_shape": "time_series"
+    },
+    {
+      "id": "product.users.active.weekly",
+      "result_shape": "time_series"
+    },
+    {
+      "id": "product.users.active.month",
+      "result_shape": "scalar"
+    },
+    {
+      "id": "product.owners.active",
+      "result_shape": "scalar"
+    },
+    {
+      "id": "product.owners.active.daily",
+      "result_shape": "time_series"
+    },
+    {
+      "id": "product.owners.active.weekly",
+      "result_shape": "time_series"
+    },
+    {
+      "id": "product.owners.active.month",
+      "result_shape": "scalar"
+    },
+    {
+      "id": "product.snakes.active",
+      "result_shape": "scalar"
+    },
+    {
+      "id": "product.snakes.active.weekly",
+      "result_shape": "time_series"
+    },
+    {
+      "id": "product.games.ladder",
+      "result_shape": "scalar"
+    },
+    {
+      "id": "product.games.tournament",
+      "result_shape": "scalar"
+    },
+    {
+      "id": "product.games.ladder.weekly",
+      "result_shape": "time_series"
+    },
+    {
+      "id": "product.games.custom.weekly",
+      "result_shape": "time_series"
+    },
+    {
+      "id": "product.games.tournament.weekly",
+      "result_shape": "time_series"
+    },
+    {
+      "id": "product.new_users.weekly",
+      "result_shape": "time_series"
+    },
+    {
+      "id": "product.new_snakes.weekly",
+      "result_shape": "time_series"
+    },
+    {
+      "id": "product.users.active.stickiness.daily",
+      "result_shape": "scalar"
+    },
+    {
+      "id": "product.users.active.stickiness.weekly",
+      "result_shape": "scalar"
+    },
+    {
+      "id": "product.owners.active.stickiness.daily",
+      "result_shape": "scalar"
+    },
+    {
+      "id": "product.owners.active.stickiness.weekly",
+      "result_shape": "scalar"
+    },
+    {
+      "id": "product.games.ladder.share",
+      "result_shape": "scalar"
+    },
+    {
+      "id": "product.games.user_created.share",
+      "result_shape": "scalar"
+    },
+    {
+      "id": "product.games.tournament.share",
+      "result_shape": "scalar"
+    },
+    {
+      "id": "product.achievements.earned",
+      "result_shape": "scalar"
+    },
+    {
+      "id": "product.achievements.earned.daily",
+      "result_shape": "time_series"
+    },
+    {
+      "id": "product.achievements.firsts.daily",
+      "result_shape": "time_series"
+    },
+    {
+      "id": "product.achievements.by_slug",
+      "result_shape": "table"
+    },
+    {
+      "id": "product.shares.page_views",
+      "result_shape": "scalar"
+    },
+    {
+      "id": "product.shares.page_views.daily",
+      "result_shape": "time_series"
+    },
+    {
+      "id": "product.shares.page_views.by_referrer",
+      "result_shape": "table"
+    },
+    {
+      "id": "product.shares.actions",
+      "result_shape": "table"
+    },
+    {
+      "id": "product.shares.cta_clicks",
+      "result_shape": "table"
+    }
+  ],
+  "monitors": [
+    {
+      "enabled": true,
+      "expected_status_max": 299,
+      "expected_status_min": 200,
+      "failure_threshold": 3,
+      "id": "health",
+      "interval_seconds": 60,
+      "method": "GET",
+      "target": "/health",
+      "timeout_seconds": 10
+    }
+  ],
+  "thresholds": [
+    {
+      "critical": {
+        "comparison": "above",
+        "threshold": 30000.0
+      },
+      "description": "Game queue delay",
+      "enabled": true,
+      "evaluation_delay_seconds": 30,
+      "evaluation_interval_seconds": 60,
+      "failure_threshold": 3,
+      "group_match": "any",
+      "id": "game-queue-delay",
+      "metric_id": "game.queue_wait.p95",
+      "recovery_threshold": 2,
+      "warning": {
+        "comparison": "above",
+        "threshold": 10000.0
+      },
+      "window_seconds": 300
+    },
+    {
+      "critical": {
+        "comparison": "above",
+        "threshold": 3000.0
+      },
+      "description": "Turn persistence latency",
+      "enabled": true,
+      "evaluation_delay_seconds": 30,
+      "evaluation_interval_seconds": 60,
+      "failure_threshold": 3,
+      "group_match": "any",
+      "id": "turn-storage-latency",
+      "metric_id": "game.db_write.p95",
+      "recovery_threshold": 2,
+      "warning": {
+        "comparison": "above",
+        "threshold": 1000.0
+      },
+      "window_seconds": 300
+    }
+  ]
+}

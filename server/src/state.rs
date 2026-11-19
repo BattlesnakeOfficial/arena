@@ -332,4 +332,12 @@ impl cja::app_state::AppState for AppState {
     fn cookie_key(&self) -> &cja::server::cookies::CookieKey {
         &self.cookie_key
     }
+
+    fn eyes_base_url(&self) -> Option<&str> {
+        Some(crate::config::ARENA_PUBLIC_BASE_URL)
+    }
+
+    fn eyes_http_monitors(&self) -> Vec<cja::app_state::HttpMonitor> {
+        crate::observability::http_monitors(self.config.features.server)
+    }
 }
