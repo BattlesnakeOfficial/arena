@@ -718,7 +718,7 @@ mod tests {
         assert_eq!(Wave::current(at("2026-11-30T05:00:00Z")), None);
 
         // Every wave starts at 10:00 Eastern, and the redirect is midnight.
-        let eastern = |t: DateTime<Utc>| t.with_timezone(&cja::chrono_tz::America::New_York);
+        let eastern = |t: DateTime<Utc>| t.with_timezone(&chrono_tz::America::New_York);
         for wave in Wave::ALL {
             assert_eq!(
                 eastern(wave.starts_at()).format("%H:%M").to_string(),

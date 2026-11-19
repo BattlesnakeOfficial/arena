@@ -211,14 +211,7 @@ pub async fn github_auth_callback(
         }
     };
     if let Some(summary) = &auto_claim {
-        tracing::info!(
-            event_type = "play_claim_succeeded",
-            user_id = %user.user_id,
-            play_username = %summary.username,
-            snakes = summary.snakes_created,
-            grants = summary.grants_created,
-            "play account auto-claimed via GitHub link"
-        );
+        cja::product_event!(name: "play_claim_succeeded", user_id: Some(&user.user_id), message: "play account auto-claimed via GitHub link", properties: { snakes = summary.snakes_created, grants = summary.grants_created });
         state
             .discord
             .notify_account_claimed(&summary.username, summary.snakes_created);
@@ -243,14 +236,7 @@ pub async fn github_auth_callback(
     .wrap_err("Failed to rotate session at login")?;
     cookie_jar.add(super::auth::build_session_cookie(new_session.session_id));
 
-    tracing::info!(
-        event_type = "user_authenticated",
-        user_id = %user.user_id,
-        github_login = %user.github_login,
-        auth_type = if is_cli_auth { "cli" } else { "web" },
-        new_user = is_new_user,
-        "user authenticated via GitHub OAuth"
-    );
+    cja::product_event!(name: "user_authenticated", user_id: Some(&user.user_id), message: "user authenticated via GitHub OAuth", properties: { auth_type = if is_cli_auth { "cli" } else { "web" }, new_user = is_new_user });
 
     // If CLI auth, create an API token and render the token page directly as
     // this response. Never put the secret in a URL (redirect Location, query,

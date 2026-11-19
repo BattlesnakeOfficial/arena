@@ -4,27 +4,39 @@ use crate::{
     config::{AppConfig, FeatureFlags},
     state::AppState,
 };
+#[cfg(test)]
+use arena::observability_declarations::{
+    DAY, FOUR_WEEKS, NINETY_DAYS, THREE_HUNDRED_SIXTY_FOUR_DAYS, WEEK,
+};
 use cja::eyes_manifest::{AppManifest, ExpectedProcessRole, HttpMonitor};
+#[cfg(test)]
+use eyes_subscriber::{DashboardItem as Item, DashboardSection as Section, NamedDashboard};
 use eyes_subscriber::{
-    AggregateFunction as Agg, DashboardItem as Item, DashboardSection as Section,
-    MetricResultShape, MetricThresholdBuilder, MetricValueType, NamedDashboard, NamedMetric,
-    NamedMetricBuilder as Metric, ProcessHeartbeat, ProcessHeartbeatConfig, ProcessHeartbeatHandle,
-    ProcessIdentity, RatioMetricBuilder, RetentionPolicy, ThresholdComparison::Above,
+    ProcessHeartbeat, ProcessHeartbeatConfig, ProcessHeartbeatHandle, ProcessIdentity,
+    RetentionPolicy,
 };
 
 pub const ROLE: &str = "arena";
+pub const CRITICAL_JOBS: &[&str] = &[
+    "GameRunnerJob",
+    "RunMatchJob",
+    "RunTournamentRoundJob",
+    "UpdateTournamentStatusJob",
+    "LeaderboardRatingUpdateJob",
+    "BackupSingleGameJob",
+];
+
+pub(crate) fn http_monitors(server_enabled: bool) -> Vec<HttpMonitor> {
+    if server_enabled {
+        vec![HttpMonitor::new("health", "/health")]
+    } else {
+        Vec::new()
+    }
+}
 
 /// Days Eyes keeps arena's DEBUG telemetry in Postgres; its lake keeps it after
 /// that. Every other level keeps Eyes' server default.
 pub const DEBUG_RETENTION_DAYS: u32 = 2;
-
-/// Trailing-window constants for the product dashboards' fixed tiles and
-/// charts (DEV-2062). All within the server's 1..=31_622_400 s item bound.
-const DAY: u64 = 86_400;
-const WEEK: u64 = 604_800;
-const FOUR_WEEKS: u64 = 2_419_200;
-const NINETY_DAYS: u64 = 7_776_000; // 90 days
-const THREE_HUNDRED_SIXTY_FOUR_DAYS: u64 = 31_449_600; // 364 days
 
 pub fn manifest(
     registry: &cja::cron::CronRegistry<AppState>,
@@ -41,887 +53,17 @@ pub fn manifest(
     .process(identity)
     .expected_process_roles(vec![ExpectedProcessRole::new(ROLE).min_instances(1)])
     .monitors(if features.server {
-        vec![HttpMonitor::new("health", "/health")]
+        http_monitors(true)
     } else {
-        vec![]
+        http_monitors(false)
     });
     if features.jobs {
-        manifest = manifest.critical_jobs(
-            vec![
-                "GameRunnerJob",
-                "RunMatchJob",
-                "RunTournamentRoundJob",
-                "UpdateTournamentStatusJob",
-                "LeaderboardRatingUpdateJob",
-                "BackupSingleGameJob",
-            ]
-            .into_iter()
-            .map(str::to_owned)
-            .collect(),
-        );
+        manifest =
+            manifest.critical_jobs(CRITICAL_JOBS.iter().copied().map(str::to_owned).collect());
     } else {
         manifest.jobs.clear();
     }
-    let metrics = metrics()?;
-    let thresholds = [
-        (
-            "game-queue-delay",
-            "game.queue_wait.p95",
-            "Game queue delay",
-            10_000.0,
-            30_000.0,
-        ),
-        (
-            "turn-storage-latency",
-            "game.db_write.p95",
-            "Turn persistence latency",
-            1_000.0,
-            3_000.0,
-        ),
-    ]
-    .into_iter()
-    .map(|(id, metric, description, warning, critical)| {
-        MetricThresholdBuilder::new(id, metric)
-            .description(description)
-            .window_seconds(300)
-            .evaluation_interval_seconds(60)
-            .evaluation_delay_seconds(30)
-            .failure_threshold(3)
-            .recovery_threshold(2)
-            .warning(Above, warning)
-            .critical(Above, critical)
-            .build()
-    })
-    .collect::<Result<Vec<_>, _>>()?;
-    Ok(manifest
-        .metrics(metrics)
-        .metric_thresholds(thresholds)
-        .dashboards(vec![
-            dashboard()?,
-            product_dashboard()?,
-            product_history_dashboard()?,
-        ]))
-}
-
-fn count(id: &str, title: &str, path: &str, value: &str) -> Result<Metric, String> {
-    Metric::new(id, Agg::Count, None)?
-        .display_name(title)
-        .filter_eq(path, value)
-}
-
-fn timing(id: &str, title: &str, kind: &str) -> Result<NamedMetric, String> {
-    Metric::new(id, Agg::P95, Some("fields.duration_ms"))?
-        .filter_eq("fields.metric_type", kind)?
-        .filter_numeric("fields.duration_ms")?
-        .display_name(title)
-        .unit("ms")
-        .build()
-}
-
-/// Distinct users with an authenticated request, counted on cja's
-/// `finished processing request` event. Target AND message, in that order:
-/// the target alone also matches `server.request` span rows, and
-/// `fields.user_id` alone also matches `snake.lifecycle` spans
-/// (DEV-2076 fallback ruling). Stage order is filter call order.
-fn active_request_users(id: &str, title: &str) -> Result<Metric, String> {
-    Ok(Metric::new(id, Agg::CountDistinct, Some("fields.user_id"))?
-        .display_name(title)
-        .filter_eq("target", "cja::server::trace")?
-        .filter_eq("message", "finished processing request")?
-        .unit("users"))
-}
-
-/// Distinct owners/snakes behind a real `/end` call. `endpoint` is a
-/// span-creation field on `snake.lifecycle` (DEV-2061) — open row, no
-/// close-row merge needed. Name first, then the endpoint field.
-fn active_lifecycle(id: &str, title: &str, value: &str, unit: &str) -> Result<Metric, String> {
-    Ok(Metric::new(id, Agg::CountDistinct, Some(value))?
-        .display_name(title)
-        .filter_eq("name", "snake.lifecycle")?
-        .filter_eq("fields.endpoint", "end")?
-        .unit(unit))
-}
-
-fn metrics() -> Result<Vec<NamedMetric>, String> {
-    Ok(vec![
-        count(
-            "http.requests",
-            "HTTP requests",
-            "semantic_kind",
-            "http.request",
-        )?
-        .unit("requests")
-        .build()?,
-        count(
-            "http.requests.series",
-            "Request volume",
-            "semantic_kind",
-            "http.request",
-        )?
-        .unit("requests")
-        .time_bucket(300)
-        .build()?,
-        Metric::new("http.latency.p95", Agg::P95, Some("duration"))?
-            .filter_eq("semantic_kind", "http.request")?
-            .display_name("HTTP latency · p95")
-            .unit("µs")
-            .build()?,
-        Metric::new("http.latency.series", Agg::P95, Some("duration"))?
-            .filter_eq("semantic_kind", "http.request")?
-            .display_name("HTTP latency · p95")
-            .unit("µs")
-            .time_bucket(300)
-            .build()?,
-        count(
-            "http.routes",
-            "Requests by route",
-            "semantic_kind",
-            "http.request",
-        )?
-        .group_by("fields[\"http.route\"]")?
-        .unit("requests")
-        .build()?,
-        count("errors", "Error events", "level", "ERROR")?
-            .unit("events")
-            .build()?,
-        count("errors.series", "Error events", "level", "ERROR")?
-            .unit("events")
-            .time_bucket(300)
-            .build()?,
-        count(
-            "jobs.runs",
-            "Job attempts by type",
-            "semantic_kind",
-            "job.run",
-        )?
-        .group_by("fields[\"job.name\"]")?
-        .unit("attempts")
-        .build()?,
-        count(
-            "jobs.failures",
-            "Job failure events",
-            "target",
-            "cja::jobs::worker",
-        )?
-        .filter_eq("level", "ERROR")?
-        .unit("events")
-        .build()?,
-        count(
-            "games.completed",
-            "Games completed",
-            "fields.event_type",
-            "game_completed",
-        )?
-        .unit("games")
-        .build()?,
-        count(
-            "games.series",
-            "Games completed",
-            "fields.event_type",
-            "game_completed",
-        )?
-        .unit("games")
-        .time_bucket(300)
-        .build()?,
-        timing("game.queue_wait.p95", "Game queue wait · p95", "queue_wait")?,
-        count(
-            "moderation.decisions",
-            "Moderation decisions",
-            "fields.event_type",
-            "moderation_decision",
-        )?
-        .unit("decisions")
-        .build()?,
-        count(
-            "moderation.decisions.by_field",
-            "Moderation decisions by field",
-            "fields.event_type",
-            "moderation_decision",
-        )?
-        .group_by("fields[\"field_kind\"]")?
-        .unit("decisions")
-        .build()?,
-        Metric::new(
-            "moderation.latency.p95",
-            Agg::P95,
-            Some("fields.latency_ms"),
-        )?
-        .filter_eq("fields.event_type", "moderation_decision")?
-        .filter_numeric("fields.latency_ms")?
-        .display_name("Moderation latency · p95")
-        .unit("ms")
-        .build()?,
-        count(
-            "moderation.shouts.screened",
-            "Games screened for shouts",
-            "fields.event_type",
-            "shout_screening",
-        )?
-        .unit("games")
-        .build()?,
-        Metric::new(
-            "moderation.shouts.suppressed",
-            Agg::Sum,
-            Some("fields.suppressed_count"),
-        )?
-        .filter_eq("fields.event_type", "shout_screening")?
-        .filter_numeric("fields.suppressed_count")?
-        .display_name("Shouts suppressed")
-        .unit("shouts")
-        .build()?,
-        timing(
-            "game.db_write.p95",
-            "Turn persistence · p95",
-            "db_write_latency",
-        )?,
-        Metric::new("game.overhead.p95", Agg::P95, Some("fields.duration_ms"))?
-            .filter_eq("fields.metric_type", "processing_overhead")?
-            .filter_eq("fields.timing_basis", "elapsed_move_wait")?
-            .filter_numeric("fields.duration_ms")?
-            .display_name("Game processing overhead · p95")
-            .unit("ms")
-            .build()?,
-        count(
-            "product.games.played",
-            "Games played",
-            "fields.event_type",
-            "game_completed",
-        )?
-        .unit("games")
-        .build()?,
-        count(
-            "product.games.daily",
-            "Games played",
-            "fields.event_type",
-            "game_completed",
-        )?
-        .unit("games")
-        .time_bucket(86_400)
-        .build()?,
-        count(
-            "product.games.ladder.daily",
-            "Games played (ladder)",
-            "fields.event_type",
-            "game_completed",
-        )?
-        .filter_eq("fields.source", "ladder")?
-        .unit("games")
-        .time_bucket(86_400)
-        .build()?,
-        count(
-            "product.games.custom.daily",
-            "Games played (custom)",
-            "fields.event_type",
-            "game_completed",
-        )?
-        .filter_eq("fields.source", "custom")?
-        .unit("games")
-        .time_bucket(86_400)
-        .build()?,
-        count(
-            "product.games.tournament.daily",
-            "Games played (tournament)",
-            "fields.event_type",
-            "game_completed",
-        )?
-        .filter_eq("fields.source", "tournament")?
-        .unit("games")
-        .time_bucket(86_400)
-        .build()?,
-        count(
-            "product.games.user_created",
-            "User-created games",
-            "fields.event_type",
-            "game_completed",
-        )?
-        .filter_eq("fields.source", "custom")?
-        .unit("games")
-        .build()?,
-        count(
-            "product.play_claims.daily",
-            "Play claims",
-            "fields.event_type",
-            "play_claim_succeeded",
-        )?
-        .unit("claims")
-        .time_bucket(86_400)
-        .build()?,
-        count(
-            "product.new_users.daily",
-            "New users",
-            "fields.event_type",
-            "user_authenticated",
-        )?
-        .filter_eq("fields.new_user", true)?
-        .unit("users")
-        .time_bucket(86_400)
-        .build()?,
-        count(
-            "product.new_snakes.daily",
-            "New snakes",
-            "fields.event_type",
-            "battlesnake_created",
-        )?
-        .unit("snakes")
-        .time_bucket(86_400)
-        .build()?,
-        // DEV-2062: active users/owners/snakes, per-source games, weekly
-        // variants, and the ratios over them. Every aggregate is
-        // count_distinct or count over events that exist today; Arena
-        // computes nothing itself.
-        active_request_users("product.users.active", "Users with an authenticated request")?
-            .description(
-                "Distinct users who made an authenticated request (session sign-in or API token), counted on the request-completion event.",
-            )
-            .build()?,
-        active_request_users(
-            "product.users.active.daily",
-            "Users with an authenticated request, per day",
-        )?
-        .time_bucket(DAY)
-        .build()?,
-        active_request_users(
-            "product.users.active.weekly",
-            "Users with an authenticated request, per week",
-        )?
-        .time_bucket_weeks(1)
-        .build()?,
-        active_request_users(
-            "product.users.active.month",
-            "Users with an authenticated request (28-day side)",
-        )?
-        .build()?,
-        active_lifecycle(
-            "product.owners.active",
-            "Owners whose snake played",
-            "fields.user_id",
-            "users",
-        )?
-        .description(
-            "Distinct owners whose snake played a game, counted on the snake /end call (snake.lifecycle span, endpoint end).",
-        )
-        .build()?,
-        active_lifecycle(
-            "product.owners.active.daily",
-            "Owners whose snake played, per day",
-            "fields.user_id",
-            "users",
-        )?
-        .time_bucket(DAY)
-        .build()?,
-        active_lifecycle(
-            "product.owners.active.weekly",
-            "Owners whose snake played, per week",
-            "fields.user_id",
-            "users",
-        )?
-        .time_bucket_weeks(1)
-        .build()?,
-        active_lifecycle(
-            "product.owners.active.month",
-            "Owners whose snake played (28-day side)",
-            "fields.user_id",
-            "users",
-        )?
-        .build()?,
-        active_lifecycle(
-            "product.snakes.active",
-            "Snakes that played a game",
-            "fields.battlesnake_id",
-            "snakes",
-        )?
-        .description(
-            "Distinct battlesnakes that played a game, counted on the snake /end call (snake.lifecycle span, endpoint end).",
-        )
-        .build()?,
-        active_lifecycle(
-            "product.snakes.active.weekly",
-            "Snakes that played a game, per week",
-            "fields.battlesnake_id",
-            "snakes",
-        )?
-        .time_bucket_weeks(1)
-        .build()?,
-        count(
-            "product.games.ladder",
-            "Games played (ladder)",
-            "fields.event_type",
-            "game_completed",
-        )?
-        .filter_eq("fields.source", "ladder")?
-        .unit("games")
-        .build()?,
-        count(
-            "product.games.tournament",
-            "Games played (tournament)",
-            "fields.event_type",
-            "game_completed",
-        )?
-        .filter_eq("fields.source", "tournament")?
-        .unit("games")
-        .build()?,
-        count(
-            "product.games.ladder.weekly",
-            "Games played (ladder), per week",
-            "fields.event_type",
-            "game_completed",
-        )?
-        .filter_eq("fields.source", "ladder")?
-        .unit("games")
-        .time_bucket_weeks(1)
-        .build()?,
-        count(
-            "product.games.custom.weekly",
-            "Games played (custom), per week",
-            "fields.event_type",
-            "game_completed",
-        )?
-        .filter_eq("fields.source", "custom")?
-        .unit("games")
-        .time_bucket_weeks(1)
-        .build()?,
-        count(
-            "product.games.tournament.weekly",
-            "Games played (tournament), per week",
-            "fields.event_type",
-            "game_completed",
-        )?
-        .filter_eq("fields.source", "tournament")?
-        .unit("games")
-        .time_bucket_weeks(1)
-        .build()?,
-        count(
-            "product.new_users.weekly",
-            "New users, per week",
-            "fields.event_type",
-            "user_authenticated",
-        )?
-        .filter_eq("fields.new_user", true)?
-        .unit("users")
-        .time_bucket_weeks(1)
-        .build()?,
-        count(
-            "product.new_snakes.weekly",
-            "New snakes, per week",
-            "fields.event_type",
-            "battlesnake_created",
-        )?
-        .unit("snakes")
-        .time_bucket_weeks(1)
-        .build()?,
-        RatioMetricBuilder::new(
-            "product.users.active.stickiness.daily",
-            "product.users.active",
-            "product.users.active.month",
-        )
-        .numerator_window_seconds(DAY)
-        .denominator_window_seconds(FOUR_WEEKS)
-        .as_percentage()
-        .display_name("Users with an authenticated request: last 1 day as % of last 28 days")
-        .description(
-            "Distinct users with an authenticated request in the last 1 day as a percentage of the last 28 days.",
-        )
-        .build(
-            MetricResultShape::Scalar,
-            MetricValueType::Int,
-            MetricResultShape::Scalar,
-            MetricValueType::Int,
-        )?,
-        RatioMetricBuilder::new(
-            "product.users.active.stickiness.weekly",
-            "product.users.active",
-            "product.users.active.month",
-        )
-        .numerator_window_seconds(WEEK)
-        .denominator_window_seconds(FOUR_WEEKS)
-        .as_percentage()
-        .display_name("Users with an authenticated request: last 7 days as % of last 28 days")
-        .description(
-            "Distinct users with an authenticated request in the last 7 days as a percentage of the last 28 days.",
-        )
-        .build(
-            MetricResultShape::Scalar,
-            MetricValueType::Int,
-            MetricResultShape::Scalar,
-            MetricValueType::Int,
-        )?,
-        RatioMetricBuilder::new(
-            "product.owners.active.stickiness.daily",
-            "product.owners.active",
-            "product.owners.active.month",
-        )
-        .numerator_window_seconds(DAY)
-        .denominator_window_seconds(FOUR_WEEKS)
-        .as_percentage()
-        .display_name("Owners whose snake played: last 1 day as % of last 28 days")
-        .description(
-            "Distinct owners whose snake played in the last 1 day as a percentage of the last 28 days.",
-        )
-        .build(
-            MetricResultShape::Scalar,
-            MetricValueType::Int,
-            MetricResultShape::Scalar,
-            MetricValueType::Int,
-        )?,
-        RatioMetricBuilder::new(
-            "product.owners.active.stickiness.weekly",
-            "product.owners.active",
-            "product.owners.active.month",
-        )
-        .numerator_window_seconds(WEEK)
-        .denominator_window_seconds(FOUR_WEEKS)
-        .as_percentage()
-        .display_name("Owners whose snake played: last 7 days as % of last 28 days")
-        .description(
-            "Distinct owners whose snake played in the last 7 days as a percentage of the last 28 days.",
-        )
-        .build(
-            MetricResultShape::Scalar,
-            MetricValueType::Int,
-            MetricResultShape::Scalar,
-            MetricValueType::Int,
-        )?,
-        RatioMetricBuilder::new(
-            "product.games.ladder.share",
-            "product.games.ladder",
-            "product.games.played",
-        )
-        .as_percentage()
-        .display_name("Ladder share of games played")
-        .build(
-            MetricResultShape::Scalar,
-            MetricValueType::Int,
-            MetricResultShape::Scalar,
-            MetricValueType::Int,
-        )?,
-        RatioMetricBuilder::new(
-            "product.games.user_created.share",
-            "product.games.user_created",
-            "product.games.played",
-        )
-        .as_percentage()
-        .display_name("User-created share of games played")
-        .build(
-            MetricResultShape::Scalar,
-            MetricValueType::Int,
-            MetricResultShape::Scalar,
-            MetricValueType::Int,
-        )?,
-        RatioMetricBuilder::new(
-            "product.games.tournament.share",
-            "product.games.tournament",
-            "product.games.played",
-        )
-        .as_percentage()
-        .display_name("Tournament share of games played")
-        .build(
-            MetricResultShape::Scalar,
-            MetricValueType::Int,
-            MetricResultShape::Scalar,
-            MetricValueType::Int,
-        )?,
-        count(
-            "product.achievements.earned",
-            "Achievements earned",
-            "fields.event_type",
-            "achievement_earned",
-        )?
-        .unit("earns")
-        .build()?,
-        count(
-            "product.achievements.earned.daily",
-            "Achievements earned",
-            "fields.event_type",
-            "achievement_earned",
-        )?
-        .unit("earns")
-        .time_bucket(86_400)
-        .build()?,
-        count(
-            "product.achievements.firsts.daily",
-            "First achievement earns",
-            "fields.event_type",
-            "achievement_earned",
-        )?
-        .filter_eq("fields.first", true)?
-        .unit("earns")
-        .time_bucket(86_400)
-        .build()?,
-        count(
-            "product.achievements.by_slug",
-            "Achievements earned by achievement",
-            "fields.event_type",
-            "achievement_earned",
-        )?
-        .group_by("fields[\"slug\"]")?
-        .unit("earns")
-        .build()?,
-        count(
-            "product.shares.page_views",
-            "Achievement share page views",
-            "fields.event_type",
-            "share_page_view",
-        )?
-        .unit("views")
-        .build()?,
-        count(
-            "product.shares.page_views.daily",
-            "Achievement share page views",
-            "fields.event_type",
-            "share_page_view",
-        )?
-        .unit("views")
-        .time_bucket(86_400)
-        .build()?,
-        count(
-            "product.shares.page_views.by_referrer",
-            "Achievement share page views by referrer",
-            "fields.event_type",
-            "share_page_view",
-        )?
-        .group_by("fields[\"referrer\"]")?
-        .unit("views")
-        .build()?,
-        count(
-            "product.shares.actions",
-            "Achievement share actions",
-            "fields.event_type",
-            "share_action",
-        )?
-        .group_by("fields[\"channel\"]")?
-        .unit("actions")
-        .build()?,
-        count(
-            "product.shares.cta_clicks",
-            "Achievement share CTA clicks",
-            "fields.event_type",
-            "share_cta_click",
-        )?
-        .group_by("fields[\"cta\"]")?
-        .unit("clicks")
-        .build()?,
-    ])
-}
-
-fn dashboard() -> Result<NamedDashboard, String> {
-    Ok(NamedDashboard::new("arena-operations", "Arena operations")?
-        .description("Requests, games, workers, and the database work between turns.")
-        .default_range_seconds(3600)
-        .section(
-            Section::new()
-                .title("At a glance")
-                .item(Item::stat("http.requests"))
-                .item(Item::stat("games.completed"))
-                .item(Item::stat("http.latency.p95"))
-                .item(Item::stat("errors")),
-        )
-        .section(
-            Section::new()
-                .title("Traffic & errors")
-                .item(Item::time_series("http.requests.series"))
-                .item(Item::time_series("http.latency.series"))
-                .item(Item::time_series("errors.series"))
-                .item(Item::table("http.routes")),
-        )
-        .section(
-            Section::new()
-                .title("Game pipeline")
-                .item(Item::time_series("games.series"))
-                .item(Item::stat("game.queue_wait.p95"))
-                .item(Item::stat("game.db_write.p95"))
-                .item(Item::stat("game.overhead.p95")),
-        )
-        .section(
-            Section::new()
-                .title("Moderation")
-                .item(Item::stat("moderation.decisions"))
-                .item(Item::table("moderation.decisions.by_field"))
-                .item(Item::stat("moderation.latency.p95")),
-        )
-        .section(
-            Section::new()
-                .title("Background work")
-                .item(Item::health_summary())
-                .item(Item::table("jobs.runs"))
-                .item(Item::stat("jobs.failures")),
-        ))
-}
-
-fn product_dashboard() -> Result<NamedDashboard, String> {
-    Ok(NamedDashboard::new("arena-product", "Arena product")?
-        .description("Games played, active users and snakes, play claims, signups, new snakes, achievements earned, and achievement shares. Long-window charts: arena-product-history.")
-        .default_range_seconds(30 * 24 * 60 * 60)
-        .section(
-            Section::new()
-                .title("At a glance")
-                .item(Item::stat("product.games.played"))
-                .item(Item::stat("product.games.user_created")),
-        )
-        .section(
-            Section::new()
-                .title("Active users, owners, and snakes")
-                .item(
-                    Item::stat("product.users.active")
-                        .window_seconds(DAY)
-                        .label("Users with an authenticated request · last 1 day"),
-                )
-                .item(
-                    Item::stat("product.users.active")
-                        .window_seconds(WEEK)
-                        .label("Users with an authenticated request · last 7 days"),
-                )
-                .item(
-                    Item::stat("product.users.active")
-                        .window_seconds(FOUR_WEEKS)
-                        .label("Users with an authenticated request · last 28 days"),
-                )
-                .item(
-                    Item::stat("product.owners.active")
-                        .window_seconds(DAY)
-                        .label("Owners whose snake played · last 1 day"),
-                )
-                .item(
-                    Item::stat("product.owners.active")
-                        .window_seconds(WEEK)
-                        .label("Owners whose snake played · last 7 days"),
-                )
-                .item(
-                    Item::stat("product.owners.active")
-                        .window_seconds(FOUR_WEEKS)
-                        .label("Owners whose snake played · last 28 days"),
-                )
-                .item(
-                    Item::stat("product.snakes.active")
-                        .window_seconds(WEEK)
-                        .label("Snakes that played a game · last 7 days"),
-                )
-                .item(
-                    Item::stat("product.games.played")
-                        .window_seconds(WEEK)
-                        .label("Games played · last 7 days"),
-                ),
-        )
-        .section(
-            Section::new()
-                .title("Stickiness (share of 28-day actives)")
-                .item(Item::stat("product.users.active.stickiness.daily"))
-                .item(Item::stat("product.users.active.stickiness.weekly"))
-                .item(Item::stat("product.owners.active.stickiness.daily"))
-                .item(Item::stat("product.owners.active.stickiness.weekly")),
-        )
-        .section(
-            Section::new()
-                .title("Games played")
-                .item(Item::time_series("product.games.daily"))
-                .item(Item::time_series("product.games.ladder.daily"))
-                .item(Item::time_series("product.games.custom.daily"))
-                .item(Item::time_series("product.games.tournament.daily")),
-        )
-        .section(
-            Section::new()
-                .title("Source share of games (last 7 days)")
-                .item(
-                    Item::stat("product.games.ladder.share")
-                        .window_seconds(WEEK)
-                        .label("Ladder share of games · last 7 days"),
-                )
-                .item(
-                    Item::stat("product.games.user_created.share")
-                        .window_seconds(WEEK)
-                        .label("User-created share of games · last 7 days"),
-                )
-                .item(
-                    Item::stat("product.games.tournament.share")
-                        .window_seconds(WEEK)
-                        .label("Tournament share of games · last 7 days"),
-                ),
-        )
-        .section(
-            Section::new()
-                .title("Growth")
-                .item(Item::time_series("product.play_claims.daily"))
-                .item(Item::time_series("product.new_users.daily"))
-                .item(Item::time_series("product.new_snakes.daily")),
-        )
-        .section(
-            Section::new()
-                .title("Achievements")
-                .item(Item::stat("product.achievements.earned"))
-                .item(Item::time_series("product.achievements.earned.daily"))
-                .item(Item::time_series("product.achievements.firsts.daily"))
-                .item(Item::table("product.achievements.by_slug")),
-        )
-        .section(
-            Section::new()
-                .title("Sharing")
-                .item(Item::stat("product.shares.page_views"))
-                .item(Item::time_series("product.shares.page_views.daily"))
-                .item(Item::table("product.shares.page_views.by_referrer"))
-                .item(Item::table("product.shares.actions"))
-                .item(Item::table("product.shares.cta_clicks")),
-        ))
-}
-
-/// The long-window charts (DEV-2062): 90-day daily series and 364-day
-/// Monday-week series, on their own page so `arena-product` never pays for
-/// year-long lake scans. Every window clamps to the lake's history start
-/// until coverage grows (DEV-2059).
-fn product_history_dashboard() -> Result<NamedDashboard, String> {
-    Ok(NamedDashboard::new("arena-product-history", "Arena product history")?
-        .description("Long-window engagement, games, and growth charts. Each card's window starts at the lake's history until coverage grows; every clamped card shows the date it starts from.")
-        .default_range_seconds(31_622_400) // 366 days, the post-DEV-2059 bound
-        .section(
-            Section::new()
-                .title("Active users, owners, and snakes over time")
-                .item(
-                    Item::time_series("product.users.active.daily")
-                        .window_seconds(NINETY_DAYS),
-                )
-                .item(
-                    Item::time_series("product.owners.active.daily")
-                        .window_seconds(NINETY_DAYS),
-                )
-                .item(
-                    Item::time_series("product.users.active.weekly")
-                        .window_seconds(THREE_HUNDRED_SIXTY_FOUR_DAYS),
-                )
-                .item(
-                    Item::time_series("product.owners.active.weekly")
-                        .window_seconds(THREE_HUNDRED_SIXTY_FOUR_DAYS),
-                )
-                .item(
-                    Item::time_series("product.snakes.active.weekly")
-                        .window_seconds(THREE_HUNDRED_SIXTY_FOUR_DAYS),
-                ),
-        )
-        .section(
-            Section::new()
-                .title("Games played by source")
-                .item(
-                    Item::time_series("product.games.ladder.weekly")
-                        .window_seconds(THREE_HUNDRED_SIXTY_FOUR_DAYS),
-                )
-                .item(
-                    Item::time_series("product.games.custom.weekly")
-                        .window_seconds(THREE_HUNDRED_SIXTY_FOUR_DAYS),
-                )
-                .item(
-                    Item::time_series("product.games.tournament.weekly")
-                        .window_seconds(THREE_HUNDRED_SIXTY_FOUR_DAYS),
-                ),
-        )
-        .section(
-            Section::new()
-                .title("Growth")
-                .item(
-                    Item::time_series("product.new_users.weekly")
-                        .window_seconds(THREE_HUNDRED_SIXTY_FOUR_DAYS),
-                )
-                .item(
-                    Item::time_series("product.new_snakes.weekly")
-                        .window_seconds(THREE_HUNDRED_SIXTY_FOUR_DAYS),
-                ),
-        ))
+    arena::observability_declarations::declarations()?.attach_to_eyes_manifest(manifest)
 }
 
 /// Publishing and heartbeats are best effort: Eyes must not prevent Arena
@@ -971,6 +113,81 @@ mod tests {
     use super::*;
     use eyes_subscriber::MetricResultShape;
     use std::collections::HashMap;
+
+    #[test]
+    fn eyes_manifest_contract_matches_pre_port_baseline() {
+        let manifest = manifest(
+            &crate::cron::cron_registry(&AppConfig::test_default()),
+            ProcessIdentity::new(ROLE),
+            FeatureFlags {
+                server: true,
+                jobs: true,
+                cron: true,
+            },
+        )
+        .unwrap();
+        let wire = serde_json::to_value(&manifest).unwrap();
+        let snapshot = serde_json::json!({
+            "metrics": wire["metrics"].as_array().unwrap().iter().map(|m| {
+                serde_json::json!({"id": m["id"], "result_shape": m["result_shape"]})
+            }).collect::<Vec<_>>(),
+            "dashboards": wire["dashboards"],
+            "thresholds": wire["metric_thresholds"],
+            "monitors": wire["monitors"],
+            "critical_jobs": wire["critical_jobs"],
+        });
+        let actual = serde_json::to_string_pretty(&snapshot).unwrap();
+        assert_eq!(
+            actual,
+            std::fs::read_to_string(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/eyes-manifest-baseline.json"
+            ))
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn product_breakdowns_use_the_same_eyes_field_paths() {
+        let manifest = manifest(
+            &crate::cron::cron_registry(&AppConfig::test_default()),
+            ProcessIdentity::new(ROLE),
+            FeatureFlags {
+                server: true,
+                jobs: true,
+                cron: true,
+            },
+        )
+        .unwrap();
+        let wire = serde_json::to_value(manifest).unwrap();
+        for (id, property) in [
+            ("product.achievements.by_slug", "slug"),
+            ("product.shares.page_views.by_referrer", "referrer"),
+            ("product.shares.actions", "channel"),
+            ("product.shares.cta_clicks", "cta"),
+        ] {
+            let metric = wire["metrics"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|metric| metric["id"] == id)
+                .unwrap();
+            let aggregate = metric["query"]["query"]["stages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|stage| stage["stage"] == "aggregate")
+                .unwrap();
+            assert_eq!(
+                aggregate["groups"][0]["expr"],
+                serde_json::json!({
+                    "type": "path",
+                    "path": {"root": "fields", "segments": [{"type": "key", "value": property}]},
+                }),
+                "{id}"
+            );
+        }
+    }
 
     #[test]
     fn dashboard_items_resolve_to_metrics_of_the_right_shape() {

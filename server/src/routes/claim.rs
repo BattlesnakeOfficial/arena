@@ -257,14 +257,7 @@ pub async fn submit_claim(
             .into_response());
     };
 
-    tracing::info!(
-        event_type = "play_claim_succeeded",
-        user_id = %user.user_id,
-        play_username = %summary.username,
-        snakes = summary.snakes_created,
-        grants = summary.grants_created,
-        "play account claimed via password"
-    );
+    cja::product_event!(name: "play_claim_succeeded", user_id: Some(&user.user_id), message: "play account claimed via password", properties: { snakes = summary.snakes_created, grants = summary.grants_created });
 
     state
         .discord
@@ -536,14 +529,7 @@ pub async fn complete_email_claim(
         imported_account::EmailClaimOutcome::Claimed(summary) => summary,
     };
 
-    tracing::info!(
-        event_type = "play_claim_succeeded",
-        user_id = %user.user_id,
-        play_username = %summary.username,
-        snakes = summary.snakes_created,
-        grants = summary.grants_created,
-        "play account claimed via email link"
-    );
+    cja::product_event!(name: "play_claim_succeeded", user_id: Some(&user.user_id), message: "play account claimed via email link", properties: { snakes = summary.snakes_created, grants = summary.grants_created });
 
     state
         .discord
@@ -720,6 +706,7 @@ mod tests {
     async fn password_and_email_link_claim_routes_queue_original_play_address(
         pool: PgPool,
     ) -> cja::Result<()> {
+        let capture = crate::test_capture::Capture::shared();
         let state = AppState::test_from_pool(pool.clone());
         let app = app(&state);
         let session = create_user_session(&pool, 1673111, false).await;
@@ -735,6 +722,11 @@ mod tests {
         .await;
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
         assert_claim_notice(&pool, user_id, "play-111@example.com").await?;
+        let events = capture.events("play_claim_succeeded", user_id);
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert!(events[0].contains_key("snakes"));
+        assert!(events[0].contains_key("grants"));
+        assert!(!events[0].contains_key("play_username"));
 
         let session = create_user_session(&pool, 1673112, false).await;
         let user_id = session_user_id(&pool, session).await;
@@ -752,6 +744,11 @@ mod tests {
         .await;
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
         assert_claim_notice(&pool, user_id, "play-112@example.com").await?;
+        let events = capture.events("play_claim_succeeded", user_id);
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert!(events[0].contains_key("snakes"));
+        assert!(events[0].contains_key("grants"));
+        assert!(!events[0].contains_key("play_username"));
         Ok(())
     }
 

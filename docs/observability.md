@@ -1,4 +1,37 @@
-# Eyes observability
+# Eyes and PostHog observability
+
+Arena declares metrics, alerts, and all three dashboards once in
+`server/src/observability_declarations.rs`. `server/src/observability.rs` attaches
+them to the full Eyes boot manifest. The post-deploy `posthog-sync` job syncs
+only explicitly declared product-event metrics and their compatible dashboard
+items as tagged PostHog insights. Span/log telemetry metrics, ratios, and
+health widgets remain Eyes-only. A `product.*` metric ID does not by itself
+make a metric eligible for PostHog.
+
+The runtime needs only `POSTHOG_PROJECT_TOKEN`, the public ingestion token,
+set in Cloud Run Terraform. It sends OTLP logs and traces with
+`service.name=arena` and captures explicit `cja::product_event!` calls. Capture
+is lossy and independent of request success. Product capture covers
+`user_authenticated`, `battlesnake_created`, `play_claim_succeeded`,
+`achievement_earned`, `share_page_view`, `share_action`, and `share_cta_click`.
+An acting user's opaque account ID is the PostHog distinct ID; anonymous share
+visitors get an anonymous distinct ID. New Eyes and Cloud Logging copies of
+the sign-in and Play-claim events omit GitHub and Play usernames. Existing
+Eyes telemetry, manifest registration, and heartbeat continue during the trial.
+
+The GitHub Actions sync job needs `POSTHOG_PROJECT_ID` as a repo variable and
+`POSTHOG_PERSONAL_API_KEY` as a repo secret. They are never runtime settings.
+Missing CI settings skip sync with a notice; a successful deploy alone does
+not prove a dashboard exists. The management API uses `us.posthog.com`; runtime
+ingestion defaults to `us.i.posthog.com`.
+
+Before rollout, confirm the Cloud Run revision has `GCP_LOGGING=true`,
+`RUST_LOG=info`, the Eyes IDs, and the `POSTHOG_PROJECT_TOKEN` env name. Check
+the boot log for `PostHog OTLP layer configured`, an arena log and trace in
+PostHog, a durable boot manifest event, all captured event families, the
+tagged `arena-product` dashboard, and the three Eyes dashboards plus heartbeat.
+Run an unchanged second sync and require zero creates, updates, and deletes.
+Keep deployment outside every shutdown-email send window.
 
 Arena declares its operational contract in `server/src/observability.rs`. One
 boot-stable `ProcessIdentity` is shared by the tracing subscriber, boot manifest,

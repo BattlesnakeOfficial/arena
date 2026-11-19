@@ -476,6 +476,8 @@ async fn user_authenticated_event_carries_new_user(pool: PgPool) {
         Some("true"),
         "{events:?}"
     );
+    assert_eq!(events[0].get("auth_type").map(String::as_str), Some("web"));
+    assert!(!events[0].contains_key("github_login"));
 
     // Second callback for the same GitHub identity: a fresh session+state,
     // but an existing user.
@@ -495,4 +497,6 @@ async fn user_authenticated_event_carries_new_user(pool: PgPool) {
         Some("false"),
         "{events:?}"
     );
+    assert_eq!(events[1].get("auth_type").map(String::as_str), Some("web"));
+    assert!(!events[1].contains_key("github_login"));
 }

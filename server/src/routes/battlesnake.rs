@@ -732,13 +732,7 @@ pub async fn create_battlesnake(
 
     match battlesnake_result {
         Ok(snake) => {
-            tracing::info!(
-                event_type = "battlesnake_created",
-                battlesnake_id = %snake.battlesnake_id,
-                user_id = %user.user_id,
-                source = "web",
-                "battlesnake created"
-            );
+            cja::product_event!(name: "battlesnake_created", user_id: Some(&user.user_id), message: "battlesnake created", properties: { battlesnake_id = %snake.battlesnake_id, source = "web" });
             tag::set_tags_for_battlesnake(&state.db, snake.battlesnake_id, &form.tag_ids)
                 .await
                 .wrap_err("Failed to set battlesnake tags")?;

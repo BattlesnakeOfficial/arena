@@ -286,8 +286,8 @@ async fn poll_batch(
         #[cfg(test)]
         watched.stats.status_reads.fetch_add(1, Ordering::Relaxed);
         Some(sqlx::query!(
-            r#"SELECT g.game_id, g.status, (SELECT MAX(t.turn_number) FROM turns t WHERE t.game_id = g.game_id) AS latest_turn,
-                      c.turn_id AS cursor_turn_id
+            r#"SELECT g.game_id AS "game_id!", g.status AS "status!", (SELECT MAX(t.turn_number) FROM turns t WHERE t.game_id = g.game_id) AS latest_turn,
+                      c.turn_id AS "cursor_turn_id?"
                FROM unnest($1::uuid[], $2::int[]) AS w(game_id, last_turn)
                JOIN games g ON g.game_id = w.game_id
                LEFT JOIN turns c ON c.game_id = w.game_id AND c.turn_number = w.last_turn"#,
