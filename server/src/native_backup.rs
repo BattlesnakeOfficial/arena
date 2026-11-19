@@ -23,8 +23,6 @@
 //! only surviving frame copy lives at the deterministic key this job
 //! would overwrite with nothing; the latter have nothing to archive and
 //! are kept out of discovery's enqueue set entirely.
-
-use chrono::Utc;
 use color_eyre::eyre::{Context as _, eyre};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -52,8 +50,8 @@ struct NativeGameHeader {
     game_type: String,
     board_size: String,
     status: String,
-    created_at: chrono::DateTime<chrono::Utc>,
-    finished_at: Option<chrono::DateTime<chrono::Utc>>,
+    created_at: jiff::Timestamp,
+    finished_at: Option<jiff::Timestamp>,
 }
 
 /// v2-family export object for one native game. `archive_version` and
@@ -66,17 +64,17 @@ struct NativeGameExport {
     game_id: String,
     game: NativeGameHeader,
     frames: Vec<serde_json::Value>,
-    exported_at: chrono::DateTime<chrono::Utc>,
+    exported_at: jiff::Timestamp,
 }
 
 /// GCS key: own top-level namespace (`native/`), distinct from Play's
 /// `games/YYYY/MM/DD/<play_id>.json.zst` even though both ids are UUIDs.
-fn native_gcs_path(game_id: Uuid, created_at: chrono::DateTime<chrono::Utc>) -> String {
+fn native_gcs_path(game_id: Uuid, created_at: jiff::Timestamp) -> String {
     format!(
         "native/{}/{:02}/{:02}/{}.json.zst",
-        created_at.format("%Y"),
-        created_at.format("%m"),
-        created_at.format("%d"),
+        created_at.strftime("%Y"),
+        created_at.strftime("%m"),
+        created_at.strftime("%d"),
         game_id
     )
 }
@@ -131,7 +129,7 @@ fn build_native_compressed_export(
         game_id: game_id.to_string(),
         game: header,
         frames,
-        exported_at: Utc::now(),
+        exported_at: jiff::Timestamp::now(),
     };
     let json = serde_json::to_vec(&export).wrap_err("Failed to serialize native game export")?;
     let compressed = zstd::stream::encode_all(json.as_slice(), ZSTD_COMPRESSION_LEVEL)
@@ -201,9 +199,10 @@ struct NativeGameHeaderRow {
     game_type: String,
     board_size: String,
     status: String,
-    created_at: chrono::DateTime<chrono::Utc>,
-    finished_at: Option<chrono::DateTime<chrono::Utc>>,
-    archived_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[sqlx(try_from = "cja::jiff_sqlx::Timestamp")]
+    created_at: jiff::Timestamp,
+    finished_at: Option<cja::jiff_sqlx::Timestamp>,
+    archived_at: Option<cja::jiff_sqlx::Timestamp>,
 }
 
 /// Test/direct-call entry: no shared-budget serialization (the worker
@@ -289,7 +288,7 @@ pub(crate) async fn archive_native_game_with_slot(
         board_size: row.board_size,
         status: row.status,
         created_at: row.created_at,
-        finished_at: row.finished_at,
+        finished_at: row.finished_at.map(Into::into),
     };
 
     // The frame texts AND the slot ride INTO the closure — the budget is
@@ -409,17 +408,17 @@ mod tests {
     async fn fixture_game(
         pool: &sqlx::PgPool,
         status: &str,
-        created_at: chrono::DateTime<chrono::Utc>,
-        updated_at: chrono::DateTime<chrono::Utc>,
+        created_at: jiff::Timestamp,
+        updated_at: jiff::Timestamp,
         archived: bool,
         engine_game_id: Option<&str>,
     ) -> cja::Result<Uuid> {
         let id: Uuid = sqlx::query_scalar(
             r#"INSERT INTO games (board_size, game_type, status, created_at, updated_at, engine_game_id, archived_at)
                VALUES ('11x11', 'Standard', $1, $2, $3, $4, $5) RETURNING game_id"#)
-            .bind(status).bind(created_at).bind(updated_at)
+            .bind(status).bind(cja::jiff_sqlx::Timestamp::from(created_at)).bind(cja::jiff_sqlx::Timestamp::from(updated_at))
             .bind(engine_game_id)
-            .bind(archived.then(chrono::Utc::now))
+            .bind(archived.then(jiff::Timestamp::now).map(cja::jiff_sqlx::Timestamp::from))
             .fetch_one(pool).await?;
         Ok(id)
     }
@@ -544,8 +543,16 @@ mod tests {
     #[sqlx::test(migrations = "../migrations")]
     async fn native_export_round_trips_raw_frames_exactly(pool: sqlx::PgPool) -> cja::Result<()> {
         let state = AppState::test_from_pool(pool.clone());
-        let created_at = Utc::now() - chrono::Duration::days(5);
-        let game_id = fixture_game(&pool, "failed", created_at, Utc::now(), false, None).await?;
+        let created_at = jiff::Timestamp::now() - jiff::SignedDuration::from_hours(120);
+        let game_id = fixture_game(
+            &pool,
+            "failed",
+            created_at,
+            jiff::Timestamp::now(),
+            false,
+            None,
+        )
+        .await?;
         fixture_turn(&pool, game_id, 0, modern_frame(0)).await?;
         fixture_turn(&pool, game_id, 1, legacy_frame(1)).await?;
 
@@ -605,9 +612,7 @@ mod tests {
     #[test]
     fn native_gcs_path_uses_its_own_namespace() {
         let uuid = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
-        let created = chrono::DateTime::parse_from_rfc3339("2026-01-29T00:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
+        let created = "2026-01-29T00:00:00Z".parse::<jiff::Timestamp>().unwrap();
         let path = native_gcs_path(uuid, created);
         assert_eq!(
             path,
@@ -625,11 +630,11 @@ mod tests {
     ) -> cja::Result<()> {
         let mut state = AppState::test_from_pool(pool.clone());
         configured_state(&mut state);
-        let now = Utc::now();
+        let now = jiff::Timestamp::now();
         let finished = fixture_game(
             &pool,
             "finished",
-            now - chrono::Duration::days(5),
+            now - jiff::SignedDuration::from_hours(120),
             now,
             false,
             None,
@@ -639,7 +644,7 @@ mod tests {
         let failed = fixture_game(
             &pool,
             "failed",
-            now - chrono::Duration::days(5),
+            now - jiff::SignedDuration::from_hours(120),
             now,
             false,
             None,
@@ -649,7 +654,7 @@ mod tests {
         let running = fixture_game(
             &pool,
             "running",
-            now - chrono::Duration::days(5),
+            now - jiff::SignedDuration::from_hours(120),
             now,
             false,
             None,
@@ -658,7 +663,7 @@ mod tests {
         let archived = fixture_game(
             &pool,
             "finished",
-            now - chrono::Duration::days(5),
+            now - jiff::SignedDuration::from_hours(120),
             now,
             true,
             None,
@@ -667,7 +672,7 @@ mod tests {
         let imported = fixture_game(
             &pool,
             "finished",
-            now - chrono::Duration::days(5),
+            now - jiff::SignedDuration::from_hours(120),
             now,
             false,
             Some("11111111-1111-1111-1111-111111111111"),
@@ -699,12 +704,12 @@ mod tests {
     ) -> cja::Result<()> {
         let mut state = AppState::test_from_pool(pool.clone());
         configured_state(&mut state);
-        let now = Utc::now();
+        let now = jiff::Timestamp::now();
         let a = fixture_game(
             &pool,
             "finished",
-            now - chrono::Duration::days(30),
-            now - chrono::Duration::days(2),
+            now - jiff::SignedDuration::from_hours(720),
+            now - jiff::SignedDuration::from_hours(48),
             false,
             None,
         )
@@ -713,8 +718,8 @@ mod tests {
         let b = fixture_game(
             &pool,
             "finished",
-            now - chrono::Duration::days(20),
-            now - chrono::Duration::days(2),
+            now - jiff::SignedDuration::from_hours(480),
+            now - jiff::SignedDuration::from_hours(48),
             false,
             None,
         )
@@ -723,8 +728,8 @@ mod tests {
         let c = fixture_game(
             &pool,
             "finished",
-            now - chrono::Duration::days(10),
-            now - chrono::Duration::days(2),
+            now - jiff::SignedDuration::from_hours(240),
+            now - jiff::SignedDuration::from_hours(48),
             false,
             None,
         )
@@ -733,7 +738,7 @@ mod tests {
         let r = fixture_game(
             &pool,
             "finished",
-            now - chrono::Duration::days(1),
+            now - jiff::SignedDuration::from_hours(24),
             now,
             false,
             None,
@@ -762,11 +767,11 @@ mod tests {
     ) -> cja::Result<()> {
         let mut state = AppState::test_from_pool(pool.clone());
         configured_state(&mut state);
-        let now = Utc::now();
+        let now = jiff::Timestamp::now();
         let game_id = fixture_game(
             &pool,
             "finished",
-            now - chrono::Duration::days(5),
+            now - jiff::SignedDuration::from_hours(120),
             now,
             false,
             None,
@@ -809,13 +814,13 @@ mod tests {
         // reaching the upload would error).
         let mut state = AppState::test_from_pool(pool.clone());
         state.object_store = std::sync::Arc::new(crate::object_store::DisabledObjectStore);
-        let now = Utc::now();
+        let now = jiff::Timestamp::now();
 
         // (a) already archived (gcs_path still NULL) -> no-op
         let archived = fixture_game(
             &pool,
             "failed",
-            now - chrono::Duration::days(5),
+            now - jiff::SignedDuration::from_hours(120),
             now,
             true,
             None,
@@ -836,18 +841,21 @@ mod tests {
         let running = fixture_game(
             &pool,
             "running",
-            now - chrono::Duration::days(5),
+            now - jiff::SignedDuration::from_hours(120),
             now,
             false,
             None,
         )
         .await?;
         archive_native_game(&state, running).await?;
-        let archived_at: Option<chrono::DateTime<Utc>> =
-            sqlx::query_scalar("SELECT archived_at FROM games WHERE game_id = $1")
-                .bind(running)
-                .fetch_one(&pool)
-                .await?;
+        let archived_at: Option<jiff::Timestamp> =
+            sqlx::query_scalar::<_, Option<cja::jiff_sqlx::Timestamp>>(
+                "SELECT archived_at FROM games WHERE game_id = $1",
+            )
+            .bind(running)
+            .fetch_one(&pool)
+            .await?
+            .map(Into::into);
         assert!(archived_at.is_none());
 
         Ok(())
@@ -864,11 +872,11 @@ mod tests {
         // have errored — Ok(()) proves the skip).
         let mut state = AppState::test_from_pool(pool.clone());
         state.object_store = std::sync::Arc::new(crate::object_store::DisabledObjectStore);
-        let now = Utc::now();
+        let now = jiff::Timestamp::now();
         let game_id = fixture_game(
             &pool,
             "failed",
-            now - chrono::Duration::days(5),
+            now - jiff::SignedDuration::from_hours(120),
             now,
             false,
             None,
@@ -895,12 +903,12 @@ mod tests {
     /// refuses to record a stale archive on a row whose status changed.
     #[sqlx::test(migrations = "../migrations")]
     async fn mark_native_game_archived_sets_row_fields(pool: sqlx::PgPool) -> cja::Result<()> {
-        let now = Utc::now();
+        let now = jiff::Timestamp::now();
         // (a) positive
         let guarded = fixture_game(
             &pool,
             "failed",
-            now - chrono::Duration::days(5),
+            now - jiff::SignedDuration::from_hours(120),
             now,
             false,
             None,
@@ -908,7 +916,7 @@ mod tests {
         .await?;
         mark_native_game_archived(&pool, guarded, "native/2026/10/31/x.json.zst", "failed").await?;
         let (archived_at, gcs_path, archive_version): (
-            Option<chrono::DateTime<Utc>>,
+            Option<cja::jiff_sqlx::Timestamp>,
             Option<String>,
             Option<i32>,
         ) = sqlx::query_as(
@@ -925,7 +933,7 @@ mod tests {
         let raced = fixture_game(
             &pool,
             "failed",
-            now - chrono::Duration::days(5),
+            now - jiff::SignedDuration::from_hours(120),
             now,
             false,
             None,
@@ -936,11 +944,14 @@ mod tests {
             .execute(&pool)
             .await?;
         mark_native_game_archived(&pool, raced, "native/2026/10/31/y.json.zst", "failed").await?;
-        let archived_at: Option<chrono::DateTime<Utc>> =
-            sqlx::query_scalar("SELECT archived_at FROM games WHERE game_id = $1")
-                .bind(raced)
-                .fetch_one(&pool)
-                .await?;
+        let archived_at: Option<jiff::Timestamp> =
+            sqlx::query_scalar::<_, Option<cja::jiff_sqlx::Timestamp>>(
+                "SELECT archived_at FROM games WHERE game_id = $1",
+            )
+            .bind(raced)
+            .fetch_one(&pool)
+            .await?
+            .map(Into::into);
         assert!(archived_at.is_none(), "stale archive must not be recorded");
         Ok(())
     }
@@ -952,11 +963,11 @@ mod tests {
         pool: sqlx::PgPool,
     ) -> cja::Result<()> {
         let mut state = AppState::test_from_pool(pool.clone());
-        let now = Utc::now();
+        let now = jiff::Timestamp::now();
         let game_id = fixture_game(
             &pool,
             "failed",
-            now - chrono::Duration::days(5),
+            now - jiff::SignedDuration::from_hours(120),
             now,
             false,
             None,
@@ -967,14 +978,15 @@ mod tests {
 
         // The finish path's actual write.
         let mut tx = pool.begin().await?;
-        crate::models::game::mark_game_finished_tx(&mut tx, game_id, Utc::now()).await?;
+        crate::models::game::mark_game_finished_tx(&mut tx, game_id, jiff::Timestamp::now())
+            .await?;
         tx.commit().await?;
 
         #[derive(sqlx::FromRow)]
         struct GameRow {
             status: String,
-            finished_at: Option<chrono::DateTime<Utc>>,
-            archived_at: Option<chrono::DateTime<Utc>>,
+            finished_at: Option<cja::jiff_sqlx::Timestamp>,
+            archived_at: Option<cja::jiff_sqlx::Timestamp>,
             gcs_path: Option<String>,
             archive_version: Option<i32>,
         }
@@ -1007,11 +1019,11 @@ mod tests {
 
         let mut state = AppState::test_from_pool(pool.clone());
         configured_state(&mut state);
-        let now = Utc::now();
+        let now = jiff::Timestamp::now();
         let game_id = fixture_game(
             &pool,
             "finished",
-            now - chrono::Duration::days(5),
+            now - jiff::SignedDuration::from_hours(120),
             now,
             false,
             None,
@@ -1056,8 +1068,16 @@ mod tests {
     ) -> cja::Result<()> {
         let mut state = AppState::test_from_pool(pool.clone());
         configured_state(&mut state);
-        let created_at = Utc::now() - chrono::Duration::days(5);
-        let game_id = fixture_game(&pool, "finished", created_at, Utc::now(), false, None).await?;
+        let created_at = jiff::Timestamp::now() - jiff::SignedDuration::from_hours(120);
+        let game_id = fixture_game(
+            &pool,
+            "finished",
+            created_at,
+            jiff::Timestamp::now(),
+            false,
+            None,
+        )
+        .await?;
         fixture_turn(&pool, game_id, 0, modern_frame(0)).await?;
         fixture_turn(&pool, game_id, 1, legacy_frame(1)).await?;
 
@@ -1065,7 +1085,7 @@ mod tests {
 
         // The row: archived as of this terminal state.
         let (archived_at, gcs_path, archive_version): (
-            Option<chrono::DateTime<Utc>>,
+            Option<cja::jiff_sqlx::Timestamp>,
             Option<String>,
             Option<i32>,
         ) = sqlx::query_as(
@@ -1119,13 +1139,21 @@ mod tests {
     async fn archive_native_game_refuses_zero_frame_export(pool: sqlx::PgPool) -> cja::Result<()> {
         let mut state = AppState::test_from_pool(pool.clone());
         configured_state(&mut state);
-        let created_at = Utc::now() - chrono::Duration::days(5);
-        let game_id = fixture_game(&pool, "finished", created_at, Utc::now(), false, None).await?;
+        let created_at = jiff::Timestamp::now() - jiff::SignedDuration::from_hours(120);
+        let game_id = fixture_game(
+            &pool,
+            "finished",
+            created_at,
+            jiff::Timestamp::now(),
+            false,
+            None,
+        )
+        .await?;
         // NO turns: the game has nothing to archive.
 
         archive_native_game(&state, game_id).await?;
 
-        let (archived_at, gcs_path): (Option<chrono::DateTime<Utc>>, Option<String>) =
+        let (archived_at, gcs_path): (Option<cja::jiff_sqlx::Timestamp>, Option<String>) =
             sqlx::query_as("SELECT archived_at, gcs_path FROM games WHERE game_id = $1")
                 .bind(game_id)
                 .fetch_one(&pool)
@@ -1175,11 +1203,11 @@ mod tests {
         // store touch (mirrors the existing skip tests).
         let mut state = AppState::test_from_pool(pool.clone());
         state.object_store = std::sync::Arc::new(crate::object_store::DisabledObjectStore);
-        let now = Utc::now();
+        let now = jiff::Timestamp::now();
         let game_id = fixture_game(
             &pool,
             "failed",
-            now - chrono::Duration::days(40),
+            now - jiff::SignedDuration::from_hours(960),
             now,
             false,
             None,
@@ -1202,11 +1230,14 @@ mod tests {
                 .fetch_one(&pool)
                 .await?;
         assert!(gcs_path.is_none(), "pruned game must not be re-archived");
-        let archived_at: Option<chrono::DateTime<Utc>> =
-            sqlx::query_scalar("SELECT archived_at FROM games WHERE game_id = $1")
-                .bind(game_id)
-                .fetch_one(&pool)
-                .await?;
+        let archived_at: Option<jiff::Timestamp> =
+            sqlx::query_scalar::<_, Option<cja::jiff_sqlx::Timestamp>>(
+                "SELECT archived_at FROM games WHERE game_id = $1",
+            )
+            .bind(game_id)
+            .fetch_one(&pool)
+            .await?
+            .map(Into::into);
         assert!(archived_at.is_none());
         Ok(())
     }

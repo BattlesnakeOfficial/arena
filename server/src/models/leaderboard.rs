@@ -23,9 +23,41 @@ pub struct Leaderboard {
     /// Private leaderboards are unlisted: reachable by direct link only, and
     /// joining takes an invite code (see `models::private_leaderboard`).
     pub visibility: Visibility,
-    pub disabled_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub disabled_at: Option<jiff::Timestamp>,
+    #[sqlx(try_from = "cja::jiff_sqlx::Timestamp")]
+    pub created_at: jiff::Timestamp,
+    #[sqlx(try_from = "cja::jiff_sqlx::Timestamp")]
+    pub updated_at: jiff::Timestamp,
+}
+
+/// `Leaderboard` as `query_as!` decodes it: nullable date/time columns come back as
+/// `Option<cja::jiff_sqlx::*>`, which has no `Into<Option<jiff::*>>`.
+pub(crate) struct LeaderboardRow {
+    pub(crate) leaderboard_id: Uuid,
+    pub(crate) name: String,
+    pub(crate) game_type: String,
+    pub(crate) board_size: String,
+    pub(crate) match_size: i32,
+    pub(crate) visibility: Visibility,
+    pub(crate) disabled_at: Option<cja::jiff_sqlx::Timestamp>,
+    pub(crate) created_at: jiff::Timestamp,
+    pub(crate) updated_at: jiff::Timestamp,
+}
+
+impl From<LeaderboardRow> for Leaderboard {
+    fn from(row: LeaderboardRow) -> Self {
+        Self {
+            leaderboard_id: row.leaderboard_id,
+            name: row.name,
+            game_type: row.game_type,
+            board_size: row.board_size,
+            match_size: row.match_size,
+            visibility: row.visibility,
+            disabled_at: row.disabled_at.map(Into::into),
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+        }
+    }
 }
 
 // Leaderboard entry: one per snake per leaderboard
@@ -40,10 +72,50 @@ pub struct LeaderboardEntry {
     pub games_played: i32,
     pub first_place_finishes: i32,
     pub non_first_finishes: i32,
-    pub disabled_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub disabled_at: Option<jiff::Timestamp>,
     pub disabled_reason: Option<String>,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
+    #[sqlx(try_from = "cja::jiff_sqlx::Timestamp")]
+    pub created_at: jiff::Timestamp,
+    #[sqlx(try_from = "cja::jiff_sqlx::Timestamp")]
+    pub updated_at: jiff::Timestamp,
+}
+
+/// `LeaderboardEntry` as `query_as!` decodes it: nullable date/time columns come back as
+/// `Option<cja::jiff_sqlx::*>`, which has no `Into<Option<jiff::*>>`.
+pub(crate) struct LeaderboardEntryRow {
+    pub(crate) leaderboard_entry_id: Uuid,
+    pub(crate) leaderboard_id: Uuid,
+    pub(crate) battlesnake_id: Uuid,
+    pub(crate) mu: f64,
+    pub(crate) sigma: f64,
+    pub(crate) display_score: f64,
+    pub(crate) games_played: i32,
+    pub(crate) first_place_finishes: i32,
+    pub(crate) non_first_finishes: i32,
+    pub(crate) disabled_at: Option<cja::jiff_sqlx::Timestamp>,
+    pub(crate) disabled_reason: Option<String>,
+    pub(crate) created_at: jiff::Timestamp,
+    pub(crate) updated_at: jiff::Timestamp,
+}
+
+impl From<LeaderboardEntryRow> for LeaderboardEntry {
+    fn from(row: LeaderboardEntryRow) -> Self {
+        Self {
+            leaderboard_entry_id: row.leaderboard_entry_id,
+            leaderboard_id: row.leaderboard_id,
+            battlesnake_id: row.battlesnake_id,
+            mu: row.mu,
+            sigma: row.sigma,
+            display_score: row.display_score,
+            games_played: row.games_played,
+            first_place_finishes: row.first_place_finishes,
+            non_first_finishes: row.non_first_finishes,
+            disabled_at: row.disabled_at.map(Into::into),
+            disabled_reason: row.disabled_reason,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+        }
+    }
 }
 
 // Leaderboard game: links a game to a leaderboard
@@ -52,7 +124,8 @@ pub struct LeaderboardGame {
     pub leaderboard_game_id: Uuid,
     pub leaderboard_id: Uuid,
     pub game_id: Uuid,
-    pub created_at: chrono::DateTime<chrono::Utc>,
+    #[sqlx(try_from = "cja::jiff_sqlx::Timestamp")]
+    pub created_at: jiff::Timestamp,
 }
 
 // Leaderboard game result: per-snake rating change audit trail
@@ -68,7 +141,8 @@ pub struct LeaderboardGameResult {
     pub sigma_after: f64,
     pub display_score_change: f64,
     pub food_eaten: i32,
-    pub created_at: chrono::DateTime<chrono::Utc>,
+    #[sqlx(try_from = "cja::jiff_sqlx::Timestamp")]
+    pub created_at: jiff::Timestamp,
 }
 
 // Ranked entry with snake and owner info for display
@@ -127,7 +201,7 @@ impl LeaderboardSort {
 /// unlisted, so anything that lists ladders to users goes through here.
 pub async fn get_public_leaderboards(pool: &PgPool) -> cja::Result<Vec<Leaderboard>> {
     let rows = sqlx::query_as!(
-        Leaderboard,
+        LeaderboardRow,
         r#"SELECT leaderboard_id, name, game_type, board_size, match_size,
                 visibility as "visibility: Visibility",
                 disabled_at, created_at, updated_at
@@ -139,7 +213,7 @@ pub async fn get_public_leaderboards(pool: &PgPool) -> cja::Result<Vec<Leaderboa
     .await
     .wrap_err("Failed to fetch public leaderboards")?;
 
-    Ok(rows)
+    Ok(rows.into_iter().map(Into::into).collect())
 }
 
 /// Every active leaderboard, private ones included. For background work
@@ -147,7 +221,7 @@ pub async fn get_public_leaderboards(pool: &PgPool) -> cja::Result<Vec<Leaderboa
 /// other — never for anything a user sees as a list.
 pub async fn get_active_leaderboards(pool: &PgPool) -> cja::Result<Vec<Leaderboard>> {
     let rows = sqlx::query_as!(
-        Leaderboard,
+        LeaderboardRow,
         r#"SELECT leaderboard_id, name, game_type, board_size, match_size,
                 visibility as "visibility: Visibility",
                 disabled_at, created_at, updated_at
@@ -159,14 +233,14 @@ pub async fn get_active_leaderboards(pool: &PgPool) -> cja::Result<Vec<Leaderboa
     .await
     .wrap_err("Failed to fetch active leaderboards")?;
 
-    Ok(rows)
+    Ok(rows.into_iter().map(Into::into).collect())
 }
 
 /// Active public leaderboards: the user-facing subset of
 /// [`get_active_leaderboards`].
 pub async fn get_active_public_leaderboards(pool: &PgPool) -> cja::Result<Vec<Leaderboard>> {
     let rows = sqlx::query_as!(
-        Leaderboard,
+        LeaderboardRow,
         r#"SELECT leaderboard_id, name, game_type, board_size, match_size,
                 visibility as "visibility: Visibility",
                 disabled_at, created_at, updated_at
@@ -178,7 +252,7 @@ pub async fn get_active_public_leaderboards(pool: &PgPool) -> cja::Result<Vec<Le
     .await
     .wrap_err("Failed to fetch active public leaderboards")?;
 
-    Ok(rows)
+    Ok(rows.into_iter().map(Into::into).collect())
 }
 
 /// Active leaderboards to Test Snake against: every active public ladder plus
@@ -190,7 +264,7 @@ pub async fn get_active_leaderboards_for_battlesnake(
     battlesnake_id: Uuid,
 ) -> cja::Result<Vec<Leaderboard>> {
     let rows = sqlx::query_as!(
-        Leaderboard,
+        LeaderboardRow,
         r#"SELECT l.leaderboard_id, l.name, l.game_type, l.board_size, l.match_size,
                 l.visibility as "visibility: Visibility",
                 l.disabled_at, l.created_at, l.updated_at
@@ -207,7 +281,7 @@ pub async fn get_active_leaderboards_for_battlesnake(
     .await
     .wrap_err("Failed to fetch leaderboards for battlesnake")?;
 
-    Ok(rows)
+    Ok(rows.into_iter().map(Into::into).collect())
 }
 
 pub async fn get_leaderboard_by_id(
@@ -215,7 +289,7 @@ pub async fn get_leaderboard_by_id(
     leaderboard_id: Uuid,
 ) -> cja::Result<Option<Leaderboard>> {
     let row = sqlx::query_as!(
-        Leaderboard,
+        LeaderboardRow,
         r#"SELECT leaderboard_id, name, game_type, board_size, match_size,
                 visibility as "visibility: Visibility",
                 disabled_at, created_at, updated_at
@@ -227,7 +301,7 @@ pub async fn get_leaderboard_by_id(
     .await
     .wrap_err("Failed to fetch leaderboard")?;
 
-    Ok(row)
+    Ok(row.map(Into::into))
 }
 
 // --- Leaderboard entry queries ---
@@ -260,7 +334,7 @@ pub async fn get_or_create_entry(
     // anywhere else (a pre-check, a CTE) reads the pre-wait snapshot and lets
     // the join through.
     let entry = sqlx::query_as!(
-        LeaderboardEntry,
+        LeaderboardEntryRow,
         r#"INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id)
          SELECT $1::uuid, b.battlesnake_id
          FROM battlesnakes b
@@ -292,7 +366,7 @@ pub async fn get_or_create_entry(
     .await
     .wrap_err("Failed to create or get leaderboard entry")?;
 
-    Ok(entry)
+    Ok(entry.map(Into::into))
 }
 
 /// Get all active entries for a leaderboard (not disabled)
@@ -301,7 +375,7 @@ pub async fn get_active_entries(
     leaderboard_id: Uuid,
 ) -> cja::Result<Vec<LeaderboardEntry>> {
     let entries = sqlx::query_as!(
-        LeaderboardEntry,
+        LeaderboardEntryRow,
         r#"SELECT
             leaderboard_entry_id, leaderboard_id, battlesnake_id,
             mu, sigma, display_score, games_played, first_place_finishes, non_first_finishes,
@@ -315,7 +389,7 @@ pub async fn get_active_entries(
     .await
     .wrap_err("Failed to fetch active leaderboard entries")?;
 
-    Ok(entries)
+    Ok(entries.into_iter().map(Into::into).collect())
 }
 
 /// Get ranked entries (only snakes with enough games) with snake/owner info
@@ -449,7 +523,7 @@ pub async fn get_entry(
     battlesnake_id: Uuid,
 ) -> cja::Result<Option<LeaderboardEntry>> {
     let entry = sqlx::query_as!(
-        LeaderboardEntry,
+        LeaderboardEntryRow,
         r#"SELECT
             leaderboard_entry_id, leaderboard_id, battlesnake_id,
             mu, sigma, display_score, games_played, first_place_finishes, non_first_finishes,
@@ -463,7 +537,7 @@ pub async fn get_entry(
     .await
     .wrap_err("Failed to fetch leaderboard entry")?;
 
-    Ok(entry)
+    Ok(entry.map(Into::into))
 }
 
 /// Get a specific entry by leaderboard and battlesnake, locking the row for update.
@@ -477,7 +551,7 @@ where
     E: sqlx::Executor<'e, Database = Postgres>,
 {
     let entry = sqlx::query_as!(
-        LeaderboardEntry,
+        LeaderboardEntryRow,
         r#"SELECT
             leaderboard_entry_id, leaderboard_id, battlesnake_id,
             mu, sigma, display_score, games_played, first_place_finishes, non_first_finishes,
@@ -492,7 +566,7 @@ where
     .await
     .wrap_err("Failed to fetch leaderboard entry for update")?;
 
-    Ok(entry)
+    Ok(entry.map(Into::into))
 }
 
 /// Get a specific entry by its primary key, locking the row for update.
@@ -507,7 +581,7 @@ where
     E: sqlx::Executor<'e, Database = Postgres>,
 {
     let entry = sqlx::query_as!(
-        LeaderboardEntry,
+        LeaderboardEntryRow,
         r#"SELECT
             leaderboard_entry_id, leaderboard_id, battlesnake_id,
             mu, sigma, display_score, games_played, first_place_finishes, non_first_finishes,
@@ -521,7 +595,7 @@ where
     .await
     .wrap_err("Failed to fetch leaderboard entry for update by ID")?;
 
-    Ok(entry)
+    Ok(entry.map(Into::into))
 }
 
 /// Get entry by ID
@@ -530,7 +604,7 @@ pub async fn get_entry_by_id(
     leaderboard_entry_id: Uuid,
 ) -> cja::Result<Option<LeaderboardEntry>> {
     let entry = sqlx::query_as!(
-        LeaderboardEntry,
+        LeaderboardEntryRow,
         r#"SELECT
             leaderboard_entry_id, leaderboard_id, battlesnake_id,
             mu, sigma, display_score, games_played, first_place_finishes, non_first_finishes,
@@ -543,7 +617,7 @@ pub async fn get_entry_by_id(
     .await
     .wrap_err("Failed to fetch leaderboard entry by ID")?;
 
-    Ok(entry)
+    Ok(entry.map(Into::into))
 }
 
 /// Update rating for an entry after a game.
@@ -587,7 +661,7 @@ where
 pub async fn set_disabled(
     pool: &PgPool,
     entry_id: Uuid,
-    disabled_at: Option<chrono::DateTime<chrono::Utc>>,
+    disabled_at: Option<jiff::Timestamp>,
 ) -> cja::Result<()> {
     sqlx::query!(
         r#"UPDATE leaderboard_entries
@@ -595,7 +669,7 @@ pub async fn set_disabled(
          WHERE leaderboard_entry_id = $1
            AND disabled_reason IS DISTINCT FROM $3"#,
         entry_id,
-        disabled_at,
+        disabled_at.map(cja::jiff_sqlx::Timestamp::from),
         crate::models::battlesnake::DISABLED_REASON_DELETED
     )
     .execute(pool)
@@ -612,7 +686,7 @@ pub async fn get_user_entries(
     user_id: Uuid,
 ) -> cja::Result<Vec<LeaderboardEntry>> {
     let entries = sqlx::query_as!(
-        LeaderboardEntry,
+        LeaderboardEntryRow,
         r#"SELECT
             le.leaderboard_entry_id, le.leaderboard_id, le.battlesnake_id,
             le.mu, le.sigma, le.display_score, le.games_played, le.first_place_finishes, le.non_first_finishes,
@@ -628,7 +702,7 @@ pub async fn get_user_entries(
     .await
     .wrap_err("Failed to fetch user leaderboard entries")?;
 
-    Ok(entries)
+    Ok(entries.into_iter().map(Into::into).collect())
 }
 
 // --- Leaderboard game queries ---
@@ -861,7 +935,8 @@ pub struct LeaderboardGameHistoryEntry {
     pub sigma_before: f64,
     pub sigma_after: f64,
     pub food_eaten: i32,
-    pub game_created_at: chrono::DateTime<chrono::Utc>,
+    #[sqlx(try_from = "cja::jiff_sqlx::Timestamp")]
+    pub game_created_at: jiff::Timestamp,
 }
 
 /// Get paginated game history for a leaderboard entry
@@ -929,7 +1004,8 @@ pub async fn count_game_results_for_entry(
 #[derive(Debug, FromRow)]
 pub struct RatingPoint {
     pub display_score_after: f64,
-    pub game_created_at: chrono::DateTime<chrono::Utc>,
+    #[sqlx(try_from = "cja::jiff_sqlx::Timestamp")]
+    pub game_created_at: jiff::Timestamp,
 }
 
 /// Get full rating history for chart
@@ -1006,7 +1082,7 @@ pub async fn get_opponents_for_games(
 /// Leaderboard status for matchmaker visibility
 #[derive(Debug)]
 pub struct LeaderboardStatus {
-    pub last_game_created_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub last_game_created_at: Option<jiff::Timestamp>,
     pub games_in_progress: i64,
     pub total_games: i64,
 }
@@ -1046,7 +1122,7 @@ pub async fn get_leaderboard_status(
     .wrap_err("Failed to count total games")?;
 
     Ok(LeaderboardStatus {
-        last_game_created_at,
+        last_game_created_at: last_game_created_at.map(Into::into),
         games_in_progress,
         total_games,
     })
@@ -1066,7 +1142,8 @@ pub struct ActivityFeedEntry {
     /// First place shared with another snake: nobody won.
     pub is_draw: bool,
     pub display_score_change: f64,
-    pub created_at: chrono::DateTime<chrono::Utc>,
+    #[sqlx(try_from = "cja::jiff_sqlx::Timestamp")]
+    pub created_at: jiff::Timestamp,
 }
 
 /// Get recent activity feed for a leaderboard
@@ -1122,8 +1199,40 @@ pub struct BattlesnakeLeaderboardSummary {
     pub games_played: i32,
     pub first_place_finishes: i32,
     pub non_first_finishes: i32,
-    pub disabled_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub disabled_at: Option<jiff::Timestamp>,
     pub disabled_reason: Option<String>,
+}
+
+/// `BattlesnakeLeaderboardSummary` as `query_as!` decodes it: nullable date/time columns come back as
+/// `Option<cja::jiff_sqlx::*>`, which has no `Into<Option<jiff::*>>`.
+pub(crate) struct BattlesnakeLeaderboardSummaryRow {
+    pub(crate) leaderboard_entry_id: Uuid,
+    pub(crate) leaderboard_id: Uuid,
+    pub(crate) leaderboard_name: String,
+    pub(crate) leaderboard_visibility: Visibility,
+    pub(crate) display_score: f64,
+    pub(crate) games_played: i32,
+    pub(crate) first_place_finishes: i32,
+    pub(crate) non_first_finishes: i32,
+    pub(crate) disabled_at: Option<cja::jiff_sqlx::Timestamp>,
+    pub(crate) disabled_reason: Option<String>,
+}
+
+impl From<BattlesnakeLeaderboardSummaryRow> for BattlesnakeLeaderboardSummary {
+    fn from(row: BattlesnakeLeaderboardSummaryRow) -> Self {
+        Self {
+            leaderboard_entry_id: row.leaderboard_entry_id,
+            leaderboard_id: row.leaderboard_id,
+            leaderboard_name: row.leaderboard_name,
+            leaderboard_visibility: row.leaderboard_visibility,
+            display_score: row.display_score,
+            games_played: row.games_played,
+            first_place_finishes: row.first_place_finishes,
+            non_first_finishes: row.non_first_finishes,
+            disabled_at: row.disabled_at.map(Into::into),
+            disabled_reason: row.disabled_reason,
+        }
+    }
 }
 
 /// Get a battlesnake's leaderboard entries as `viewer` may see them. Private
@@ -1138,7 +1247,7 @@ pub async fn get_entries_for_battlesnake(
     let viewer_id = viewer.map(|u| u.user_id);
     let viewer_is_admin = viewer.is_some_and(|u| u.is_admin);
     let entries = sqlx::query_as!(
-        BattlesnakeLeaderboardSummary,
+        BattlesnakeLeaderboardSummaryRow,
         r#"SELECT
             le.leaderboard_entry_id,
             le.leaderboard_id,
@@ -1163,7 +1272,7 @@ pub async fn get_entries_for_battlesnake(
     .await
     .wrap_err("Failed to fetch leaderboard entries for battlesnake")?;
 
-    Ok(entries)
+    Ok(entries.into_iter().map(Into::into).collect())
 }
 
 /// Get competition rank for a specific entry (count of entries with higher score + 1)
@@ -1391,12 +1500,12 @@ mod tests {
             .await?;
         }
 
-        let tied_at = chrono::Utc::now();
+        let tied_at = jiff::Timestamp::now();
         sqlx::query!(
             "UPDATE leaderboard_game_results
              SET created_at = $1
              WHERE leaderboard_game_id = $2",
-            tied_at,
+            cja::jiff_sqlx::Timestamp::from(tied_at),
             leaderboard_game_id,
         )
         .execute(&pool)

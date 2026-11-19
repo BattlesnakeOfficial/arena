@@ -41,7 +41,7 @@ pub struct StageAccount {
     pub points: i32,
     pub points_high_score: i32,
     pub is_staff: bool,
-    pub play_created_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub play_created_at: Option<jiff::Timestamp>,
 }
 
 #[derive(Debug, Clone)]
@@ -160,7 +160,7 @@ pub async fn stage_play_account(
             account.play_user_id, account.play_account_id, account.email, account.password_hash,
             account.is_email_verified, account.username, account.display_name, account.pronouns,
             account.country, account.backstory, account.github_login, account.points,
-            account.points_high_score, account.is_staff, account.play_created_at
+            account.points_high_score, account.is_staff, account.play_created_at.map(cja::jiff_sqlx::Timestamp::from)
         ).fetch_optional(&mut *tx).await.wrap_err("Failed to insert staged account")?;
         if let Some(row) = inserted {
             (
@@ -247,7 +247,7 @@ pub async fn stage_play_account(
         account.points,
         account.points_high_score,
         account.is_staff,
-        account.play_created_at
+        account.play_created_at.map(cja::jiff_sqlx::Timestamp::from)
     )
     .execute(&mut *tx)
     .await
@@ -379,10 +379,10 @@ pub async fn find_unclaimed_by_github_uid(
     pool: &PgPool,
     github_uid: i64,
 ) -> cja::Result<Option<ImportedAccount>> {
-    let account = sqlx::query_as::<_, ImportedAccount>(&format!(
+    let account = sqlx::query_as::<_, ImportedAccount>(sqlx::AssertSqlSafe(format!(
         "SELECT {IMPORTED_ACCOUNT_COLUMNS} FROM imported_accounts
          WHERE github_uid = $1 AND claimed_by_user_id IS NULL"
-    ))
+    )))
     .bind(github_uid)
     .fetch_optional(pool)
     .await
@@ -415,11 +415,11 @@ pub async fn find_unclaimed_by_email(
     pool: &PgPool,
     email: &str,
 ) -> cja::Result<Vec<ImportedAccount>> {
-    let accounts = sqlx::query_as::<_, ImportedAccount>(&format!(
+    let accounts = sqlx::query_as::<_, ImportedAccount>(sqlx::AssertSqlSafe(format!(
         "SELECT {IMPORTED_ACCOUNT_COLUMNS} FROM imported_accounts
          WHERE lower(email) = lower($1) AND claimed_by_user_id IS NULL
          ORDER BY imported_at"
-    ))
+    )))
     .bind(email)
     .fetch_all(pool)
     .await
@@ -1803,7 +1803,7 @@ mod tests {
         let id = stage_play_account(&pool, &original)
             .await?
             .imported_account_id;
-        let before: (String, chrono::DateTime<chrono::Utc>, serde_json::Value, serde_json::Value) = sqlx::query_as(
+        let before: (String, cja::jiff_sqlx::Timestamp, serde_json::Value, serde_json::Value) = sqlx::query_as(
             "SELECT display_name, updated_at, (SELECT coalesce(jsonb_agg(to_jsonb(s) ORDER BY s.play_snake_id), '[]'::jsonb) FROM imported_snakes s WHERE s.imported_account_id=a.imported_account_id), (SELECT coalesce(jsonb_agg(to_jsonb(g) ORDER BY g.slug), '[]'::jsonb) FROM imported_grants g WHERE g.imported_account_id=a.imported_account_id) FROM imported_accounts a WHERE imported_account_id=$1"
         ).bind(id).fetch_one(&pool).await?;
         let mut refresh = complete_payload(103);
@@ -1814,7 +1814,7 @@ mod tests {
         });
         refresh.snakes.push(complete_payload(101).snakes.remove(0));
         assert!(stage_play_account(&pool, &refresh).await.is_err());
-        let after: (String, chrono::DateTime<chrono::Utc>, serde_json::Value, serde_json::Value) = sqlx::query_as(
+        let after: (String, cja::jiff_sqlx::Timestamp, serde_json::Value, serde_json::Value) = sqlx::query_as(
             "SELECT display_name, updated_at, (SELECT coalesce(jsonb_agg(to_jsonb(s) ORDER BY s.play_snake_id), '[]'::jsonb) FROM imported_snakes s WHERE s.imported_account_id=a.imported_account_id), (SELECT coalesce(jsonb_agg(to_jsonb(g) ORDER BY g.slug), '[]'::jsonb) FROM imported_grants g WHERE g.imported_account_id=a.imported_account_id) FROM imported_accounts a WHERE imported_account_id=$1"
         ).bind(id).fetch_one(&pool).await?;
         assert_eq!(before, after);
@@ -1827,14 +1827,14 @@ mod tests {
         let id = stage_play_account(&pool, &payload)
             .await?
             .imported_account_id;
-        let before: (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>, uuid::Uuid, uuid::Uuid) = sqlx::query_as(
+        let before: (cja::jiff_sqlx::Timestamp, cja::jiff_sqlx::Timestamp, uuid::Uuid, uuid::Uuid) = sqlx::query_as(
             "SELECT a.updated_at, s.updated_at, s.imported_snake_id, g.imported_grant_id FROM imported_accounts a JOIN imported_snakes s USING (imported_account_id) JOIN imported_grants g USING (imported_account_id) WHERE a.imported_account_id=$1"
         ).bind(id).fetch_one(&pool).await?;
         assert_eq!(
             stage_play_account(&pool, &payload).await?.status,
             StageStatus::Unchanged
         );
-        let same: (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>, uuid::Uuid, uuid::Uuid) = sqlx::query_as(
+        let same: (cja::jiff_sqlx::Timestamp, cja::jiff_sqlx::Timestamp, uuid::Uuid, uuid::Uuid) = sqlx::query_as(
             "SELECT a.updated_at, s.updated_at, s.imported_snake_id, g.imported_grant_id FROM imported_accounts a JOIN imported_snakes s USING (imported_account_id) JOIN imported_grants g USING (imported_account_id) WHERE a.imported_account_id=$1"
         ).bind(id).fetch_one(&pool).await?;
         assert_eq!(before, same);

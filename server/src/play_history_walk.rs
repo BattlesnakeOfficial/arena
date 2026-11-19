@@ -15,8 +15,6 @@
 //! artifacts) and `game_type`. Once the backlog is gone, ticks are cheap
 //! no-op pages that also catch anything the hourly job's 4-hour window
 //! misses — there is no "done" state until DEV-1545 removes the walk.
-
-use chrono::{DateTime, NaiveDateTime, Utc};
 use color_eyre::eyre::Context as _;
 use std::collections::{HashMap, HashSet};
 
@@ -53,8 +51,8 @@ const PLAY_WALK_MIN_GAME_AGE_HOURS: i64 = 24;
 /// untouched — and their trigger-bumped `updated_at` with them.
 const EPOCH_ARTIFACT_CUTOFF_UNIX_SECS: i64 = 31_536_000;
 
-fn is_epoch_artifact(created_at: DateTime<Utc>) -> bool {
-    created_at.timestamp() < EPOCH_ARTIFACT_CUTOFF_UNIX_SECS
+fn is_epoch_artifact(created_at: jiff::Timestamp) -> bool {
+    created_at.as_second() < EPOCH_ARTIFACT_CUTOFF_UNIX_SECS
 }
 
 /// What one tick did — returned so tests can assert without scraping logs.
@@ -78,7 +76,8 @@ pub(crate) struct PinnedJob {
 #[derive(sqlx::FromRow)]
 struct WalkPageRow {
     id: String,
-    created: NaiveDateTime,
+    #[sqlx(try_from = "cja::jiff_sqlx::DateTime")]
+    created: jiff::civil::DateTime,
     raw_game_type: String,
 }
 
@@ -148,8 +147,10 @@ pub(crate) async fn run_walk_tick_with(
 
     // Runtime query on the engine pool (engine schema is unknown to the
     // arena macros); same shape as the hourly discovery's engine fetch.
-    let max_created =
-        (Utc::now() - chrono::Duration::hours(PLAY_WALK_MIN_GAME_AGE_HOURS)).naive_utc();
+    let max_created = (jiff::Timestamp::now()
+        - jiff::SignedDuration::from_hours(PLAY_WALK_MIN_GAME_AGE_HOURS))
+    .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+    .datetime();
     let page: Vec<WalkPageRow> = sqlx::query_as(
         r#"
         SELECT id, created,
@@ -164,7 +165,7 @@ pub(crate) async fn run_walk_tick_with(
     )
     .bind(cursor.last_created)
     .bind(&cursor.last_id)
-    .bind(max_created)
+    .bind(cja::jiff_sqlx::DateTime::from(max_created))
     .bind(page_size)
     .fetch_all(engine_db)
     .await
@@ -192,9 +193,14 @@ pub(crate) async fn run_walk_tick_with(
     .fetch_all(&app_state.db)
     .await
     .wrap_err("Failed to batch-check archived games")?;
-    let archived: HashMap<String, (DateTime<Utc>, String)> = archived_rows
+    let archived: HashMap<String, (jiff::Timestamp, String)> = archived_rows
         .into_iter()
-        .map(|row| (row.engine_game_id, (row.created_at, row.game_type)))
+        .map(|row| {
+            (
+                row.engine_game_id,
+                (row.created_at.to_jiff(), row.game_type),
+            )
+        })
         .collect();
 
     let exception_rows = sqlx::query!(
@@ -237,13 +243,17 @@ pub(crate) async fn run_walk_tick_with(
         .collect();
 
     let mut frontier_open = true;
-    let mut new_cursor: Option<(NaiveDateTime, String)> = None;
-    let mut corrections: Vec<(String, DateTime<Utc>, String)> = Vec::new();
+    let mut new_cursor: Option<(jiff::civil::DateTime, String)> = None;
+    let mut corrections: Vec<(String, jiff::Timestamp, String)> = Vec::new();
     let mut pinned_by_pending: Option<PinnedJob> = None;
     let mut enqueued = 0usize;
 
     for row in &page {
-        let engine_created = row.created.and_utc();
+        let engine_created = row
+            .created
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+            .expect("in range")
+            .timestamp();
         let normalized_type = normalize_game_type(&row.raw_game_type);
 
         if let Some((row_created_at, row_game_type)) = archived.get(&row.id) {
@@ -291,8 +301,10 @@ pub(crate) async fn run_walk_tick_with(
     // trigger-bumped updated_at) untouched.
     if !corrections.is_empty() {
         let ids: Vec<String> = corrections.iter().map(|(id, _, _)| id.clone()).collect();
-        let dates: Vec<DateTime<Utc>> =
-            corrections.iter().map(|(_, created, _)| *created).collect();
+        let dates: Vec<cja::jiff_sqlx::Timestamp> = corrections
+            .iter()
+            .map(|(_, created, _)| cja::jiff_sqlx::Timestamp::from(*created))
+            .collect();
         let types: Vec<String> = corrections
             .iter()
             .map(|(_, _, game_type)| game_type.clone())
@@ -333,7 +345,7 @@ pub(crate) async fn run_walk_tick_with(
             SET last_created = $1, last_id = $2, updated_at = NOW()
             WHERE singleton AND (last_created, last_id) < ($1, $2)
             "#,
-            last_created,
+            cja::jiff_sqlx::DateTime::from(last_created),
             last_id
         )
         .execute(&app_state.db)
@@ -409,7 +421,7 @@ mod tests {
     async fn seed_engine_game(
         engine_pool: &sqlx::PgPool,
         id: &str,
-        created: chrono::NaiveDateTime,
+        created: jiff::civil::DateTime,
         ruleset_name: Option<&str>,
     ) -> cja::Result<()> {
         insert_engine_game(
@@ -423,13 +435,13 @@ mod tests {
         Ok(())
     }
 
-    async fn read_cursor(pool: &sqlx::PgPool) -> cja::Result<(NaiveDateTime, String)> {
+    async fn read_cursor(pool: &sqlx::PgPool) -> cja::Result<(jiff::civil::DateTime, String)> {
         let row = sqlx::query!(
             "SELECT last_created, last_id FROM play_history_walk_cursor WHERE singleton"
         )
         .fetch_one(pool)
         .await?;
-        Ok((row.last_created, row.last_id))
+        Ok((row.last_created.to_jiff(), row.last_id))
     }
 
     async fn job_ids_for(
@@ -454,10 +466,9 @@ mod tests {
         assert_eq!(
             (created, id.as_str()),
             (
-                chrono::NaiveDate::from_ymd_opt(1970, 1, 1)
+                jiff::civil::Date::new(1970, 1, 1)
                     .expect("date")
-                    .and_hms_opt(0, 0, 0)
-                    .expect("time"),
+                    .at(0, 0, 0, 0),
                 ""
             )
         );
@@ -478,11 +489,10 @@ mod tests {
         pool: sqlx::PgPool,
     ) -> cja::Result<()> {
         let (state, _store, engine_pool) = engine_fixture(&pool).await?;
-        let base = chrono::NaiveDate::from_ymd_opt(2020, 1, 1)
+        let base = jiff::civil::Date::new(2020, 1, 1)
             .expect("date")
-            .and_hms_opt(0, 0, 0)
-            .expect("time");
-        let created = |hours: i32| base + chrono::Duration::hours(i64::from(hours));
+            .at(0, 0, 0, 0);
+        let created = |hours: i32| base + jiff::SignedDuration::from_hours(i64::from(hours));
 
         // A (missing), B (missing), C (archived), D (missing), in that order.
         seed_engine_game(&engine_pool, "A", created(0), Some("standard")).await?;
@@ -563,10 +573,9 @@ mod tests {
     #[sqlx::test(migrations = "../migrations")]
     async fn cursor_does_not_pass_a_dropped_job(pool: sqlx::PgPool) -> cja::Result<()> {
         let (state, _store, engine_pool) = engine_fixture(&pool).await?;
-        let base = chrono::NaiveDate::from_ymd_opt(2020, 2, 1)
+        let base = jiff::civil::Date::new(2020, 2, 1)
             .expect("date")
-            .and_hms_opt(0, 0, 0)
-            .expect("time");
+            .at(0, 0, 0, 0);
         seed_engine_game(&engine_pool, "A", base, Some("standard")).await?;
 
         run_walk_tick_with(&state, 5, 2_000).await?;
@@ -592,15 +601,14 @@ mod tests {
         pool: sqlx::PgPool,
     ) -> cja::Result<()> {
         let (state, _store, engine_pool) = engine_fixture(&pool).await?;
-        let base = chrono::NaiveDate::from_ymd_opt(2020, 3, 1)
+        let base = jiff::civil::Date::new(2020, 3, 1)
             .expect("date")
-            .and_hms_opt(0, 0, 0)
-            .expect("time");
+            .at(0, 0, 0, 0);
         seed_engine_game(&engine_pool, "A", base, Some("standard")).await?;
         seed_engine_game(
             &engine_pool,
             "B",
-            base + chrono::Duration::hours(1),
+            base + jiff::SignedDuration::from_hours(1),
             Some("standard"),
         )
         .await?;
@@ -648,10 +656,9 @@ mod tests {
     #[sqlx::test(migrations = "../migrations")]
     async fn tick_corrects_epoch_dated_row_leaving_gcs_path(pool: sqlx::PgPool) -> cja::Result<()> {
         let (state, store, engine_pool) = engine_fixture(&pool).await?;
-        let created = chrono::NaiveDate::from_ymd_opt(2020, 3, 10)
+        let created = jiff::civil::Date::new(2020, 3, 10)
             .expect("date")
-            .and_hms_opt(0, 0, 0)
-            .expect("time");
+            .at(0, 0, 0, 0);
 
         // X: the 1970 artifact. Engine value has Ruleset.name = solo and no
         // RulesetName — stored game_type would be wrong ("Standard") too.
@@ -670,14 +677,18 @@ mod tests {
         let puts_before = store.put_count();
 
         // Near-miss: 6 ms off the engine column — must NOT be touched.
-        let near_miss_created = created.and_utc() + chrono::Duration::milliseconds(6);
+        let near_miss_created = created
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+            .expect("in range")
+            .timestamp()
+            + jiff::SignedDuration::from_millis(6);
         seed_engine_game(&engine_pool, "near-miss", created, Some("standard")).await?;
         sqlx::query!(
             r#"
             INSERT INTO games (board_size, game_type, status, engine_game_id, created_at, archived_at, gcs_path, archive_version)
             VALUES ('11x11', 'Standard', 'finished', 'near-miss', $1, NOW(), 'games/2020/03/10/near-miss.json.zst', 1)
             "#,
-            near_miss_created
+            cja::jiff_sqlx::Timestamp::from(near_miss_created)
         )
         .execute(&pool)
         .await?;
@@ -689,12 +700,12 @@ mod tests {
             INSERT INTO games (board_size, game_type, status, engine_game_id, created_at, archived_at, gcs_path, archive_version)
             VALUES ('11x11', 'Standard', 'finished', 'correct-row', $1, NOW(), 'games/2020/03/10/correct-row.json.zst', 1)
             "#,
-            created.and_utc()
+            cja::jiff_sqlx::Timestamp::from(created.to_zoned_datetime(jiff::tz::TimeZone::UTC).expect("in range").timestamp())
         )
         .execute(&pool)
         .await?;
 
-        let updated_at_before: Vec<(String, chrono::DateTime<Utc>)> = sqlx::query_as(
+        let updated_at_before: Vec<(String, cja::jiff_sqlx::Timestamp)> = sqlx::query_as(
             "SELECT engine_game_id, updated_at FROM games WHERE engine_game_id = ANY($1)",
         )
         .bind(vec!["near-miss", "correct-row"])
@@ -714,7 +725,13 @@ mod tests {
         )
         .fetch_one(&pool)
         .await?;
-        assert_eq!(x.created_at, created.and_utc());
+        assert_eq!(
+            x.created_at.to_jiff(),
+            created
+                .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+                .expect("in range")
+                .timestamp()
+        );
         assert_eq!(
             x.game_type, "Solo",
             "Ruleset.name fallback corrects the type"
@@ -733,9 +750,15 @@ mod tests {
             let expected_created = if engine_game_id == "near-miss" {
                 near_miss_created
             } else {
-                created.and_utc()
+                created
+                    .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+                    .expect("in range")
+                    .timestamp()
             };
-            assert_eq!(row.created_at, expected_created);
+            assert_eq!(
+                row.created_at,
+                cja::jiff_sqlx::Timestamp::from(expected_created)
+            );
             assert_eq!(row.game_type, "Standard");
             assert_eq!(row.updated_at, updated_at, "{engine_game_id} untouched");
         }
@@ -747,10 +770,9 @@ mod tests {
     #[sqlx::test(migrations = "../migrations")]
     async fn tick_treats_exceptions_as_done(pool: sqlx::PgPool) -> cja::Result<()> {
         let (state, _store, engine_pool) = engine_fixture(&pool).await?;
-        let created = chrono::NaiveDate::from_ymd_opt(2020, 4, 1)
+        let created = jiff::civil::Date::new(2020, 4, 1)
             .expect("date")
-            .and_hms_opt(0, 0, 0)
-            .expect("time");
+            .at(0, 0, 0, 0);
         seed_engine_game(&engine_pool, "X", created, Some("standard")).await?;
 
         sqlx::query!(
@@ -771,10 +793,11 @@ mod tests {
             .await?;
         sqlx::query!(
             r#"UPDATE play_history_walk_cursor SET last_created = $1, last_id = $2"#,
-            chrono::NaiveDate::from_ymd_opt(1970, 1, 1)
-                .expect("date")
-                .and_hms_opt(0, 0, 0)
-                .expect("time"),
+            cja::jiff_sqlx::DateTime::from(
+                jiff::civil::Date::new(1970, 1, 1)
+                    .expect("date")
+                    .at(0, 0, 0, 0)
+            ),
             ""
         )
         .execute(&pool)
@@ -794,10 +817,9 @@ mod tests {
         pool: sqlx::PgPool,
     ) -> cja::Result<()> {
         let (state, store, engine_pool) = engine_fixture(&pool).await?;
-        let created = chrono::NaiveDate::from_ymd_opt(2020, 5, 1)
+        let created = jiff::civil::Date::new(2020, 5, 1)
             .expect("date")
-            .and_hms_opt(0, 0, 0)
-            .expect("time");
+            .at(0, 0, 0, 0);
 
         // One archived epoch-dated row (correction must still apply).
         seed_engine_game(&engine_pool, "arch-1970", created, Some("standard")).await?;
@@ -813,7 +835,7 @@ mod tests {
         seed_engine_game(
             &engine_pool,
             "missing-1",
-            created + chrono::Duration::hours(1),
+            created + jiff::SignedDuration::from_hours(1),
             Some("standard"),
         )
         .await?;
@@ -862,10 +884,11 @@ mod tests {
         .await?;
         sqlx::query!(
             r#"UPDATE play_history_walk_cursor SET last_created = $1, last_id = $2"#,
-            chrono::NaiveDate::from_ymd_opt(1970, 1, 1)
-                .expect("date")
-                .and_hms_opt(0, 0, 0)
-                .expect("time"),
+            cja::jiff_sqlx::DateTime::from(
+                jiff::civil::Date::new(1970, 1, 1)
+                    .expect("date")
+                    .at(0, 0, 0, 0)
+            ),
             ""
         )
         .execute(&pool)
@@ -874,7 +897,7 @@ mod tests {
             seed_engine_game(
                 &engine_pool,
                 &format!("gap-{number:02}"),
-                created + chrono::Duration::hours(i64::from(number)),
+                created + jiff::SignedDuration::from_hours(i64::from(number)),
                 Some("standard"),
             )
             .await?;
@@ -900,13 +923,15 @@ mod tests {
     #[sqlx::test(migrations = "../migrations")]
     async fn young_games_are_not_walked_yet(pool: sqlx::PgPool) -> cja::Result<()> {
         let (state, _store, engine_pool) = engine_fixture(&pool).await?;
-        let now = Utc::now().naive_utc();
+        let now = jiff::Timestamp::now()
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+            .datetime();
 
         seed_engine_game(&engine_pool, "young", now, Some("standard")).await?;
         seed_engine_game(
             &engine_pool,
             "old-enough",
-            now - chrono::Duration::hours(25),
+            now - jiff::SignedDuration::from_hours(25),
             Some("standard"),
         )
         .await?;
@@ -923,10 +948,9 @@ mod tests {
         assert_eq!(cursor_id, "");
         assert_eq!(
             cursor_created,
-            chrono::NaiveDate::from_ymd_opt(1970, 1, 1)
+            jiff::civil::Date::new(1970, 1, 1)
                 .expect("date")
-                .and_hms_opt(0, 0, 0)
-                .expect("time")
+                .at(0, 0, 0, 0)
         );
         Ok(())
     }

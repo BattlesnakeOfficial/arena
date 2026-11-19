@@ -31,7 +31,7 @@ use crate::{
 pub(crate) struct EarnView {
     pub achievement: Achievement,
     pub owner: User,
-    pub earned_at: chrono::DateTime<chrono::Utc>,
+    pub earned_at: jiff::Timestamp,
     /// The snake that earned it, when the earn recorded one and it still
     /// exists (soft-deleted snakes resolve to None).
     pub snake: Option<Battlesnake>,
@@ -103,7 +103,7 @@ async fn load_earn_row(
         EarnView {
             achievement,
             owner,
-            earned_at: earn.earned_at,
+            earned_at: earn.earned_at.to_jiff(),
             snake,
         },
         EarnRefs {
@@ -332,7 +332,7 @@ pub async fn share_page(
 
     let def = achievement.def();
     let owner_name = view.earn.owner.public_name().to_string();
-    let earned = view.earn.earned_at.format("%b %-d, %Y").to_string();
+    let earned = view.earn.earned_at.strftime("%b %-d, %Y").to_string();
     let card_path = crate::routes::og::achievement_card_path(achievement.slug(), user_id);
     let clip_path = share_clip_path(achievement.slug(), user_id);
     let description = match &view.earn.snake {

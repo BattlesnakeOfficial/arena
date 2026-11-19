@@ -6,7 +6,13 @@
       {
         "ordinal": 0,
         "name": "snake_access",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "api_tokens",
+            "name": "snake_access"
+          }
+        }
       }
     ],
     "parameters": {

@@ -9,8 +9,8 @@ pub struct SavedGame {
     pub user_id: Uuid,
     pub game_id: Uuid,
     pub title: String,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub created_at: jiff::Timestamp,
+    pub updated_at: jiff::Timestamp,
 }
 
 /// A saved game joined with the game it points at, shaped for profile
@@ -23,7 +23,7 @@ pub struct SavedGameListing {
     pub title: String,
     pub game_type: String,
     pub board_size: String,
-    pub game_created_at: chrono::DateTime<chrono::Utc>,
+    pub game_created_at: jiff::Timestamp,
 }
 
 impl SavedGameListing {
@@ -216,7 +216,7 @@ mod tests {
             title: String::new(),
             game_type: "Standard".to_string(),
             board_size: "11x11".to_string(),
-            game_created_at: chrono::Utc::now(),
+            game_created_at: jiff::Timestamp::now(),
         };
         assert_eq!(listing.display_title(), "Standard on 11x11");
 

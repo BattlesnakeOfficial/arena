@@ -6,12 +6,24 @@
       {
         "ordinal": 0,
         "name": "status: MatchStatus",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "tournament_matches",
+            "name": "status"
+          }
+        }
       },
       {
         "ordinal": 1,
         "name": "winner_id",
-        "type_info": "Uuid"
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "tournament_matches",
+            "name": "winner_id"
+          }
+        }
       }
     ],
     "parameters": {

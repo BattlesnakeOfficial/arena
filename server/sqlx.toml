@@ -1,0 +1,10 @@
+# query!/query_as! decode Postgres date/time columns as cja's jiff-sqlx
+# wrappers, which convert into jiff types with `.into()`. Nullable columns
+# decode as `Option<wrapper>`; map them with `.map(Into::into)`.
+[macros.type-overrides]
+'TIMESTAMPTZ' = "cja::jiff_sqlx::Timestamp"
+'TIMESTAMP' = "cja::jiff_sqlx::DateTime"
+'DATE' = "cja::jiff_sqlx::Date"
+'TIME' = "cja::jiff_sqlx::Time"
+'TIMESTAMPTZ[]' = "Vec<cja::jiff_sqlx::Timestamp>"
+'DATE[]' = "Vec<cja::jiff_sqlx::Date>"

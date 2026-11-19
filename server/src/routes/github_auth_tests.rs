@@ -267,7 +267,7 @@ async fn web_login_rotates_session_and_reissues_cookie(pool: PgPool) {
         .unwrap()
         .expect("rotated session exists");
     assert!(rotated.user_id.is_some());
-    assert!(rotated.expires_at > chrono::Utc::now() + chrono::Duration::days(29));
+    assert!(rotated.expires_at > jiff::Timestamp::now() + jiff::SignedDuration::from_hours(696));
     let (redirect, draft): (Option<String>, Option<serde_json::Value>) = sqlx::query_as(
         "SELECT post_login_redirect::text, pending_form_data::jsonb FROM sessions WHERE session_id = $1",
     )

@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
-use chrono::{Duration, Utc};
 use color_eyre::eyre::Context as _;
 use maud::{Markup, html};
 
@@ -14,14 +13,20 @@ use crate::{
 };
 
 async fn snapshot(state: &AppState) -> cja::Result<Arc<StatsSnapshot>> {
-    snapshot_for_day(state, Utc::now().date_naive()).await
+    snapshot_for_day(
+        state,
+        jiff::Timestamp::now()
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+            .date(),
+    )
+    .await
 }
 
 async fn snapshot_for_day(
     state: &AppState,
-    today_utc: chrono::NaiveDate,
+    today_utc: jiff::civil::Date,
 ) -> cja::Result<Arc<StatsSnapshot>> {
-    let as_of = today_utc - Duration::days(1);
+    let as_of = today_utc - jiff::SignedDuration::from_hours(24);
     if let Some(cached) = state.stats_cache.get()
         && cached.as_of_utc_date >= as_of
     {
@@ -242,7 +247,7 @@ fn tile(label: &str, value: String, detail: &str) -> Markup {
     html! { div class="stat" { div class="label" { (label) } div class="value" { (value) } div class="detail" { (detail) } } }
 }
 
-fn active_tile(value: Option<String>, available_on: chrono::NaiveDate) -> String {
+fn active_tile(value: Option<String>, available_on: jiff::civil::Date) -> String {
     value.unwrap_or_else(|| format!("Collecting data — available {available_on}"))
 }
 
@@ -301,13 +306,16 @@ mod tests {
         state.stats_cache = Arc::new(crate::cache::TtlCell::new(std::time::Duration::from_secs(
             900,
         )));
-        let today = chrono::NaiveDate::from_ymd_opt(2026, 9, 28).unwrap();
-        let stale = StatsSnapshot::fetch(&db, today - Duration::days(1))
+        let today = jiff::civil::Date::new(2026, 9, 28).unwrap();
+        let stale = StatsSnapshot::fetch(&db, today - jiff::SignedDuration::from_hours(24))
             .await
             .unwrap();
         state.stats_cache.put(stale);
         let fresh = snapshot_for_day(&state, today).await.unwrap();
-        assert_eq!(fresh.as_of_utc_date, today - Duration::days(1));
+        assert_eq!(
+            fresh.as_of_utc_date,
+            today - jiff::SignedDuration::from_hours(24)
+        );
     }
 
     #[sqlx::test(migrations = "../migrations")]

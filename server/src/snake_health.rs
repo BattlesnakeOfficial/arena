@@ -236,7 +236,7 @@ pub struct TestGame {
 /// of that mode sends on turn 0. Game and snake ids are fresh UUIDs that never
 /// touch the database.
 pub fn build_test_game(snake: &Battlesnake, spec: &TestGameSpec) -> TestGame {
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
     let snake_id = Uuid::new_v4();
     let opponent_ids: Vec<Uuid> = (1..spec.snake_count).map(|_| Uuid::new_v4()).collect();
 
@@ -848,7 +848,7 @@ mod tests {
     use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
     fn test_snake() -> Battlesnake {
-        let now = chrono::Utc::now();
+        let now = jiff::Timestamp::now();
         Battlesnake {
             battlesnake_id: Uuid::new_v4(),
             user_id: Uuid::new_v4(),

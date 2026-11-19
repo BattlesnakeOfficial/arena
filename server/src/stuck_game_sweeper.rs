@@ -109,8 +109,6 @@ async fn fail_stuck_games(pool: &sqlx::PgPool, max_age_hours: i32) -> cja::Resul
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    use chrono::{DateTime, Duration, Utc};
     use sqlx::PgPool;
 
     /// Insert a game with an explicit `created_at`, so eligibility can be
@@ -118,14 +116,14 @@ mod tests {
     async fn insert_game(
         pool: &PgPool,
         status: &str,
-        created_at: DateTime<Utc>,
+        created_at: jiff::Timestamp,
     ) -> cja::Result<Uuid> {
         let game_id = sqlx::query_scalar!(
             "INSERT INTO games (board_size, game_type, status, created_at, updated_at)
              VALUES ('11x11', 'Standard', $1, $2, $2)
              RETURNING game_id",
             status,
-            created_at,
+            cja::jiff_sqlx::Timestamp::from(created_at),
         )
         .fetch_one(pool)
         .await?;
@@ -139,26 +137,34 @@ mod tests {
         Ok(status)
     }
 
-    async fn game_updated_at(pool: &PgPool, game_id: Uuid) -> cja::Result<DateTime<Utc>> {
+    async fn game_updated_at(pool: &PgPool, game_id: Uuid) -> cja::Result<jiff::Timestamp> {
         let updated_at =
             sqlx::query_scalar!("SELECT updated_at FROM games WHERE game_id = $1", game_id)
                 .fetch_one(pool)
                 .await?;
-        Ok(updated_at)
+        Ok(updated_at.to_jiff())
     }
 
     /// A `running` game left behind by a dead runner is failed on the next
     /// sweep, and its `updated_at` is bumped.
     #[sqlx::test(migrations = "../migrations")]
     async fn stale_running_game_is_failed(pool: PgPool) -> cja::Result<()> {
-        let base_time = Utc::now();
-        let game_id = insert_game(&pool, "running", base_time - Duration::hours(3)).await?;
+        let base_time = jiff::Timestamp::now();
+        let game_id = insert_game(
+            &pool,
+            "running",
+            base_time - jiff::SignedDuration::from_hours(3),
+        )
+        .await?;
 
         let failed = fail_stuck_games(&pool, 2).await?;
 
         assert_eq!(failed, vec![game_id]);
         assert_eq!(game_status(&pool, game_id).await?, "failed");
-        assert!(game_updated_at(&pool, game_id).await? > base_time - Duration::hours(3));
+        assert!(
+            game_updated_at(&pool, game_id).await?
+                > base_time - jiff::SignedDuration::from_hours(3)
+        );
 
         Ok(())
     }
@@ -166,8 +172,13 @@ mod tests {
     /// A game that never left the queue is stuck just the same.
     #[sqlx::test(migrations = "../migrations")]
     async fn stale_waiting_game_is_failed(pool: PgPool) -> cja::Result<()> {
-        let base_time = Utc::now();
-        let game_id = insert_game(&pool, "waiting", base_time - Duration::hours(3)).await?;
+        let base_time = jiff::Timestamp::now();
+        let game_id = insert_game(
+            &pool,
+            "waiting",
+            base_time - jiff::SignedDuration::from_hours(3),
+        )
+        .await?;
 
         let failed = fail_stuck_games(&pool, 2).await?;
 
@@ -195,7 +206,7 @@ mod tests {
         )
         .fetch_one(&pool)
         .await?;
-        let old = Utc::now() - Duration::hours(3);
+        let old = jiff::Timestamp::now() - jiff::SignedDuration::from_hours(3);
         let running = insert_game(&pool, "running", old).await?;
         let waiting = insert_game(&pool, "waiting", old).await?;
         for game_id in [running, waiting] {
@@ -231,9 +242,10 @@ mod tests {
         )
         .fetch_one(&pool)
         .await?;
-        let now = Utc::now();
-        let recent = insert_game(&pool, "waiting", now - Duration::minutes(30)).await?;
-        let old = insert_game(&pool, "waiting", now - Duration::hours(3)).await?;
+        let now = jiff::Timestamp::now();
+        let recent =
+            insert_game(&pool, "waiting", now - jiff::SignedDuration::from_mins(30)).await?;
+        let old = insert_game(&pool, "waiting", now - jiff::SignedDuration::from_hours(3)).await?;
         for game_id in [recent, old] {
             sqlx::query("INSERT INTO leaderboard_games (leaderboard_id, game_id) VALUES ($1, $2)")
                 .bind(ladder)
@@ -258,10 +270,25 @@ mod tests {
     /// leave all three alone.
     #[sqlx::test(migrations = "../migrations")]
     async fn fresh_and_terminal_games_are_untouched(pool: PgPool) -> cja::Result<()> {
-        let base_time = Utc::now();
-        let fresh = insert_game(&pool, "running", base_time - Duration::minutes(10)).await?;
-        let finished = insert_game(&pool, "finished", base_time - Duration::hours(3)).await?;
-        let already_failed = insert_game(&pool, "failed", base_time - Duration::hours(3)).await?;
+        let base_time = jiff::Timestamp::now();
+        let fresh = insert_game(
+            &pool,
+            "running",
+            base_time - jiff::SignedDuration::from_mins(10),
+        )
+        .await?;
+        let finished = insert_game(
+            &pool,
+            "finished",
+            base_time - jiff::SignedDuration::from_hours(3),
+        )
+        .await?;
+        let already_failed = insert_game(
+            &pool,
+            "failed",
+            base_time - jiff::SignedDuration::from_hours(3),
+        )
+        .await?;
 
         let failed = fail_stuck_games(&pool, 2).await?;
 
@@ -278,9 +305,19 @@ mod tests {
     /// on failed), so match games are excluded no matter how stale.
     #[sqlx::test(migrations = "../migrations")]
     async fn tournament_match_games_are_excluded(pool: PgPool) -> cja::Result<()> {
-        let base_time = Utc::now();
-        let match_game = insert_game(&pool, "running", base_time - Duration::hours(3)).await?;
-        let control = insert_game(&pool, "running", base_time - Duration::hours(3)).await?;
+        let base_time = jiff::Timestamp::now();
+        let match_game = insert_game(
+            &pool,
+            "running",
+            base_time - jiff::SignedDuration::from_hours(3),
+        )
+        .await?;
+        let control = insert_game(
+            &pool,
+            "running",
+            base_time - jiff::SignedDuration::from_hours(3),
+        )
+        .await?;
 
         let user_id = sqlx::query_scalar!(
             "INSERT INTO users (external_github_id, github_login)
@@ -380,7 +417,7 @@ mod tests {
     /// of the predicate (the legacy pre-bulk-cancel shape).
     #[sqlx::test(migrations = "../migrations")]
     async fn stale_game_of_a_canceled_match_is_failed(pool: PgPool) -> cja::Result<()> {
-        let base_time = Utc::now();
+        let base_time = jiff::Timestamp::now();
         let user_id: Uuid = sqlx::query_scalar(
             "INSERT INTO users (external_github_id, github_login)
              VALUES (2180, 'dev2180-user') RETURNING user_id",
@@ -389,7 +426,12 @@ mod tests {
         .await?;
 
         // A: live match in an in-progress tournament — excluded, stays running.
-        let game_a = insert_game(&pool, "running", base_time - Duration::hours(3)).await?;
+        let game_a = insert_game(
+            &pool,
+            "running",
+            base_time - jiff::SignedDuration::from_hours(3),
+        )
+        .await?;
         fixture_match_game(
             &pool,
             user_id,
@@ -401,7 +443,12 @@ mod tests {
         .await?;
 
         // B: canceled match in an in-progress tournament — swept.
-        let game_b = insert_game(&pool, "running", base_time - Duration::hours(3)).await?;
+        let game_b = insert_game(
+            &pool,
+            "running",
+            base_time - jiff::SignedDuration::from_hours(3),
+        )
+        .await?;
         fixture_match_game(
             &pool,
             user_id,
@@ -414,7 +461,12 @@ mod tests {
 
         // C: live-status match in a canceled tournament (legacy pre-fix
         // cancel shape) — swept.
-        let game_c = insert_game(&pool, "running", base_time - Duration::hours(3)).await?;
+        let game_c = insert_game(
+            &pool,
+            "running",
+            base_time - jiff::SignedDuration::from_hours(3),
+        )
+        .await?;
         fixture_match_game(
             &pool,
             user_id,
@@ -444,8 +496,13 @@ mod tests {
     /// resume rows deleted in the same transaction.
     #[sqlx::test(migrations = "../migrations")]
     async fn sweep_failing_stuck_games_deletes_resume_state(pool: PgPool) -> cja::Result<()> {
-        let base_time = Utc::now();
-        let game_id = insert_game(&pool, "running", base_time - Duration::hours(3)).await?;
+        let base_time = jiff::Timestamp::now();
+        let game_id = insert_game(
+            &pool,
+            "running",
+            base_time - jiff::SignedDuration::from_hours(3),
+        )
+        .await?;
         sqlx::query!(
             "INSERT INTO game_resume_states (game_id, turn_number, food, hazards)
              VALUES ($1, 7, '[]', '[]')",
@@ -475,8 +532,13 @@ mod tests {
     /// matches nothing and leaves `updated_at` alone.
     #[sqlx::test(migrations = "../migrations")]
     async fn second_sweep_is_a_no_op(pool: PgPool) -> cja::Result<()> {
-        let base_time = Utc::now();
-        let game_id = insert_game(&pool, "running", base_time - Duration::hours(3)).await?;
+        let base_time = jiff::Timestamp::now();
+        let game_id = insert_game(
+            &pool,
+            "running",
+            base_time - jiff::SignedDuration::from_hours(3),
+        )
+        .await?;
 
         assert_eq!(fail_stuck_games(&pool, 2).await?, vec![game_id]);
         let after_first = game_updated_at(&pool, game_id).await?;
@@ -493,17 +555,26 @@ mod tests {
     /// enqueue (held, never dispatched) still ages from creation.
     #[sqlx::test(migrations = "../migrations")]
     async fn age_counts_from_enqueue_when_present(pool: PgPool) -> cja::Result<()> {
-        let base_time = Utc::now();
-        let recently_started =
-            insert_game(&pool, "running", base_time - Duration::hours(3)).await?;
+        let base_time = jiff::Timestamp::now();
+        let recently_started = insert_game(
+            &pool,
+            "running",
+            base_time - jiff::SignedDuration::from_hours(3),
+        )
+        .await?;
         sqlx::query!(
             "UPDATE games SET enqueued_at = $2 WHERE game_id = $1",
             recently_started,
-            base_time - Duration::minutes(10),
+            cja::jiff_sqlx::Timestamp::from(base_time - jiff::SignedDuration::from_mins(10)),
         )
         .execute(&pool)
         .await?;
-        let never_enqueued = insert_game(&pool, "waiting", base_time - Duration::hours(3)).await?;
+        let never_enqueued = insert_game(
+            &pool,
+            "waiting",
+            base_time - jiff::SignedDuration::from_hours(3),
+        )
+        .await?;
 
         let failed = fail_stuck_games(&pool, 2).await?;
 
@@ -517,13 +588,18 @@ mod tests {
     /// through `run_sweep` so the AppState/config path is covered too.
     #[sqlx::test(migrations = "../migrations")]
     async fn swept_games_drop_out_of_the_leaderboard_live_count(pool: PgPool) -> cja::Result<()> {
-        let base_time = Utc::now();
+        let base_time = jiff::Timestamp::now();
         let leaderboard_id = sqlx::query_scalar!(
             "INSERT INTO leaderboards (name) VALUES ('sweep-test') RETURNING leaderboard_id",
         )
         .fetch_one(&pool)
         .await?;
-        let game_id = insert_game(&pool, "running", base_time - Duration::hours(3)).await?;
+        let game_id = insert_game(
+            &pool,
+            "running",
+            base_time - jiff::SignedDuration::from_hours(3),
+        )
+        .await?;
         sqlx::query!(
             "INSERT INTO leaderboard_games (leaderboard_id, game_id) VALUES ($1, $2)",
             leaderboard_id,

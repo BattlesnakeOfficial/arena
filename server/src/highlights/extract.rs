@@ -10,11 +10,9 @@
 //! - Frame parsing never panics (a panicking cja job kills the live game
 //!   runner); malformed rows are skipped with a warn.
 
-use std::collections::{BTreeMap, BTreeSet};
-
-use chrono::{DateTime, Utc};
 use color_eyre::eyre::Context as _;
 use sqlx::PgPool;
+use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 
 use super::detectors;
@@ -28,8 +26,8 @@ use super::types::{
 pub async fn compute_digest(
     pool: &PgPool,
     house: &HouseSnakeConfig,
-    w0: DateTime<Utc>,
-    w1: DateTime<Utc>,
+    w0: jiff::Timestamp,
+    w1: jiff::Timestamp,
 ) -> cja::Result<ComputedDigest> {
     let mut data = extract_window(pool, house, w0, w1).await?;
 
@@ -72,8 +70,8 @@ pub async fn compute_digest(
 async fn extract_window(
     pool: &PgPool,
     house: &HouseSnakeConfig,
-    w0: DateTime<Utc>,
-    w1: DateTime<Utc>,
+    w0: jiff::Timestamp,
+    w1: jiff::Timestamp,
 ) -> cja::Result<WindowData> {
     // 1. Ladders, ordered by LADDER_ORDER position then name.
     let ladder_rows = sqlx::query!(
@@ -132,7 +130,7 @@ async fn extract_window(
                     leaderboard_id: row.leaderboard_id,
                     snake_name: row.snake_name,
                     owner_login: row.owner_login,
-                    disabled_at: row.disabled_at,
+                    disabled_at: row.disabled_at.map(Into::into),
                     house,
                 },
             )
@@ -150,7 +148,7 @@ async fn extract_window(
         WHERE r.created_at < $1
         ORDER BY r.leaderboard_entry_id, r.created_at DESC
         "#,
-        w0
+        cja::jiff_sqlx::Timestamp::from(w0)
     )
     .fetch_all(pool)
     .await
@@ -183,8 +181,8 @@ async fn extract_window(
           AND l.visibility = 'public'
         ORDER BY lg.created_at, lg.game_id
         "#,
-        w0,
-        w1
+        cja::jiff_sqlx::Timestamp::from(w0),
+        cja::jiff_sqlx::Timestamp::from(w1)
     )
     .fetch_all(pool)
     .await
@@ -201,7 +199,7 @@ async fn extract_window(
                 games.push(WindowGame {
                     game_id: row.game_id,
                     ladder_index: ladder_idx,
-                    created_at: row.created_at,
+                    created_at: row.created_at.to_jiff(),
                     snakes: Vec::new(),
                     final_turn: None,
                 });
@@ -232,8 +230,8 @@ async fn extract_window(
         JOIN leaderboard_games lg USING (game_id)
         WHERE lg.created_at >= $1 AND lg.created_at < $2
         "#,
-        w0,
-        w1
+        cja::jiff_sqlx::Timestamp::from(w0),
+        cja::jiff_sqlx::Timestamp::from(w1)
     )
     .fetch_all(pool)
     .await
@@ -283,8 +281,8 @@ async fn extract_window(
             WHERE l.leaderboard_id = $1 AND lg.created_at >= $2 AND lg.created_at < $3
             "#,
             ladder.leaderboard_id,
-            w0,
-            w1
+            cja::jiff_sqlx::Timestamp::from(w0),
+            cja::jiff_sqlx::Timestamp::from(w1)
         )
         .fetch_all(pool)
         .await

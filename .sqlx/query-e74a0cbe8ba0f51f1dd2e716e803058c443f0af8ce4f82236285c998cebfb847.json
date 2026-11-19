@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT (tracking_started_at AT TIME ZONE 'UTC')::date AS \"start_day!: cja::jiff_sqlx::Date\" FROM stats_tracking_start WHERE singleton = TRUE",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "start_day!: cja::jiff_sqlx::Date",
+        "type_info": "Date",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "e74a0cbe8ba0f51f1dd2e716e803058c443f0af8ce4f82236285c998cebfb847"
+}

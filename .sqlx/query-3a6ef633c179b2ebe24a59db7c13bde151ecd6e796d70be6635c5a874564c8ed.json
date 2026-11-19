@@ -6,17 +6,35 @@
       {
         "ordinal": 0,
         "name": "turn_number",
-        "type_info": "Int4"
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "game_resume_states",
+            "name": "turn_number"
+          }
+        }
       },
       {
         "ordinal": 1,
         "name": "food",
-        "type_info": "Jsonb"
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "game_resume_states",
+            "name": "food"
+          }
+        }
       },
       {
         "ordinal": 2,
         "name": "hazards",
-        "type_info": "Jsonb"
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "game_resume_states",
+            "name": "hazards"
+          }
+        }
       }
     ],
     "parameters": {

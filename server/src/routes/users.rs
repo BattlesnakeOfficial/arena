@@ -141,7 +141,7 @@ async fn render_user_profile(
                         "@" (user.github_login)
                         @if !user.pronouns.is_empty() { " · " (user.pronouns) }
                         @if !user.country.is_empty() { " · " (crate::components::flag::country_meta(&user.country)) }
-                        " · joined " (user.created_at.format("%b %Y"))
+                        " · joined " (user.created_at.strftime("%b %Y"))
                     }
                     @if !user.backstory.is_empty() {
                         p class="bio" { (user.backstory) }
@@ -226,7 +226,7 @@ async fn render_user_profile(
                                     a href={"/games/"(saved.game_id)} { (saved.display_title()) }
                                 }
                                 dd {
-                                    (saved.game_created_at.format("%b %-d, %Y"))
+                                    (saved.game_created_at.strftime("%b %-d, %Y"))
                                     @if is_self {
                                         " "
                                         form
@@ -274,7 +274,7 @@ fn render_profile_achievements(
     profile_user_id: Uuid,
     earned: &[(
         crate::customizations::achievements::Achievement,
-        chrono::DateTime<chrono::Utc>,
+        jiff::Timestamp,
     )],
 ) -> Markup {
     if earned.is_empty() {
@@ -297,7 +297,7 @@ fn render_profile_achievements(
                             }
                             span class="profile-achievement-copy" {
                                 span class="profile-achievement-name" { (def.name) }
-                                span class="profile-achievement-date" { "Unlocked " (earned_at.format("%b %-d, %Y")) }
+                                span class="profile-achievement-date" { "Unlocked " (earned_at.strftime("%b %-d, %Y")) }
                             }
                         }
                     }
@@ -691,8 +691,8 @@ mod tests {
             is_admin: false,
             site_theme: "system".to_string(),
             theater_theme: "dark".to_string(),
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
+            created_at: jiff::Timestamp::now(),
+            updated_at: jiff::Timestamp::now(),
         }
     }
 
@@ -900,7 +900,7 @@ mod tests {
         pool: &PgPool,
         user_id: Uuid,
         slug: &str,
-        earned_at: chrono::DateTime<chrono::Utc>,
+        earned_at: jiff::Timestamp,
         snake: Option<Uuid>,
         game: Option<Uuid>,
         live: bool,
@@ -914,7 +914,7 @@ mod tests {
         .bind(snake)
         .bind(game)
         .bind(live)
-        .bind(earned_at)
+        .bind(cja::jiff_sqlx::Timestamp::from(earned_at))
         .execute(pool)
         .await
         .unwrap();
@@ -973,12 +973,12 @@ mod tests {
         &body[start..end]
     }
 
-    fn earn_instant(y: i32, m: u32, d: u32, h: u32) -> chrono::DateTime<chrono::Utc> {
-        use chrono::TimeZone as _;
-        chrono::Utc
-            .with_ymd_and_hms(y, m, d, h, 0, 0)
-            .single()
+    fn earn_instant(y: i16, m: i8, d: i8, h: i8) -> jiff::Timestamp {
+        jiff::civil::date(y, m, d)
+            .at(h, 0, 0, 0)
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
             .expect("valid earn instant")
+            .timestamp()
     }
 
     #[sqlx::test(migrations = "../migrations")]

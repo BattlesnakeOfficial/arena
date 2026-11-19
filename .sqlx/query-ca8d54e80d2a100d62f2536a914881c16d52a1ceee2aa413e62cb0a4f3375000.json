@@ -6,32 +6,68 @@
       {
         "ordinal": 0,
         "name": "game_type",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "games",
+            "name": "game_type"
+          }
+        }
       },
       {
         "ordinal": 1,
         "name": "board_size",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "games",
+            "name": "board_size"
+          }
+        }
       },
       {
         "ordinal": 2,
         "name": "status",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "games",
+            "name": "status"
+          }
+        }
       },
       {
         "ordinal": 3,
         "name": "created_at",
-        "type_info": "Timestamptz"
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "games",
+            "name": "created_at"
+          }
+        }
       },
       {
         "ordinal": 4,
         "name": "finished_at",
-        "type_info": "Timestamptz"
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "games",
+            "name": "finished_at"
+          }
+        }
       },
       {
         "ordinal": 5,
         "name": "archived_at",
-        "type_info": "Timestamptz"
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "games",
+            "name": "archived_at"
+          }
+        }
       }
     ],
     "parameters": {

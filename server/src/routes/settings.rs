@@ -356,7 +356,7 @@ pub async fn authorized_apps_page(
                                 style="width: 44px; height: 44px; border-radius: 8px; object-fit: cover;";
                         }
                         h3 style="margin: 0;" { (grant.client_name) }
-                        span class="badge" { "authorized " (grant.created_at.format("%b %d, %Y")) }
+                        span class="badge" { "authorized " (grant.created_at.strftime("%b %d, %Y")) }
                     }
 
                     h4 style="margin: 18px 0 6px;" { "Can:" }

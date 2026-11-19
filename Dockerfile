@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y \
 # Note: mock-github-oauth and rules Cargo.toml are needed because they're workspace members
 # engine-proxy Cargo.toml is needed for the same reason (DEV-1943)
 COPY Cargo.toml Cargo.lock ./
-COPY server/Cargo.toml ./server/
+COPY server/Cargo.toml server/sqlx.toml ./server/
 COPY server/build.rs ./server/
 COPY server/frontend ./server/frontend
 COPY server/static ./server/static

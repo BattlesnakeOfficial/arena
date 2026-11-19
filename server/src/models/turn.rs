@@ -15,7 +15,8 @@ pub struct Turn {
     pub game_id: Uuid,
     pub turn_number: i32,
     pub frame_data: Option<serde_json::Value>,
-    pub created_at: chrono::DateTime<chrono::Utc>,
+    #[sqlx(try_from = "cja::jiff_sqlx::Timestamp")]
+    pub created_at: jiff::Timestamp,
 }
 
 /// Get all turns for a game, ordered by turn number
@@ -298,7 +299,7 @@ pub struct SnakeTurn {
     pub latency_ms: Option<i32>,
     pub timed_out: bool,
     pub errored: bool,
-    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub created_at: jiff::Timestamp,
 }
 /// One snake move to persist with a turn.
 #[derive(Debug, Clone)]
@@ -482,7 +483,7 @@ pub async fn get_snake_turns_by_turn_id(
             latency_ms: row.latency_ms,
             timed_out: row.timed_out,
             errored: row.errored,
-            created_at: row.created_at,
+            created_at: row.created_at.to_jiff(),
         })
         .collect();
 
@@ -500,9 +501,7 @@ mod tests {
             game_id: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440001").unwrap(),
             turn_number: 42,
             frame_data: Some(serde_json::json!({"test": "data"})),
-            created_at: chrono::DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
-                .unwrap()
-                .with_timezone(&chrono::Utc),
+            created_at: "2024-01-01T00:00:00Z".parse::<jiff::Timestamp>().unwrap(),
         };
 
         let json = serde_json::to_string(&turn).unwrap();
@@ -541,7 +540,7 @@ mod tests {
             game_id: Uuid::new_v4(),
             turn_number: 5,
             frame_data: Some(frame_data.clone()),
-            created_at: chrono::Utc::now(),
+            created_at: jiff::Timestamp::now(),
         };
 
         assert_eq!(turn.frame_data.as_ref().unwrap()["Turn"], 5);
@@ -558,7 +557,7 @@ mod tests {
             latency_ms: Some(123),
             timed_out: false,
             errored: false,
-            created_at: chrono::Utc::now(),
+            created_at: jiff::Timestamp::now(),
         };
 
         let json = serde_json::to_string(&snake_turn).unwrap();
@@ -578,7 +577,7 @@ mod tests {
                 latency_ms: None,
                 timed_out: false,
                 errored: false,
-                created_at: chrono::Utc::now(),
+                created_at: jiff::Timestamp::now(),
             };
             assert_eq!(snake_turn.direction, direction);
         }
@@ -594,7 +593,7 @@ mod tests {
             latency_ms: None,
             timed_out: true,
             errored: false,
-            created_at: chrono::Utc::now(),
+            created_at: jiff::Timestamp::now(),
         };
         assert!(snake_turn.timed_out);
         assert!(snake_turn.latency_ms.is_none());

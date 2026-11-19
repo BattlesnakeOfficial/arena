@@ -2,7 +2,6 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::{Form, Json, extract::Path, http::header, response::Redirect};
-use chrono::{DateTime, Utc};
 use color_eyre::eyre::{Context as _, eyre};
 use maud::{Markup, html};
 use serde::{Deserialize, Serialize};
@@ -70,7 +69,7 @@ pub struct JobError {
     pub name: String,
     pub error_count: i32,
     pub last_error_message: Option<String>,
-    pub last_failed_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub last_failed_at: Option<jiff::Timestamp>,
 }
 
 impl AdminMetrics {
@@ -194,7 +193,7 @@ impl AdminMetrics {
                 name: r.name,
                 error_count: r.error_count,
                 last_error_message: r.last_error_message,
-                last_failed_at: r.last_failed_at,
+                last_failed_at: r.last_failed_at.map(Into::into),
             })
             .collect();
 
@@ -383,7 +382,7 @@ pub async fn dashboard(
                                     }
                                     td style="padding: 8px; border-bottom: 1px solid var(--hairline);" {
                                         @if let Some(ts) = err.last_failed_at {
-                                            (ts.format("%Y-%m-%d %H:%M:%S"))
+                                            (ts.strftime("%Y-%m-%d %H:%M:%S"))
                                         } @else {
                                             "-"
                                         }
@@ -592,7 +591,7 @@ pub async fn moderation_queue(
     let rows = flags.iter().map(|flag: &ModerationFlagListing| {
         maud::html! {
             tr {
-                td style="padding: 8px; border-bottom: 1px solid var(--hairline); white-space: nowrap;" { (flag.created_at.format("%Y-%m-%d %H:%M")) }
+                td style="padding: 8px; border-bottom: 1px solid var(--hairline); white-space: nowrap;" { (flag.created_at.strftime("%Y-%m-%d %H:%M")) }
                 td style="padding: 8px; border-bottom: 1px solid var(--hairline);" { (flag.field_kind) }
                 // maud escapes the text — the submitted string renders
                 // inert even though it's attacker-controlled.
@@ -736,8 +735,8 @@ pub async fn list_codes(
                         td { (code.customization_type) ": " (code.slug) }
                         td { (code.note.as_deref().unwrap_or("—")) }
                         td { (code.redemptions_used) " / " (code.max_redemptions) }
-                        td { (code.expires_at.map_or_else(|| "—".to_string(), |date| date.to_rfc3339())) }
-                        td { (code.created_at.to_rfc3339()) }
+                        td { (code.expires_at.map_or_else(|| "—".to_string(), |date| date.to_string())) }
+                        td { (code.created_at.to_string()) }
                         td {
                             @if code.disabled_at.is_some() { "Disabled" }
                             @else {
@@ -776,8 +775,8 @@ pub async fn create_code(
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty());
-    let expires_at = match expiry_text.map(DateTime::parse_from_rfc3339).transpose() {
-        Ok(value) => value.map(|date| date.with_timezone(&Utc)),
+    let expires_at = match expiry_text.map(str::parse::<jiff::Timestamp>).transpose() {
+        Ok(value) => value,
         Err(_) => {
             return Ok(code_error(
                 page_factory,
@@ -2304,11 +2303,7 @@ mod tests {
             name: "GameRunnerJob".to_string(),
             error_count: 3,
             last_error_message: Some("connection timeout".to_string()),
-            last_failed_at: Some(
-                chrono::DateTime::parse_from_rfc3339("2026-02-08T12:00:00Z")
-                    .unwrap()
-                    .with_timezone(&chrono::Utc),
-            ),
+            last_failed_at: Some("2026-02-08T12:00:00Z".parse::<jiff::Timestamp>().unwrap()),
         };
 
         let json = serde_json::to_value(&error).unwrap();

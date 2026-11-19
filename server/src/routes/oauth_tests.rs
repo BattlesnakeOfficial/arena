@@ -1157,13 +1157,14 @@ async fn replayed_code_revokes_issued_token(pool: PgPool) {
     // The replay revoked the issued token AND its grant.
     let (status, _body) = send_api(&fx.app, "GET", "/api/me", Some(&token), None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
-    let revoked: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar!(
+    let revoked: Option<jiff::Timestamp> = sqlx::query_scalar!(
         "SELECT revoked_at FROM oauth_grants WHERE user_id = $1",
         fx.user_id
     )
     .fetch_one(&pool)
     .await
-    .unwrap();
+    .unwrap()
+    .map(Into::into);
     assert!(revoked.is_some(), "no zombie grant after replay");
 }
 
@@ -1305,13 +1306,14 @@ async fn disabled_client_and_revival(pool: PgPool) {
     // One successful call stamps last_used_at.
     let (status, _body) = send_api(&fx.app, "GET", "/api/me", Some(&token), None).await;
     assert_eq!(status, StatusCode::OK);
-    let used_before: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar!(
+    let used_before: Option<jiff::Timestamp> = sqlx::query_scalar!(
         "SELECT last_used_at FROM api_tokens WHERE user_id = $1 AND revoked_at IS NULL",
         fx.user_id
     )
     .fetch_one(&pool)
     .await
-    .unwrap();
+    .unwrap()
+    .map(Into::into);
     assert!(used_before.is_some());
 
     // A code approved while the client is live (for the exchange below).
@@ -1366,13 +1368,14 @@ async fn disabled_client_and_revival(pool: PgPool) {
     // (c) the previously issued token is rejected with no last_used_at bump.
     let (status, _body) = send_api(&fx.app, "GET", "/api/me", Some(&token), None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
-    let used_after: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar!(
+    let used_after: Option<jiff::Timestamp> = sqlx::query_scalar!(
         "SELECT last_used_at FROM api_tokens WHERE user_id = $1 AND revoked_at IS NULL",
         fx.user_id
     )
     .fetch_one(&pool)
     .await
-    .unwrap();
+    .unwrap()
+    .map(Into::into);
     assert_eq!(
         used_before, used_after,
         "rejected token must not stamp last_used_at"
@@ -1385,13 +1388,14 @@ async fn disabled_client_and_revival(pool: PgPool) {
         .unwrap();
     let (status, _body) = send_api(&fx.app, "GET", "/api/me", Some(&token), None).await;
     assert_eq!(status, StatusCode::OK);
-    let revoked: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar!(
+    let revoked: Option<jiff::Timestamp> = sqlx::query_scalar!(
         "SELECT revoked_at FROM api_tokens WHERE user_id = $1",
         fx.user_id
     )
     .fetch_one(&pool)
     .await
-    .unwrap();
+    .unwrap()
+    .map(Into::into);
     assert!(revoked.is_none());
 }
 
@@ -1417,11 +1421,12 @@ async fn revoked_grant_token_dies(pool: PgPool) {
 
     let (status, _body) = send_api(&fx.app, "GET", "/api/me", Some(&token), None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
-    let revoked: Option<chrono::DateTime<chrono::Utc>> =
+    let revoked: Option<jiff::Timestamp> =
         sqlx::query_scalar!("SELECT revoked_at FROM oauth_grants WHERE id = $1", grant)
             .fetch_one(&pool)
             .await
-            .unwrap();
+            .unwrap()
+            .map(Into::into);
     assert!(revoked.is_some());
 }
 
@@ -2121,11 +2126,12 @@ async fn exchange_is_atomic_code_not_consumed_on_failure(pool: PgPool) {
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{json}");
 
     // The whole transaction rolled back: the code is still unconsumed.
-    let consumed: Option<chrono::DateTime<chrono::Utc>> =
+    let consumed: Option<jiff::Timestamp> =
         sqlx::query_scalar!("SELECT consumed_at FROM oauth_authorization_codes")
             .fetch_one(&pool)
             .await
-            .unwrap();
+            .unwrap()
+            .map(Into::into);
     assert!(consumed.is_none(), "consume must roll back with the mint");
 
     // Drop the fault; the same code exchanges successfully.
@@ -2459,11 +2465,12 @@ async fn token_revoke_via_api_kills_grant(pool: PgPool) {
 
     let (status, _body) = send_api(&fx.app, "GET", "/api/me", Some(&token), None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
-    let revoked: Option<chrono::DateTime<chrono::Utc>> =
+    let revoked: Option<jiff::Timestamp> =
         sqlx::query_scalar!("SELECT revoked_at FROM oauth_grants WHERE id = $1", grant)
             .fetch_one(&pool)
             .await
-            .unwrap();
+            .unwrap()
+            .map(Into::into);
     assert!(revoked.is_some());
 }
 

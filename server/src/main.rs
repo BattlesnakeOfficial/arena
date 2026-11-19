@@ -33,6 +33,7 @@ mod game_progress;
 mod game_runner;
 mod github;
 mod highlights;
+mod human_time;
 mod jobs;
 mod leaderboard_matchmaker;
 mod leaderboard_ratings;

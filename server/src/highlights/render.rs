@@ -39,8 +39,8 @@ pub fn render_markdown(digest: &ComputedDigest, base_url: &str) -> String {
     let mut out = String::new();
     out.push_str(&format!(
         "# Arena highlights: {} to {}\n\n",
-        digest.window_start.format("%a %b %d %H:%MZ"),
-        digest.window_end.format("%a %b %d %H:%MZ"),
+        digest.window_start.strftime("%a %b %d %H:%MZ"),
+        digest.window_end.strftime("%a %b %d %H:%MZ"),
     ));
     let counts = digest
         .per_ladder_counts
@@ -190,8 +190,8 @@ pub fn discord_message(
     let mut lines: Vec<String> = Vec::new();
     lines.push(format!(
         "**Arena highlights: {} – {}** ({} rated ladder games)",
-        digest.window_start.format("%b %-d"),
-        digest.window_end.format("%b %-d, %Y"),
+        digest.window_start.strftime("%b %-d"),
+        digest.window_end.strftime("%b %-d, %Y"),
         thousands(digest.games_count)
     ));
     if let Some(pick) = &picks.duel_photo_finish

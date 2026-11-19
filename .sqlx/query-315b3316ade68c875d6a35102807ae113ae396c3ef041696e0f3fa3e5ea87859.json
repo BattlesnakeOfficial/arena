@@ -6,12 +6,24 @@
       {
         "ordinal": 0,
         "name": "registration_id",
-        "type_info": "Uuid"
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "tournament_registrations",
+            "name": "registration_id"
+          }
+        }
       },
       {
         "ordinal": 1,
         "name": "tournament_id",
-        "type_info": "Uuid"
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "tournament_registrations",
+            "name": "tournament_id"
+          }
+        }
       }
     ],
     "parameters": {

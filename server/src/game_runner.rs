@@ -611,7 +611,7 @@ pub async fn run_game(app_state: &AppState, game_id: Uuid) -> cja::Result<()> {
             // UPDATE: a game the sweeper failed mid-run may already carry a
             // failed-era archive; finishing invalidates it so native backup
             // discovery re-archives the complete game (DEV-1980).
-            let finished_at = chrono::Utc::now();
+            let finished_at = jiff::Timestamp::now();
             crate::models::game::mark_game_finished_tx(&mut tx, game_id, finished_at).await?;
 
             if let Some(resolved) = &resolved_match_game {
@@ -742,7 +742,7 @@ fn emit_start_events(
     leaderboard_id: Option<Uuid>,
     wait_ms: i64,
     via: Option<&'static str>,
-    enqueued_at: Option<chrono::DateTime<chrono::Utc>>,
+    enqueued_at: Option<jiff::Timestamp>,
 ) {
     if let Some(leaderboard_id) = leaderboard_id {
         tracing::info!(event_type = "ladder_game_started", game_id = %game_id,
@@ -751,7 +751,7 @@ fn emit_start_events(
     }
     if let Some(enqueued_at) = enqueued_at {
         tracing::info!(metric_type = "queue_wait", game_id = %game_id,
-            duration_ms = chrono::Utc::now().signed_duration_since(enqueued_at).num_milliseconds(),
+            duration_ms = jiff::Timestamp::now().duration_since(enqueued_at).as_millis(),
             "game queue wait time");
     }
 }
@@ -919,7 +919,7 @@ mod tests {
                 Some(leaderboard_id),
                 1234,
                 Some("deadline"),
-                Some(chrono::Utc::now()),
+                Some(jiff::Timestamp::now()),
             );
         });
         let events = capture.0.lock().unwrap();
@@ -1036,11 +1036,18 @@ mod tests {
         .await?;
         let finished_at = credited
             .finished_at
-            .expect("finished game has exact finish instant");
-        use chrono::Datelike as _;
-        let monday = finished_at.date_naive()
-            - chrono::Duration::days(i64::from(finished_at.weekday().num_days_from_monday()));
-        assert_eq!(credited.week_start, monday);
+            .expect("finished game has exact finish instant")
+            .to_jiff();
+        let monday = finished_at
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+            .date()
+            - jiff::ToSpan::days(i64::from(
+                finished_at
+                    .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+                    .weekday()
+                    .to_monday_zero_offset(),
+            ));
+        assert_eq!(credited.week_start, cja::jiff_sqlx::Date::from(monday));
         assert_eq!(
             crate::customizations::token_balance(&pool, user_id).await?,
             1

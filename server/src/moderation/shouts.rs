@@ -955,8 +955,8 @@ mod tests {
                 is_admin: false,
                 site_theme: "system".to_string(),
                 theater_theme: "match".to_string(),
-                created_at: chrono::Utc::now(),
-                updated_at: chrono::Utc::now(),
+                created_at: jiff::Timestamp::now(),
+                updated_at: jiff::Timestamp::now(),
             }
         }
         let response = crate::routes::api::games::show_game(
@@ -1319,12 +1319,12 @@ mod tests {
     #[sqlx::test(migrations = "../migrations")]
     async fn distinct_shouts_from_archive_after_prune(pool: PgPool) -> cja::Result<()> {
         let state = AppState::test_from_pool(pool.clone());
-        let old = chrono::Utc::now() - chrono::Duration::days(40);
+        let old = jiff::Timestamp::now() - jiff::SignedDuration::from_hours(960);
 
         // Prunable native fixture with shouts.
         let game_id = fixture_game(&pool, "finished").await?;
         sqlx::query("UPDATE games SET created_at = $1, updated_at = $1 WHERE game_id = $2")
-            .bind(old)
+            .bind(cja::jiff_sqlx::Timestamp::from(old))
             .bind(game_id)
             .execute(&pool)
             .await?;
@@ -1332,7 +1332,7 @@ mod tests {
         let _ = user_id;
         let _ = snake_id;
         sqlx::query("UPDATE game_battlesnakes SET created_at = $1 WHERE game_id = $2")
-            .bind(old)
+            .bind(cja::jiff_sqlx::Timestamp::from(old))
             .bind(game_id)
             .execute(&pool)
             .await?;

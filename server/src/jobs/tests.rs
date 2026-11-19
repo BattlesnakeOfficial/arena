@@ -136,12 +136,12 @@ async fn run_idle_gate_burst(pool: PgPool, via_enqueue: bool) -> cja::Result<()>
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         }).await??;
-        let latest_start: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("SELECT max(started_at) FROM job_start_markers")
-            .fetch_one(&pool).await?;
-        let earliest_start: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("SELECT min(started_at) FROM job_start_markers")
-            .fetch_one(&pool).await?;
+        let latest_start: jiff::Timestamp = sqlx::query_scalar::<_, cja::jiff_sqlx::Timestamp>("SELECT max(started_at) FROM job_start_markers")
+            .fetch_one(&pool).await?.to_jiff();
+        let earliest_start: jiff::Timestamp = sqlx::query_scalar::<_, cja::jiff_sqlx::Timestamp>("SELECT min(started_at) FROM job_start_markers")
+            .fetch_one(&pool).await?.to_jiff();
         cja::color_eyre::eyre::ensure!(
-            latest_start - earliest_start < chrono::Duration::seconds(2),
+            latest_start - earliest_start < jiff::SignedDuration::from_secs(2),
             "burst took too long to enter job bodies"
         );
         Ok(())
@@ -831,16 +831,13 @@ async fn shared_key_types_never_run_concurrently(pool: PgPool) -> cja::Result<()
         })
         .await?;
 
-        let intervals: Vec<(
-            String,
-            chrono::DateTime<chrono::Utc>,
-            chrono::DateTime<chrono::Utc>,
-        )> = sqlx::query_as(
-            "SELECT kind, started_at, finished_at FROM shared_key_probe_markers \
+        let intervals: Vec<(String, cja::jiff_sqlx::Timestamp, cja::jiff_sqlx::Timestamp)> =
+            sqlx::query_as(
+                "SELECT kind, started_at, finished_at FROM shared_key_probe_markers \
                  ORDER BY started_at",
-        )
-        .fetch_all(&pool)
-        .await?;
+            )
+            .fetch_all(&pool)
+            .await?;
         cja::color_eyre::eyre::ensure!(
             intervals.len() == 4,
             "expected 4 probe markers, found {}",
@@ -1008,7 +1005,7 @@ async fn idle_claim_scan_rate_before_and_after_gate(pool: PgPool) -> cja::Result
         let before: i64 = sqlx::query_scalar(
             "SELECT seq_scan + idx_scan FROM pg_stat_user_tables WHERE schemaname = 'public' AND relname = 'jobs'"
         ).fetch_one(&mut *stats).await?;
-        let started_at = chrono::Utc::now();
+        let started_at = jiff::Timestamp::now();
         let instant = std::time::Instant::now();
         tokio::time::sleep(Duration::from_secs(60)).await;
         sqlx::query("SELECT pg_stat_clear_snapshot()")
@@ -1027,7 +1024,7 @@ async fn idle_claim_scan_rate_before_and_after_gate(pool: PgPool) -> cja::Result
                 .await?;
         println!(
             "gated={gated} started_at={started_at} ended_at={} workers=100 idle_pollers=2 interval_ms=200 before={before} after={after} delta={} elapsed_secs={elapsed:.3} scans_per_sec={:.2} queued={queued} running={running}",
-            chrono::Utc::now(),
+            jiff::Timestamp::now(),
             after - before,
             (after - before) as f64 / elapsed
         );
@@ -2636,8 +2633,12 @@ async fn confirmation_uses_hashed_single_use_link_and_user_mail_uses_confirmed_a
     );
     assert!(!format!("{row:?}").contains(secret));
     assert!(row.sent_at.is_some());
-    let ttl = row.expires_at.expect("expiry") - chrono::Utc::now();
-    assert!(ttl.num_hours() >= 23 && ttl.num_hours() <= 24);
+    let ttl = row
+        .expires_at
+        .expect("expiry")
+        .to_jiff()
+        .duration_since(jiff::Timestamp::now());
+    assert!(ttl.as_hours() >= 23 && ttl.as_hours() <= 24);
     let send_user = |user_id| NewNotification {
         user_id,
         kind: NotificationKind::SnakeMatchmakingPaused,

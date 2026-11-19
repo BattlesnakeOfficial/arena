@@ -5,8 +5,6 @@
 use std::collections::HashMap;
 use std::fmt;
 
-#[cfg(test)]
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize, de};
 
 /// Deserialize a value that could be either a string or an integer into an Option<String>.
@@ -291,7 +289,7 @@ pub struct GameExport {
     pub game_id: String,
     pub game: EngineGame,
     pub frames: Vec<EngineGameFrame>,
-    pub exported_at: DateTime<Utc>,
+    pub exported_at: jiff::Timestamp,
 }
 
 #[cfg(test)]

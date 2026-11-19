@@ -22,8 +22,8 @@ pub struct ModerationFlag {
     pub action_confidence: Option<f64>,
     pub action_block_mass: Option<f64>,
     pub model: Option<String>,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub reviewed_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub created_at: jiff::Timestamp,
+    pub reviewed_at: Option<jiff::Timestamp>,
     pub review_outcome: Option<String>,
 }
 
@@ -99,7 +99,7 @@ pub struct ModerationFlagListing {
     pub action_confidence: Option<f64>,
     pub action_block_mass: Option<f64>,
     pub model: Option<String>,
-    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub created_at: jiff::Timestamp,
 }
 
 /// Unreviewed flags, newest first. INNER JOIN: `user_id` is NOT NULL with

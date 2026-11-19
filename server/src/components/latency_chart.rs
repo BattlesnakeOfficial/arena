@@ -102,11 +102,11 @@ pub fn latency_chart(recent: &RecentLatency, timeout_ms: i64) -> Markup {
     let first_date = recent
         .games
         .first()
-        .map(|g| g.game_created_at.format("%b %-d").to_string());
+        .map(|g| g.game_created_at.strftime("%b %-d").to_string());
     let last_date = recent
         .games
         .last()
-        .map(|g| g.game_created_at.format("%b %-d").to_string());
+        .map(|g| g.game_created_at.strftime("%b %-d").to_string());
 
     html! {
         p class="latency-summary" {
@@ -145,7 +145,7 @@ pub fn latency_chart(recent: &RecentLatency, timeout_ms: i64) -> Markup {
             @for (i, game) in recent.games.iter().enumerate() {
                 a href=(format!("/games/{}", game.game_id)) {
                     title {
-                        (game.game_created_at.format("%Y-%m-%d %H:%M UTC"))
+                        (game.game_created_at.strftime("%Y-%m-%d %H:%M UTC"))
                         " · p50 " (fmt_ms(game.stats.p50_ms))
                         " · p95 " (fmt_ms(game.stats.p95_ms))
                         " · " (plural(game.stats.timeouts, "timeout"))
@@ -190,7 +190,6 @@ pub fn latency_chart(recent: &RecentLatency, timeout_ms: i64) -> Markup {
 mod tests {
     use super::*;
     use crate::models::snake_latency::GameLatency;
-    use chrono::{TimeZone as _, Utc};
     use proptest::prelude::*;
     use uuid::Uuid;
 
@@ -203,7 +202,18 @@ mod tests {
     ) -> GameLatency {
         GameLatency {
             game_id: Uuid::new_v4(),
-            game_created_at: Utc.with_ymd_and_hms(2026, 9, 29, 12, minute, 0).unwrap(),
+            game_created_at: jiff::civil::datetime(
+                2026,
+                9,
+                29,
+                12,
+                i8::try_from(minute).unwrap(),
+                0,
+                0,
+            )
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+            .unwrap()
+            .timestamp(),
             stats: LatencyStats {
                 answered,
                 timeouts,

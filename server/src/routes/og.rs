@@ -664,7 +664,10 @@ fn achievement_profile_card(earn: &crate::routes::achievements::EarnView) -> Pro
         subtitle,
         avatar: Some((shape(AssetKind::Head, def.head.slug()), color)),
         stats: vec![
-            Stat::new("Unlocked", earn.earned_at.format("%b %-d, %Y").to_string()),
+            Stat::new(
+                "Unlocked",
+                earn.earned_at.strftime("%b %-d, %Y").to_string(),
+            ),
             Stat::new("Reward", def.head.def().display_name.to_string()),
         ],
         highlight: None,
@@ -1570,12 +1573,12 @@ mod tests {
     #[sqlx::test(migrations = "../migrations")]
     async fn game_card_identical_before_and_after_prune(pool: PgPool) {
         let state = AppState::test_from_pool(pool.clone());
-        let old = chrono::Utc::now() - chrono::Duration::days(40);
+        let old = jiff::Timestamp::now() - jiff::SignedDuration::from_hours(960);
         let game_id: Uuid = sqlx::query_scalar(
             "INSERT INTO games (board_size, game_type, status, created_at, updated_at)
              VALUES ('11x11', 'Solo', 'finished', $1, $1) RETURNING game_id",
         )
-        .bind(old)
+        .bind(cja::jiff_sqlx::Timestamp::from(old))
         .fetch_one(&pool)
         .await
         .unwrap();
@@ -1600,7 +1603,7 @@ mod tests {
         )
         .bind(game_id)
         .bind(snake_id)
-        .bind(old)
+        .bind(cja::jiff_sqlx::Timestamp::from(old))
         .fetch_one(&pool)
         .await
         .unwrap();

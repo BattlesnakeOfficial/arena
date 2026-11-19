@@ -6,12 +6,24 @@
       {
         "ordinal": 0,
         "name": "created_at",
-        "type_info": "Timestamptz"
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "games",
+            "name": "created_at"
+          }
+        }
       },
       {
         "ordinal": 1,
         "name": "gcs_path",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "games",
+            "name": "gcs_path"
+          }
+        }
       }
     ],
     "parameters": {

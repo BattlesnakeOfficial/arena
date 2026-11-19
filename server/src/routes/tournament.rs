@@ -873,7 +873,7 @@ pub async fn list_tournaments(
                                         td { (status_badge(t.status)) }
                                         td class="r num" { (t.registration_count) }
                                         td class="r num" { (t.game_type.as_str()) }
-                                        td class="r num" { (t.created_at.format("%b %-d, %Y")) }
+                                        td class="r num" { (t.created_at.strftime("%b %-d, %Y")) }
                                     }
                                 }
                             }
@@ -1422,7 +1422,7 @@ pub async fn show_tournament(
                             div { dt { "Visibility" } dd { (t.visibility.as_str()) } }
                             div { dt { "Max snakes / user" } dd { (t.max_snakes_per_user) } }
                             div { dt { "Required to start" } dd { (t.required_participants) } }
-                            div { dt { "Created" } dd { (t.created_at.format("%b %-d, %Y")) } }
+                            div { dt { "Created" } dd { (t.created_at.strftime("%b %-d, %Y")) } }
                         }
                     }
                 }
@@ -2595,8 +2595,8 @@ mod tests {
             max_snakes_per_user: 1,
             required_participants: 2,
             current_round: 0,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
+            created_at: jiff::Timestamp::now(),
+            updated_at: jiff::Timestamp::now(),
         }
     }
 
@@ -2611,8 +2611,8 @@ mod tests {
             winner_id: None,
             visual_column: 0,
             visual_row: 0,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
+            created_at: jiff::Timestamp::now(),
+            updated_at: jiff::Timestamp::now(),
         }
     }
 
@@ -2843,7 +2843,7 @@ mod tests {
             battlesnake_id,
             user_id,
             seed,
-            registered_at: chrono::Utc::now(),
+            registered_at: jiff::Timestamp::now(),
         }
     }
 

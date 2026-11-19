@@ -1033,8 +1033,8 @@ fn home_ladder_grid(
 }
 
 /// Compact relative time for the home rail feed ("2m ago").
-fn home_fmt_ago(t: chrono::DateTime<chrono::Utc>) -> String {
-    let secs = (chrono::Utc::now() - t).num_seconds().max(0);
+fn home_fmt_ago(t: jiff::Timestamp) -> String {
+    let secs = (jiff::Timestamp::now() - t).as_secs().max(0);
     match secs {
         0..=59 => format!("{secs}s ago"),
         60..=3599 => format!("{}m ago", secs / 60),
@@ -1084,7 +1084,7 @@ async fn profile_page(
                         "@" (user.github_login)
                         @if !user.pronouns.is_empty() { " · " (user.pronouns) }
                         @if !user.country.is_empty() { " · " (crate::components::flag::country_meta(&user.country)) }
-                        " · joined " (user.created_at.format("%b %Y"))
+                        " · joined " (user.created_at.strftime("%b %Y"))
                     }
                     @if !user.backstory.is_empty() {
                         p class="bio" { (user.backstory) }
@@ -1154,8 +1154,8 @@ async fn profile_page(
                                 div { dt { "Email:" } dd { (email) } }
                             }
                             div { dt { "GitHub ID:" } dd { (user.external_github_id) } }
-                            div { dt { "Account created:" } dd { (user.created_at.format("%Y-%m-%d")) } }
-                            div { dt { "Last updated:" } dd { (user.updated_at.format("%Y-%m-%d")) } }
+                            div { dt { "Account created:" } dd { (user.created_at.strftime("%Y-%m-%d")) } }
+                            div { dt { "Last updated:" } dd { (user.updated_at.strftime("%Y-%m-%d")) } }
                         }
                     }
                 }

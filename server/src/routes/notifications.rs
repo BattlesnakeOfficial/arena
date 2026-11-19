@@ -4,8 +4,6 @@ use axum::{
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Redirect, Response},
 };
-use chrono::{DateTime, SecondsFormat, Utc};
-use chrono_humanize::HumanTime;
 use color_eyre::eyre::Context as _;
 use maud::{Markup, html};
 use serde::{Deserialize, Serialize};
@@ -31,9 +29,9 @@ impl CursorQuery {
         match (self.before, self.before_id) {
             (None, None) => Ok(None),
             (Some(before), Some(before_id)) => {
-                let created_at = DateTime::parse_from_rfc3339(&before)
-                    .map_err(|_| StatusCode::BAD_REQUEST)?
-                    .with_timezone(&Utc);
+                let created_at = before
+                    .parse::<jiff::Timestamp>()
+                    .map_err(|_| StatusCode::BAD_REQUEST)?;
                 let notification_id =
                     Uuid::parse_str(&before_id).map_err(|_| StatusCode::BAD_REQUEST)?;
                 Ok(Some(NotificationCursor {
@@ -48,9 +46,7 @@ impl CursorQuery {
 
 fn cursor_parts(cursor: NotificationCursor) -> (String, String) {
     (
-        cursor
-            .created_at
-            .to_rfc3339_opts(SecondsFormat::Micros, true),
+        format!("{:.6}", cursor.created_at),
         cursor.notification_id.to_string(),
     )
 }
@@ -245,8 +241,8 @@ fn item_markup(item: &NotificationRecord) -> Markup {
                     span class="notification-item-copy" {
                         span class="notification-item-title" { (item.title) }
                         span class="notification-item-body" { (body) @if shortened { "…" } }
-                        time datetime=(item.created_at.to_rfc3339_opts(SecondsFormat::Micros, true)) {
-                            (HumanTime::from(item.created_at).to_string())
+                        time datetime=(format!("{:.6}", item.created_at)) {
+                            (crate::human_time::human_time(item.created_at, jiff::Timestamp::now()))
                         }
                     }
                     @if item.read_at.is_none() { span class="notification-unread-marker" aria-hidden="true" { "New" } }

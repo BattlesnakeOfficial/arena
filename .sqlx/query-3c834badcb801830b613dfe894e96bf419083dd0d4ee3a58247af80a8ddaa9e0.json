@@ -6,7 +6,13 @@
       {
         "ordinal": 0,
         "name": "last_used_at",
-        "type_info": "Timestamptz"
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "api_tokens",
+            "name": "last_used_at"
+          }
+        }
       }
     ],
     "parameters": {

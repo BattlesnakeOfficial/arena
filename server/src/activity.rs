@@ -1,21 +1,27 @@
-use std::{collections::HashMap, sync::Mutex, time::Duration};
-
-use chrono::{NaiveDate, Utc};
+use jiff::civil::Date;
 use sqlx::PgPool;
+use std::{collections::HashMap, sync::Mutex, time::Duration};
 use uuid::Uuid;
 
 /// One attempted activity write per user and UTC day on this instance.
 #[derive(Default)]
 pub struct ActivityRecorder {
-    attempted: Mutex<HashMap<Uuid, NaiveDate>>,
+    attempted: Mutex<HashMap<Uuid, Date>>,
 }
 
 impl ActivityRecorder {
     pub async fn record(&self, db: &PgPool, user_id: Uuid) -> bool {
-        self.record_on(db, user_id, Utc::now().date_naive()).await
+        self.record_on(
+            db,
+            user_id,
+            jiff::Timestamp::now()
+                .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+                .date(),
+        )
+        .await
     }
 
-    async fn record_on(&self, db: &PgPool, user_id: Uuid, day: NaiveDate) -> bool {
+    async fn record_on(&self, db: &PgPool, user_id: Uuid, day: Date) -> bool {
         {
             let mut attempted = self.attempted.lock().unwrap_or_else(|e| e.into_inner());
             if attempted.get(&user_id).is_some_and(|last| *last >= day) {
@@ -27,7 +33,7 @@ impl ActivityRecorder {
         let write = sqlx::query!(
             "INSERT INTO user_activity_days (user_id, day) VALUES ($1, $2) ON CONFLICT (user_id, day) DO NOTHING",
             user_id,
-            day
+            cja::jiff_sqlx::Date::from(day)
         )
         .execute(db);
         match tokio::time::timeout(Duration::from_secs(1), write).await {
@@ -53,17 +59,19 @@ mod tests {
             "INSERT INTO users(external_github_id, github_login) VALUES (1, 'active') RETURNING user_id"
         ).fetch_one(&db).await.unwrap();
         let recorder = ActivityRecorder::default();
-        let day = Utc::now().date_naive();
+        let day = jiff::Timestamp::now()
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+            .date();
         assert!(recorder.record_on(&db, user_id, day).await);
         assert!(!recorder.record_on(&db, user_id, day).await);
         assert!(
             !recorder
-                .record_on(&db, user_id, day.pred_opt().unwrap())
+                .record_on(&db, user_id, day.yesterday().unwrap())
                 .await
         );
         assert!(
             recorder
-                .record_on(&db, user_id, day.succ_opt().unwrap())
+                .record_on(&db, user_id, day.tomorrow().unwrap())
                 .await
         );
         let count = sqlx::query_scalar!(

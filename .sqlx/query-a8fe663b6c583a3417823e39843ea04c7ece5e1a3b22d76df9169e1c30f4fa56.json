@@ -6,47 +6,101 @@
       {
         "ordinal": 0,
         "name": "digest_id",
-        "type_info": "Uuid"
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "highlight_digests",
+            "name": "digest_id"
+          }
+        }
       },
       {
         "ordinal": 1,
         "name": "window_start",
-        "type_info": "Timestamptz"
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "highlight_digests",
+            "name": "window_start"
+          }
+        }
       },
       {
         "ordinal": 2,
         "name": "window_end",
-        "type_info": "Timestamptz"
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "highlight_digests",
+            "name": "window_end"
+          }
+        }
       },
       {
         "ordinal": 3,
         "name": "games_count",
-        "type_info": "Int4"
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "highlight_digests",
+            "name": "games_count"
+          }
+        }
       },
       {
         "ordinal": 4,
         "name": "duel_calibration_k",
-        "type_info": "Float8"
+        "type_info": "Float8",
+        "origin": {
+          "Table": {
+            "table": "highlight_digests",
+            "name": "duel_calibration_k"
+          }
+        }
       },
       {
         "ordinal": 5,
         "name": "four_snake_calibration_k",
-        "type_info": "Float8"
+        "type_info": "Float8",
+        "origin": {
+          "Table": {
+            "table": "highlight_digests",
+            "name": "four_snake_calibration_k"
+          }
+        }
       },
       {
         "ordinal": 6,
         "name": "discord_status",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "highlight_digests",
+            "name": "discord_status"
+          }
+        }
       },
       {
         "ordinal": 7,
         "name": "discord_posted_at",
-        "type_info": "Timestamptz"
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "highlight_digests",
+            "name": "discord_posted_at"
+          }
+        }
       },
       {
         "ordinal": 8,
         "name": "computed_at",
-        "type_info": "Timestamptz"
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "highlight_digests",
+            "name": "computed_at"
+          }
+        }
       }
     ],
     "parameters": {

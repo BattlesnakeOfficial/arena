@@ -19,7 +19,7 @@ pub struct MeResponse {
     pub pronouns: Option<String>,
     pub country: Option<String>,
     pub profile_url: String,
-    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub created_at: jiff::Timestamp,
 }
 
 /// GET /api/me - profile of the authenticated user (Bearer token or session).
@@ -157,7 +157,7 @@ mod tests {
         assert_eq!(json["country"], "CA");
         assert_eq!(json["profile_url"], "http://localhost:3000/users/gh-me");
         let created_at = json["created_at"].as_str().unwrap();
-        assert!(chrono::DateTime::parse_from_rfc3339(created_at).is_ok());
+        assert!((created_at).parse::<jiff::Timestamp>().is_ok());
 
         // Full-power token: the seeded email is included.
         assert_eq!(json["email"], "octo@example.com");

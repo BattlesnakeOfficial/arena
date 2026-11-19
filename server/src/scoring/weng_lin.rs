@@ -161,8 +161,8 @@ impl ScoringAlgorithm for WengLinScoring {
                 first_place_finishes: 0,
                 non_first_finishes: 0,
                 disabled_at: None,
-                created_at: chrono::Utc::now(),
-                updated_at: chrono::Utc::now(),
+                created_at: jiff::Timestamp::now(),
+                updated_at: jiff::Timestamp::now(),
             };
             entries_with_placements.push((entry, result.placement));
         }
@@ -299,8 +299,8 @@ mod tests {
             non_first_finishes: 3,
             disabled_at: None,
             disabled_reason: None,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
+            created_at: jiff::Timestamp::now(),
+            updated_at: jiff::Timestamp::now(),
         }
     }
 

@@ -24,7 +24,7 @@ pub struct HealthResponse {
     pub version: &'static str,
     pub git_sha: &'static str,
     pub database_reachable: bool,
-    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub timestamp: jiff::Timestamp,
 }
 
 /// `GET`/`HEAD /health` — unauthenticated, cheap, no template rendering.
@@ -54,7 +54,7 @@ pub async fn health(
             version: SERVER_VERSION,
             git_sha: GIT_SHA,
             database_reachable,
-            timestamp: chrono::Utc::now(),
+            timestamp: jiff::Timestamp::now(),
         }),
     )
 }

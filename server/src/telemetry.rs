@@ -54,9 +54,7 @@ where
         // Add timestamp
         map.insert(
             "time".to_string(),
-            serde_json::Value::String(
-                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-            ),
+            serde_json::Value::String(format!("{:.3}", jiff::Timestamp::now())),
         );
 
         // Walk spans to find TraceContext

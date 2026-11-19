@@ -6,7 +6,13 @@
       {
         "ordinal": 0,
         "name": "revoked_at",
-        "type_info": "Timestamptz"
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "api_tokens",
+            "name": "revoked_at"
+          }
+        }
       }
     ],
     "parameters": {

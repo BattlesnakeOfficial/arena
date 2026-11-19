@@ -1267,7 +1267,7 @@ fn render_battlesnake_profile(view: &ProfileView<'_>) -> Markup {
                                 }
                             }
                         }
-                        span { "created " (snake.created_at.format("%b %-d, %Y")) }
+                        span { "created " (snake.created_at.strftime("%b %-d, %Y")) }
                         span { "head " (display_head) }
                         span { "tail " (display_tail) }
                         span {
@@ -1469,8 +1469,8 @@ fn render_battlesnake_profile(view: &ProfileView<'_>) -> Markup {
                                     @let finished = entry.status == crate::models::game::GameStatus::Finished;
                                     tr {
                                         td class="when" {
-                                            (entry.created_at.format("%b %-d"))
-                                            span class="sub" { (entry.created_at.format("%H:%M")) }
+                                            (entry.created_at.strftime("%b %-d"))
+                                            span class="sub" { (entry.created_at.strftime("%H:%M")) }
                                         }
                                         td {
                                             (entry.game_type.as_str())

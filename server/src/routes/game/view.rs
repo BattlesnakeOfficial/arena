@@ -320,7 +320,7 @@ pub async fn view_game(
                             div { dt { "Board" } dd { (game.board_size.as_str()) } }
                             div { dt { "Mode" } dd { (game.game_type.as_str()) } }
                             div { dt { "Status" } dd { (capitalize(game.status.as_str())) } }
-                            div { dt { "Created" } dd { (game.created_at.format("%Y-%m-%d %H:%M UTC")) } }
+                            div { dt { "Created" } dd { (game.created_at.strftime("%Y-%m-%d %H:%M UTC")) } }
                             @if let Some(stats) = &solo_stats {
                                 // "Turns Survived" is the final frame's turn
                                 // number verbatim: the same number the board
@@ -638,8 +638,8 @@ mod tests {
             is_admin: false,
             site_theme: site.to_string(),
             theater_theme: theater.to_string(),
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
+            created_at: jiff::Timestamp::now(),
+            updated_at: jiff::Timestamp::now(),
         }
     }
 

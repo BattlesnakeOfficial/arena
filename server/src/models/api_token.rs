@@ -17,9 +17,38 @@ pub struct ApiToken {
     pub token_hash: String,
     pub name: String,
     pub snake_access: SnakeAccess,
-    pub last_used_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub last_used_at: Option<jiff::Timestamp>,
+    #[sqlx(try_from = "cja::jiff_sqlx::Timestamp")]
+    pub created_at: jiff::Timestamp,
+    pub revoked_at: Option<jiff::Timestamp>,
+}
+
+/// `ApiToken` as `query_as!` decodes it: nullable date/time columns come back as
+/// `Option<cja::jiff_sqlx::*>`, which has no `Into<Option<jiff::*>>`.
+pub(crate) struct ApiTokenRow {
+    pub(crate) id: Uuid,
+    pub(crate) user_id: Uuid,
+    pub(crate) token_hash: String,
+    pub(crate) name: String,
+    pub(crate) snake_access: SnakeAccess,
+    pub(crate) last_used_at: Option<cja::jiff_sqlx::Timestamp>,
+    pub(crate) created_at: jiff::Timestamp,
+    pub(crate) revoked_at: Option<cja::jiff_sqlx::Timestamp>,
+}
+
+impl From<ApiTokenRow> for ApiToken {
+    fn from(row: ApiTokenRow) -> Self {
+        Self {
+            id: row.id,
+            user_id: row.user_id,
+            token_hash: row.token_hash,
+            name: row.name,
+            snake_access: row.snake_access,
+            last_used_at: row.last_used_at.map(Into::into),
+            created_at: row.created_at,
+            revoked_at: row.revoked_at.map(Into::into),
+        }
+    }
 }
 
 /// A token's scope, loaded at auth time: permission set + snake access.
@@ -157,7 +186,7 @@ pub async fn create_api_token_on(
     let token_hash = hash_token(&secret);
 
     let token = sqlx::query_as!(
-        ApiToken,
+        ApiTokenRow,
         r#"
         INSERT INTO api_tokens (user_id, token_hash, name, snake_access, oauth_grant_id)
         VALUES ($1, $2, $3, $4, $5)
@@ -207,7 +236,10 @@ pub async fn create_api_token_on(
         .wrap_err("Failed to insert token snake access")?;
     }
 
-    Ok(NewApiToken { token, secret })
+    Ok(NewApiToken {
+        token: token.into(),
+        secret,
+    })
 }
 
 /// Add a snake to a token's selected-access list (idempotent). Used when a
@@ -272,9 +304,9 @@ async fn load_token_summaries(
                 token_hash: row.token_hash,
                 name: row.name,
                 snake_access: row.snake_access,
-                last_used_at: row.last_used_at,
-                created_at: row.created_at,
-                revoked_at: row.revoked_at,
+                last_used_at: row.last_used_at.map(Into::into),
+                created_at: row.created_at.to_jiff(),
+                revoked_at: row.revoked_at.map(Into::into),
             },
         })
         .collect())

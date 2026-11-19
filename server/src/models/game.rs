@@ -168,9 +168,9 @@ pub struct Game {
     pub board_size: GameBoardSize,
     pub game_type: GameType,
     pub status: GameStatus,
-    pub enqueued_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub enqueued_at: Option<jiff::Timestamp>,
+    pub created_at: jiff::Timestamp,
+    pub updated_at: jiff::Timestamp,
 }
 
 // For creating a new game
@@ -226,7 +226,7 @@ pub enum StartClaim {
         via: Option<&'static str>,
         /// Read under the claim's row lock, so a dispatcher that stamped it in a
         /// still-open transaction is waited for rather than read stale.
-        enqueued_at: Option<chrono::DateTime<chrono::Utc>>,
+        enqueued_at: Option<jiff::Timestamp>,
     },
     Busy,
     AlreadyRunning,
@@ -237,15 +237,15 @@ pub enum StartClaim {
 pub(crate) struct ScheduleGame {
     pub game_id: Uuid,
     pub status: String,
-    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub created_at: jiff::Timestamp,
     pub leaderboard_id: Option<Uuid>,
-    pub disabled_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub disabled_at: Option<jiff::Timestamp>,
     pub participants: Vec<Uuid>,
 }
 
 #[derive(Debug)]
 pub(crate) struct ScheduleSnapshot {
-    pub at: chrono::DateTime<chrono::Utc>,
+    pub at: jiff::Timestamp,
     pub games: Vec<ScheduleGame>,
 }
 
@@ -275,15 +275,15 @@ pub(crate) async fn load_schedule_snapshot(
         .await
         .wrap_err("Failed to read schedule clock")?;
     Ok(ScheduleSnapshot {
-        at,
+        at: at.to_jiff(),
         games: rows
             .into_iter()
             .map(|r| ScheduleGame {
                 game_id: r.game_id,
                 status: r.status,
-                created_at: r.created_at,
+                created_at: r.created_at.to_jiff(),
                 leaderboard_id: r.leaderboard_id,
-                disabled_at: r.disabled_at,
+                disabled_at: r.disabled_at.map(Into::into),
                 participants: r.participants,
             })
             .collect(),
@@ -322,12 +322,7 @@ fn base_eligibility(
     if conflicts.is_empty() {
         return Some("free");
     }
-    if snapshot
-        .at
-        .signed_duration_since(game.created_at)
-        .num_seconds()
-        >= deadline_secs
-    {
+    if snapshot.at.duration_since(game.created_at).as_secs() >= deadline_secs {
         Some("deadline")
     } else {
         None
@@ -347,11 +342,7 @@ fn reserves_same_ladder(
         && game.leaderboard_id.is_some()
         && game.disabled_at.is_none()
         && !game.participants.is_empty()
-        && snapshot
-            .at
-            .signed_duration_since(game.created_at)
-            .num_seconds()
-            >= deadline_secs
+        && snapshot.at.duration_since(game.created_at).as_secs() >= deadline_secs
 }
 
 /// Oldest base-eligible game sharing a participant wins this dispatch cycle,
@@ -456,9 +447,10 @@ pub async fn claim_game_start(
     }
     let wait_ms = snapshot
         .at
-        .signed_duration_since(target.created_at)
-        .num_milliseconds()
+        .duration_since(target.created_at.to_jiff())
+        .as_millis()
         .max(0);
+    let wait_ms = i64::try_from(wait_ms).unwrap_or(i64::MAX);
     tx.commit()
         .await
         .wrap_err("Failed to commit game start claim")?;
@@ -466,14 +458,13 @@ pub async fn claim_game_start(
         leaderboard_id,
         wait_ms,
         via,
-        enqueued_at: target.enqueued_at,
+        enqueued_at: target.enqueued_at.map(Into::into),
     })
 }
 
 #[cfg(test)]
 mod ladder_dispatch_tests {
     use super::*;
-    use chrono::{Duration, Utc};
 
     fn game(
         id: u128,
@@ -485,7 +476,7 @@ mod ladder_dispatch_tests {
         ScheduleGame {
             game_id: Uuid::from_u128(id),
             status: status.into(),
-            created_at: Utc::now() - Duration::seconds(age),
+            created_at: jiff::Timestamp::now() - jiff::SignedDuration::from_secs(age),
             leaderboard_id: ladder,
             disabled_at: None,
             participants: snakes.to_vec(),
@@ -499,11 +490,11 @@ mod ladder_dispatch_tests {
         let running = game(10, "running", 20, None, &[snake]);
         let waiting = game(11, "waiting", 479, Some(ladder), &[snake]);
         let mut snapshot = ScheduleSnapshot {
-            at: Utc::now(),
+            at: jiff::Timestamp::now(),
             games: vec![running, waiting],
         };
         assert_eq!(ladder_eligibility(&snapshot, &snapshot.games[1], 480), None);
-        snapshot.games[1].created_at = snapshot.at - Duration::seconds(480);
+        snapshot.games[1].created_at = snapshot.at - jiff::SignedDuration::from_secs(480);
         assert_eq!(
             ladder_eligibility(&snapshot, &snapshot.games[1], 480),
             Some("deadline")
@@ -517,7 +508,7 @@ mod ladder_dispatch_tests {
         let snake = Uuid::from_u128(1);
         let ladder = Uuid::from_u128(2);
         let mut snapshot = ScheduleSnapshot {
-            at: Utc::now(),
+            at: jiff::Timestamp::now(),
             games: vec![
                 game(1, "waiting", 20, Some(ladder), &[snake]),
                 game(2, "waiting", 10, Some(ladder), &[snake]),
@@ -546,7 +537,7 @@ mod ladder_dispatch_tests {
     fn equal_creation_time_uses_game_id_for_fifo() {
         let snake = Uuid::from_u128(1);
         let ladder = Uuid::from_u128(2);
-        let at = Utc::now();
+        let at = jiff::Timestamp::now();
         let mut younger_id = game(20, "waiting", 0, Some(ladder), &[snake]);
         let mut older_id = game(10, "waiting", 0, Some(ladder), &[snake]);
         younger_id.created_at = at;
@@ -568,7 +559,7 @@ mod ladder_dispatch_tests {
         let blocked = Uuid::from_u128(2);
         let ladder = Uuid::from_u128(3);
         let snapshot = ScheduleSnapshot {
-            at: Utc::now(),
+            at: jiff::Timestamp::now(),
             games: vec![
                 game(10, "waiting", 30, Some(ladder), &[shared, blocked]),
                 game(11, "waiting", 20, Some(ladder), &[shared]),
@@ -591,7 +582,7 @@ mod ladder_dispatch_tests {
         let held = game(10, "waiting", 500, Some(ladder), &[shared, blocked]);
         let blocker = game(12, "running", 600, Some(ladder), &[blocked]);
         let same_ladder = ScheduleSnapshot {
-            at: Utc::now(),
+            at: jiff::Timestamp::now(),
             games: vec![
                 held.clone(),
                 game(11, "waiting", 20, Some(ladder), &[shared]),
@@ -608,7 +599,7 @@ mod ladder_dispatch_tests {
             "a younger same-ladder game must not take a past-deadline game's snake"
         );
         let other = ScheduleSnapshot {
-            at: Utc::now(),
+            at: jiff::Timestamp::now(),
             games: vec![
                 held,
                 blocker,
@@ -687,9 +678,9 @@ pub async fn get_game_by_id(pool: &PgPool, game_id: Uuid) -> cja::Result<Option<
                 board_size,
                 game_type,
                 status,
-                enqueued_at: row.enqueued_at,
-                created_at: row.created_at,
-                updated_at: row.updated_at,
+                enqueued_at: row.enqueued_at.map(Into::into),
+                created_at: row.created_at.to_jiff(),
+                updated_at: row.updated_at.to_jiff(),
             })
         }
         None => None,
@@ -756,9 +747,9 @@ pub async fn get_game_row_by_any_id(pool: &PgPool, id: Uuid) -> cja::Result<Opti
             board_size,
             game_type,
             status,
-            enqueued_at: row.enqueued_at,
-            created_at: row.created_at,
-            updated_at: row.updated_at,
+            enqueued_at: row.enqueued_at.map(Into::into),
+            created_at: row.created_at.to_jiff(),
+            updated_at: row.updated_at.to_jiff(),
         },
         engine_game_id: row.engine_game_id,
         gcs_path: row.gcs_path,
@@ -870,9 +861,9 @@ pub async fn create_game_with_snakes_for_user(
         board_size: data.board_size,
         game_type: data.game_type,
         status: GameStatus::from_str(&row.status)?,
-        enqueued_at: row.enqueued_at,
-        created_at: row.created_at,
-        updated_at: row.updated_at,
+        enqueued_at: row.enqueued_at.map(Into::into),
+        created_at: row.created_at.to_jiff(),
+        updated_at: row.updated_at.to_jiff(),
     })
 }
 
@@ -950,9 +941,9 @@ where
         game_type: data.game_type,
         status: GameStatus::from_str(&row.status)
             .wrap_err_with(|| format!("Invalid game status: {}", row.status))?,
-        enqueued_at: row.enqueued_at,
-        created_at: row.created_at,
-        updated_at: row.updated_at,
+        enqueued_at: row.enqueued_at.map(Into::into),
+        created_at: row.created_at.to_jiff(),
+        updated_at: row.updated_at.to_jiff(),
     })
 }
 
@@ -1027,7 +1018,7 @@ where
 pub async fn mark_game_finished_tx(
     conn: &mut sqlx::PgConnection,
     game_id: Uuid,
-    finished_at: chrono::DateTime<chrono::Utc>,
+    finished_at: jiff::Timestamp,
 ) -> cja::Result<()> {
     let updated = sqlx::query!(
         r#"UPDATE games
@@ -1037,7 +1028,7 @@ pub async fn mark_game_finished_tx(
              AND status IN ('running', 'failed')"#,
         game_id,
         GameStatus::Finished.as_str(),
-        finished_at,
+        cja::jiff_sqlx::Timestamp::from(finished_at),
     )
     .execute(&mut *conn)
     .await
@@ -1087,7 +1078,7 @@ pub async fn touch_game_updated_at(pool: &PgPool, game_id: Uuid) -> cja::Result<
 pub async fn get_game_last_activity(
     pool: &PgPool,
     game_id: Uuid,
-) -> cja::Result<Option<chrono::DateTime<chrono::Utc>>> {
+) -> cja::Result<Option<jiff::Timestamp>> {
     let last_activity = sqlx::query_scalar!(
         r#"
         SELECT GREATEST(
@@ -1103,7 +1094,7 @@ pub async fn get_game_last_activity(
     .await
     .wrap_err("Failed to fetch game last activity")?;
 
-    Ok(last_activity)
+    Ok(last_activity.map(Into::into))
 }
 
 /// Wipe the per-game state a previous (crashed) run left behind so `run_game`
@@ -1143,7 +1134,7 @@ pub async fn reset_game_state_for_retry(pool: &PgPool, game_id: Uuid) -> cja::Re
 pub async fn set_game_enqueued_at(
     pool: &PgPool,
     game_id: Uuid,
-    enqueued_at: chrono::DateTime<chrono::Utc>,
+    enqueued_at: jiff::Timestamp,
 ) -> cja::Result<()> {
     sqlx::query!(
         r#"
@@ -1152,7 +1143,7 @@ pub async fn set_game_enqueued_at(
         WHERE game_id = $1
         "#,
         game_id,
-        enqueued_at
+        cja::jiff_sqlx::Timestamp::from(enqueued_at)
     )
     .execute(pool)
     .await
@@ -1165,7 +1156,7 @@ pub async fn set_game_enqueued_at(
 pub async fn set_game_enqueued_at_tx(
     conn: &mut sqlx::PgConnection,
     game_id: Uuid,
-    enqueued_at: chrono::DateTime<chrono::Utc>,
+    enqueued_at: jiff::Timestamp,
 ) -> cja::Result<()> {
     sqlx::query!(
         r#"
@@ -1174,7 +1165,7 @@ pub async fn set_game_enqueued_at_tx(
         WHERE game_id = $1
         "#,
         game_id,
-        enqueued_at
+        cja::jiff_sqlx::Timestamp::from(enqueued_at)
     )
     .execute(&mut *conn)
     .await
@@ -2033,7 +2024,7 @@ mod tests {
 
         // First finish: succeeds and commits.
         let mut tx = pool.begin().await?;
-        mark_game_finished_tx(&mut tx, game_id, chrono::Utc::now()).await?;
+        mark_game_finished_tx(&mut tx, game_id, jiff::Timestamp::now()).await?;
         tx.commit().await?;
 
         // Stand in for a real archiver's bookkeeping: the refused finish
@@ -2052,14 +2043,15 @@ mod tests {
         #[derive(sqlx::FromRow)]
         struct FinishGuardRow {
             status: String,
-            finished_at: Option<chrono::DateTime<chrono::Utc>>,
-            archived_at: Option<chrono::DateTime<chrono::Utc>>,
+            finished_at: Option<cja::jiff_sqlx::Timestamp>,
+            archived_at: Option<cja::jiff_sqlx::Timestamp>,
             gcs_path: Option<String>,
             archive_version: Option<i32>,
-            updated_at: chrono::DateTime<chrono::Utc>,
+            #[sqlx(try_from = "cja::jiff_sqlx::Timestamp")]
+            updated_at: jiff::Timestamp,
         }
         async fn read_row(pool: &sqlx::PgPool, game_id: Uuid) -> cja::Result<FinishGuardRow> {
-            Ok(sqlx::query_as(
+            Ok(sqlx::query_as::<_, FinishGuardRow>(
                 "SELECT status, finished_at, archived_at, gcs_path, archive_version, updated_at
                      FROM games WHERE game_id = $1",
             )
@@ -2073,7 +2065,7 @@ mod tests {
         // Second finish: refused, and its uncommitted transaction (which the
         // caller would have written placements into) rolls back on drop.
         let mut tx = pool.begin().await?;
-        let result = mark_game_finished_tx(&mut tx, game_id, chrono::Utc::now()).await;
+        let result = mark_game_finished_tx(&mut tx, game_id, jiff::Timestamp::now()).await;
         assert!(result.is_err(), "second finish must error, not no-op");
         drop(tx);
 
@@ -2096,7 +2088,7 @@ mod tests {
         let game_id = fixture_bare_game(&pool, "failed").await?;
 
         let mut tx = pool.begin().await?;
-        mark_game_finished_tx(&mut tx, game_id, chrono::Utc::now()).await?;
+        mark_game_finished_tx(&mut tx, game_id, jiff::Timestamp::now()).await?;
         tx.commit().await?;
 
         let status: String = sqlx::query_scalar("SELECT status FROM games WHERE game_id = $1")
@@ -2116,7 +2108,7 @@ mod tests {
 
         let mut tx = pool.begin().await?;
         assert!(
-            mark_game_finished_tx(&mut tx, game_id, chrono::Utc::now())
+            mark_game_finished_tx(&mut tx, game_id, jiff::Timestamp::now())
                 .await
                 .is_err()
         );
@@ -2188,7 +2180,7 @@ mod tests {
         .fetch_one(&pool)
         .await?;
 
-        let finished_at = chrono::Utc::now();
+        let finished_at = jiff::Timestamp::now();
 
         // Holder: finish + record winner_a, NOT committed — holds the row locks.
         let mut holder = pool.begin().await?;
@@ -2208,7 +2200,7 @@ mod tests {
         let second = tokio::spawn(async move {
             let outcome: cja::Result<()> = async {
                 let mut tx = p.begin().await?;
-                mark_game_finished_tx(&mut tx, game_id, chrono::Utc::now()).await?;
+                mark_game_finished_tx(&mut tx, game_id, jiff::Timestamp::now()).await?;
                 crate::models::tournament::set_match_game_winner(
                     &mut *tx,
                     match_game_id,
@@ -2237,7 +2229,7 @@ mod tests {
                 .await?;
         assert_eq!(winner_id, Some(snake_a));
 
-        let (status, stored_finished_at): (String, Option<chrono::DateTime<chrono::Utc>>) =
+        let (status, stored_finished_at): (String, Option<cja::jiff_sqlx::Timestamp>) =
             sqlx::query_as("SELECT status, finished_at FROM games WHERE game_id = $1")
                 .bind(game_id)
                 .fetch_one(&pool)
@@ -2245,8 +2237,8 @@ mod tests {
         assert_eq!(status, "finished");
         // timestamptz truncates to microseconds; compare at that precision.
         assert_eq!(
-            stored_finished_at.map(|t| t.timestamp_micros()),
-            Some(finished_at.timestamp_micros())
+            stored_finished_at.map(|t| t.to_jiff().as_microsecond()),
+            Some(finished_at.as_microsecond())
         );
 
         Ok(())

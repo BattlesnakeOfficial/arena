@@ -257,7 +257,7 @@ pub(crate) async fn run_cron(
     Worker::new_with_timezone(
         app_state,
         registry,
-        cja::chrono_tz::UTC,
+        jiff::tz::TimeZone::UTC,
         Duration::from_secs(CRON_POLL_SECS),
     )
     .run(shutdown)
@@ -388,32 +388,33 @@ mod tests {
         // 20261103210000 seeds the crons row: without it, cja's
         // IntervalSchedule::should_run treats the cron as never-run and
         // the first tick (2s poll) enqueues the prune batch at boot.
-        let last_run_at: chrono::DateTime<chrono::Utc> =
+        let last_run_at: jiff::Timestamp =
             sqlx::query_scalar!("SELECT last_run_at FROM crons WHERE name = 'TurnRetentionJob'")
                 .fetch_one(&pool)
                 .await
-                .expect("20261103210000 must seed the TurnRetentionJob cron row");
+                .expect("20261103210000 must seed the TurnRetentionJob cron row")
+                .to_jiff();
         let registry = cron_registry(&AppConfig::test_default());
         let job = registry
             .get("TurnRetentionJob")
             .expect("turn retention registered");
         // One second after the seeded last_run_at — i.e. right after the
         // deploy that applied the migration — the tick must not fire.
-        let just_after_boot = last_run_at + chrono::Duration::seconds(1);
+        let just_after_boot = last_run_at + jiff::SignedDuration::from_secs(1);
         assert!(!job.schedule.should_run(
             Some(&last_run_at),
             just_after_boot,
             just_after_boot,
-            cja::chrono_tz::UTC
+            &jiff::tz::TimeZone::UTC
         ));
         // One registered interval (hourly) plus a second later, it must.
         let one_interval_later =
-            last_run_at + chrono::Duration::hours(1) + chrono::Duration::seconds(1);
+            last_run_at + jiff::SignedDuration::from_hours(1) + jiff::SignedDuration::from_secs(1);
         assert!(job.schedule.should_run(
             Some(&last_run_at),
             one_interval_later,
             one_interval_later,
-            cja::chrono_tz::UTC
+            &jiff::tz::TimeZone::UTC
         ));
     }
 
@@ -440,29 +441,30 @@ mod tests {
         // IntervalSchedule::should_run treats the cron as never-run and
         // the first tick (2s poll) enqueues the prune at boot — against
         // the 1M-row prod backlog.
-        let last_run_at: chrono::DateTime<chrono::Utc> =
+        let last_run_at: jiff::Timestamp =
             sqlx::query_scalar!("SELECT last_run_at FROM crons WHERE name = 'SessionPruneJob'")
                 .fetch_one(&pool)
                 .await
-                .expect("20261108160000 must seed the SessionPruneJob cron row");
+                .expect("20261108160000 must seed the SessionPruneJob cron row")
+                .to_jiff();
         let registry = cron_registry(&AppConfig::test_default());
         let job = registry
             .get("SessionPruneJob")
             .expect("session prune registered");
-        let just_after_boot = last_run_at + chrono::Duration::seconds(1);
+        let just_after_boot = last_run_at + jiff::SignedDuration::from_secs(1);
         assert!(!job.schedule.should_run(
             Some(&last_run_at),
             just_after_boot,
             just_after_boot,
-            cja::chrono_tz::UTC
+            &jiff::tz::TimeZone::UTC
         ));
         let one_interval_later =
-            last_run_at + chrono::Duration::hours(1) + chrono::Duration::seconds(1);
+            last_run_at + jiff::SignedDuration::from_hours(1) + jiff::SignedDuration::from_secs(1);
         assert!(job.schedule.should_run(
             Some(&last_run_at),
             one_interval_later,
             one_interval_later,
-            cja::chrono_tz::UTC
+            &jiff::tz::TimeZone::UTC
         ));
     }
 
@@ -491,30 +493,31 @@ mod tests {
         // 20261105000000 seeds the crons row: without it, cja's
         // IntervalSchedule::should_run treats the cron as never-run and
         // the first tick (2s poll) enqueues the walk at boot.
-        let last_run_at: chrono::DateTime<chrono::Utc> =
+        let last_run_at: jiff::Timestamp =
             sqlx::query_scalar!("SELECT last_run_at FROM crons WHERE name = 'PlayHistoryWalkJob'")
                 .fetch_one(&pool)
                 .await
-                .expect("20261105000000 must seed the PlayHistoryWalkJob cron row");
+                .expect("20261105000000 must seed the PlayHistoryWalkJob cron row")
+                .to_jiff();
         let registry = cron_registry(&AppConfig::test_default());
         let job = registry
             .get("PlayHistoryWalkJob")
             .expect("play history walk registered");
-        let just_after_boot = last_run_at + chrono::Duration::seconds(1);
+        let just_after_boot = last_run_at + jiff::SignedDuration::from_secs(1);
         assert!(!job.schedule.should_run(
             Some(&last_run_at),
             just_after_boot,
             just_after_boot,
-            cja::chrono_tz::UTC
+            &jiff::tz::TimeZone::UTC
         ));
         let one_interval_later = last_run_at
-            + chrono::Duration::seconds(PLAY_HISTORY_WALK_INTERVAL_SECS as i64)
-            + chrono::Duration::seconds(1);
+            + jiff::SignedDuration::from_secs(PLAY_HISTORY_WALK_INTERVAL_SECS as i64)
+            + jiff::SignedDuration::from_secs(1);
         assert!(job.schedule.should_run(
             Some(&last_run_at),
             one_interval_later,
             one_interval_later,
-            cja::chrono_tz::UTC
+            &jiff::tz::TimeZone::UTC
         ));
     }
 
@@ -560,17 +563,20 @@ mod tests {
             interval.0,
             Duration::from_secs(CUSTOMIZATION_ACTIVE_WEEK_BACKFILL_INTERVAL_SECS)
         );
-        let now = chrono::Utc::now();
-        assert!(job.schedule.should_run(None, now, now, cja::chrono_tz::UTC));
+        let now = jiff::Timestamp::now();
+        assert!(
+            job.schedule
+                .should_run(None, now, now, &jiff::tz::TimeZone::UTC)
+        );
         assert!(
             !job.schedule
-                .should_run(Some(&now), now, now, cja::chrono_tz::UTC)
+                .should_run(Some(&now), now, now, &jiff::tz::TimeZone::UTC)
         );
         assert!(job.schedule.should_run(
-            Some(&(now - chrono::Duration::hours(2))),
+            Some(&(now - jiff::SignedDuration::from_hours(2))),
             now,
             now,
-            cja::chrono_tz::UTC
+            &jiff::tz::TimeZone::UTC
         ));
     }
 

@@ -50,7 +50,7 @@ pub enum UnlockOutcome {
 pub async fn record_active_week_for_game(
     conn: &mut PgConnection,
     game_id: Uuid,
-    finished_at: chrono::DateTime<chrono::Utc>,
+    finished_at: jiff::Timestamp,
 ) -> cja::Result<u64> {
     let result = sqlx::query!(
         r#"
@@ -65,7 +65,7 @@ pub async fn record_active_week_for_game(
         ON CONFLICT (user_id, week_start) DO NOTHING
         "#,
         game_id,
-        finished_at,
+        cja::jiff_sqlx::Timestamp::from(finished_at),
     )
     .execute(conn)
     .await
@@ -218,15 +218,17 @@ pub async fn backfill_active_weeks(pool: &PgPool) -> cja::Result<u64> {
         )
         .fetch_one(&mut *tx).await
         .wrap_err("Failed to lock active-week backfill cursor")?
-        .scanned_through;
-        let run_now = chrono::Utc::now();
+        .scanned_through
+        .to_jiff();
+        let run_now = jiff::Timestamp::now();
         let advancing = cursor < run_now;
         let batch_end = if advancing {
-            (cursor + chrono::Duration::days(7)).min(run_now)
+            (cursor + jiff::SignedDuration::from_hours(168)).min(run_now)
         } else {
             run_now
         };
-        let window_start = if advancing { cursor } else { run_now } - chrono::Duration::days(1);
+        let window_start =
+            if advancing { cursor } else { run_now } - jiff::SignedDuration::from_hours(24);
         let inserted = sqlx::query!(
             r#"
             WITH window_links AS MATERIALIZED (
@@ -254,8 +256,8 @@ pub async fn backfill_active_weeks(pool: &PgPool) -> cja::Result<u64> {
             ORDER BY 1, 2
             ON CONFLICT (user_id, week_start) DO NOTHING
             "#,
-            window_start,
-            batch_end,
+            cja::jiff_sqlx::Timestamp::from(window_start),
+            cja::jiff_sqlx::Timestamp::from(batch_end),
         )
         .execute(&mut *tx).await
         .wrap_err("Failed to insert historical active weeks")?
@@ -263,7 +265,7 @@ pub async fn backfill_active_weeks(pool: &PgPool) -> cja::Result<u64> {
         if advancing {
             sqlx::query!(
                 "UPDATE customization_active_week_backfill_cursor SET scanned_through = $1 WHERE singleton = TRUE",
-                batch_end,
+                cja::jiff_sqlx::Timestamp::from(batch_end),
             ).execute(&mut *tx).await
             .wrap_err("Failed to advance active-week backfill cursor")?;
         }
@@ -588,7 +590,6 @@ mod tests {
 
     #[sqlx::test(migrations = "../migrations")]
     async fn week_credit_spend_and_permanence(pool: PgPool) -> cja::Result<()> {
-        use chrono::{TimeZone as _, Utc};
         let owner = create_test_user(&pool).await?;
         let other = sqlx::query_scalar!(
             "INSERT INTO users (external_github_id, github_login) VALUES (42424243, 'other-customization-tester') RETURNING user_id"
@@ -614,14 +615,14 @@ mod tests {
             .execute(&pool)
             .await?;
         }
-        let sunday = Utc
-            .with_ymd_and_hms(2026, 10, 11, 23, 59, 59)
-            .single()
-            .unwrap();
-        let monday = Utc
-            .with_ymd_and_hms(2026, 10, 12, 0, 0, 0)
-            .single()
-            .unwrap();
+        let sunday = jiff::civil::datetime(2026, 10, 11, 23, 59, 59, 0)
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+            .unwrap()
+            .timestamp();
+        let monday = jiff::civil::datetime(2026, 10, 12, 0, 0, 0, 0)
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+            .unwrap()
+            .timestamp();
         let mut conn = pool.acquire().await?;
         assert_eq!(
             record_active_week_for_game(&mut conn, game, sunday).await?,
@@ -686,7 +687,6 @@ mod tests {
 
     #[sqlx::test(migrations = "../migrations")]
     async fn backfill_is_idempotent_and_skips_new_finishes(pool: PgPool) -> cja::Result<()> {
-        use chrono::{TimeZone as _, Utc};
         let user = create_test_user(&pool).await?;
         let snake = sqlx::query_scalar!(
             "INSERT INTO battlesnakes (user_id, name, url) VALUES ($1, 'Backfill Snake', 'https://example.com') RETURNING battlesnake_id", user
@@ -694,48 +694,54 @@ mod tests {
         let legacy = sqlx::query_scalar!(
             "INSERT INTO games (board_size, game_type, status) VALUES ('11x11', 'Standard', 'finished') RETURNING game_id"
         ).fetch_one(&pool).await?;
-        let sunday = Utc
-            .with_ymd_and_hms(2026, 10, 4, 23, 59, 59)
-            .single()
-            .unwrap();
-        let monday = Utc.with_ymd_and_hms(2026, 10, 5, 0, 0, 0).single().unwrap();
-        let earliest = Utc.with_ymd_and_hms(2026, 9, 21, 0, 0, 0).single().unwrap();
-        let zero_turn_finish = Utc
-            .with_ymd_and_hms(2026, 9, 22, 12, 0, 0)
-            .single()
-            .unwrap();
-        sqlx::query!("UPDATE customization_active_week_backfill_cursor SET scanned_through = $1 WHERE singleton = TRUE", earliest).execute(&pool).await?;
+        let sunday = jiff::civil::datetime(2026, 10, 4, 23, 59, 59, 0)
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+            .unwrap()
+            .timestamp();
+        let monday = jiff::civil::datetime(2026, 10, 5, 0, 0, 0, 0)
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+            .unwrap()
+            .timestamp();
+        let earliest = jiff::civil::datetime(2026, 9, 21, 0, 0, 0, 0)
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+            .unwrap()
+            .timestamp();
+        let zero_turn_finish = jiff::civil::datetime(2026, 9, 22, 12, 0, 0, 0)
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+            .unwrap()
+            .timestamp();
+        sqlx::query!("UPDATE customization_active_week_backfill_cursor SET scanned_through = $1 WHERE singleton = TRUE", cja::jiff_sqlx::Timestamp::from(earliest)).execute(&pool).await?;
         let zero_turn_game = sqlx::query_scalar!(
             "INSERT INTO games (board_size, game_type, status, updated_at) VALUES ('11x11', 'Standard', 'finished', $1) RETURNING game_id",
-            zero_turn_finish,
+            cja::jiff_sqlx::Timestamp::from(zero_turn_finish),
         ).fetch_one(&pool).await?;
-        sqlx::query!("INSERT INTO game_battlesnakes (game_id, battlesnake_id, created_at) VALUES ($1, $2, $3)", zero_turn_game, snake, zero_turn_finish).execute(&pool).await?;
+        sqlx::query!("INSERT INTO game_battlesnakes (game_id, battlesnake_id, created_at) VALUES ($1, $2, $3)", zero_turn_game, snake, cja::jiff_sqlx::Timestamp::from(zero_turn_finish)).execute(&pool).await?;
         sqlx::query!(
             "INSERT INTO games (board_size, game_type, status, created_at) VALUES ('11x11', 'Standard', 'finished', '1970-01-01')"
         ).execute(&pool).await?;
-        sqlx::query!("INSERT INTO game_battlesnakes (game_id, battlesnake_id, created_at) VALUES ($1, $2, $3)", legacy, snake, sunday).execute(&pool).await?;
+        sqlx::query!("INSERT INTO game_battlesnakes (game_id, battlesnake_id, created_at) VALUES ($1, $2, $3)", legacy, snake, cja::jiff_sqlx::Timestamp::from(sunday)).execute(&pool).await?;
         sqlx::query!(
             "INSERT INTO turns (game_id, turn_number, created_at) VALUES ($1, 2, $2)",
             legacy,
-            sunday
+            cja::jiff_sqlx::Timestamp::from(sunday)
         )
         .execute(&pool)
         .await?;
         sqlx::query!(
             "INSERT INTO turns (game_id, turn_number, created_at) VALUES ($1, 1, $2)",
             legacy,
-            monday
+            cja::jiff_sqlx::Timestamp::from(monday)
         )
         .execute(&pool)
         .await?;
         let new_game = sqlx::query_scalar!(
-            "INSERT INTO games (board_size, game_type, status, finished_at) VALUES ('11x11', 'Standard', 'finished', $1) RETURNING game_id", monday
+            "INSERT INTO games (board_size, game_type, status, finished_at) VALUES ('11x11', 'Standard', 'finished', $1) RETURNING game_id", cja::jiff_sqlx::Timestamp::from(monday)
         ).fetch_one(&pool).await?;
-        sqlx::query!("INSERT INTO game_battlesnakes (game_id, battlesnake_id, created_at) VALUES ($1, $2, $3)", new_game, snake, sunday).execute(&pool).await?;
+        sqlx::query!("INSERT INTO game_battlesnakes (game_id, battlesnake_id, created_at) VALUES ($1, $2, $3)", new_game, snake, cja::jiff_sqlx::Timestamp::from(sunday)).execute(&pool).await?;
         sqlx::query!(
             "INSERT INTO turns (game_id, turn_number, created_at) VALUES ($1, 1, $2)",
             new_game,
-            sunday
+            cja::jiff_sqlx::Timestamp::from(sunday)
         )
         .execute(&pool)
         .await?;
@@ -761,14 +767,14 @@ mod tests {
         let game = sqlx::query_scalar!(
             "INSERT INTO games (board_size, game_type, status) VALUES ('11x11', 'Standard', 'running') RETURNING game_id"
         ).fetch_one(&pool).await?;
-        let linked_at = chrono::Utc::now() - chrono::Duration::hours(2);
+        let linked_at = jiff::Timestamp::now() - jiff::SignedDuration::from_hours(2);
         sqlx::query!(
             "INSERT INTO game_battlesnakes (game_id, battlesnake_id, created_at) VALUES ($1, $2, $3)",
-            game, snake, linked_at
+            game, snake, cja::jiff_sqlx::Timestamp::from(linked_at)
         ).execute(&pool).await?;
         sqlx::query!(
             "UPDATE customization_active_week_backfill_cursor SET scanned_through = $1 WHERE singleton = TRUE",
-            linked_at - chrono::Duration::hours(1)
+            cja::jiff_sqlx::Timestamp::from(linked_at - jiff::SignedDuration::from_hours(1))
         ).execute(&pool).await?;
         assert_eq!(backfill_active_weeks(&pool).await?, 0);
         sqlx::query!(
@@ -777,11 +783,11 @@ mod tests {
         )
         .execute(&pool)
         .await?;
-        let finished_at = chrono::Utc::now();
+        let finished_at = jiff::Timestamp::now();
         sqlx::query!(
             "INSERT INTO turns (game_id, turn_number, created_at) VALUES ($1, 1, $2)",
             game,
-            finished_at
+            cja::jiff_sqlx::Timestamp::from(finished_at)
         )
         .execute(&pool)
         .await?;
@@ -792,11 +798,17 @@ mod tests {
         )
         .fetch_one(&pool)
         .await?;
-        use chrono::Datelike as _;
         assert_eq!(
-            week,
-            finished_at.date_naive()
-                - chrono::Duration::days(i64::from(finished_at.weekday().num_days_from_monday()))
+            week.to_jiff(),
+            finished_at
+                .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+                .date()
+                - jiff::ToSpan::days(i64::from(
+                    finished_at
+                        .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+                        .weekday()
+                        .to_monday_zero_offset()
+                ))
         );
         Ok(())
     }
@@ -808,9 +820,9 @@ mod tests {
             "INSERT INTO users (external_github_id, github_login) VALUES (42424243, 'poison-tester') RETURNING user_id"
         ).fetch_one(&pool).await?;
         let (normal, poisoned) = if a < b { (a, b) } else { (b, a) };
-        let start = chrono::Utc::now() - chrono::Duration::hours(4);
+        let start = jiff::Timestamp::now() - jiff::SignedDuration::from_hours(4);
         sqlx::query!(
-            "UPDATE customization_active_week_backfill_cursor SET scanned_through = $1 WHERE singleton = TRUE", start
+            "UPDATE customization_active_week_backfill_cursor SET scanned_through = $1 WHERE singleton = TRUE", cja::jiff_sqlx::Timestamp::from(start)
         ).execute(&pool).await?;
         let start = sqlx::query_scalar!(
             "SELECT scanned_through FROM customization_active_week_backfill_cursor WHERE singleton = TRUE"
@@ -825,12 +837,12 @@ mod tests {
             ).fetch_one(&pool).await?;
             sqlx::query!(
                 "INSERT INTO game_battlesnakes (game_id, battlesnake_id, created_at) VALUES ($1, $2, $3)",
-                game, snake, start + chrono::Duration::hours(1)
+                game, snake, cja::jiff_sqlx::Timestamp::from(start.to_jiff() + jiff::SignedDuration::from_hours(1))
             ).execute(&pool).await?;
         }
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "CREATE FUNCTION reject_poisoned_week() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.user_id = '{poisoned}'::uuid THEN RAISE EXCEPTION 'poisoned week'; END IF; RETURN NEW; END $$"
-        )).execute(&pool).await?;
+        ))).execute(&pool).await?;
         sqlx::query("CREATE TRIGGER reject_poisoned_week BEFORE INSERT ON customization_active_weeks FOR EACH ROW EXECUTE FUNCTION reject_poisoned_week()")
             .execute(&pool).await?;
         assert!(backfill_active_weeks(&pool).await.is_err());
@@ -869,9 +881,9 @@ mod tests {
         let game = sqlx::query_scalar!(
             "INSERT INTO games (board_size, game_type, status) VALUES ('11x11', 'Standard', 'finished') RETURNING game_id"
         ).fetch_one(&pool).await?;
-        let start = chrono::Utc::now() - chrono::Duration::hours(4);
-        sqlx::query!("UPDATE customization_active_week_backfill_cursor SET scanned_through = $1 WHERE singleton = TRUE", start).execute(&pool).await?;
-        sqlx::query!("INSERT INTO game_battlesnakes (game_id, battlesnake_id, created_at) VALUES ($1, $2, $3)", game, snake, start + chrono::Duration::hours(1)).execute(&pool).await?;
+        let start = jiff::Timestamp::now() - jiff::SignedDuration::from_hours(4);
+        sqlx::query!("UPDATE customization_active_week_backfill_cursor SET scanned_through = $1 WHERE singleton = TRUE", cja::jiff_sqlx::Timestamp::from(start)).execute(&pool).await?;
+        sqlx::query!("INSERT INTO game_battlesnakes (game_id, battlesnake_id, created_at) VALUES ($1, $2, $3)", game, snake, cja::jiff_sqlx::Timestamp::from(start + jiff::SignedDuration::from_hours(1))).execute(&pool).await?;
         let mut blocker = pool.begin().await?;
         sqlx::query!("SELECT scanned_through FROM customization_active_week_backfill_cursor WHERE singleton = TRUE FOR UPDATE")
             .fetch_one(&mut *blocker).await?;
@@ -897,8 +909,13 @@ mod tests {
         assert_eq!(token_balance(&pool, user).await?, 1);
         let cursor = sqlx::query_scalar!("SELECT scanned_through FROM customization_active_week_backfill_cursor WHERE singleton = TRUE")
             .fetch_one(&pool).await?;
-        assert!(cursor >= start);
-        assert!((chrono::Utc::now() - cursor).num_seconds() < 5);
+        assert!(cursor >= cja::jiff_sqlx::Timestamp::from(start));
+        assert!(
+            jiff::Timestamp::now()
+                .duration_since(cursor.to_jiff())
+                .as_secs()
+                < 5
+        );
         Ok(())
     }
 
@@ -909,17 +926,22 @@ mod tests {
             .fetch_one(&pool).await?;
         let game = sqlx::query_scalar!("INSERT INTO games (board_size, game_type, status) VALUES ('11x11', 'Standard', 'finished') RETURNING game_id")
             .fetch_one(&pool).await?;
-        let start = chrono::Utc::now() - chrono::Duration::days(15);
-        let edge = start + chrono::Duration::days(7);
-        sqlx::query!("UPDATE customization_active_week_backfill_cursor SET scanned_through = $1 WHERE singleton = TRUE", start)
+        let start = jiff::Timestamp::now() - jiff::SignedDuration::from_hours(360);
+        let edge = start + jiff::SignedDuration::from_hours(168);
+        sqlx::query!("UPDATE customization_active_week_backfill_cursor SET scanned_through = $1 WHERE singleton = TRUE", cja::jiff_sqlx::Timestamp::from(start))
             .execute(&pool).await?;
-        sqlx::query!("INSERT INTO game_battlesnakes (game_id, battlesnake_id, created_at) VALUES ($1, $2, $3)", game, snake, edge)
+        sqlx::query!("INSERT INTO game_battlesnakes (game_id, battlesnake_id, created_at) VALUES ($1, $2, $3)", game, snake, cja::jiff_sqlx::Timestamp::from(edge))
             .execute(&pool).await?;
         assert_eq!(backfill_active_weeks(&pool).await?, 1);
         assert_eq!(token_balance(&pool, user).await?, 1);
         let caught_up = sqlx::query_scalar!("SELECT scanned_through FROM customization_active_week_backfill_cursor WHERE singleton = TRUE")
             .fetch_one(&pool).await?;
-        assert!((chrono::Utc::now() - caught_up).num_seconds() < 5);
+        assert!(
+            jiff::Timestamp::now()
+                .duration_since(caught_up.to_jiff())
+                .as_secs()
+                < 5
+        );
         assert_eq!(backfill_active_weeks(&pool).await?, 0);
         let again = sqlx::query_scalar!("SELECT scanned_through FROM customization_active_week_backfill_cursor WHERE singleton = TRUE")
             .fetch_one(&pool).await?;
@@ -1027,7 +1049,6 @@ mod tests {
 
     #[sqlx::test(migrations = "../migrations")]
     async fn leaderboard_entry_link_credits_owner(pool: PgPool) -> cja::Result<()> {
-        use chrono::{TimeZone as _, Utc};
         let user = create_test_user(&pool).await?;
         let snake = sqlx::query_scalar!(
             "INSERT INTO battlesnakes (user_id, name, url) VALUES ($1, 'Ladder Snake', 'https://example.com') RETURNING battlesnake_id", user
@@ -1045,10 +1066,10 @@ mod tests {
         )
         .execute(&pool)
         .await?;
-        let monday = Utc
-            .with_ymd_and_hms(2026, 10, 12, 0, 0, 0)
-            .single()
-            .unwrap();
+        let monday = jiff::civil::datetime(2026, 10, 12, 0, 0, 0, 0)
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+            .unwrap()
+            .timestamp();
         let mut conn = pool.acquire().await?;
         assert_eq!(
             record_active_week_for_game(&mut conn, game, monday).await?,
@@ -1060,7 +1081,6 @@ mod tests {
 
     #[sqlx::test(migrations = "../migrations")]
     async fn active_week_insert_does_not_wait_for_spend_lock(pool: PgPool) -> cja::Result<()> {
-        use chrono::{TimeZone as _, Utc};
         let user = create_test_user(&pool).await?;
         let snake = sqlx::query_scalar!(
             "INSERT INTO battlesnakes (user_id, name, url) VALUES ($1, 'Unlocked Snake', 'https://example.com') RETURNING battlesnake_id", user
@@ -1082,10 +1102,10 @@ mod tests {
         )
         .fetch_one(&mut *spending)
         .await?;
-        let finish = Utc
-            .with_ymd_and_hms(2026, 10, 12, 0, 0, 0)
-            .single()
-            .unwrap();
+        let finish = jiff::civil::datetime(2026, 10, 12, 0, 0, 0, 0)
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+            .unwrap()
+            .timestamp();
         let mut recording = pool.acquire().await?;
         let inserted = tokio::time::timeout(
             std::time::Duration::from_secs(2),
@@ -1100,28 +1120,30 @@ mod tests {
 
     #[sqlx::test(migrations = "../migrations")]
     async fn randomized_finish_and_unlock_model(pool: PgPool) -> cja::Result<()> {
-        use chrono::{TimeZone as _, Utc};
         use proptest::{prelude::*, strategy::ValueTree as _};
         let mut runner = proptest::test_runner::TestRunner::default();
         let strategy = proptest::collection::vec((any::<u8>(), any::<u8>()), 1..41);
         let anchors = [
             (
-                Utc.with_ymd_and_hms(2026, 10, 11, 23, 59, 59)
-                    .single()
-                    .unwrap(),
-                chrono::NaiveDate::from_ymd_opt(2026, 10, 5).unwrap(),
+                jiff::civil::datetime(2026, 10, 11, 23, 59, 59, 0)
+                    .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+                    .unwrap()
+                    .timestamp(),
+                jiff::civil::Date::new(2026, 10, 5).unwrap(),
             ),
             (
-                Utc.with_ymd_and_hms(2026, 10, 12, 0, 0, 0)
-                    .single()
-                    .unwrap(),
-                chrono::NaiveDate::from_ymd_opt(2026, 10, 12).unwrap(),
+                jiff::civil::datetime(2026, 10, 12, 0, 0, 0, 0)
+                    .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+                    .unwrap()
+                    .timestamp(),
+                jiff::civil::Date::new(2026, 10, 12).unwrap(),
             ),
             (
-                Utc.with_ymd_and_hms(2026, 10, 15, 12, 0, 0)
-                    .single()
-                    .unwrap(),
-                chrono::NaiveDate::from_ymd_opt(2026, 10, 12).unwrap(),
+                jiff::civil::datetime(2026, 10, 15, 12, 0, 0, 0)
+                    .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+                    .unwrap()
+                    .timestamp(),
+                jiff::civil::Date::new(2026, 10, 12).unwrap(),
             ),
         ];
         // Eligibility is deliberately declared independently of the catalog predicate.
@@ -1274,6 +1296,7 @@ mod tests {
                     .fetch_all(&pool)
                     .await?
                     .into_iter()
+                    .map(cja::jiff_sqlx::Date::to_jiff)
                     .collect();
                     let db_grants = sqlx::query!(
                         "SELECT customization_type, slug, source FROM customization_grants WHERE user_id = $1", users[owner]
@@ -1425,8 +1448,6 @@ mod tests {
     /// scanned past the link.
     #[sqlx::test(migrations = "../migrations")]
     async fn backfill_weeks_unchanged_after_prune(pool: PgPool) -> cja::Result<()> {
-        use chrono::{Datelike as _, Utc};
-
         let state = crate::state::AppState::test_from_pool(pool.clone());
         let user = create_test_user(&pool).await?;
         let snake = sqlx::query_scalar!(
@@ -1435,11 +1456,11 @@ mod tests {
         )
         .fetch_one(&pool)
         .await?;
-        let old = Utc::now() - chrono::Duration::days(40);
+        let old = jiff::Timestamp::now() - jiff::SignedDuration::from_hours(960);
         let game = sqlx::query_scalar!(
             "INSERT INTO games (board_size, game_type, status, created_at, updated_at)
              VALUES ('11x11', 'Standard', 'finished', $1, $1) RETURNING game_id",
-            old
+            cja::jiff_sqlx::Timestamp::from(old)
         )
         .fetch_one(&pool)
         .await?;
@@ -1447,7 +1468,7 @@ mod tests {
             "INSERT INTO game_battlesnakes (game_id, battlesnake_id, created_at) VALUES ($1, $2, $3)",
             game,
             snake,
-            old
+            cja::jiff_sqlx::Timestamp::from(old)
         )
         .execute(&pool)
         .await?;
@@ -1456,7 +1477,7 @@ mod tests {
              VALUES ($1, 0, $2, $3)",
             game,
             serde_json::json!({"Turn": 0, "Snakes": []}),
-            old
+            cja::jiff_sqlx::Timestamp::from(old)
         )
         .execute(&pool)
         .await?;
@@ -1468,7 +1489,7 @@ mod tests {
         // until it stops advancing, then once more (0 inserted).
         sqlx::query!(
             "UPDATE customization_active_week_backfill_cursor SET scanned_through = $1 WHERE singleton = TRUE",
-            old - chrono::Duration::days(2)
+            cja::jiff_sqlx::Timestamp::from(old - jiff::SignedDuration::from_hours(48))
         )
         .execute(&pool)
         .await?;
@@ -1490,9 +1511,13 @@ mod tests {
         )
         .fetch_one(&pool)
         .await?;
-        let expected = old.date_naive()
-            - chrono::Duration::days(i64::from(old.weekday().num_days_from_monday()));
-        assert_eq!(week, expected);
+        let expected = old.to_zoned_datetime(jiff::tz::TimeZone::UTC).date()
+            - jiff::ToSpan::days(i64::from(
+                old.to_zoned_datetime(jiff::tz::TimeZone::UTC)
+                    .weekday()
+                    .to_monday_zero_offset(),
+            ));
+        assert_eq!(week, cja::jiff_sqlx::Date::from(expected));
 
         // The real pruner: turns gone, updated_at bumped to ~now.
         crate::turn_retention::prune_game_turns(&state, game).await?;
@@ -1519,7 +1544,7 @@ mod tests {
         )
         .fetch_all(&pool)
         .await?;
-        assert_eq!(weeks, vec![expected]);
+        assert_eq!(weeks, vec![cja::jiff_sqlx::Date::from(expected)]);
         Ok(())
     }
 }

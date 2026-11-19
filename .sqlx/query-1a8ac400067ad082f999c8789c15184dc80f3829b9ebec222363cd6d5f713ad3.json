@@ -6,7 +6,8 @@
       {
         "ordinal": 0,
         "name": "avg_duration_secs: f64",
-        "type_info": "Numeric"
+        "type_info": "Numeric",
+        "origin": "Expression"
       }
     ],
     "parameters": {

@@ -8,7 +8,6 @@ use axum::{
     http::{StatusCode, header},
     response::{IntoResponse, Redirect},
 };
-use chrono::{DateTime, NaiveDate, Utc};
 use color_eyre::eyre::Context as _;
 use maud::{Markup, html};
 use serde::Deserialize;
@@ -27,11 +26,11 @@ const BODY_STYLE: &str = "font-size:16px";
 const BUTTON_STYLE: &str = "min-height:44px;padding:8px 16px;background:#666;color:white;text-decoration:none;\
      border-radius:4px;box-sizing:border-box;display:inline-flex;align-items:center;font-size:16px";
 
-fn fmt_window(start: DateTime<Utc>, end: DateTime<Utc>) -> String {
+fn fmt_window(start: jiff::Timestamp, end: jiff::Timestamp) -> String {
     format!(
         "{} – {}",
-        start.format("%a %b %-d"),
-        end.format("%a %b %-d, %Y")
+        start.strftime("%a %b %-d"),
+        end.strftime("%a %b %-d, %Y")
     )
 }
 
@@ -68,7 +67,7 @@ pub async fn list(
                     }
                     td style="text-align:right;padding:0.5rem" { (digest.games_count) }
                     td style="padding:0.5rem" { (status_badge(&digest.discord_status)) }
-                    td style="padding:0.5rem" { (digest.computed_at.format("%Y-%m-%d %H:%MZ")) }
+                    td style="padding:0.5rem" { (digest.computed_at.strftime("%Y-%m-%d %H:%MZ")) }
                 }
             }
         })
@@ -189,11 +188,8 @@ pub async fn preview(
     page_factory: PageFactory,
     Query(params): Query<WindowParams>,
 ) -> ServerResult<impl IntoResponse, StatusCode> {
-    let parse = |value: String| -> Option<DateTime<Utc>> {
-        DateTime::parse_from_rfc3339(&value)
-            .ok()
-            .map(|dt| dt.with_timezone(&Utc))
-    };
+    let parse =
+        |value: String| -> Option<jiff::Timestamp> { value.parse::<jiff::Timestamp>().ok() };
     let Some(start) = parse(params.start) else {
         return Err(preview_error(
             "start must be RFC 3339, e.g. 2026-10-24T12:00:00Z",
@@ -266,8 +262,8 @@ pub async fn backfill(
     flasher: Flasher,
     Form(form): Form<WeekForm>,
 ) -> ServerResult<Redirect, StatusCode> {
-    let now = Utc::now();
-    let week = match NaiveDate::parse_from_str(&form.week, "%Y-%m-%d")
+    let now = jiff::Timestamp::now();
+    let week = match jiff::civil::Date::strptime("%Y-%m-%d", &form.week)
         .ok()
         .and_then(|date| Week::ending(date, now))
     {
@@ -297,7 +293,7 @@ pub async fn backfill(
 
     let house = state.config.highlights_house();
     let digest = highlights::compute_digest(&state.db, &house, week.start, week.end).await?;
-    let past_deadline = now >= week.end + chrono::Duration::days(7);
+    let past_deadline = now >= week.end + jiff::SignedDuration::from_hours(168);
     let banner = highlights::render::frames_missing_banner(&digest);
     let stored = highlights::store_digest(&state.db, &digest, &state.config.base_url, now).await?;
     let date = form.week.clone();
@@ -433,7 +429,7 @@ mod tests {
     #[sqlx::test(migrations = "../migrations")]
     async fn detail_page_shows_links_and_cards(pool: PgPool) {
         let f = Fixture::new(pool).await;
-        let week = Week::latest_completed(chrono::Utc::now());
+        let week = Week::latest_completed(jiff::Timestamp::now());
         let digest = highlights::compute_digest(
             &f.state.db,
             &HouseSnakeConfig::default(),
@@ -446,7 +442,7 @@ mod tests {
             &f.state.db,
             &digest,
             &f.state.config.base_url,
-            chrono::Utc::now(),
+            jiff::Timestamp::now(),
         )
         .await
         .unwrap()
@@ -527,13 +523,8 @@ mod tests {
     #[sqlx::test(migrations = "../migrations")]
     async fn preview_computes_without_storing(pool: PgPool) {
         let f = Fixture::new(pool).await;
-        let week = Week::latest_completed(chrono::Utc::now());
-        let query = format!(
-            "?start={}&end={}",
-            week.start
-                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-            week.end.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
-        );
+        let week = Week::latest_completed(jiff::Timestamp::now());
+        let query = format!("?start={:.0}&end={:.0}", week.start, week.end);
         let (status, body, _) = f
             .request(
                 "GET",
@@ -565,10 +556,8 @@ mod tests {
             .request(
                 "GET",
                 &format!(
-                    "/admin/highlights/preview?start={}&end={}",
-                    week.end.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-                    week.start
-                        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+                    "/admin/highlights/preview?start={:.0}&end={:.0}",
+                    week.end, week.start
                 ),
                 Some(f.admin_session),
                 None,
@@ -580,8 +569,13 @@ mod tests {
     #[sqlx::test(migrations = "../migrations")]
     async fn backfill_stores_once_and_rejects_non_saturdays(pool: PgPool) {
         let f = Fixture::new(pool).await;
-        let week = Week::latest_completed(chrono::Utc::now());
-        let saturday = week.end.date_naive().format("%Y-%m-%d").to_string();
+        let week = Week::latest_completed(jiff::Timestamp::now());
+        let saturday = week
+            .end
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+            .date()
+            .strftime("%Y-%m-%d")
+            .to_string();
 
         let (status, _, _) = f
             .request(
@@ -632,9 +626,10 @@ mod tests {
 
         // Non-Saturday: flashed error, nothing stored (the same latest week
         // would collide, so use the Friday before it).
-        let friday = (week.end - chrono::Duration::days(1))
-            .date_naive()
-            .format("%Y-%m-%d")
+        let friday = (week.end - jiff::SignedDuration::from_hours(24))
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+            .date()
+            .strftime("%Y-%m-%d")
             .to_string();
         let (status, _, _) = f
             .request(

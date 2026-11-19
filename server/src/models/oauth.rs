@@ -67,8 +67,43 @@ pub struct OauthClient {
     pub onboarding_url: Option<String>,
     pub description: Option<String>,
     pub kind: OauthClientKind,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub disabled_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[sqlx(try_from = "cja::jiff_sqlx::Timestamp")]
+    pub created_at: jiff::Timestamp,
+    pub disabled_at: Option<jiff::Timestamp>,
+}
+
+/// `OauthClient` as `query_as!` decodes it: nullable date/time columns come back as
+/// `Option<cja::jiff_sqlx::*>`, which has no `Into<Option<jiff::*>>`.
+pub(crate) struct OauthClientRow {
+    pub(crate) id: Uuid,
+    pub(crate) public_client_id: String,
+    pub(crate) secret_hash: String,
+    pub(crate) name: String,
+    pub(crate) logo_url: Option<String>,
+    pub(crate) homepage_url: Option<String>,
+    pub(crate) onboarding_url: Option<String>,
+    pub(crate) description: Option<String>,
+    pub(crate) kind: OauthClientKind,
+    pub(crate) created_at: jiff::Timestamp,
+    pub(crate) disabled_at: Option<cja::jiff_sqlx::Timestamp>,
+}
+
+impl From<OauthClientRow> for OauthClient {
+    fn from(row: OauthClientRow) -> Self {
+        Self {
+            id: row.id,
+            public_client_id: row.public_client_id,
+            secret_hash: row.secret_hash,
+            name: row.name,
+            logo_url: row.logo_url,
+            homepage_url: row.homepage_url,
+            onboarding_url: row.onboarding_url,
+            description: row.description,
+            kind: row.kind,
+            created_at: row.created_at,
+            disabled_at: row.disabled_at.map(Into::into),
+        }
+    }
 }
 
 /// A client plus its registered redirect URIs (admin list page + authorize
@@ -142,7 +177,7 @@ pub async fn create_client(
         .wrap_err("Failed to begin OAuth client creation transaction")?;
 
     let client = sqlx::query_as!(
-        OauthClient,
+        OauthClientRow,
         r#"
         INSERT INTO oauth_clients
             (public_client_id, secret_hash, name, logo_url, homepage_url, onboarding_url, description, kind)
@@ -207,7 +242,10 @@ pub async fn create_client(
         .await
         .wrap_err("Failed to commit OAuth client creation transaction")?;
 
-    Ok(NewOauthClient { client, secret })
+    Ok(NewOauthClient {
+        client: client.into(),
+        secret,
+    })
 }
 
 /// All clients with their redirect URIs, ordered by name.
@@ -257,8 +295,8 @@ pub async fn list_clients(pool: &PgPool) -> cja::Result<Vec<OauthClientWithUris>
                 onboarding_url: row.onboarding_url,
                 description: row.description,
                 kind: row.kind,
-                created_at: row.created_at,
-                disabled_at: row.disabled_at,
+                created_at: row.created_at.to_jiff(),
+                disabled_at: row.disabled_at.map(Into::into),
             },
             redirect_uris: row.redirect_uris,
             hosting_domains: row.hosting_domains,
@@ -272,7 +310,7 @@ pub async fn get_client_by_public_id(
     public_client_id: &str,
 ) -> cja::Result<Option<OauthClient>> {
     let client = sqlx::query_as!(
-        OauthClient,
+        OauthClientRow,
         r#"
         SELECT
             id,
@@ -295,13 +333,13 @@ pub async fn get_client_by_public_id(
     .await
     .wrap_err("Failed to fetch OAuth client by public id")?;
 
-    Ok(client)
+    Ok(client.map(Into::into))
 }
 
 /// Look up a client by its DB primary key (marks, kind checks).
 pub async fn get_client_by_id(pool: &PgPool, id: Uuid) -> cja::Result<Option<OauthClient>> {
     let client = sqlx::query_as!(
-        OauthClient,
+        OauthClientRow,
         r#"
         SELECT
             id,
@@ -324,7 +362,7 @@ pub async fn get_client_by_id(pool: &PgPool, id: Uuid) -> cja::Result<Option<Oau
     .await
     .wrap_err("Failed to fetch OAuth client by id")?;
 
-    Ok(client)
+    Ok(client.map(Into::into))
 }
 
 /// Look up a client (by DB id) with its registered redirect URIs.
@@ -376,8 +414,8 @@ pub async fn get_client_with_uris(
             onboarding_url: row.onboarding_url,
             description: row.description,
             kind: row.kind,
-            created_at: row.created_at,
-            disabled_at: row.disabled_at,
+            created_at: row.created_at.to_jiff(),
+            disabled_at: row.disabled_at.map(Into::into),
         },
         redirect_uris: row.redirect_uris,
         hosting_domains: row.hosting_domains,
@@ -694,7 +732,7 @@ pub async fn hosting_clients_for_snakes(
 /// apps" page. The scope shown is the live token's scope.
 pub struct GrantSummary {
     pub grant_id: Uuid,
-    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub created_at: jiff::Timestamp,
     pub client_name: String,
     pub client_logo_url: Option<String>,
     pub permissions: BTreeSet<Permission>,
@@ -731,7 +769,7 @@ pub async fn list_active_grants(pool: &PgPool, user_id: Uuid) -> cja::Result<Vec
         .into_iter()
         .map(|row| GrantSummary {
             grant_id: row.grant_id,
-            created_at: row.created_at,
+            created_at: row.created_at.to_jiff(),
             permissions: decode_permissions(row.grant_id, row.permissions),
             client_name: row.client_name,
             client_logo_url: row.client_logo_url,
@@ -1175,7 +1213,7 @@ pub async fn exchange_authorization_code(
     if row.redirect_uri != redirect_uri {
         return Ok(Err(ExchangeError::RedirectMismatch));
     }
-    if row.expires_at < chrono::Utc::now() {
+    if row.expires_at < cja::jiff_sqlx::Timestamp::from(jiff::Timestamp::now()) {
         return Ok(Err(ExchangeError::Expired));
     }
     // PKCE verify (lengths were checked at authorize; verify here too).

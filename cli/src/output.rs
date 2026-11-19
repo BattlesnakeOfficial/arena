@@ -1,7 +1,4 @@
 //! CLI output formatting utilities for human-readable and JSON output modes.
-
-use chrono::{DateTime, Utc};
-use chrono_humanize::HumanTime;
 use colored::Colorize;
 use is_terminal::IsTerminal;
 use std::io;
@@ -43,13 +40,8 @@ impl OutputFormat {
 }
 
 /// Format a timestamp for human-readable output.
-pub fn format_timestamp(dt: DateTime<Utc>) -> String {
-    dt.format("%Y-%m-%d %H:%M:%S UTC").to_string()
-}
-
-/// Format a timestamp as relative time (e.g., "2 minutes ago").
-pub fn format_relative_time(dt: DateTime<Utc>) -> String {
-    HumanTime::from(dt).to_string()
+pub fn format_timestamp(dt: jiff::Timestamp) -> String {
+    dt.strftime("%Y-%m-%d %H:%M:%S UTC").to_string()
 }
 
 /// Format a UUID, optionally truncated for display.
@@ -145,8 +137,7 @@ mod tests {
 
     #[test]
     fn test_format_timestamp() {
-        use chrono::TimeZone;
-        let dt = Utc.with_ymd_and_hms(2026, 1, 27, 12, 0, 0).unwrap();
+        let dt: jiff::Timestamp = "2026-01-27T12:00:00Z".parse().unwrap();
         assert_eq!(format_timestamp(dt), "2026-01-27 12:00:00 UTC");
     }
 }

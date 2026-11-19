@@ -6,7 +6,13 @@
       {
         "ordinal": 0,
         "name": "earned_at",
-        "type_info": "Timestamptz"
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "achievement_earns",
+            "name": "earned_at"
+          }
+        }
       }
     ],
     "parameters": {

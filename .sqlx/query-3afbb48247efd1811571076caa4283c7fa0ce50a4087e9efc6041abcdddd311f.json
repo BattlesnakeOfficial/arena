@@ -6,17 +6,35 @@
       {
         "ordinal": 0,
         "name": "play_points",
-        "type_info": "Int4"
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "customization_legacy_tokens",
+            "name": "play_points"
+          }
+        }
       },
       {
         "ordinal": 1,
         "name": "token_count",
-        "type_info": "Int8"
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "customization_legacy_tokens",
+            "name": "token_count"
+          }
+        }
       },
       {
         "ordinal": 2,
         "name": "converted_at",
-        "type_info": "Timestamptz"
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "customization_legacy_tokens",
+            "name": "converted_at"
+          }
+        }
       }
     ],
     "parameters": {

@@ -1,4 +1,3 @@
-use chrono::{DateTime, Utc};
 use color_eyre::eyre::Context as _;
 use rand::{Rng, rngs::OsRng};
 use sha2::{Digest, Sha256};
@@ -20,17 +19,47 @@ pub struct CodeListing {
     pub slug: String,
     pub max_redemptions: i32,
     pub redemptions_used: i32,
-    pub expires_at: Option<DateTime<Utc>>,
+    pub expires_at: Option<jiff::Timestamp>,
     pub note: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub disabled_at: Option<DateTime<Utc>>,
+    pub created_at: jiff::Timestamp,
+    pub disabled_at: Option<jiff::Timestamp>,
+}
+
+/// `CodeListing` as `query_as!` decodes it: nullable date/time columns come back as
+/// `Option<cja::jiff_sqlx::*>`, which has no `Into<Option<jiff::*>>`.
+pub(crate) struct CodeListingRow {
+    pub(crate) code_id: Uuid,
+    pub(crate) customization_type: String,
+    pub(crate) slug: String,
+    pub(crate) max_redemptions: i32,
+    pub(crate) redemptions_used: i32,
+    pub(crate) expires_at: Option<cja::jiff_sqlx::Timestamp>,
+    pub(crate) note: Option<String>,
+    pub(crate) created_at: jiff::Timestamp,
+    pub(crate) disabled_at: Option<cja::jiff_sqlx::Timestamp>,
+}
+
+impl From<CodeListingRow> for CodeListing {
+    fn from(row: CodeListingRow) -> Self {
+        Self {
+            code_id: row.code_id,
+            customization_type: row.customization_type,
+            slug: row.slug,
+            max_redemptions: row.max_redemptions,
+            redemptions_used: row.redemptions_used,
+            expires_at: row.expires_at.map(Into::into),
+            note: row.note,
+            created_at: row.created_at,
+            disabled_at: row.disabled_at.map(Into::into),
+        }
+    }
 }
 
 pub struct CreateCode {
     pub customization_type: String,
     pub slug: String,
     pub max_redemptions: i32,
-    pub expires_at: Option<DateTime<Utc>>,
+    pub expires_at: Option<jiff::Timestamp>,
     pub note: Option<String>,
 }
 
@@ -99,7 +128,10 @@ pub async fn create(
     if input.max_redemptions < 1 {
         return Err(ValidationError("Maximum redemptions must be at least 1").into());
     }
-    if input.expires_at.is_some_and(|expiry| expiry <= Utc::now()) {
+    if input
+        .expires_at
+        .is_some_and(|expiry| expiry <= jiff::Timestamp::now())
+    {
         return Err(ValidationError("Expiry must be in the future").into());
     }
     let note = input
@@ -115,7 +147,7 @@ pub async fn create(
         let code_hash = hash(&code);
         let inserted = sqlx::query!(
             "INSERT INTO customization_unlock_codes (code_hash, customization_type, slug, max_redemptions, expires_at, note, created_by_user_id) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (code_hash) DO NOTHING RETURNING code_id",
-            code_hash, input.customization_type, input.slug, input.max_redemptions, input.expires_at, note, created_by_user_id,
+            code_hash, input.customization_type, input.slug, input.max_redemptions, input.expires_at.map(cja::jiff_sqlx::Timestamp::from), note, created_by_user_id,
         ).fetch_optional(pool).await.wrap_err("Failed to create unlock code")?;
         if inserted.is_some() {
             return Ok(code);
@@ -127,10 +159,11 @@ pub async fn create(
 }
 
 pub async fn list(pool: &PgPool) -> cja::Result<Vec<CodeListing>> {
-    let rows = sqlx::query_as!(CodeListing,
+    let rows = sqlx::query_as!(
+        CodeListingRow,
         "SELECT code_id, customization_type, slug, max_redemptions, redemptions_used, expires_at, note, created_at, disabled_at FROM customization_unlock_codes ORDER BY created_at DESC, code_id DESC"
     ).fetch_all(pool).await.wrap_err("Failed to list unlock codes")?;
-    Ok(rows)
+    Ok(rows.into_iter().map(Into::into).collect())
 }
 
 pub async fn disable(pool: &PgPool, code_id: Uuid) -> cja::Result<bool> {
@@ -194,7 +227,10 @@ pub async fn redeem(pool: &PgPool, user_id: Uuid, submitted: &str) -> cja::Resul
         Some(RedeemOutcome::AlreadyRedeemed)
     } else if code.disabled_at.is_some() {
         Some(RedeemOutcome::Disabled)
-    } else if code.expires_at.is_some_and(|expiry| expiry <= Utc::now()) {
+    } else if code
+        .expires_at
+        .is_some_and(|expiry| expiry <= cja::jiff_sqlx::Timestamp::from(jiff::Timestamp::now()))
+    {
         Some(RedeemOutcome::Expired)
     } else if owned.is_some() {
         Some(RedeemOutcome::AlreadyOwned)
@@ -294,7 +330,7 @@ mod tests {
             );
         }
         let mut past = input("head", "hydra", 1);
-        past.expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
+        past.expires_at = Some(jiff::Timestamp::now() - jiff::SignedDuration::from_secs(1));
         assert!(create(&pool, admin, &past).await.is_err());
         let mut long_note = input("head", "hydra", 1);
         long_note.note = Some("x".repeat(501));

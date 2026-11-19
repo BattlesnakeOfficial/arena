@@ -440,7 +440,8 @@ impl Job<AppState> for CustomizationActiveWeekBackfillJob {
         .fetch_one(&app_state.db)
         .await
         .wrap_err("Failed to read active-week backfill cursor")?
-        .scanned_through;
+        .scanned_through
+        .to_jiff();
         tracing::info!(inserted, %cursor, "Customization active-week backfill completed");
         Ok(())
     }

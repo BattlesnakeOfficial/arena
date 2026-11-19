@@ -6,17 +6,35 @@
       {
         "ordinal": 0,
         "name": "engine_game_id!",
-        "type_info": "Varchar"
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "games",
+            "name": "engine_game_id"
+          }
+        }
       },
       {
         "ordinal": 1,
         "name": "created_at",
-        "type_info": "Timestamptz"
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "games",
+            "name": "created_at"
+          }
+        }
       },
       {
         "ordinal": 2,
         "name": "game_type",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "games",
+            "name": "game_type"
+          }
+        }
       }
     ],
     "parameters": {

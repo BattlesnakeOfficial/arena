@@ -6,7 +6,13 @@
       {
         "ordinal": 0,
         "name": "engine_game_id!",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "play_archive_exceptions",
+            "name": "engine_game_id"
+          }
+        }
       }
     ],
     "parameters": {

@@ -6,7 +6,13 @@
       {
         "ordinal": 0,
         "name": "purpose",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "email_log",
+            "name": "purpose"
+          }
+        }
       }
     ],
     "parameters": {
