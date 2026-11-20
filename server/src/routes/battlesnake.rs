@@ -1111,10 +1111,10 @@ pub async fn retire_battlesnake(
             withdrawn_registrations,
         } => (
             if withdrawn_registrations == 0 {
-                "Battlesnake retired.".to_string()
+                "Enjoy the retirement!".to_string()
             } else {
                 format!(
-                    "Battlesnake retired. Withdrawn from {withdrawn_registrations} unopened tournament registration(s); unretiring will not restore them."
+                    "Enjoy the retirement! Withdrawn from {withdrawn_registrations} unopened tournament registration(s); unretiring will not restore them."
                 )
             },
             session::FLASH_TYPE_SUCCESS,
@@ -1153,7 +1153,7 @@ pub async fn unretire_battlesnake(
             .wrap_err("Failed to unretire battlesnake")?
         {
             UnretireBattlesnakeOutcome::Unretired => (
-                "Battlesnake restored to competition.".to_string(),
+                "Out of retirement and hungry 🐍".to_string(),
                 session::FLASH_TYPE_SUCCESS,
             ),
             UnretireBattlesnakeOutcome::AlreadyActive => (
@@ -1338,9 +1338,9 @@ fn render_battlesnake_profile(view: &ProfileView<'_>) -> Markup {
                     h1 { (snake.name) }
                     @if let Some(retired_at) = snake.retired_at {
                         div class="retired-notice" {
+                            "Hung up its fangs on " (retired_at.format("%b %-d, %Y")) ". "
                             strong { "Retired" }
-                            " since " (retired_at.format("%b %-d, %Y"))
-                            ". This battlesnake keeps its history and ratings but cannot enter new games."
+                            " from competition, legacy intact: stats and ratings live on."
                         }
                     }
                     div class="sub owner-line" {
@@ -2551,10 +2551,16 @@ mod profile_page_tests {
                 .fetch_one(&fx.db)
                 .await
                 .unwrap();
-        assert_eq!(flash, "Battlesnake retired.");
+        assert_eq!(flash, "Enjoy the retirement!");
         let (status, profile) = fx.get(Some(fx.visitor_session)).await;
         assert_eq!(status, StatusCode::OK);
-        assert!(profile.contains("Retired</strong> since"), "{profile}");
+        assert!(profile.contains("Hung up its fangs on "), "{profile}");
+        assert!(
+            profile.contains(
+                "Retired</strong> from competition, legacy intact: stats and ratings live on."
+            ),
+            "{profile}"
+        );
         assert!(profile.contains("No games played yet."));
         assert!(!profile.contains(challenge_form(fx.snake_id).as_str()));
 
@@ -2587,7 +2593,7 @@ mod profile_page_tests {
                 .fetch_one(&fx.db)
                 .await
                 .unwrap();
-        assert_eq!(flash, "Battlesnake restored to competition.");
+        assert_eq!(flash, "Out of retirement and hungry 🐍");
     }
 
     #[sqlx::test(migrations = "../migrations")]
@@ -2645,7 +2651,10 @@ mod profile_page_tests {
                 .fetch_one(&fx.db)
                 .await
                 .unwrap();
-        assert!(flash.contains("Withdrawn from 1 unopened tournament registration(s)"));
+        assert_eq!(
+            flash,
+            "Enjoy the retirement! Withdrawn from 1 unopened tournament registration(s); unretiring will not restore them."
+        );
         let remaining: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM tournament_registrations WHERE tournament_id = $1",
         )
@@ -2946,7 +2955,10 @@ mod profile_page_tests {
         {
             let (status, retired) = fx.get_page(Some(viewer), page).await;
             assert_eq!(status, StatusCode::OK);
-            assert!(retired.contains("Retired</strong> since"));
+            assert!(retired.contains("Hung up its fangs on "));
+            assert!(retired.contains(
+                "Retired</strong> from competition, legacy intact: stats and ratings live on."
+            ));
             assert!(retired.contains("53<small>2 won</small>"));
             assert!(retired.contains("Avg. Placement</div><div class=\"value\">2.0</div>"));
             assert!(retired.contains("<td class=\"r num\">7</td>"));

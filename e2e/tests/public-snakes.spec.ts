@@ -102,7 +102,7 @@ test.describe('Public Snakes Directory', () => {
       authenticatedPage.once('dialog', (dialog) => dialog.accept());
       await authenticatedPage.getByRole('button', { name: 'Retire', exact: true }).click();
       await expect(authenticatedPage).toHaveURL(profile);
-      await expect(authenticatedPage.getByText('Retired since')).toBeVisible();
+      await expect(authenticatedPage.getByText('Hung up its fangs on')).toBeVisible();
       await expect(authenticatedPage.locator('.snake-profile .stats')).toContainText('1 won');
       await expect(authenticatedPage.locator('.snake-profile .stats')).toContainText('1.0');
       await expect(authenticatedPage.locator(`a[href="${replayLink}"]`)).toBeVisible();
@@ -117,7 +117,7 @@ test.describe('Public Snakes Directory', () => {
       await authenticatedPage.setViewportSize({ width: 375, height: 812 });
       await authenticatedPage.emulateMedia({ colorScheme: 'dark' });
       await authenticatedPage.goto(profile);
-      await expect(authenticatedPage.getByText('Retired since')).toBeVisible();
+      await expect(authenticatedPage.getByText('Hung up its fangs on')).toBeVisible();
       await capture(authenticatedPage, 'profile-owner-retired-mobile-dark');
       await authenticatedPage.goto('/battlesnakes');
       const ownerRow = authenticatedPage.locator('table.my-snakes tbody tr', {
@@ -136,7 +136,7 @@ test.describe('Public Snakes Directory', () => {
       await page.setViewportSize({ width: 375, height: 812 });
       await page.emulateMedia({ colorScheme: 'dark' });
       await expect(page.getByRole('heading', { name, exact: true })).toBeVisible();
-      await expect(page.getByText('Retired since')).toBeVisible();
+      await expect(page.getByText('Hung up its fangs on')).toBeVisible();
       await expect(page.locator('.snake-profile .stats')).toContainText('1 won');
       await expect(page.locator('.snake-profile .stats')).toContainText('1.0');
       await expect(page.locator(`a[href="${replayLink}"]`)).toBeVisible();
@@ -158,7 +158,7 @@ test.describe('Public Snakes Directory', () => {
       await authenticatedPage.goto(profile);
       await authenticatedPage.getByRole('button', { name: 'Unretire' }).click();
       await expect(authenticatedPage).toHaveURL(profile);
-      await expect(authenticatedPage.getByText('Retired since')).toHaveCount(0);
+      await expect(authenticatedPage.getByText('Hung up its fangs on')).toHaveCount(0);
       await capture(authenticatedPage, 'profile-owner-unretired');
       const activeRow = await findSnakeRow(authenticatedPage, name);
       expect(activeRow).not.toBeNull();
