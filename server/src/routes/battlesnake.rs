@@ -2914,6 +2914,47 @@ mod profile_page_tests {
                 assert!(!html.contains("Next ›"));
             }
         }
+
+        // Exercise the populated history through the owner action, for both
+        // viewers and both pages. A retired-only filter in the profile query
+        // must not turn this into an apparently valid empty profile.
+        let history_section = |html: &str| {
+            html.split("Game History")
+                .nth(1)
+                .unwrap()
+                .split("</section>")
+                .next()
+                .unwrap()
+                .to_string()
+        };
+        let before_pages = [
+            fx.get_page(Some(fx.owner_session), None).await.1,
+            fx.get_page(Some(fx.owner_session), Some(1)).await.1,
+            fx.get_page(Some(fx.visitor_session), None).await.1,
+            fx.get_page(Some(fx.visitor_session), Some(1)).await.1,
+        ];
+        let response = fx.post_response(fx.owner_session, "retire").await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        for (index, (viewer, page)) in [
+            (fx.owner_session, None),
+            (fx.owner_session, Some(1)),
+            (fx.visitor_session, None),
+            (fx.visitor_session, Some(1)),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (status, retired) = fx.get_page(Some(viewer), page).await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(retired.contains("Retired</strong> since"));
+            assert!(retired.contains("53<small>2 won</small>"));
+            assert!(retired.contains("Avg. Placement</div><div class=\"value\">2.0</div>"));
+            assert!(retired.contains("<td class=\"r num\">7</td>"));
+            assert!(!retired.contains("No games played yet."));
+            let history = history_section(&retired);
+            assert_eq!(history, history_section(&before_pages[index]));
+            assert!(history.contains("🥇 1st") || history.contains("🥈 2nd"));
+        }
     }
 
     #[sqlx::test(migrations = "../migrations")]

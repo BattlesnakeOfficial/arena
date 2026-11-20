@@ -34,6 +34,21 @@ pub async fn run_matchmaker(app_state: &AppState) -> cja::Result<()> {
 }
 
 async fn run_matchmaker_for_leaderboard(app_state: &AppState, lb: &Leaderboard) -> cja::Result<()> {
+    run_leaderboard_round(app_state, lb, |round| async { Ok(round) }).await
+}
+
+/// One matchmaker round. `after_selection` runs between round selection and
+/// the per-group snake locks; production passes the round through unchanged,
+/// and the race test uses it to retire a snake mid-round.
+async fn run_leaderboard_round<F, Fut>(
+    app_state: &AppState,
+    lb: &Leaderboard,
+    after_selection: F,
+) -> cja::Result<()>
+where
+    F: FnOnce(Vec<Vec<LeaderboardEntry>>) -> Fut,
+    Fut: std::future::Future<Output = cja::Result<Vec<Vec<LeaderboardEntry>>>>,
+{
     let pool = &app_state.db;
     let leaderboard_id = lb.leaderboard_id;
     let backlog = sqlx::query!(
@@ -88,6 +103,7 @@ async fn run_matchmaker_for_leaderboard(app_state: &AppState, lb: &Leaderboard) 
         .wrap_err_with(|| format!("Invalid board size for leaderboard {}", lb.name))?;
 
     let round = select_round(&mut rand::thread_rng(), &entries, lb.match_size as usize);
+    let round = after_selection(round).await?;
 
     tracing::info!(
         leaderboard_id = %leaderboard_id,
@@ -771,32 +787,35 @@ mod tests {
     ) -> cja::Result<()> {
         use crate::models::battlesnake::{self, RetireBattlesnakeOutcome};
         let (lb, _) = seeded_mode(&pool, "Standard 11x11", 8).await?;
-        let entries = leaderboard::get_active_entries(&pool, lb.leaderboard_id).await?;
-        let round = select_round(&mut rand::thread_rng(), &entries, lb.match_size as usize);
-        assert_eq!(round.len(), 2);
-        let stale_snake = round[0][0].battlesnake_id;
-        let owner: Uuid =
-            sqlx::query_scalar("SELECT user_id FROM battlesnakes WHERE battlesnake_id = $1")
-                .bind(stale_snake)
+        let app_state = crate::state::AppState::test_from_pool(pool.clone());
+        let retire_pool = pool.clone();
+        run_leaderboard_round(&app_state, &lb, move |round| async move {
+            assert_eq!(round.len(), 2);
+            let stale_snake = round[0][0].battlesnake_id;
+            let owner: Uuid =
+                sqlx::query_scalar("SELECT user_id FROM battlesnakes WHERE battlesnake_id = $1")
+                    .bind(stale_snake)
+                    .fetch_one(&retire_pool)
+                    .await?;
+            assert_eq!(
+                battlesnake::retire_battlesnake(&retire_pool, stale_snake, owner).await?,
+                RetireBattlesnakeOutcome::Retired {
+                    withdrawn_registrations: 0
+                }
+            );
+            Ok(round)
+        })
+        .await?;
+        let stale_snake: Uuid = sqlx::query_scalar(
+            "SELECT battlesnake_id FROM battlesnakes WHERE retired_at IS NOT NULL",
+        )
+        .fetch_one(&pool)
+        .await?;
+        let created: Uuid =
+            sqlx::query_scalar("SELECT game_id FROM leaderboard_games WHERE leaderboard_id = $1")
+                .bind(lb.leaderboard_id)
                 .fetch_one(&pool)
                 .await?;
-        assert_eq!(
-            battlesnake::retire_battlesnake(&pool, stale_snake, owner).await?,
-            RetireBattlesnakeOutcome::Retired {
-                withdrawn_registrations: 0
-            }
-        );
-        let board_size = GameBoardSize::from_str(&lb.board_size)?;
-        let game_type = GameType::from_str(&lb.game_type)?;
-        assert!(
-            create_selected_game(&pool, lb.leaderboard_id, &round[0], &board_size, &game_type)
-                .await?
-                .is_none()
-        );
-        let created =
-            create_selected_game(&pool, lb.leaderboard_id, &round[1], &board_size, &game_type)
-                .await?
-                .expect("unaffected second group creates a game");
         let participants: Vec<Uuid> = sqlx::query_scalar(
             "SELECT le.battlesnake_id FROM game_battlesnakes gb JOIN leaderboard_entries le ON le.leaderboard_entry_id = gb.leaderboard_entry_id WHERE gb.game_id = $1",
         )

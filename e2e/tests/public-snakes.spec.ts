@@ -76,6 +76,14 @@ test.describe('Public Snakes Directory', () => {
       [`Retire Ladder ${testInfo.workerIndex} ${Date.now()}`]
     );
     const ladderPage = `/leaderboards/${ladder.leaderboard_id}`;
+    const [finishedGame] = await query<{ game_id: string }>(
+      "INSERT INTO games (board_size, game_type, status) VALUES ('11x11', 'Standard', 'finished') RETURNING game_id",
+    );
+    await query(
+      'INSERT INTO game_battlesnakes (game_id, battlesnake_id, placement) VALUES ($1, $2, 1)',
+      [finishedGame.game_id, snakeId],
+    );
+    const replayLink = `/games/${finishedGame.game_id}`;
     const ladderRow = authenticatedPage.locator('.mine', {
       has: authenticatedPage.getByText(name, { exact: true }),
     });
@@ -87,12 +95,18 @@ test.describe('Public Snakes Directory', () => {
 
       await authenticatedPage.goto(profile);
       await expect(authenticatedPage.getByRole('heading', { name, exact: true })).toBeVisible();
+      await expect(authenticatedPage.locator('.snake-profile .stats')).toContainText('1 won');
+      await expect(authenticatedPage.locator('.snake-profile .stats')).toContainText('1.0');
+      await expect(authenticatedPage.locator(`a[href="${replayLink}"]`)).toBeVisible();
       await capture(authenticatedPage, 'profile-owner-before-retire');
       authenticatedPage.once('dialog', (dialog) => dialog.accept());
       await authenticatedPage.getByRole('button', { name: 'Retire', exact: true }).click();
       await expect(authenticatedPage).toHaveURL(profile);
       await expect(authenticatedPage.getByText('Retired since')).toBeVisible();
-      await expect(authenticatedPage.locator('.snake-profile .stats').getByText('Games', { exact: true })).toBeVisible();
+      await expect(authenticatedPage.locator('.snake-profile .stats')).toContainText('1 won');
+      await expect(authenticatedPage.locator('.snake-profile .stats')).toContainText('1.0');
+      await expect(authenticatedPage.locator(`a[href="${replayLink}"]`)).toBeVisible();
+      await expect(authenticatedPage.getByText('🥇 1st')).toBeVisible();
       await capture(authenticatedPage, 'profile-owner-retired');
 
       await authenticatedPage.goto(ladderPage);
@@ -123,6 +137,10 @@ test.describe('Public Snakes Directory', () => {
       await page.emulateMedia({ colorScheme: 'dark' });
       await expect(page.getByRole('heading', { name, exact: true })).toBeVisible();
       await expect(page.getByText('Retired since')).toBeVisible();
+      await expect(page.locator('.snake-profile .stats')).toContainText('1 won');
+      await expect(page.locator('.snake-profile .stats')).toContainText('1.0');
+      await expect(page.locator(`a[href="${replayLink}"]`)).toBeVisible();
+      await expect(page.getByText('🥇 1st')).toBeVisible();
       await expect(page.getByRole('button', { name: 'Challenge' })).toHaveCount(0);
       await capture(page, 'profile-public-retired');
       await page.goto(`/users/${mockUser.login}`);
@@ -148,6 +166,7 @@ test.describe('Public Snakes Directory', () => {
       await authenticatedPage.goto(ladderPage);
       await expect(ladderRow.getByText('Active', { exact: true })).toBeVisible();
     } finally {
+      await query('DELETE FROM games WHERE game_id = $1', [finishedGame.game_id]);
       await query('DELETE FROM leaderboards WHERE leaderboard_id = $1', [ladder.leaderboard_id]);
     }
   });
