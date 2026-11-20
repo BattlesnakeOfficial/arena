@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT battlesnake_id FROM battlesnakes\n           WHERE battlesnake_id = ANY($1)\n             AND (user_id = $2 OR visibility = 'public')\n             AND deleted_at IS NULL\n             AND retired_at IS NULL\n           ORDER BY battlesnake_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "battlesnake_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "battlesnakes",
+            "name": "battlesnake_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "0ccc50796d2ada312f8c98af4a4f841687b5aaa4fa04cf115847a4c4a49f6250"
+}

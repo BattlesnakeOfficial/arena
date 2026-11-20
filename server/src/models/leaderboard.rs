@@ -266,6 +266,7 @@ pub async fn get_or_create_entry(
          FROM battlesnakes b
          WHERE b.battlesnake_id = $2
            AND b.deleted_at IS NULL
+           AND b.retired_at IS NULL
          FOR SHARE
          ON CONFLICT (leaderboard_id, battlesnake_id) DO UPDATE
             SET disabled_at = NULL, disabled_reason = NULL, updated_at = NOW(),
@@ -280,13 +281,15 @@ pub async fn get_or_create_entry(
                     THEN leaderboard_entries.health_last_failure
                 END
             WHERE leaderboard_entries.disabled_reason IS DISTINCT FROM $3
+              AND leaderboard_entries.disabled_reason IS DISTINCT FROM $4
          RETURNING
             leaderboard_entry_id, leaderboard_id, battlesnake_id,
             mu, sigma, display_score, games_played, first_place_finishes, non_first_finishes,
             disabled_at, disabled_reason, created_at, updated_at"#,
         leaderboard_id,
         battlesnake_id,
-        crate::models::battlesnake::DISABLED_REASON_DELETED
+        crate::models::battlesnake::DISABLED_REASON_DELETED,
+        crate::models::battlesnake::DISABLED_REASON_RETIRED
     )
     .fetch_optional(pool)
     .await
@@ -303,12 +306,14 @@ pub async fn get_active_entries(
     let entries = sqlx::query_as!(
         LeaderboardEntry,
         r#"SELECT
-            leaderboard_entry_id, leaderboard_id, battlesnake_id,
-            mu, sigma, display_score, games_played, first_place_finishes, non_first_finishes,
-            disabled_at, disabled_reason, created_at, updated_at
-         FROM leaderboard_entries
-         WHERE leaderboard_id = $1 AND disabled_at IS NULL
-         ORDER BY display_score DESC"#,
+            le.leaderboard_entry_id, le.leaderboard_id, le.battlesnake_id,
+            le.mu, le.sigma, le.display_score, le.games_played, le.first_place_finishes, le.non_first_finishes,
+            le.disabled_at, le.disabled_reason, le.created_at, le.updated_at
+         FROM leaderboard_entries le
+         JOIN battlesnakes b ON b.battlesnake_id = le.battlesnake_id
+         WHERE le.leaderboard_id = $1 AND le.disabled_at IS NULL
+           AND b.deleted_at IS NULL AND b.retired_at IS NULL
+         ORDER BY le.display_score DESC"#,
         leaderboard_id
     )
     .fetch_all(pool)
@@ -589,19 +594,59 @@ pub async fn set_disabled(
     entry_id: Uuid,
     disabled_at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> cja::Result<()> {
+    if let Some(disabled_at) = disabled_at {
+        sqlx::query!(
+            r#"UPDATE leaderboard_entries
+         SET disabled_at = $2, disabled_reason = NULL
+         WHERE leaderboard_entry_id = $1
+           AND disabled_reason IS DISTINCT FROM $3
+           AND disabled_reason IS DISTINCT FROM $4"#,
+            entry_id,
+            Some(disabled_at),
+            crate::models::battlesnake::DISABLED_REASON_DELETED,
+            crate::models::battlesnake::DISABLED_REASON_RETIRED
+        )
+        .execute(pool)
+        .await
+        .wrap_err("Failed to pause leaderboard entry")?;
+        return Ok(());
+    }
+    let mut tx = pool
+        .begin()
+        .await
+        .wrap_err("Failed to begin entry resume")?;
+    let live = sqlx::query_scalar!(
+        r#"SELECT b.battlesnake_id
+               FROM leaderboard_entries le
+               JOIN battlesnakes b ON b.battlesnake_id = le.battlesnake_id
+               WHERE le.leaderboard_entry_id = $1
+                 AND b.deleted_at IS NULL AND b.retired_at IS NULL
+               FOR SHARE OF b"#,
+        entry_id
+    )
+    .fetch_optional(&mut *tx)
+    .await
+    .wrap_err("Failed to lock snake for leaderboard resume")?;
+    if live.is_none() {
+        return Ok(());
+    }
     sqlx::query!(
         r#"UPDATE leaderboard_entries
          SET disabled_at = $2, disabled_reason = NULL
          WHERE leaderboard_entry_id = $1
-           AND disabled_reason IS DISTINCT FROM $3"#,
+           AND disabled_reason IS DISTINCT FROM $3
+           AND disabled_reason IS DISTINCT FROM $4"#,
         entry_id,
         disabled_at,
-        crate::models::battlesnake::DISABLED_REASON_DELETED
+        crate::models::battlesnake::DISABLED_REASON_DELETED,
+        crate::models::battlesnake::DISABLED_REASON_RETIRED
     )
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .wrap_err("Failed to update leaderboard entry disabled status")?;
-
+    tx.commit()
+        .await
+        .wrap_err("Failed to commit leaderboard entry resume")?;
     Ok(())
 }
 
@@ -1807,6 +1852,64 @@ mod tests {
             row.disabled_reason.as_deref(),
             Some("deleted"),
             "marker cleared: {row:?}"
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn join_waiting_behind_retirement_cannot_restore_entry(pool: PgPool) -> cja::Result<()> {
+        use crate::models::battlesnake::{self, RetireBattlesnakeOutcome};
+        let leaderboard_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO leaderboards (name) VALUES ('retirement-race') RETURNING leaderboard_id",
+        )
+        .fetch_one(&pool)
+        .await?;
+        let owner: Uuid = sqlx::query_scalar(
+            "INSERT INTO users (external_github_id, github_login) VALUES (262050, 'retirement-race-owner') RETURNING user_id",
+        )
+        .fetch_one(&pool)
+        .await?;
+        let snake: Uuid = sqlx::query_scalar(
+            "INSERT INTO battlesnakes (user_id, name, url) VALUES ($1, 'Retirement Race', 'https://example.com') RETURNING battlesnake_id",
+        )
+        .bind(owner)
+        .fetch_one(&pool)
+        .await?;
+        let entry = get_or_create_entry(&pool, leaderboard_id, snake)
+            .await?
+            .unwrap();
+        set_disabled(&pool, entry.leaderboard_entry_id, Some(chrono::Utc::now())).await?;
+
+        let mut holder = pool.begin().await?;
+        sqlx::query("SELECT battlesnake_id FROM battlesnakes WHERE battlesnake_id = $1 FOR UPDATE")
+            .bind(snake)
+            .fetch_one(&mut *holder)
+            .await?;
+        let retire_pool = pool.clone();
+        let retire = tokio::spawn(async move {
+            battlesnake::retire_battlesnake(&retire_pool, snake, owner).await
+        });
+        wait_for_lock_waiters(&pool, 1).await?;
+        let join_pool = pool.clone();
+        let join =
+            tokio::spawn(
+                async move { get_or_create_entry(&join_pool, leaderboard_id, snake).await },
+            );
+        wait_for_lock_waiters(&pool, 2).await?;
+        holder.commit().await?;
+        assert_eq!(
+            retire.await.expect("retirement panicked")?,
+            RetireBattlesnakeOutcome::Retired {
+                withdrawn_registrations: 0
+            }
+        );
+        assert!(join.await.expect("join panicked")?.is_none());
+        let after = get_entry(&pool, leaderboard_id, snake).await?.unwrap();
+        assert_eq!(after.leaderboard_entry_id, entry.leaderboard_entry_id);
+        assert!(after.disabled_at.is_some());
+        assert!(
+            after.disabled_reason.is_none(),
+            "manual pause stays manual: {after:?}"
         );
         Ok(())
     }

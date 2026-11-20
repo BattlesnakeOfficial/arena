@@ -126,7 +126,8 @@ async fn candidates(
             b.head,
             b.tail,
             b.created_at,
-            b.updated_at
+            b.updated_at,
+            b.retired_at
          FROM leaderboard_entries le
          JOIN leaderboards l ON l.leaderboard_id = le.leaderboard_id
          JOIN battlesnakes b ON b.battlesnake_id = le.battlesnake_id
@@ -142,6 +143,7 @@ async fn candidates(
          ) evidence
          WHERE l.disabled_at IS NULL
            AND b.deleted_at IS NULL
+           AND b.retired_at IS NULL
            AND (
              (le.disabled_at IS NOT NULL AND le.disabled_reason = $3)
              OR (
@@ -191,6 +193,7 @@ async fn candidates(
                         tail: row.tail,
                         created_at: row.created_at,
                         updated_at: row.updated_at,
+                        retired_at: row.retired_at,
                     },
                     Vec::new(),
                 )
@@ -256,6 +259,20 @@ pub async fn run_sweep(app_state: &AppState) -> cja::Result<()> {
                 continue;
             }
         };
+        let live = sqlx::query_scalar!(
+            "SELECT battlesnake_id FROM battlesnakes WHERE battlesnake_id = $1 AND deleted_at IS NULL AND retired_at IS NULL FOR SHARE",
+            snake.battlesnake_id
+        )
+        .fetch_optional(&mut *tx)
+        .await;
+        match live {
+            Ok(Some(_)) => {}
+            Ok(None) => continue,
+            Err(error) => {
+                tracing::error!(battlesnake_id = %snake.battlesnake_id, error = format!("{error:#}"), "Failed to lock health sweep snake");
+                continue;
+            }
+        }
         let mut pulled = Vec::new();
         let mut resumed = Vec::new();
         let mut failed = false;

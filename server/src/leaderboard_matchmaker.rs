@@ -1,5 +1,6 @@
 use color_eyre::eyre::Context as _;
 use std::str::FromStr;
+use uuid::Uuid;
 
 use crate::{
     jobs::GameRunnerJob,
@@ -106,6 +107,20 @@ async fn run_matchmaker_for_leaderboard(app_state: &AppState, lb: &Leaderboard) 
             .begin()
             .await
             .wrap_err("Failed to start matchmaker transaction")?;
+
+        let mut snake_ids: Vec<Uuid> = selected.iter().map(|entry| entry.battlesnake_id).collect();
+        snake_ids.sort_unstable();
+        snake_ids.dedup();
+        let locked = sqlx::query_scalar!(
+            "SELECT battlesnake_id FROM battlesnakes WHERE battlesnake_id = ANY($1) AND deleted_at IS NULL AND retired_at IS NULL ORDER BY battlesnake_id FOR SHARE",
+            &snake_ids
+        )
+        .fetch_all(&mut *tx)
+        .await
+        .wrap_err("Failed to lock matchmaker snakes")?;
+        if locked.len() != snake_ids.len() {
+            continue;
+        }
 
         let game = game::create_game(
             &mut *tx,
@@ -677,6 +692,64 @@ mod tests {
     #[sqlx::test(migrations = "../migrations")]
     async fn standard_round(pool: sqlx::PgPool) -> cja::Result<()> {
         mode_round(pool, "Standard 11x11", "Standard", 4, 21, 6).await
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn retired_snake_is_not_scheduled_and_unretirement_restores_eligibility(
+        pool: sqlx::PgPool,
+    ) -> cja::Result<()> {
+        use crate::models::battlesnake::{
+            self, RetireBattlesnakeOutcome, UnretireBattlesnakeOutcome,
+        };
+        let (lb, entries) = seeded_mode(&pool, "Standard 11x11", 5).await?;
+        let retired_entry = *entries.iter().next().unwrap();
+        let (snake, owner): (Uuid, Uuid) = sqlx::query_as(
+            "SELECT b.battlesnake_id, b.user_id FROM leaderboard_entries le JOIN battlesnakes b ON b.battlesnake_id = le.battlesnake_id WHERE le.leaderboard_entry_id = $1",
+        )
+        .bind(retired_entry)
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(
+            battlesnake::retire_battlesnake(&pool, snake, owner).await?,
+            RetireBattlesnakeOutcome::Retired {
+                withdrawn_registrations: 0
+            }
+        );
+        let active = leaderboard::get_active_entries(&pool, lb.leaderboard_id).await?;
+        assert_eq!(active.len(), 4);
+        assert!(!active.iter().any(|entry| entry.battlesnake_id == snake));
+        let app_state = crate::state::AppState::test_from_pool(pool.clone());
+        run_matchmaker_for_leaderboard(&app_state, &lb).await?;
+        let scheduled: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM leaderboard_games lg JOIN game_battlesnakes gb ON gb.game_id = lg.game_id WHERE lg.leaderboard_id = $1 AND gb.leaderboard_entry_id = $2",
+        )
+        .bind(lb.leaderboard_id)
+        .bind(retired_entry)
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(scheduled, 0);
+        assert_created_round(
+            &pool,
+            &lb,
+            &entries
+                .difference(&std::collections::HashSet::from([retired_entry]))
+                .copied()
+                .collect(),
+            1,
+            4,
+        )
+        .await?;
+        assert_eq!(
+            battlesnake::unretire_battlesnake(&pool, snake, owner).await?,
+            UnretireBattlesnakeOutcome::Unretired
+        );
+        assert!(
+            leaderboard::get_active_entries(&pool, lb.leaderboard_id)
+                .await?
+                .iter()
+                .any(|entry| entry.battlesnake_id == snake)
+        );
+        Ok(())
     }
 
     #[sqlx::test(migrations = "../migrations")]

@@ -1,0 +1,91 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO tournament_registrations (tournament_id, battlesnake_id, user_id, seed)\n        SELECT $1::uuid, b.battlesnake_id, $3::uuid, $4::int\n        FROM battlesnakes b\n        WHERE b.battlesnake_id = $2\n          AND b.deleted_at IS NULL\n          AND b.retired_at IS NULL\n        FOR SHARE\n        RETURNING\n            registration_id,\n            tournament_id,\n            battlesnake_id,\n            user_id,\n            seed,\n            registered_at\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "registration_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "tournament_registrations",
+            "name": "registration_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "tournament_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "tournament_registrations",
+            "name": "tournament_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "battlesnake_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "tournament_registrations",
+            "name": "battlesnake_id"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "user_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "tournament_registrations",
+            "name": "user_id"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "seed",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "tournament_registrations",
+            "name": "seed"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "registered_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "tournament_registrations",
+            "name": "registered_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "d9db953a46fb2b71d560d72863fc6c89495df0a8b938aa217e5fba8e33bbd213"
+}

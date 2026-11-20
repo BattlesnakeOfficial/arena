@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE battlesnakes SET retired_at = NULL WHERE battlesnake_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f97dd4378576cdf7a1f26711fb4253521ec4d2d8529fd05d65562dacdc5661fb"
+}

@@ -861,6 +861,7 @@ mod tests {
             tail: "default".to_string(),
             created_at: now,
             updated_at: now,
+            retired_at: None,
         }
     }
 

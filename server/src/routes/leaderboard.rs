@@ -520,8 +520,13 @@ pub async fn show_leaderboard(
                                     div class="mine" {
                                         (snake_avatar(&snake.head, &snake.tail, &snake.color))
                                         span class="mname" { (snake.name) }
+                                        @if snake.retired_at.is_some() {
+                                            span class="badge" { "Retired" }
+                                        }
                                         @if entry.disabled_at.is_some() {
-                                            @if entry.disabled_reason.as_deref() == Some(leaderboard_entry_health::DISABLED_REASON_HEALTH) {
+                                            @if entry.disabled_reason.as_deref() == Some(battlesnake::DISABLED_REASON_RETIRED) {
+                                                span class="badge" { "Retired" }
+                                            } @else if entry.disabled_reason.as_deref() == Some(leaderboard_entry_health::DISABLED_REASON_HEALTH) {
                                                 a class="badge warn" href={"/battlesnakes/"(snake.battlesnake_id)"/profile"}
                                                     title="Automatically paused: this snake is failing health checks. Resume re-tests it — details on its profile." {
                                                     "Auto-paused"
@@ -529,9 +534,11 @@ pub async fn show_leaderboard(
                                             } @else {
                                                 span class="badge" { "Paused" }
                                             }
-                                            form action={"/leaderboards/"(leaderboard_id)"/join"} method="post" {
-                                                input type="hidden" name="battlesnake_id" value=(snake.battlesnake_id);
-                                                button type="submit" class="btn sm" aria-label={"Resume " (snake.name)} { "Resume" }
+                                            @if snake.retired_at.is_none() {
+                                                form action={"/leaderboards/"(leaderboard_id)"/join"} method="post" {
+                                                    input type="hidden" name="battlesnake_id" value=(snake.battlesnake_id);
+                                                    button type="submit" class="btn sm" aria-label={"Resume " (snake.name)} { "Resume" }
+                                                }
                                             }
                                         } @else {
                                             span class="badge ok" { "Active" }
@@ -548,7 +555,7 @@ pub async fn show_leaderboard(
                                 }
                             }
 
-                            @let joinable: Vec<_> = user_snakes.iter().collect();
+                            @let joinable: Vec<_> = user_snakes.iter().filter(|snake| snake.retired_at.is_none()).collect();
                             @if !joinable.is_empty() {
                                 form class="join-form" action={"/leaderboards/"(leaderboard_id)"/join"} method="post" {
                                     @if needs_invite_code {
@@ -833,6 +840,9 @@ pub async fn show_leaderboard_entry(
                 div {
                     h1 {
                         a href={"/battlesnakes/"(snake.battlesnake_id)"/profile"} { (snake.name) }
+                        @if snake.retired_at.is_some() {
+                            span class="badge" { "Retired" }
+                        }
                     }
                     div class="sub" {
                         "by "
@@ -1101,6 +1111,15 @@ pub async fn join_leaderboard(
         ));
     }
 
+    if snake.retired_at.is_some() {
+        flasher
+            .error("This battlesnake is retired — unretire it before joining.")
+            .await
+            .wrap_err("Failed to flash")
+            .with_redirect(redirect.clone())?;
+        return Ok(redirect);
+    }
+
     if !private_leaderboard::join_allowed(&state.db, &lb, user.user_id, form.invite_code.as_deref())
         .await
         .wrap_err("Failed to check invite code")
@@ -1125,8 +1144,17 @@ pub async fn join_leaderboard(
     else {
         // Raced a delete: the snake was live at the pre-check but is gone (or
         // its entry is 'deleted'-marked) by the time the upsert ran.
+        let retired = battlesnake::get_battlesnake_by_id(&state.db, form.battlesnake_id)
+            .await
+            .wrap_err("Failed to recheck battlesnake")
+            .with_redirect(redirect.clone())?
+            .is_some_and(|snake| snake.retired_at.is_some());
         flasher
-            .error("That battlesnake doesn't exist or has been deleted.")
+            .error(if retired {
+                "This battlesnake is retired — unretire it before joining."
+            } else {
+                "That battlesnake doesn't exist or has been deleted."
+            })
             .await
             .wrap_err("Failed to flash")
             .with_redirect(redirect.clone())?;
