@@ -63,10 +63,12 @@ pub fn manifest(
 }
 
 /// Bound on the Eyes process-shutdown signal, sent after the supervisor stops
-/// and before the telemetry flush (`run_instrumented_application`).
-/// eyes-subscriber's 5 second default would push a SIGTERM with Eyes hanging
-/// past Cloud Run's 10 second kill: 4s job drain + 2s exit grace + this + 3s
-/// flush must stay within 9.5s (asserted in `main.rs`).
+/// and before the telemetry flush (`run_instrumented_application`). With this
+/// timeout, the bounded steps total 4 + 2 + 0.5 + 3 = 9.5 seconds at the
+/// defaults (asserted in `main.rs`). This does not bound process exit: cja's
+/// post-deadline task join can wait before this signal, and runtime drop can
+/// wait for `spawn_blocking` work after the telemetry flush. Cloud Run sends
+/// SIGKILL 10 seconds after SIGTERM.
 pub const EYES_HEARTBEAT_SHUTDOWN_TIMEOUT: std::time::Duration =
     std::time::Duration::from_millis(500);
 
