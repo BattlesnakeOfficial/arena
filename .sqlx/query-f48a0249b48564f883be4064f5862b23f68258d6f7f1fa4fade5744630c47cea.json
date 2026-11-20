@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT battlesnake_id FROM battlesnakes WHERE battlesnake_id = ANY($1) AND deleted_at IS NULL AND retired_at IS NULL ORDER BY battlesnake_id FOR SHARE",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "battlesnake_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "battlesnakes",
+            "name": "battlesnake_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "f48a0249b48564f883be4064f5862b23f68258d6f7f1fa4fade5744630c47cea"
+}

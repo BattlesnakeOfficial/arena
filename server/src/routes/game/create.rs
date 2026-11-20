@@ -82,6 +82,7 @@ async fn load_public_opponents(
     search: &str,
 ) -> cja::Result<PublicOpponentPage> {
     let mut query = battlesnake::PublicBattlesnakeQuery {
+        selectable_only: true,
         search,
         excluded_owner_id: Some(owner_id),
         page: 0,
@@ -189,7 +190,7 @@ pub async fn challenge_battlesnake(
 
     // Missing and non-public collapse to the same 404 — don't leak which.
     let snake = snake
-        .filter(|snake| snake.visibility == Visibility::Public)
+        .filter(|snake| snake.visibility == Visibility::Public && snake.retired_at.is_none())
         .ok_or_else(|| "Public battlesnake not found".to_string())
         .with_status(StatusCode::NOT_FOUND)?;
 

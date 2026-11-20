@@ -265,6 +265,7 @@ impl GameCreationFlow {
                 WHERE battlesnake_id = $1
                   AND (user_id = $2 OR visibility = 'public')
                   AND deleted_at IS NULL
+                  AND retired_at IS NULL
             ) AS "eligible!""#,
             battlesnake_id,
             user_id
@@ -433,9 +434,11 @@ impl GameCreationFlow {
 
     // Get all battlesnakes for the current user
     pub async fn get_user_battlesnakes(&self, pool: &PgPool) -> cja::Result<Vec<Battlesnake>> {
-        battlesnake::get_battlesnakes_by_user_id(pool, self.user_id)
+        let mut snakes = battlesnake::get_battlesnakes_by_user_id(pool, self.user_id)
             .await
-            .wrap_err("Failed to get user's battlesnakes")
+            .wrap_err("Failed to get user's battlesnakes")?;
+        snakes.retain(|snake| snake.retired_at.is_none());
+        Ok(snakes)
     }
 
     // Get details of the selected battlesnakes
@@ -460,11 +463,13 @@ impl GameCreationFlow {
                 head,
                 tail,
                 created_at,
-                updated_at
+                updated_at,
+                retired_at
             FROM battlesnakes
             WHERE battlesnake_id = ANY($1)
               AND (user_id = $2 OR visibility = 'public')
               AND deleted_at IS NULL
+              AND retired_at IS NULL
             ORDER BY name ASC
             "#,
             &ids,

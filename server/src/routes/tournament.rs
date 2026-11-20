@@ -1100,7 +1100,9 @@ pub async fn show_tournament(
                     .await
                     .wrap_err("Failed to fetch viewer's battlesnakes")?
                     .into_iter()
-                    .filter(|s| !registered_ids.contains(&s.battlesnake_id))
+                    .filter(|s| {
+                        s.retired_at.is_none() && !registered_ids.contains(&s.battlesnake_id)
+                    })
                     .collect()
             } else {
                 vec![]
@@ -1777,6 +1779,16 @@ pub async fn register_snake(
         )
         .await;
     };
+    if snake.retired_at.is_some() {
+        return flash_redirect(
+            &state,
+            session.session_id,
+            "This battlesnake is retired — unretire it before registering.".to_string(),
+            session::FLASH_TYPE_ERROR,
+            &detail_url,
+        )
+        .await;
+    }
 
     let registration =
         match register_snake_in_tx(&mut tx, &t, user.user_id, snake.battlesnake_id, &snake.name)

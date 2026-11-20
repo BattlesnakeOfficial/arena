@@ -1,5 +1,6 @@
 use color_eyre::eyre::Context as _;
 use std::str::FromStr;
+use uuid::Uuid;
 
 use crate::{
     jobs::GameRunnerJob,
@@ -33,6 +34,21 @@ pub async fn run_matchmaker(app_state: &AppState) -> cja::Result<()> {
 }
 
 async fn run_matchmaker_for_leaderboard(app_state: &AppState, lb: &Leaderboard) -> cja::Result<()> {
+    run_leaderboard_round(app_state, lb, |round| async { Ok(round) }).await
+}
+
+/// One matchmaker round. `after_selection` runs between round selection and
+/// the per-group snake locks; production passes the round through unchanged,
+/// and the race test uses it to retire a snake mid-round.
+async fn run_leaderboard_round<F, Fut>(
+    app_state: &AppState,
+    lb: &Leaderboard,
+    after_selection: F,
+) -> cja::Result<()>
+where
+    F: FnOnce(Vec<Vec<LeaderboardEntry>>) -> Fut,
+    Fut: std::future::Future<Output = cja::Result<Vec<Vec<LeaderboardEntry>>>>,
+{
     let pool = &app_state.db;
     let leaderboard_id = lb.leaderboard_id;
     let backlog = sqlx::query!(
@@ -87,6 +103,7 @@ async fn run_matchmaker_for_leaderboard(app_state: &AppState, lb: &Leaderboard) 
         .wrap_err_with(|| format!("Invalid board size for leaderboard {}", lb.name))?;
 
     let round = select_round(&mut rand::thread_rng(), &entries, lb.match_size as usize);
+    let round = after_selection(round).await?;
 
     tracing::info!(
         leaderboard_id = %leaderboard_id,
@@ -98,54 +115,81 @@ async fn run_matchmaker_for_leaderboard(app_state: &AppState, lb: &Leaderboard) 
     );
 
     for selected in round {
-        // Use a transaction to atomically create the game and link it to the
-        // leaderboard. This prevents "zombie" games without a leaderboard record.
-        // enqueued_at stays NULL until the dispatcher enqueues the runner, so
-        // queue_wait measures enqueue-to-claim rather than the deliberate hold.
-        let mut tx = pool
-            .begin()
-            .await
-            .wrap_err("Failed to start matchmaker transaction")?;
-
-        let game = game::create_game(
-            &mut *tx,
-            CreateGame {
-                board_size: board_size.clone(),
-                game_type: game_type.clone(),
-            },
-        )
-        .await
-        .wrap_err("Failed to create game")?;
-
-        // Add each selected entry by leaderboard_entry_id only — no redundant battlesnake_id copy.
-        // The effective battlesnake is resolved via JOIN in get_battlesnakes_by_game_id when needed.
-        for entry in &selected {
-            game::add_leaderboard_entry_to_game(&mut *tx, game.game_id, entry.leaderboard_entry_id)
-                .await
-                .wrap_err_with(|| {
-                    format!(
-                        "Failed to add entry {} to game {}",
-                        entry.leaderboard_entry_id, game.game_id
-                    )
-                })?;
+        if let Some(game_id) =
+            create_selected_game(pool, leaderboard_id, &selected, &board_size, &game_type).await?
+        {
+            tracing::info!(leaderboard_id = %leaderboard_id, game_id = %game_id,
+                "Created leaderboard match game");
         }
-
-        leaderboard::create_leaderboard_game(&mut *tx, leaderboard_id, game.game_id)
-            .await
-            .wrap_err("Failed to create leaderboard game record")?;
-
-        tx.commit()
-            .await
-            .wrap_err("Failed to commit matchmaker transaction")?;
-
-        tracing::info!(
-            leaderboard_id = %leaderboard_id,
-            game_id = %game.game_id,
-            "Created leaderboard match game"
-        );
     }
 
     Ok(())
+}
+
+/// Create one already-selected group. A retirement after selection skips only
+/// this group, leaving other groups in the round free to create games.
+async fn create_selected_game(
+    pool: &sqlx::PgPool,
+    leaderboard_id: Uuid,
+    selected: &[LeaderboardEntry],
+    board_size: &GameBoardSize,
+    game_type: &GameType,
+) -> cja::Result<Option<Uuid>> {
+    // Use a transaction to atomically create the game and link it to the
+    // leaderboard. This prevents "zombie" games without a leaderboard record.
+    // enqueued_at stays NULL until the dispatcher enqueues the runner, so
+    // queue_wait measures enqueue-to-claim rather than the deliberate hold.
+    let mut tx = pool
+        .begin()
+        .await
+        .wrap_err("Failed to start matchmaker transaction")?;
+
+    let mut snake_ids: Vec<Uuid> = selected.iter().map(|entry| entry.battlesnake_id).collect();
+    snake_ids.sort_unstable();
+    snake_ids.dedup();
+    let locked = sqlx::query_scalar!(
+            "SELECT battlesnake_id FROM battlesnakes WHERE battlesnake_id = ANY($1) AND deleted_at IS NULL AND retired_at IS NULL ORDER BY battlesnake_id FOR SHARE",
+            &snake_ids
+        )
+        .fetch_all(&mut *tx)
+        .await
+        .wrap_err("Failed to lock matchmaker snakes")?;
+    if locked.len() != snake_ids.len() {
+        return Ok(None);
+    }
+
+    let game = game::create_game(
+        &mut *tx,
+        CreateGame {
+            board_size: board_size.clone(),
+            game_type: game_type.clone(),
+        },
+    )
+    .await
+    .wrap_err("Failed to create game")?;
+
+    // Add each selected entry by leaderboard_entry_id only — no redundant battlesnake_id copy.
+    // The effective battlesnake is resolved via JOIN in get_battlesnakes_by_game_id when needed.
+    for entry in selected {
+        game::add_leaderboard_entry_to_game(&mut *tx, game.game_id, entry.leaderboard_entry_id)
+            .await
+            .wrap_err_with(|| {
+                format!(
+                    "Failed to add entry {} to game {}",
+                    entry.leaderboard_entry_id, game.game_id
+                )
+            })?;
+    }
+
+    leaderboard::create_leaderboard_game(&mut *tx, leaderboard_id, game.game_id)
+        .await
+        .wrap_err("Failed to create leaderboard game record")?;
+
+    tx.commit()
+        .await
+        .wrap_err("Failed to commit matchmaker transaction")?;
+
+    Ok(Some(game.game_id))
 }
 
 /// Discover and enqueue eligible waiting ladder games. The runner repeats the
@@ -677,6 +721,116 @@ mod tests {
     #[sqlx::test(migrations = "../migrations")]
     async fn standard_round(pool: sqlx::PgPool) -> cja::Result<()> {
         mode_round(pool, "Standard 11x11", "Standard", 4, 21, 6).await
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn retired_snake_is_not_scheduled_and_unretirement_restores_eligibility(
+        pool: sqlx::PgPool,
+    ) -> cja::Result<()> {
+        use crate::models::battlesnake::{
+            self, RetireBattlesnakeOutcome, UnretireBattlesnakeOutcome,
+        };
+        let (lb, entries) = seeded_mode(&pool, "Standard 11x11", 5).await?;
+        let retired_entry = *entries.iter().next().unwrap();
+        let (snake, owner): (Uuid, Uuid) = sqlx::query_as(
+            "SELECT b.battlesnake_id, b.user_id FROM leaderboard_entries le JOIN battlesnakes b ON b.battlesnake_id = le.battlesnake_id WHERE le.leaderboard_entry_id = $1",
+        )
+        .bind(retired_entry)
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(
+            battlesnake::retire_battlesnake(&pool, snake, owner).await?,
+            RetireBattlesnakeOutcome::Retired {
+                withdrawn_registrations: 0
+            }
+        );
+        let active = leaderboard::get_active_entries(&pool, lb.leaderboard_id).await?;
+        assert_eq!(active.len(), 4);
+        assert!(!active.iter().any(|entry| entry.battlesnake_id == snake));
+        let app_state = crate::state::AppState::test_from_pool(pool.clone());
+        run_matchmaker_for_leaderboard(&app_state, &lb).await?;
+        let scheduled: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM leaderboard_games lg JOIN game_battlesnakes gb ON gb.game_id = lg.game_id WHERE lg.leaderboard_id = $1 AND gb.leaderboard_entry_id = $2",
+        )
+        .bind(lb.leaderboard_id)
+        .bind(retired_entry)
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(scheduled, 0);
+        assert_created_round(
+            &pool,
+            &lb,
+            &entries
+                .difference(&std::collections::HashSet::from([retired_entry]))
+                .copied()
+                .collect(),
+            1,
+            4,
+        )
+        .await?;
+        assert_eq!(
+            battlesnake::unretire_battlesnake(&pool, snake, owner).await?,
+            UnretireBattlesnakeOutcome::Unretired
+        );
+        assert!(
+            leaderboard::get_active_entries(&pool, lb.leaderboard_id)
+                .await?
+                .iter()
+                .any(|entry| entry.battlesnake_id == snake)
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn stale_selected_group_is_skipped_but_next_group_runs(
+        pool: sqlx::PgPool,
+    ) -> cja::Result<()> {
+        use crate::models::battlesnake::{self, RetireBattlesnakeOutcome};
+        let (lb, _) = seeded_mode(&pool, "Standard 11x11", 8).await?;
+        let app_state = crate::state::AppState::test_from_pool(pool.clone());
+        let retire_pool = pool.clone();
+        run_leaderboard_round(&app_state, &lb, move |round| async move {
+            assert_eq!(round.len(), 2);
+            let stale_snake = round[0][0].battlesnake_id;
+            let owner: Uuid =
+                sqlx::query_scalar("SELECT user_id FROM battlesnakes WHERE battlesnake_id = $1")
+                    .bind(stale_snake)
+                    .fetch_one(&retire_pool)
+                    .await?;
+            assert_eq!(
+                battlesnake::retire_battlesnake(&retire_pool, stale_snake, owner).await?,
+                RetireBattlesnakeOutcome::Retired {
+                    withdrawn_registrations: 0
+                }
+            );
+            Ok(round)
+        })
+        .await?;
+        let stale_snake: Uuid = sqlx::query_scalar(
+            "SELECT battlesnake_id FROM battlesnakes WHERE retired_at IS NOT NULL",
+        )
+        .fetch_one(&pool)
+        .await?;
+        let created: Uuid =
+            sqlx::query_scalar("SELECT game_id FROM leaderboard_games WHERE leaderboard_id = $1")
+                .bind(lb.leaderboard_id)
+                .fetch_one(&pool)
+                .await?;
+        let participants: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT le.battlesnake_id FROM game_battlesnakes gb JOIN leaderboard_entries le ON le.leaderboard_entry_id = gb.leaderboard_entry_id WHERE gb.game_id = $1",
+        )
+        .bind(created)
+        .fetch_all(&pool)
+        .await?;
+        assert_eq!(participants.len(), 4);
+        assert!(!participants.contains(&stale_snake));
+        let games: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM leaderboard_games WHERE leaderboard_id = $1")
+                .bind(lb.leaderboard_id)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(games, 1);
+        Ok(())
     }
 
     #[sqlx::test(migrations = "../migrations")]

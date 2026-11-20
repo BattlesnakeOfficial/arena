@@ -224,6 +224,20 @@ pub async fn reactivate(
 /// The owner's Resume Matchmaking: [`reactivate`] every one of the snake's
 /// health-paused entries. Returns how many were resumed.
 pub async fn reactivate_snake(pool: &PgPool, battlesnake_id: Uuid) -> cja::Result<u64> {
+    let mut tx = pool
+        .begin()
+        .await
+        .wrap_err("Failed to begin snake reactivation")?;
+    let live = sqlx::query_scalar!(
+        "SELECT battlesnake_id FROM battlesnakes WHERE battlesnake_id = $1 AND deleted_at IS NULL AND retired_at IS NULL FOR SHARE",
+        battlesnake_id
+    )
+    .fetch_optional(&mut *tx)
+    .await
+    .wrap_err("Failed to lock snake for reactivation")?;
+    if live.is_none() {
+        return Ok(0);
+    }
     let result = sqlx::query!(
         r#"UPDATE leaderboard_entries
          SET disabled_at = NULL,
@@ -236,10 +250,12 @@ pub async fn reactivate_snake(pool: &PgPool, battlesnake_id: Uuid) -> cja::Resul
         battlesnake_id,
         DISABLED_REASON_HEALTH
     )
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .wrap_err("Failed to put snake back into matchmaking")?;
-
+    tx.commit()
+        .await
+        .wrap_err("Failed to commit snake reactivation")?;
     Ok(result.rows_affected())
 }
 

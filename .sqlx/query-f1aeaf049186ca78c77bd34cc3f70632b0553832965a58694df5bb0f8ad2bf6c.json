@@ -1,0 +1,160 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            battlesnake_id,\n            user_id,\n            name,\n            url,\n            visibility as \"visibility: Visibility\",\n            engine_region as \"engine_region: EngineRegion\",\n            color,\n            head,\n            tail,\n            created_at,\n            updated_at,\n            retired_at\n        FROM battlesnakes\n        WHERE battlesnake_id = $1\n          AND deleted_at IS NULL\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "battlesnake_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "battlesnakes",
+            "name": "battlesnake_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "user_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "battlesnakes",
+            "name": "user_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "battlesnakes",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "url",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "battlesnakes",
+            "name": "url"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "visibility: Visibility",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "battlesnakes",
+            "name": "visibility"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "engine_region: EngineRegion",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "battlesnakes",
+            "name": "engine_region"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "color",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "battlesnakes",
+            "name": "color"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "head",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "battlesnakes",
+            "name": "head"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "tail",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "battlesnakes",
+            "name": "tail"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "created_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "battlesnakes",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "updated_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "battlesnakes",
+            "name": "updated_at"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "retired_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "battlesnakes",
+            "name": "retired_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "f1aeaf049186ca78c77bd34cc3f70632b0553832965a58694df5bb0f8ad2bf6c"
+}

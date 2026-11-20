@@ -1440,6 +1440,50 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "../migrations")]
+    async fn owned_creation_rejects_retired_snake_and_restores_after_unretire(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        use crate::models::battlesnake::{
+            self, RetireBattlesnakeOutcome, UnretireBattlesnakeOutcome,
+        };
+        let creator = rematch_user(&pool, 262020).await?;
+        let other = rematch_user(&pool, 262021).await?;
+        let snake = rematch_snake(&pool, other, "Veteran", "public").await?;
+        let spec = || CreateGameWithSnakes {
+            board_size: GameBoardSize::Medium,
+            game_type: GameType::Standard,
+            battlesnake_ids: vec![snake],
+        };
+        let before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM games")
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(
+            battlesnake::retire_battlesnake(&pool, snake, other).await?,
+            RetireBattlesnakeOutcome::Retired {
+                withdrawn_registrations: 0
+            }
+        );
+        let error = create_game_with_snakes_for_user(&pool, spec(), creator)
+            .await
+            .unwrap_err();
+        assert!(error.downcast_ref::<InaccessibleBattlesnake>().is_some());
+        let after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM games")
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(before, after);
+        assert_eq!(
+            battlesnake::unretire_battlesnake(&pool, snake, other).await?,
+            UnretireBattlesnakeOutcome::Unretired
+        );
+        create_game_with_snakes_for_user(&pool, spec(), creator).await?;
+        let restored: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM games")
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(restored, before + 1);
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
     async fn privacy_change_race_waits_then_rejects_without_partial_rows(
         pool: PgPool,
     ) -> cja::Result<()> {

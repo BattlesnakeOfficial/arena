@@ -224,6 +224,7 @@ async fn load_public_battlesnake_page(
     search: &str,
 ) -> cja::Result<PublicBattlesnakePage> {
     let mut query = battlesnake::PublicBattlesnakeQuery {
+        selectable_only: false,
         search,
         excluded_owner_id: None,
         page: 0,
@@ -325,7 +326,9 @@ fn render_public_battlesnake_list(
                                     }
                                     td class="r" {
                                         div class="row-actions" {
-                                            @if is_authenticated {
+                                            @if snake.retired_at.is_some() {
+                                                span class="badge" { "Retired" }
+                                            } @else if is_authenticated {
                                                 form action={"/battlesnakes/"(snake.battlesnake_id)"/challenge"} method="post" {
                                                     button type="submit" class="btn sm solid" { "Challenge" }
                                                 }
@@ -456,6 +459,9 @@ pub async fn list_battlesnakes(
                                             span class="chip" style={"background:" (chip_color(&snake.color))} {}
                                             span class="snake-details" {
                                                 a class="name" href={"/battlesnakes/"(snake.battlesnake_id)"/profile"} { (snake.name) }
+                                                @if snake.retired_at.is_some() {
+                                                    span class="badge" { "Retired" }
+                                                }
                                                 @if let Some(host) = hosting.get(&snake.battlesnake_id) {
                                                     @if let Some(homepage) = oauth::renderable_https_url(&host.homepage_url) {
                                                         a class="badge host-badge" href=(homepage) rel="noopener" {
@@ -1087,6 +1093,86 @@ pub async fn delete_battlesnake(
     Ok(Redirect::to("/battlesnakes").into_response())
 }
 
+pub async fn retire_battlesnake(
+    State(state): State<AppState>,
+    CurrentUserWithSession { user, session }: CurrentUserWithSession,
+    Path(battlesnake_id): Path<Uuid>,
+) -> ServerResult<impl IntoResponse, StatusCode> {
+    use battlesnake::RetireBattlesnakeOutcome;
+    let (message, kind) = match battlesnake::retire_battlesnake(
+        &state.db,
+        battlesnake_id,
+        user.user_id,
+    )
+    .await
+    .wrap_err("Failed to retire battlesnake")?
+    {
+        RetireBattlesnakeOutcome::Retired {
+            withdrawn_registrations,
+        } => (
+            if withdrawn_registrations == 0 {
+                "Battlesnake retired.".to_string()
+            } else {
+                format!(
+                    "Battlesnake retired. Withdrawn from {withdrawn_registrations} unopened tournament registration(s); unretiring will not restore them."
+                )
+            },
+            session::FLASH_TYPE_SUCCESS,
+        ),
+        RetireBattlesnakeOutcome::AlreadyRetired => (
+            "This battlesnake is already retired.".to_string(),
+            session::FLASH_TYPE_ERROR,
+        ),
+        RetireBattlesnakeOutcome::InActiveTournament => (
+            "This battlesnake is registered in an active tournament. Withdraw it first."
+                .to_string(),
+            session::FLASH_TYPE_ERROR,
+        ),
+        RetireBattlesnakeOutcome::NotFound => {
+            return Err(
+                "Battlesnake not found or you don't have permission to retire it".to_string(),
+            )
+            .with_status(StatusCode::FORBIDDEN);
+        }
+    };
+    session::set_flash_message(&state.db, session.session_id, message, kind)
+        .await
+        .wrap_err("Failed to set retirement flash")?;
+    Ok(Redirect::to(&format!("/battlesnakes/{battlesnake_id}/profile")).into_response())
+}
+
+pub async fn unretire_battlesnake(
+    State(state): State<AppState>,
+    CurrentUserWithSession { user, session }: CurrentUserWithSession,
+    Path(battlesnake_id): Path<Uuid>,
+) -> ServerResult<impl IntoResponse, StatusCode> {
+    use battlesnake::UnretireBattlesnakeOutcome;
+    let (message, kind) =
+        match battlesnake::unretire_battlesnake(&state.db, battlesnake_id, user.user_id)
+            .await
+            .wrap_err("Failed to unretire battlesnake")?
+        {
+            UnretireBattlesnakeOutcome::Unretired => (
+                "Battlesnake restored to competition.".to_string(),
+                session::FLASH_TYPE_SUCCESS,
+            ),
+            UnretireBattlesnakeOutcome::AlreadyActive => (
+                "This battlesnake is already active.".to_string(),
+                session::FLASH_TYPE_ERROR,
+            ),
+            UnretireBattlesnakeOutcome::NotFound => {
+                return Err(
+                    "Battlesnake not found or you don't have permission to unretire it".to_string(),
+                )
+                .with_status(StatusCode::FORBIDDEN);
+            }
+        };
+    session::set_flash_message(&state.db, session.session_id, message, kind)
+        .await
+        .wrap_err("Failed to set unretirement flash")?;
+    Ok(Redirect::to(&format!("/battlesnakes/{battlesnake_id}/profile")).into_response())
+}
+
 const PROFILE_HISTORY_PER_PAGE: i64 = 50;
 
 #[derive(Debug, serde::Deserialize)]
@@ -1113,6 +1199,23 @@ pub async fn reactivate_battlesnake(
             "Battlesnake not found or you don't have permission to reactivate it".to_string(),
         )
         .with_status(StatusCode::FORBIDDEN);
+    }
+
+    let snake = battlesnake::get_battlesnake_by_id(&state.db, battlesnake_id)
+        .await
+        .wrap_err("Failed to fetch battlesnake for reactivation")?;
+    if snake.is_some_and(|snake| snake.retired_at.is_some()) {
+        session::set_flash_message(
+            &state.db,
+            session.session_id,
+            "This battlesnake is retired — unretire it first.".to_string(),
+            session::FLASH_TYPE_ERROR,
+        )
+        .await
+        .wrap_err("Failed to set flash message")?;
+        return Ok(
+            Redirect::to(&format!("/battlesnakes/{battlesnake_id}/profile")).into_response(),
+        );
     }
 
     let resumed = leaderboard_entry_health::reactivate_snake(&state.db, battlesnake_id)
@@ -1233,6 +1336,13 @@ fn render_battlesnake_profile(view: &ProfileView<'_>) -> Markup {
                     width="128" height="40";
                 div class="snake-id" {
                     h1 { (snake.name) }
+                    @if let Some(retired_at) = snake.retired_at {
+                        div class="retired-notice" {
+                            strong { "Retired" }
+                            " since " (retired_at.format("%b %-d, %Y"))
+                            ". This battlesnake keeps its history and ratings but cannot enter new games."
+                        }
+                    }
                     div class="sub owner-line" {
                         "by "
                         (user_avatar(view.owner_avatar_url, view.owner_name, "owner-avatar"))
@@ -1291,17 +1401,27 @@ fn render_battlesnake_profile(view: &ProfileView<'_>) -> Markup {
                                 button type="submit" class="btn" { "Test Snake" }
                             }
                             a href={"/battlesnakes/"(battlesnake_id)"/edit"} class="btn" { "Edit" }
+                            @if snake.retired_at.is_some() {
+                                form action={"/battlesnakes/"(battlesnake_id)"/unretire"} method="post" {
+                                    button type="submit" class="btn" { "Unretire" }
+                                }
+                            } @else {
+                                form action={"/battlesnakes/"(battlesnake_id)"/retire"} method="post" {
+                                    button type="submit" class="btn"
+                                        data-confirm="Retire this battlesnake? Registrations in unopened tournaments will be withdrawn. Unretiring will not restore them." { "Retire" }
+                                }
+                            }
                             form action={"/battlesnakes/"(battlesnake_id)"/delete"} method="post" {
                                 button type="submit" class="btn danger"
                                     data-confirm="Are you sure you want to delete this battlesnake?" { "Delete" }
                             }
                         }
-                        ProfileViewer::Visitor if is_public => {
+                        ProfileViewer::Visitor if is_public && snake.retired_at.is_none() => {
                             form action={"/battlesnakes/"(battlesnake_id)"/challenge"} method="post" {
                                 button type="submit" class="btn solid" { "Challenge" }
                             }
                         }
-                        ProfileViewer::Anonymous if is_public => {
+                        ProfileViewer::Anonymous if is_public && snake.retired_at.is_none() => {
                             a href="/auth/github" class="btn" { "Sign in to challenge" }
                         }
                         _ => {}
@@ -1312,7 +1432,7 @@ fn render_battlesnake_profile(view: &ProfileView<'_>) -> Markup {
             // Auto-deactivation notice: the health sweeper pulled this snake
             // from matchmaking on some leaderboards; the owner can resume
             // once it's fixed.
-            @if !health_paused.is_empty() {
+            @if !health_paused.is_empty() && snake.retired_at.is_none() {
                 div class="form-error snake-paused" {
                     p {
                         strong { "Paused from leaderboard matchmaking. " }
@@ -1431,7 +1551,9 @@ fn render_battlesnake_profile(view: &ProfileView<'_>) -> Markup {
                                             }
                                         }
                                         td class="r" {
-                                            @if entry.disabled_at.is_some()
+                                            @if entry.disabled_reason.as_deref() == Some(battlesnake::DISABLED_REASON_RETIRED) {
+                                                span class="badge" { "Retired" }
+                                            } @else if entry.disabled_at.is_some()
                                                 && entry.disabled_reason.as_deref() == Some(leaderboard_entry_health::DISABLED_REASON_HEALTH)
                                             {
                                                 span class="badge warn" title="Automatically paused: this snake is failing health checks on this leaderboard." { "Auto-paused" }
@@ -1952,6 +2074,7 @@ mod public_list_tests {
             color: "#ff0000".to_string(),
             owner_login: owner.to_string(),
             owner_name: owner.to_string(),
+            retired_at: None,
         }
     }
 
@@ -2018,6 +2141,17 @@ mod public_list_tests {
         assert!(html.contains(r#"href="/auth/github""#));
         assert!(html.contains("Sign in to challenge"));
         assert!(!html.contains("/challenge"));
+    }
+
+    #[test]
+    fn retired_public_row_keeps_profile_but_hides_challenge() {
+        let mut snake = item("Veteran", "owner");
+        snake.retired_at = Some(chrono::Utc::now());
+        let html = render_public_battlesnake_list(&[snake], true, "", 0, 1, 1).into_string();
+        assert!(html.contains("Veteran"));
+        assert!(html.contains("Retired"));
+        assert!(!html.contains("/challenge"));
+        assert!(!html.contains("Sign in to challenge"));
     }
 
     #[test]
@@ -2342,7 +2476,7 @@ mod profile_page_tests {
             (status, String::from_utf8(body.to_vec()).unwrap())
         }
 
-        async fn post(&self, session: Uuid, action: &str) -> (StatusCode, String) {
+        async fn post_response(&self, session: Uuid, action: &str) -> axum::response::Response {
             let request = Request::builder()
                 .method(axum::http::Method::POST)
                 .uri(format!("/battlesnakes/{}/{action}", self.snake_id))
@@ -2356,7 +2490,11 @@ mod profile_page_tests {
                 )
                 .body(Body::empty())
                 .unwrap();
-            let response = self.app.clone().oneshot(request).await.unwrap();
+            self.app.clone().oneshot(request).await.unwrap()
+        }
+
+        async fn post(&self, session: Uuid, action: &str) -> (StatusCode, String) {
+            let response = self.post_response(session, action).await;
             let status = response.status();
             let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
             (status, String::from_utf8(body.to_vec()).unwrap())
@@ -2375,6 +2513,231 @@ mod profile_page_tests {
             .await
             .unwrap();
         }
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn retire_routes_enforce_owner_and_preserve_profile(db: PgPool) {
+        let fx = Fixture::new(db, "public").await;
+        let path = format!("/battlesnakes/{}/profile", fx.snake_id);
+        let before = fx.get(Some(fx.owner_session)).await.1;
+        assert!(
+            before.contains("Registrations in unopened tournaments will be withdrawn"),
+            "{before}"
+        );
+
+        let visitor = fx.post_response(fx.visitor_session, "retire").await;
+        assert_eq!(visitor.status(), StatusCode::FORBIDDEN);
+        let retired_at: Option<chrono::DateTime<chrono::Utc>> =
+            sqlx::query_scalar("SELECT retired_at FROM battlesnakes WHERE battlesnake_id = $1")
+                .bind(fx.snake_id)
+                .fetch_one(&fx.db)
+                .await
+                .unwrap();
+        assert!(retired_at.is_none());
+
+        let owner = fx.post_response(fx.owner_session, "retire").await;
+        assert_eq!(owner.status(), StatusCode::SEE_OTHER);
+        assert_eq!(owner.headers()[header::LOCATION], path);
+        let retired_at: Option<chrono::DateTime<chrono::Utc>> =
+            sqlx::query_scalar("SELECT retired_at FROM battlesnakes WHERE battlesnake_id = $1")
+                .bind(fx.snake_id)
+                .fetch_one(&fx.db)
+                .await
+                .unwrap();
+        assert!(retired_at.is_some());
+        let flash: String =
+            sqlx::query_scalar("SELECT flash_message FROM sessions WHERE session_id = $1")
+                .bind(fx.owner_session)
+                .fetch_one(&fx.db)
+                .await
+                .unwrap();
+        assert_eq!(flash, "Battlesnake retired.");
+        let (status, profile) = fx.get(Some(fx.visitor_session)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(profile.contains("Retired</strong> since"), "{profile}");
+        assert!(profile.contains("No games played yet."));
+        assert!(!profile.contains(challenge_form(fx.snake_id).as_str()));
+
+        let reactivate = fx.post_response(fx.owner_session, "reactivate").await;
+        assert_eq!(reactivate.status(), StatusCode::SEE_OTHER);
+        assert_eq!(reactivate.headers()[header::LOCATION], path);
+        let flash: String =
+            sqlx::query_scalar("SELECT flash_message FROM sessions WHERE session_id = $1")
+                .bind(fx.owner_session)
+                .fetch_one(&fx.db)
+                .await
+                .unwrap();
+        assert_eq!(flash, "This battlesnake is retired — unretire it first.");
+
+        let visitor = fx.post_response(fx.visitor_session, "unretire").await;
+        assert_eq!(visitor.status(), StatusCode::FORBIDDEN);
+        let restored = fx.post_response(fx.owner_session, "unretire").await;
+        assert_eq!(restored.status(), StatusCode::SEE_OTHER);
+        assert_eq!(restored.headers()[header::LOCATION], path);
+        let retired_at: Option<chrono::DateTime<chrono::Utc>> =
+            sqlx::query_scalar("SELECT retired_at FROM battlesnakes WHERE battlesnake_id = $1")
+                .bind(fx.snake_id)
+                .fetch_one(&fx.db)
+                .await
+                .unwrap();
+        assert!(retired_at.is_none());
+        let flash: String =
+            sqlx::query_scalar("SELECT flash_message FROM sessions WHERE session_id = $1")
+                .bind(fx.owner_session)
+                .fetch_one(&fx.db)
+                .await
+                .unwrap();
+        assert_eq!(flash, "Battlesnake restored to competition.");
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn retire_route_reports_tournament_block_and_withdrawal(db: PgPool) {
+        let fx = Fixture::new(db, "public").await;
+        let owner = session_user_id(&fx.db, fx.owner_session).await;
+        let tournament_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO tournaments (name, user_id, status) VALUES ('Active Route', $1, 'registration') RETURNING tournament_id",
+        )
+        .bind(owner)
+        .fetch_one(&fx.db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO tournament_registrations (tournament_id, battlesnake_id, user_id, seed) VALUES ($1, $2, $3, 1)",
+        )
+        .bind(tournament_id)
+        .bind(fx.snake_id)
+        .bind(owner)
+        .execute(&fx.db)
+        .await
+        .unwrap();
+        assert_eq!(
+            fx.post_response(fx.owner_session, "retire").await.status(),
+            StatusCode::SEE_OTHER
+        );
+        let flash: String =
+            sqlx::query_scalar("SELECT flash_message FROM sessions WHERE session_id = $1")
+                .bind(fx.owner_session)
+                .fetch_one(&fx.db)
+                .await
+                .unwrap();
+        assert!(flash.contains("Withdraw it first."));
+        let retired: bool = sqlx::query_scalar(
+            "SELECT retired_at IS NOT NULL FROM battlesnakes WHERE battlesnake_id = $1",
+        )
+        .bind(fx.snake_id)
+        .fetch_one(&fx.db)
+        .await
+        .unwrap();
+        assert!(!retired);
+
+        sqlx::query("UPDATE tournaments SET status = 'created' WHERE tournament_id = $1")
+            .bind(tournament_id)
+            .execute(&fx.db)
+            .await
+            .unwrap();
+        assert_eq!(
+            fx.post_response(fx.owner_session, "retire").await.status(),
+            StatusCode::SEE_OTHER
+        );
+        let flash: String =
+            sqlx::query_scalar("SELECT flash_message FROM sessions WHERE session_id = $1")
+                .bind(fx.owner_session)
+                .fetch_one(&fx.db)
+                .await
+                .unwrap();
+        assert!(flash.contains("Withdrawn from 1 unopened tournament registration(s)"));
+        let remaining: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM tournament_registrations WHERE tournament_id = $1",
+        )
+        .bind(tournament_id)
+        .fetch_one(&fx.db)
+        .await
+        .unwrap();
+        assert_eq!(remaining, 0);
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn retired_snake_web_join_and_registration_show_clear_flashes(db: PgPool) {
+        let fx = Fixture::new(db, "public").await;
+        let owner = session_user_id(&fx.db, fx.owner_session).await;
+        assert_eq!(
+            fx.post_response(fx.owner_session, "retire").await.status(),
+            StatusCode::SEE_OTHER
+        );
+        let cookie = format!(
+            "{}={}",
+            session::SESSION_COOKIE_NAME,
+            signed_session_cookie(&fx.state, fx.owner_session)
+        );
+        let leaderboard_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO leaderboards (name) VALUES ('Retired Route Join') RETURNING leaderboard_id",
+        )
+        .fetch_one(&fx.db)
+        .await
+        .unwrap();
+        let join = Request::builder()
+            .method(axum::http::Method::POST)
+            .uri(format!("/leaderboards/{leaderboard_id}/join"))
+            .header(header::COOKIE, &cookie)
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from(format!("battlesnake_id={}", fx.snake_id)))
+            .unwrap();
+        let response = fx.app.clone().oneshot(join).await.unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let flash: String =
+            sqlx::query_scalar("SELECT flash_message FROM sessions WHERE session_id = $1")
+                .bind(fx.owner_session)
+                .fetch_one(&fx.db)
+                .await
+                .unwrap();
+        assert_eq!(
+            flash,
+            "This battlesnake is retired — unretire it before joining."
+        );
+        let entries: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM leaderboard_entries WHERE leaderboard_id = $1 AND battlesnake_id = $2",
+        )
+        .bind(leaderboard_id)
+        .bind(fx.snake_id)
+        .fetch_one(&fx.db)
+        .await
+        .unwrap();
+        assert_eq!(entries, 0);
+
+        let tournament_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO tournaments (name, user_id, status) VALUES ('Retired Route Tournament', $1, 'registration') RETURNING tournament_id",
+        )
+        .bind(owner)
+        .fetch_one(&fx.db)
+        .await
+        .unwrap();
+        let register = Request::builder()
+            .method(axum::http::Method::POST)
+            .uri(format!("/tournaments/{tournament_id}/register"))
+            .header(header::COOKIE, &cookie)
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from(format!("battlesnake_id={}", fx.snake_id)))
+            .unwrap();
+        let response = fx.app.clone().oneshot(register).await.unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let flash: String =
+            sqlx::query_scalar("SELECT flash_message FROM sessions WHERE session_id = $1")
+                .bind(fx.owner_session)
+                .fetch_one(&fx.db)
+                .await
+                .unwrap();
+        assert_eq!(
+            flash,
+            "This battlesnake is retired — unretire it before registering."
+        );
+        let registrations: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM tournament_registrations WHERE tournament_id = $1",
+        )
+        .bind(tournament_id)
+        .fetch_one(&fx.db)
+        .await
+        .unwrap();
+        assert_eq!(registrations, 0);
     }
 
     /// Test Snake plays one game per active public leaderboard — enrolled or
@@ -2550,6 +2913,47 @@ mod profile_page_tests {
                 assert!(html.contains("‹ Prev"));
                 assert!(!html.contains("Next ›"));
             }
+        }
+
+        // Exercise the populated history through the owner action, for both
+        // viewers and both pages. A retired-only filter in the profile query
+        // must not turn this into an apparently valid empty profile.
+        let history_section = |html: &str| {
+            html.split("Game History")
+                .nth(1)
+                .unwrap()
+                .split("</section>")
+                .next()
+                .unwrap()
+                .to_string()
+        };
+        let before_pages = [
+            fx.get_page(Some(fx.owner_session), None).await.1,
+            fx.get_page(Some(fx.owner_session), Some(1)).await.1,
+            fx.get_page(Some(fx.visitor_session), None).await.1,
+            fx.get_page(Some(fx.visitor_session), Some(1)).await.1,
+        ];
+        let response = fx.post_response(fx.owner_session, "retire").await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        for (index, (viewer, page)) in [
+            (fx.owner_session, None),
+            (fx.owner_session, Some(1)),
+            (fx.visitor_session, None),
+            (fx.visitor_session, Some(1)),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (status, retired) = fx.get_page(Some(viewer), page).await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(retired.contains("Retired</strong> since"));
+            assert!(retired.contains("53<small>2 won</small>"));
+            assert!(retired.contains("Avg. Placement</div><div class=\"value\">2.0</div>"));
+            assert!(retired.contains("<td class=\"r num\">7</td>"));
+            assert!(!retired.contains("No games played yet."));
+            let history = history_section(&retired);
+            assert_eq!(history, history_section(&before_pages[index]));
+            assert!(history.contains("🥇 1st") || history.contains("🥈 2nd"));
         }
     }
 

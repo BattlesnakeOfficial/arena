@@ -31,6 +31,7 @@ pub struct SnakeResponse {
     engine_region: EngineRegion,
     created_at: chrono::DateTime<chrono::Utc>,
     updated_at: chrono::DateTime<chrono::Utc>,
+    retired_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl SnakeResponse {
@@ -50,6 +51,7 @@ impl SnakeResponse {
             engine_region: snake.engine_region,
             created_at: snake.created_at,
             updated_at: snake.updated_at,
+            retired_at: snake.retired_at,
         }
     }
 }
@@ -606,6 +608,34 @@ mod tests {
         let (status, body) = send_api(app, method, path, Some(bearer), body).await;
         let json = serde_json::from_str(&body).unwrap_or(serde_json::Value::String(body));
         (status, json)
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn retired_at_is_nullable_in_owner_api_without_exposing_url(db: PgPool) {
+        let state = AppState::test_from_pool(db.clone());
+        let app = api_app(&state);
+        let user = create_user(&db, 262040, false).await;
+        let snake = make_snake(&db, user, "api-retirement").await;
+        let token = mint(&db, user, &[Permission::SnakesRead], SnakeAccess::All, &[]).await;
+        let path = format!("/api/snakes/{}", snake.battlesnake_id);
+        let (status, before) = request(&app, "GET", &path, &token, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(before["retired_at"].is_null());
+        assert!(before.get("url").is_none());
+        battlesnake::retire_battlesnake(&db, snake.battlesnake_id, user)
+            .await
+            .unwrap();
+        let (status, retired) = request(&app, "GET", &path, &token, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(retired["retired_at"].as_str().is_some());
+        assert!(retired.get("url").is_none());
+        battlesnake::unretire_battlesnake(&db, snake.battlesnake_id, user)
+            .await
+            .unwrap();
+        let (status, restored) = request(&app, "GET", &path, &token, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(restored["retired_at"].is_null());
+        assert!(restored.get("url").is_none());
     }
 
     #[sqlx::test(migrations = "../migrations")]

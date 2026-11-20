@@ -100,6 +100,7 @@ pub struct Battlesnake {
     pub tail: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub retired_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Return the requested snakes that are selectable by this user. Missing,
@@ -114,6 +115,7 @@ pub async fn eligible_battlesnake_ids(
            WHERE battlesnake_id = ANY($1)
              AND (user_id = $2 OR visibility = 'public')
              AND deleted_at IS NULL
+             AND retired_at IS NULL
            ORDER BY battlesnake_id"#,
         requested,
         requester
@@ -136,6 +138,7 @@ pub async fn lock_eligible_battlesnake_ids(
            WHERE battlesnake_id = ANY($1)
              AND (user_id = $2 OR visibility = 'public')
              AND deleted_at IS NULL
+             AND retired_at IS NULL
            ORDER BY battlesnake_id
            FOR SHARE"#,
         requested,
@@ -258,7 +261,8 @@ pub async fn get_battlesnakes_by_user_id(
             head,
             tail,
             created_at,
-            updated_at
+            updated_at,
+            retired_at
         FROM battlesnakes
         WHERE user_id = $1
           AND deleted_at IS NULL
@@ -292,7 +296,8 @@ pub async fn get_battlesnake_by_id(
             head,
             tail,
             created_at,
-            updated_at
+            updated_at,
+            retired_at
         FROM battlesnakes
         WHERE battlesnake_id = $1
           AND deleted_at IS NULL
@@ -339,7 +344,8 @@ where
             head,
             tail,
             created_at,
-            updated_at
+            updated_at,
+            retired_at
         "#,
         user_id,
         data.name,
@@ -424,7 +430,8 @@ pub async fn update_battlesnake(
             head,
             tail,
             created_at,
-            updated_at
+            updated_at,
+            retired_at
         "#,
         battlesnake_id,
         user_id,
@@ -619,6 +626,148 @@ pub async fn snake_creator_client(
 /// Nothing re-enables these: health reactivation only touches `health`
 /// entries, and owner pause/resume refuses them.
 pub const DISABLED_REASON_DELETED: &str = "deleted";
+pub const DISABLED_REASON_RETIRED: &str = "retired";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetireBattlesnakeOutcome {
+    Retired { withdrawn_registrations: usize },
+    AlreadyRetired,
+    NotFound,
+    InActiveTournament,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnretireBattlesnakeOutcome {
+    Unretired,
+    AlreadyActive,
+    NotFound,
+}
+
+pub async fn retire_battlesnake(
+    pool: &PgPool,
+    battlesnake_id: Uuid,
+    user_id: Uuid,
+) -> cja::Result<RetireBattlesnakeOutcome> {
+    use crate::models::tournament::{self, TournamentStatus};
+
+    let mut tx = pool.begin().await.wrap_err("Failed to begin retirement")?;
+    let locked = sqlx::query_scalar!(
+        "SELECT retired_at FROM battlesnakes WHERE battlesnake_id = $1 AND user_id = $2 AND deleted_at IS NULL FOR UPDATE",
+        battlesnake_id,
+        user_id
+    )
+    .fetch_optional(&mut *tx)
+    .await
+    .wrap_err("Failed to lock battlesnake for retirement")?;
+    let Some(retired_at) = locked else {
+        return Ok(RetireBattlesnakeOutcome::NotFound);
+    };
+    if retired_at.is_some() {
+        return Ok(RetireBattlesnakeOutcome::AlreadyRetired);
+    }
+    if tournament::count_active_tournament_registrations(&mut *tx, battlesnake_id).await? > 0 {
+        return Ok(RetireBattlesnakeOutcome::InActiveTournament);
+    }
+
+    let pending = sqlx::query!(
+        r#"SELECT tr.registration_id, tr.tournament_id
+           FROM tournament_registrations tr
+           JOIN tournaments t ON t.tournament_id = tr.tournament_id
+           WHERE tr.battlesnake_id = $1 AND t.status = 'created'
+           ORDER BY tr.tournament_id"#,
+        battlesnake_id
+    )
+    .fetch_all(&mut *tx)
+    .await
+    .wrap_err("Failed to find unopened tournament registrations")?;
+    let mut withdrawn_registrations = 0;
+    for registration in pending {
+        let status = tournament::get_tournament_for_update(&mut tx, registration.tournament_id)
+            .await?
+            .map(|t| t.status);
+        match status {
+            Some(TournamentStatus::Created) => {
+                if tournament::delete_registration_and_renumber(
+                    &mut tx,
+                    registration.tournament_id,
+                    registration.registration_id,
+                )
+                .await?
+                {
+                    withdrawn_registrations += 1;
+                }
+            }
+            Some(TournamentStatus::Registration | TournamentStatus::InProgress) => {
+                return Ok(RetireBattlesnakeOutcome::InActiveTournament);
+            }
+            Some(TournamentStatus::Completed | TournamentStatus::Canceled) | None => {}
+        }
+    }
+
+    sqlx::query!(
+        "UPDATE battlesnakes SET retired_at = NOW() WHERE battlesnake_id = $1",
+        battlesnake_id
+    )
+    .execute(&mut *tx)
+    .await
+    .wrap_err("Failed to mark battlesnake retired")?;
+    sqlx::query!(
+        "UPDATE leaderboard_entries SET disabled_at = NOW(), disabled_reason = $2, updated_at = NOW() WHERE battlesnake_id = $1 AND disabled_at IS NULL",
+        battlesnake_id,
+        DISABLED_REASON_RETIRED
+    )
+    .execute(&mut *tx)
+    .await
+    .wrap_err("Failed to disable retired battlesnake's leaderboard entries")?;
+    tx.commit().await.wrap_err("Failed to commit retirement")?;
+    Ok(RetireBattlesnakeOutcome::Retired {
+        withdrawn_registrations,
+    })
+}
+
+pub async fn unretire_battlesnake(
+    pool: &PgPool,
+    battlesnake_id: Uuid,
+    user_id: Uuid,
+) -> cja::Result<UnretireBattlesnakeOutcome> {
+    let mut tx = pool
+        .begin()
+        .await
+        .wrap_err("Failed to begin unretirement")?;
+    let locked = sqlx::query_scalar!(
+        "SELECT retired_at FROM battlesnakes WHERE battlesnake_id = $1 AND user_id = $2 AND deleted_at IS NULL FOR UPDATE",
+        battlesnake_id,
+        user_id
+    )
+    .fetch_optional(&mut *tx)
+    .await
+    .wrap_err("Failed to lock battlesnake for unretirement")?;
+    let Some(retired_at) = locked else {
+        return Ok(UnretireBattlesnakeOutcome::NotFound);
+    };
+    if retired_at.is_none() {
+        return Ok(UnretireBattlesnakeOutcome::AlreadyActive);
+    }
+    sqlx::query!(
+        "UPDATE battlesnakes SET retired_at = NULL WHERE battlesnake_id = $1",
+        battlesnake_id
+    )
+    .execute(&mut *tx)
+    .await
+    .wrap_err("Failed to clear battlesnake retirement")?;
+    sqlx::query!(
+        "UPDATE leaderboard_entries SET disabled_at = NULL, disabled_reason = NULL, health_consecutive_failures = 0, health_consecutive_successes = 0, health_last_failure = NULL, updated_at = NOW() WHERE battlesnake_id = $1 AND disabled_reason = $2",
+        battlesnake_id,
+        DISABLED_REASON_RETIRED
+    )
+    .execute(&mut *tx)
+    .await
+    .wrap_err("Failed to restore retired leaderboard entries")?;
+    tx.commit()
+        .await
+        .wrap_err("Failed to commit unretirement")?;
+    Ok(UnretireBattlesnakeOutcome::Unretired)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeleteBattlesnakeOutcome {
@@ -806,7 +955,8 @@ pub async fn get_public_battlesnakes(pool: &PgPool) -> cja::Result<Vec<Battlesna
             head,
             tail,
             created_at,
-            updated_at
+            updated_at,
+            retired_at
         FROM battlesnakes
         WHERE visibility = 'public'
           AND deleted_at IS NULL
@@ -831,6 +981,7 @@ pub struct PublicBattlesnakeListItem {
     pub color: String,
     pub owner_login: String,
     pub owner_name: String,
+    pub retired_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Debug, Clone)]
@@ -839,6 +990,7 @@ pub struct PublicBattlesnakeQuery<'a> {
     pub excluded_owner_id: Option<Uuid>,
     pub page: i64,
     pub per_page: i64,
+    pub selectable_only: bool,
 }
 
 // Count public snakes matching a literal, case-insensitive name or owner
@@ -854,13 +1006,15 @@ pub async fn count_public_battlesnakes(
         JOIN users u ON b.user_id = u.user_id
         WHERE b.visibility = 'public'
           AND b.deleted_at IS NULL
+          AND (NOT $3::bool OR b.retired_at IS NULL)
           AND ($2::uuid IS NULL OR b.user_id != $2)
           AND (strpos(lower(b.name), lower($1)) > 0
                OR strpos(lower(u.github_login), lower($1)) > 0
                OR strpos(lower(COALESCE(u.display_name, '')), lower($1)) > 0)
         "#,
         query.search,
-        query.excluded_owner_id
+        query.excluded_owner_id,
+        query.selectable_only
     )
     .fetch_one(pool)
     .await
@@ -884,12 +1038,14 @@ pub async fn get_public_battlesnakes_paginated(
             b.battlesnake_id,
             b.name,
             b.color,
+            b.retired_at,
             u.github_login AS owner_login,
             COALESCE(NULLIF(u.display_name, ''), u.github_login) AS "owner_name!"
         FROM battlesnakes b
         JOIN users u ON b.user_id = u.user_id
         WHERE b.visibility = 'public'
           AND b.deleted_at IS NULL
+          AND (NOT $5::bool OR b.retired_at IS NULL)
           AND ($4::uuid IS NULL OR b.user_id != $4)
           AND (strpos(lower(b.name), lower($3)) > 0
                OR strpos(lower(u.github_login), lower($3)) > 0
@@ -900,7 +1056,8 @@ pub async fn get_public_battlesnakes_paginated(
         query.per_page,
         offset,
         query.search,
-        query.excluded_owner_id
+        query.excluded_owner_id,
+        query.selectable_only
     )
     .fetch_all(pool)
     .await
@@ -928,7 +1085,8 @@ pub async fn get_available_battlesnakes(
             head,
             tail,
             created_at,
-            updated_at
+            updated_at,
+            retired_at
         FROM battlesnakes
         WHERE (user_id = $1 OR visibility = 'public')
           AND deleted_at IS NULL
@@ -1049,6 +1207,184 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "../migrations")]
+    async fn retirement_restores_only_entries_it_disabled(pool: PgPool) -> cja::Result<()> {
+        let owner = create_user(&pool, 262001, "retire-owner").await?;
+        let other = create_user(&pool, 262002, "retire-other").await?;
+        let snake = create_snake(&pool, owner, "Retire Test", Visibility::Public).await?;
+        let mut entries = Vec::new();
+        for (index, reason) in [None, Some("manual"), Some("health")].iter().enumerate() {
+            let leaderboard_id: Uuid = sqlx::query_scalar(
+                "INSERT INTO leaderboards (name) VALUES ($1) RETURNING leaderboard_id",
+            )
+            .bind(format!("Retire Test {index}"))
+            .fetch_one(&pool)
+            .await?;
+            let entry =
+                crate::models::leaderboard::get_or_create_entry(&pool, leaderboard_id, snake)
+                    .await?
+                    .expect("live snake joins");
+            if reason.is_some() {
+                sqlx::query("UPDATE leaderboard_entries SET disabled_at = NOW(), disabled_reason = $2 WHERE leaderboard_entry_id = $1")
+                    .bind(entry.leaderboard_entry_id)
+                    .bind(if *reason == Some("manual") { None } else { *reason })
+                    .execute(&pool)
+                    .await?;
+            }
+            sqlx::query("UPDATE leaderboard_entries SET games_played = 11, display_score = 42.5 WHERE leaderboard_entry_id = $1")
+                .bind(entry.leaderboard_entry_id)
+                .execute(&pool)
+                .await?;
+            entries.push((leaderboard_id, entry.leaderboard_entry_id));
+        }
+
+        let score_before = crate::models::global_ranking::get_global_player_score(&pool, owner)
+            .await?
+            .expect("enabled ranked entry contributes");
+        assert_eq!(score_before.total_score, 42.5);
+
+        assert_eq!(
+            retire_battlesnake(&pool, snake, other).await?,
+            RetireBattlesnakeOutcome::NotFound
+        );
+        assert_eq!(
+            retire_battlesnake(&pool, snake, owner).await?,
+            RetireBattlesnakeOutcome::Retired {
+                withdrawn_registrations: 0
+            }
+        );
+        let retired_at = get_battlesnake_by_id(&pool, snake)
+            .await?
+            .unwrap()
+            .retired_at;
+        assert!(retired_at.is_some());
+        assert_eq!(
+            retire_battlesnake(&pool, snake, owner).await?,
+            RetireBattlesnakeOutcome::AlreadyRetired
+        );
+        assert_eq!(
+            get_battlesnake_by_id(&pool, snake)
+                .await?
+                .unwrap()
+                .retired_at,
+            retired_at
+        );
+        assert_eq!(
+            eligible_battlesnake_ids(&pool, owner, &[snake]).await?,
+            HashSet::new()
+        );
+        assert!(
+            crate::models::global_ranking::get_global_player_score(&pool, owner)
+                .await?
+                .is_none()
+        );
+        let directory = PublicBattlesnakeQuery {
+            search: "Retire Test",
+            excluded_owner_id: None,
+            page: 0,
+            per_page: 10,
+            selectable_only: false,
+        };
+        assert_eq!(count_public_battlesnakes(&pool, &directory).await?, 1);
+        assert_eq!(
+            get_public_battlesnakes_paginated(&pool, &directory).await?[0].retired_at,
+            retired_at
+        );
+        let picker = PublicBattlesnakeQuery {
+            selectable_only: true,
+            ..directory
+        };
+        assert_eq!(count_public_battlesnakes(&pool, &picker).await?, 0);
+        assert!(
+            get_public_battlesnakes_paginated(&pool, &picker)
+                .await?
+                .is_empty()
+        );
+        assert_eq!(
+            crate::models::leaderboard_entry_health::reactivate_snake(&pool, snake).await?,
+            0
+        );
+        // A manually paused entry has no reason, so only the snake lock can
+        // prevent this direct resume while retirement is active.
+        crate::models::leaderboard::set_disabled(&pool, entries[1].1, None).await?;
+        let manual_while_retired =
+            crate::models::leaderboard::get_entry(&pool, entries[1].0, snake)
+                .await?
+                .unwrap();
+        assert!(manual_while_retired.disabled_at.is_some());
+        assert!(manual_while_retired.disabled_reason.is_none());
+        crate::models::leaderboard::set_disabled(&pool, entries[0].1, None).await?;
+        assert!(
+            crate::models::leaderboard::get_active_entries(&pool, entries[0].0)
+                .await?
+                .is_empty()
+        );
+        for (index, (leaderboard_id, entry_id)) in entries.iter().enumerate() {
+            let entry = crate::models::leaderboard::get_entry(&pool, *leaderboard_id, snake)
+                .await?
+                .expect("history remains");
+            assert_eq!(entry.leaderboard_entry_id, *entry_id);
+            assert_eq!(entry.games_played, 11);
+            assert_eq!(entry.display_score, 42.5);
+            assert_eq!(
+                entry.disabled_reason.as_deref(),
+                [Some("retired"), None, Some("health")][index]
+            );
+            assert!(entry.disabled_at.is_some());
+            assert!(
+                crate::models::leaderboard::get_or_create_entry(&pool, *leaderboard_id, snake)
+                    .await?
+                    .is_none()
+            );
+        }
+
+        assert_eq!(
+            unretire_battlesnake(&pool, snake, other).await?,
+            UnretireBattlesnakeOutcome::NotFound
+        );
+        assert_eq!(
+            unretire_battlesnake(&pool, snake, owner).await?,
+            UnretireBattlesnakeOutcome::Unretired
+        );
+        assert_eq!(
+            unretire_battlesnake(&pool, snake, owner).await?,
+            UnretireBattlesnakeOutcome::AlreadyActive
+        );
+        assert_eq!(
+            get_battlesnake_by_id(&pool, snake)
+                .await?
+                .unwrap()
+                .retired_at,
+            None
+        );
+        assert_eq!(
+            eligible_battlesnake_ids(&pool, owner, &[snake]).await?,
+            HashSet::from([snake])
+        );
+        assert_eq!(count_public_battlesnakes(&pool, &picker).await?, 1);
+        assert_eq!(
+            crate::models::global_ranking::get_global_player_score(&pool, owner)
+                .await?
+                .unwrap()
+                .total_score,
+            score_before.total_score
+        );
+        for (index, (leaderboard_id, entry_id)) in entries.iter().enumerate() {
+            let entry = crate::models::leaderboard::get_entry(&pool, *leaderboard_id, snake)
+                .await?
+                .unwrap();
+            assert_eq!(entry.leaderboard_entry_id, *entry_id);
+            assert_eq!(entry.games_played, 11);
+            assert_eq!(entry.display_score, 42.5);
+            assert_eq!(entry.disabled_at.is_none(), index == 0);
+            assert_eq!(
+                entry.disabled_reason.as_deref(),
+                [None, None, Some("health")][index]
+            );
+        }
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
     async fn count_public_battlesnakes_excludes_private(pool: PgPool) -> cja::Result<()> {
         let owner = create_user(&pool, 8001, "count-owner").await?;
         create_snake(&pool, owner, "Alpha", Visibility::Public).await?;
@@ -1056,6 +1392,7 @@ mod tests {
         create_snake(&pool, owner, "Hidden", Visibility::Private).await?;
 
         let query = PublicBattlesnakeQuery {
+            selectable_only: false,
             search: "",
             excluded_owner_id: None,
             page: 0,
@@ -1078,6 +1415,7 @@ mod tests {
         create_snake(&pool, second_owner, "Secret", Visibility::Private).await?;
 
         let query = PublicBattlesnakeQuery {
+            selectable_only: false,
             search: "",
             excluded_owner_id: None,
             page: 0,
@@ -1105,6 +1443,7 @@ mod tests {
         }
 
         let page = |page| PublicBattlesnakeQuery {
+            selectable_only: false,
             search: "",
             excluded_owner_id: None,
             page,
@@ -1142,6 +1481,7 @@ mod tests {
         create_snake(&pool, included, "Needle Hidden", Visibility::Private).await?;
 
         let query = PublicBattlesnakeQuery {
+            selectable_only: false,
             search: "needle",
             excluded_owner_id: Some(excluded),
             page: 0,
@@ -1154,6 +1494,7 @@ mod tests {
         assert_eq!(snakes[0].owner_login, "NeedleOwner");
 
         let literal = PublicBattlesnakeQuery {
+            selectable_only: false,
             search: "%_",
             excluded_owner_id: None,
             page: 0,
@@ -1336,6 +1677,7 @@ mod tests {
         );
 
         let query = PublicBattlesnakeQuery {
+            selectable_only: false,
             search: "",
             excluded_owner_id: None,
             page: 0,
@@ -1479,6 +1821,68 @@ mod tests {
         let later = create_tournament_in(&pool, other, "registration").await?;
         assert!(register(&pool, later, doomed, owner, 1).await.is_err());
 
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn retire_refuses_active_tournaments_and_withdraws_created_registrations(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        let owner = create_user(&pool, 262010, "retire-tournament-owner").await?;
+        let other = create_user(&pool, 262011, "retire-tournament-other").await?;
+        let snake = create_snake(&pool, owner, "Retiring", Visibility::Public).await?;
+        let first = create_snake(&pool, other, "First", Visibility::Public).await?;
+        let last = create_snake(&pool, other, "Last", Visibility::Public).await?;
+        let open = create_tournament_in(&pool, other, "registration").await?;
+        register(&pool, open, snake, owner, 1).await?;
+        assert_eq!(
+            retire_battlesnake(&pool, snake, owner).await?,
+            RetireBattlesnakeOutcome::InActiveTournament
+        );
+        assert!(
+            get_battlesnake_by_id(&pool, snake)
+                .await?
+                .unwrap()
+                .retired_at
+                .is_none()
+        );
+        sqlx::query("UPDATE tournaments SET status = 'completed' WHERE tournament_id = $1")
+            .bind(open)
+            .execute(&pool)
+            .await?;
+
+        let draft = create_tournament_in(&pool, other, "created").await?;
+        register(&pool, draft, first, other, 1).await?;
+        register(&pool, draft, snake, owner, 2).await?;
+        register(&pool, draft, last, other, 3).await?;
+        assert_eq!(
+            retire_battlesnake(&pool, snake, owner).await?,
+            RetireBattlesnakeOutcome::Retired {
+                withdrawn_registrations: 1
+            }
+        );
+        let seeds: Vec<(Uuid, i32)> = sqlx::query_as(
+            "SELECT battlesnake_id, seed FROM tournament_registrations WHERE tournament_id = $1 ORDER BY seed",
+        )
+        .bind(draft)
+        .fetch_all(&pool)
+        .await?;
+        assert_eq!(seeds, vec![(first, 1), (last, 2)]);
+        let history_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM tournament_registrations WHERE tournament_id = $1 AND battlesnake_id = $2",
+        )
+        .bind(open)
+        .bind(snake)
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(history_count, 1);
+        let later = create_tournament_in(&pool, other, "registration").await?;
+        assert!(register(&pool, later, snake, owner, 1).await.is_err());
+        assert_eq!(
+            unretire_battlesnake(&pool, snake, owner).await?,
+            UnretireBattlesnakeOutcome::Unretired
+        );
+        register(&pool, later, snake, owner, 1).await?;
         Ok(())
     }
 
