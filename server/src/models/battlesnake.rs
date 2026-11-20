@@ -1303,6 +1303,15 @@ mod tests {
             crate::models::leaderboard_entry_health::reactivate_snake(&pool, snake).await?,
             0
         );
+        // A manually paused entry has no reason, so only the snake lock can
+        // prevent this direct resume while retirement is active.
+        crate::models::leaderboard::set_disabled(&pool, entries[1].1, None).await?;
+        let manual_while_retired =
+            crate::models::leaderboard::get_entry(&pool, entries[1].0, snake)
+                .await?
+                .unwrap();
+        assert!(manual_while_retired.disabled_at.is_some());
+        assert!(manual_while_retired.disabled_reason.is_none());
         crate::models::leaderboard::set_disabled(&pool, entries[0].1, None).await?;
         assert!(
             crate::models::leaderboard::get_active_entries(&pool, entries[0].0)

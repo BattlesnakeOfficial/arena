@@ -747,7 +747,7 @@ async fn root_page(
                                         span class="chip" style={"background:"(chip_color(&snake.color))} {}
                                         span class="sname" { (snake.name) }
                                         @if snake.retired_at.is_some() {
-                                            span class="badge" { "Retired" }
+                                            span class="badge retired" { "Retired" }
                                         }
                                         span class="surl hide-sm" { (snake.url) }
                                         @if snake.visibility == battlesnake_model::Visibility::Public {

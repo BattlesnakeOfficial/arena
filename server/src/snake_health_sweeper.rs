@@ -1127,6 +1127,70 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "../migrations")]
+    async fn retirement_during_probe_preserves_health_pause_and_sends_no_notice(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        use crate::models::battlesnake::{
+            self, RetireBattlesnakeOutcome, UnretireBattlesnakeOutcome,
+        };
+        let server = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(r#"{"move":"up"}"#)
+                    .set_delay(std::time::Duration::from_secs(2)),
+            )
+            .mount(&server)
+            .await;
+        let seed = Seed::new(&pool, &server.uri()).await?;
+        let entry = seed
+            .join("Recovery After Retirement", "Standard", 4)
+            .await?;
+        pause(&pool, entry).await?;
+        age_checks(&pool).await?;
+        let owner: Uuid =
+            sqlx::query_scalar("SELECT user_id FROM battlesnakes WHERE battlesnake_id = $1")
+                .bind(seed.snake_id)
+                .fetch_one(&pool)
+                .await?;
+        let mut state = AppState::test_from_pool(pool.clone());
+        let mut config = (*state.config).clone();
+        config.snake_health_recovery_threshold = 1;
+        state.config = std::sync::Arc::new(config);
+        let sweep = tokio::spawn(async move { run_sweep(&state).await });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while requests(&server).await == 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await?;
+        assert_eq!(
+            battlesnake::retire_battlesnake(&pool, seed.snake_id, owner).await?,
+            RetireBattlesnakeOutcome::Retired {
+                withdrawn_registrations: 0
+            }
+        );
+        sweep.await??;
+        let paused = health(&pool, entry).await?;
+        assert!(paused.disabled);
+        assert_eq!(paused.reason.as_deref(), Some("health"));
+        assert_eq!(paused.successes, 0);
+        let notices: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM notifications")
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(notices, 0);
+        assert_eq!(
+            battlesnake::unretire_battlesnake(&pool, seed.snake_id, owner).await?,
+            UnretireBattlesnakeOutcome::Unretired
+        );
+        assert_eq!(
+            health(&pool, entry).await?.reason.as_deref(),
+            Some("health")
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
     async fn retired_boards_and_manual_pauses_are_never_probed(pool: PgPool) -> cja::Result<()> {
         let server = broken_snake_server().await;
         let seed = Seed::new(&pool, &server.uri()).await?;

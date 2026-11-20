@@ -1913,4 +1913,71 @@ mod tests {
         );
         Ok(())
     }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn manual_resume_winning_snake_lock_is_recorded_by_retirement(
+        pool: PgPool,
+    ) -> cja::Result<()> {
+        use crate::models::battlesnake::{
+            self, RetireBattlesnakeOutcome, UnretireBattlesnakeOutcome,
+        };
+        let leaderboard_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO leaderboards (name) VALUES ('manual-resume-race') RETURNING leaderboard_id",
+        )
+        .fetch_one(&pool)
+        .await?;
+        let owner: Uuid = sqlx::query_scalar(
+            "INSERT INTO users (external_github_id, github_login) VALUES (262051, 'manual-resume-owner') RETURNING user_id",
+        )
+        .fetch_one(&pool)
+        .await?;
+        let snake: Uuid = sqlx::query_scalar(
+            "INSERT INTO battlesnakes (user_id, name, url) VALUES ($1, 'Manual Resume', 'https://example.com') RETURNING battlesnake_id",
+        )
+        .bind(owner)
+        .fetch_one(&pool)
+        .await?;
+        let entry = get_or_create_entry(&pool, leaderboard_id, snake)
+            .await?
+            .unwrap();
+        set_disabled(&pool, entry.leaderboard_entry_id, Some(chrono::Utc::now())).await?;
+        let mut holder = pool.begin().await?;
+        sqlx::query("SELECT battlesnake_id FROM battlesnakes WHERE battlesnake_id = $1 FOR UPDATE")
+            .bind(snake)
+            .fetch_one(&mut *holder)
+            .await?;
+        let resume_pool = pool.clone();
+        let resume = tokio::spawn(async move {
+            set_disabled(&resume_pool, entry.leaderboard_entry_id, None).await
+        });
+        wait_for_lock_waiters(&pool, 1).await?;
+        let retire_pool = pool.clone();
+        let retire = tokio::spawn(async move {
+            battlesnake::retire_battlesnake(&retire_pool, snake, owner).await
+        });
+        wait_for_lock_waiters(&pool, 2).await?;
+        holder.commit().await?;
+        resume.await.expect("resume panicked")?;
+        assert_eq!(
+            retire.await.expect("retirement panicked")?,
+            RetireBattlesnakeOutcome::Retired {
+                withdrawn_registrations: 0
+            }
+        );
+        let after = get_entry(&pool, leaderboard_id, snake).await?.unwrap();
+        assert_eq!(after.disabled_reason.as_deref(), Some("retired"));
+        assert!(after.disabled_at.is_some());
+        assert_eq!(
+            battlesnake::unretire_battlesnake(&pool, snake, owner).await?,
+            UnretireBattlesnakeOutcome::Unretired
+        );
+        assert!(
+            get_entry(&pool, leaderboard_id, snake)
+                .await?
+                .unwrap()
+                .disabled_at
+                .is_none()
+        );
+        Ok(())
+    }
 }

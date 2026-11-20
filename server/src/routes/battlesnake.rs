@@ -317,9 +317,6 @@ fn render_public_battlesnake_list(
                                                 a class="name" href={"/battlesnakes/"(snake.battlesnake_id)"/profile"} {
                                                     (snake.name)
                                                 }
-                                                @if snake.retired_at.is_some() {
-                                                    span class="badge" { "Retired" }
-                                                }
                                                 span class="owner" {
                                                     "by "
                                                     a href={"/users/"(snake.owner_login)} { (snake.owner_name) }
@@ -1113,9 +1110,13 @@ pub async fn retire_battlesnake(
         RetireBattlesnakeOutcome::Retired {
             withdrawn_registrations,
         } => (
-            format!(
-                "Battlesnake retired. Withdrawn from {withdrawn_registrations} unopened tournament registration(s); unretiring will not restore them."
-            ),
+            if withdrawn_registrations == 0 {
+                "Battlesnake retired.".to_string()
+            } else {
+                format!(
+                    "Battlesnake retired. Withdrawn from {withdrawn_registrations} unopened tournament registration(s); unretiring will not restore them."
+                )
+            },
             session::FLASH_TYPE_SUCCESS,
         ),
         RetireBattlesnakeOutcome::AlreadyRetired => (
@@ -1336,7 +1337,7 @@ fn render_battlesnake_profile(view: &ProfileView<'_>) -> Markup {
                 div class="snake-id" {
                     h1 { (snake.name) }
                     @if let Some(retired_at) = snake.retired_at {
-                        div class="form-error" {
+                        div class="retired-notice" {
                             strong { "Retired" }
                             " since " (retired_at.format("%b %-d, %Y"))
                             ". This battlesnake keeps its history and ratings but cannot enter new games."
@@ -2475,7 +2476,7 @@ mod profile_page_tests {
             (status, String::from_utf8(body.to_vec()).unwrap())
         }
 
-        async fn post(&self, session: Uuid, action: &str) -> (StatusCode, String) {
+        async fn post_response(&self, session: Uuid, action: &str) -> axum::response::Response {
             let request = Request::builder()
                 .method(axum::http::Method::POST)
                 .uri(format!("/battlesnakes/{}/{action}", self.snake_id))
@@ -2489,7 +2490,11 @@ mod profile_page_tests {
                 )
                 .body(Body::empty())
                 .unwrap();
-            let response = self.app.clone().oneshot(request).await.unwrap();
+            self.app.clone().oneshot(request).await.unwrap()
+        }
+
+        async fn post(&self, session: Uuid, action: &str) -> (StatusCode, String) {
+            let response = self.post_response(session, action).await;
             let status = response.status();
             let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
             (status, String::from_utf8(body.to_vec()).unwrap())
@@ -2508,6 +2513,231 @@ mod profile_page_tests {
             .await
             .unwrap();
         }
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn retire_routes_enforce_owner_and_preserve_profile(db: PgPool) {
+        let fx = Fixture::new(db, "public").await;
+        let path = format!("/battlesnakes/{}/profile", fx.snake_id);
+        let before = fx.get(Some(fx.owner_session)).await.1;
+        assert!(
+            before.contains("Registrations in unopened tournaments will be withdrawn"),
+            "{before}"
+        );
+
+        let visitor = fx.post_response(fx.visitor_session, "retire").await;
+        assert_eq!(visitor.status(), StatusCode::FORBIDDEN);
+        let retired_at: Option<chrono::DateTime<chrono::Utc>> =
+            sqlx::query_scalar("SELECT retired_at FROM battlesnakes WHERE battlesnake_id = $1")
+                .bind(fx.snake_id)
+                .fetch_one(&fx.db)
+                .await
+                .unwrap();
+        assert!(retired_at.is_none());
+
+        let owner = fx.post_response(fx.owner_session, "retire").await;
+        assert_eq!(owner.status(), StatusCode::SEE_OTHER);
+        assert_eq!(owner.headers()[header::LOCATION], path);
+        let retired_at: Option<chrono::DateTime<chrono::Utc>> =
+            sqlx::query_scalar("SELECT retired_at FROM battlesnakes WHERE battlesnake_id = $1")
+                .bind(fx.snake_id)
+                .fetch_one(&fx.db)
+                .await
+                .unwrap();
+        assert!(retired_at.is_some());
+        let flash: String =
+            sqlx::query_scalar("SELECT flash_message FROM sessions WHERE session_id = $1")
+                .bind(fx.owner_session)
+                .fetch_one(&fx.db)
+                .await
+                .unwrap();
+        assert_eq!(flash, "Battlesnake retired.");
+        let (status, profile) = fx.get(Some(fx.visitor_session)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(profile.contains("Retired</strong> since"), "{profile}");
+        assert!(profile.contains("No games played yet."));
+        assert!(!profile.contains(challenge_form(fx.snake_id).as_str()));
+
+        let reactivate = fx.post_response(fx.owner_session, "reactivate").await;
+        assert_eq!(reactivate.status(), StatusCode::SEE_OTHER);
+        assert_eq!(reactivate.headers()[header::LOCATION], path);
+        let flash: String =
+            sqlx::query_scalar("SELECT flash_message FROM sessions WHERE session_id = $1")
+                .bind(fx.owner_session)
+                .fetch_one(&fx.db)
+                .await
+                .unwrap();
+        assert_eq!(flash, "This battlesnake is retired — unretire it first.");
+
+        let visitor = fx.post_response(fx.visitor_session, "unretire").await;
+        assert_eq!(visitor.status(), StatusCode::FORBIDDEN);
+        let restored = fx.post_response(fx.owner_session, "unretire").await;
+        assert_eq!(restored.status(), StatusCode::SEE_OTHER);
+        assert_eq!(restored.headers()[header::LOCATION], path);
+        let retired_at: Option<chrono::DateTime<chrono::Utc>> =
+            sqlx::query_scalar("SELECT retired_at FROM battlesnakes WHERE battlesnake_id = $1")
+                .bind(fx.snake_id)
+                .fetch_one(&fx.db)
+                .await
+                .unwrap();
+        assert!(retired_at.is_none());
+        let flash: String =
+            sqlx::query_scalar("SELECT flash_message FROM sessions WHERE session_id = $1")
+                .bind(fx.owner_session)
+                .fetch_one(&fx.db)
+                .await
+                .unwrap();
+        assert_eq!(flash, "Battlesnake restored to competition.");
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn retire_route_reports_tournament_block_and_withdrawal(db: PgPool) {
+        let fx = Fixture::new(db, "public").await;
+        let owner = session_user_id(&fx.db, fx.owner_session).await;
+        let tournament_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO tournaments (name, user_id, status) VALUES ('Active Route', $1, 'registration') RETURNING tournament_id",
+        )
+        .bind(owner)
+        .fetch_one(&fx.db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO tournament_registrations (tournament_id, battlesnake_id, user_id, seed) VALUES ($1, $2, $3, 1)",
+        )
+        .bind(tournament_id)
+        .bind(fx.snake_id)
+        .bind(owner)
+        .execute(&fx.db)
+        .await
+        .unwrap();
+        assert_eq!(
+            fx.post_response(fx.owner_session, "retire").await.status(),
+            StatusCode::SEE_OTHER
+        );
+        let flash: String =
+            sqlx::query_scalar("SELECT flash_message FROM sessions WHERE session_id = $1")
+                .bind(fx.owner_session)
+                .fetch_one(&fx.db)
+                .await
+                .unwrap();
+        assert!(flash.contains("Withdraw it first."));
+        let retired: bool = sqlx::query_scalar(
+            "SELECT retired_at IS NOT NULL FROM battlesnakes WHERE battlesnake_id = $1",
+        )
+        .bind(fx.snake_id)
+        .fetch_one(&fx.db)
+        .await
+        .unwrap();
+        assert!(!retired);
+
+        sqlx::query("UPDATE tournaments SET status = 'created' WHERE tournament_id = $1")
+            .bind(tournament_id)
+            .execute(&fx.db)
+            .await
+            .unwrap();
+        assert_eq!(
+            fx.post_response(fx.owner_session, "retire").await.status(),
+            StatusCode::SEE_OTHER
+        );
+        let flash: String =
+            sqlx::query_scalar("SELECT flash_message FROM sessions WHERE session_id = $1")
+                .bind(fx.owner_session)
+                .fetch_one(&fx.db)
+                .await
+                .unwrap();
+        assert!(flash.contains("Withdrawn from 1 unopened tournament registration(s)"));
+        let remaining: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM tournament_registrations WHERE tournament_id = $1",
+        )
+        .bind(tournament_id)
+        .fetch_one(&fx.db)
+        .await
+        .unwrap();
+        assert_eq!(remaining, 0);
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn retired_snake_web_join_and_registration_show_clear_flashes(db: PgPool) {
+        let fx = Fixture::new(db, "public").await;
+        let owner = session_user_id(&fx.db, fx.owner_session).await;
+        assert_eq!(
+            fx.post_response(fx.owner_session, "retire").await.status(),
+            StatusCode::SEE_OTHER
+        );
+        let cookie = format!(
+            "{}={}",
+            session::SESSION_COOKIE_NAME,
+            signed_session_cookie(&fx.state, fx.owner_session)
+        );
+        let leaderboard_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO leaderboards (name) VALUES ('Retired Route Join') RETURNING leaderboard_id",
+        )
+        .fetch_one(&fx.db)
+        .await
+        .unwrap();
+        let join = Request::builder()
+            .method(axum::http::Method::POST)
+            .uri(format!("/leaderboards/{leaderboard_id}/join"))
+            .header(header::COOKIE, &cookie)
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from(format!("battlesnake_id={}", fx.snake_id)))
+            .unwrap();
+        let response = fx.app.clone().oneshot(join).await.unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let flash: String =
+            sqlx::query_scalar("SELECT flash_message FROM sessions WHERE session_id = $1")
+                .bind(fx.owner_session)
+                .fetch_one(&fx.db)
+                .await
+                .unwrap();
+        assert_eq!(
+            flash,
+            "This battlesnake is retired — unretire it before joining."
+        );
+        let entries: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM leaderboard_entries WHERE leaderboard_id = $1 AND battlesnake_id = $2",
+        )
+        .bind(leaderboard_id)
+        .bind(fx.snake_id)
+        .fetch_one(&fx.db)
+        .await
+        .unwrap();
+        assert_eq!(entries, 0);
+
+        let tournament_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO tournaments (name, user_id, status) VALUES ('Retired Route Tournament', $1, 'registration') RETURNING tournament_id",
+        )
+        .bind(owner)
+        .fetch_one(&fx.db)
+        .await
+        .unwrap();
+        let register = Request::builder()
+            .method(axum::http::Method::POST)
+            .uri(format!("/tournaments/{tournament_id}/register"))
+            .header(header::COOKIE, &cookie)
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from(format!("battlesnake_id={}", fx.snake_id)))
+            .unwrap();
+        let response = fx.app.clone().oneshot(register).await.unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let flash: String =
+            sqlx::query_scalar("SELECT flash_message FROM sessions WHERE session_id = $1")
+                .bind(fx.owner_session)
+                .fetch_one(&fx.db)
+                .await
+                .unwrap();
+        assert_eq!(
+            flash,
+            "This battlesnake is retired — unretire it before registering."
+        );
+        let registrations: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM tournament_registrations WHERE tournament_id = $1",
+        )
+        .bind(tournament_id)
+        .fetch_one(&fx.db)
+        .await
+        .unwrap();
+        assert_eq!(registrations, 0);
     }
 
     /// Test Snake plays one game per active public leaderboard — enrolled or

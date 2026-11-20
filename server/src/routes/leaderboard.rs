@@ -524,14 +524,12 @@ pub async fn show_leaderboard(
                                             span class="badge" { "Retired" }
                                         }
                                         @if entry.disabled_at.is_some() {
-                                            @if entry.disabled_reason.as_deref() == Some(battlesnake::DISABLED_REASON_RETIRED) {
-                                                span class="badge" { "Retired" }
-                                            } @else if entry.disabled_reason.as_deref() == Some(leaderboard_entry_health::DISABLED_REASON_HEALTH) {
+                                            @if entry.disabled_reason.as_deref() == Some(leaderboard_entry_health::DISABLED_REASON_HEALTH) {
                                                 a class="badge warn" href={"/battlesnakes/"(snake.battlesnake_id)"/profile"}
                                                     title="Automatically paused: this snake is failing health checks. Resume re-tests it — details on its profile." {
                                                     "Auto-paused"
                                                 }
-                                            } @else {
+                                            } @else if entry.disabled_reason.as_deref() != Some(battlesnake::DISABLED_REASON_RETIRED) {
                                                 span class="badge" { "Paused" }
                                             }
                                             @if snake.retired_at.is_none() {
