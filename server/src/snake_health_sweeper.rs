@@ -391,11 +391,10 @@ async fn apply_probe(
         return Ok(None);
     };
     let threshold = app_state.config.snake_health_failure_threshold;
-    // No snake name or failure summary: both can hold user text (summaries
-    // quote shouts and snake URLs), and logs reach PostHog. The summary is
-    // in the entry's health row.
     tracing::info!(
         battlesnake_id = %snake.battlesnake_id,
+        snake_name = %snake.name,
+        failure = %outcome.failure_summary,
         leaderboard = %candidate.spec.label,
         consecutive_failures = failures,
         threshold,
@@ -407,6 +406,7 @@ async fn apply_probe(
 
     tracing::warn!(
         battlesnake_id = %snake.battlesnake_id,
+        snake_name = %snake.name,
         leaderboard = %candidate.spec.label,
         consecutive_failures = failures,
         "Pulled snake from leaderboard matchmaking"
@@ -446,6 +446,7 @@ async fn apply_recovery_probe(
     let threshold = app_state.config.snake_health_recovery_threshold;
     tracing::info!(
         battlesnake_id = %snake.battlesnake_id,
+        snake_name = %snake.name,
         leaderboard = %candidate.spec.label,
         consecutive_successes = successes,
         threshold,
@@ -457,6 +458,7 @@ async fn apply_recovery_probe(
 
     tracing::info!(
         battlesnake_id = %snake.battlesnake_id,
+        snake_name = %snake.name,
         leaderboard = %candidate.spec.label,
         "Put recovered snake back into leaderboard matchmaking"
     );
@@ -744,6 +746,108 @@ mod tests {
             .mount(&server)
             .await;
         server
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn failed_probe_logs_snake_name_and_failure(pool: PgPool) -> cja::Result<()> {
+        let capture = crate::test_capture::Capture::shared();
+        let name = Uuid::new_v4().to_string();
+        let failure = Uuid::new_v4().to_string();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/move"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(format!(r#"{{"move":"{failure}"}}"#)),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let seed = Seed::new(&pool, &server.uri()).await?;
+        sqlx::query!(
+            "UPDATE battlesnakes SET name = $1 WHERE battlesnake_id = $2",
+            name,
+            seed.snake_id
+        )
+        .execute(&pool)
+        .await?;
+        let entry = seed.join("Standard", "Standard", 4).await?;
+        seed.broken_games(entry).await?;
+        let mut app_state = AppState::test_from_pool(pool.clone());
+        let mut config = (*app_state.config).clone();
+        config.snake_health_failure_threshold = 1;
+        app_state.config = std::sync::Arc::new(config);
+        run_sweep(&app_state).await?;
+        let lines = capture.log_lines();
+        for message in [
+            "Snake failed health probe",
+            "Pulled snake from leaderboard matchmaking",
+        ] {
+            let line = lines
+                .iter()
+                .find(|line| {
+                    line.get("message").map(String::as_str) == Some(message)
+                        && line.get("battlesnake_id") == Some(&seed.snake_id.to_string())
+                })
+                .expect("sweeper event");
+            assert_eq!(line.get("snake_name"), Some(&name), "{line:?}");
+            if message == "Snake failed health probe" {
+                assert!(
+                    line.get("failure")
+                        .is_some_and(|value| value.contains(&failure)),
+                    "{line:?}"
+                );
+            }
+        }
+        let state = health(&pool, entry).await?;
+        assert!(state.disabled);
+        assert!(
+            state
+                .last_failure
+                .is_some_and(|value| value.contains(&failure))
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn recovery_probe_logs_snake_name(pool: PgPool) -> cja::Result<()> {
+        let capture = crate::test_capture::Capture::shared();
+        let server = healthy_snake_server().await;
+        let seed = Seed::new(&pool, &server.uri()).await?;
+        let name = Uuid::new_v4().to_string();
+        sqlx::query!(
+            "UPDATE battlesnakes SET name = $1 WHERE battlesnake_id = $2",
+            name,
+            seed.snake_id
+        )
+        .execute(&pool)
+        .await?;
+        let entry = seed.join("Standard", "Standard", 4).await?;
+        pause(&pool, entry).await?;
+        age_checks(&pool).await?;
+        let mut app_state = AppState::test_from_pool(pool.clone());
+        let mut config = (*app_state.config).clone();
+        config.snake_health_recovery_threshold = 1;
+        app_state.config = std::sync::Arc::new(config);
+        run_sweep(&app_state).await?;
+        let lines = capture.log_lines();
+        for message in [
+            "Paused snake passed recovery probe",
+            "Put recovered snake back into leaderboard matchmaking",
+        ] {
+            let line = lines
+                .iter()
+                .find(|line| {
+                    line.get("message").map(String::as_str) == Some(message)
+                        && line.get("battlesnake_id") == Some(&seed.snake_id.to_string())
+                })
+                .expect("sweeper event");
+            assert_eq!(line.get("snake_name"), Some(&name), "{line:?}");
+        }
+        assert!(!health(&pool, entry).await?.disabled);
+        Ok(())
     }
 
     #[sqlx::test(migrations = "../migrations")]

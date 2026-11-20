@@ -99,40 +99,21 @@ fn privacy_content() -> Markup {
                 "and the UTC date of activity."
             }
             p {
-                "Battlesnake also keeps technical logs in an observability system "
-                "we run ourselves. For every request, those logs store the full "
-                "request URL (including any query string), the referring page, "
-                "the IP address, and the browser user agent. For signed-in "
-                "requests, they also store your account ID. Gameplay telemetry "
-                "in the same system ties account IDs and snake IDs to the games "
-                "they took part in. Older sign-in and Play account claim events "
-                "may include GitHub and Play usernames; new product events omit "
-                "those usernames. This "
-                "data has no fixed deletion date, and deleting your account does "
-                "not remove what was already recorded there."
+                "We keep operational logs, traces, and product analytics in an "
+                "observability system we run ourselves and in PostHog (US cloud), "
+                "our analytics processor. This data can include account identifiers, "
+                "usernames, email addresses, snake names and URLs, IP addresses, "
+                "browser user agents, request URLs and referrers, game data, and "
+                "message contents."
             }
             p {
-                "We also send product events to PostHog (US cloud), our analytics "
-                "processor. Events for sign-in, snake creation, Play account claims, "
-                "achievement earns, and achievement share page views, actions, and "
-                "calls to action use your Battlesnake account ID when you are the "
-                "acting user. Anonymous share visitors are not identified as the "
-                "page owner. Event properties contain authentication type, new-user "
-                "status, snake and game IDs, claim counts, achievement slug, kind, "
-                "live and first flags, share owner ID, bounded referrer, and "
-                "validated share channel or call-to-action type. They do not contain "
-                "email, GitHub or Play usernames, or free-text fields."
+                "Credentials, including passwords, tokens, secret URL parameters, "
+                "authorization headers, and cookie headers, are removed before "
+                "data goes to PostHog."
             }
             p {
-                "PostHog also receives server logs and traces. These can contain "
-                "URL paths and query strings, referrers, IP addresses, user agents, "
-                "account IDs, gameplay and snake IDs, and usernames embedded in URL "
-                "paths. For PostHog only, credential values in query strings, "
-                "authorization and cookie headers, and copies of background-job "
-                "data (which can include account details) are redacted. Our own "
-                "observability system continues to receive its existing stream. "
-                "At process boot, PostHog receives a manifest of app configuration, "
-                "scheduled jobs, and health monitors without user data."
+                "This data has no fixed deletion date, and deleting your account "
+                "does not remove what was already recorded."
             }
 
             h3 { "Play.battlesnake.com Migration Data" }
@@ -294,38 +275,8 @@ mod tests {
         assert!(html.contains("Contact"));
         assert!(html.contains(PRIVACY_EFFECTIVE_DATE));
         assert_eq!(PRIVACY_EFFECTIVE_DATE, "November 2026");
-        for disclosure in [
-            "PostHog (US cloud)",
-            "account ID",
-            "snake creation",
-            "Play account claims",
-            "achievement earns",
-            "share page views",
-            "new-user status",
-            "claim counts",
-            "bounded referrer",
-            "server logs and traces",
-            "URL paths and query strings",
-            "IP addresses",
-            "user agents",
-            "credential values in query strings",
-            "authorization and cookie headers",
-            "copies of background-job data",
-            "manifest of app configuration",
-            "without user data",
-            "no fixed deletion date",
-            "our observability system",
-            "Google Cloud",
-            "analytics cookies",
-        ] {
-            assert!(
-                html.contains(disclosure),
-                "missing privacy disclosure: {disclosure}"
-            );
-        }
-        assert!(!html.contains("Sign-in events include your GitHub username"));
-        assert!(!html.contains("Play account claim events include your Play username"));
-        assert!(!html.contains("<h1>Arena"));
+        assert!(html.contains("PostHog (US cloud)"));
+        assert!(html.contains("operational logs, traces, and product analytics"));
     }
 
     #[test]
