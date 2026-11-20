@@ -94,7 +94,7 @@ impl Mailer {
         if !self.is_enabled() {
             // Keep the disabled path a true no-op (matching `send`): no log
             // rows for messages that never had a transport.
-            tracing::info!(purpose, "Email disabled (no Mailgun config); not sending");
+            tracing::info!(purpose, subject = %message.subject, "Email disabled (no Mailgun config); not sending");
             return Ok(SendOutcome::Disabled);
         }
 
@@ -131,12 +131,11 @@ impl Mailer {
 
         match self.send(message).await {
             Ok(()) => Ok(SendOutcome::Sent),
-            // No recipient: logs reach PostHog. `body` is already redacted
-            // of email addresses (see `send`).
             Err(SendError::Rejected { status, body }) => {
                 tracing::warn!(
                     event_type = "email_rejected",
                     purpose,
+                    recipient = %message.to,
                     %status,
                     body = %body,
                     "Mailgun permanently rejected the message"
@@ -215,15 +214,13 @@ impl Mailer {
     /// must build the client with one (`state.rs` sets a 10s total timeout
     /// and a 5s connect timeout; [`Mailer::disabled`] never sends).
     pub async fn send(&self, message: &EmailMessage) -> Result<(), SendError> {
-        // These logs omit `subject`: some subjects embed a snake name, and
-        // logs reach PostHog.
         let Some(config) = &self.config else {
-            tracing::info!("Email disabled (no Mailgun config); not sending");
+            tracing::info!(subject = %message.subject, "Email disabled (no Mailgun config); not sending");
             return Ok(());
         };
 
         if message.to.trim().is_empty() {
-            tracing::warn!("Skipping email with empty recipient");
+            tracing::warn!(subject = %message.subject, "Skipping email with empty recipient");
             return Ok(());
         }
 
@@ -263,9 +260,7 @@ impl Mailer {
 
         let status = response.status();
         if !status.is_success() {
-            // Mailgun's error text can quote the recipient, and both error
-            // kinds end up in logs.
-            let body = redact_email_addresses(&response.text().await.unwrap_or_default());
+            let body = response.text().await.unwrap_or_default();
             return Err(if status.is_client_error() && status.as_u16() != 429 {
                 SendError::Rejected { status, body }
             } else {
@@ -275,44 +270,9 @@ impl Mailer {
             });
         }
 
-        tracing::info!("Email sent");
+        tracing::info!(subject = %message.subject, "Email sent");
         Ok(())
     }
-}
-
-/// Logged in place of each email address.
-const REDACTED_EMAIL: &str = "[email]";
-
-/// `text` with every `local@domain` run replaced by [`REDACTED_EMAIL`]. It
-/// errs toward redacting too much: the local part takes any RFC 5322 atom
-/// character, so neighbouring `=`, `'` or `/` can go with it.
-fn redact_email_addresses(text: &str) -> String {
-    let is_local = |c: char| c.is_alphanumeric() || "!#$%&'*+-/=?^_`{|}~.".contains(c);
-    let is_domain = |c: char| c.is_alphanumeric() || c == '-' || c == '.';
-    let chars: Vec<char> = text.chars().collect();
-    let mut out = String::with_capacity(text.len());
-    // `out` holds `chars[..copied]`.
-    let mut copied = 0;
-    for (at, &c) in chars.iter().enumerate() {
-        if c != '@' || at < copied {
-            continue;
-        }
-        let mut start = at;
-        while start > copied && is_local(chars[start - 1]) {
-            start -= 1;
-        }
-        let mut end = at + 1;
-        while end < chars.len() && is_domain(chars[end]) {
-            end += 1;
-        }
-        if start < at && end > at + 1 {
-            out.extend(&chars[copied..start]);
-            out.push_str(REDACTED_EMAIL);
-            copied = end;
-        }
-    }
-    out.extend(&chars[copied..]);
-    out
 }
 
 #[cfg(test)]
@@ -598,68 +558,90 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn redact_email_addresses_replaces_every_address() {
-        for (input, expected) in [
-            (
-                "'to' parameter is not a valid address: bob@example.com",
-                "'to' parameter is not a valid address: [email]",
-            ),
-            (
-                r#"{"message":"Rejected: o'brien+tag@mail.example.co.uk."}"#,
-                r#"{"message":"Rejected: [email]"}"#,
-            ),
-            ("a@b.com,c@d.org", "[email],[email]"),
-            ("to=Ünï@bücher.de&x=1", "[email]&x=1"),
-            ("Unauthorized", "Unauthorized"),
-            ("@ x, user@ and @domain stay", "@ x, user@ and @domain stay"),
-            ("", ""),
-        ] {
-            assert_eq!(redact_email_addresses(input), expected, "{input}");
-        }
-    }
-
     #[sqlx::test(migrations = "../migrations")]
-    async fn email_rejected_log_has_purpose_not_the_address(pool: PgPool) -> cja::Result<()> {
+    async fn email_logs_subject_recipient_and_mailgun_body(pool: PgPool) -> cja::Result<()> {
         let capture = crate::test_capture::Capture::shared();
-        let id = uuid::Uuid::new_v4().simple();
-        let address = format!("rejected-{id}@example.com");
-        let purpose = format!("test-rejected-{id}");
+        let marker = uuid::Uuid::new_v4();
+        let subject = format!("subject-{marker}");
+        let address = format!("rejected-{}@example.com", uuid::Uuid::new_v4());
+        let purpose = format!("test-rejected-{marker}");
+        let message = EmailMessage {
+            subject: subject.clone(),
+            ..test_message()
+        };
+        let disabled = Mailer::disabled();
+        assert_eq!(
+            disabled.send_limited(&pool, 5, &purpose, &message).await?,
+            SendOutcome::Disabled
+        );
+        disabled.send(&message).await?;
         let server = MockServer::start().await;
-        // Mailgun's rejection text quotes the address back.
         Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(400).set_body_string(format!(
-                r#"{{"message":"'to' parameter is not a valid address: {address}"}}"#
-            )))
+            .respond_with(ResponseTemplate::new(200))
             .expect(1)
             .mount(&server)
             .await;
-        let message = EmailMessage {
-            to: address.clone(),
-            ..test_message()
-        };
+        let configured = configured_mailer(server.uri(), reqwest::Client::new());
+        configured
+            .send(&EmailMessage {
+                to: String::new(),
+                ..message.clone()
+            })
+            .await?;
+        configured.send(&message).await?;
+        let lines = capture.log_lines();
+        let disabled_lines: Vec<_> = lines
+            .iter()
+            .filter(|line| {
+                line.get("message").map(String::as_str)
+                    == Some("Email disabled (no Mailgun config); not sending")
+                    && line.get("subject") == Some(&subject)
+            })
+            .collect();
+        assert_eq!(disabled_lines.len(), 2, "{lines:?}");
+        assert!(
+            disabled_lines
+                .iter()
+                .any(|line| line.get("purpose") == Some(&purpose))
+        );
+        for expected in ["Skipping email with empty recipient", "Email sent"] {
+            assert!(
+                lines.iter().any(
+                    |line| line.get("message").map(String::as_str) == Some(expected)
+                        && line.get("subject") == Some(&subject)
+                ),
+                "missing {expected}: {lines:?}"
+            );
+        }
 
-        let outcome = configured_mailer(server.uri(), reqwest::Client::new())
-            .send_limited(&pool, 5, &purpose, &message)
+        let reject_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(400).set_body_string(format!("invalid address: {address}")),
+            )
+            .expect(1)
+            .mount(&reject_server)
+            .await;
+        let rejected_message = EmailMessage {
+            to: address.clone(),
+            ..message
+        };
+        let outcome = configured_mailer(reject_server.uri(), reqwest::Client::new())
+            .send_limited(&pool, 5, &purpose, &rejected_message)
             .await?;
         assert_eq!(outcome, SendOutcome::Failed);
-
-        let leaked = capture.log_lines_containing(&address);
-        assert!(leaked.is_empty(), "address reached a log line: {leaked:?}");
         let rejected: Vec<_> = capture
             .log_lines()
             .into_iter()
             .filter(|fields| {
                 fields.get("event_type").map(String::as_str) == Some("email_rejected")
-                    && fields.get("purpose") == Some(&purpose)
+                    && fields.get("recipient") == Some(&address)
             })
             .collect();
         assert_eq!(rejected.len(), 1, "{rejected:?}");
+        assert_eq!(rejected[0]["purpose"], purpose);
         assert_eq!(rejected[0]["status"], "400 Bad Request");
-        assert_eq!(
-            rejected[0]["body"],
-            r#"{"message":"'to' parameter is not a valid address: [email]"}"#
-        );
+        assert_eq!(rejected[0]["body"], format!("invalid address: {address}"));
         Ok(())
     }
 

@@ -242,6 +242,7 @@ pub async fn create_snake(
         message: "battlesnake created",
         properties: {
             battlesnake_id = %snake.battlesnake_id,
+            snake_name = %snake.name,
             source = "api",
         }
     );
@@ -1707,6 +1708,7 @@ mod tests {
 
         let events = capture.events("battlesnake_created", user);
         assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0]["snake_name"], "api-event-snake");
         assert_eq!(
             events[0].get("battlesnake_id").map(String::as_str),
             Some(created.to_string().as_str()),

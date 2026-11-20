@@ -738,6 +738,7 @@ pub async fn create_battlesnake(
                 message: "battlesnake created",
                 properties: {
                     battlesnake_id = %snake.battlesnake_id,
+                    snake_name = %snake.name,
                     source = "web",
                 }
             );
@@ -3068,6 +3069,7 @@ mod creation_event_tests {
 
         let events = capture.events("battlesnake_created", user_id);
         assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0]["snake_name"], "Web Event Snake");
         assert_eq!(
             events[0].get("battlesnake_id").map(String::as_str),
             Some(snake_id.to_string().as_str()),

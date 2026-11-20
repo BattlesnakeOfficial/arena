@@ -466,7 +466,7 @@ pub async fn claim_account(
 struct ClaimCompleted {
     summary: ClaimSummary,
     receipt: crate::notifications::RecordResult,
-    created_snake_ids: Vec<Uuid>,
+    created_snakes: Vec<(Uuid, String)>,
 }
 
 /// Run one claim inside a caller-owned transaction: copy the display
@@ -566,7 +566,7 @@ async fn claim_account_tx(
     .wrap_err("Failed to fetch staged snakes")?;
 
     let mut snakes_created = 0;
-    let mut created_snake_ids: Vec<Uuid> = Vec::new();
+    let mut created_snakes: Vec<(Uuid, String)> = Vec::new();
     for snake in staged_snakes {
         let mut name = snake.name.clone();
         let mut suffix = 2;
@@ -606,9 +606,9 @@ async fn claim_account_tx(
         .await
         .wrap_err("Failed to link materialized snake")?;
 
+        created_snakes.push((battlesnake_id, name.clone()));
         existing_names.push(name);
         snakes_created += 1;
-        created_snake_ids.push(battlesnake_id);
     }
 
     // Materialize grants. The catalog is code-defined, so staged (type,
@@ -706,22 +706,22 @@ async fn claim_account_tx(
     Ok(Some(ClaimCompleted {
         summary,
         receipt,
-        created_snake_ids,
+        created_snakes,
     }))
 }
 
-/// Post-commit logging for a finished claim (moved verbatim from the old
-/// `claim_account_inner` tail so behavior is unchanged).
+/// Post-commit logging for a finished claim.
 fn log_claim_completed(user_id: Uuid, completed: &ClaimCompleted) {
     completed.receipt.log_enqueued();
 
-    for battlesnake_id in &completed.created_snake_ids {
+    for (battlesnake_id, snake_name) in &completed.created_snakes {
         cja::product_event!(
             name: "battlesnake_created",
             user_id: Some(&user_id),
             message: "battlesnake created via play claim",
             properties: {
                 battlesnake_id = %battlesnake_id,
+                snake_name = %snake_name,
                 source = "play_claim",
             }
         );
@@ -1059,32 +1059,58 @@ mod tests {
     async fn play_claim_emits_battlesnake_created_per_snake(pool: PgPool) -> cja::Result<()> {
         let capture = crate::test_capture::Capture::shared();
         let user_id = create_user(&pool, 1648).await?;
-        let account_id = stage_full_account(&pool, 1648).await?;
+        let account = play_account(1648);
+        let snakes = (1..=2)
+            .map(|n| StageSnake {
+                play_snake_id: format!("snk_1648_{n}"),
+                play_account_id: "act_1648".to_string(),
+                name: "Hissy".to_string(),
+                url: "https://example.com/snake".to_string(),
+                head: "default".to_string(),
+                tail: "default".to_string(),
+                color: "#ff0000".to_string(),
+                is_public: true,
+                engine_region: EngineRegion::UsWest1,
+            })
+            .collect();
+        let account_id = stage_play_account(
+            &pool,
+            &StagePlayAccount {
+                account,
+                snakes,
+                grants: vec![],
+            },
+        )
+        .await?
+        .imported_account_id;
 
         let summary = claim_account(&pool, account_id, user_id)
             .await?
             .expect("claim should succeed");
-        assert_eq!(summary.snakes_created, 1);
+        assert_eq!(summary.snakes_created, 2);
 
-        let snake_id: Uuid = sqlx::query_scalar(
-            "SELECT battlesnake_id FROM battlesnakes WHERE user_id = $1 AND name = 'Hissy'",
-        )
-        .bind(user_id)
-        .fetch_one(&pool)
-        .await?;
+        let created: Vec<(Uuid, String)> =
+            sqlx::query_as("SELECT battlesnake_id, name FROM battlesnakes WHERE user_id = $1")
+                .bind(user_id)
+                .fetch_all(&pool)
+                .await?;
 
         let events = capture.events("battlesnake_created", user_id);
-        assert_eq!(events.len(), 1, "{events:?}");
-        assert_eq!(
-            events[0].get("battlesnake_id").map(String::as_str),
-            Some(snake_id.to_string().as_str()),
-            "{events:?}"
-        );
-        assert_eq!(
-            events[0].get("source").map(String::as_str),
-            Some("play_claim"),
-            "{events:?}"
-        );
+        assert_eq!(events.len(), 2, "{events:?}");
+        let mut actual: Vec<(Uuid, String)> = events
+            .iter()
+            .map(|event| {
+                assert_eq!(event.get("source").map(String::as_str), Some("play_claim"));
+                (
+                    event["battlesnake_id"].parse().unwrap(),
+                    event["snake_name"].clone(),
+                )
+            })
+            .collect();
+        actual.sort();
+        let mut expected = created;
+        expected.sort();
+        assert_eq!(actual, expected);
         Ok(())
     }
 
