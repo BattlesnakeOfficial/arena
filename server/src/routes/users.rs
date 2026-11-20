@@ -174,6 +174,9 @@ async fn render_user_profile(
                                             a href={"/battlesnakes/"(snake.battlesnake_id)"/profile"} {
                                                 (snake.name)
                                             }
+                                            @if snake.retired_at.is_some() {
+                                                " " span class="live-pill quiet" { "Retired" }
+                                            }
                                             @if snake.visibility == Visibility::Private {
                                                 " "
                                                 span class="live-pill quiet" { "Private" }

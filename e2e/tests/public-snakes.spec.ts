@@ -55,6 +55,122 @@ async function snakeIdByName(name: string, ownerLogin: string): Promise<string> 
 }
 
 test.describe('Public Snakes Directory', () => {
+  test('retirement keeps the public profile and restores challenge on unretire', async ({
+    authenticatedPage,
+    page,
+    mockUser,
+  }, testInfo) => {
+    // Screenshots ride along in the Playwright report as review evidence.
+    const capture = async (target: Page, shot: string, focus?: Locator) => {
+      const path = testInfo.outputPath(`${shot}.png`);
+      if (focus) await focus.scrollIntoViewIfNeeded();
+      await target.screenshot({ path, fullPage: !focus });
+      await testInfo.attach(shot, { path, contentType: 'image/png' });
+    };
+    const name = `Veteran Directory ${Date.now()}`;
+    await createSnake(authenticatedPage, name, 'public');
+    const snakeId = await snakeIdByName(name, mockUser.login);
+    const profile = `/battlesnakes/${snakeId}/profile`;
+    const [ladder] = await query<{ leaderboard_id: string }>(
+      'INSERT INTO leaderboards (name) VALUES ($1) RETURNING leaderboard_id',
+      [`Retire Ladder ${testInfo.workerIndex} ${Date.now()}`]
+    );
+    const ladderPage = `/leaderboards/${ladder.leaderboard_id}`;
+    const [finishedGame] = await query<{ game_id: string }>(
+      "INSERT INTO games (board_size, game_type, status) VALUES ('11x11', 'Standard', 'finished') RETURNING game_id",
+    );
+    await query(
+      'INSERT INTO game_battlesnakes (game_id, battlesnake_id, placement) VALUES ($1, $2, 1)',
+      [finishedGame.game_id, snakeId],
+    );
+    const replayLink = `/games/${finishedGame.game_id}`;
+    const ladderRow = authenticatedPage.locator('.mine', {
+      has: authenticatedPage.getByText(name, { exact: true }),
+    });
+
+    try {
+      await authenticatedPage.goto(ladderPage);
+      await authenticatedPage.getByRole('button', { name: 'Join', exact: true }).click();
+      await expect(ladderRow.getByText('Active', { exact: true })).toBeVisible();
+
+      await authenticatedPage.goto(profile);
+      await expect(authenticatedPage.getByRole('heading', { name, exact: true })).toBeVisible();
+      await expect(authenticatedPage.locator('.snake-profile .stats')).toContainText('1 won');
+      await expect(authenticatedPage.locator('.snake-profile .stats')).toContainText('1.0');
+      await expect(authenticatedPage.locator(`a[href="${replayLink}"]`)).toBeVisible();
+      await capture(authenticatedPage, 'profile-owner-before-retire');
+      authenticatedPage.once('dialog', (dialog) => dialog.accept());
+      await authenticatedPage.getByRole('button', { name: 'Retire', exact: true }).click();
+      await expect(authenticatedPage).toHaveURL(profile);
+      await expect(authenticatedPage.getByText('Retired since')).toBeVisible();
+      await expect(authenticatedPage.locator('.snake-profile .stats')).toContainText('1 won');
+      await expect(authenticatedPage.locator('.snake-profile .stats')).toContainText('1.0');
+      await expect(authenticatedPage.locator(`a[href="${replayLink}"]`)).toBeVisible();
+      await expect(authenticatedPage.getByText('🥇 1st')).toBeVisible();
+      await capture(authenticatedPage, 'profile-owner-retired');
+
+      await authenticatedPage.goto(ladderPage);
+      await expect(ladderRow.getByText('Retired', { exact: true })).toHaveCount(1);
+      await expect(ladderRow.getByRole('button', { name: `Resume ${name}` })).toHaveCount(0);
+      await capture(authenticatedPage, 'leaderboard-row-retired', ladderRow);
+
+      await authenticatedPage.setViewportSize({ width: 375, height: 812 });
+      await authenticatedPage.emulateMedia({ colorScheme: 'dark' });
+      await authenticatedPage.goto(profile);
+      await expect(authenticatedPage.getByText('Retired since')).toBeVisible();
+      await capture(authenticatedPage, 'profile-owner-retired-mobile-dark');
+      await authenticatedPage.goto('/battlesnakes');
+      const ownerRow = authenticatedPage.locator('table.my-snakes tbody tr', {
+        has: authenticatedPage.getByRole('link', { name, exact: true }),
+      });
+      await expect(ownerRow.getByText('Retired', { exact: true })).toBeVisible();
+      await capture(authenticatedPage, 'owner-snake-list-retired', ownerRow);
+      await authenticatedPage.goto('/');
+      const homeRow = authenticatedPage.locator('.srow', {
+        has: authenticatedPage.getByText(name, { exact: true }),
+      });
+      await expect(homeRow.getByText('Retired', { exact: true })).toBeVisible();
+      await capture(authenticatedPage, 'home-row-retired', homeRow);
+
+      await page.goto(profile);
+      await page.setViewportSize({ width: 375, height: 812 });
+      await page.emulateMedia({ colorScheme: 'dark' });
+      await expect(page.getByRole('heading', { name, exact: true })).toBeVisible();
+      await expect(page.getByText('Retired since')).toBeVisible();
+      await expect(page.locator('.snake-profile .stats')).toContainText('1 won');
+      await expect(page.locator('.snake-profile .stats')).toContainText('1.0');
+      await expect(page.locator(`a[href="${replayLink}"]`)).toBeVisible();
+      await expect(page.getByText('🥇 1st')).toBeVisible();
+      await expect(page.getByRole('button', { name: 'Challenge' })).toHaveCount(0);
+      await capture(page, 'profile-public-retired');
+      await page.goto(`/users/${mockUser.login}`);
+      const publicCard = page.locator('.scard', {
+        has: page.getByRole('link', { name, exact: true }),
+      });
+      await expect(publicCard.getByText('Retired', { exact: true })).toBeVisible();
+      await capture(page, 'user-page-card-retired', publicCard);
+      const retiredRow = await findSnakeRow(authenticatedPage, name);
+      expect(retiredRow).not.toBeNull();
+      await expect(retiredRow!.getByText('Retired', { exact: true })).toBeVisible();
+      await expect(retiredRow!.getByRole('button', { name: 'Challenge' })).toHaveCount(0);
+      await capture(authenticatedPage, 'directory-row-retired', retiredRow!);
+
+      await authenticatedPage.goto(profile);
+      await authenticatedPage.getByRole('button', { name: 'Unretire' }).click();
+      await expect(authenticatedPage).toHaveURL(profile);
+      await expect(authenticatedPage.getByText('Retired since')).toHaveCount(0);
+      await capture(authenticatedPage, 'profile-owner-unretired');
+      const activeRow = await findSnakeRow(authenticatedPage, name);
+      expect(activeRow).not.toBeNull();
+      await expect(activeRow!.getByRole('button', { name: 'Challenge' })).toBeVisible();
+      await authenticatedPage.goto(ladderPage);
+      await expect(ladderRow.getByText('Active', { exact: true })).toBeVisible();
+    } finally {
+      await query('DELETE FROM games WHERE game_id = $1', [finishedGame.game_id]);
+      await query('DELETE FROM leaderboards WHERE leaderboard_id = $1', [ladder.leaderboard_id]);
+    }
+  });
+
   test('lists public snakes with owner links and hides private ones', async ({
     authenticatedPage,
     mockUser,

@@ -271,6 +271,13 @@ pub async fn create_entry(
         ));
     }
 
+    if snake.retired_at.is_some() {
+        return Err((
+            StatusCode::CONFLICT,
+            "Battlesnake is retired; unretire it before joining.".to_string(),
+        ));
+    }
+
     let allowed = private_leaderboard::join_allowed(
         &state.db,
         &lb,
@@ -300,8 +307,29 @@ pub async fn create_entry(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Internal server error".to_string(),
             )
-        })?
-        .ok_or((StatusCode::NOT_FOUND, "Battlesnake not found".to_string()))?;
+        })?;
+    let entry = if let Some(entry) = entry {
+        entry
+    } else {
+        let retired = battlesnake::get_battlesnake_by_id(&state.db, request.battlesnake_id)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to recheck battlesnake: {}", e);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal server error".to_string(),
+                )
+            })?
+            .is_some_and(|snake| snake.user_id == auth.user_id && snake.retired_at.is_some());
+        return Err(if retired {
+            (
+                StatusCode::CONFLICT,
+                "Battlesnake is retired; unretire it before joining.".to_string(),
+            )
+        } else {
+            (StatusCode::NOT_FOUND, "Battlesnake not found".to_string())
+        });
+    };
 
     // Initialize scoring algorithm entries
     for algo in state.scoring.algorithms() {
@@ -500,5 +528,58 @@ mod scoped_token_tests {
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[sqlx::test(migrations = "../migrations")]
+    async fn retired_snake_join_returns_conflict_and_unretired_join_succeeds(db: PgPool) {
+        use crate::models::battlesnake;
+        let state = AppState::test_from_pool(db.clone());
+        let app = api_app(&state);
+        let user = create_user(&db, 262030, false).await;
+        let snake = make_snake(&db, user, "api-retired").await;
+        let leaderboard_id: Uuid = sqlx::query_scalar(
+            "SELECT leaderboard_id FROM leaderboards WHERE name = 'Standard 11x11'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        let token = create_api_token(
+            &db,
+            user,
+            "retirement",
+            &[Permission::SnakeCompete],
+            SnakeAccess::All,
+            &[],
+        )
+        .await
+        .unwrap();
+        battlesnake::retire_battlesnake(&db, snake, user)
+            .await
+            .unwrap();
+        let path = format!("/api/leaderboards/{leaderboard_id}/entries");
+        let body = Some(serde_json::json!({ "battlesnake_id": snake }));
+        let (status, message) =
+            send_api(&app, "POST", &path, Some(&token.secret), body.clone()).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(
+            message,
+            "Battlesnake is retired; unretire it before joining."
+        );
+        let missing = Uuid::new_v4();
+        let (status, message) = send_api(
+            &app,
+            "POST",
+            &path,
+            Some(&token.secret),
+            Some(serde_json::json!({ "battlesnake_id": missing })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(message, "Battlesnake not found");
+        battlesnake::unretire_battlesnake(&db, snake, user)
+            .await
+            .unwrap();
+        let (status, _) = send_api(&app, "POST", &path, Some(&token.secret), body).await;
+        assert_eq!(status, StatusCode::CREATED);
     }
 }

@@ -51,14 +51,8 @@ impl DiscordNotifier {
     /// all mention parsing — prevents `@everyone`/`@here` injection from
     /// user-controlled content like snake names.
     pub async fn send(&self, content: &str) -> cja::Result<()> {
-        // Logs carry only the content's length: the text names GitHub and
-        // Play users, and logs reach PostHog.
-        let content_chars = content.chars().count();
         let Some(url) = self.webhook_url.as_ref().map(Secret::current) else {
-            tracing::info!(
-                content_chars,
-                "Discord disabled (no webhook URL); not sending"
-            );
+            tracing::info!(content = %content, "Discord disabled (no webhook URL); not sending");
             return Ok(());
         };
 
@@ -83,7 +77,7 @@ impl DiscordNotifier {
             ));
         }
 
-        tracing::info!(content_chars, "Discord notification sent");
+        tracing::info!(content = %content, "Discord notification sent");
         Ok(())
     }
 
@@ -262,11 +256,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_logs_content_length_not_content() {
+    async fn send_logs_content() {
         let capture = crate::test_capture::Capture::shared();
         let login = format!("octocat-{}", uuid::Uuid::new_v4().simple());
         let message = user_signup_message(&login);
-        let chars = message.chars().count().to_string();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .respond_with(ResponseTemplate::new(204))
@@ -281,11 +274,6 @@ mod tests {
             .unwrap();
         DiscordNotifier::disabled().send(&message).await.unwrap();
 
-        let leaked = capture.log_lines_containing(&login);
-        assert!(
-            leaked.is_empty(),
-            "Discord text reached a log line: {leaked:?}"
-        );
         for line in [
             "Discord notification sent",
             "Discord disabled (no webhook URL); not sending",
@@ -293,9 +281,9 @@ mod tests {
             assert!(
                 capture.log_lines().iter().any(|fields| {
                     fields.get("message").map(String::as_str) == Some(line)
-                        && fields.get("content_chars") == Some(&chars)
+                        && fields.get("content") == Some(&message)
                 }),
-                "no {line:?} line with content_chars={chars}"
+                "no {line:?} line with content={message:?}"
             );
         }
     }

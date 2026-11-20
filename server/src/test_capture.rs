@@ -51,7 +51,12 @@ pub(crate) struct Capture {
 }
 
 /// Modules whose log lines are captured into `log_lines`.
-const LOG_LINE_TARGETS: &[&str] = &["arena::email", "arena::discord", "arena::snake_client"];
+const LOG_LINE_TARGETS: &[&str] = &[
+    "arena::email",
+    "arena::discord",
+    "arena::snake_client",
+    "arena::snake_health_sweeper",
+];
 
 /// Extension payload tying a `server.request` span to its capture sequence.
 #[derive(Debug)]

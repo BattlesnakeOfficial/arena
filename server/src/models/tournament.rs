@@ -616,6 +616,7 @@ where
         FROM battlesnakes b
         WHERE b.battlesnake_id = $2
           AND b.deleted_at IS NULL
+          AND b.retired_at IS NULL
         FOR SHARE
         RETURNING
             registration_id,

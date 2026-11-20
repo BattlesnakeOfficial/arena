@@ -303,6 +303,14 @@ pub fn routes(app_state: AppState) -> cja::Result<cja::server::App> {
             axum::routing::post(battlesnake::delete_battlesnake),
         )
         .route(
+            "/battlesnakes/{id}/retire",
+            axum::routing::post(battlesnake::retire_battlesnake),
+        )
+        .route(
+            "/battlesnakes/{id}/unretire",
+            axum::routing::post(battlesnake::unretire_battlesnake),
+        )
+        .route(
             "/battlesnakes/{id}/profile",
             get(battlesnake::view_battlesnake_profile),
         )
@@ -738,6 +746,9 @@ async fn root_page(
                                     a class="srow" href={"/battlesnakes/"(snake.battlesnake_id)"/profile"} {
                                         span class="chip" style={"background:"(chip_color(&snake.color))} {}
                                         span class="sname" { (snake.name) }
+                                        @if snake.retired_at.is_some() {
+                                            span class="badge retired" { "Retired" }
+                                        }
                                         span class="surl hide-sm" { (snake.url) }
                                         @if snake.visibility == battlesnake_model::Visibility::Public {
                                             span class="badge ok" { "Public" }
