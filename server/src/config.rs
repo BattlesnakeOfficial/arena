@@ -47,12 +47,14 @@ pub struct JobConfig {
     /// before another worker may reclaim the job.
     pub reclaim_window_secs: u64,
     /// How long an in-flight job may keep running after a shutdown signal
-    /// before it is dropped and its lock released. Cloud Run sends SIGKILL
-    /// 10 seconds after SIGTERM. The worst case runs this, the 2-second exit
-    /// grace ([`crate::SHUTDOWN_EXIT_GRACE`]), the 0.5-second Eyes shutdown
-    /// signal ([`crate::observability::EYES_HEARTBEAT_SHUTDOWN_TIMEOUT`]) and
-    /// up to 3 seconds of telemetry flush in sequence: 9.5 seconds at the
-    /// 4-second default. Increasing this override can exceed the limit.
+    /// before it is dropped and its lock released. The bounded steps total
+    /// 4 + 2 + 0.5 + 3 = 9.5 seconds at the default: job drain, exit grace
+    /// ([`crate::SHUTDOWN_EXIT_GRACE`]), Eyes shutdown signal
+    /// ([`crate::observability::EYES_HEARTBEAT_SHUTDOWN_TIMEOUT`]), and
+    /// telemetry flush. Process exit also waits for cja's post-deadline
+    /// `self.tasks.shutdown().await` join before Eyes shutdown, then for
+    /// in-flight `spawn_blocking` work when the runtime drops after the flush.
+    /// Neither wait is bounded; Cloud Run sends SIGKILL 10 seconds after SIGTERM.
     pub shutdown_drain_secs: u64,
     pub max_retries: i32,
     pub workers: usize,
