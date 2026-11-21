@@ -21,9 +21,8 @@ use crate::connector::{OutboundBody, TimedConnector};
 use crate::metrics;
 use crate::proxy;
 
-/// Shared proxy state. No database anywhere: cja's server module never needs
-/// one (we do not implement cja's `AppState`, which requires a `PgPool` —
-/// `run_server_until`/`serve_until` take a plain `axum::Router`).
+/// Shared proxy state. The proxy has no database and does not implement cja's
+/// `AppState`: `run_server_until`/`serve_until` take a plain `axum::Router`.
 pub struct ProxyState {
     pub(crate) cfg: Arc<ProxyConfig>,
     pub(crate) client: Client<TimedConnector, OutboundBody>,
