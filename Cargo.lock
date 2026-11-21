@@ -821,8 +821,8 @@ dependencies = [
 
 [[package]]
 name = "cja"
-version = "0.0.0"
-source = "git+https://github.com/coreyja/cja?rev=4409b108f75ee56d36065fdcb92ce6118b9392e3#4409b108f75ee56d36065fdcb92ce6118b9392e3"
+version = "0.0.1"
+source = "git+https://github.com/coreyja/cja?rev=ed0a58ed386c7eff2afd42b39ac9b4c8643c0772#ed0a58ed386c7eff2afd42b39ac9b4c8643c0772"
 dependencies = [
  "async-trait",
  "axum",
@@ -867,8 +867,8 @@ dependencies = [
 
 [[package]]
 name = "cja-build"
-version = "0.0.0"
-source = "git+https://github.com/coreyja/cja?rev=4409b108f75ee56d36065fdcb92ce6118b9392e3#4409b108f75ee56d36065fdcb92ce6118b9392e3"
+version = "0.0.1"
+source = "git+https://github.com/coreyja/cja?rev=ed0a58ed386c7eff2afd42b39ac9b4c8643c0772#ed0a58ed386c7eff2afd42b39ac9b4c8643c0772"
 dependencies = [
  "anyhow",
  "flate2",
@@ -888,8 +888,8 @@ dependencies = [
 
 [[package]]
 name = "cja-secret"
-version = "0.0.0"
-source = "git+https://github.com/coreyja/cja?rev=4409b108f75ee56d36065fdcb92ce6118b9392e3#4409b108f75ee56d36065fdcb92ce6118b9392e3"
+version = "0.0.1"
+source = "git+https://github.com/coreyja/cja?rev=ed0a58ed386c7eff2afd42b39ac9b4c8643c0772#ed0a58ed386c7eff2afd42b39ac9b4c8643c0772"
 dependencies = [
  "cja",
  "cja-secret-macros",
@@ -903,8 +903,8 @@ dependencies = [
 
 [[package]]
 name = "cja-secret-macros"
-version = "0.0.0"
-source = "git+https://github.com/coreyja/cja?rev=4409b108f75ee56d36065fdcb92ce6118b9392e3#4409b108f75ee56d36065fdcb92ce6118b9392e3"
+version = "0.0.1"
+source = "git+https://github.com/coreyja/cja?rev=ed0a58ed386c7eff2afd42b39ac9b4c8643c0772#ed0a58ed386c7eff2afd42b39ac9b4c8643c0772"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -913,8 +913,8 @@ dependencies = [
 
 [[package]]
 name = "cja-tailnet"
-version = "0.0.0"
-source = "git+https://github.com/coreyja/cja?rev=4409b108f75ee56d36065fdcb92ce6118b9392e3#4409b108f75ee56d36065fdcb92ce6118b9392e3"
+version = "0.0.1"
+source = "git+https://github.com/coreyja/cja?rev=ed0a58ed386c7eff2afd42b39ac9b4c8643c0772#ed0a58ed386c7eff2afd42b39ac9b4c8643c0772"
 dependencies = [
  "reqwest 0.13.5",
  "rustls",
@@ -1054,7 +1054,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "117725a109d387c937a1533ce01b450cbde6b88abceea8473c4d7a85853cda3c"
 dependencies = [
  "lazy_static",
- "windows-sys 0.59.0",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
@@ -6875,8 +6875,8 @@ dependencies = [
 
 [[package]]
 name = "setec"
-version = "0.0.0"
-source = "git+https://github.com/coreyja/cja?rev=4409b108f75ee56d36065fdcb92ce6118b9392e3#4409b108f75ee56d36065fdcb92ce6118b9392e3"
+version = "0.0.1"
+source = "git+https://github.com/coreyja/cja?rev=ed0a58ed386c7eff2afd42b39ac9b4c8643c0772#ed0a58ed386c7eff2afd42b39ac9b4c8643c0772"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -9145,7 +9145,7 @@ version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf221c93e13a30d793f7645a0e7762c55d169dbb0a49671918a2319d289b10bb"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]

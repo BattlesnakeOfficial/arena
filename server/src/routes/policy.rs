@@ -172,8 +172,8 @@ fn privacy_content() -> Markup {
                 "events and boot manifests have no fixed deletion date unless a "
                 "verified project retention setting says otherwise. Google Cloud "
                 "also keeps server and load "
-                "balancer logs for a short time, which can contain the same kinds "
-                "of technical details described above."
+                "balancer logs for a short time, which can contain IP addresses, "
+                "browser user agents, request URLs, and referrers."
             }
 
             h2 { "Cookies" }

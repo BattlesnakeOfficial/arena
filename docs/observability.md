@@ -2,11 +2,11 @@
 
 Arena declares metrics, alerts, and all three dashboards once in
 `server/src/observability_declarations.rs`. `server/src/observability.rs` attaches
-them to the full Eyes boot manifest. The post-deploy `posthog-sync` job syncs
-only explicitly declared product-event metrics and their compatible dashboard
-items as tagged PostHog insights. Span/log telemetry metrics, ratios, and
-health widgets remain Eyes-only. A `product.*` metric ID does not by itself
-make a metric eligible for PostHog.
+them to the full Eyes boot manifest. The post-deploy `posthog-sync` job projects
+eligible product, telemetry, and ratio metrics and compatible dashboard items
+as tagged PostHog insights. It preserves stat, table, and window presentation
+and emits the health tile. Eligibility depends on the metric's query, not just
+a `product.*` ID.
 
 The runtime needs only `POSTHOG_PROJECT_TOKEN`, the public ingestion token,
 set in Cloud Run Terraform. It sends OTLP logs and traces with
@@ -18,10 +18,11 @@ An acting user's opaque account ID is the PostHog distinct ID; anonymous share
 visitors get an anonymous distinct ID. New Eyes and Cloud Logging copies of
 the sign-in and Play-claim events omit GitHub and Play usernames. Existing
 Eyes telemetry, manifest registration, and heartbeat continue during the trial.
-PostHog redaction removes the enqueue `jobs.enqueue` span's Debug `self` field
-and the run `jobs.run_from_value` span's serialized `value` field. These
-fields can contain background-job payloads; the PostHog copy omits them while
-Eyes keeps its existing stream.
+PostHog receives the recorded enqueue `jobs.enqueue` span's Debug `self`, the
+run `jobs.run_from_value` span's serialized `value`, and job serde
+`error.detail` as Eyes does. These fields can contain background-job payloads
+and error text. Named credential headers and known secret query parameters in
+`uri`, `url.query`, and referer remain redacted.
 
 The GitHub Actions sync job needs `POSTHOG_PROJECT_ID` as a repo variable and
 `POSTHOG_PERSONAL_API_KEY` as a repo secret. They are never runtime settings.
