@@ -1,0 +1,10 @@
+SET LOCAL lock_timeout = '5s';
+DROP TRIGGER fill_leaderboard_entry_season_before_insert ON leaderboard_entries;
+DROP TRIGGER fill_leaderboard_game_season_before_insert ON leaderboard_games;
+DROP FUNCTION fill_leaderboard_season_id();
+ALTER TABLE leaderboard_entries DROP CONSTRAINT leaderboard_entries_season_league_fk;
+ALTER TABLE leaderboard_games DROP CONSTRAINT leaderboard_games_season_league_fk;
+ALTER TABLE leaderboard_entries DROP COLUMN season_id;
+ALTER TABLE leaderboard_games DROP COLUMN season_id;
+DROP TRIGGER create_leaderboard_preseason_after_insert ON leaderboards;
+DROP FUNCTION create_leaderboard_preseason();
