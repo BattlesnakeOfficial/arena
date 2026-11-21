@@ -172,8 +172,10 @@ fn privacy_content() -> Markup {
                 "events and boot manifests have no fixed deletion date unless a "
                 "verified project retention setting says otherwise. Google Cloud "
                 "also keeps server and load "
-                "balancer logs for a short time, which can contain IP addresses, "
-                "browser user agents, request URLs, and referrers."
+                "balancer logs for a short time, which can contain account "
+                "identifiers, usernames, email addresses, snake names and URLs, "
+                "IP addresses, browser user agents, request URLs and referrers, "
+                "game data, and message contents."
             }
 
             h2 { "Cookies" }
@@ -277,6 +279,11 @@ mod tests {
         assert_eq!(PRIVACY_EFFECTIVE_DATE, "November 2026");
         assert!(html.contains("PostHog (US cloud)"));
         assert!(html.contains("operational logs, traces, and product analytics"));
+        assert!(html.contains(
+            "balancer logs for a short time, which can contain account identifiers, \
+             usernames, email addresses, snake names and URLs, IP addresses, \
+             browser user agents, request URLs and referrers, game data, and message contents."
+        ));
     }
 
     #[test]
