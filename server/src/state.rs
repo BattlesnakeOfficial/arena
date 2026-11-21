@@ -243,10 +243,7 @@ impl AppState {
             tracing::info!("TYPESAFE_API_KEY not set, Jev moderation disabled");
         }
 
-        let mut scoring_registry = crate::scoring::ScoringRegistry::new();
-        scoring_registry.register(Box::new(crate::scoring::weng_lin::WengLinScoring));
-        scoring_registry.register(Box::new(crate::scoring::win_rate::WinRateScoring));
-        scoring_registry.register(Box::new(crate::scoring::food_eaten::FoodEatenScoring));
+        let scoring_registry = crate::scoring::default_registry();
 
         let home_feed_cache = Arc::new(crate::cache::TtlCell::new(std::time::Duration::from_secs(
             config.home_feed_cache_secs,
