@@ -111,6 +111,8 @@ async fn register(
     let mut heartbeat =
         ProcessHeartbeatConfig::from_manifest(base_url.parse()?, org_id, app_id, manifest)?;
     heartbeat.token = token.map(str::to_owned);
+    // eyes-subscriber 0.10.0 defaults to 5 s; that would exceed the 9.5 s
+    // bounded shutdown-step budget and Cloud Run's 10 s window if Eyes hangs.
     heartbeat.shutdown_timeout = EYES_HEARTBEAT_SHUTDOWN_TIMEOUT;
     Ok(ProcessHeartbeat::spawn(heartbeat)?)
 }

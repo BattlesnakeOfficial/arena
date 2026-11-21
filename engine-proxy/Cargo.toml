@@ -17,10 +17,9 @@ name = "engine_proxy"
 [dependencies]
 axum = "0.8"
 tokio = { version = "1", features = ["full"] }
-# default-features = false: cja's defaults only gate the jobs/cron modules,
-# which need Postgres. The server module (run_server_until/serve_until) has
-# no DB requirement.
-cja = { version = "0.0.0", git = "https://github.com/coreyja/cja", rev = "4409b108f75ee56d36065fdcb92ce6118b9392e3", default-features = false }
+# default-features = false: cja defaults enable postgres, jobs, and cron.
+# The proxy's Supervisor, TracingConfig, and run_server_until need none of them.
+cja = { version = "0.0.1", git = "https://github.com/coreyja/cja", rev = "ed0a58ed386c7eff2afd42b39ac9b4c8643c0772", default-features = false }
 hyper = { version = "1", features = ["client", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "http2", "tokio", "server", "service"] }
 http-body-util = "0.1"

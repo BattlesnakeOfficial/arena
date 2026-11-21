@@ -258,7 +258,7 @@ async fn load_secrets_before_telemetry()
 /// (`observability::EYES_HEARTBEAT_SHUTDOWN_TIMEOUT`), and up to 3 seconds
 /// of telemetry flush: 4 + 2 + 0.5 + 3 = 9.5 seconds at the defaults.
 /// This is not a process-exit bound. After the supervisor deadline, cja's
-/// `Supervisor::run_until` calls `self.tasks.shutdown().await` before Eyes
+/// `Supervisor::run` (via private `run_until`) calls `self.tasks.shutdown().await` before Eyes
 /// shutdown and telemetry flush; `JoinSet::shutdown` cancels async tasks at
 /// their next yield but can wait on synchronous worker code. After the flush,
 /// dropping the multi-thread runtime waits for in-flight `spawn_blocking`
@@ -459,10 +459,7 @@ mod tests {
             + SHUTDOWN_EXIT_GRACE
             + observability::EYES_HEARTBEAT_SHUTDOWN_TIMEOUT
             + CJA_TELEMETRY_FLUSH_BOUND;
-        assert!(
-            bounded_total <= Duration::from_millis(9500),
-            "{bounded_total:?}"
-        );
+        assert_eq!(bounded_total, Duration::from_millis(9500));
     }
 
     #[test]

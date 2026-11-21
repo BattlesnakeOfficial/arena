@@ -17,8 +17,8 @@ byte-identical to the upstream versions.
 
 ## cja pin
 
-Arena holds cja at `4409b108f75ee56d36065fdcb92ce6118b9392e3` (the PostHog
-telemetry, product events, and declaration sync adopted by DEV-2485). Bumping cja must always be a
+Arena holds cja at `ed0a58ed386c7eff2afd42b39ac9b4c8643c0772` (the PostHog
+telemetry, product events, and declaration sync adopted by DEV-2485 and DEV-2627). Bumping cja must always be a
 precise pin, never a bare `cargo update` or `cargo update -p cja`:
 
 ```
@@ -53,7 +53,7 @@ Arena then allows 2 seconds of exit grace, up to 0.5 seconds for the Eyes
 process-shutdown signal, and up to 3 seconds for telemetry flush. These
 bounded steps total 4 + 2 + 0.5 + 3 = 9.5 seconds at the defaults; this is
 not a bound on process exit. After the supervisor deadline, cja
-`Supervisor::run_until` (pinned revision `4409b108`) calls the unbounded
+`Supervisor::run` (via private `run_until`) calls the unbounded
 `self.tasks.shutdown().await` join **before** Arena signals Eyes shutdown and
 flushes telemetry. `JoinSet::shutdown` cancels async tasks at their next yield
 but can wait on synchronous worker code. **After** the telemetry flush, Arena
