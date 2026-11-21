@@ -62,17 +62,36 @@ const MIGRATION_LOCK_ID: i64 = 0xDB_DB_DB_DB_DB_DB_DB;
 async fn run_migrations_with_lock(pool: &PgPool, migrator: &Migrator) -> cja::Result<()> {
     let mut conn = pool.acquire().await?;
     conn.close_on_drop();
-    sqlx::query("SELECT pg_advisory_lock($1)")
-        .bind(MIGRATION_LOCK_ID)
-        .execute(&mut *conn)
+    // Poll for the lock instead of blocking in pg_advisory_lock: a session
+    // parked in that statement holds an open snapshot, so a concurrent
+    // CREATE INDEX CONCURRENTLY run by the lock holder waits on the waiter's
+    // virtualxid while the waiter waits on the advisory lock. Postgres then
+    // detects the cycle, aborts the index build, and leaves an INVALID index
+    // that a later `indisvalid` assertion turns into a permanent boot
+    // failure. Each pg_try_advisory_lock attempt is a short statement, so no
+    // booter ever holds an open transaction while waiting for the lock.
+    loop {
+        let acquired: bool = sqlx::query_scalar!(
+            r#"SELECT pg_try_advisory_lock($1) AS "acquired!""#,
+            MIGRATION_LOCK_ID
+        )
+        .fetch_one(&mut *conn)
         .await?;
+        if acquired {
+            break;
+        }
+        tracing::debug!(lock_id = MIGRATION_LOCK_ID, "migration lock held elsewhere");
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
 
     let migration_result = migrator.run(&mut *conn).await;
     let unlock_result: cja::Result<()> = async {
-        let unlocked: bool = sqlx::query_scalar("SELECT pg_advisory_unlock($1)")
-            .bind(MIGRATION_LOCK_ID)
-            .fetch_one(&mut *conn)
-            .await?;
+        let unlocked: bool = sqlx::query_scalar!(
+            r#"SELECT pg_advisory_unlock($1) AS "unlocked!""#,
+            MIGRATION_LOCK_ID
+        )
+        .fetch_one(&mut *conn)
+        .await?;
         if !unlocked {
             return Err(eyre!("Failed to unlock migration lock"));
         }
@@ -373,6 +392,7 @@ mod migration_lock_tests {
                      WHERE a.pid <> pg_backend_pid() AND a.datname = current_database() AND a.state = 'active'
                        AND a.query LIKE '%pg_sleep%'
                        AND l.locktype = 'advisory' AND l.granted
+                       AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())
                        AND l.classid::text::bigint = ($1::bigint >> 32)
                        AND l.objid::text::bigint = ($1::bigint & 4294967295)
                      LIMIT 1",
@@ -402,8 +422,13 @@ mod migration_lock_tests {
                 .await
                 .unwrap();
         assert_eq!(remaining, 0, "migration backend must be closed");
+        // pg_locks is cluster-wide while each #[sqlx::test] runs in its own
+        // database: scope to this database so a sibling test's advisory lock
+        // (the success/failure probes and the CIC test all hold the same key
+        // concurrently) is not counted here.
         let locks: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND granted
+               AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
                AND classid::text::bigint = ($1::bigint >> 32)
                AND objid::text::bigint = ($1::bigint & 4294967295)",
         )
@@ -443,5 +468,58 @@ mod migration_lock_tests {
             true,
         )
         .await;
+    }
+
+    // Regression: a blocking `pg_advisory_lock` wait keeps the statement (and
+    // its snapshot) open, so when the lock holder reaches a CREATE INDEX
+    // CONCURRENTLY migration the two sessions wait on each other, Postgres
+    // reports a deadlock, the index build aborts, and the leftover INVALID
+    // index would fail every later boot. A second booter using the polling
+    // helper must coexist with a concurrent index build instead.
+    #[sqlx::test(migrations = false)]
+    async fn concurrent_lock_waiter_survives_concurrent_index_build(pool: PgPool) {
+        let index_directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            index_directory.path().join("20261121130100_probe.sql"),
+            "CREATE TABLE deadlock_probe (id integer);\nSELECT pg_sleep(2);",
+        )
+        .unwrap();
+        std::fs::write(
+            index_directory.path().join("20261121130200_probe_cic.sql"),
+            "-- no-transaction\nCREATE INDEX CONCURRENTLY IF NOT EXISTS deadlock_probe_idx ON deadlock_probe (id);",
+        )
+        .unwrap();
+        // Both booters resolve the same migrations: a migrator whose set is
+        // missing a version another booter already applied is rejected by
+        // sqlx (VersionMissing), so the waiter replays this set as a no-op
+        // after the index runner finishes. What is under test is the wait
+        // protocol around the lock, not the waiter's own migrations.
+        let migrator = Migrator::new(index_directory.path()).await.unwrap();
+
+        // The index runner acquires the lock first and spends two seconds in
+        // its first migration, so the waiter is guaranteed to be waiting (in
+        // whatever protocol it uses) by the time the concurrent index build
+        // starts. With the old blocking wait that overlap deadlocked.
+        let index_pool = pool.clone();
+        let (index_run, waiter_run) = tokio::join!(
+            async { run_migrations_with_lock(&index_pool, &migrator).await },
+            async {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                run_migrations_with_lock(&pool, &migrator).await
+            }
+        );
+        index_run.unwrap();
+        waiter_run.unwrap();
+
+        let valid: bool = sqlx::query_scalar(
+            "SELECT indisvalid FROM pg_index WHERE indexrelid = 'deadlock_probe_idx'::regclass",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            valid,
+            "concurrent index must be valid after a contended boot"
+        );
     }
 }

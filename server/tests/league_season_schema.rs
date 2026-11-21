@@ -84,22 +84,49 @@ async fn historical_backfill_preserves_rows_and_values(pool: PgPool) {
     ];
     let before: Vec<i64> = futures::future::join_all(tables.iter().map(|t| count(&pool, t))).await;
     migrate_before(&pool, "20261121120500").await.unwrap();
+    // Lock the newest game by UUID: with 10,001 games it lands in the second
+    // and final game batch, so the entry batch and the first 10,000-game
+    // batch commit before the procedure aborts on this row. That exercises
+    // resume-after-partial-commits, not just a first-batch abort.
+    let late_game: Uuid = sqlx::query_scalar(
+        "SELECT leaderboard_game_id FROM leaderboard_games ORDER BY leaderboard_game_id DESC LIMIT 1",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     let mut blocker = pool.begin().await.unwrap();
-    sqlx::query("SELECT leaderboard_entry_id FROM leaderboard_entries WHERE leaderboard_entry_id = $1 FOR UPDATE")
-        .bind(entry).execute(&mut *blocker).await.unwrap();
-    let (failed, ()) = tokio::join!(
-        async {
-            sqlx::query("CALL backfill_leaderboard_seasons()")
-                .execute(&pool)
-                .await
-        },
-        async {
-            tokio::time::sleep(std::time::Duration::from_secs(6)).await;
-            blocker.rollback().await.unwrap();
-        }
-    );
-    let failure = failed.unwrap_err().to_string();
+    sqlx::query("SELECT leaderboard_game_id FROM leaderboard_games WHERE leaderboard_game_id = $1 FOR UPDATE")
+        .bind(late_game).execute(&mut *blocker).await.unwrap();
+    let failed = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        sqlx::query("CALL backfill_leaderboard_seasons()")
+            .execute(&pool)
+            .await
+    })
+    .await
+    .expect("blocked backfill call must finish within its lock timeout")
+    .unwrap_err();
+    blocker.rollback().await.unwrap();
+    let failure = failed.to_string();
     assert!(failure.contains("lock timeout"), "{failure}");
+    // Earlier batches committed before the abort: the entry is linked and
+    // exactly the locked row is still missing its season.
+    assert_eq!(
+        count(&pool, "leaderboard_entries WHERE season_id IS NULL").await,
+        0
+    );
+    assert_eq!(
+        count(&pool, "leaderboard_games WHERE season_id IS NULL").await,
+        1
+    );
+    let still_null: Option<Uuid> = sqlx::query_scalar(
+        "SELECT season_id FROM leaderboard_games WHERE leaderboard_game_id = $1",
+    )
+    .bind(late_game)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(still_null.is_none());
+    // Retrying the unapplied migration resumes past the committed batches.
     sqlx::migrate!("../migrations").run(&pool).await.unwrap();
     let after: Vec<i64> = futures::future::join_all(tables.iter().map(|t| count(&pool, t))).await;
     assert_eq!(after, before);
