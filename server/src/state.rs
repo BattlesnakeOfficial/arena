@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use cja::jobs::worker::IdlePollGate;
 use color_eyre::eyre::{Context as _, eyre};
-use sqlx::{PgPool, postgres::PgPoolOptions};
+use sqlx::{PgPool, migrate::Migrator, postgres::PgPoolOptions};
 use std::num::NonZeroUsize;
 
 use crate::config::AppConfig;
@@ -57,6 +57,37 @@ pub struct AppState {
     pub archive: crate::archive::ArchiveReader,
 }
 
+const MIGRATION_LOCK_ID: i64 = 0xDB_DB_DB_DB_DB_DB_DB;
+
+async fn run_migrations_with_lock(pool: &PgPool, migrator: &Migrator) -> cja::Result<()> {
+    let mut conn = pool.acquire().await?;
+    conn.close_on_drop();
+    sqlx::query("SELECT pg_advisory_lock($1)")
+        .bind(MIGRATION_LOCK_ID)
+        .execute(&mut *conn)
+        .await?;
+
+    let migration_result = migrator.run(&mut *conn).await;
+    let unlock_result: cja::Result<()> = async {
+        let unlocked: bool = sqlx::query_scalar("SELECT pg_advisory_unlock($1)")
+            .bind(MIGRATION_LOCK_ID)
+            .fetch_one(&mut *conn)
+            .await?;
+        if !unlocked {
+            return Err(eyre!("Failed to unlock migration lock"));
+        }
+        Ok(())
+    }
+    .await;
+    let close_result = conn.close().await;
+
+    migration_result?;
+    unlock_result?;
+    close_result?;
+    tracing::info!("Migration lock unlocked");
+    Ok(())
+}
+
 impl AppState {
     /// Turn resolved [`AppConfig`] into live resources (pools, clients).
     /// All environment reading already happened in [`AppConfig::from_env`].
@@ -65,36 +96,12 @@ impl AppState {
         secrets: Option<&crate::secrets::AppSecrets>,
     ) -> cja::Result<Self> {
         async fn setup_db_pool(database_url: &str, max_connections: u32) -> cja::Result<PgPool> {
-            const MIGRATION_LOCK_ID: i64 = 0xDB_DB_DB_DB_DB_DB_DB;
-
             let pool = PgPoolOptions::new()
                 .max_connections(max_connections)
                 .acquire_timeout(std::time::Duration::from_secs(60))
                 .connect(database_url)
                 .await?;
-
-            sqlx::query!("SELECT pg_advisory_lock($1)", MIGRATION_LOCK_ID)
-                .execute(&pool)
-                .await?;
-
-            sqlx::migrate!("../migrations").run(&pool).await?;
-
-            let unlock_result = sqlx::query!("SELECT pg_advisory_unlock($1)", MIGRATION_LOCK_ID)
-                .fetch_one(&pool)
-                .await?
-                .pg_advisory_unlock;
-
-            match unlock_result {
-                Some(b) => {
-                    if b {
-                        tracing::info!("Migration lock unlocked");
-                    } else {
-                        tracing::info!("Failed to unlock migration lock");
-                    }
-                }
-                None => return Err(eyre!("Failed to unlock migration lock")),
-            }
-
+            run_migrations_with_lock(&pool, &sqlx::migrate!("../migrations")).await?;
             Ok(pool)
         }
 
@@ -339,5 +346,102 @@ impl cja::app_state::AppState for AppState {
 
     fn eyes_http_monitors(&self) -> Vec<cja::app_state::HttpMonitor> {
         crate::observability::http_monitors(self.config.features.server)
+    }
+}
+
+#[cfg(test)]
+mod migration_lock_tests {
+    use super::{MIGRATION_LOCK_ID, run_migrations_with_lock};
+    use sqlx::{PgPool, migrate::Migrator};
+    use std::time::Duration;
+
+    async fn exercise(pool: PgPool, sql: &str, should_fail: bool) {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("20261121130000_probe.sql"), sql).unwrap();
+        let migrator = Migrator::new(directory.path()).await.unwrap();
+        let migration_pool = pool.clone();
+        let directory_guard = directory;
+        let migration = async move {
+            let _directory_guard = directory_guard;
+            run_migrations_with_lock(&migration_pool, &migrator).await
+        };
+
+        let observer = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let pid: Option<i32> = sqlx::query_scalar(
+                    "SELECT a.pid FROM pg_stat_activity a JOIN pg_locks l ON l.pid = a.pid
+                     WHERE a.pid <> pg_backend_pid() AND a.datname = current_database() AND a.state = 'active'
+                       AND a.query LIKE '%pg_sleep%'
+                       AND l.locktype = 'advisory' AND l.granted
+                       AND l.classid::text::bigint = ($1::bigint >> 32)
+                       AND l.objid::text::bigint = ($1::bigint & 4294967295)
+                     LIMIT 1",
+                )
+                .bind(MIGRATION_LOCK_ID)
+                .fetch_optional(&pool)
+                .await
+                .unwrap();
+                if let Some(pid) = pid {
+                    break pid;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        });
+        let (result, holder) = tokio::join!(migration, observer);
+        let holder = holder.expect("migrator must hold the application lock on its own backend");
+        if should_fail {
+            let message = result.unwrap_err().to_string();
+            assert!(message.contains("sentinel migration failure"), "{message}");
+        } else {
+            result.unwrap();
+        }
+        let remaining: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE pid = $1")
+                .bind(holder)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(remaining, 0, "migration backend must be closed");
+        let locks: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND granted
+               AND classid::text::bigint = ($1::bigint >> 32)
+               AND objid::text::bigint = ($1::bigint & 4294967295)",
+        )
+        .bind(MIGRATION_LOCK_ID)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(locks, 0);
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn application_migrator_runs_on_disposable_database(pool: PgPool) {
+        run_migrations_with_lock(&pool, &sqlx::migrate!("../migrations"))
+            .await
+            .unwrap();
+        let seasons: i64 = sqlx::query_scalar("SELECT count(*) FROM leaderboard_seasons")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let leagues: i64 = sqlx::query_scalar("SELECT count(*) FROM leaderboards")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(seasons, leagues);
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn migration_lock_uses_migrator_backend_on_success(pool: PgPool) {
+        exercise(pool, "SELECT pg_sleep(2);", false).await;
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn migration_lock_uses_migrator_backend_on_failure(pool: PgPool) {
+        exercise(
+            pool,
+            "DO $$ BEGIN PERFORM pg_sleep(2); RAISE EXCEPTION 'sentinel migration failure'; END $$;",
+            true,
+        )
+        .await;
     }
 }
