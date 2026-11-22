@@ -31,6 +31,7 @@ use crate::{
         },
         global_ranking::get_global_player_score,
         leaderboard::{self, LeaderboardSort},
+        leaderboard_season,
         tournament::{self, TournamentStatus},
         turn::{get_latest_frame, get_turn_frames_page},
         user::{User, get_user_by_id},
@@ -464,18 +465,15 @@ async fn load_snake_card(
         .wrap_err("Failed to get snake leaderboard entries for social card")?;
     // A registration without an active-season entry (a gap) has no rank.
     for entry in entries.into_iter().filter(|e| e.disabled_at.is_none()) {
-        let (Some(display_score), Some(games_played)) = (entry.display_score, entry.games_played)
+        let (Some(season_id), Some(display_score), Some(games_played)) =
+            (entry.season_id, entry.display_score, entry.games_played)
         else {
             continue;
         };
-        let rank = leaderboard::get_rank_for_entry(
-            &state.db,
-            entry.leaderboard_id,
-            display_score,
-            games_played,
-        )
-        .await
-        .wrap_err("Failed to rank snake for social card")?;
+        let rank =
+            leaderboard::get_rank_for_entry(&state.db, season_id, display_score, games_played)
+                .await
+                .wrap_err("Failed to rank snake for social card")?;
         if let Some(rank) = rank
             && best.as_ref().is_none_or(|(b, _)| rank < *b)
         {
@@ -547,7 +545,7 @@ async fn load_entry_card(
         .wrap_err("Failed to get entry owner for social card")?;
     let rank = leaderboard::get_rank_for_entry(
         &state.db,
-        leaderboard_id,
+        entry.season_id,
         entry.display_score,
         entry.games_played,
     )
@@ -707,21 +705,46 @@ async fn load_leaderboard_card(
     else {
         return Ok(None);
     };
-    let ranked = leaderboard::count_ranked_entries(&state.db, leaderboard_id)
+    // The page's default season; zeros and an empty ladder when only
+    // future seasons exist.
+    let season_id = match leaderboard_season::select_season(&state.db, leaderboard_id, None)
         .await
-        .wrap_err("Failed to count ranked entries for social card")?;
-    let status = leaderboard::get_leaderboard_status(&state.db, leaderboard_id)
+        .wrap_err("Failed to select season for social card")?
+    {
+        leaderboard_season::SeasonLookup::Found(selection) => {
+            selection.selected.map(|info| info.season.season_id)
+        }
+        leaderboard_season::SeasonLookup::Foreign => None,
+    };
+    let (ranked, status, top) = if let Some(season_id) = season_id {
+        let ranked = leaderboard::count_ranked_entries(&state.db, leaderboard_id, season_id)
+            .await
+            .wrap_err("Failed to count ranked entries for social card")?;
+        let status = leaderboard::get_leaderboard_status(&state.db, leaderboard_id, season_id)
+            .await
+            .wrap_err("Failed to get leaderboard status for social card")?;
+        let top = leaderboard::get_ranked_entries_paginated(
+            &state.db,
+            leaderboard_id,
+            season_id,
+            0,
+            LADDER_ROWS,
+            LeaderboardSort::Rating,
+        )
         .await
-        .wrap_err("Failed to get leaderboard status for social card")?;
-    let top = leaderboard::get_ranked_entries_paginated(
-        &state.db,
-        leaderboard_id,
-        0,
-        LADDER_ROWS,
-        LeaderboardSort::Rating,
-    )
-    .await
-    .wrap_err("Failed to get top entries for social card")?;
+        .wrap_err("Failed to get top entries for social card")?;
+        (ranked, status, top)
+    } else {
+        (
+            0,
+            leaderboard::LeaderboardStatus {
+                last_game_created_at: None,
+                games_in_progress: 0,
+                total_games: 0,
+            },
+            vec![],
+        )
+    };
     let ids: Vec<Uuid> = top.iter().map(|e| e.battlesnake_id).collect();
     let looks = battlesnake::get_cosmetics_by_ids(&state.db, &ids)
         .await

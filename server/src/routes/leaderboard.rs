@@ -26,6 +26,7 @@ use crate::{
         battlesnake::{self, Visibility},
         game::GameType,
         leaderboard::{self, MIN_GAMES_FOR_RANKING},
+        leaderboard_season::{self, SeasonLookup, SeasonPhase},
         private_leaderboard, tag, user,
     },
     routes::auth::{CurrentUser, OptionalUser},
@@ -40,6 +41,10 @@ pub struct PaginationParams {
     pub page: Option<i64>,
     #[serde(default)]
     pub sort: leaderboard::LeaderboardSort,
+    /// `?season=<season_id>`: show that season (must belong to the league).
+    /// Absent = the league's default season (see `select_season`).
+    #[serde(default)]
+    pub season: Option<Uuid>,
 }
 
 /// GET /leaderboards — list all leaderboards
@@ -140,42 +145,99 @@ pub async fn show_leaderboard(
         leaderboard::LeaderboardSort::Rating
     };
 
+    let SeasonLookup::Found(selection) =
+        leaderboard_season::select_season(&state.db, leaderboard_id, pagination.season)
+            .await
+            .wrap_err("Failed to select leaderboard season")?
+    else {
+        return Ok(crate::routes::render_not_found(page_factory));
+    };
+    let selected = selection.selected.clone();
+    let league_active = selection.league_active().cloned();
+    let next_season_starts_at = selection.next_season_starts_at;
+    // Sort and pager links stay sticky to an explicit ?season= only, so the
+    // canonical (default-season) URLs are unchanged.
+    let season_param = pagination
+        .season
+        .map(|id| format!("&season={id}"))
+        .unwrap_or_default();
+
     let per_page: i64 = 50;
 
-    let total_ranked = leaderboard::count_ranked_entries(&state.db, leaderboard_id)
-        .await
-        .wrap_err("Failed to count ranked entries")?;
+    let (total_ranked, page, ranked, placement, status, activity, top_eaters) = if let Some(info) =
+        &selected
+    {
+        let season_id = info.season.season_id;
+        let total_ranked = leaderboard::count_ranked_entries(&state.db, leaderboard_id, season_id)
+            .await
+            .wrap_err("Failed to count ranked entries")?;
 
+        let total_pages = if total_ranked > 0 {
+            (total_ranked + per_page - 1) / per_page
+        } else {
+            1
+        };
+        let page = pagination.page.unwrap_or(0).clamp(0, total_pages - 1);
+
+        let ranked = leaderboard::get_ranked_entries_paginated(
+            &state.db,
+            leaderboard_id,
+            season_id,
+            page,
+            per_page,
+            sort,
+        )
+        .await
+        .wrap_err("Failed to fetch ranked entries")?;
+
+        let placement = leaderboard::get_placement_entries(&state.db, leaderboard_id, season_id)
+            .await
+            .wrap_err("Failed to fetch placement entries")?;
+
+        let status = leaderboard::get_leaderboard_status(&state.db, leaderboard_id, season_id)
+            .await
+            .wrap_err("Failed to fetch leaderboard status")?;
+
+        let activity = leaderboard::get_activity_feed(&state.db, leaderboard_id, season_id, 8)
+            .await
+            .wrap_err("Failed to fetch activity feed")?;
+
+        let top_eaters = if has_food {
+            leaderboard::get_top_eaters(&state.db, leaderboard_id, season_id, 3)
+                .await
+                .wrap_err("Failed to fetch top eaters")?
+        } else {
+            vec![]
+        };
+        (
+            total_ranked,
+            page,
+            ranked,
+            placement,
+            status,
+            activity,
+            top_eaters,
+        )
+    } else {
+        // Only future seasons: the empty-league shape.
+        (
+            0,
+            0,
+            vec![],
+            vec![],
+            leaderboard::LeaderboardStatus {
+                last_game_created_at: None,
+                games_in_progress: 0,
+                total_games: 0,
+            },
+            vec![],
+            vec![],
+        )
+    };
     let total_pages = if total_ranked > 0 {
         (total_ranked + per_page - 1) / per_page
     } else {
         1
-    };
-    let page = pagination.page.unwrap_or(0).clamp(0, total_pages - 1);
-
-    let ranked =
-        leaderboard::get_ranked_entries_paginated(&state.db, leaderboard_id, page, per_page, sort)
-            .await
-            .wrap_err("Failed to fetch ranked entries")?;
-
-    let placement = leaderboard::get_placement_entries(&state.db, leaderboard_id)
-        .await
-        .wrap_err("Failed to fetch placement entries")?;
-
-    let status = leaderboard::get_leaderboard_status(&state.db, leaderboard_id)
-        .await
-        .wrap_err("Failed to fetch leaderboard status")?;
-
-    let activity = leaderboard::get_activity_feed(&state.db, leaderboard_id, 8)
-        .await
-        .wrap_err("Failed to fetch activity feed")?;
-
-    let top_eaters = if has_food {
-        leaderboard::get_top_eaters(&state.db, leaderboard_id, 3)
-            .await
-            .wrap_err("Failed to fetch top eaters")?
-    } else {
-        vec![]
     };
 
     // Get user's snakes for the join form
@@ -206,16 +268,34 @@ pub async fn show_leaderboard(
         _ => false,
     };
 
-    // Compute next matchmaker run time. When the ladder is starved the
-    // matchmaker no-ops, so "last game + interval" would show an ever-staler
-    // past timestamp — say why matchmaking is paused instead.
+    // Compute next matchmaker run time — a league-live fact, keyed to the
+    // league's active season, never to the selected (maybe past) one. When
+    // the ladder is starved the matchmaker no-ops, so "last game + interval"
+    // would show an ever-staler past timestamp — say why matchmaking is
+    // paused instead.
     let enabled_count = leaderboard::count_active_entries(&state.db, leaderboard_id)
         .await
         .wrap_err("Failed to count active entries")?;
+    let active_last_game_created_at = match &league_active {
+        None => None,
+        Some(active)
+            if selected
+                .as_ref()
+                .is_some_and(|info| info.season.season_id == active.season.season_id) =>
+        {
+            status.last_game_created_at
+        }
+        Some(active) => {
+            leaderboard::get_leaderboard_status(&state.db, leaderboard_id, active.season.season_id)
+                .await
+                .wrap_err("Failed to fetch active season status")?
+                .last_game_created_at
+        }
+    };
     let next_run_str = if enabled_count < leaderboard::MIN_MATCH_SIZE as i64 {
         None
     } else {
-        status.last_game_created_at.map(|last| {
+        active_last_game_created_at.map(|last| {
             let next_run = last + chrono::Duration::seconds(MATCHMAKER_INTERVAL_SECS as i64);
             HumanTime::from(next_run).to_string()
         })
@@ -303,6 +383,9 @@ pub async fn show_leaderboard(
                 }
             }
 
+            (season_picker(leaderboard_id, &selection.seasons, selected.as_ref().map(|info| info.season.season_id)))
+            (season_notice(leaderboard_id, selected.as_ref(), league_active.as_ref(), next_season_starts_at))
+
             div class="stats" {
                 div class="stat" {
                     div class="label" { "Ranked snakes" }
@@ -322,7 +405,14 @@ pub async fn show_leaderboard(
                 div class="stat" {
                     div class="label" { "Next matchmaker run" }
                     div class="value sm" {
-                        @if enabled_count < leaderboard::MIN_MATCH_SIZE as i64 {
+                        @if league_active.is_none() {
+                            // Never "paused" here either (see below).
+                            @if let Some(next) = next_season_starts_at {
+                                "between seasons — next starts " (HumanTime::from(next).to_string())
+                            } @else {
+                                "between seasons"
+                            }
+                        } @else if enabled_count < leaderboard::MIN_MATCH_SIZE as i64 {
                             // "waiting", not "paused": entry status badges say
                             // "Paused" and e2e locators match text loosely.
                             "waiting for at least "
@@ -363,12 +453,12 @@ pub async fn show_leaderboard(
                             @if sort == leaderboard::LeaderboardSort::Rating {
                                 span class="on" aria-current="true" { "Rating" }
                             } @else {
-                                a href={"/leaderboards/"(leaderboard_id)"?sort=rating"} { "Rating" }
+                                a href={"/leaderboards/"(leaderboard_id)"?sort=rating"(season_param)} { "Rating" }
                             }
                             @if sort == leaderboard::LeaderboardSort::FoodEaten {
                                 span class="on" aria-current="true" { "Food eaten" }
                             } @else {
-                                a href={"/leaderboards/"(leaderboard_id)"?sort=food_eaten"} { "Food eaten" }
+                                a href={"/leaderboards/"(leaderboard_id)"?sort=food_eaten"(season_param)} { "Food eaten" }
                             }
                         }
                     }
@@ -432,13 +522,13 @@ pub async fn show_leaderboard(
 
                         div class="pager" {
                             @if page > 0 {
-                                a href={"/leaderboards/"(leaderboard_id)"?sort="(sort_param)"&page="(page - 1)} { "‹ Prev" }
+                                a href={"/leaderboards/"(leaderboard_id)"?sort="(sort_param)"&page="(page - 1)(season_param)} { "‹ Prev" }
                             }
                             @if total_pages > 1 {
                                 span class="cur" { "Page " (page + 1) " of " (total_pages) }
                             }
                             @if page < total_pages - 1 {
-                                a href={"/leaderboards/"(leaderboard_id)"?sort="(sort_param)"&page="(page + 1)} { "Next ›" }
+                                a href={"/leaderboards/"(leaderboard_id)"?sort="(sort_param)"&page="(page + 1)(season_param)} { "Next ›" }
                             }
                             span class="spacer" {}
                             span {
@@ -711,14 +801,29 @@ pub async fn show_leaderboard_entry(
         .await
         .wrap_err("Failed to fetch rating history")?;
 
+    // Rank within the entry's own season, so an old entry link keeps its
+    // standing after a rollover.
     let rank = leaderboard::get_rank_for_entry(
         &state.db,
-        leaderboard_id,
+        entry.season_id,
         entry.display_score,
         entry.games_played,
     )
     .await
     .wrap_err("Failed to get rank")?;
+
+    // Name the entry's season only once the league has more than one.
+    let season_badge = match leaderboard_season::select_season(&state.db, leaderboard_id, None)
+        .await
+        .wrap_err("Failed to fetch leaderboard seasons")?
+    {
+        SeasonLookup::Found(selection) if selection.seasons.len() > 1 => selection
+            .seasons
+            .into_iter()
+            .find(|info| info.season.season_id == entry.season_id)
+            .map(|info| info.season.name),
+        _ => None,
+    };
 
     // Compute SVG chart data
     let (points_str, grid_y_positions, y_labels) = if rating_points.len() >= 2 {
@@ -840,6 +945,10 @@ pub async fn show_leaderboard_entry(
                         a href={"/battlesnakes/"(snake.battlesnake_id)"/profile"} { (snake.name) }
                         @if snake.retired_at.is_some() {
                             span class="badge" { "Retired" }
+                        }
+                        @if let Some(season_name) = &season_badge {
+                            " "
+                            span class="badge season" { (season_name) }
                         }
                     }
                     div class="sub" {
@@ -1243,6 +1352,73 @@ pub async fn leave_leaderboard(
     .with_redirect(redirect.clone())?;
 
     Ok(redirect)
+}
+
+/// Season picker: every season of the league, the shown one marked current.
+/// Always rendered — even a lone Preseason gets its chip.
+fn season_picker(
+    leaderboard_id: Uuid,
+    seasons: &[leaderboard_season::SeasonInfo],
+    selected: Option<Uuid>,
+) -> Markup {
+    html! {
+        nav class="modes seasons" aria-label="Seasons" {
+            @for info in seasons {
+                @if selected == Some(info.season.season_id) {
+                    span class="mode on" aria-current="page" { (info.season.name) }
+                } @else {
+                    a class="mode" href={"/leaderboards/"(leaderboard_id)"?season="(info.season.season_id)} {
+                        (info.season.name)
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The one-line note above the stats when the shown season isn't the live
+/// one. Nothing for the active season.
+fn season_notice(
+    leaderboard_id: Uuid,
+    selected: Option<&leaderboard_season::SeasonInfo>,
+    league_active: Option<&leaderboard_season::SeasonInfo>,
+    next_season_starts_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> Markup {
+    html! {
+        @match selected.map(|info| info.phase) {
+            Some(SeasonPhase::Active) => {}
+            Some(SeasonPhase::Ended) => {
+                p class="empty season-notice" {
+                    @if let Some(active) = league_active {
+                        "This season has ended — see the live standings in "
+                        a href={"/leaderboards/"(leaderboard_id)} { (active.season.name) }
+                        "."
+                    } @else if let Some(next) = next_season_starts_at {
+                        "This season has ended. The next one starts "
+                        (HumanTime::from(next).to_string()) "."
+                    } @else {
+                        "This season has ended."
+                    }
+                }
+            }
+            Some(SeasonPhase::Upcoming) => {
+                @if let Some(info) = selected {
+                    p class="empty season-notice" {
+                        "This season starts " (HumanTime::from(info.season.starts_at).to_string()) "."
+                    }
+                }
+            }
+            None => {
+                p class="empty season-notice" {
+                    @if let Some(next) = next_season_starts_at {
+                        "The next season starts " (HumanTime::from(next).to_string()) "."
+                    } @else {
+                        "The next season hasn't started yet."
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Compact relative time for rail feeds ("2m ago"), where HumanTime is too wordy.

@@ -1,0 +1,49 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO leaderboard_seasons (leaderboard_id, season_id, name, starts_at, ends_at)\n         SELECT $1::uuid, gen_random_uuid(), $2::text, $3::timestamptz, $4::timestamptz\n         WHERE $3::timestamptz >= clock_timestamp()\n         RETURNING season_id, leaderboard_id, name, starts_at, ends_at",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "season_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "leaderboard_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "starts_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 4,
+        "name": "ends_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Timestamptz",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "40a0a328f9413289de55fdb4843bd8d173965db5aac9d907a826f51d4dd1fed0"
+}

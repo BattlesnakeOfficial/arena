@@ -2523,13 +2523,38 @@ pub async fn import_leaderboard(
 
     let count = form.count.clamp(1, MAX_IMPORT_COUNT);
 
-    let ranked = leaderboard::get_ranked_entries(
-        &state.db,
-        lb.leaderboard_id,
-        leaderboard::LeaderboardSort::Rating,
-    )
-    .await
-    .wrap_err("Failed to fetch ranked leaderboard entries")?;
+    // The ladder's default season (active, else the last ended — its
+    // frozen standings). Only future seasons: nothing to import, which takes
+    // the "No eligible snakes" path below.
+    let season_id =
+        match crate::models::leaderboard_season::select_season(&state.db, lb.leaderboard_id, None)
+            .await
+            .wrap_err("Failed to select leaderboard season")?
+        {
+            crate::models::leaderboard_season::SeasonLookup::Found(selection) => {
+                selection.selected.map(|info| info.season.season_id)
+            }
+            crate::models::leaderboard_season::SeasonLookup::Foreign => None,
+        };
+    let mut ranked = match season_id {
+        Some(season_id) => leaderboard::get_ranked_entries(
+            &state.db,
+            lb.leaderboard_id,
+            season_id,
+            leaderboard::LeaderboardSort::Rating,
+        )
+        .await
+        .wrap_err("Failed to fetch ranked leaderboard entries")?,
+        None => vec![],
+    };
+    // An ended season's frozen standings include snakes that have since left
+    // the league, been paused, retired or deleted. Import only current live
+    // members: leaving a ladder opts a snake out of its imports, and a dead
+    // snake can't be registered at all.
+    let live_members =
+        crate::models::leaderboard_registration::live_member_snake_ids(&mut tx, lb.leaderboard_id)
+            .await?;
+    ranked.retain(|entry| live_members.contains(&entry.battlesnake_id));
 
     // Snapshot the registrations inside the locked transaction so duplicate
     // skipping and the per-user/total caps are enforced against reality.

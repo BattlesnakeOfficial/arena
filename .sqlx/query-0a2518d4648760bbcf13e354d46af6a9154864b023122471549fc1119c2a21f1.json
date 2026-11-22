@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT MAX(created_at) FROM leaderboard_games WHERE leaderboard_id = $1",
+  "query": "SELECT MAX(created_at) FROM leaderboard_games\n         WHERE leaderboard_id = $1 AND season_id = $2",
   "describe": {
     "columns": [
       {
@@ -11,6 +11,7 @@
     ],
     "parameters": {
       "Left": [
+        "Uuid",
         "Uuid"
       ]
     },
@@ -18,5 +19,5 @@
       null
     ]
   },
-  "hash": "7f6a7051f58e2f36352005a4d49934c6ae6a4f01a61728dc08bd9831facebd91"
+  "hash": "0a2518d4648760bbcf13e354d46af6a9154864b023122471549fc1119c2a21f1"
 }

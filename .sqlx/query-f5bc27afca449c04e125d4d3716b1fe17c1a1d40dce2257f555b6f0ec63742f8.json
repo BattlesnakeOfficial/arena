@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT\n            leaderboard_entry_id, leaderboard_id, battlesnake_id,\n            mu, sigma, display_score, games_played, first_place_finishes, non_first_finishes,\n            disabled_at, disabled_reason, created_at, updated_at\n         FROM leaderboard_entries\n         WHERE leaderboard_entry_id = $1",
+  "query": "SELECT\n            leaderboard_entry_id, leaderboard_id, season_id AS \"season_id!\", battlesnake_id,\n            mu, sigma, display_score, games_played, first_place_finishes, non_first_finishes,\n            disabled_at, disabled_reason, created_at, updated_at\n         FROM leaderboard_entries\n         WHERE leaderboard_entry_id = $1",
   "describe": {
     "columns": [
       {
@@ -15,56 +15,61 @@
       },
       {
         "ordinal": 2,
-        "name": "battlesnake_id",
+        "name": "season_id!",
         "type_info": "Uuid"
       },
       {
         "ordinal": 3,
+        "name": "battlesnake_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 4,
         "name": "mu",
         "type_info": "Float8"
       },
       {
-        "ordinal": 4,
+        "ordinal": 5,
         "name": "sigma",
         "type_info": "Float8"
       },
       {
-        "ordinal": 5,
+        "ordinal": 6,
         "name": "display_score",
         "type_info": "Float8"
       },
       {
-        "ordinal": 6,
+        "ordinal": 7,
         "name": "games_played",
         "type_info": "Int4"
       },
       {
-        "ordinal": 7,
+        "ordinal": 8,
         "name": "first_place_finishes",
         "type_info": "Int4"
       },
       {
-        "ordinal": 8,
+        "ordinal": 9,
         "name": "non_first_finishes",
         "type_info": "Int4"
       },
       {
-        "ordinal": 9,
+        "ordinal": 10,
         "name": "disabled_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 10,
+        "ordinal": 11,
         "name": "disabled_reason",
         "type_info": "Text"
       },
       {
-        "ordinal": 11,
+        "ordinal": 12,
         "name": "created_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 12,
+        "ordinal": 13,
         "name": "updated_at",
         "type_info": "Timestamptz"
       }
@@ -77,6 +82,7 @@
     "nullable": [
       false,
       false,
+      true,
       false,
       false,
       false,
@@ -90,5 +96,5 @@
       false
     ]
   },
-  "hash": "2889147593bc1c1265f04feebc988828f0f659bd75d1dfe8ea5fafdcfa1e130c"
+  "hash": "f5bc27afca449c04e125d4d3716b1fe17c1a1d40dce2257f555b6f0ec63742f8"
 }

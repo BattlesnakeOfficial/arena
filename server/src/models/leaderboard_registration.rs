@@ -141,6 +141,32 @@ pub async fn get_or_create_registration(
     .wrap_err("Failed to create or get leaderboard registration")
 }
 
+/// Snakes currently eligible to be drawn from this league: an active
+/// registration on a live (not deleted, not retired) snake.
+///
+/// Frozen standings of an ended season deliberately include entrants who
+/// later left; anything that *acts* on standings (tournament import) must
+/// intersect them with this set so leavers and dead snakes are never picked.
+pub async fn live_member_snake_ids(
+    conn: &mut PgConnection,
+    leaderboard_id: Uuid,
+) -> cja::Result<std::collections::HashSet<Uuid>> {
+    let ids = sqlx::query_scalar!(
+        r#"SELECT lr.battlesnake_id
+         FROM leaderboard_registrations lr
+         JOIN battlesnakes b ON b.battlesnake_id = lr.battlesnake_id
+         WHERE lr.leaderboard_id = $1
+           AND lr.disabled_at IS NULL
+           AND b.deleted_at IS NULL
+           AND b.retired_at IS NULL"#,
+        leaderboard_id
+    )
+    .fetch_all(conn)
+    .await
+    .wrap_err("Failed to fetch live league members")?;
+    Ok(ids.into_iter().collect())
+}
+
 /// A snake's registration in a league, whatever its state.
 pub async fn get_registration(
     pool: &PgPool,

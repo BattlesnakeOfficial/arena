@@ -550,3 +550,85 @@ test.describe('Country flags', () => {
     }
   });
 });
+
+test.describe('League seasons', () => {
+  test('season picker switches to a past season with frozen standings, leavers included', async ({ authenticatedPage }) => {
+    const stamp = `${Date.now()}_${Math.floor(Math.random() * 10000)}`;
+    const [league] = await query<{ leaderboard_id: string }>(
+      "INSERT INTO leaderboards (name, game_type) VALUES ($1, 'Standard') RETURNING leaderboard_id",
+      [`Seasons LB ${stamp}`],
+    );
+    const leaderboardId = league.leaderboard_id;
+    const [owner] = await query<{ user_id: string }>(
+      `INSERT INTO users (external_github_id, github_login) VALUES ($1::bigint, $2) RETURNING user_id`,
+      [Date.now() * 1000 + 700_200, `season-owner-${stamp}`],
+    );
+    try {
+      // Preseason ends; a past "Autumn" season and a live "Winter" season follow.
+      await query(
+        `UPDATE leaderboard_seasons
+         SET starts_at = now() - interval '60 days', ends_at = now() - interval '30 days'
+         WHERE leaderboard_id = $1`,
+        [leaderboardId],
+      );
+      const [autumn] = await query<{ season_id: string }>(
+        `INSERT INTO leaderboard_seasons (leaderboard_id, name, starts_at, ends_at)
+         VALUES ($1, 'Autumn', now() - interval '30 days', now() - interval '1 day') RETURNING season_id`,
+        [leaderboardId],
+      );
+      const [winter] = await query<{ season_id: string }>(
+        `INSERT INTO leaderboard_seasons (leaderboard_id, name, starts_at)
+         VALUES ($1, 'Winter', now() - interval '1 day') RETURNING season_id`,
+        [leaderboardId],
+      );
+
+      const snakes: Record<string, string> = {};
+      for (const name of [`Stayer ${stamp}`, `Leaver ${stamp}`, `Winter Snake ${stamp}`]) {
+        const [snake] = await query<{ battlesnake_id: string }>(
+          `INSERT INTO battlesnakes (user_id, name, url, visibility)
+           VALUES ($1, $2, 'https://example.com', 'public') RETURNING battlesnake_id`,
+          [owner.user_id, name],
+        );
+        snakes[name] = snake.battlesnake_id;
+        await query(
+          `INSERT INTO leaderboard_registrations (leaderboard_id, battlesnake_id, disabled_at)
+           VALUES ($1, $2, $3)`,
+          [leaderboardId, snake.battlesnake_id, name.startsWith('Leaver') ? new Date() : null],
+        );
+      }
+      for (const [name, season, score] of [
+        [`Stayer ${stamp}`, autumn.season_id, 30],
+        [`Leaver ${stamp}`, autumn.season_id, 20],
+        [`Winter Snake ${stamp}`, winter.season_id, 25],
+      ] as const) {
+        await query(
+          `INSERT INTO leaderboard_entries (leaderboard_id, season_id, battlesnake_id, games_played, display_score)
+           VALUES ($1, $2, $3, 10, $4)`,
+          [leaderboardId, season, snakes[name], score],
+        );
+      }
+
+      await authenticatedPage.goto(`/leaderboards/${leaderboardId}`);
+      const picker = authenticatedPage.getByRole('navigation', { name: 'Seasons' });
+      await expect(picker.getByText('Preseason')).toBeVisible();
+      await expect(picker.getByRole('link', { name: 'Autumn' })).toBeVisible();
+      await expect(picker.locator('[aria-current="page"]')).toHaveText('Winter');
+
+      // Default: the live season's standings.
+      const rows = authenticatedPage.locator('tbody tr');
+      await expect(rows.filter({ hasText: `Winter Snake ${stamp}` })).toHaveCount(1);
+      await expect(rows.filter({ hasText: `Stayer ${stamp}` })).toHaveCount(0);
+
+      await picker.getByRole('link', { name: 'Autumn' }).click();
+      await expect(authenticatedPage).toHaveURL((url) => url.searchParams.get('season') === autumn.season_id);
+      await expect(picker.locator('[aria-current="page"]')).toHaveText('Autumn');
+      await expect(rows.filter({ hasText: `Stayer ${stamp}` })).toHaveCount(1);
+      await expect(rows.filter({ hasText: `Leaver ${stamp}` })).toHaveCount(1);
+      await expect(rows.filter({ hasText: `Winter Snake ${stamp}` })).toHaveCount(0);
+      await expect(authenticatedPage.getByText('This season has ended — see the live standings in')).toBeVisible();
+    } finally {
+      await query('DELETE FROM leaderboards WHERE leaderboard_id = $1', [leaderboardId]);
+      await query('DELETE FROM users WHERE user_id = $1', [owner.user_id]);
+    }
+  });
+});

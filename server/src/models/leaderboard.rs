@@ -35,6 +35,8 @@ pub struct Leaderboard {
 pub struct LeaderboardEntry {
     pub leaderboard_entry_id: Uuid,
     pub leaderboard_id: Uuid,
+    /// The season this entry's ratings belong to.
+    pub season_id: Uuid,
     pub battlesnake_id: Uuid,
     pub mu: f64,
     pub sigma: f64,
@@ -303,7 +305,7 @@ pub async fn ensure_snake_season_entry(
     let entry = sqlx::query_as!(
         LeaderboardEntry,
         r#"SELECT
-            le.leaderboard_entry_id, le.leaderboard_id, le.battlesnake_id,
+            le.leaderboard_entry_id, le.leaderboard_id, le.season_id AS "season_id!", le.battlesnake_id,
             le.mu, le.sigma, le.display_score, le.games_played, le.first_place_finishes, le.non_first_finishes,
             le.disabled_at, le.disabled_reason, le.created_at, le.updated_at
          FROM leaderboard_entries le
@@ -383,7 +385,7 @@ pub async fn get_active_entries(
     let entries = sqlx::query_as!(
         LeaderboardEntry,
         r#"SELECT
-            le.leaderboard_entry_id, le.leaderboard_id, le.battlesnake_id,
+            le.leaderboard_entry_id, le.leaderboard_id, le.season_id AS "season_id!", le.battlesnake_id,
             le.mu, le.sigma, le.display_score, le.games_played, le.first_place_finishes, le.non_first_finishes,
             le.disabled_at, le.disabled_reason, le.created_at, le.updated_at
          FROM leaderboard_entries le
@@ -410,6 +412,7 @@ pub async fn get_active_entries(
 pub async fn get_ranked_entries(
     pool: &PgPool,
     leaderboard_id: Uuid,
+    season_id: Uuid,
     sort: LeaderboardSort,
 ) -> cja::Result<Vec<RankedEntry>> {
     let entries = match sort {
@@ -436,13 +439,16 @@ pub async fn get_ranked_entries(
                  FROM leaderboard_entries le
                  JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id
                  JOIN users u ON b.user_id = u.user_id
+                 JOIN leaderboard_seasons s ON s.season_id = le.season_id
                  JOIN leaderboard_registrations lr ON lr.leaderboard_id = le.leaderboard_id AND lr.battlesnake_id = le.battlesnake_id
-                 WHERE le.leaderboard_id = $1
-                   AND lr.disabled_at IS NULL
-                   AND le.games_played >= $2
+                 WHERE le.leaderboard_id = $1 AND s.season_id = $2
+                   AND ((s.ends_at IS NOT NULL AND clock_timestamp() >= s.ends_at)
+                        OR lr.disabled_at IS NULL)
+                   AND le.games_played >= $3
                  ORDER BY le.display_score DESC
                  LIMIT 100"#,
                 leaderboard_id,
+                season_id,
                 MIN_GAMES_FOR_RANKING
             )
             .fetch_all(pool)
@@ -472,13 +478,16 @@ pub async fn get_ranked_entries(
                  JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id
                  JOIN users u ON b.user_id = u.user_id
                  LEFT JOIN food_eaten_stats fes ON le.leaderboard_entry_id = fes.leaderboard_entry_id
+                 JOIN leaderboard_seasons s ON s.season_id = le.season_id
                  JOIN leaderboard_registrations lr ON lr.leaderboard_id = le.leaderboard_id AND lr.battlesnake_id = le.battlesnake_id
-                 WHERE le.leaderboard_id = $1
-                   AND lr.disabled_at IS NULL
-                   AND le.games_played >= $2
+                 WHERE le.leaderboard_id = $1 AND s.season_id = $2
+                   AND ((s.ends_at IS NOT NULL AND clock_timestamp() >= s.ends_at)
+                        OR lr.disabled_at IS NULL)
+                   AND le.games_played >= $3
                  ORDER BY COALESCE(fes.food_score, 0) DESC
                  LIMIT 100"#,
                 leaderboard_id,
+                season_id,
                 MIN_GAMES_FOR_RANKING
             )
             .fetch_all(pool)
@@ -494,6 +503,7 @@ pub async fn get_ranked_entries(
 pub async fn get_placement_entries(
     pool: &PgPool,
     leaderboard_id: Uuid,
+    season_id: Uuid,
 ) -> cja::Result<Vec<RankedEntry>> {
     let entries = sqlx::query_as!(
         RankedEntry,
@@ -517,13 +527,16 @@ pub async fn get_placement_entries(
          FROM leaderboard_entries le
          JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id
          JOIN users u ON b.user_id = u.user_id
+         JOIN leaderboard_seasons s ON s.season_id = le.season_id
          JOIN leaderboard_registrations lr ON lr.leaderboard_id = le.leaderboard_id AND lr.battlesnake_id = le.battlesnake_id
-         WHERE le.leaderboard_id = $1
-           AND lr.disabled_at IS NULL
-           AND le.games_played < $2
+         WHERE le.leaderboard_id = $1 AND s.season_id = $2
+           AND ((s.ends_at IS NOT NULL AND clock_timestamp() >= s.ends_at)
+                OR lr.disabled_at IS NULL)
+           AND le.games_played < $3
          ORDER BY le.games_played DESC
          LIMIT 100"#,
         leaderboard_id,
+        season_id,
         MIN_GAMES_FOR_RANKING
     )
     .fetch_all(pool)
@@ -542,7 +555,7 @@ pub async fn get_entry(
     let entry = sqlx::query_as!(
         LeaderboardEntry,
         r#"SELECT
-            le.leaderboard_entry_id, le.leaderboard_id, le.battlesnake_id,
+            le.leaderboard_entry_id, le.leaderboard_id, le.season_id AS "season_id!", le.battlesnake_id,
             le.mu, le.sigma, le.display_score, le.games_played, le.first_place_finishes, le.non_first_finishes,
             le.disabled_at, le.disabled_reason, le.created_at, le.updated_at
          FROM leaderboard_entries le
@@ -573,7 +586,7 @@ where
     let entry = sqlx::query_as!(
         LeaderboardEntry,
         r#"SELECT
-            leaderboard_entry_id, leaderboard_id, battlesnake_id,
+            leaderboard_entry_id, leaderboard_id, season_id AS "season_id!", battlesnake_id,
             mu, sigma, display_score, games_played, first_place_finishes, non_first_finishes,
             disabled_at, disabled_reason, created_at, updated_at
          FROM leaderboard_entries
@@ -603,7 +616,7 @@ where
     let entry = sqlx::query_as!(
         LeaderboardEntry,
         r#"SELECT
-            leaderboard_entry_id, leaderboard_id, battlesnake_id,
+            leaderboard_entry_id, leaderboard_id, season_id AS "season_id!", battlesnake_id,
             mu, sigma, display_score, games_played, first_place_finishes, non_first_finishes,
             disabled_at, disabled_reason, created_at, updated_at
          FROM leaderboard_entries
@@ -626,7 +639,7 @@ pub async fn get_entry_by_id(
     let entry = sqlx::query_as!(
         LeaderboardEntry,
         r#"SELECT
-            leaderboard_entry_id, leaderboard_id, battlesnake_id,
+            leaderboard_entry_id, leaderboard_id, season_id AS "season_id!", battlesnake_id,
             mu, sigma, display_score, games_played, first_place_finishes, non_first_finishes,
             disabled_at, disabled_reason, created_at, updated_at
          FROM leaderboard_entries
@@ -848,6 +861,7 @@ pub async fn count_active_entries(pool: &PgPool, leaderboard_id: Uuid) -> cja::R
 pub async fn get_ranked_entries_paginated(
     pool: &PgPool,
     leaderboard_id: Uuid,
+    season_id: Uuid,
     page: i64,
     per_page: i64,
     sort: LeaderboardSort,
@@ -877,13 +891,16 @@ pub async fn get_ranked_entries_paginated(
                  FROM leaderboard_entries le
                  JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id
                  JOIN users u ON b.user_id = u.user_id
+                 JOIN leaderboard_seasons s ON s.season_id = le.season_id
                  JOIN leaderboard_registrations lr ON lr.leaderboard_id = le.leaderboard_id AND lr.battlesnake_id = le.battlesnake_id
-                 WHERE le.leaderboard_id = $1
-                   AND lr.disabled_at IS NULL
-                   AND le.games_played >= $2
+                 WHERE le.leaderboard_id = $1 AND s.season_id = $2
+                   AND ((s.ends_at IS NOT NULL AND clock_timestamp() >= s.ends_at)
+                        OR lr.disabled_at IS NULL)
+                   AND le.games_played >= $3
                  ORDER BY le.display_score DESC
-                 LIMIT $3 OFFSET $4"#,
+                 LIMIT $4 OFFSET $5"#,
                 leaderboard_id,
+                season_id,
                 MIN_GAMES_FOR_RANKING,
                 per_page,
                 offset
@@ -915,13 +932,16 @@ pub async fn get_ranked_entries_paginated(
                  JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id
                  JOIN users u ON b.user_id = u.user_id
                  LEFT JOIN food_eaten_stats fes ON le.leaderboard_entry_id = fes.leaderboard_entry_id
+                 JOIN leaderboard_seasons s ON s.season_id = le.season_id
                  JOIN leaderboard_registrations lr ON lr.leaderboard_id = le.leaderboard_id AND lr.battlesnake_id = le.battlesnake_id
-                 WHERE le.leaderboard_id = $1
-                   AND lr.disabled_at IS NULL
-                   AND le.games_played >= $2
+                 WHERE le.leaderboard_id = $1 AND s.season_id = $2
+                   AND ((s.ends_at IS NOT NULL AND clock_timestamp() >= s.ends_at)
+                        OR lr.disabled_at IS NULL)
+                   AND le.games_played >= $3
                  ORDER BY COALESCE(fes.food_score, 0) DESC
-                 LIMIT $3 OFFSET $4"#,
+                 LIMIT $4 OFFSET $5"#,
                 leaderboard_id,
+                season_id,
                 MIN_GAMES_FOR_RANKING,
                 per_page,
                 offset
@@ -936,13 +956,22 @@ pub async fn get_ranked_entries_paginated(
 }
 
 /// Count total ranked entries for pagination
-pub async fn count_ranked_entries(pool: &PgPool, leaderboard_id: Uuid) -> cja::Result<i64> {
+pub async fn count_ranked_entries(
+    pool: &PgPool,
+    leaderboard_id: Uuid,
+    season_id: Uuid,
+) -> cja::Result<i64> {
     let count = sqlx::query_scalar!(
         r#"SELECT COUNT(*) as "count!"
          FROM leaderboard_entries le
+         JOIN leaderboard_seasons s ON s.season_id = le.season_id
          JOIN leaderboard_registrations lr ON lr.leaderboard_id = le.leaderboard_id AND lr.battlesnake_id = le.battlesnake_id
-         WHERE le.leaderboard_id = $1 AND lr.disabled_at IS NULL AND le.games_played >= $2"#,
+         WHERE le.leaderboard_id = $1 AND s.season_id = $2
+           AND ((s.ends_at IS NOT NULL AND clock_timestamp() >= s.ends_at)
+                OR lr.disabled_at IS NULL)
+           AND le.games_played >= $3"#,
         leaderboard_id,
+        season_id,
         MIN_GAMES_FOR_RANKING
     )
     .fetch_one(pool)
@@ -1120,10 +1149,13 @@ pub struct LeaderboardStatus {
 pub async fn get_leaderboard_status(
     pool: &PgPool,
     leaderboard_id: Uuid,
+    season_id: Uuid,
 ) -> cja::Result<LeaderboardStatus> {
     let last_game_created_at = sqlx::query_scalar!(
-        r#"SELECT MAX(created_at) FROM leaderboard_games WHERE leaderboard_id = $1"#,
-        leaderboard_id
+        r#"SELECT MAX(created_at) FROM leaderboard_games
+         WHERE leaderboard_id = $1 AND season_id = $2"#,
+        leaderboard_id,
+        season_id
     )
     .fetch_one(pool)
     .await
@@ -1135,16 +1167,19 @@ pub async fn get_leaderboard_status(
     let games_in_progress = sqlx::query_scalar!(
         r#"SELECT COUNT(*) as "count!" FROM leaderboard_games lg
          JOIN games g ON lg.game_id = g.game_id
-         WHERE lg.leaderboard_id = $1 AND g.status = 'running'"#,
-        leaderboard_id
+         WHERE lg.leaderboard_id = $1 AND lg.season_id = $2 AND g.status = 'running'"#,
+        leaderboard_id,
+        season_id
     )
     .fetch_one(pool)
     .await
     .wrap_err("Failed to count games in progress")?;
 
     let total_games = sqlx::query_scalar!(
-        r#"SELECT COUNT(*) as "count!" FROM leaderboard_games WHERE leaderboard_id = $1"#,
-        leaderboard_id
+        r#"SELECT COUNT(*) as "count!" FROM leaderboard_games
+         WHERE leaderboard_id = $1 AND season_id = $2"#,
+        leaderboard_id,
+        season_id
     )
     .fetch_one(pool)
     .await
@@ -1178,6 +1213,7 @@ pub struct ActivityFeedEntry {
 pub async fn get_activity_feed(
     pool: &PgPool,
     leaderboard_id: Uuid,
+    season_id: Uuid,
     limit: i64,
 ) -> cja::Result<Vec<ActivityFeedEntry>> {
     let entries = sqlx::query_as!(
@@ -1202,11 +1238,12 @@ pub async fn get_activity_feed(
          JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id
          JOIN users u ON b.user_id = u.user_id
          JOIN leaderboard_games lg ON lgr.leaderboard_game_id = lg.leaderboard_game_id
-         WHERE lg.leaderboard_id = $1
+         WHERE lg.leaderboard_id = $1 AND lg.season_id = $2
          ORDER BY lgr.created_at DESC, lgr.leaderboard_game_id DESC, lgr.placement ASC,
                   b.battlesnake_id ASC
-         LIMIT $2"#,
+         LIMIT $3"#,
         leaderboard_id,
+        season_id,
         limit
     )
     .fetch_all(pool)
@@ -1222,6 +1259,8 @@ pub struct BattlesnakeLeaderboardSummary {
     /// The active-season entry; `None` when the snake has none yet (a gap).
     /// The stats below are `None` exactly when this is.
     pub leaderboard_entry_id: Option<Uuid>,
+    /// The active season's id; `None` during a gap. Scopes the entry's rank.
+    pub season_id: Option<Uuid>,
     pub leaderboard_id: Uuid,
     pub leaderboard_name: String,
     pub leaderboard_visibility: Visibility,
@@ -1250,6 +1289,7 @@ pub async fn get_entries_for_battlesnake(
         BattlesnakeLeaderboardSummary,
         r#"SELECT
             le.leaderboard_entry_id AS "leaderboard_entry_id?",
+            s.season_id AS "season_id?",
             r.leaderboard_id,
             l.name as leaderboard_name,
             l.visibility as "leaderboard_visibility: Visibility",
@@ -1284,7 +1324,7 @@ pub async fn get_entries_for_battlesnake(
 /// Get competition rank for a specific entry (count of entries with higher score + 1)
 pub async fn get_rank_for_entry(
     pool: &PgPool,
-    leaderboard_id: Uuid,
+    season_id: Uuid,
     display_score: f64,
     games_played: i32,
 ) -> cja::Result<Option<i64>> {
@@ -1295,12 +1335,14 @@ pub async fn get_rank_for_entry(
     let rank = sqlx::query_scalar!(
         r#"SELECT COUNT(*) + 1 as "rank!"
          FROM leaderboard_entries le
+         JOIN leaderboard_seasons s ON s.season_id = le.season_id
          JOIN leaderboard_registrations lr ON lr.leaderboard_id = le.leaderboard_id AND lr.battlesnake_id = le.battlesnake_id
-         WHERE le.leaderboard_id = $1
-           AND lr.disabled_at IS NULL
+         WHERE s.season_id = $1
+           AND ((s.ends_at IS NOT NULL AND clock_timestamp() >= s.ends_at)
+                OR lr.disabled_at IS NULL)
            AND le.games_played >= $2
            AND le.display_score > $3"#,
-        leaderboard_id,
+        season_id,
         MIN_GAMES_FOR_RANKING,
         display_score
     )
@@ -1330,6 +1372,7 @@ pub struct TopEater {
 pub async fn get_top_eaters(
     pool: &PgPool,
     leaderboard_id: Uuid,
+    season_id: Uuid,
     limit: i64,
 ) -> cja::Result<Vec<TopEater>> {
     let entries = sqlx::query_as!(
@@ -1346,13 +1389,16 @@ pub async fn get_top_eaters(
          JOIN food_eaten_stats fes ON le.leaderboard_entry_id = fes.leaderboard_entry_id
          JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id
          JOIN users u ON b.user_id = u.user_id
+         JOIN leaderboard_seasons s ON s.season_id = le.season_id
          JOIN leaderboard_registrations lr ON lr.leaderboard_id = le.leaderboard_id AND lr.battlesnake_id = le.battlesnake_id
-         WHERE le.leaderboard_id = $1
-           AND lr.disabled_at IS NULL
+         WHERE le.leaderboard_id = $1 AND s.season_id = $2
+           AND ((s.ends_at IS NOT NULL AND clock_timestamp() >= s.ends_at)
+                OR lr.disabled_at IS NULL)
            AND fes.food_score > 0
          ORDER BY fes.food_score DESC
-         LIMIT $2"#,
+         LIMIT $3"#,
         leaderboard_id,
+        season_id,
         limit
     )
     .fetch_all(pool)
@@ -1379,14 +1425,32 @@ pub async fn load_home_feed(pool: &sqlx::PgPool) -> cja::Result<HomeFeed> {
         .wrap_err("Failed to fetch leaderboards")?;
     let featured = leaderboards.into_iter().next();
 
-    let (activity, top_entries) = if let Some(lb) = &featured {
-        let activity = get_activity_feed(pool, lb.leaderboard_id, 8)
+    // The featured ladder's default season (active, else last ended); none
+    // when only future seasons exist.
+    let featured_season = match &featured {
+        Some(lb) => match leaderboard_season::select_season(pool, lb.leaderboard_id, None).await? {
+            leaderboard_season::SeasonLookup::Found(selection) => selection
+                .selected
+                .map(|info| (lb.leaderboard_id, info.season.season_id)),
+            leaderboard_season::SeasonLookup::Foreign => None,
+        },
+        None => None,
+    };
+
+    let (activity, top_entries) = if let Some((leaderboard_id, season_id)) = featured_season {
+        let activity = get_activity_feed(pool, leaderboard_id, season_id, 8)
             .await
             .wrap_err("Failed to fetch activity feed")?;
-        let top =
-            get_ranked_entries_paginated(pool, lb.leaderboard_id, 0, 5, LeaderboardSort::Rating)
-                .await
-                .wrap_err("Failed to fetch top entries")?;
+        let top = get_ranked_entries_paginated(
+            pool,
+            leaderboard_id,
+            season_id,
+            0,
+            5,
+            LeaderboardSort::Rating,
+        )
+        .await
+        .wrap_err("Failed to fetch top entries")?;
         (activity, top)
     } else {
         (Vec::new(), Vec::new())
@@ -1402,6 +1466,16 @@ pub async fn load_home_feed(pool: &sqlx::PgPool) -> cja::Result<HomeFeed> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The league's auto-created Preseason (its only season in these tests).
+    async fn preseason_id(pool: &PgPool, leaderboard_id: Uuid) -> cja::Result<Uuid> {
+        Ok(sqlx::query_scalar::<_, Uuid>(
+            "SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1",
+        )
+        .bind(leaderboard_id)
+        .fetch_one(pool)
+        .await?)
+    }
 
     async fn leaderboard_game_with_status(
         pool: &PgPool,
@@ -1438,7 +1512,8 @@ mod tests {
             leaderboard_game_with_status(&pool, leaderboard_id, status).await?;
         }
 
-        let status = get_leaderboard_status(&pool, leaderboard_id).await?;
+        let season_id = preseason_id(&pool, leaderboard_id).await?;
+        let status = get_leaderboard_status(&pool, leaderboard_id, season_id).await?;
         assert_eq!(status.games_in_progress, 1);
         assert_eq!(status.total_games, 4);
 
@@ -1519,8 +1594,9 @@ mod tests {
         .execute(&pool)
         .await?;
 
+        let season_id = preseason_id(&pool, leaderboard_id).await?;
         for _ in 0..5 {
-            let feed = get_activity_feed(&pool, leaderboard_id, 2).await?;
+            let feed = get_activity_feed(&pool, leaderboard_id, season_id, 2).await?;
             assert_eq!(
                 feed.iter()
                     .map(|entry| entry.leaderboard_entry_id)
@@ -1643,28 +1719,30 @@ mod tests {
             )
         };
 
+        let season_id = preseason_id(&pool, leaderboard_id).await?;
         for sort in [LeaderboardSort::Rating, LeaderboardSort::FoodEaten] {
             assert_eq!(
-                ranked_names(get_ranked_entries(&pool, leaderboard_id, sort).await?),
+                ranked_names(get_ranked_entries(&pool, leaderboard_id, season_id, sort).await?),
                 expected,
                 "get_ranked_entries {sort:?}"
             );
             assert_eq!(
                 ranked_names(
-                    get_ranked_entries_paginated(&pool, leaderboard_id, 0, 50, sort).await?
+                    get_ranked_entries_paginated(&pool, leaderboard_id, season_id, 0, 50, sort)
+                        .await?
                 ),
                 expected,
                 "get_ranked_entries_paginated {sort:?}"
             );
         }
         assert_eq!(
-            ranked_names(get_placement_entries(&pool, leaderboard_id).await?),
+            ranked_names(get_placement_entries(&pool, leaderboard_id, season_id).await?),
             expected,
             "get_placement_entries"
         );
         assert_eq!(
             names(
-                get_top_eaters(&pool, leaderboard_id, 10)
+                get_top_eaters(&pool, leaderboard_id, season_id, 10)
                     .await?
                     .into_iter()
                     .map(|e| (e.owner_login, e.owner_name, e.owner_country))
@@ -1678,7 +1756,7 @@ mod tests {
             .map(|(login, name, _)| (login, name))
             .collect();
         assert_eq!(
-            get_activity_feed(&pool, leaderboard_id, 10)
+            get_activity_feed(&pool, leaderboard_id, season_id, 10)
                 .await?
                 .into_iter()
                 .map(|e| (e.owner_login, e.owner_name))
@@ -1690,6 +1768,237 @@ mod tests {
     }
 
     /// Wait until `n` sessions in this test's database are blocked on a lock.
+    /// One finished game in `season_id` with a result for each entry.
+    async fn season_game(
+        pool: &PgPool,
+        leaderboard_id: Uuid,
+        season_id: Uuid,
+        entry_ids: &[Uuid],
+    ) -> cja::Result<()> {
+        let game_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO games (board_size, game_type, status)
+             VALUES ('11x11', 'Standard', 'finished') RETURNING game_id",
+        )
+        .fetch_one(pool)
+        .await?;
+        let leaderboard_game_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO leaderboard_games (leaderboard_id, game_id, season_id)
+             VALUES ($1, $2, $3) RETURNING leaderboard_game_id",
+        )
+        .bind(leaderboard_id)
+        .bind(game_id)
+        .bind(season_id)
+        .fetch_one(pool)
+        .await?;
+        for (i, &leaderboard_entry_id) in entry_ids.iter().enumerate() {
+            create_game_result(
+                pool,
+                CreateGameResult {
+                    leaderboard_game_id,
+                    leaderboard_entry_id,
+                    placement: i as i32 + 1,
+                    mu_before: 25.0,
+                    mu_after: 25.0,
+                    sigma_before: 8.0,
+                    sigma_after: 8.0,
+                    display_score_change: 0.0,
+                },
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// Every display query sees only the season it's given. An ended
+    /// season's standings are frozen (entrants who later left still show);
+    /// a live season's hide them.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn display_queries_are_scoped_to_one_season(pool: PgPool) -> cja::Result<()> {
+        let leaderboard_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO leaderboards (name) VALUES ('scoped') RETURNING leaderboard_id",
+        )
+        .fetch_one(&pool)
+        .await?;
+        let preseason = preseason_id(&pool, leaderboard_id).await?;
+        sqlx::query(
+            "UPDATE leaderboard_seasons
+             SET starts_at = clock_timestamp() - interval '30 days',
+                 ends_at = clock_timestamp() - interval '1 day'
+             WHERE season_id = $1",
+        )
+        .bind(preseason)
+        .execute(&pool)
+        .await?;
+        let season1: Uuid = sqlx::query_scalar(
+            "INSERT INTO leaderboard_seasons (leaderboard_id, name, starts_at)
+             VALUES ($1, 'Season 1', clock_timestamp() - interval '1 day') RETURNING season_id",
+        )
+        .bind(leaderboard_id)
+        .fetch_one(&pool)
+        .await?;
+        let user_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (9930001, 'scoped-owner') RETURNING user_id",
+        )
+        .fetch_one(&pool)
+        .await?;
+
+        // (name, season, games, score, food)
+        let rows = [
+            ("ada", preseason, 12, 50.0, 4),
+            ("bea", preseason, 11, 40.0, 2),
+            ("pip", preseason, 3, 1.0, 1),
+            ("cy", season1, 10, 45.0, 5),
+            ("bea", season1, 10, 90.0, 9),
+        ];
+        let mut snakes = std::collections::HashMap::new();
+        let mut entries = std::collections::HashMap::new();
+        for (name, season_id, games, score, food) in rows {
+            let battlesnake_id = match snakes.get(name) {
+                Some(id) => *id,
+                None => {
+                    let id: Uuid = sqlx::query_scalar(
+                        "INSERT INTO battlesnakes (user_id, name, url)
+                         VALUES ($1, $2, 'http://snake') RETURNING battlesnake_id",
+                    )
+                    .bind(user_id)
+                    .bind(name)
+                    .fetch_one(&pool)
+                    .await?;
+                    leaderboard_registration::get_or_create_registration(&pool, leaderboard_id, id)
+                        .await?
+                        .expect("live snake registers");
+                    snakes.insert(name, id);
+                    id
+                }
+            };
+            let entry_id: Uuid = sqlx::query_scalar(
+                "INSERT INTO leaderboard_entries
+                     (leaderboard_id, season_id, battlesnake_id, games_played, display_score)
+                 VALUES ($1, $2, $3, $4, $5) RETURNING leaderboard_entry_id",
+            )
+            .bind(leaderboard_id)
+            .bind(season_id)
+            .bind(battlesnake_id)
+            .bind(games)
+            .bind(score)
+            .fetch_one(&pool)
+            .await?;
+            sqlx::query(
+                "INSERT INTO food_eaten_stats (leaderboard_entry_id, food_score) VALUES ($1, $2)
+                 ON CONFLICT (leaderboard_entry_id) DO UPDATE SET food_score = EXCLUDED.food_score",
+            )
+            .bind(entry_id)
+            .bind(food)
+            .execute(&pool)
+            .await?;
+            entries.insert((name, season_id), entry_id);
+        }
+        // Bea leaves the league after the Preseason.
+        leaderboard_registration::set_registration_disabled(
+            &pool,
+            leaderboard_id,
+            snakes["bea"],
+            Some(chrono::Utc::now()),
+        )
+        .await?;
+        season_game(
+            &pool,
+            leaderboard_id,
+            preseason,
+            &[entries[&("ada", preseason)], entries[&("bea", preseason)]],
+        )
+        .await?;
+        season_game(
+            &pool,
+            leaderboard_id,
+            preseason,
+            &[entries[&("pip", preseason)]],
+        )
+        .await?;
+        season_game(&pool, leaderboard_id, season1, &[entries[&("cy", season1)]]).await?;
+
+        let names =
+            |rows: Vec<RankedEntry>| rows.into_iter().map(|e| e.snake_name).collect::<Vec<_>>();
+        for sort in [LeaderboardSort::Rating, LeaderboardSort::FoodEaten] {
+            let pre = names(get_ranked_entries(&pool, leaderboard_id, preseason, sort).await?);
+            let pre_page = names(
+                get_ranked_entries_paginated(&pool, leaderboard_id, preseason, 0, 50, sort).await?,
+            );
+            let live = names(get_ranked_entries(&pool, leaderboard_id, season1, sort).await?);
+            assert_eq!(pre, vec!["ada", "bea"], "{sort:?}");
+            assert_eq!(pre_page, pre, "{sort:?}");
+            assert_eq!(live, vec!["cy"], "{sort:?}");
+        }
+        assert_eq!(
+            count_ranked_entries(&pool, leaderboard_id, preseason).await?,
+            2
+        );
+        assert_eq!(
+            count_ranked_entries(&pool, leaderboard_id, season1).await?,
+            1
+        );
+        assert_eq!(
+            names(get_placement_entries(&pool, leaderboard_id, preseason).await?),
+            vec!["pip"]
+        );
+        assert!(
+            get_placement_entries(&pool, leaderboard_id, season1)
+                .await?
+                .is_empty()
+        );
+
+        let eaters =
+            |rows: Vec<TopEater>| rows.into_iter().map(|e| e.snake_name).collect::<Vec<_>>();
+        assert_eq!(
+            eaters(get_top_eaters(&pool, leaderboard_id, preseason, 10).await?),
+            vec!["ada", "bea", "pip"]
+        );
+        assert_eq!(
+            eaters(get_top_eaters(&pool, leaderboard_id, season1, 10).await?),
+            vec!["cy"]
+        );
+
+        let pre_status = get_leaderboard_status(&pool, leaderboard_id, preseason).await?;
+        let live_status = get_leaderboard_status(&pool, leaderboard_id, season1).await?;
+        assert_eq!(pre_status.total_games, 2);
+        assert_eq!(live_status.total_games, 1);
+        assert!(pre_status.last_game_created_at.is_some());
+
+        let feed_entries = |rows: Vec<ActivityFeedEntry>| {
+            let mut ids: Vec<Uuid> = rows.into_iter().map(|e| e.leaderboard_entry_id).collect();
+            ids.sort();
+            ids
+        };
+        let mut expected_pre = vec![
+            entries[&("ada", preseason)],
+            entries[&("bea", preseason)],
+            entries[&("pip", preseason)],
+        ];
+        expected_pre.sort();
+        assert_eq!(
+            feed_entries(get_activity_feed(&pool, leaderboard_id, preseason, 10).await?),
+            expected_pre
+        );
+        assert_eq!(
+            feed_entries(get_activity_feed(&pool, leaderboard_id, season1, 10).await?),
+            vec![entries[&("cy", season1)]]
+        );
+
+        // Ranks stay within the season; the leaver counts only once frozen.
+        assert_eq!(
+            get_rank_for_entry(&pool, preseason, 45.0, 10).await?,
+            Some(2)
+        );
+        assert_eq!(
+            get_rank_for_entry(&pool, preseason, 30.0, 10).await?,
+            Some(3)
+        );
+        assert_eq!(get_rank_for_entry(&pool, season1, 30.0, 10).await?, Some(2));
+        assert_eq!(get_rank_for_entry(&pool, season1, 30.0, 9).await?, None);
+        Ok(())
+    }
+
     async fn wait_for_lock_waiters(pool: &PgPool, n: i64) -> cja::Result<()> {
         for _ in 0..500 {
             let waiting = sqlx::query_scalar!(
