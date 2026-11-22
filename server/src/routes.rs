@@ -1004,14 +1004,17 @@ fn home_ladder_grid(
                                     td class="rank" { "#" (i + 1) }
                                     td {
                                         div class="snake-cell" {
-                                            (crate::components::snake_avatar::snake_avatar(&entry.snake_head, &entry.snake_tail, &entry.snake_color))
+                                            (crate::components::snake_avatar::snake_avatar(entry.snake_head.as_deref().unwrap_or(""), entry.snake_tail.as_deref().unwrap_or(""), entry.snake_color.as_deref().unwrap_or("")))
                                             span {
-                                                @if let Some(lb) = featured {
-                                                    a class="name" href={"/leaderboards/"(lb.leaderboard_id)"/entries/"(entry.leaderboard_entry_id)} { (entry.snake_name) }
+                                                @if entry.deleted {
+                                                    span class="name" { "Deleted snake" }
+                                                } @else if let Some(lb) = featured {
+                                                    a class="name" href={"/leaderboards/"(lb.leaderboard_id)"/entries/"(entry.leaderboard_entry_id)} { (entry.snake_name.as_deref().unwrap_or_default()) }
+                                                    span class="owner" { "by " (crate::components::flag::country_flag(entry.owner_country.as_deref().unwrap_or(""))) (entry.owner_name.as_deref().unwrap_or_default()) }
                                                 } @else {
-                                                    span class="name" { (entry.snake_name) }
+                                                    span class="name" { (entry.snake_name.as_deref().unwrap_or_default()) }
+                                                    span class="owner" { "by " (crate::components::flag::country_flag(entry.owner_country.as_deref().unwrap_or(""))) (entry.owner_name.as_deref().unwrap_or_default()) }
                                                 }
-                                                span class="owner" { "by " (crate::components::flag::country_flag(&entry.owner_country)) (entry.owner_name) }
                                             }
                                         }
                                     }
@@ -1037,12 +1040,14 @@ fn home_ladder_grid(
                                 li {
                                     span class="t" { (home_fmt_ago(event.created_at)) }
                                     span {
-                                        @if let Some(lb) = featured {
+                                        @if event.deleted {
+                                            b { "Deleted snake" }
+                                        } @else if let Some(lb) = featured {
                                             a href={"/leaderboards/"(lb.leaderboard_id)"/entries/"(event.leaderboard_entry_id)} {
-                                                b { (event.snake_name) }
+                                                b { (event.snake_name.as_deref().unwrap_or_default()) }
                                             }
                                         } @else {
-                                            b { (event.snake_name) }
+                                            b { (event.snake_name.as_deref().unwrap_or_default()) }
                                         }
                                         " "
                                         (leaderboard::render_feed_place(event.placement, event.is_draw))
@@ -1551,5 +1556,104 @@ mod asset_tests {
         )
         .expect("committed static favicon.ico");
         assert_eq!(bytes.as_ref(), source);
+    }
+}
+
+#[cfg(test)]
+mod home_tombstone_tests {
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode},
+    };
+    use sqlx::PgPool;
+    use tower::ServiceExt as _;
+    use uuid::Uuid;
+
+    use crate::models::leaderboard::{self, MIN_GAMES_FOR_RANKING};
+    use crate::state::AppState;
+
+    async fn get(pool: &PgPool, path: &str) -> (StatusCode, String) {
+        let app = crate::routes::routes(AppState::test_from_pool(pool.clone()))
+            .expect("asset router")
+            .into_router();
+        let response = app
+            .oneshot(Request::get(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        (status, String::from_utf8_lossy(&body).into_owned())
+    }
+
+    /// The home "Top of the ladder" preview tombstones deleted snakes once
+    /// their season ended. The featured ladder is the oldest active public
+    /// league, so the fixture backdates its league past the two seeded ones.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn home_ladder_tombstones_deleted_snakes(pool: PgPool) {
+        let leaderboard_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO leaderboards (name) VALUES ('home-tombstone') RETURNING leaderboard_id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE leaderboards SET created_at = '2020-01-01' WHERE leaderboard_id = $1")
+            .bind(leaderboard_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let user_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (9932201, 'home-ghost-owner') RETURNING user_id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let snake_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO battlesnakes (user_id, name, url)
+             VALUES ($1, 'Home Ghost', 'http://snake') RETURNING battlesnake_id",
+        )
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let entry_id = leaderboard::get_or_create_entry(&pool, leaderboard_id, snake_id)
+            .await
+            .unwrap()
+            .expect("live snake joins")
+            .leaderboard_entry_id;
+        sqlx::query(
+            "UPDATE leaderboard_entries SET games_played = $2, display_score = 50
+             WHERE leaderboard_entry_id = $1",
+        )
+        .bind(entry_id)
+        .bind(MIN_GAMES_FOR_RANKING + 2)
+        .execute(&pool)
+        .await
+        .unwrap();
+        // The Preseason ends (a gap: the default season is the last ended
+        // one), then the snake is deleted through the real flow.
+        sqlx::query(
+            "UPDATE leaderboard_seasons
+             SET starts_at = clock_timestamp() - interval '30 days',
+                 ends_at = clock_timestamp() - interval '1 day'
+             WHERE leaderboard_id = $1",
+        )
+        .bind(leaderboard_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            crate::models::battlesnake::delete_battlesnake(&pool, snake_id, user_id)
+                .await
+                .unwrap(),
+            crate::models::battlesnake::DeleteBattlesnakeOutcome::Deleted
+        );
+
+        let (status, body) = get(&pool, "/").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("home-tombstone"), "featured ladder: {body}");
+        assert!(body.contains("Deleted snake"), "{body}");
+        assert!(!body.contains("Home Ghost"), "{body}");
+        assert!(!body.contains("home-ghost-owner"), "{body}");
     }
 }

@@ -2863,13 +2863,14 @@ mod tests {
             non_first_finishes: 40,
             mu: 25.0,
             sigma: 8.333,
-            snake_name: "ranked-snake".to_string(),
-            snake_color: "#888888".to_string(),
-            snake_head: String::new(),
-            snake_tail: String::new(),
-            owner_login: "ranked-owner".to_string(),
-            owner_name: "Ranked Owner".to_string(),
-            owner_country: String::new(),
+            snake_name: Some("ranked-snake".to_string()),
+            snake_color: Some("#888888".to_string()),
+            snake_head: Some(String::new()),
+            snake_tail: Some(String::new()),
+            owner_login: Some("ranked-owner".to_string()),
+            owner_name: Some("Ranked Owner".to_string()),
+            owner_country: Some(String::new()),
+            deleted: false,
         }
     }
 

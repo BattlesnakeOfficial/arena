@@ -484,23 +484,29 @@ pub async fn show_leaderboard(
                                 tbody {
                                     @for (i, entry) in ranked.iter().enumerate() {
                                         @let rank = rank_start + i as i64 + 1;
-                                        @let is_you = user.as_ref().is_some_and(|u| u.user_id == entry.user_id);
+                                        // Tombstone rows are not "yours": no row highlight,
+                                        // no "— you" (the user id is not nulled).
+                                        @let is_you = !entry.deleted && user.as_ref().is_some_and(|u| u.user_id == entry.user_id);
                                         tr .top[rank <= 3] .you[is_you] {
                                             td class="rank" { (format!("{rank:02}")) }
                                             td {
                                                 div class="snake-cell" {
-                                                    (snake_avatar(&entry.snake_head, &entry.snake_tail, &entry.snake_color))
+                                                    (snake_avatar(entry.snake_head.as_deref().unwrap_or(""), entry.snake_tail.as_deref().unwrap_or(""), entry.snake_color.as_deref().unwrap_or("")))
                                                     div class="snake-details" {
-                                                        a class="name" href={"/leaderboards/"(leaderboard_id)"/entries/"(entry.leaderboard_entry_id)} {
-                                                            (entry.snake_name)
+                                                        @if entry.deleted {
+                                                            span class="name" { "Deleted snake" }
+                                                        } @else {
+                                                            a class="name" href={"/leaderboards/"(leaderboard_id)"/entries/"(entry.leaderboard_entry_id)} {
+                                                                (entry.snake_name.as_deref().unwrap_or_default())
+                                                            }
+                                                            span class="owner" {
+                                                                "by "
+                                                                (crate::components::flag::country_flag(entry.owner_country.as_deref().unwrap_or("")))
+                                                                a href={"/users/"(entry.owner_login.as_deref().unwrap_or_default())} { (entry.owner_name.as_deref().unwrap_or_default()) }
+                                                                @if is_you { " — you" }
+                                                            }
+                                                            (snake_tag_chips(snake_tags.get(&entry.battlesnake_id).map(Vec::as_slice).unwrap_or(&[])))
                                                         }
-                                                        span class="owner" {
-                                                            "by "
-                                                            (crate::components::flag::country_flag(&entry.owner_country))
-                                                            a href={"/users/"(entry.owner_login)} { (entry.owner_name) }
-                                                            @if is_you { " — you" }
-                                                        }
-                                                        (snake_tag_chips(snake_tags.get(&entry.battlesnake_id).map(Vec::as_slice).unwrap_or(&[])))
                                                     }
                                                 }
                                             }
@@ -555,17 +561,21 @@ pub async fn show_leaderboard(
                                         tr {
                                             td {
                                                 div class="snake-cell" {
-                                                    (snake_avatar(&entry.snake_head, &entry.snake_tail, &entry.snake_color))
+                                                    (snake_avatar(entry.snake_head.as_deref().unwrap_or(""), entry.snake_tail.as_deref().unwrap_or(""), entry.snake_color.as_deref().unwrap_or("")))
                                                     div class="snake-details" {
-                                                        a class="name" href={"/leaderboards/"(leaderboard_id)"/entries/"(entry.leaderboard_entry_id)} {
-                                                            (entry.snake_name)
+                                                        @if entry.deleted {
+                                                            span class="name" { "Deleted snake" }
+                                                        } @else {
+                                                            a class="name" href={"/leaderboards/"(leaderboard_id)"/entries/"(entry.leaderboard_entry_id)} {
+                                                                (entry.snake_name.as_deref().unwrap_or_default())
+                                                            }
+                                                            span class="owner" {
+                                                                "by "
+                                                                (crate::components::flag::country_flag(entry.owner_country.as_deref().unwrap_or("")))
+                                                                a href={"/users/"(entry.owner_login.as_deref().unwrap_or_default())} { (entry.owner_name.as_deref().unwrap_or_default()) }
+                                                            }
+                                                            (snake_tag_chips(snake_tags.get(&entry.battlesnake_id).map(Vec::as_slice).unwrap_or(&[])))
                                                         }
-                                                        span class="owner" {
-                                                            "by "
-                                                            (crate::components::flag::country_flag(&entry.owner_country))
-                                                            a href={"/users/"(entry.owner_login)} { (entry.owner_name) }
-                                                        }
-                                                        (snake_tag_chips(snake_tags.get(&entry.battlesnake_id).map(Vec::as_slice).unwrap_or(&[])))
                                                     }
                                                 }
                                             }
@@ -588,8 +598,12 @@ pub async fn show_leaderboard(
                                     li {
                                         span class="t" { (fmt_ago(event.created_at)) }
                                         span {
-                                            a href={"/leaderboards/"(leaderboard_id)"/entries/"(event.leaderboard_entry_id)} {
-                                                b { (event.snake_name) }
+                                            @if event.deleted {
+                                                b { "Deleted snake" }
+                                            } @else {
+                                                a href={"/leaderboards/"(leaderboard_id)"/entries/"(event.leaderboard_entry_id)} {
+                                                    b { (event.snake_name.as_deref().unwrap_or_default()) }
+                                                }
                                             }
                                             " "
                                             (render_feed_place(event.placement, event.is_draw))
@@ -675,13 +689,17 @@ pub async fn show_leaderboard(
                                     li {
                                         span class="t" { "#" (i + 1) }
                                         span {
-                                            a href={"/leaderboards/"(leaderboard_id)"/entries/"(eater.leaderboard_entry_id)} {
-                                                b { (eater.snake_name) }
-                                            }
-                                            span class="owner-inline" {
-                                                " by "
-                                                (crate::components::flag::country_flag(&eater.owner_country))
-                                                a href={"/users/"(eater.owner_login)} { (eater.owner_name) }
+                                            @if eater.deleted {
+                                                b { "Deleted snake" }
+                                            } @else {
+                                                a href={"/leaderboards/"(leaderboard_id)"/entries/"(eater.leaderboard_entry_id)} {
+                                                    b { (eater.snake_name.as_deref().unwrap_or_default()) }
+                                                }
+                                                span class="owner-inline" {
+                                                    " by "
+                                                    (crate::components::flag::country_flag(eater.owner_country.as_deref().unwrap_or("")))
+                                                    a href={"/users/"(eater.owner_login.as_deref().unwrap_or_default())} { (eater.owner_name.as_deref().unwrap_or_default()) }
+                                                }
                                             }
                                             " · "
                                             span class="place" { (eater.food_score) " food" }
@@ -1894,6 +1912,259 @@ mod owner_name_route_tests {
             owners("placement"),
             vec![pair("gh-display", "Display Person")]
         );
+    }
+}
+
+#[cfg(test)]
+mod tombstone_route_tests {
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode, header},
+    };
+    use sqlx::PgPool;
+    use tower::ServiceExt as _;
+    use uuid::Uuid;
+
+    use crate::models::leaderboard::{self, MIN_GAMES_FOR_RANKING};
+    use crate::scoring::{
+        ScoringRegistry, food_eaten::FoodEatenScoring, weng_lin::WengLinScoring,
+        win_rate::WinRateScoring,
+    };
+    use crate::state::AppState;
+
+    /// GET `path` with the production scoring algorithms registered, so the
+    /// rankings API returns real per-algorithm scores.
+    async fn get(pool: &PgPool, path: &str) -> (StatusCode, String) {
+        let mut state = AppState::test_from_pool(pool.clone());
+        let mut scoring = ScoringRegistry::new();
+        scoring.register(Box::new(WengLinScoring));
+        scoring.register(Box::new(WinRateScoring));
+        scoring.register(Box::new(FoodEatenScoring));
+        state.scoring = std::sync::Arc::new(scoring);
+        let mut builder = Request::builder().uri(path);
+        if path.starts_with("/api/") {
+            builder = builder.header(header::ORIGIN, "https://example.com");
+        }
+        let app = crate::routes::routes(state)
+            .expect("asset router")
+            .into_router();
+        let response = app
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        (status, String::from_utf8_lossy(&body).into_owned())
+    }
+
+    async fn owner(pool: &PgPool, github_id: i64, login: &str) -> Uuid {
+        sqlx::query_scalar!(
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES ($1, $2) RETURNING user_id",
+            github_id,
+            login
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    /// Adds a snake to the leaderboard with the given games played and food
+    /// score, returning its leaderboard entry id.
+    async fn entry(
+        pool: &PgPool,
+        leaderboard_id: Uuid,
+        user_id: Uuid,
+        name: &str,
+        games_played: i32,
+        food_score: i64,
+    ) -> Uuid {
+        let battlesnake_id = sqlx::query_scalar!(
+            "INSERT INTO battlesnakes (user_id, name, url)
+             VALUES ($1, $2, 'http://snake') RETURNING battlesnake_id",
+            user_id,
+            name
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        let entry_id = leaderboard::get_or_create_entry(pool, leaderboard_id, battlesnake_id)
+            .await
+            .unwrap()
+            .expect("live snake joins")
+            .leaderboard_entry_id;
+        sqlx::query!(
+            "UPDATE leaderboard_entries SET games_played = $2 WHERE leaderboard_entry_id = $1",
+            entry_id,
+            games_played
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        // get_or_create_entry initializes every algorithm's row, so overwrite it.
+        sqlx::query(
+            "INSERT INTO food_eaten_stats (leaderboard_entry_id, food_score) VALUES ($1, $2)
+             ON CONFLICT (leaderboard_entry_id) DO UPDATE SET food_score = EXCLUDED.food_score",
+        )
+        .bind(entry_id)
+        .bind(food_score)
+        .execute(pool)
+        .await
+        .unwrap();
+        entry_id
+    }
+
+    /// Ended-season standings tombstone soft-deleted snakes on the league
+    /// page and the rankings API: the row and its rank stay, identity is
+    /// blanked, no links to the snake or its owner.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn ended_season_standings_tombstone_deleted_snakes(pool: PgPool) {
+        let leaderboard_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO leaderboards (name) VALUES ('tombstone-league') RETURNING leaderboard_id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let live_owner = owner(&pool, 9932101, "gh-live").await;
+        let ghost_owner = owner(&pool, 9932102, "gh-ghost").await;
+        let live = entry(
+            &pool,
+            leaderboard_id,
+            live_owner,
+            "Live Lass",
+            MIN_GAMES_FOR_RANKING + 2,
+            7,
+        )
+        .await;
+        let ghost_ranked = entry(
+            &pool,
+            leaderboard_id,
+            ghost_owner,
+            "Ghost Racer",
+            MIN_GAMES_FOR_RANKING + 1,
+            0,
+        )
+        .await;
+        let ghost_placement =
+            entry(&pool, leaderboard_id, ghost_owner, "Ghost Placement", 1, 0).await;
+        // Rank order: the live snake leads the frozen standings.
+        for (entry_id, score) in [(live, 50.0), (ghost_ranked, 40.0)] {
+            sqlx::query(
+                "UPDATE leaderboard_entries SET display_score = $2
+                 WHERE leaderboard_entry_id = $1",
+            )
+            .bind(entry_id)
+            .bind(score)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        // The Preseason ends, then the ghosts are deleted through the real
+        // flow (registrations disabled exactly as in prod).
+        sqlx::query(
+            "UPDATE leaderboard_seasons
+             SET starts_at = clock_timestamp() - interval '30 days',
+                 ends_at = clock_timestamp() - interval '1 day'
+             WHERE leaderboard_id = $1",
+        )
+        .bind(leaderboard_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        for entry_id in [ghost_ranked, ghost_placement] {
+            let snake_id: Uuid = sqlx::query_scalar(
+                "SELECT battlesnake_id FROM leaderboard_entries WHERE leaderboard_entry_id = $1",
+            )
+            .bind(entry_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                crate::models::battlesnake::delete_battlesnake(&pool, snake_id, ghost_owner)
+                    .await
+                    .unwrap(),
+                crate::models::battlesnake::DeleteBattlesnakeOutcome::Deleted
+            );
+        }
+        let season: Uuid = sqlx::query_scalar(
+            "SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1",
+        )
+        .bind(leaderboard_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        // League page: tombstones render in the ranked and placement rows
+        // with their ranks; nothing links the ghosts' names or owner.
+        let (status, body) = get(
+            &pool,
+            &format!("/leaderboards/{leaderboard_id}?season={season}"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body.matches("Deleted snake").count(),
+            2,
+            "ranked + placement rows: {body}"
+        );
+        assert!(body.contains("Live Lass"), "{body}");
+        assert!(!body.contains("Ghost Racer"), "{body}");
+        assert!(!body.contains("Ghost Placement"), "{body}");
+        assert!(!body.contains("/users/gh-ghost"), "{body}");
+        assert!(body.contains(r#"<td class="rank">01</td>"#), "{body}");
+        assert!(body.contains(r#"<td class="rank">02</td>"#), "{body}");
+
+        // Rankings API: tombstone rows keep id, rank, and stats; identity
+        // fields are null. Both `ranked` and `placement` share the mapper.
+        let (status, body) = get(
+            &pool,
+            &format!("/api/leaderboards/{leaderboard_id}/rankings?season={season}"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let ranked = json["ranked"].as_array().unwrap();
+        assert_eq!(ranked.len(), 2);
+        assert_eq!(ranked[0]["snake_name"], "Live Lass");
+        assert_eq!(ranked[0]["owner"], "gh-live");
+        assert_eq!(ranked[0]["deleted"], false);
+        assert_eq!(ranked[1]["rank"], 2);
+        assert_eq!(ranked[1]["snake_name"], serde_json::Value::Null);
+        assert_eq!(ranked[1]["owner"], serde_json::Value::Null);
+        assert_eq!(ranked[1]["owner_name"], serde_json::Value::Null);
+        assert_eq!(ranked[1]["deleted"], true);
+        assert_eq!(ranked[1]["games_played"], MIN_GAMES_FOR_RANKING + 1);
+        assert_eq!(ranked[1]["display_score"], 40.0);
+        let live_score_keys = {
+            let mut keys: Vec<&str> = ranked[0]["scores"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(|k| k.as_str())
+                .collect();
+            keys.sort_unstable();
+            keys
+        };
+        let mut ghost_score_keys: Vec<&str> = ranked[1]["scores"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|k| k.as_str())
+            .collect();
+        ghost_score_keys.sort_unstable();
+        assert_eq!(
+            ghost_score_keys, live_score_keys,
+            "tombstone keeps its per-algorithm scores"
+        );
+
+        let placement = json["placement"].as_array().unwrap();
+        assert_eq!(placement.len(), 1);
+        assert_eq!(placement[0]["snake_name"], serde_json::Value::Null);
+        assert_eq!(placement[0]["owner"], serde_json::Value::Null);
+        assert_eq!(placement[0]["owner_name"], serde_json::Value::Null);
+        assert_eq!(placement[0]["deleted"], true);
+        assert_eq!(placement[0]["games_played"], 1);
     }
 }
 

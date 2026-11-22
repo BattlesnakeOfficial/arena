@@ -92,21 +92,26 @@ pub struct RankedEntry {
     pub non_first_finishes: i32,
     pub mu: f64,
     pub sigma: f64,
-    pub snake_name: String,
-    pub snake_color: String,
+    /// `None` when the snake is soft-deleted (tombstoned on an ended
+    /// season's frozen standings) — see `deleted`.
+    pub snake_name: Option<String>,
+    pub snake_color: Option<String>,
     /// The snake's declared head/tail cosmetic slugs ('' when never
     /// customized). Display-only; unknown slugs render as the default shape.
     #[serde(skip)]
-    pub snake_head: String,
+    pub snake_head: Option<String>,
     #[serde(skip)]
-    pub snake_tail: String,
+    pub snake_tail: Option<String>,
     /// Owner's GitHub login — the `/users/{login}` URL key, not display text.
-    pub owner_login: String,
+    pub owner_login: Option<String>,
     /// Owner's public name: `display_name` when set, else the GitHub login.
-    pub owner_name: String,
+    pub owner_name: Option<String>,
     /// Owner's ISO-3166-1 alpha-2 country ('' when unset). Display-only.
     #[serde(skip)]
-    pub owner_country: String,
+    pub owner_country: Option<String>,
+    /// The snake is soft-deleted: the identity fields above are NULL but the
+    /// row (and its rank) stays as a tombstone.
+    pub deleted: bool,
 }
 
 /// Sort order for ranked leaderboard entries.
@@ -429,13 +434,14 @@ pub async fn get_ranked_entries(
                     le.non_first_finishes,
                     le.mu,
                     le.sigma,
-                    b.name as snake_name,
-                    b.color as snake_color,
-                    b.head as snake_head,
-                    b.tail as snake_tail,
-                    u.github_login as owner_login,
-                    COALESCE(NULLIF(u.display_name, ''), u.github_login) AS "owner_name!",
-                    u.country as owner_country
+                    (b.deleted_at IS NOT NULL) AS "deleted!",
+                    CASE WHEN b.deleted_at IS NULL THEN b.name END AS "snake_name?",
+                    CASE WHEN b.deleted_at IS NULL THEN b.color END AS "snake_color?",
+                    CASE WHEN b.deleted_at IS NULL THEN b.head END AS "snake_head?",
+                    CASE WHEN b.deleted_at IS NULL THEN b.tail END AS "snake_tail?",
+                    CASE WHEN b.deleted_at IS NULL THEN u.github_login END AS "owner_login?",
+                    CASE WHEN b.deleted_at IS NULL THEN COALESCE(NULLIF(u.display_name, ''), u.github_login) END AS "owner_name?",
+                    CASE WHEN b.deleted_at IS NULL THEN u.country END AS "owner_country?"
                  FROM leaderboard_entries le
                  JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id
                  JOIN users u ON b.user_id = u.user_id
@@ -467,13 +473,14 @@ pub async fn get_ranked_entries(
                     le.non_first_finishes,
                     le.mu,
                     le.sigma,
-                    b.name as snake_name,
-                    b.color as snake_color,
-                    b.head as snake_head,
-                    b.tail as snake_tail,
-                    u.github_login as owner_login,
-                    COALESCE(NULLIF(u.display_name, ''), u.github_login) AS "owner_name!",
-                    u.country as owner_country
+                    (b.deleted_at IS NOT NULL) AS "deleted!",
+                    CASE WHEN b.deleted_at IS NULL THEN b.name END AS "snake_name?",
+                    CASE WHEN b.deleted_at IS NULL THEN b.color END AS "snake_color?",
+                    CASE WHEN b.deleted_at IS NULL THEN b.head END AS "snake_head?",
+                    CASE WHEN b.deleted_at IS NULL THEN b.tail END AS "snake_tail?",
+                    CASE WHEN b.deleted_at IS NULL THEN u.github_login END AS "owner_login?",
+                    CASE WHEN b.deleted_at IS NULL THEN COALESCE(NULLIF(u.display_name, ''), u.github_login) END AS "owner_name?",
+                    CASE WHEN b.deleted_at IS NULL THEN u.country END AS "owner_country?"
                  FROM leaderboard_entries le
                  JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id
                  JOIN users u ON b.user_id = u.user_id
@@ -517,13 +524,14 @@ pub async fn get_placement_entries(
             le.non_first_finishes,
             le.mu,
             le.sigma,
-            b.name as snake_name,
-            b.color as snake_color,
-            b.head as snake_head,
-            b.tail as snake_tail,
-            u.github_login as owner_login,
-            COALESCE(NULLIF(u.display_name, ''), u.github_login) AS "owner_name!",
-            u.country as owner_country
+            (b.deleted_at IS NOT NULL) AS "deleted!",
+            CASE WHEN b.deleted_at IS NULL THEN b.name END AS "snake_name?",
+            CASE WHEN b.deleted_at IS NULL THEN b.color END AS "snake_color?",
+            CASE WHEN b.deleted_at IS NULL THEN b.head END AS "snake_head?",
+            CASE WHEN b.deleted_at IS NULL THEN b.tail END AS "snake_tail?",
+            CASE WHEN b.deleted_at IS NULL THEN u.github_login END AS "owner_login?",
+            CASE WHEN b.deleted_at IS NULL THEN COALESCE(NULLIF(u.display_name, ''), u.github_login) END AS "owner_name?",
+            CASE WHEN b.deleted_at IS NULL THEN u.country END AS "owner_country?"
          FROM leaderboard_entries le
          JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id
          JOIN users u ON b.user_id = u.user_id
@@ -881,13 +889,14 @@ pub async fn get_ranked_entries_paginated(
                     le.non_first_finishes,
                     le.mu,
                     le.sigma,
-                    b.name as snake_name,
-                    b.color as snake_color,
-                    b.head as snake_head,
-                    b.tail as snake_tail,
-                    u.github_login as owner_login,
-                    COALESCE(NULLIF(u.display_name, ''), u.github_login) AS "owner_name!",
-                    u.country as owner_country
+                    (b.deleted_at IS NOT NULL) AS "deleted!",
+                    CASE WHEN b.deleted_at IS NULL THEN b.name END AS "snake_name?",
+                    CASE WHEN b.deleted_at IS NULL THEN b.color END AS "snake_color?",
+                    CASE WHEN b.deleted_at IS NULL THEN b.head END AS "snake_head?",
+                    CASE WHEN b.deleted_at IS NULL THEN b.tail END AS "snake_tail?",
+                    CASE WHEN b.deleted_at IS NULL THEN u.github_login END AS "owner_login?",
+                    CASE WHEN b.deleted_at IS NULL THEN COALESCE(NULLIF(u.display_name, ''), u.github_login) END AS "owner_name?",
+                    CASE WHEN b.deleted_at IS NULL THEN u.country END AS "owner_country?"
                  FROM leaderboard_entries le
                  JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id
                  JOIN users u ON b.user_id = u.user_id
@@ -921,13 +930,14 @@ pub async fn get_ranked_entries_paginated(
                     le.non_first_finishes,
                     le.mu,
                     le.sigma,
-                    b.name as snake_name,
-                    b.color as snake_color,
-                    b.head as snake_head,
-                    b.tail as snake_tail,
-                    u.github_login as owner_login,
-                    COALESCE(NULLIF(u.display_name, ''), u.github_login) AS "owner_name!",
-                    u.country as owner_country
+                    (b.deleted_at IS NOT NULL) AS "deleted!",
+                    CASE WHEN b.deleted_at IS NULL THEN b.name END AS "snake_name?",
+                    CASE WHEN b.deleted_at IS NULL THEN b.color END AS "snake_color?",
+                    CASE WHEN b.deleted_at IS NULL THEN b.head END AS "snake_head?",
+                    CASE WHEN b.deleted_at IS NULL THEN b.tail END AS "snake_tail?",
+                    CASE WHEN b.deleted_at IS NULL THEN u.github_login END AS "owner_login?",
+                    CASE WHEN b.deleted_at IS NULL THEN COALESCE(NULLIF(u.display_name, ''), u.github_login) END AS "owner_name?",
+                    CASE WHEN b.deleted_at IS NULL THEN u.country END AS "owner_country?"
                  FROM leaderboard_entries le
                  JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id
                  JOIN users u ON b.user_id = u.user_id
@@ -1195,18 +1205,23 @@ pub async fn get_leaderboard_status(
 /// Activity feed entry for recent leaderboard events
 #[derive(Debug, FromRow)]
 pub struct ActivityFeedEntry {
-    pub snake_name: String,
-    pub snake_color: String,
+    /// `None` when the snake is soft-deleted (tombstoned) — see `deleted`.
+    pub snake_name: Option<String>,
+    pub snake_color: Option<String>,
     /// Owner's GitHub login — the `/users/{login}` URL key, not display text.
-    pub owner_login: String,
+    pub owner_login: Option<String>,
     /// Owner's public name: `display_name` when set, else the GitHub login.
-    pub owner_name: String,
+    pub owner_name: Option<String>,
     pub leaderboard_entry_id: Uuid,
     pub placement: i32,
     /// First place shared with another snake: nobody won.
     pub is_draw: bool,
     pub display_score_change: f64,
     pub created_at: chrono::DateTime<chrono::Utc>,
+    /// The snake is soft-deleted: identity fields above are NULL but the
+    /// event stays as a tombstone (in every season — the feed has no
+    /// registration predicate).
+    pub deleted: bool,
 }
 
 /// Get recent activity feed for a leaderboard
@@ -1219,10 +1234,11 @@ pub async fn get_activity_feed(
     let entries = sqlx::query_as!(
         ActivityFeedEntry,
         r#"SELECT
-            b.name as snake_name,
-            b.color as snake_color,
-            u.github_login as owner_login,
-            COALESCE(NULLIF(u.display_name, ''), u.github_login) AS "owner_name!",
+            (b.deleted_at IS NOT NULL) AS "deleted!",
+            CASE WHEN b.deleted_at IS NULL THEN b.name END AS "snake_name?",
+            CASE WHEN b.deleted_at IS NULL THEN b.color END AS "snake_color?",
+            CASE WHEN b.deleted_at IS NULL THEN u.github_login END AS "owner_login?",
+            CASE WHEN b.deleted_at IS NULL THEN COALESCE(NULLIF(u.display_name, ''), u.github_login) END AS "owner_name?",
             lgr.leaderboard_entry_id,
             lgr.placement,
             lgr.placement = 1 AND EXISTS (
@@ -1358,14 +1374,18 @@ pub async fn get_rank_for_entry(
 pub struct TopEater {
     pub leaderboard_entry_id: Uuid,
     pub food_score: i64,
-    pub snake_name: String,
-    pub snake_color: String,
+    /// `None` when the snake is soft-deleted (tombstoned) — see `deleted`.
+    pub snake_name: Option<String>,
+    pub snake_color: Option<String>,
     /// Owner's GitHub login — the `/users/{login}` URL key, not display text.
-    pub owner_login: String,
+    pub owner_login: Option<String>,
     /// Owner's public name: `display_name` when set, else the GitHub login.
-    pub owner_name: String,
+    pub owner_name: Option<String>,
     /// Owner's ISO-3166-1 alpha-2 country ('' when unset). Display-only.
-    pub owner_country: String,
+    pub owner_country: Option<String>,
+    /// The snake is soft-deleted: identity fields above are NULL but the
+    /// row stays as a tombstone.
+    pub deleted: bool,
 }
 
 /// Get the top food-eaters for a leaderboard, ordered by cumulative food eaten.
@@ -1380,11 +1400,12 @@ pub async fn get_top_eaters(
         r#"SELECT
             le.leaderboard_entry_id,
             fes.food_score,
-            b.name as snake_name,
-            b.color as snake_color,
-            u.github_login as owner_login,
-            COALESCE(NULLIF(u.display_name, ''), u.github_login) AS "owner_name!",
-            u.country as owner_country
+            (b.deleted_at IS NOT NULL) AS "deleted!",
+            CASE WHEN b.deleted_at IS NULL THEN b.name END AS "snake_name?",
+            CASE WHEN b.deleted_at IS NULL THEN b.color END AS "snake_color?",
+            CASE WHEN b.deleted_at IS NULL THEN u.github_login END AS "owner_login?",
+            CASE WHEN b.deleted_at IS NULL THEN COALESCE(NULLIF(u.display_name, ''), u.github_login) END AS "owner_name?",
+            CASE WHEN b.deleted_at IS NULL THEN u.country END AS "owner_country?"
          FROM leaderboard_entries le
          JOIN food_eaten_stats fes ON le.leaderboard_entry_id = fes.leaderboard_entry_id
          JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id
@@ -1714,7 +1735,13 @@ mod tests {
         let ranked_names = |rows: Vec<RankedEntry>| {
             names(
                 rows.into_iter()
-                    .map(|e| (e.owner_login, e.owner_name, e.owner_country))
+                    .map(|e| {
+                        (
+                            e.owner_login.unwrap(),
+                            e.owner_name.unwrap(),
+                            e.owner_country.unwrap(),
+                        )
+                    })
                     .collect(),
             )
         };
@@ -1745,7 +1772,11 @@ mod tests {
                 get_top_eaters(&pool, leaderboard_id, season_id, 10)
                     .await?
                     .into_iter()
-                    .map(|e| (e.owner_login, e.owner_name, e.owner_country))
+                    .map(|e| (
+                        e.owner_login.unwrap(),
+                        e.owner_name.unwrap(),
+                        e.owner_country.unwrap()
+                    ))
                     .collect()
             ),
             expected,
@@ -1759,7 +1790,7 @@ mod tests {
             get_activity_feed(&pool, leaderboard_id, season_id, 10)
                 .await?
                 .into_iter()
-                .map(|e| (e.owner_login, e.owner_name))
+                .map(|e| (e.owner_login.unwrap(), e.owner_name.unwrap()))
                 .collect::<BTreeSet<_>>(),
             feed_expected,
             "get_activity_feed"
@@ -1918,8 +1949,11 @@ mod tests {
         .await?;
         season_game(&pool, leaderboard_id, season1, &[entries[&("cy", season1)]]).await?;
 
-        let names =
-            |rows: Vec<RankedEntry>| rows.into_iter().map(|e| e.snake_name).collect::<Vec<_>>();
+        let names = |rows: Vec<RankedEntry>| {
+            rows.into_iter()
+                .map(|e| e.snake_name.unwrap_or_default())
+                .collect::<Vec<_>>()
+        };
         for sort in [LeaderboardSort::Rating, LeaderboardSort::FoodEaten] {
             let pre = names(get_ranked_entries(&pool, leaderboard_id, preseason, sort).await?);
             let pre_page = names(
@@ -1948,8 +1982,11 @@ mod tests {
                 .is_empty()
         );
 
-        let eaters =
-            |rows: Vec<TopEater>| rows.into_iter().map(|e| e.snake_name).collect::<Vec<_>>();
+        let eaters = |rows: Vec<TopEater>| {
+            rows.into_iter()
+                .map(|e| e.snake_name.unwrap_or_default())
+                .collect::<Vec<_>>()
+        };
         assert_eq!(
             eaters(get_top_eaters(&pool, leaderboard_id, preseason, 10).await?),
             vec!["ada", "bea", "pip"]
@@ -1996,6 +2033,227 @@ mod tests {
         );
         assert_eq!(get_rank_for_entry(&pool, season1, 30.0, 10).await?, Some(2));
         assert_eq!(get_rank_for_entry(&pool, season1, 30.0, 9).await?, None);
+        Ok(())
+    }
+
+    /// Ended-season standings tombstone soft-deleted snakes: the row, its
+    /// rank and its stats stay, but every identity field is NULL
+    /// (`deleted == true`). Live seasons are unchanged — except the
+    /// activity feed, which has no registration predicate and tombstones in
+    /// every season by design.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn ended_season_standings_tombstone_deleted_snakes(pool: PgPool) -> cja::Result<()> {
+        let leaderboard_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO leaderboards (name) VALUES ('tombstone') RETURNING leaderboard_id",
+        )
+        .fetch_one(&pool)
+        .await?;
+        let preseason = preseason_id(&pool, leaderboard_id).await?;
+        let user_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO users (external_github_id, github_login)
+             VALUES (9932001, 'tombstone-owner') RETURNING user_id",
+        )
+        .fetch_one(&pool)
+        .await?;
+
+        // (name, games, score, food) in the active Preseason.
+        let preseason_rows = [
+            ("ada", 12, 50.0, 4),
+            ("bea", 11, 40.0, 2),
+            ("pip", 3, 1.0, 1),
+        ];
+        let mut snakes = std::collections::HashMap::new();
+        let mut entries = std::collections::HashMap::new();
+        for (name, games, score, food) in preseason_rows {
+            let battlesnake_id: Uuid = sqlx::query_scalar(
+                "INSERT INTO battlesnakes (user_id, name, url)
+                 VALUES ($1, $2, 'http://snake') RETURNING battlesnake_id",
+            )
+            .bind(user_id)
+            .bind(name)
+            .fetch_one(&pool)
+            .await?;
+            let entry_id = get_or_create_entry(&pool, leaderboard_id, battlesnake_id)
+                .await?
+                .expect("live snake joins")
+                .leaderboard_entry_id;
+            sqlx::query(
+                "UPDATE leaderboard_entries SET games_played = $2, display_score = $3
+                 WHERE leaderboard_entry_id = $1",
+            )
+            .bind(entry_id)
+            .bind(games)
+            .bind(score)
+            .execute(&pool)
+            .await?;
+            sqlx::query(
+                "INSERT INTO food_eaten_stats (leaderboard_entry_id, food_score)
+                 VALUES ($1, $2)
+                 ON CONFLICT (leaderboard_entry_id) DO UPDATE SET food_score = EXCLUDED.food_score",
+            )
+            .bind(entry_id)
+            .bind(food)
+            .execute(&pool)
+            .await?;
+            snakes.insert(name, battlesnake_id);
+            entries.insert(name, entry_id);
+        }
+        season_game(
+            &pool,
+            leaderboard_id,
+            preseason,
+            &[entries["ada"], entries["bea"]],
+        )
+        .await?;
+
+        // The Preseason ends; Season 1 goes live.
+        sqlx::query(
+            "UPDATE leaderboard_seasons
+             SET starts_at = clock_timestamp() - interval '30 days',
+                 ends_at = clock_timestamp() - interval '1 day'
+             WHERE season_id = $1",
+        )
+        .bind(preseason)
+        .execute(&pool)
+        .await?;
+        let season1: Uuid = sqlx::query_scalar(
+            "INSERT INTO leaderboard_seasons (leaderboard_id, name, starts_at)
+             VALUES ($1, 'Season 1', clock_timestamp() - interval '1 day') RETURNING season_id",
+        )
+        .bind(leaderboard_id)
+        .fetch_one(&pool)
+        .await?;
+
+        // cy joins the live season, plays, then is deleted mid-season.
+        let cy_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO battlesnakes (user_id, name, url)
+             VALUES ($1, 'cy', 'http://snake') RETURNING battlesnake_id",
+        )
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await?;
+        let cy_entry = get_or_create_entry(&pool, leaderboard_id, cy_id)
+            .await?
+            .expect("live snake joins the live season")
+            .leaderboard_entry_id;
+        sqlx::query(
+            "UPDATE leaderboard_entries SET games_played = 10, display_score = 45
+             WHERE leaderboard_entry_id = $1",
+        )
+        .bind(cy_entry)
+        .execute(&pool)
+        .await?;
+        season_game(&pool, leaderboard_id, season1, &[cy_entry]).await?;
+
+        // Only once the facts are in the history books, the ghosts are
+        // deleted — through the real flow, so registrations are disabled
+        // exactly as in prod.
+        for snake_id in [snakes["bea"], cy_id] {
+            assert_eq!(
+                crate::models::battlesnake::delete_battlesnake(&pool, snake_id, user_id).await?,
+                crate::models::battlesnake::DeleteBattlesnakeOutcome::Deleted
+            );
+        }
+
+        // Ended-season ranked standings: bea stays as a tombstone in rank
+        // order; ada is untouched.
+        for sort in [LeaderboardSort::Rating, LeaderboardSort::FoodEaten] {
+            for rows in [
+                get_ranked_entries(&pool, leaderboard_id, preseason, sort).await?,
+                get_ranked_entries_paginated(&pool, leaderboard_id, preseason, 0, 50, sort).await?,
+            ] {
+                let order: Vec<Uuid> = rows.iter().map(|e| e.battlesnake_id).collect();
+                assert_eq!(order, vec![snakes["ada"], snakes["bea"]], "{sort:?}");
+                let (ada, bea) = (&rows[0], &rows[1]);
+                assert!(!ada.deleted, "{sort:?}");
+                assert_eq!(ada.snake_name.as_deref(), Some("ada"), "{sort:?}");
+                assert!(bea.deleted, "{sort:?}");
+                assert!(bea.snake_name.is_none(), "{sort:?}");
+                assert!(bea.snake_color.is_none(), "{sort:?}");
+                assert!(bea.snake_head.is_none(), "{sort:?}");
+                assert!(bea.snake_tail.is_none(), "{sort:?}");
+                assert!(bea.owner_login.is_none(), "{sort:?}");
+                assert!(bea.owner_name.is_none(), "{sort:?}");
+                assert!(bea.owner_country.is_none(), "{sort:?}");
+                // The row itself is intact: rank inputs and stats survive.
+                assert_eq!((bea.display_score, bea.games_played), (40.0, 11));
+            }
+        }
+        // The tombstone still counts and still holds its rank slot: a
+        // 45.0 snake ranks #2 behind ada, exactly as it would with bea live.
+        assert_eq!(
+            count_ranked_entries(&pool, leaderboard_id, preseason).await?,
+            2
+        );
+        assert_eq!(
+            get_rank_for_entry(&pool, preseason, 45.0, 10).await?,
+            Some(2)
+        );
+
+        // Top eaters: bea is present as a tombstone between ada and pip.
+        let eaters = get_top_eaters(&pool, leaderboard_id, preseason, 10).await?;
+        assert_eq!(
+            eaters
+                .iter()
+                .map(|e| e.leaderboard_entry_id)
+                .collect::<Vec<_>>(),
+            vec![entries["ada"], entries["bea"], entries["pip"]]
+        );
+        assert!(!eaters[0].deleted);
+        let bea_eater = &eaters[1];
+        assert!(bea_eater.deleted);
+        assert!(bea_eater.snake_name.is_none());
+        assert!(bea_eater.snake_color.is_none());
+        assert!(bea_eater.owner_login.is_none());
+        assert!(bea_eater.owner_name.is_none());
+        assert!(bea_eater.owner_country.is_none());
+
+        // Feed in the ended season: bea's event stays, tombstoned; ada's is
+        // untouched.
+        let feed = get_activity_feed(&pool, leaderboard_id, preseason, 10).await?;
+        let ada_event = feed
+            .iter()
+            .find(|e| e.leaderboard_entry_id == entries["ada"])
+            .expect("ada's event stays");
+        assert!(!ada_event.deleted);
+        assert_eq!(ada_event.snake_name.as_deref(), Some("ada"));
+        let bea_event = feed
+            .iter()
+            .find(|e| e.leaderboard_entry_id == entries["bea"])
+            .expect("bea's event stays");
+        assert!(bea_event.deleted);
+        assert!(bea_event.snake_name.is_none());
+        assert!(bea_event.snake_color.is_none());
+        assert!(bea_event.owner_login.is_none());
+        assert!(bea_event.owner_name.is_none());
+
+        // Live season: ranked and placement drop cy entirely (disabled
+        // registration), but the feed keeps cy's event as a tombstone —
+        // the feed has never filtered on registration, so it tombstones in
+        // every season.
+        for sort in [LeaderboardSort::Rating, LeaderboardSort::FoodEaten] {
+            assert!(
+                get_ranked_entries(&pool, leaderboard_id, season1, sort)
+                    .await?
+                    .iter()
+                    .all(|e| e.battlesnake_id != cy_id),
+                "live-season ranked drops deleted snakes ({sort:?})"
+            );
+        }
+        assert!(
+            get_placement_entries(&pool, leaderboard_id, season1)
+                .await?
+                .is_empty()
+        );
+        let live_feed = get_activity_feed(&pool, leaderboard_id, season1, 10).await?;
+        let cy_event = live_feed
+            .iter()
+            .find(|e| e.leaderboard_entry_id == cy_entry)
+            .expect("the feed keeps deleted snakes' events");
+        assert!(cy_event.deleted);
+        assert!(cy_event.snake_name.is_none());
+        assert!(cy_event.owner_login.is_none());
+        assert!(cy_event.owner_name.is_none());
         Ok(())
     }
 
