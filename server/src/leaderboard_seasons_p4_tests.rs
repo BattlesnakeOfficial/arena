@@ -1219,11 +1219,11 @@ async fn import_in_a_gap_skips_leavers_and_retired_snakes(pool: PgPool) {
     assert_eq!(imported, vec![member]);
 }
 
-/// Import obeys the same snake-eligibility rule as game creation: another
-/// user's private snake is skipped even when it tops the ladder, while public
-/// snakes and the organizer's own private snake still import.
+/// Import skips another user's private snake (even at the top of the ladder)
+/// and another user's public snake whose owner opted out of imports. Opted-in
+/// public snakes and all of the organizer's own snakes still import.
 #[sqlx::test(migrations = "../migrations")]
-async fn import_skips_other_users_private_snakes(pool: PgPool) {
+async fn import_skips_private_and_opted_out_snakes(pool: PgPool) {
     let state = AppState::test_from_pool(pool.clone());
     let lb = league(&pool, "Visibility Ladder").await;
     let pre = preseason(&pool, lb).await;
@@ -1235,24 +1235,40 @@ async fn import_skips_other_users_private_snakes(pool: PgPool) {
     let stranger = owner(&pool, 4_400_202).await;
     let other = owner(&pool, 4_400_203).await;
 
+    let opted_out_owner = owner(&pool, 4_400_204).await;
+
     let hidden = snake(&pool, stranger, "Hidden").await;
+    let opted_out = snake(&pool, opted_out_owner, "Opted Out").await;
     let open = snake(&pool, other, "Open").await;
     let own_hidden = snake(&pool, organizer_id, "Own Hidden").await;
+    let own_opted_out = snake(&pool, organizer_id, "Own Opted Out").await;
     sqlx::query("UPDATE battlesnakes SET visibility = 'private' WHERE battlesnake_id = ANY($1)")
         .bind(vec![hidden, own_hidden])
         .execute(&pool)
         .await
         .unwrap();
-    for s in [hidden, open, own_hidden] {
+    for s in [opted_out, own_opted_out] {
+        let owner_id = if s == opted_out {
+            opted_out_owner
+        } else {
+            organizer_id
+        };
+        crate::models::battlesnake::set_allow_tournament_import(&pool, s, owner_id, false)
+            .await
+            .unwrap();
+    }
+    for s in [hidden, opted_out, open, own_hidden, own_opted_out] {
         register(&pool, lb, s).await;
     }
     entry(&pool, lb, pre, hidden, 12, 90.0).await;
+    entry(&pool, lb, pre, opted_out, 12, 85.0).await;
     entry(&pool, lb, pre, open, 12, 80.0).await;
     entry(&pool, lb, pre, own_hidden, 12, 70.0).await;
+    entry(&pool, lb, pre, own_opted_out, 12, 60.0).await;
 
     let tournament_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO tournaments (name, user_id, status)
-         VALUES ('Visibility Cup', $1, 'registration') RETURNING tournament_id",
+        "INSERT INTO tournaments (name, user_id, status, max_snakes_per_user)
+         VALUES ('Visibility Cup', $1, 'registration', 2) RETURNING tournament_id",
     )
     .bind(organizer_id)
     .fetch_one(&pool)
@@ -1277,7 +1293,7 @@ async fn import_skips_other_users_private_snakes(pool: PgPool) {
     .fetch_all(&pool)
     .await
     .unwrap();
-    assert_eq!(imported, vec![open, own_hidden]);
+    assert_eq!(imported, vec![open, own_hidden, own_opted_out]);
 }
 
 #[sqlx::test(migrations = "../migrations")]

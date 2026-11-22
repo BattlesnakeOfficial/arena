@@ -1383,7 +1383,7 @@ pub async fn show_tournament(
                             div class="block" {
                                 h3 { "Import from Leaderboard" }
                                 p class="railp" {
-                                    "Register the top-ranked snakes from a leaderboard, seeded by rank."
+                                    "Register the top-ranked snakes from a leaderboard, seeded by rank. Private snakes and snakes whose owners opted out of imports are skipped."
                                 }
                                 form class="rail-form" action={"/tournaments/"(t.tournament_id)"/import-leaderboard"} method="post" {
                                     select name="leaderboard_id" aria-label="Leaderboard" {
@@ -2556,12 +2556,10 @@ pub async fn import_leaderboard(
             .await?;
     ranked.retain(|entry| live_members.contains(&entry.battlesnake_id));
 
-    // Import obeys the same snake-eligibility rule as game creation: the
-    // owner may pull in their own snakes, but another user's snake only if
-    // it's public. The shared locks keep a racing visibility change from
-    // slipping a private snake in.
+    // The organizer may pull in their own snakes; another user's snake only
+    // if it's public and its owner hasn't opted out of imports.
     let ranked_ids: Vec<Uuid> = ranked.iter().map(|e| e.battlesnake_id).collect();
-    let eligible = battlesnake::lock_eligible_battlesnake_ids(&mut tx, user.user_id, &ranked_ids)
+    let eligible = battlesnake::lock_importable_battlesnake_ids(&mut tx, user.user_id, &ranked_ids)
         .await
         .wrap_err("Failed to check imported snake eligibility")?;
     ranked.retain(|entry| eligible.contains(&entry.battlesnake_id));

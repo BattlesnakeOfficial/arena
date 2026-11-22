@@ -34,7 +34,7 @@ use crate::{
 // Parsed new/edit battlesnake form. Parsed by hand from the urlencoded body
 // because the tag checkboxes submit a repeated `tags` key, which
 // `axum::Form` (serde_urlencoded) can't deserialize into a Vec.
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct BattlesnakeFormData {
     name: String,
     url: String,
@@ -42,6 +42,27 @@ struct BattlesnakeFormData {
     #[serde(default)]
     engine_region: EngineRegion,
     tag_ids: Vec<Uuid>,
+    /// Pending drafts saved before this field existed default to allowed,
+    /// matching the column default.
+    #[serde(default = "default_allow_tournament_import")]
+    allow_tournament_import: bool,
+}
+
+fn default_allow_tournament_import() -> bool {
+    true
+}
+
+impl Default for BattlesnakeFormData {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            url: String::new(),
+            visibility: Visibility::default(),
+            engine_region: EngineRegion::default(),
+            tag_ids: Vec::new(),
+            allow_tournament_import: default_allow_tournament_import(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -70,6 +91,7 @@ fn bounded_form_copy(form: &BattlesnakeFormData) -> BattlesnakeFormData {
             .take(tag::MAX_TAGS_PER_SNAKE * 4)
             .copied()
             .collect(),
+        allow_tournament_import: form.allow_tournament_import,
     }
 }
 
@@ -79,6 +101,8 @@ fn parse_battlesnake_form(bytes: &[u8]) -> Result<BattlesnakeFormData, String> {
     let mut visibility = None;
     let mut engine_region = None;
     let mut tag_ids = Vec::new();
+    // An unchecked checkbox submits nothing, so absence means opted out.
+    let mut allow_tournament_import = false;
 
     for (key, value) in url::form_urlencoded::parse(bytes) {
         match key.as_ref() {
@@ -100,6 +124,7 @@ fn parse_battlesnake_form(bytes: &[u8]) -> Result<BattlesnakeFormData, String> {
             }
             "tags" => tag_ids
                 .push(Uuid::parse_str(&value).map_err(|_| "Invalid tag selection".to_string())?),
+            "allow_tournament_import" => allow_tournament_import = true,
             _ => {}
         }
     }
@@ -112,6 +137,7 @@ fn parse_battlesnake_form(bytes: &[u8]) -> Result<BattlesnakeFormData, String> {
         visibility: visibility.ok_or_else(|| "Visibility is required".to_string())?,
         engine_region: engine_region.ok_or_else(|| "Engine region is required".to_string())?,
         tag_ids,
+        allow_tournament_import,
     })
 }
 
@@ -178,6 +204,14 @@ fn battlesnake_form(
                     option value="private" selected[form.visibility == Visibility::Private] { "Private — only you can add it to games" }
                 }
                 p class="help" { "Only controls who can pick this snake in Create Game. It always shows on your profile and in the games it plays, and you can still enter it in leaderboards and tournaments." }
+            }
+            div class="field" {
+                label style="display:inline-flex; align-items:center; gap:6px; min-height:44px;" {
+                    input type="checkbox" id="allow_tournament_import" name="allow_tournament_import" value="on"
+                        checked[form.allow_tournament_import];
+                    "Allow tournament imports"
+                }
+                p class="help" { "Tournament organizers can import the top snakes from a leaderboard. Uncheck to keep this snake out of other people's imports. Private snakes are never imported." }
             }
             div class="field" {
                 label for="engine_region" { "Engine region" }
@@ -751,6 +785,16 @@ pub async fn create_battlesnake(
             tag::set_tags_for_battlesnake(&state.db, snake.battlesnake_id, &form.tag_ids)
                 .await
                 .wrap_err("Failed to set battlesnake tags")?;
+            if !form.allow_tournament_import {
+                battlesnake::set_allow_tournament_import(
+                    &state.db,
+                    snake.battlesnake_id,
+                    user.user_id,
+                    false,
+                )
+                .await
+                .wrap_err("Failed to set battlesnake import preference")?;
+            }
 
             session::take_pending_form_data(&state.db, session.session_id)
                 .await
@@ -835,12 +879,18 @@ pub async fn edit_battlesnake(
         .map(|t| t.tag_id)
         .collect();
 
+    let allow_tournament_import = battlesnake::allows_tournament_import(&state.db, battlesnake_id)
+        .await
+        .wrap_err("Failed to get battlesnake import preference")?
+        .unwrap_or(true);
+
     let fallback = BattlesnakeFormData {
         name: battlesnake.name.clone(),
         url: battlesnake.url.clone(),
         visibility: battlesnake.visibility,
         engine_region: battlesnake.engine_region,
         tag_ids: selected_tag_ids,
+        allow_tournament_import,
     };
     let form = match session::take_pending_form_data(&state.db, session.session_id)
         .await
@@ -1012,6 +1062,14 @@ pub async fn update_battlesnake(
             tag::set_tags_for_battlesnake(&state.db, battlesnake_id, &form.tag_ids)
                 .await
                 .wrap_err("Failed to set battlesnake tags")?;
+            battlesnake::set_allow_tournament_import(
+                &state.db,
+                battlesnake_id,
+                user.user_id,
+                form.allow_tournament_import,
+            )
+            .await
+            .wrap_err("Failed to set battlesnake import preference")?;
 
             session::take_pending_form_data(&state.db, session.session_id)
                 .await
@@ -2025,9 +2083,11 @@ mod form_tests {
             visibility: Visibility::Private,
             engine_region: EngineRegion::UsEast4,
             tag_ids: tag_ids.clone(),
+            allow_tournament_import: false,
         };
 
         let bounded = bounded_form_copy(&form);
+        assert!(!bounded.allow_tournament_import);
 
         assert_eq!(bounded.name.chars().count(), battlesnake::MAX_NAME_LEN);
         assert_eq!(bounded.url.chars().count(), MAX_DRAFT_URL_CHARS);
@@ -2073,6 +2133,25 @@ mod form_tests {
             r#"{"name":"Example","url":"https://example.com","visibility":"public","tag_ids":[]}"#;
         let form: BattlesnakeFormData = serde_json::from_str(old).unwrap();
         assert_eq!(form.engine_region, EngineRegion::UsWest1);
+        assert!(form.allow_tournament_import);
+    }
+
+    #[test]
+    fn tournament_import_checkbox_is_opt_out() {
+        let base =
+            "name=Example&url=https%3A%2F%2Fexample.com&visibility=public&engine_region=us-west1";
+        assert!(
+            !parse_battlesnake_form(base.as_bytes())
+                .unwrap()
+                .allow_tournament_import
+        );
+        let checked = format!("{base}&allow_tournament_import=on");
+        assert!(
+            parse_battlesnake_form(checked.as_bytes())
+                .unwrap()
+                .allow_tournament_import
+        );
+        assert!(BattlesnakeFormData::default().allow_tournament_import);
     }
 }
 
@@ -3437,6 +3516,87 @@ mod hosting_route_tests {
         .await;
         assert_eq!(status, StatusCode::SEE_OTHER);
         assert_eq!(hosted_mark(&pool, snake).await, Some(client));
+    }
+
+    /// The edit form round-trips the tournament-import opt-out: unchecking
+    /// stores false and renders unchecked; checking it restores true.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn web_update_round_trips_tournament_import_opt_out(pool: PgPool) {
+        let state = AppState::test_from_pool(pool.clone());
+        let app = app(&state);
+        let session = crate::routes::test_support::create_user_session(&pool, 9305, false).await;
+        let user = crate::routes::test_support::session_user_id(&pool, session).await;
+        let cookie = format!(
+            "{}={}",
+            crate::models::session::SESSION_COOKIE_NAME,
+            crate::routes::test_support::signed_session_cookie(&state, session)
+        );
+        let snake: Uuid = sqlx::query_scalar(
+            "INSERT INTO battlesnakes (user_id, name, url) VALUES ($1, 'Import Pref Snake', 'https://pref.example/s') RETURNING battlesnake_id",
+        )
+        .bind(user)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let checked =
+            r#"id="allow_tournament_import" name="allow_tournament_import" value="on" checked"#;
+
+        let (status, body) = send(
+            &app,
+            Method::GET,
+            &format!("/battlesnakes/{snake}/edit"),
+            Some(&cookie),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body.contains(checked),
+            "new snakes default to allowed: {body}"
+        );
+
+        let base = "name=Import+Pref+Snake&url=https://pref.example/s&visibility=public&engine_region=us-west1";
+        let (status, _) = send(
+            &app,
+            Method::POST,
+            &format!("/battlesnakes/{snake}/update"),
+            Some(&cookie),
+            Some(base.to_string()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+        assert_eq!(
+            battlesnake::allows_tournament_import(&pool, snake)
+                .await
+                .unwrap(),
+            Some(false)
+        );
+        let (_, body) = send(
+            &app,
+            Method::GET,
+            &format!("/battlesnakes/{snake}/edit"),
+            Some(&cookie),
+            None,
+        )
+        .await;
+        assert!(body.contains(r#"id="allow_tournament_import""#), "{body}");
+        assert!(!body.contains(checked), "{body}");
+
+        let (status, _) = send(
+            &app,
+            Method::POST,
+            &format!("/battlesnakes/{snake}/update"),
+            Some(&cookie),
+            Some(format!("{base}&allow_tournament_import=on")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+        assert_eq!(
+            battlesnake::allows_tournament_import(&pool, snake)
+                .await
+                .unwrap(),
+            Some(true)
+        );
     }
 }
 

@@ -126,6 +126,69 @@ pub async fn eligible_battlesnake_ids(
     Ok(rows.into_iter().map(|row| row.battlesnake_id).collect())
 }
 
+/// Snakes a tournament organizer may pull in through a leaderboard import:
+/// their own snakes, plus other users' public snakes whose owners haven't
+/// opted out of imports. Private snakes are never importable by others.
+/// The deterministic shared locks keep a racing visibility/opt-out change or
+/// deletion from slipping an ineligible snake into the import.
+pub async fn lock_importable_battlesnake_ids(
+    conn: &mut PgConnection,
+    organizer: Uuid,
+    requested: &[Uuid],
+) -> cja::Result<HashSet<Uuid>> {
+    let rows = sqlx::query!(
+        r#"SELECT battlesnake_id FROM battlesnakes
+           WHERE battlesnake_id = ANY($1)
+             AND (user_id = $2 OR (visibility = 'public' AND allow_tournament_import))
+             AND deleted_at IS NULL
+           ORDER BY battlesnake_id
+           FOR SHARE"#,
+        requested,
+        organizer
+    )
+    .fetch_all(conn)
+    .await
+    .wrap_err("Failed to check battlesnake import eligibility")?;
+    Ok(rows.into_iter().map(|row| row.battlesnake_id).collect())
+}
+
+/// Whether the snake's owner allows it to be imported into other users'
+/// tournaments. `None` when the snake doesn't exist or is deleted.
+pub async fn allows_tournament_import(
+    pool: &PgPool,
+    battlesnake_id: Uuid,
+) -> cja::Result<Option<bool>> {
+    sqlx::query_scalar!(
+        "SELECT allow_tournament_import FROM battlesnakes
+         WHERE battlesnake_id = $1 AND deleted_at IS NULL",
+        battlesnake_id
+    )
+    .fetch_optional(pool)
+    .await
+    .wrap_err("Failed to read battlesnake import preference")
+}
+
+/// Set the owner's tournament-import preference. Scoped to the owner, so a
+/// non-owner's call is a no-op.
+pub async fn set_allow_tournament_import(
+    pool: &PgPool,
+    battlesnake_id: Uuid,
+    user_id: Uuid,
+    allow: bool,
+) -> cja::Result<()> {
+    sqlx::query!(
+        "UPDATE battlesnakes SET allow_tournament_import = $3
+         WHERE battlesnake_id = $1 AND user_id = $2 AND deleted_at IS NULL",
+        battlesnake_id,
+        user_id,
+        allow
+    )
+    .execute(pool)
+    .await
+    .wrap_err("Failed to update battlesnake import preference")?;
+    Ok(())
+}
+
 /// Transactional eligibility check. The deterministic shared locks prevent a
 /// visibility change or deletion racing game creation.
 pub async fn lock_eligible_battlesnake_ids(
