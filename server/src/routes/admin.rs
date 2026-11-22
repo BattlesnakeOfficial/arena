@@ -907,7 +907,7 @@ pub async fn list_leaderboards(
                     @let path = format!("/leaderboards/{}", lb.leaderboard_id);
                     article class="admin-lb" aria-label=(lb.name) {
                         h3 {
-                            a href=(path) { (lb.name) }
+                            a id={"lb-name-"(lb.leaderboard_id)} href=(path) { (lb.name) }
                             " "
                             @if lb.disabled_at.is_some() {
                                 span class="badge" { "Inactive" }
@@ -921,7 +921,9 @@ pub async fn list_leaderboards(
                             div { dt { "Mode" } dd { (lb.game_type) " · " (lb.board_size) " · " (lb.match_size) " snakes" } }
                             div { dt { "Active snakes" } dd { (lb.active_entries) } }
                         }
-                        a class="btn" href=(format!("/admin/leaderboards/{}", lb.leaderboard_id)) aria-label={"Seasons for " (lb.name)} { "Seasons" }
+                        // aria-describedby, not aria-label: an accessible name containing
+                        // the league name would collide with the league link's name.
+                        a class="btn" href=(format!("/admin/leaderboards/{}", lb.leaderboard_id)) aria-describedby={"lb-name-"(lb.leaderboard_id)} { "Seasons" }
                         form method="post" action=(format!("/admin/leaderboards/{}/invite-code", lb.leaderboard_id)) {
                             button type="submit" class="btn" aria-label={"Regenerate invite code for " (lb.name)} {
                                 "Regenerate invite code"
@@ -947,7 +949,7 @@ pub async fn list_leaderboards(
                         tbody {
                             @for lb in &public {
                                 tr {
-                                    td { a href={"/leaderboards/"(lb.leaderboard_id)} { (lb.name) } }
+                                    td { a id={"lb-name-"(lb.leaderboard_id)} href={"/leaderboards/"(lb.leaderboard_id)} { (lb.name) } }
                                     td { (lb.game_type) " · " (lb.board_size) " · " (lb.match_size) }
                                     td class="r num" { (lb.active_entries) }
                                     td class="r" {
@@ -958,7 +960,7 @@ pub async fn list_leaderboards(
                                         }
                                     }
                                     td class="r" {
-                                        a href={"/admin/leaderboards/"(lb.leaderboard_id)} aria-label={"Seasons for " (lb.name)} { "Seasons" }
+                                        a href={"/admin/leaderboards/"(lb.leaderboard_id)} aria-describedby={"lb-name-"(lb.leaderboard_id)} { "Seasons" }
                                     }
                                 }
                             }

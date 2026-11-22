@@ -1218,3 +1218,33 @@ async fn import_in_a_gap_skips_leavers_and_retired_snakes(pool: PgPool) {
     .unwrap();
     assert_eq!(imported, vec![member]);
 }
+
+#[sqlx::test(migrations = "../migrations")]
+async fn admin_edit_while_season_row_is_held_flashes_busy(pool: PgPool) {
+    let state = AppState::test_from_pool(pool.clone());
+    let admin = create_user_session(&pool, 4_400_090, true).await;
+    let lb = league(&pool, "Busy Season").await;
+    let season = preseason(&pool, lb).await;
+
+    // The matchmaker holds the active season FOR SHARE while it creates
+    // games; hold it the same way so the edit's FOR UPDATE hits
+    // lock_timeout (55P03).
+    let mut holder = pool.begin().await.unwrap();
+    sqlx::query("SELECT 1 FROM leaderboard_seasons WHERE season_id = $1 FOR SHARE")
+        .bind(season)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+
+    let page = post_and_follow(
+        &state,
+        &format!("/admin/leaderboards/{lb}/seasons/{season}/edit"),
+        admin,
+        "name=Renamed&timezone=UTC",
+    )
+    .await;
+    assert!(page.contains("busy with matchmaking"), "{page}");
+
+    holder.rollback().await.unwrap();
+    assert_eq!(season_row(&pool, season).await.0, "Preseason");
+}
