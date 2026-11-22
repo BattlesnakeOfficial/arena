@@ -380,6 +380,15 @@ async fn lock_season(
     .fetch_optional(&mut **tx)
     .await
     .wrap_err("Failed to lock leaderboard season")
+    .map_err(|err| {
+        // 55P03 = lock_timeout: the matchmaker holds the active season
+        // FOR SHARE while it creates games. Nothing was written; say so.
+        if has_sqlstate(&err, "55P03") {
+            ValidationError("That season is busy with matchmaking right now — try again.").into()
+        } else {
+            err
+        }
+    })
 }
 
 /// The resolved `(starts_at, ends_at)` an edit may write, given the

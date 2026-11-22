@@ -1095,3 +1095,119 @@ async fn admin_rename_passes_ambiguous_prefill_through(pool: PgPool) {
         assert_eq!(season_row(&pool, season).await.0, "Fall Classic");
     }
 }
+
+/// A finished ladder game in `season_id`, created `minutes_ago` minutes ago.
+async fn ladder_game(pool: &PgPool, leaderboard_id: Uuid, season_id: Uuid, minutes_ago: i32) {
+    let game_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO games (board_size, game_type, status)
+         VALUES ('11x11', 'Standard', 'finished') RETURNING game_id",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO leaderboard_games (leaderboard_id, game_id, season_id, created_at)
+         VALUES ($1, $2, $3, clock_timestamp() - make_interval(mins => $4))",
+    )
+    .bind(leaderboard_id)
+    .bind(game_id)
+    .bind(season_id)
+    .bind(minutes_ago)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+/// Viewing a past season while one is live: the matchmaker countdown comes
+/// from the *active* season's last game, never the viewed season's
+/// (ever-staler) one.
+#[sqlx::test(migrations = "../migrations")]
+async fn past_season_view_counts_down_from_the_active_seasons_last_game(pool: PgPool) {
+    let state = AppState::test_from_pool(pool.clone());
+    let r = rollover(&pool).await;
+    // Ada + Cy are live members: enough for the countdown branch.
+    assert!(
+        leaderboard::count_active_entries(&pool, r.lb)
+            .await
+            .unwrap()
+            >= leaderboard::MIN_MATCH_SIZE as i64
+    );
+    // Preseason's last game is days old; Season 1's is a minute old.
+    ladder_game(&pool, r.lb, r.preseason, 3 * 24 * 60).await;
+    ladder_game(&pool, r.lb, r.season1, 1).await;
+
+    for query in [String::new(), format!("?season={}", r.preseason)] {
+        let res = get(&state, &format!("/leaderboards/{}{query}", r.lb)).await;
+        assert_eq!(res.status, StatusCode::OK);
+        let cell = matchmaker_cell(&res.body);
+        // last Season 1 game + interval is in the future; the Preseason
+        // game + interval would read "… days ago".
+        assert!(cell.contains("in "), "{query}: {cell}");
+        assert!(!cell.contains("ago"), "{query}: {cell}");
+        assert!(!cell.contains("waiting"), "{query}: {cell}");
+    }
+}
+
+/// Tournament import during a gap draws on the last ended season's frozen
+/// standings, but only from current live members: a leaver and a retired
+/// snake are skipped (not a 500), and the remaining member still imports.
+#[sqlx::test(migrations = "../migrations")]
+async fn import_in_a_gap_skips_leavers_and_retired_snakes(pool: PgPool) {
+    let state = AppState::test_from_pool(pool.clone());
+    let lb = league(&pool, "Gap Ladder").await;
+    let pre = preseason(&pool, lb).await;
+    set_season_days(&pool, pre, -30, Some(-1)).await;
+    insert_season(&pool, lb, "Season 1", 7, None).await;
+
+    let user = owner(&pool, 4_400_101).await;
+    let retired = snake(&pool, user, "Retired").await;
+    let leaver = snake(&pool, user, "Leaver").await;
+    let member = snake(&pool, user, "Member").await;
+    for s in [retired, leaver, member] {
+        register(&pool, lb, s).await;
+    }
+    entry(&pool, lb, pre, retired, 12, 90.0).await;
+    entry(&pool, lb, pre, leaver, 12, 80.0).await;
+    entry(&pool, lb, pre, member, 12, 70.0).await;
+    leave(&pool, lb, leaver).await;
+    crate::models::battlesnake::retire_battlesnake(&pool, retired, user)
+        .await
+        .unwrap();
+
+    // The frozen standings still show the leaver.
+    let res = get(&state, &format!("/leaderboards/{lb}")).await;
+    for name in ["Leaver", "Member"] {
+        assert!(res.body.contains(&format!(">{name}</a>")), "{name}");
+    }
+
+    let organizer = create_user_session(&pool, 4_400_102, false).await;
+    let organizer_id = session_user_id(&pool, organizer).await;
+    let tournament_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO tournaments (name, user_id, status)
+         VALUES ('Gap Cup', $1, 'registration') RETURNING tournament_id",
+    )
+    .bind(organizer_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let res = send(
+        &state,
+        "POST",
+        &format!("/tournaments/{tournament_id}/import-leaderboard"),
+        Some(organizer),
+        Some(format!("leaderboard_id={lb}&count=8")),
+    )
+    .await;
+    assert_eq!(res.status, StatusCode::SEE_OTHER, "{}", res.body);
+
+    let imported: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT battlesnake_id FROM tournament_registrations
+         WHERE tournament_id = $1 ORDER BY seed",
+    )
+    .bind(tournament_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(imported, vec![member]);
+}

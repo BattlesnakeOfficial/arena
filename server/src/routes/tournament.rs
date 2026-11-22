@@ -2536,7 +2536,7 @@ pub async fn import_leaderboard(
             }
             crate::models::leaderboard_season::SeasonLookup::Foreign => None,
         };
-    let ranked = match season_id {
+    let mut ranked = match season_id {
         Some(season_id) => leaderboard::get_ranked_entries(
             &state.db,
             lb.leaderboard_id,
@@ -2547,6 +2547,14 @@ pub async fn import_leaderboard(
         .wrap_err("Failed to fetch ranked leaderboard entries")?,
         None => vec![],
     };
+    // An ended season's frozen standings include snakes that have since left
+    // the league, been paused, retired or deleted. Import only current live
+    // members: leaving a ladder opts a snake out of its imports, and a dead
+    // snake can't be registered at all.
+    let live_members =
+        crate::models::leaderboard_registration::live_member_snake_ids(&mut tx, lb.leaderboard_id)
+            .await?;
+    ranked.retain(|entry| live_members.contains(&entry.battlesnake_id));
 
     // Snapshot the registrations inside the locked transaction so duplicate
     // skipping and the per-user/total caps are enforced against reality.
