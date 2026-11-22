@@ -350,17 +350,22 @@ async fn gap_join_registers_without_entry_and_schedules_nothing(pool: PgPool) {
     assert!(other.disabled_at.is_none(), "only the named snake pauses");
 
     // Leaving a league the snake never joined flashes instead of pausing.
+    let never_joined = snake(&pool, p.user_id, "Never Joined").await;
     let res = post_form(
         &state,
         &format!("/leaderboards/{live}/leave"),
         p.session,
-        format!(
-            "battlesnake_id={}",
-            snake(&pool, p.user_id, "Never Joined").await
-        ),
+        format!("battlesnake_id={never_joined}"),
     )
     .await;
     assert_eq!(res.status, StatusCode::SEE_OTHER);
+    assert!(
+        leaderboard_registration::get_registration(&pool, live, never_joined)
+            .await
+            .unwrap()
+            .is_none(),
+        "leaving an unjoined league must not create a registration"
+    );
     let page = send(
         &state,
         "GET",
@@ -871,7 +876,7 @@ async fn unretire_restores_only_retired_registrations(pool: PgPool) {
         .unwrap();
     assert!(
         leaderboard_registration::deactivate(
-            &mut *pool.acquire().await.unwrap(),
+            &mut pool.acquire().await.unwrap(),
             health_reg.leaderboard_registration_id
         )
         .await
@@ -957,7 +962,7 @@ async fn unretire_restores_only_retired_registrations(pool: PgPool) {
     );
     assert!(
         !leaderboard_registration::reactivate(
-            &mut *pool.acquire().await.unwrap(),
+            &mut pool.acquire().await.unwrap(),
             deleted.leaderboard_registration_id
         )
         .await
