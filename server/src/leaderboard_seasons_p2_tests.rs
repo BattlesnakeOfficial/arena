@@ -1071,9 +1071,10 @@ async fn unretire_restores_only_retired_registrations(pool: PgPool) {
     );
 }
 
-/// The sync trigger's INSERT branch must never revert a concurrent pause: a
-/// lazy ensure whose entry INSERT races an uncommitted pause leaves the pause
-/// in place (DO NOTHING, not DO UPDATE).
+/// A lazy ensure never writes the registration, so it can't revert a
+/// concurrent pause: it runs to completion past an uncommitted pause without
+/// waiting on it, and the pause stands once committed (PR 2 dropped the sync
+/// trigger whose registration upsert used to queue behind the pause).
 #[sqlx::test(migrations = "../migrations")]
 async fn lazy_ensure_never_reverts_a_concurrent_pause(pool: PgPool) {
     let p = player(&pool, 9_266_009).await;
@@ -1091,22 +1092,25 @@ async fn lazy_ensure_never_reverts_a_concurrent_pause(pool: PgPool) {
     .await
     .unwrap();
 
-    let ensure_pool = pool.clone();
-    let ensure = tokio::spawn(async move {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
         leaderboard::ensure_active_season_entries(
-            &ensure_pool,
+            &pool,
             &crate::scoring::ScoringRegistry::new(),
             lb,
-        )
-        .await
-    });
-    wait_for_lock_waiters(&pool, 1).await;
+        ),
+    )
+    .await
+    .expect("ensure doesn't queue behind the uncommitted pause")
+    .unwrap();
+    let entries: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM leaderboard_entries WHERE leaderboard_id = $1")
+            .bind(lb)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(entries, 1, "the ensure saw the pre-pause registration");
     pauser.commit().await.unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(30), ensure)
-        .await
-        .expect("ensure finishes once the pause commits")
-        .unwrap()
-        .unwrap();
 
     let registration = leaderboard_registration::get_registration(&pool, lb, p.snakes[0])
         .await
@@ -1122,21 +1126,4 @@ async fn lazy_ensure_never_reverts_a_concurrent_pause(pool: PgPool) {
             .unwrap()
             .is_empty()
     );
-}
-
-async fn wait_for_lock_waiters(pool: &PgPool, n: i64) {
-    for _ in 0..3000 {
-        let waiting: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM pg_stat_activity
-             WHERE datname = current_database() AND wait_event_type = 'Lock'",
-        )
-        .fetch_one(pool)
-        .await
-        .unwrap();
-        if waiting >= n {
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    panic!("timed out waiting for {n} lock waiters");
 }
