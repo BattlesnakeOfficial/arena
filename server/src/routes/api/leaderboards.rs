@@ -14,7 +14,9 @@ use crate::{
     models::{
         battlesnake,
         leaderboard::{self, MIN_GAMES_FOR_RANKING},
-        leaderboard_registration, private_leaderboard,
+        leaderboard_registration,
+        leaderboard_season::{self, SeasonLookup},
+        private_leaderboard,
     },
     routes::auth::ApiUser,
     state::AppState,
@@ -69,6 +71,9 @@ pub struct OptInRequest {
 pub struct RankingsQuery {
     #[serde(default)]
     pub sort: leaderboard::LeaderboardSort,
+    /// `?season=<season_id>`; absent = the same default season as the page.
+    #[serde(default)]
+    pub season: Option<Uuid>,
 }
 
 #[derive(Debug, Serialize)]
@@ -97,6 +102,15 @@ pub async fn list_leaderboards(
                 "Internal server error".to_string(),
             )
         })?;
+    let active_season_ids = leaderboard_season::leaderboards_with_active_season(&state.db)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to fetch active seasons: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal server error".to_string(),
+            )
+        })?;
 
     let response: Vec<LeaderboardResponse> = leaderboards
         .into_iter()
@@ -106,7 +120,8 @@ pub async fn list_leaderboards(
             game_type: lb.game_type,
             board_size: lb.board_size,
             match_size: lb.match_size,
-            active: lb.disabled_at.is_none(),
+            // Live = not admin-paused and inside a season.
+            active: lb.disabled_at.is_none() && active_season_ids.contains(&lb.leaderboard_id),
             created_at: lb.created_at,
         })
         .collect();
@@ -131,25 +146,46 @@ pub async fn get_rankings(
         })?
         .ok_or((StatusCode::NOT_FOUND, "Leaderboard not found".to_string()))?;
 
-    let ranked = leaderboard::get_ranked_entries(&state.db, leaderboard_id, query.sort)
+    let lookup = leaderboard_season::select_season(&state.db, leaderboard_id, query.season)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to fetch ranked entries: {}", e);
+            tracing::error!("Failed to select leaderboard season: {}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Internal server error".to_string(),
             )
         })?;
+    let SeasonLookup::Found(selection) = lookup else {
+        return Err((StatusCode::NOT_FOUND, "Season not found".to_string()));
+    };
 
-    let placement = leaderboard::get_placement_entries(&state.db, leaderboard_id)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to fetch placement entries: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Internal server error".to_string(),
-            )
-        })?;
+    // Only future seasons: nothing to rank yet.
+    let (ranked, placement) = if let Some(info) = selection.selected {
+        let season_id = info.season.season_id;
+        let ranked =
+            leaderboard::get_ranked_entries(&state.db, leaderboard_id, season_id, query.sort)
+                .await
+                .map_err(|e| {
+                    tracing::error!("Failed to fetch ranked entries: {}", e);
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Internal server error".to_string(),
+                    )
+                })?;
+
+        let placement = leaderboard::get_placement_entries(&state.db, leaderboard_id, season_id)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to fetch placement entries: {}", e);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal server error".to_string(),
+                )
+            })?;
+        (ranked, placement)
+    } else {
+        (vec![], vec![])
+    };
 
     // Collect entry IDs from both ranked and placement entries for scoring lookups
     let entry_ids: Vec<Uuid> = ranked

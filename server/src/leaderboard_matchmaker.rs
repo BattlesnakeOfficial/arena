@@ -514,6 +514,7 @@ mod tests {
         LeaderboardEntry {
             leaderboard_entry_id: Uuid::new_v4(),
             leaderboard_id: Uuid::new_v4(),
+            season_id: Uuid::new_v4(),
             battlesnake_id: Uuid::new_v4(),
             mu: 25.0,
             sigma: 8.333,

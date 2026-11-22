@@ -1,0 +1,60 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n            le.leaderboard_entry_id,\n            fes.food_score,\n            b.name as snake_name,\n            b.color as snake_color,\n            u.github_login as owner_login,\n            COALESCE(NULLIF(u.display_name, ''), u.github_login) AS \"owner_name!\",\n            u.country as owner_country\n         FROM leaderboard_entries le\n         JOIN food_eaten_stats fes ON le.leaderboard_entry_id = fes.leaderboard_entry_id\n         JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id\n         JOIN users u ON b.user_id = u.user_id\n         JOIN leaderboard_seasons s ON s.season_id = le.season_id\n         JOIN leaderboard_registrations lr ON lr.leaderboard_id = le.leaderboard_id AND lr.battlesnake_id = le.battlesnake_id\n         WHERE le.leaderboard_id = $1 AND s.season_id = $2\n           AND ((s.ends_at IS NOT NULL AND clock_timestamp() >= s.ends_at)\n                OR lr.disabled_at IS NULL)\n           AND fes.food_score > 0\n         ORDER BY fes.food_score DESC\n         LIMIT $3",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "leaderboard_entry_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "food_score",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "snake_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "snake_color",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "owner_login",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "owner_name!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "owner_country",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      null,
+      false
+    ]
+  },
+  "hash": "bdff817652ada01769e34e4f15f48f18c18031cd40ce890b4a1294add1b27e79"
+}

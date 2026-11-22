@@ -531,9 +531,16 @@ mod tests {
         )
         .execute(&pool)
         .await?;
+        let season_id = sqlx::query_scalar!(
+            "SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1",
+            leaderboard_id
+        )
+        .fetch_one(&pool)
+        .await?;
 
         let before =
-            crate::models::leaderboard::get_leaderboard_status(&pool, leaderboard_id).await?;
+            crate::models::leaderboard::get_leaderboard_status(&pool, leaderboard_id, season_id)
+                .await?;
         assert_eq!(before.games_in_progress, 1);
         assert_eq!(before.total_games, 1);
 
@@ -541,7 +548,8 @@ mod tests {
         run_sweep(&app_state).await?;
 
         let after =
-            crate::models::leaderboard::get_leaderboard_status(&pool, leaderboard_id).await?;
+            crate::models::leaderboard::get_leaderboard_status(&pool, leaderboard_id, season_id)
+                .await?;
         assert_eq!(after.games_in_progress, 0);
         assert_eq!(after.total_games, 1);
 

@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT COUNT(*) as \"count!\"\n         FROM leaderboard_entries le\n         JOIN leaderboard_seasons s ON s.season_id = le.season_id\n         JOIN leaderboard_registrations lr ON lr.leaderboard_id = le.leaderboard_id AND lr.battlesnake_id = le.battlesnake_id\n         WHERE le.leaderboard_id = $1 AND s.season_id = $2\n           AND ((s.ends_at IS NOT NULL AND clock_timestamp() >= s.ends_at)\n                OR lr.disabled_at IS NULL)\n           AND le.games_played >= $3",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "8bec20f0445e854b6a6928e3082663ae3424feb85196a619f0e8640b9f195c60"
+}

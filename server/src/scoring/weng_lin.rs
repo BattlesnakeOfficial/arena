@@ -151,6 +151,8 @@ impl ScoringAlgorithm for WengLinScoring {
             let entry = LeaderboardEntry {
                 leaderboard_entry_id: result.leaderboard_entry_id,
                 leaderboard_id: event.leaderboard_id,
+                // Not used by calculate_rating_updates (the event carries no season).
+                season_id: Uuid::nil(),
                 battlesnake_id: result.battlesnake_id,
                 disabled_reason: None,
                 mu,
@@ -290,6 +292,7 @@ mod tests {
         LeaderboardEntry {
             leaderboard_entry_id: Uuid::new_v4(),
             leaderboard_id: Uuid::new_v4(),
+            season_id: Uuid::new_v4(),
             battlesnake_id: Uuid::new_v4(),
             mu,
             sigma,

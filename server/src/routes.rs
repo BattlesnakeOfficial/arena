@@ -434,6 +434,22 @@ pub fn routes(app_state: AppState) -> cja::Result<cja::server::App> {
             "/admin/leaderboards/{id}/invite-code",
             post(admin::regenerate_invite_code),
         )
+        .route(
+            "/admin/leaderboards/{id}",
+            get(admin::show_admin_leaderboard),
+        )
+        .route(
+            "/admin/leaderboards/{id}/seasons",
+            post(admin::create_season),
+        )
+        .route(
+            "/admin/leaderboards/{id}/seasons/{season_id}/edit",
+            post(admin::edit_season),
+        )
+        .route(
+            "/admin/leaderboards/{id}/seasons/{season_id}/delete",
+            post(admin::delete_season),
+        )
         .route("/admin/emails", get(admin::email_catalog))
         .route("/admin/emails/{kind}", get(admin::email_preview))
         .route(
