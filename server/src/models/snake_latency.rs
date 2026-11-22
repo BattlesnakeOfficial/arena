@@ -237,16 +237,20 @@ mod tests {
 
         /// Enter the snake in the `nth` seeded leaderboard.
         async fn entry(&self, nth: i64) -> cja::Result<Uuid> {
-            Ok(sqlx::query_scalar!(
-                "INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id)
-                 SELECT leaderboard_id, $1 FROM leaderboards
+            let entry = sqlx::query_scalar!(
+                "INSERT INTO leaderboard_entries (leaderboard_id, season_id, battlesnake_id)
+                 SELECT leaderboard_id, (SELECT season_id FROM leaderboard_seasons s WHERE s.leaderboard_id = leaderboards.leaderboard_id), $1
+                 FROM leaderboards
                  ORDER BY created_at, leaderboard_id OFFSET $2 LIMIT 1
                  RETURNING leaderboard_entry_id",
                 self.battlesnake_id,
                 nth
             )
             .fetch_one(&self.pool)
-            .await?)
+            .await?;
+            crate::routes::test_support::register_snake_entries(&self.pool, self.battlesnake_id)
+                .await;
+            Ok(entry)
         }
 
         async fn join_via_leaderboard(&self, game_id: Uuid, entry_id: Uuid) -> cja::Result<Uuid> {

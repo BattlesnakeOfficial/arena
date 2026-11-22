@@ -1211,9 +1211,11 @@ mod tests {
                     .await?
                     .expect("live snake joins");
             if reason.is_some() {
-                sqlx::query("UPDATE leaderboard_entries SET disabled_at = NOW(), disabled_reason = $2 WHERE leaderboard_entry_id = $1")
+                sqlx::query("UPDATE leaderboard_registrations SET disabled_at = NOW(), disabled_reason = $2 WHERE leaderboard_id = $3 AND battlesnake_id = $4")
                     .bind(entry.leaderboard_entry_id)
                     .bind(if *reason == Some("manual") { None } else { *reason })
+                    .bind(leaderboard_id)
+                    .bind(snake)
                     .execute(&pool)
                     .await?;
             }
@@ -1300,7 +1302,7 @@ mod tests {
         )
         .await?;
         let manual_while_retired =
-            crate::models::leaderboard::get_entry(&pool, entries[1].0, snake)
+            crate::models::leaderboard_registration::get_registration(&pool, entries[1].0, snake)
                 .await?
                 .unwrap();
         assert!(manual_while_retired.disabled_at.is_some());
@@ -1324,11 +1326,18 @@ mod tests {
             assert_eq!(entry.leaderboard_entry_id, *entry_id);
             assert_eq!(entry.games_played, 11);
             assert_eq!(entry.display_score, 42.5);
+            let registration = crate::models::leaderboard_registration::get_registration(
+                &pool,
+                *leaderboard_id,
+                snake,
+            )
+            .await?
+            .unwrap();
             assert_eq!(
-                entry.disabled_reason.as_deref(),
+                registration.disabled_reason.as_deref(),
                 [Some("retired"), None, Some("health")][index]
             );
-            assert!(entry.disabled_at.is_some());
+            assert!(registration.disabled_at.is_some());
             assert!(
                 crate::models::leaderboard::get_or_create_entry(&pool, *leaderboard_id, snake)
                     .await?
@@ -1374,9 +1383,16 @@ mod tests {
             assert_eq!(entry.leaderboard_entry_id, *entry_id);
             assert_eq!(entry.games_played, 11);
             assert_eq!(entry.display_score, 42.5);
-            assert_eq!(entry.disabled_at.is_none(), index == 0);
+            let registration = crate::models::leaderboard_registration::get_registration(
+                &pool,
+                *leaderboard_id,
+                snake,
+            )
+            .await?
+            .unwrap();
+            assert_eq!(registration.disabled_at.is_none(), index == 0);
             assert_eq!(
-                entry.disabled_reason.as_deref(),
+                registration.disabled_reason.as_deref(),
                 [None, None, Some("health")][index]
             );
         }
@@ -1508,15 +1524,17 @@ mod tests {
         leaderboard_id: Uuid,
         battlesnake_id: Uuid,
     ) -> cja::Result<Uuid> {
-        Ok(sqlx::query_scalar!(
-            "INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id)
-             VALUES ($1, $2)
+        let entry = sqlx::query_scalar!(
+            "INSERT INTO leaderboard_entries (leaderboard_id, season_id, battlesnake_id)
+             VALUES ($1, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1), $2)
              RETURNING leaderboard_entry_id",
             leaderboard_id,
             battlesnake_id
         )
         .fetch_one(pool)
-        .await?)
+        .await?;
+        crate::routes::test_support::register_snake_entries(pool, battlesnake_id).await;
+        Ok(entry)
     }
 
     async fn create_finished_game(pool: &PgPool) -> cja::Result<Uuid> {
@@ -1559,10 +1577,17 @@ mod tests {
         Ok(())
     }
 
-    async fn entry_state(pool: &PgPool, entry_id: Uuid) -> cja::Result<(bool, Option<String>)> {
+    /// Membership state of the registration behind a fixture entry.
+    async fn registration_state(
+        pool: &PgPool,
+        entry_id: Uuid,
+    ) -> cja::Result<(bool, Option<String>)> {
         let row = sqlx::query!(
-            "SELECT disabled_at IS NOT NULL AS \"disabled!\", disabled_reason
-             FROM leaderboard_entries WHERE leaderboard_entry_id = $1",
+            "SELECT r.disabled_at IS NOT NULL AS \"disabled!\", r.disabled_reason
+             FROM leaderboard_registrations r
+             JOIN leaderboard_entries le
+               ON le.leaderboard_id = r.leaderboard_id AND le.battlesnake_id = r.battlesnake_id
+             WHERE le.leaderboard_entry_id = $1",
             entry_id
         )
         .fetch_one(pool)
@@ -1640,10 +1665,10 @@ mod tests {
 
         // Out of matchmaking and the rankings; the rival is unaffected.
         assert_eq!(
-            entry_state(&pool, doomed_entry).await?,
+            registration_state(&pool, doomed_entry).await?,
             (true, Some(DISABLED_REASON_DELETED.to_string()))
         );
-        assert_eq!(entry_state(&pool, rival_entry).await?, (false, None));
+        assert_eq!(registration_state(&pool, rival_entry).await?, (false, None));
 
         Ok(())
     }
@@ -1906,7 +1931,7 @@ mod tests {
         .await?;
 
         assert_eq!(
-            entry_state(&pool, entry).await?,
+            registration_state(&pool, entry).await?,
             (true, Some(DISABLED_REASON_DELETED.to_string()))
         );
 

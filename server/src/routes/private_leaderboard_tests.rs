@@ -133,7 +133,7 @@ impl Fixture {
     async fn active_entry(&self, leaderboard_id: Uuid, battlesnake_id: Uuid) -> bool {
         sqlx::query_scalar!(
             r#"SELECT EXISTS (
-                SELECT 1 FROM leaderboard_entries
+                SELECT 1 FROM leaderboard_registrations
                 WHERE leaderboard_id = $1 AND battlesnake_id = $2 AND disabled_at IS NULL
             ) AS "exists!""#,
             leaderboard_id,
@@ -651,7 +651,7 @@ async fn deleted_snake_cannot_rejoin_via_web(pool: PgPool) {
     // The refused join didn't re-enable the entry: it's still terminal.
     let row = sqlx::query!(
         "SELECT disabled_at, disabled_reason
-         FROM leaderboard_entries
+         FROM leaderboard_registrations
          WHERE leaderboard_id = $1 AND battlesnake_id = $2",
         public,
         fx.member_snake

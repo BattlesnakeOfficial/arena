@@ -462,14 +462,16 @@ mod tests {
     ) -> cja::Result<()> {
         let disabled_at = disabled.then(chrono::Utc::now);
         sqlx::query!(
-            "INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id, disabled_at)
-             SELECT leaderboard_id, $2, $3 FROM leaderboards WHERE name = $1",
+            "INSERT INTO leaderboard_entries (leaderboard_id, season_id, battlesnake_id, disabled_at)
+             SELECT leaderboard_id, (SELECT season_id FROM leaderboard_seasons s WHERE s.leaderboard_id = leaderboards.leaderboard_id), $2, $3
+             FROM leaderboards WHERE name = $1",
             leaderboard_name,
             battlesnake_id,
             disabled_at,
         )
         .execute(pool)
         .await?;
+        crate::routes::test_support::register_snake_entries(pool, battlesnake_id).await;
         Ok(())
     }
 

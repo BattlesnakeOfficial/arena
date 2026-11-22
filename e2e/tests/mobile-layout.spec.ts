@@ -1,6 +1,6 @@
 import type { Locator, Page } from '@playwright/test';
 import { test, expect, createMockUser } from '../fixtures/test';
-import { query } from '../fixtures/db';
+import { query, registerFixtureEntries } from '../fixtures/db';
 
 const PHONE = { width: 375, height: 812 };
 const PAGES = ['/', '/me', '/games/new', '/leaderboards', '/battlesnakes', '/players?q=snake', '/rankings', '/snakes?q=snake'];
@@ -101,10 +101,11 @@ test.describe('Mobile layout (375px)', () => {
     );
     try {
       await query(
-        `INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id, games_played)
-         VALUES ($1, $2, 3), ($1, $3, 1)`,
+        `INSERT INTO leaderboard_entries (leaderboard_id, season_id, battlesnake_id, games_played)
+         VALUES ($1, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1), $2, 3), ($1, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1), $3, 1)`,
         [leaderboard.leaderboard_id, ...snakeIds],
       );
+      await registerFixtureEntries();
       const [tournament] = await query<{ tournament_id: string }>(
         `INSERT INTO tournaments (name, user_id, status) VALUES ($1, $2, 'registration') RETURNING tournament_id`,
         [`Phone Tables Cup ${Date.now()}`, owner.user_id],
@@ -161,10 +162,11 @@ test.describe('Mobile layout (375px)', () => {
         [mockUser.login],
       );
       await query(
-        `INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id, games_played, first_place_finishes, display_score)
-         VALUES ($1, $2, 12, 3, 30)`,
+        `INSERT INTO leaderboard_entries (leaderboard_id, season_id, battlesnake_id, games_played, first_place_finishes, display_score)
+         VALUES ($1, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1), $2, 12, 3, 30)`,
         [leaderboard.leaderboard_id, snake.battlesnake_id],
       );
+      await registerFixtureEntries();
 
       await assertNoHorizontalOverflow(authenticatedPage, `/leaderboards/${leaderboard.leaderboard_id}`);
       const scroller = authenticatedPage.locator('.table-scroll').first();

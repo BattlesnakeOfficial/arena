@@ -1639,7 +1639,7 @@ mod tests {
         .fetch_one(&pool)
         .await?;
         sqlx::query!(
-            "INSERT INTO leaderboard_games (leaderboard_id, game_id) VALUES ($1, $2)",
+            "INSERT INTO leaderboard_games (leaderboard_id, game_id, season_id) VALUES ($1, $2, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1))",
             leaderboard_id,
             ladder.game_id
         )
@@ -1701,7 +1701,7 @@ mod tests {
         )
         .fetch_one(&pool)
         .await?;
-        sqlx::query("INSERT INTO leaderboard_games (leaderboard_id, game_id) VALUES ($1, $2)")
+        sqlx::query("INSERT INTO leaderboard_games (leaderboard_id, game_id, season_id) VALUES ($1, $2, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1))")
             .bind(ladder)
             .bind(ladder_game.game_id)
             .execute(&pool)
@@ -1724,24 +1724,25 @@ mod tests {
         .fetch_one(&pool)
         .await?;
         let entry = sqlx::query_scalar!(
-            "INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id)
-            VALUES ($1, $2) RETURNING leaderboard_entry_id",
+            "INSERT INTO leaderboard_entries (leaderboard_id, season_id, battlesnake_id)
+            VALUES ($1, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1), $2) RETURNING leaderboard_entry_id",
             leaderboard_id,
             snake
         )
         .fetch_one(&pool)
         .await?;
+        crate::routes::test_support::register_snake_entries(&pool, snake).await;
         let game_id = sqlx::query_scalar!("INSERT INTO games (board_size, game_type) VALUES ('11x11', 'Standard') RETURNING game_id")
             .fetch_one(&pool).await?;
         add_leaderboard_entry_to_game(&pool, game_id, entry).await?;
         sqlx::query!(
-            "INSERT INTO leaderboard_games (leaderboard_id, game_id) VALUES ($1, $2)",
+            "INSERT INTO leaderboard_games (leaderboard_id, game_id, season_id) VALUES ($1, $2, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1))",
             leaderboard_id,
             game_id
         )
         .execute(&pool)
         .await?;
-        sqlx::query!("UPDATE leaderboard_entries SET disabled_at = clock_timestamp() WHERE leaderboard_entry_id = $1", entry)
+        sqlx::query!("UPDATE leaderboard_registrations r SET disabled_at = clock_timestamp() FROM leaderboard_entries le WHERE le.leaderboard_entry_id = $1 AND r.leaderboard_id = le.leaderboard_id AND r.battlesnake_id = le.battlesnake_id", entry)
             .execute(&pool).await?;
         sqlx::query!(
             "UPDATE leaderboards SET disabled_at = clock_timestamp() WHERE leaderboard_id = $1",
@@ -1836,7 +1837,7 @@ mod tests {
                 },
             )
             .await?;
-            sqlx::query("INSERT INTO leaderboard_games (leaderboard_id, game_id) VALUES ($1, $2)")
+            sqlx::query("INSERT INTO leaderboard_games (leaderboard_id, game_id, season_id) VALUES ($1, $2, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1))")
                 .bind(ladder)
                 .bind(game.game_id)
                 .execute(&pool)
@@ -1925,7 +1926,7 @@ mod tests {
         let mut ids = Vec::new();
         for (snakes, age) in [(vec![t], 200), (vec![a, t], 100), (vec![a], 50)] {
             let g = create_game_with_snakes(&pool, mk(snakes)).await?;
-            sqlx::query("INSERT INTO leaderboard_games (leaderboard_id, game_id) VALUES ($1, $2)")
+            sqlx::query("INSERT INTO leaderboard_games (leaderboard_id, game_id, season_id) VALUES ($1, $2, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1))")
                 .bind(ladder)
                 .bind(g.game_id)
                 .execute(&pool)
@@ -2035,7 +2036,7 @@ mod tests {
         // Ladder only.
         let ladder_game = bare_game(&pool).await?;
         sqlx::query!(
-            "INSERT INTO leaderboard_games (leaderboard_id, game_id) VALUES ($1, $2)",
+            "INSERT INTO leaderboard_games (leaderboard_id, game_id, season_id) VALUES ($1, $2, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1))",
             leaderboard,
             ladder_game
         )
@@ -2055,7 +2056,7 @@ mod tests {
         // Both rows: tournament wins (the flip this test pins).
         let both_game = bare_game(&pool).await?;
         sqlx::query!(
-            "INSERT INTO leaderboard_games (leaderboard_id, game_id) VALUES ($1, $2)",
+            "INSERT INTO leaderboard_games (leaderboard_id, game_id, season_id) VALUES ($1, $2, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1))",
             leaderboard,
             both_game
         )

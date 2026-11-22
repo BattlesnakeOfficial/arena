@@ -179,11 +179,12 @@ mod tests {
         .bind(Uuid::new_v4().to_string())
         .fetch_one(pool).await?;
         let entry_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id, display_score, games_played)
-             VALUES ($1, $2, $3, $4) RETURNING leaderboard_entry_id",
+            "INSERT INTO leaderboard_entries (leaderboard_id, season_id, battlesnake_id, display_score, games_played)
+             VALUES ($1, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1), $2, $3, $4) RETURNING leaderboard_entry_id",
         )
         .bind(board_id).bind(snake_id).bind(score).bind(games)
         .fetch_one(pool).await?;
+        crate::routes::test_support::register_snake_entries(pool, snake_id).await;
         Ok((snake_id, entry_id))
     }
 
@@ -315,7 +316,7 @@ mod tests {
         let user_id = user(&pool, 1, "entry-disabled").await?;
         let (_, entry_id) = entry(&pool, user_id, board(&pool).await?, 16.0, 10).await?;
         sqlx::query(
-            "UPDATE leaderboard_entries SET disabled_at = now() WHERE leaderboard_entry_id = $1",
+            "UPDATE leaderboard_registrations r SET disabled_at = now() FROM leaderboard_entries le WHERE le.leaderboard_entry_id = $1 AND r.leaderboard_id = le.leaderboard_id AND r.battlesnake_id = le.battlesnake_id",
         )
         .bind(entry_id)
         .execute(&pool)

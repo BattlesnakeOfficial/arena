@@ -1,0 +1,35 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT r.disabled_at IS NOT NULL AS \"disabled!\", r.disabled_reason\n             FROM leaderboard_registrations r\n             JOIN leaderboard_entries le\n               ON le.leaderboard_id = r.leaderboard_id AND le.battlesnake_id = r.battlesnake_id\n             WHERE le.leaderboard_entry_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "disabled!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "disabled_reason",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_registrations",
+            "name": "disabled_reason"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null,
+      true
+    ]
+  },
+  "hash": "080c656705e9ad9d4b64545bcc7aa5a20d52adf9a67b3f72dbba57a3ae43d300"
+}

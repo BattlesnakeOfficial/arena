@@ -26,16 +26,14 @@
 //! retries, and why there's no second "deactivated" stamp to drift out of sync
 //! (the DEV-710 bugs).
 //!
-//! **Transitional mirror (removed in DEV-2642 PR 2):** every mutation here
-//! copies the registration's full state onto that (league, snake)'s
-//! `leaderboard_entries` rows in the **same transaction**, so revisions that
-//! still read the entry columns stay correct during the rolling deploy. The
-//! mirror is consistency-critical: a failure aborts the mutation.
+//! Registrations are the only membership writer. The entry-side
+//! `disabled_at`/`disabled_reason`/`health_*` columns are inert leftovers
+//! from before seasons and nothing reads them for membership.
 
 use chrono::{DateTime, Utc};
 use color_eyre::eyre::Context as _;
 use serde::{Deserialize, Serialize};
-use sqlx::{Connection as _, FromRow, PgConnection, PgPool};
+use sqlx::{FromRow, PgConnection, PgPool};
 use uuid::Uuid;
 
 use crate::models::battlesnake::{DISABLED_REASON_DELETED, DISABLED_REASON_RETIRED};
@@ -80,68 +78,6 @@ pub struct HealthPausedLeague {
     pub last_failure: Option<String>,
 }
 
-/// Copy the registration's full state (membership plus all four health
-/// columns) onto that (league, snake)'s entry rows. Rows already in agreement
-/// are skipped, so they take no entry lock.
-///
-/// Transitional (DEV-2642 PR 1 only). **Must run in the same transaction as
-/// the registration mutation it follows**; errors propagate and abort it.
-async fn mirror_registration_state_to_entries(
-    connection: &mut PgConnection,
-    leaderboard_id: Uuid,
-    battlesnake_id: Uuid,
-) -> cja::Result<()> {
-    sqlx::query!(
-        r#"UPDATE leaderboard_entries le
-         SET (disabled_at, disabled_reason, health_consecutive_failures,
-              health_consecutive_successes, health_last_checked_at, health_last_failure)
-           = (r.disabled_at, r.disabled_reason, r.health_consecutive_failures,
-              r.health_consecutive_successes, r.health_last_checked_at, r.health_last_failure)
-         FROM leaderboard_registrations r
-         WHERE r.leaderboard_id = $1 AND r.battlesnake_id = $2
-           AND le.leaderboard_id = r.leaderboard_id AND le.battlesnake_id = r.battlesnake_id
-           AND (le.disabled_at, le.disabled_reason, le.health_consecutive_failures,
-                le.health_consecutive_successes, le.health_last_checked_at, le.health_last_failure)
-               IS DISTINCT FROM
-               (r.disabled_at, r.disabled_reason, r.health_consecutive_failures,
-                r.health_consecutive_successes, r.health_last_checked_at, r.health_last_failure)"#,
-        leaderboard_id,
-        battlesnake_id
-    )
-    .execute(connection)
-    .await
-    .wrap_err("Failed to mirror registration state to leaderboard entries")?;
-    Ok(())
-}
-
-/// [`mirror_registration_state_to_entries`] for every league the snake is
-/// registered in. Same transaction requirement.
-async fn mirror_snake_registrations_to_entries(
-    connection: &mut PgConnection,
-    battlesnake_id: Uuid,
-) -> cja::Result<()> {
-    sqlx::query!(
-        r#"UPDATE leaderboard_entries le
-         SET (disabled_at, disabled_reason, health_consecutive_failures,
-              health_consecutive_successes, health_last_checked_at, health_last_failure)
-           = (r.disabled_at, r.disabled_reason, r.health_consecutive_failures,
-              r.health_consecutive_successes, r.health_last_checked_at, r.health_last_failure)
-         FROM leaderboard_registrations r
-         WHERE r.battlesnake_id = $1
-           AND le.leaderboard_id = r.leaderboard_id AND le.battlesnake_id = r.battlesnake_id
-           AND (le.disabled_at, le.disabled_reason, le.health_consecutive_failures,
-                le.health_consecutive_successes, le.health_last_checked_at, le.health_last_failure)
-               IS DISTINCT FROM
-               (r.disabled_at, r.disabled_reason, r.health_consecutive_failures,
-                r.health_consecutive_successes, r.health_last_checked_at, r.health_last_failure)"#,
-        battlesnake_id
-    )
-    .execute(connection)
-    .await
-    .wrap_err("Failed to mirror snake registrations to leaderboard entries")?;
-    Ok(())
-}
-
 /// Register a snake in a league ("put this snake in rotation"). `Ok(None)` =
 /// the snake is missing, deleted or retired, or the registration is
 /// terminally marked `'deleted'`/`'retired'` (join refused); callers surface
@@ -153,16 +89,11 @@ async fn mirror_snake_registrations_to_entries(
 /// that's already in rotation changes nothing — an idempotent retry mustn't
 /// wipe a real failing streak.
 ///
-/// Opens its own transaction: upsert, mirror to entries, commit.
 pub async fn get_or_create_registration(
     pool: &PgPool,
     leaderboard_id: Uuid,
     battlesnake_id: Uuid,
 ) -> cja::Result<Option<LeaderboardRegistration>> {
-    let mut tx = pool
-        .begin()
-        .await
-        .wrap_err("Failed to begin leaderboard registration")?;
     // Selecting the snake FOR SHARE (instead of VALUES) refuses deleted and
     // retired snakes and serializes against `battlesnake::delete_battlesnake`
     // and `retire_battlesnake`'s row locks (the FK insert alone takes only
@@ -171,7 +102,7 @@ pub async fn get_or_create_registration(
     // READ COMMITTED re-checks only the locked relation's own predicates
     // against the committed row version (EvalPlanQual). A liveness check
     // anywhere else reads the pre-wait snapshot and lets the join through.
-    let registration = sqlx::query_as!(
+    sqlx::query_as!(
         LeaderboardRegistration,
         r#"INSERT INTO leaderboard_registrations (leaderboard_id, battlesnake_id)
          SELECT $1::uuid, b.battlesnake_id
@@ -205,17 +136,9 @@ pub async fn get_or_create_registration(
         DISABLED_REASON_DELETED,
         DISABLED_REASON_RETIRED
     )
-    .fetch_optional(&mut *tx)
+    .fetch_optional(pool)
     .await
-    .wrap_err("Failed to create or get leaderboard registration")?;
-
-    if registration.is_some() {
-        mirror_registration_state_to_entries(&mut tx, leaderboard_id, battlesnake_id).await?;
-    }
-    tx.commit()
-        .await
-        .wrap_err("Failed to commit leaderboard registration")?;
-    Ok(registration)
+    .wrap_err("Failed to create or get leaderboard registration")
 }
 
 /// A snake's registration in a league, whatever its state.
@@ -250,7 +173,7 @@ pub async fn get_registration(
 /// (`'deleted'`/`'retired'`) registrations are never touched, and a resume
 /// only happens for a live snake.
 ///
-/// One transaction per path; the entry mirror runs inside it.
+/// A resume holds the snake's liveness lock for its transaction.
 pub async fn set_registration_disabled(
     pool: &PgPool,
     leaderboard_id: Uuid,
@@ -273,7 +196,7 @@ pub async fn set_registration_disabled(
             return Ok(());
         }
     }
-    let updated = sqlx::query!(
+    sqlx::query!(
         r#"UPDATE leaderboard_registrations
          SET disabled_at = $3, disabled_reason = NULL
          WHERE leaderboard_id = $1 AND battlesnake_id = $2
@@ -288,9 +211,6 @@ pub async fn set_registration_disabled(
     .execute(&mut *tx)
     .await
     .wrap_err("Failed to update leaderboard registration disabled status")?;
-    if updated.rows_affected() > 0 {
-        mirror_registration_state_to_entries(&mut tx, leaderboard_id, battlesnake_id).await?;
-    }
     tx.commit()
         .await
         .wrap_err("Failed to commit registration pause/resume")?;
@@ -301,8 +221,7 @@ pub async fn set_registration_disabled(
 /// `reason` (retirement). Health streaks are untouched. Returns how many
 /// registrations it paused.
 ///
-/// Runs on the caller's lifecycle transaction and mirrors inside it. Unrelated
-/// to the tournament `withdrawn_registrations` count in `retire_battlesnake`.
+/// Runs on the caller's lifecycle transaction. Unrelated to the tournament `withdrawn_registrations` count in `retire_battlesnake`.
 pub async fn pause_registrations_for_snake(
     connection: &mut PgConnection,
     battlesnake_id: Uuid,
@@ -313,18 +232,17 @@ pub async fn pause_registrations_for_snake(
         battlesnake_id,
         reason
     )
-    .execute(&mut *connection)
+    .execute(connection)
     .await
     .wrap_err("Failed to pause snake's leaderboard registrations")?;
-    mirror_snake_registrations_to_entries(connection, battlesnake_id).await?;
     Ok(result.rows_affected())
 }
 
 /// Mark every registration of a deleted snake `'deleted'` (terminal), keeping
 /// an existing pause timestamp. Returns how many registrations it marked.
 ///
-/// Runs on the caller's lifecycle transaction (`delete_battlesnake`) and
-/// mirrors inside it. Unrelated to tournament registrations.
+/// Runs on the caller's lifecycle transaction (`delete_battlesnake`).
+/// Unrelated to tournament registrations.
 pub async fn mark_registrations_deleted_for_snake(
     connection: &mut PgConnection,
     battlesnake_id: Uuid,
@@ -338,10 +256,9 @@ pub async fn mark_registrations_deleted_for_snake(
         battlesnake_id,
         DISABLED_REASON_DELETED
     )
-    .execute(&mut *connection)
+    .execute(connection)
     .await
     .wrap_err("Failed to mark deleted snake's leaderboard registrations")?;
-    mirror_snake_registrations_to_entries(connection, battlesnake_id).await?;
     Ok(result.rows_affected())
 }
 
@@ -349,8 +266,7 @@ pub async fn mark_registrations_deleted_for_snake(
 /// with health streaks reset. Manual and health pauses are untouched. Returns
 /// how many registrations it resumed.
 ///
-/// Runs on the caller's lifecycle transaction and mirrors inside it. Unrelated
-/// to tournament registrations.
+/// Runs on the caller's lifecycle transaction. Unrelated to tournament registrations.
 pub async fn resume_registrations_for_snake(
     connection: &mut PgConnection,
     battlesnake_id: Uuid,
@@ -361,48 +277,32 @@ pub async fn resume_registrations_for_snake(
         battlesnake_id,
         reason
     )
-    .execute(&mut *connection)
+    .execute(connection)
     .await
     .wrap_err("Failed to resume snake's leaderboard registrations")?;
-    mirror_snake_registrations_to_entries(connection, battlesnake_id).await?;
     Ok(result.rows_affected())
 }
 
 /// Record a passing probe of a registration in matchmaking: the failure
 /// streak starts over. `checked_at` is when the sweep started (the evidence
 /// cursor: bad turns after it will be looked at next sweep).
-///
-/// Mirrors to entries in one transaction (a savepoint when the caller's
-/// connection is already in one).
 pub async fn record_success(
     connection: &mut PgConnection,
     leaderboard_registration_id: Uuid,
     checked_at: DateTime<Utc>,
 ) -> cja::Result<()> {
-    let mut tx = connection
-        .begin()
-        .await
-        .wrap_err("Failed to begin health success")?;
-    let row = sqlx::query!(
+    sqlx::query!(
         r#"UPDATE leaderboard_registrations
          SET health_consecutive_failures = 0,
              health_last_failure = NULL,
              health_last_checked_at = $2
-         WHERE leaderboard_registration_id = $1 AND disabled_at IS NULL
-         RETURNING leaderboard_id, battlesnake_id"#,
+         WHERE leaderboard_registration_id = $1 AND disabled_at IS NULL"#,
         leaderboard_registration_id,
         checked_at,
     )
-    .fetch_optional(&mut *tx)
+    .execute(connection)
     .await
     .wrap_err("Failed to record registration health success")?;
-    if let Some(row) = row {
-        mirror_registration_state_to_entries(&mut tx, row.leaderboard_id, row.battlesnake_id)
-            .await?;
-    }
-    tx.commit()
-        .await
-        .wrap_err("Failed to commit health success")?;
     Ok(())
 }
 
@@ -415,18 +315,12 @@ pub async fn record_success(
 /// or concurrent sweeps update the failure text but don't inflate the
 /// streak, keeping "N consecutive failures" meaning N separate sweep windows
 /// (~N × 30 min), as the threshold design assumes.
-///
-/// Mirrors to entries in the same transaction.
 pub async fn record_failure(
     connection: &mut PgConnection,
     leaderboard_registration_id: Uuid,
     failure_summary: &str,
     checked_at: DateTime<Utc>,
 ) -> cja::Result<Option<i32>> {
-    let mut tx = connection
-        .begin()
-        .await
-        .wrap_err("Failed to begin health failure")?;
     let row = sqlx::query!(
         r#"UPDATE leaderboard_registrations
          SET health_consecutive_failures = CASE
@@ -438,27 +332,16 @@ pub async fn record_failure(
              health_last_failure = $2,
              health_last_checked_at = $3
          WHERE leaderboard_registration_id = $1 AND disabled_at IS NULL
-         RETURNING leaderboard_id, battlesnake_id, health_consecutive_failures"#,
+         RETURNING health_consecutive_failures"#,
         leaderboard_registration_id,
         failure_summary,
         checked_at,
         PROBE_COUNT_SPACING_MINUTES,
     )
-    .fetch_optional(&mut *tx)
+    .fetch_optional(connection)
     .await
     .wrap_err("Failed to record registration health failure")?;
-    let failures = match row {
-        Some(row) => {
-            mirror_registration_state_to_entries(&mut tx, row.leaderboard_id, row.battlesnake_id)
-                .await?;
-            Some(row.health_consecutive_failures)
-        }
-        None => None,
-    };
-    tx.commit()
-        .await
-        .wrap_err("Failed to commit health failure")?;
-    Ok(failures)
+    Ok(row.map(|row| row.health_consecutive_failures))
 }
 
 /// Record a passing probe of a health-paused registration and return the
@@ -466,17 +349,11 @@ pub async fn record_failure(
 /// health-paused any more (the owner resumed it meanwhile). Spacing-gated
 /// like [`record_failure`], so piled-up sweeps can't fake a recovery in
 /// minutes.
-///
-/// Mirrors to entries in the same transaction.
 pub async fn record_recovery_success(
     connection: &mut PgConnection,
     leaderboard_registration_id: Uuid,
     checked_at: DateTime<Utc>,
 ) -> cja::Result<Option<i32>> {
-    let mut tx = connection
-        .begin()
-        .await
-        .wrap_err("Failed to begin recovery success")?;
     let row = sqlx::query!(
         r#"UPDATE leaderboard_registrations
          SET health_consecutive_successes = CASE
@@ -487,66 +364,41 @@ pub async fn record_recovery_success(
              END,
              health_last_checked_at = $2
          WHERE leaderboard_registration_id = $1 AND disabled_reason = $4
-         RETURNING leaderboard_id, battlesnake_id, health_consecutive_successes"#,
+         RETURNING health_consecutive_successes"#,
         leaderboard_registration_id,
         checked_at,
         PROBE_COUNT_SPACING_MINUTES,
         DISABLED_REASON_HEALTH,
     )
-    .fetch_optional(&mut *tx)
+    .fetch_optional(connection)
     .await
     .wrap_err("Failed to record registration recovery success")?;
-    let successes = match row {
-        Some(row) => {
-            mirror_registration_state_to_entries(&mut tx, row.leaderboard_id, row.battlesnake_id)
-                .await?;
-            Some(row.health_consecutive_successes)
-        }
-        None => None,
-    };
-    tx.commit()
-        .await
-        .wrap_err("Failed to commit recovery success")?;
-    Ok(successes)
+    Ok(row.map(|row| row.health_consecutive_successes))
 }
 
 /// Record a failed probe of a health-paused registration: the recovery
 /// streak starts over. No spacing gate — any failure genuinely breaks the
 /// streak.
-///
-/// Mirrors to entries in the same transaction.
 pub async fn record_recovery_failure(
     connection: &mut PgConnection,
     leaderboard_registration_id: Uuid,
     failure_summary: &str,
     checked_at: DateTime<Utc>,
 ) -> cja::Result<()> {
-    let mut tx = connection
-        .begin()
-        .await
-        .wrap_err("Failed to begin recovery failure")?;
-    let row = sqlx::query!(
+    sqlx::query!(
         r#"UPDATE leaderboard_registrations
          SET health_consecutive_successes = 0,
              health_last_failure = $2,
              health_last_checked_at = $3
-         WHERE leaderboard_registration_id = $1 AND disabled_reason = $4
-         RETURNING leaderboard_id, battlesnake_id"#,
+         WHERE leaderboard_registration_id = $1 AND disabled_reason = $4"#,
         leaderboard_registration_id,
         failure_summary,
         checked_at,
         DISABLED_REASON_HEALTH,
     )
-    .fetch_optional(&mut *tx)
+    .execute(connection)
     .await
     .wrap_err("Failed to record registration recovery failure")?;
-    if let Some(row) = row {
-        mirror_registration_state_to_entries(&mut tx, row.leaderboard_id, row.battlesnake_id)
-            .await?;
-    }
-    tx.commit()
-        .await
-        .wrap_err("Failed to commit recovery failure")?;
     Ok(())
 }
 
@@ -557,39 +409,24 @@ pub async fn record_recovery_failure(
 /// transition; the caller emails the owner exactly on that `true`, which
 /// keeps a re-entrant job from emailing twice. A registration that's already
 /// disabled (by the owner, or a deleted snake) is left alone.
-///
-/// Mirrors to entries in the same transaction.
 pub async fn deactivate(
     connection: &mut PgConnection,
     leaderboard_registration_id: Uuid,
 ) -> cja::Result<bool> {
-    let mut tx = connection
-        .begin()
-        .await
-        .wrap_err("Failed to begin health deactivation")?;
-    let row = sqlx::query!(
+    let result = sqlx::query!(
         r#"UPDATE leaderboard_registrations
          SET disabled_at = NOW(),
              disabled_reason = $2,
              health_consecutive_successes = 0,
              updated_at = NOW()
-         WHERE leaderboard_registration_id = $1 AND disabled_at IS NULL
-         RETURNING leaderboard_id, battlesnake_id"#,
+         WHERE leaderboard_registration_id = $1 AND disabled_at IS NULL"#,
         leaderboard_registration_id,
         DISABLED_REASON_HEALTH
     )
-    .fetch_optional(&mut *tx)
+    .execute(connection)
     .await
     .wrap_err("Failed to pull leaderboard registration from matchmaking")?;
-    let flipped = row.is_some();
-    if let Some(row) = row {
-        mirror_registration_state_to_entries(&mut tx, row.leaderboard_id, row.battlesnake_id)
-            .await?;
-    }
-    tx.commit()
-        .await
-        .wrap_err("Failed to commit health deactivation")?;
-    Ok(flipped)
+    Ok(result.rows_affected() > 0)
 }
 
 /// Put a health-paused registration back into matchmaking with both streaks
@@ -598,17 +435,11 @@ pub async fn deactivate(
 /// Returns `true` only when this call performed the paused -> enabled
 /// transition; the sweeper sends the "back in matchmaking" email exactly on
 /// that `true`.
-///
-/// Mirrors to entries in the same transaction.
 pub async fn reactivate(
     connection: &mut PgConnection,
     leaderboard_registration_id: Uuid,
 ) -> cja::Result<bool> {
-    let mut tx = connection
-        .begin()
-        .await
-        .wrap_err("Failed to begin health reactivation")?;
-    let row = sqlx::query!(
+    let result = sqlx::query!(
         r#"UPDATE leaderboard_registrations
          SET disabled_at = NULL,
              disabled_reason = NULL,
@@ -616,29 +447,20 @@ pub async fn reactivate(
              health_consecutive_successes = 0,
              health_last_failure = NULL,
              updated_at = NOW()
-         WHERE leaderboard_registration_id = $1 AND disabled_reason = $2
-         RETURNING leaderboard_id, battlesnake_id"#,
+         WHERE leaderboard_registration_id = $1 AND disabled_reason = $2"#,
         leaderboard_registration_id,
         DISABLED_REASON_HEALTH
     )
-    .fetch_optional(&mut *tx)
+    .execute(connection)
     .await
     .wrap_err("Failed to put leaderboard registration back into matchmaking")?;
-    let flipped = row.is_some();
-    if let Some(row) = row {
-        mirror_registration_state_to_entries(&mut tx, row.leaderboard_id, row.battlesnake_id)
-            .await?;
-    }
-    tx.commit()
-        .await
-        .wrap_err("Failed to commit health reactivation")?;
-    Ok(flipped)
+    Ok(result.rows_affected() > 0)
 }
 
 /// The owner's Resume Matchmaking: [`reactivate`] every one of the snake's
 /// health-paused registrations. Returns how many were resumed.
 ///
-/// One transaction: snake liveness lock, update, mirror.
+/// One transaction: snake liveness lock, then the update.
 pub async fn reactivate_snake(pool: &PgPool, battlesnake_id: Uuid) -> cja::Result<u64> {
     let mut tx = pool
         .begin()
@@ -669,7 +491,6 @@ pub async fn reactivate_snake(pool: &PgPool, battlesnake_id: Uuid) -> cja::Resul
     .execute(&mut *tx)
     .await
     .wrap_err("Failed to put snake back into matchmaking")?;
-    mirror_snake_registrations_to_entries(&mut tx, battlesnake_id).await?;
     tx.commit()
         .await
         .wrap_err("Failed to commit snake reactivation")?;
@@ -1126,66 +947,30 @@ mod tests {
         .unwrap()
     }
 
-    async fn entry_columns(pool: &PgPool, registration_id: Uuid) -> SixColumns {
+    async fn entry_columns(pool: &PgPool, entry_id: Uuid) -> SixColumns {
         sqlx::query_as(
-            "SELECT le.disabled_at, le.disabled_reason, le.health_consecutive_failures,
-                    le.health_consecutive_successes, le.health_last_checked_at, le.health_last_failure
-             FROM leaderboard_entries le
-             JOIN leaderboard_registrations r
-               ON r.leaderboard_id = le.leaderboard_id AND r.battlesnake_id = le.battlesnake_id
-             WHERE r.leaderboard_registration_id = $1",
+            "SELECT disabled_at, disabled_reason, health_consecutive_failures,
+                    health_consecutive_successes, health_last_checked_at, health_last_failure
+             FROM leaderboard_entries WHERE leaderboard_entry_id = $1",
         )
-        .bind(registration_id)
+        .bind(entry_id)
         .fetch_one(pool)
         .await
         .unwrap()
     }
 
-    /// Every mutation mirrors the registration onto its entry, the sync
-    /// trigger writes the same values back, and a second mirror is a no-op.
+    /// Registrations are the only membership writer: a health pause lands on
+    /// the registration and leaves the entry's inert columns untouched, and
+    /// an entry-side write no longer reaches the registration (DEV-2642 PR 2
+    /// dropped the mirror and the sync trigger).
     #[sqlx::test(migrations = "../migrations")]
-    async fn mirror_and_sync_trigger_round_trip_is_idempotent(pool: PgPool) -> cja::Result<()> {
+    async fn registration_and_entry_membership_columns_are_decoupled(
+        pool: PgPool,
+    ) -> cja::Result<()> {
         let user_id = create_user(&pool, 9010).await?;
-        let snake_id = create_snake(&pool, user_id, "mirrored").await?;
+        let snake_id = create_snake(&pool, user_id, "decoupled").await?;
         let leaderboard_id = sqlx::query_scalar!(
-            "INSERT INTO leaderboards (name) VALUES ('mirror') RETURNING leaderboard_id"
-        )
-        .fetch_one(&pool)
-        .await?;
-        crate::models::leaderboard::get_or_create_entry(&pool, leaderboard_id, snake_id)
-            .await?
-            .expect("entry");
-        let registration = get_registration(&pool, leaderboard_id, snake_id)
-            .await?
-            .expect("registration")
-            .leaderboard_registration_id;
-
-        let t0 = Utc::now();
-        record_failure(&mut *pool.acquire().await?, registration, "timeout", t0).await?;
-        assert!(deactivate(&mut *pool.acquire().await?, registration).await?);
-        let after = registration_columns(&pool, registration).await;
-        assert_eq!(after.1.as_deref(), Some(DISABLED_REASON_HEALTH));
-        assert_eq!(after.2, 1);
-        assert_eq!(after.5.as_deref(), Some("timeout"));
-        assert_eq!(entry_columns(&pool, registration).await, after, "mirrored");
-
-        let mut tx = pool.begin().await?;
-        mirror_registration_state_to_entries(&mut tx, leaderboard_id, snake_id).await?;
-        tx.commit().await?;
-        assert_eq!(registration_columns(&pool, registration).await, after);
-        assert_eq!(entry_columns(&pool, registration).await, after);
-        Ok(())
-    }
-
-    /// A pre-PR1 revision's re-enable writes only the entry (the old
-    /// `get_or_create_entry` DO UPDATE shape); the sync trigger carries it to
-    /// the registration, streaks included.
-    #[sqlx::test(migrations = "../migrations")]
-    async fn old_revision_entry_reenable_reaches_the_registration(pool: PgPool) -> cja::Result<()> {
-        let user_id = create_user(&pool, 9011).await?;
-        let snake_id = create_snake(&pool, user_id, "old-rev").await?;
-        let leaderboard_id = sqlx::query_scalar!(
-            "INSERT INTO leaderboards (name) VALUES ('old-rev') RETURNING leaderboard_id"
+            "INSERT INTO leaderboards (name) VALUES ('decoupled') RETURNING leaderboard_id"
         )
         .fetch_one(&pool)
         .await?;
@@ -1197,33 +982,37 @@ mod tests {
             .await?
             .expect("registration")
             .leaderboard_registration_id;
-        record_failure(
-            &mut *pool.acquire().await?,
-            registration,
-            "down",
-            Utc::now(),
-        )
-        .await?;
+        let entry_before = entry_columns(&pool, entry.leaderboard_entry_id).await;
+
+        let t0 = Utc::now();
+        record_failure(&mut *pool.acquire().await?, registration, "timeout", t0).await?;
         assert!(deactivate(&mut *pool.acquire().await?, registration).await?);
-        let paused = state(&pool, registration).await?;
-        assert!(paused.disabled);
-        assert_eq!(paused.failures, 1);
+        let after = registration_columns(&pool, registration).await;
+        assert!(after.0.is_some());
+        assert_eq!(after.1.as_deref(), Some(DISABLED_REASON_HEALTH));
+        assert_eq!(after.2, 1);
+        assert_eq!(after.5.as_deref(), Some("timeout"));
+        assert_eq!(
+            entry_columns(&pool, entry.leaderboard_entry_id).await,
+            entry_before,
+            "entry columns untouched by registration writes"
+        );
+        assert_eq!(entry_before, (None, None, 0, 0, None, None));
 
         sqlx::query(
             "UPDATE leaderboard_entries
-             SET disabled_at = NULL, disabled_reason = NULL, updated_at = NOW(),
-                 health_consecutive_failures = 0, health_consecutive_successes = 0,
-                 health_last_failure = NULL
+             SET disabled_at = NULL, disabled_reason = NULL,
+                 health_consecutive_failures = 0, health_last_failure = NULL
              WHERE leaderboard_entry_id = $1",
         )
         .bind(entry.leaderboard_entry_id)
         .execute(&pool)
         .await?;
-        let after = state(&pool, registration).await?;
-        assert!(!after.disabled);
-        assert_eq!(after.reason, None);
-        assert_eq!((after.failures, after.successes), (0, 0));
-        assert!(after.last_failure.is_none());
+        assert_eq!(
+            registration_columns(&pool, registration).await,
+            after,
+            "entry writes no longer reach the registration"
+        );
         Ok(())
     }
 }

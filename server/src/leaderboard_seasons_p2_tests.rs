@@ -1,12 +1,10 @@
-//! Arena seasons phase 2, PR 1 (DEV-2660): league registrations and
+//! Arena seasons phase 2 (DEV-2660, DEV-2661): league registrations and
 //! season-aware matchmaking, dispatch, ratings and membership, end to end.
 //!
-//! PR 1 tests are single-season by constraint: while
-//! `leaderboard_entries_leaderboard_id_battlesnake_id_key` exists, a
-//! (league, snake) holds at most one entry across seasons. Any test that
-//! activates a non-Preseason season uses the gap-join arrangement: end the
-//! Preseason, join during the gap (registration only), then start the season
-//! so the lazy ensure creates each snake's first entry.
+//! PR 1's tests used the gap-join arrangement (end the Preseason, join during
+//! the gap, then start the season) because the (league, snake) entry
+//! constraint allowed one entry across seasons. PR 2 dropped that
+//! constraint, so a (league, snake) now holds one entry per season.
 
 use axum::{
     body::{Body, to_bytes},
@@ -616,7 +614,15 @@ async fn leave_and_rejoin_keep_the_season_entry(pool: PgPool) {
         (kept.mu, kept.display_score, kept.games_played),
         (31.5, 12.25, 7)
     );
-    assert!(kept.disabled_at.is_some(), "mirrored to the entry");
+    assert!(
+        leaderboard_registration::get_registration(&pool, lb, p.snakes[0])
+            .await
+            .unwrap()
+            .unwrap()
+            .disabled_at
+            .is_some(),
+        "the leave lands on the registration"
+    );
 
     let res = post_json(
         &state,
@@ -654,6 +660,101 @@ async fn leave_and_rejoin_keep_the_season_entry(pool: PgPool) {
     .await;
     assert_eq!(res.status, StatusCode::NOT_FOUND);
     assert!(res.body.contains("Snake is not in this leaderboard"));
+}
+
+/// Leaving in the Preseason and rejoining in Season 1 starts a fresh entry
+/// at default ratings; the Preseason entry keeps its history.
+#[sqlx::test(migrations = "../migrations")]
+async fn later_season_rejoin_starts_a_fresh_entry(pool: PgPool) {
+    let state = AppState::test_from_pool(pool.clone());
+    let p = player(&pool, 9_266_101).await;
+    let lb = league(&pool, "Later Season Rejoin").await;
+    let old = leaderboard::get_or_create_entry(&pool, lb, p.snakes[0])
+        .await
+        .unwrap()
+        .unwrap();
+    sqlx::query(
+        "UPDATE leaderboard_entries SET mu = 31.5, sigma = 6.5, display_score = 12.25, games_played = 7 WHERE leaderboard_entry_id = $1",
+    )
+    .bind(old.leaderboard_entry_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let api_path = format!("/api/leaderboards/{lb}/entries/{}", p.snakes[0]);
+    let res = send(&state, "DELETE", &api_path, p.session, None).await;
+    assert_eq!(res.status, StatusCode::NO_CONTENT, "{}", res.body);
+
+    end_open_seasons(&pool, lb).await;
+    let season_one = start_season(&pool, lb, "Season 1").await;
+
+    let res = post_json(
+        &state,
+        &format!("/api/leaderboards/{lb}/entries"),
+        p.session,
+        serde_json::json!({ "battlesnake_id": p.snakes[0] }),
+    )
+    .await;
+    assert_eq!(res.status, StatusCode::CREATED, "{}", res.body);
+    let json: serde_json::Value = serde_json::from_str(&res.body).unwrap();
+    let fresh_id: Uuid = json["leaderboard_entry_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_ne!(fresh_id, old.leaderboard_entry_id);
+    assert_eq!(json["display_score"], 0.0);
+    assert_eq!(json["games_played"], 0);
+    assert_eq!(json["active"], true);
+    let fresh = leaderboard::get_entry_by_id(&pool, fresh_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((fresh.mu, fresh.games_played), (25.0, 0));
+    let fresh_season: Uuid = sqlx::query_scalar(
+        "SELECT season_id FROM leaderboard_entries WHERE leaderboard_entry_id = $1",
+    )
+    .bind(fresh_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(fresh_season, season_one);
+    assert_eq!(
+        leaderboard::get_entry(&pool, lb, p.snakes[0])
+            .await
+            .unwrap()
+            .unwrap()
+            .leaderboard_entry_id,
+        fresh_id,
+        "get_entry resolves the active season's entry"
+    );
+    let kept = leaderboard::get_entry_by_id(&pool, old.leaderboard_entry_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (kept.mu, kept.sigma, kept.display_score, kept.games_played),
+        (31.5, 6.5, 12.25, 7)
+    );
+    assert!(
+        leaderboard_registration::get_registration(&pool, lb, p.snakes[0])
+            .await
+            .unwrap()
+            .unwrap()
+            .disabled_at
+            .is_none(),
+        "the rejoin re-enables the one registration"
+    );
+
+    // Rejoining again in the same season returns the same Season 1 entry.
+    let res = post_json(
+        &state,
+        &format!("/api/leaderboards/{lb}/entries"),
+        p.session,
+        serde_json::json!({ "battlesnake_id": p.snakes[0] }),
+    )
+    .await;
+    let json: serde_json::Value = serde_json::from_str(&res.body).unwrap();
+    assert_eq!(json["leaderboard_entry_id"], fresh_id.to_string());
 }
 
 /// A disabled league refuses joins and isn't matched, even with an active

@@ -27,7 +27,9 @@ test.describe('Live refresh fallback', () => {
          VALUES ('11x11', 'Standard', 'running') RETURNING game_id`
       );
       gameId = game.game_id;
-      await query('INSERT INTO leaderboard_games (leaderboard_id, game_id) VALUES ($1, $2)', [
+      await query(
+        `INSERT INTO leaderboard_games (leaderboard_id, game_id, season_id)
+         VALUES ($1, $2, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1))`, [
         leaderboardId,
         gameId,
       ]);

@@ -564,9 +564,10 @@ mod tests {
         .await
         .unwrap();
         let entry_id = sqlx::query_scalar!(
-            "INSERT INTO leaderboard_entries(leaderboard_id, battlesnake_id) VALUES ($1, $2) RETURNING leaderboard_entry_id",
+            "INSERT INTO leaderboard_entries(leaderboard_id, season_id, battlesnake_id) VALUES ($1, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1), $2) RETURNING leaderboard_entry_id",
             leaderboard_id, s2
         ).fetch_one(&db).await.unwrap();
+        crate::routes::test_support::register_snake_entries(&db, s2).await;
         let tournament_id = sqlx::query_scalar!(
             "INSERT INTO tournaments(name, user_id) VALUES ('Test', $1) RETURNING tournament_id",
             u1
@@ -592,7 +593,7 @@ mod tests {
             "INSERT INTO games(board_size, game_type, status, created_at) VALUES ('11x11', 'Standard', 'finished', '2026-09-27 23:59:59+00') RETURNING game_id"
         ).fetch_one(&db).await.unwrap();
         sqlx::query!(
-            "INSERT INTO leaderboard_games(leaderboard_id, game_id) VALUES ($1, $2), ($1, $3)",
+            "INSERT INTO leaderboard_games(leaderboard_id, game_id, season_id) SELECT $1, g, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1) FROM unnest(ARRAY[$2::uuid, $3::uuid]) AS g",
             leaderboard_id,
             leaderboard,
             double_linked

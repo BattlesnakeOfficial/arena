@@ -2324,14 +2324,15 @@ mod deleted_snake_route_tests {
         .await
         .unwrap();
         let entry_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id)
-             VALUES ($1, $2) RETURNING leaderboard_entry_id",
+            "INSERT INTO leaderboard_entries (leaderboard_id, season_id, battlesnake_id)
+             VALUES ($1, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1), $2) RETURNING leaderboard_entry_id",
         )
         .bind(leaderboard_id)
         .bind(snake)
         .fetch_one(&pool)
         .await
         .unwrap();
+        crate::routes::test_support::register_snake_entries(&pool, snake).await;
         assert_eq!(
             battlesnake::delete_battlesnake(&pool, snake, owner)
                 .await
@@ -2517,15 +2518,18 @@ mod profile_page_tests {
         async fn deactivate(&self) {
             sqlx::query(
                 "INSERT INTO leaderboard_entries
-                     (leaderboard_id, battlesnake_id, disabled_at, disabled_reason,
+                     (leaderboard_id, season_id, battlesnake_id, disabled_at, disabled_reason,
                       health_consecutive_failures, health_last_failure)
-                 SELECT leaderboard_id, $1, NOW(), 'health', 4, 'POST /move timed out'
+                 SELECT leaderboard_id,
+                        (SELECT season_id FROM leaderboard_seasons s WHERE s.leaderboard_id = leaderboards.leaderboard_id),
+                        $1, NOW(), 'health', 4, 'POST /move timed out'
                  FROM leaderboards ORDER BY created_at, leaderboard_id LIMIT 1",
             )
             .bind(self.snake_id)
             .execute(&self.db)
             .await
             .unwrap();
+            crate::routes::test_support::register_snake_entries(&self.db, self.snake_id).await;
         }
     }
 
@@ -2826,13 +2830,15 @@ mod profile_page_tests {
             .unwrap();
         }
         sqlx::query(
-            "INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id)
-             SELECT leaderboard_id, $1 FROM leaderboards WHERE name = 'Joined Private'",
+            "INSERT INTO leaderboard_entries (leaderboard_id, season_id, battlesnake_id)
+             SELECT leaderboard_id, (SELECT season_id FROM leaderboard_seasons s WHERE s.leaderboard_id = leaderboards.leaderboard_id), $1
+             FROM leaderboards WHERE name = 'Joined Private'",
         )
         .bind(fx.snake_id)
         .execute(&fx.db)
         .await
         .unwrap();
+        crate::routes::test_support::register_snake_entries(&fx.db, fx.snake_id).await;
 
         let (status, _) = fx.post(fx.visitor_session, "test").await;
         assert_eq!(status, StatusCode::FORBIDDEN);
@@ -2875,14 +2881,16 @@ mod profile_page_tests {
         assert!(empty.contains("No games played yet."));
         assert!(!empty.contains("class=\"pager\""));
         let entry_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id, games_played)
-             SELECT leaderboard_id, $1, 7 FROM leaderboards ORDER BY created_at LIMIT 1
+            "INSERT INTO leaderboard_entries (leaderboard_id, season_id, battlesnake_id, games_played)
+             SELECT leaderboard_id, (SELECT season_id FROM leaderboard_seasons s WHERE s.leaderboard_id = leaderboards.leaderboard_id), $1, 7
+             FROM leaderboards ORDER BY created_at LIMIT 1
              RETURNING leaderboard_entry_id",
         )
         .bind(fx.snake_id)
         .fetch_one(&fx.db)
         .await
         .unwrap();
+        crate::routes::test_support::register_snake_entries(&fx.db, fx.snake_id).await;
         sqlx::query(
             "INSERT INTO games (game_id, board_size, game_type, status, created_at)
              SELECT md5('profile-route-' || n)::uuid, '11x11', 'Standard', 'finished',
@@ -3111,8 +3119,9 @@ mod profile_page_tests {
         .unwrap();
         let game_battlesnake_id: Uuid = sqlx::query_scalar(
             "WITH entry AS (
-                 INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id)
-                 SELECT leaderboard_id, $2 FROM leaderboards ORDER BY created_at LIMIT 1
+                 INSERT INTO leaderboard_entries (leaderboard_id, season_id, battlesnake_id)
+                 SELECT leaderboard_id, (SELECT season_id FROM leaderboard_seasons s WHERE s.leaderboard_id = leaderboards.leaderboard_id), $2
+                 FROM leaderboards ORDER BY created_at LIMIT 1
                  RETURNING leaderboard_entry_id
              )
              INSERT INTO game_battlesnakes (game_id, leaderboard_entry_id)
@@ -3124,6 +3133,7 @@ mod profile_page_tests {
         .fetch_one(&fx.db)
         .await
         .unwrap();
+        crate::routes::test_support::register_snake_entries(&fx.db, fx.snake_id).await;
         for (turn, latency) in [(0, Some(40)), (1, Some(60)), (2, None)] {
             let turn_id: Uuid = sqlx::query_scalar(
                 "INSERT INTO turns (game_id, turn_number) VALUES ($1, $2) RETURNING turn_id",

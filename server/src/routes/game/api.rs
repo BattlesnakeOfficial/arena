@@ -1670,7 +1670,7 @@ mod tests {
         )
         .fetch_one(&pool)
         .await?;
-        sqlx::query("INSERT INTO leaderboard_games (leaderboard_id, game_id) VALUES ($1, $2)")
+        sqlx::query("INSERT INTO leaderboard_games (leaderboard_id, game_id, season_id) VALUES ($1, $2, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1))")
             .bind(leaderboard_id)
             .bind(game_id)
             .execute(&pool)
