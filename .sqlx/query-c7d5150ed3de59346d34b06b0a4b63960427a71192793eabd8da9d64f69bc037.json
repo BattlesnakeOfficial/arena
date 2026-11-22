@@ -1,0 +1,77 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT r.leaderboard_registration_id,\n                  l.name AS leaderboard_name,\n                  r.disabled_at AS \"paused_at!\",\n                  r.health_consecutive_failures AS consecutive_failures,\n                  r.health_last_failure AS last_failure\n         FROM leaderboard_registrations r\n         JOIN leaderboards l ON l.leaderboard_id = r.leaderboard_id\n         WHERE r.battlesnake_id = $1\n           AND r.disabled_reason = $2\n           AND r.disabled_at IS NOT NULL\n           AND l.disabled_at IS NULL\n         ORDER BY r.disabled_at, l.name",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "leaderboard_registration_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_registrations",
+            "name": "leaderboard_registration_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "leaderboard_name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "leaderboards",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "paused_at!",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_registrations",
+            "name": "disabled_at"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "consecutive_failures",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_registrations",
+            "name": "health_consecutive_failures"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "last_failure",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_registrations",
+            "name": "health_last_failure"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "c7d5150ed3de59346d34b06b0a4b63960427a71192793eabd8da9d64f69bc037"
+}

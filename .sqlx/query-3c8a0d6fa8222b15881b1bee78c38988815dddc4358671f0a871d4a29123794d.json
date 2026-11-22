@@ -1,0 +1,206 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n                    le.leaderboard_entry_id,\n                    le.battlesnake_id,\n                    b.user_id,\n                    le.display_score,\n                    le.games_played,\n                    le.first_place_finishes,\n                    le.non_first_finishes,\n                    le.mu,\n                    le.sigma,\n                    b.name as snake_name,\n                    b.color as snake_color,\n                    b.head as snake_head,\n                    b.tail as snake_tail,\n                    u.github_login as owner_login,\n                    COALESCE(NULLIF(u.display_name, ''), u.github_login) AS \"owner_name!\",\n                    u.country as owner_country\n                 FROM leaderboard_entries le\n                 JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id\n                 JOIN users u ON b.user_id = u.user_id\n                 JOIN leaderboard_registrations lr ON lr.leaderboard_id = le.leaderboard_id AND lr.battlesnake_id = le.battlesnake_id\n                 WHERE le.leaderboard_id = $1\n                   AND lr.disabled_at IS NULL\n                   AND le.games_played >= $2\n                 ORDER BY le.display_score DESC\n                 LIMIT $3 OFFSET $4",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "leaderboard_entry_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_entries",
+            "name": "leaderboard_entry_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "battlesnake_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_entries",
+            "name": "battlesnake_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "user_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "battlesnakes",
+            "name": "user_id"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "display_score",
+        "type_info": "Float8",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_entries",
+            "name": "display_score"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "games_played",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_entries",
+            "name": "games_played"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "first_place_finishes",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_entries",
+            "name": "first_place_finishes"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "non_first_finishes",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_entries",
+            "name": "non_first_finishes"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "mu",
+        "type_info": "Float8",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_entries",
+            "name": "mu"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "sigma",
+        "type_info": "Float8",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_entries",
+            "name": "sigma"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "snake_name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "battlesnakes",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "snake_color",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "battlesnakes",
+            "name": "color"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "snake_head",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "battlesnakes",
+            "name": "head"
+          }
+        }
+      },
+      {
+        "ordinal": 12,
+        "name": "snake_tail",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "battlesnakes",
+            "name": "tail"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
+        "name": "owner_login",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "github_login"
+          }
+        }
+      },
+      {
+        "ordinal": 14,
+        "name": "owner_name!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 15,
+        "name": "owner_country",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "country"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      null,
+      false
+    ]
+  },
+  "hash": "3c8a0d6fa8222b15881b1bee78c38988815dddc4358671f0a871d4a29123794d"
+}

@@ -36,7 +36,7 @@ pub async fn update_ratings(app_state: &AppState, leaderboard_game_id: Uuid) -> 
 
     // Fetch the leaderboard game (outside transaction — immutable data)
     let lb_game = sqlx::query_as::<_, LeaderboardGame>(
-        "SELECT leaderboard_game_id, leaderboard_id, game_id, created_at
+        "SELECT leaderboard_game_id, leaderboard_id, game_id, season_id, created_at
          FROM leaderboard_games
          WHERE leaderboard_game_id = $1",
     )
@@ -125,14 +125,18 @@ pub async fn update_ratings(app_state: &AppState, leaderboard_game_id: Uuid) -> 
                     format!("Failed to get leaderboard entry {entry_id} for update")
                 })?
         } else {
-            leaderboard::get_entry_for_update(&mut *tx, lb_game.leaderboard_id, gs.battlesnake_id)
-                .await
-                .wrap_err_with(|| {
-                    format!(
-                        "Failed to get leaderboard entry for snake {}",
-                        gs.battlesnake_id
-                    )
-                })?
+            leaderboard::get_entry_for_update_by_season_snake(
+                &mut *tx,
+                lb_game.season_id,
+                gs.battlesnake_id,
+            )
+            .await
+            .wrap_err_with(|| {
+                format!(
+                    "Failed to get leaderboard entry for snake {}",
+                    gs.battlesnake_id
+                )
+            })?
         };
 
         if let Some(entry) = entry {

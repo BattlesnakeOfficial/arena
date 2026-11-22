@@ -1,0 +1,91 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n            r.battlesnake_id,\n            r.leaderboard_registration_id,\n            r.disabled_at,\n            r.disabled_reason,\n            le.leaderboard_entry_id AS \"leaderboard_entry_id?\",\n            COALESCE(le.display_score, 0.0) AS \"display_score!\",\n            COALESCE(le.games_played, 0) AS \"games_played!\"\n         FROM leaderboard_registrations r\n         JOIN battlesnakes b ON b.battlesnake_id = r.battlesnake_id\n         LEFT JOIN leaderboard_seasons s\n           ON s.leaderboard_id = r.leaderboard_id\n          AND s.starts_at <= clock_timestamp()\n          AND (s.ends_at IS NULL OR clock_timestamp() < s.ends_at)\n         LEFT JOIN leaderboard_entries le\n           ON le.season_id = s.season_id AND le.battlesnake_id = r.battlesnake_id\n         WHERE r.leaderboard_id = $1 AND b.user_id = $2 AND b.deleted_at IS NULL\n         ORDER BY le.display_score DESC NULLS LAST",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "battlesnake_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_registrations",
+            "name": "battlesnake_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "leaderboard_registration_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_registrations",
+            "name": "leaderboard_registration_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "disabled_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_registrations",
+            "name": "disabled_at"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "disabled_reason",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_registrations",
+            "name": "disabled_reason"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "leaderboard_entry_id?",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_entries",
+            "name": "leaderboard_entry_id"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "display_score!",
+        "type_info": "Float8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 6,
+        "name": "games_played!",
+        "type_info": "Int4",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      false,
+      null,
+      null
+    ]
+  },
+  "hash": "6a7f65992480af632f17161c06dd1b8e6dec8ebf4b6413b00085d22545510dd2"
+}

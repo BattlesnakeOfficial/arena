@@ -622,9 +622,9 @@ pub async fn snake_creator_client(
     Ok(row)
 }
 
-/// `leaderboard_entries.disabled_reason` for entries of a deleted snake.
+/// `leaderboard_registrations.disabled_reason` for registrations of a deleted snake.
 /// Nothing re-enables these: health reactivation only touches `health`
-/// entries, and owner pause/resume refuses them.
+/// registrations, and owner pause/resume refuses them.
 pub const DISABLED_REASON_DELETED: &str = "deleted";
 pub const DISABLED_REASON_RETIRED: &str = "retired";
 
@@ -711,14 +711,12 @@ pub async fn retire_battlesnake(
     .execute(&mut *tx)
     .await
     .wrap_err("Failed to mark battlesnake retired")?;
-    sqlx::query!(
-        "UPDATE leaderboard_entries SET disabled_at = NOW(), disabled_reason = $2, updated_at = NOW() WHERE battlesnake_id = $1 AND disabled_at IS NULL",
+    crate::models::leaderboard_registration::pause_registrations_for_snake(
+        &mut tx,
         battlesnake_id,
-        DISABLED_REASON_RETIRED
+        DISABLED_REASON_RETIRED,
     )
-    .execute(&mut *tx)
-    .await
-    .wrap_err("Failed to disable retired battlesnake's leaderboard entries")?;
+    .await?;
     tx.commit().await.wrap_err("Failed to commit retirement")?;
     Ok(RetireBattlesnakeOutcome::Retired {
         withdrawn_registrations,
@@ -755,14 +753,12 @@ pub async fn unretire_battlesnake(
     .execute(&mut *tx)
     .await
     .wrap_err("Failed to clear battlesnake retirement")?;
-    sqlx::query!(
-        "UPDATE leaderboard_entries SET disabled_at = NULL, disabled_reason = NULL, health_consecutive_failures = 0, health_consecutive_successes = 0, health_last_failure = NULL, updated_at = NOW() WHERE battlesnake_id = $1 AND disabled_reason = $2",
+    crate::models::leaderboard_registration::resume_registrations_for_snake(
+        &mut tx,
         battlesnake_id,
-        DISABLED_REASON_RETIRED
+        DISABLED_REASON_RETIRED,
     )
-    .execute(&mut *tx)
-    .await
-    .wrap_err("Failed to restore retired leaderboard entries")?;
+    .await?;
     tx.commit()
         .await
         .wrap_err("Failed to commit unretirement")?;
@@ -799,7 +795,7 @@ pub async fn delete_battlesnake(
         .wrap_err("Failed to begin delete transaction")?;
 
     // Row lock serializes against tournament registration and leaderboard
-    // join (`leaderboard::get_or_create_entry`), which both take a FOR SHARE
+    // join (`leaderboard_registration::get_or_create_registration`), which both take a FOR SHARE
     // lock on the snake before inserting. Joins wait on this transaction, so
     // keep slow work out of it.
     let locked = sqlx::query_scalar!(
@@ -870,20 +866,11 @@ pub async fn delete_battlesnake(
     .await
     .wrap_err("Failed to mark battlesnake deleted")?;
 
-    sqlx::query!(
-        r#"
-        UPDATE leaderboard_entries
-        SET disabled_at = COALESCE(disabled_at, NOW()),
-            disabled_reason = $2,
-            updated_at = NOW()
-        WHERE battlesnake_id = $1
-        "#,
+    crate::models::leaderboard_registration::mark_registrations_deleted_for_snake(
+        &mut tx,
         battlesnake_id,
-        DISABLED_REASON_DELETED
     )
-    .execute(&mut *tx)
-    .await
-    .wrap_err("Failed to disable leaderboard entries of deleted battlesnake")?;
+    .await?;
 
     tx.commit()
         .await
@@ -1300,19 +1287,31 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(
-            crate::models::leaderboard_entry_health::reactivate_snake(&pool, snake).await?,
+            crate::models::leaderboard_registration::reactivate_snake(&pool, snake).await?,
             0
         );
         // A manually paused entry has no reason, so only the snake lock can
         // prevent this direct resume while retirement is active.
-        crate::models::leaderboard::set_disabled(&pool, entries[1].1, None).await?;
+        crate::models::leaderboard_registration::set_registration_disabled(
+            &pool,
+            entries[1].0,
+            snake,
+            None,
+        )
+        .await?;
         let manual_while_retired =
             crate::models::leaderboard::get_entry(&pool, entries[1].0, snake)
                 .await?
                 .unwrap();
         assert!(manual_while_retired.disabled_at.is_some());
         assert!(manual_while_retired.disabled_reason.is_none());
-        crate::models::leaderboard::set_disabled(&pool, entries[0].1, None).await?;
+        crate::models::leaderboard_registration::set_registration_disabled(
+            &pool,
+            entries[0].0,
+            snake,
+            None,
+        )
+        .await?;
         assert!(
             crate::models::leaderboard::get_active_entries(&pool, entries[0].0)
                 .await?
@@ -1898,7 +1897,13 @@ mod tests {
         let entry = create_leaderboard_entry(&pool, leaderboard_id, doomed).await?;
         delete_battlesnake(&pool, doomed, owner).await?;
 
-        crate::models::leaderboard::set_disabled(&pool, entry, None).await?;
+        crate::models::leaderboard_registration::set_registration_disabled(
+            &pool,
+            leaderboard_id,
+            doomed,
+            None,
+        )
+        .await?;
 
         assert_eq!(
             entry_state(&pool, entry).await?,

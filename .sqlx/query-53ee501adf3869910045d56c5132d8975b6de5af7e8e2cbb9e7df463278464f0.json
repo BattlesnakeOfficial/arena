@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE leaderboard_entries le\n         SET (disabled_at, disabled_reason, health_consecutive_failures,\n              health_consecutive_successes, health_last_checked_at, health_last_failure)\n           = (r.disabled_at, r.disabled_reason, r.health_consecutive_failures,\n              r.health_consecutive_successes, r.health_last_checked_at, r.health_last_failure)\n         FROM leaderboard_registrations r\n         WHERE r.battlesnake_id = $1\n           AND le.leaderboard_id = r.leaderboard_id AND le.battlesnake_id = r.battlesnake_id\n           AND (le.disabled_at, le.disabled_reason, le.health_consecutive_failures,\n                le.health_consecutive_successes, le.health_last_checked_at, le.health_last_failure)\n               IS DISTINCT FROM\n               (r.disabled_at, r.disabled_reason, r.health_consecutive_failures,\n                r.health_consecutive_successes, r.health_last_checked_at, r.health_last_failure)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "53ee501adf3869910045d56c5132d8975b6de5af7e8e2cbb9e7df463278464f0"
+}

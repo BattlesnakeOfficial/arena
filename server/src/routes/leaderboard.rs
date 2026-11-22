@@ -21,7 +21,7 @@ use crate::{
     },
     cron::MATCHMAKER_INTERVAL_SECS,
     errors::{ServerResult, WithRedirect},
-    models::leaderboard_entry_health,
+    models::leaderboard_registration,
     models::{
         battlesnake::{self, Visibility},
         game::GameType,
@@ -187,11 +187,11 @@ pub async fn show_leaderboard(
         vec![]
     };
 
-    // Get user's entries in this leaderboard
+    // The user's snakes registered in this league
     let user_entries = if let Some(ref u) = user {
-        leaderboard::get_user_entries(&state.db, leaderboard_id, u.user_id)
+        leaderboard::get_user_memberships(&state.db, leaderboard_id, u.user_id)
             .await
-            .wrap_err("Failed to fetch user's leaderboard entries")?
+            .wrap_err("Failed to fetch user's league memberships")?
     } else {
         vec![]
     };
@@ -524,7 +524,7 @@ pub async fn show_leaderboard(
                                             span class="badge" { "Retired" }
                                         }
                                         @if entry.disabled_at.is_some() {
-                                            @if entry.disabled_reason.as_deref() == Some(leaderboard_entry_health::DISABLED_REASON_HEALTH) {
+                                            @if entry.disabled_reason.as_deref() == Some(leaderboard_registration::DISABLED_REASON_HEALTH) {
                                                 a class="badge warn" href={"/battlesnakes/"(snake.battlesnake_id)"/profile"}
                                                     title="Automatically paused: this snake is failing health checks. Resume re-tests it — details on its profile." {
                                                     "Auto-paused"
@@ -541,7 +541,7 @@ pub async fn show_leaderboard(
                                         } @else {
                                             span class="badge ok" { "Active" }
                                             form action={"/leaderboards/"(leaderboard_id)"/leave"} method="post" {
-                                                input type="hidden" name="leaderboard_entry_id" value=(entry.leaderboard_entry_id);
+                                                input type="hidden" name="battlesnake_id" value=(entry.battlesnake_id);
                                                 button type="submit" class="btn sm" aria-label={"Pause " (snake.name)} { "Pause" }
                                             }
                                         }
@@ -1052,7 +1052,7 @@ pub struct JoinLeaveForm {
 
 #[derive(serde::Deserialize)]
 pub struct LeaveForm {
-    pub leaderboard_entry_id: Uuid,
+    pub battlesnake_id: Uuid,
 }
 
 /// POST /leaderboards/:id/join — opt-in a snake
@@ -1131,17 +1131,20 @@ pub async fn join_leaderboard(
         return Ok(redirect);
     }
 
-    // Opt-in (or resume if paused). Resuming also clears the entry's health
-    // streak, so a snake the sweeper pulled isn't re-paused on the very next
-    // sweep (see `get_or_create_entry`).
-    let Some(entry) =
-        leaderboard::get_or_create_entry(&state.db, leaderboard_id, form.battlesnake_id)
-            .await
-            .wrap_err("Failed to join leaderboard")
-            .with_redirect(redirect.clone())?
+    // Opt-in (or resume if paused). Resuming also clears the registration's
+    // health streak, so a snake the sweeper pulled isn't re-paused on the very
+    // next sweep (see `get_or_create_registration`).
+    let Some(_registration) = leaderboard_registration::get_or_create_registration(
+        &state.db,
+        leaderboard_id,
+        form.battlesnake_id,
+    )
+    .await
+    .wrap_err("Failed to join leaderboard")
+    .with_redirect(redirect.clone())?
     else {
         // Raced a delete: the snake was live at the pre-check but is gone (or
-        // its entry is 'deleted'-marked) by the time the upsert ran.
+        // its registration is 'deleted'-marked) by the time the upsert ran.
         let retired = battlesnake::get_battlesnake_by_id(&state.db, form.battlesnake_id)
             .await
             .wrap_err("Failed to recheck battlesnake")
@@ -1159,13 +1162,18 @@ pub async fn join_leaderboard(
         return Ok(redirect);
     };
 
-    // Initialize scoring algorithm entries
-    for algo in state.scoring.algorithms() {
-        algo.initialize_entry(&state.db, entry.leaderboard_entry_id)
-            .await
-            .wrap_err("Failed to initialize scoring")
-            .with_redirect(redirect.clone())?;
-    }
+    // The active season's entry, created lazily. `None` (a gap between
+    // seasons) still means the join succeeded: the snake plays once the next
+    // season starts.
+    leaderboard::ensure_snake_season_entry(
+        &state.db,
+        &state.scoring,
+        leaderboard_id,
+        form.battlesnake_id,
+    )
+    .await
+    .wrap_err("Failed to create season entry")
+    .with_redirect(redirect.clone())?;
 
     flasher
         .success(format!(
@@ -1179,37 +1187,18 @@ pub async fn join_leaderboard(
     Ok(redirect)
 }
 
-/// POST /leaderboards/:id/leave — pause a snake
+/// POST /leaderboards/:id/leave — pause a snake's league registration
 pub async fn leave_leaderboard(
     State(state): State<AppState>,
     CurrentUser(user): CurrentUser,
+    flasher: crate::flasher::Flasher,
     Path(leaderboard_id): Path<Uuid>,
     Form(form): Form<LeaveForm>,
 ) -> ServerResult<impl IntoResponse, Redirect> {
     let redirect = Redirect::to(&format!("/leaderboards/{leaderboard_id}"));
 
-    // Find the specific entry by ID
-    let entry = leaderboard::get_entry_by_id(&state.db, form.leaderboard_entry_id)
-        .await
-        .wrap_err("Failed to fetch entry")
-        .with_redirect(redirect.clone())?
-        .ok_or_else(|| {
-            crate::errors::ServerError(
-                color_eyre::eyre::eyre!("Leaderboard entry not found"),
-                redirect.clone(),
-            )
-        })?;
-
-    // Security: verify this entry belongs to the requested leaderboard
-    if entry.leaderboard_id != leaderboard_id {
-        return Err(crate::errors::ServerError(
-            color_eyre::eyre::eyre!("Entry does not belong to this leaderboard"),
-            redirect,
-        ));
-    }
-
     // Verify snake belongs to user
-    let snake = battlesnake::get_battlesnake_by_id(&state.db, entry.battlesnake_id)
+    let snake = battlesnake::get_battlesnake_by_id(&state.db, form.battlesnake_id)
         .await
         .wrap_err("Failed to fetch battlesnake")
         .with_redirect(redirect.clone())?
@@ -1227,13 +1216,30 @@ pub async fn leave_leaderboard(
         ));
     }
 
-    leaderboard::set_disabled(
+    // A registration may have no entry yet (joined during a gap), so leave
+    // is keyed on the snake, not an entry.
+    let registration =
+        leaderboard_registration::get_registration(&state.db, leaderboard_id, snake.battlesnake_id)
+            .await
+            .wrap_err("Failed to fetch registration")
+            .with_redirect(redirect.clone())?;
+    if registration.is_none() {
+        flasher
+            .error("That battlesnake is not in this leaderboard.")
+            .await
+            .wrap_err("Failed to flash")
+            .with_redirect(redirect.clone())?;
+        return Ok(redirect);
+    }
+
+    leaderboard_registration::set_registration_disabled(
         &state.db,
-        entry.leaderboard_entry_id,
+        leaderboard_id,
+        snake.battlesnake_id,
         Some(chrono::Utc::now()),
     )
     .await
-    .wrap_err("Failed to pause entry")
+    .wrap_err("Failed to pause registration")
     .with_redirect(redirect.clone())?;
 
     Ok(redirect)

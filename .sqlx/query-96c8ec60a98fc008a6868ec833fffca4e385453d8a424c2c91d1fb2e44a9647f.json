@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT COUNT(*) AS \"count!\"\n            FROM users u\n            WHERE EXISTS (\n                SELECT 1\n                FROM battlesnakes b\n                JOIN leaderboard_registrations r\n                  ON r.battlesnake_id = b.battlesnake_id\n                WHERE b.user_id = u.user_id\n                  AND r.disabled_at IS NULL\n            )\n            AND (strpos(lower(u.github_login), lower($1)) > 0\n                 OR strpos(lower(COALESCE(u.display_name, '')), lower($1)) > 0)\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "96c8ec60a98fc008a6868ec833fffca4e385453d8a424c2c91d1fb2e44a9647f"
+}

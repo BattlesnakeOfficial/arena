@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT (s.season_id IS NOT NULL AND s.starts_at <= clock_timestamp()\n                           AND (s.ends_at IS NULL OR clock_timestamp() < s.ends_at)) AS \"season_active!\"\n                   FROM leaderboard_games lg\n                   LEFT JOIN leaderboard_seasons s ON s.season_id = lg.season_id\n                   WHERE lg.game_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "season_active!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "f4f28bea90a81bfae396cbf20feb9c6c1b5b9f367e1a31e6babdf1ff2e5cd12f"
+}

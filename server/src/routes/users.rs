@@ -192,8 +192,14 @@ async fn render_user_profile(
                                         @for entry in entries {
                                             div {
                                                 dt {
-                                                    a href={"/leaderboards/"(entry.leaderboard_id)"/entries/"(entry.leaderboard_entry_id)} {
-                                                        (entry.leaderboard_name)
+                                                    @if let Some(entry_id) = entry.leaderboard_entry_id {
+                                                        a href={"/leaderboards/"(entry.leaderboard_id)"/entries/"(entry_id)} {
+                                                            (entry.leaderboard_name)
+                                                        }
+                                                    } @else {
+                                                        a href={"/leaderboards/"(entry.leaderboard_id)} {
+                                                            (entry.leaderboard_name)
+                                                        }
                                                     }
                                                     @if entry.leaderboard_visibility == Visibility::Private {
                                                         " "
@@ -201,8 +207,12 @@ async fn render_user_profile(
                                                     }
                                                 }
                                                 dd {
-                                                    (format!("{:.1}", entry.display_score))
-                                                    " · " (entry.games_played) " games"
+                                                    @if let Some(score) = entry.display_score {
+                                                        (format!("{score:.1}"))
+                                                    } @else {
+                                                        "—"
+                                                    }
+                                                    " · " (entry.games_played.unwrap_or(0)) " games"
                                                     @if entry.disabled_at.is_some() {
                                                         " · paused"
                                                     }
