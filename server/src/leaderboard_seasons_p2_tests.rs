@@ -464,11 +464,16 @@ async fn season_boundaries_are_half_open_and_games_carry_their_season(pool: PgPo
 /// a game already running when its season ends still gets rated.
 #[sqlx::test(migrations = "../migrations")]
 async fn waiting_game_is_held_and_running_game_is_rated_across_season_end(pool: PgPool) {
-    let state = AppState::test_from_pool(pool.clone());
-    let p = player(&pool, 9_266_003).await;
+    let mut state = AppState::test_from_pool(pool.clone());
+    // update_ratings is a rolled-back no-op with the empty test registry.
+    state.scoring = std::sync::Arc::new(crate::scoring::default_registry());
+    // Separate players per league: a shared snake would make the older held
+    // waiter outrank the rated game for it, and the claim would be Busy.
+    let held_player = player(&pool, 9_266_003).await;
+    let rated_player = player(&pool, 9_266_013).await;
     let held_lb = league(&pool, "Held").await;
     let rated_lb = league(&pool, "Rated").await;
-    for lb in [held_lb, rated_lb] {
+    for (lb, p) in [(held_lb, &held_player), (rated_lb, &rated_player)] {
         for snake_id in p.snakes {
             leaderboard::get_or_create_entry(&pool, lb, snake_id)
                 .await
