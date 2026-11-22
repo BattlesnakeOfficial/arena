@@ -209,9 +209,9 @@ fn battlesnake_form(
                 label style="display:inline-flex; align-items:center; gap:6px; min-height:44px;" {
                     input type="checkbox" id="allow_tournament_import" name="allow_tournament_import" value="on"
                         checked[form.allow_tournament_import];
-                    "Allow tournament imports"
+                    "Allow leaderboard imports"
                 }
-                p class="help" { "Tournament organizers can import the top snakes from a leaderboard. Uncheck to keep this snake out of other people's imports. Private snakes are never imported." }
+                p class="help" { "Tournament organizers can import the top snakes from a leaderboard into their tournament. Uncheck to keep this snake out of other people's tournament imports. Private snakes are never imported." }
             }
             div class="field" {
                 label for="engine_region" { "Engine region" }
