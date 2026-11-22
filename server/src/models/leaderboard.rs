@@ -1606,11 +1606,13 @@ mod tests {
                 )
                 .execute(&pool)
                 .await?;
-                sqlx::query!(
+                // get_or_create_entry initializes every algorithm's row, so overwrite it.
+                sqlx::query(
                     "INSERT INTO food_eaten_stats (leaderboard_entry_id, food_score)
-                     VALUES ($1, 3)",
-                    entry_id
+                     VALUES ($1, 3)
+                     ON CONFLICT (leaderboard_entry_id) DO UPDATE SET food_score = EXCLUDED.food_score",
                 )
+                .bind(entry_id)
                 .execute(&pool)
                 .await?;
                 create_game_result(

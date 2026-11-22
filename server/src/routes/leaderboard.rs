@@ -1477,11 +1477,13 @@ mod owner_name_route_tests {
         .execute(pool)
         .await
         .unwrap();
-        sqlx::query!(
-            "INSERT INTO food_eaten_stats (leaderboard_entry_id, food_score) VALUES ($1, $2)",
-            entry_id,
-            food_score
+        // get_or_create_entry initializes every algorithm's row, so overwrite it.
+        sqlx::query(
+            "INSERT INTO food_eaten_stats (leaderboard_entry_id, food_score) VALUES ($1, $2)
+             ON CONFLICT (leaderboard_entry_id) DO UPDATE SET food_score = EXCLUDED.food_score",
         )
+        .bind(entry_id)
+        .bind(food_score)
         .execute(pool)
         .await
         .unwrap();
@@ -1795,10 +1797,12 @@ mod column_route_tests {
         .execute(pool)
         .await
         .unwrap();
-        sqlx::query!(
-            "INSERT INTO food_eaten_stats (leaderboard_entry_id, food_score) VALUES ($1, 5)",
-            entry_id
+        // get_or_create_entry initializes every algorithm's row, so overwrite it.
+        sqlx::query(
+            "INSERT INTO food_eaten_stats (leaderboard_entry_id, food_score) VALUES ($1, 5)
+             ON CONFLICT (leaderboard_entry_id) DO UPDATE SET food_score = EXCLUDED.food_score",
         )
+        .bind(entry_id)
         .execute(pool)
         .await
         .unwrap();
