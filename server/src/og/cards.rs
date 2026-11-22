@@ -770,11 +770,16 @@ pub fn leaderboard_card(card: &LeaderboardCard) -> cja::Result<Vec<u8>> {
         let x = tile_x + tile + 18.0;
         let room = inner_right - rating_width - 16.0 - x;
         let name = c.ellipsize(&row.snake.name, name_style, room);
-        let owner = c.ellipsize(&format!("by {}", row.snake.owner), owner_style, room);
-        let block = name_cap + 10.0 + owner_cap;
-        let baseline = center - block / 2.0 + name_cap;
-        c.draw(&name, x, baseline);
-        c.draw(&owner, x, baseline + 10.0 + owner_cap);
+        if row.snake.owner.is_empty() {
+            // Tombstone row ("Deleted snake"): name only, centered like the rank.
+            c.draw(&name, x, center + name_cap / 2.0);
+        } else {
+            let owner = c.ellipsize(&format!("by {}", row.snake.owner), owner_style, room);
+            let block = name_cap + 10.0 + owner_cap;
+            let baseline = center - block / 2.0 + name_cap;
+            c.draw(&name, x, baseline);
+            c.draw(&owner, x, baseline + 10.0 + owner_cap);
+        }
         top += row_height;
     }
 

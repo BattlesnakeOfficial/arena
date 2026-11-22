@@ -37,11 +37,17 @@ pub struct LeaderboardResponse {
 pub struct RankingEntry {
     pub rank: usize,
     pub battlesnake_id: Uuid,
-    pub snake_name: String,
+    /// `null` when the snake is soft-deleted (tombstone on frozen standings).
+    pub snake_name: Option<String>,
     /// Owner's GitHub login (stable identifier, the `/users/{login}` key).
-    pub owner: String,
+    /// `null` when the snake is soft-deleted.
+    pub owner: Option<String>,
     /// Owner's public name: display name when set, else the GitHub login.
-    pub owner_name: String,
+    /// `null` when the snake is soft-deleted.
+    pub owner_name: Option<String>,
+    /// The snake is soft-deleted: identity fields above are null, but the
+    /// row and its rank stay (ended-season standings only).
+    pub deleted: bool,
     pub display_score: f64,
     pub games_played: i32,
     pub first_place_finishes: i32,
@@ -237,6 +243,7 @@ pub async fn get_rankings(
                     snake_name: e.snake_name,
                     owner: e.owner_login,
                     owner_name: e.owner_name,
+                    deleted: e.deleted,
                     display_score: e.display_score,
                     games_played: e.games_played,
                     first_place_finishes: e.first_place_finishes,

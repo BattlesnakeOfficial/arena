@@ -765,15 +765,23 @@ async fn load_leaderboard_card(
                 rank,
                 rating: rating(entry.display_score),
                 snake: RosterSnake {
-                    color: snake_color(&entry.snake_color),
+                    // "" ⇒ snake_fallback gray for tombstones.
+                    color: snake_color(entry.snake_color.as_deref().unwrap_or("")),
+                    // Unchanged: the cosmetics lookup already skips deleted
+                    // snakes, so a tombstone head is the default shape.
                     head: shape(
                         AssetKind::Head,
                         looks
                             .get(&entry.battlesnake_id)
                             .map_or("", |l| l.head.as_str()),
                     ),
-                    name: entry.snake_name,
-                    owner: entry.owner_name,
+                    name: if entry.deleted {
+                        "Deleted snake".to_string()
+                    } else {
+                        entry.snake_name.clone().unwrap_or_default()
+                    },
+                    // "" for tombstones: the card skips the owner line.
+                    owner: entry.owner_name.clone().unwrap_or_default(),
                     placement: None,
                     draw: false,
                 },
@@ -1329,6 +1337,49 @@ mod tests {
         );
         let reply = get(&state, &tournament_card_path(w.tournament_id)).await;
         assert_eq!(reply.status, StatusCode::NOT_FOUND);
+    }
+
+    /// Ended-season ladder cards tombstone deleted snakes: neutral name, no
+    /// owner, the gray fallback colour and the default head shape — and the
+    /// skip-empty-owner layout still renders.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn leaderboard_card_tombstones_deleted_snakes(pool: PgPool) {
+        let state = AppState::test_from_pool(pool.clone());
+        let w = fixture_world(&pool).await;
+        sqlx::query(
+            "UPDATE leaderboard_seasons
+             SET starts_at = clock_timestamp() - interval '30 days',
+                 ends_at = clock_timestamp() - interval '1 day'
+             WHERE leaderboard_id = $1",
+        )
+        .bind(w.leaderboard_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            crate::models::battlesnake::delete_battlesnake(&pool, w.snake_id, w.user_id)
+                .await
+                .unwrap(),
+            crate::models::battlesnake::DeleteBattlesnakeOutcome::Deleted
+        );
+
+        let card = load_leaderboard_card(&state, w.leaderboard_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let row = &card.rows[0];
+        assert_eq!(row.snake.name, "Deleted snake");
+        assert!(row.snake.owner.is_empty());
+        assert_eq!(row.snake.color, palette::snake_fallback());
+        // The cosmetics lookup skips deleted snakes, so the head falls back
+        // to the default catalog shape — the same 'static entry
+        // `shape(AssetKind::Head, "")` returns, never `None`.
+        assert!(std::ptr::eq(
+            row.snake.head.unwrap(),
+            shape(AssetKind::Head, "").unwrap()
+        ));
+        // Guards the skip-empty-owner centering change.
+        cards::leaderboard_card(&card).unwrap();
     }
 
     #[sqlx::test(migrations = "../migrations")]
