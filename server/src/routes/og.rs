@@ -1101,14 +1101,15 @@ mod tests {
         .await
         .unwrap();
         let entry_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id, games_played, display_score)
-             VALUES ($1, $2, 12, 33.3) RETURNING leaderboard_entry_id",
+            "INSERT INTO leaderboard_entries (leaderboard_id, season_id, battlesnake_id, games_played, display_score)
+             VALUES ($1, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1), $2, 12, 33.3) RETURNING leaderboard_entry_id",
         )
         .bind(leaderboard_id)
         .bind(snake_id)
         .fetch_one(pool)
         .await
         .unwrap();
+        crate::routes::test_support::register_snake_entries(pool, snake_id).await;
         let tournament_id: Uuid = sqlx::query_scalar(
             "INSERT INTO tournaments (name, user_id, status) VALUES ('OG Cup', $1, 'completed')
              RETURNING tournament_id",

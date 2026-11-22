@@ -1,0 +1,41 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT health_consecutive_failures, health_consecutive_successes\n                 FROM leaderboard_registrations\n                 WHERE leaderboard_id = $1 AND battlesnake_id = $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "health_consecutive_failures",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_registrations",
+            "name": "health_consecutive_failures"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "health_consecutive_successes",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_registrations",
+            "name": "health_consecutive_successes"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "a4104cfc2192a4d963529fd9e0fb67c8f95065bc664483224078210829399123"
+}

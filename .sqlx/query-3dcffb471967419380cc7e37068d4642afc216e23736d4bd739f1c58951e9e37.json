@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO leaderboard_games (leaderboard_id, game_id, season_id)\n             VALUES ($1, $2, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1)) RETURNING leaderboard_game_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "leaderboard_game_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_games",
+            "name": "leaderboard_game_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "3dcffb471967419380cc7e37068d4642afc216e23736d4bd739f1c58951e9e37"
+}

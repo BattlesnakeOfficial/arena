@@ -200,7 +200,7 @@ mod tests {
         let waiting = insert_game(&pool, "waiting", old).await?;
         for game_id in [running, waiting] {
             sqlx::query!(
-                "INSERT INTO leaderboard_games (leaderboard_id, game_id) VALUES ($1, $2)",
+                "INSERT INTO leaderboard_games (leaderboard_id, game_id, season_id) VALUES ($1, $2, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1))",
                 ladder,
                 game_id
             )
@@ -235,7 +235,7 @@ mod tests {
         let recent = insert_game(&pool, "waiting", now - Duration::minutes(30)).await?;
         let old = insert_game(&pool, "waiting", now - Duration::hours(3)).await?;
         for game_id in [recent, old] {
-            sqlx::query("INSERT INTO leaderboard_games (leaderboard_id, game_id) VALUES ($1, $2)")
+            sqlx::query("INSERT INTO leaderboard_games (leaderboard_id, game_id, season_id) VALUES ($1, $2, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1))")
                 .bind(ladder)
                 .bind(game_id)
                 .execute(&pool)
@@ -525,7 +525,7 @@ mod tests {
         .await?;
         let game_id = insert_game(&pool, "running", base_time - Duration::hours(3)).await?;
         sqlx::query!(
-            "INSERT INTO leaderboard_games (leaderboard_id, game_id) VALUES ($1, $2)",
+            "INSERT INTO leaderboard_games (leaderboard_id, game_id, season_id) VALUES ($1, $2, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1))",
             leaderboard_id,
             game_id,
         )

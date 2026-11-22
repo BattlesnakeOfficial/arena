@@ -1,5 +1,5 @@
 import { test, expect, createMockUser } from '../fixtures/test';
-import { query } from '../fixtures/db';
+import { query, registerFixtureEntries } from '../fixtures/db';
 
 test.describe('Leaderboard Pages', () => {
   test('live standings refresh when an in-progress game finishes', async ({ authenticatedPage }, testInfo) => {
@@ -20,7 +20,8 @@ test.describe('Leaderboard Pages', () => {
       );
       gameId = game.game_id;
       await query(
-        'INSERT INTO leaderboard_games (leaderboard_id, game_id) VALUES ($1, $2)',
+        `INSERT INTO leaderboard_games (leaderboard_id, game_id, season_id)
+         VALUES ($1, $2, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1))`,
         [leaderboardId, gameId]
       );
 
@@ -127,18 +128,19 @@ test.describe('Leaderboard Pages', () => {
       "SELECT leaderboard_id FROM leaderboards WHERE name = 'Standard 11x11'"
     );
     const [entry] = await query<{ leaderboard_entry_id: string }>(
-      `INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id)
-       VALUES ($1, $2) RETURNING leaderboard_entry_id`,
+      `INSERT INTO leaderboard_entries (leaderboard_id, season_id, battlesnake_id)
+       VALUES ($1, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1), $2) RETURNING leaderboard_entry_id`,
       [leaderboard.leaderboard_id, snake.battlesnake_id]
     );
+    await registerFixtureEntries();
     for (let i = 0; i < 12; i++) {
       const [game] = await query<{ game_id: string }>(
         `INSERT INTO games (board_size, game_type, status)
          VALUES ('11x11', 'Standard', 'finished') RETURNING game_id`
       );
       const [lg] = await query<{ leaderboard_game_id: string }>(
-        `INSERT INTO leaderboard_games (leaderboard_id, game_id)
-         VALUES ($1, $2) RETURNING leaderboard_game_id`,
+        `INSERT INTO leaderboard_games (leaderboard_id, game_id, season_id)
+         VALUES ($1, $2, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1)) RETURNING leaderboard_game_id`,
         [leaderboard.leaderboard_id, game.game_id]
       );
       await query(
@@ -187,7 +189,7 @@ test.describe('Leaderboard Pages', () => {
     );
     const snakeId = snakes[0].battlesnake_id;
     await query(
-      `UPDATE leaderboard_entries
+      `UPDATE leaderboard_registrations
        SET disabled_at = NOW(), disabled_reason = 'health',
            health_consecutive_failures = 3,
            health_last_failure = 'POST /move (turn 0): request timed out'
@@ -212,7 +214,7 @@ test.describe('Leaderboard Pages', () => {
       health_last_failure: string | null;
     }>(
       `SELECT health_consecutive_failures, health_last_failure
-       FROM leaderboard_entries WHERE battlesnake_id = $1`,
+       FROM leaderboard_registrations WHERE battlesnake_id = $1`,
       [snakeId]
     );
     expect(health[0].health_consecutive_failures).toBe(0);
@@ -418,7 +420,7 @@ test.describe('Leaderboard API', () => {
 
     // Verify the entry is now disabled in the database
     const entries = await query<{ disabled_at: string | null }>(
-      "SELECT disabled_at FROM leaderboard_entries WHERE leaderboard_id = $1 AND battlesnake_id = $2",
+      "SELECT disabled_at FROM leaderboard_registrations WHERE leaderboard_id = $1 AND battlesnake_id = $2",
       [leaderboardId, snakeId]
     );
     expect(entries.length).toBe(1);
@@ -522,10 +524,11 @@ test.describe('Country flags', () => {
           [user.user_id, name],
         );
         await query(
-          `INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id, games_played, display_score)
-           VALUES ($1, $2, 10, $3)`,
+          `INSERT INTO leaderboard_entries (leaderboard_id, season_id, battlesnake_id, games_played, display_score)
+           VALUES ($1, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1), $2, 10, $3)`,
           [board.leaderboard_id, snake.battlesnake_id, score],
         );
+        await registerFixtureEntries();
       }
 
       await authenticatedPage.goto(`/leaderboards/${board.leaderboard_id}`);

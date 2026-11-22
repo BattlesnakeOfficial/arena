@@ -271,11 +271,6 @@ pub async fn get_or_create_entry(
 /// Idempotent: gated on an active registration and a live snake, and
 /// `ON CONFLICT (season_id, battlesnake_id) DO NOTHING`. `Ok(None)` = no
 /// active season, or the registration is paused / the snake is dead.
-///
-/// While `leaderboard_entries_leaderboard_id_battlesnake_id_key` still exists
-/// (until DEV-2642 PR 2), a snake already entered in an earlier season of
-/// this league raises `unique_violation` here. That is deliberate: don't
-/// suppress it.
 pub async fn ensure_snake_season_entry(
     pool: &PgPool,
     scoring: &crate::scoring::ScoringRegistry,
@@ -341,8 +336,7 @@ pub async fn ensure_snake_season_entry(
 /// algorithm's row for every active-season entry — idempotent, so it also
 /// heals a crash between the INSERT and the initialization.
 ///
-/// No-op during a gap. Same `unique_violation` caveat as
-/// [`ensure_snake_season_entry`] until DEV-2642 PR 2.
+/// No-op during a gap.
 pub async fn ensure_active_season_entries(
     pool: &PgPool,
     scoring: &crate::scoring::ScoringRegistry,
@@ -1421,7 +1415,7 @@ mod tests {
         .bind(status)
         .fetch_one(pool)
         .await?;
-        sqlx::query("INSERT INTO leaderboard_games (leaderboard_id, game_id) VALUES ($1, $2)")
+        sqlx::query("INSERT INTO leaderboard_games (leaderboard_id, game_id, season_id) VALUES ($1, $2, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1))")
             .bind(leaderboard_id)
             .bind(game_id)
             .execute(pool)
@@ -1490,8 +1484,8 @@ mod tests {
         .fetch_one(&pool)
         .await?;
         let leaderboard_game_id = sqlx::query_scalar!(
-            "INSERT INTO leaderboard_games (leaderboard_id, game_id)
-             VALUES ($1, $2) RETURNING leaderboard_game_id",
+            "INSERT INTO leaderboard_games (leaderboard_id, game_id, season_id)
+             VALUES ($1, $2, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1)) RETURNING leaderboard_game_id",
             leaderboard_id,
             game_id
         )
@@ -1556,8 +1550,8 @@ mod tests {
         .fetch_one(&pool)
         .await?;
         let leaderboard_game_id = sqlx::query_scalar!(
-            "INSERT INTO leaderboard_games (leaderboard_id, game_id)
-             VALUES ($1, $2) RETURNING leaderboard_game_id",
+            "INSERT INTO leaderboard_games (leaderboard_id, game_id, season_id)
+             VALUES ($1, $2, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1)) RETURNING leaderboard_game_id",
             leaderboard_id,
             game_id
         )
@@ -1748,7 +1742,7 @@ mod tests {
         assert!(rejoined.is_none(), "deleted snake rejoined: {rejoined:?}");
         let row = sqlx::query!(
             "SELECT disabled_at, disabled_reason
-             FROM leaderboard_entries
+             FROM leaderboard_registrations
              WHERE leaderboard_id = $1 AND battlesnake_id = $2",
             leaderboard_id,
             snake
@@ -1798,7 +1792,7 @@ mod tests {
 
         for reason in [None, Some("health")] {
             sqlx::query!(
-                "UPDATE leaderboard_entries
+                "UPDATE leaderboard_registrations
                  SET disabled_at = NOW(), disabled_reason = $2,
                      health_consecutive_failures = 3, health_consecutive_successes = 2
                  WHERE leaderboard_id = $1 AND battlesnake_id = $3",
@@ -1809,14 +1803,21 @@ mod tests {
             .execute(&pool)
             .await?;
 
-            let joined = get_or_create_entry(&pool, leaderboard_id, snake)
+            get_or_create_entry(&pool, leaderboard_id, snake)
                 .await?
                 .expect("paused entry resumes on join");
+            let joined = crate::models::leaderboard_registration::get_registration(
+                &pool,
+                leaderboard_id,
+                snake,
+            )
+            .await?
+            .expect("registration");
             assert!(joined.disabled_at.is_none(), "{joined:?}");
             assert_eq!(joined.disabled_reason, None, "{joined:?}");
             let row = sqlx::query!(
                 "SELECT health_consecutive_failures, health_consecutive_successes
-                 FROM leaderboard_entries
+                 FROM leaderboard_registrations
                  WHERE leaderboard_id = $1 AND battlesnake_id = $2",
                 leaderboard_id,
                 snake
@@ -1887,7 +1888,7 @@ mod tests {
         .execute(&mut *holder)
         .await?;
         sqlx::query!(
-            r#"UPDATE leaderboard_entries
+            r#"UPDATE leaderboard_registrations
                SET disabled_at = COALESCE(disabled_at, NOW()),
                    disabled_reason = $2, updated_at = NOW()
                WHERE battlesnake_id = $1"#,
@@ -1920,7 +1921,7 @@ mod tests {
 
         let row = sqlx::query!(
             r#"SELECT disabled_at, disabled_reason
-               FROM leaderboard_entries
+               FROM leaderboard_registrations
                WHERE leaderboard_id = $1 AND battlesnake_id = $2"#,
             leaderboard_id,
             snake
@@ -1990,8 +1991,12 @@ mod tests {
             }
         );
         assert!(join.await.expect("join panicked")?.is_none());
-        let after = get_entry(&pool, leaderboard_id, snake).await?.unwrap();
-        assert_eq!(after.leaderboard_entry_id, entry.leaderboard_entry_id);
+        let after_entry = get_entry(&pool, leaderboard_id, snake).await?.unwrap();
+        assert_eq!(after_entry.leaderboard_entry_id, entry.leaderboard_entry_id);
+        let after =
+            crate::models::leaderboard_registration::get_registration(&pool, leaderboard_id, snake)
+                .await?
+                .unwrap();
         assert!(after.disabled_at.is_some());
         assert!(
             after.disabled_reason.is_none(),
@@ -2062,7 +2067,10 @@ mod tests {
                 withdrawn_registrations: 0
             }
         );
-        let after = get_entry(&pool, leaderboard_id, snake).await?.unwrap();
+        let after =
+            crate::models::leaderboard_registration::get_registration(&pool, leaderboard_id, snake)
+                .await?
+                .unwrap();
         assert_eq!(after.disabled_reason.as_deref(), Some("retired"));
         assert!(after.disabled_at.is_some());
         assert_eq!(
@@ -2070,7 +2078,7 @@ mod tests {
             UnretireBattlesnakeOutcome::Unretired
         );
         assert!(
-            get_entry(&pool, leaderboard_id, snake)
+            crate::models::leaderboard_registration::get_registration(&pool, leaderboard_id, snake)
                 .await?
                 .unwrap()
                 .disabled_at

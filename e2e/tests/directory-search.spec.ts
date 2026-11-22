@@ -1,5 +1,5 @@
 import { test, expect } from '../fixtures/test';
-import { query } from '../fixtures/db';
+import { query, registerFixtureEntries } from '../fixtures/db';
 
 test('public snake search is literal, case-insensitive, paginated, and excludes private snakes', async ({ authenticatedPage, mockUser, page }) => {
   const term = `Find ${Date.now()} 100%_&+ café`;
@@ -66,11 +66,13 @@ test('player search preserves its query across filters and pages and searches ha
       [ids, `${loginPrefix}-52`],
     );
     await query(
-      `INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id)
-       SELECT l.leaderboard_id, b.battlesnake_id FROM battlesnakes b CROSS JOIN leaderboards l
+      `INSERT INTO leaderboard_entries (leaderboard_id, season_id, battlesnake_id)
+       SELECT l.leaderboard_id, (SELECT season_id FROM leaderboard_seasons s WHERE s.leaderboard_id = l.leaderboard_id), b.battlesnake_id
+       FROM battlesnakes b CROSS JOIN leaderboards l
        WHERE b.user_id = ANY($1::uuid[]) AND l.name = 'Standard 11x11'`,
       [ids],
     );
+    await registerFixtureEntries();
     await page.goto('/players?page=99999&q=no-such-launch-player');
     await page.getByRole('searchbox', { name: 'Search players' }).fill(`  ${term.toUpperCase()}  `);
     await page.getByRole('button', { name: 'Search', exact: true }).click();

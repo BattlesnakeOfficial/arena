@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE leaderboard_registrations\n             SET health_last_checked_at = health_last_checked_at - INTERVAL '31 minutes'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "9a95bb53ed8ca7750608c2647a1371098ea3145278fc3c039a3d3542dec0efcb"
+}

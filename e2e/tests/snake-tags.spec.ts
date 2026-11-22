@@ -1,5 +1,5 @@
 import { test, expect } from '../fixtures/test';
-import { query } from '../fixtures/db';
+import { query, registerFixtureEntries } from '../fixtures/db';
 
 // Tag order everywhere is (category ASC, name ASC): 'language' sorts before
 // 'platform', so Rust comes before Raspberry Pi.
@@ -53,15 +53,16 @@ test.describe('Snake Tags', () => {
       const leaderboardId = leaderboards[0].leaderboard_id;
 
       await query(
-        `INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id, games_played, display_score)
-         VALUES ($1, $2, 10, 999)`,
+        `INSERT INTO leaderboard_entries (leaderboard_id, season_id, battlesnake_id, games_played, display_score)
+         VALUES ($1, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1), $2, 10, 999)`,
         [leaderboardId, taggedId]
       );
       await query(
-        `INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id, games_played)
-         VALUES ($1, $2, 0)`,
+        `INSERT INTO leaderboard_entries (leaderboard_id, season_id, battlesnake_id, games_played)
+         VALUES ($1, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1), $2, 0)`,
         [leaderboardId, untaggedId]
       );
+      await registerFixtureEntries();
 
       // --- User profile: chips on the tagged snake's card, nothing on the untagged one ---
       await authenticatedPage.goto(`/users/${mockUser.login}`);

@@ -1175,7 +1175,7 @@ mod tests {
         .fetch_one(&pool)
         .await?;
         sqlx::query!(
-            "INSERT INTO leaderboard_games (leaderboard_id, game_id) VALUES ($1, $2)",
+            "INSERT INTO leaderboard_games (leaderboard_id, game_id, season_id) VALUES ($1, $2, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1))",
             leaderboard,
             waiting
         )
@@ -1233,13 +1233,14 @@ mod tests {
         .fetch_one(pool)
         .await?;
         let entry = sqlx::query_scalar!(
-            "INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id)
-             VALUES ($1, $2) RETURNING leaderboard_entry_id",
+            "INSERT INTO leaderboard_entries (leaderboard_id, season_id, battlesnake_id)
+             VALUES ($1, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1), $2) RETURNING leaderboard_entry_id",
             leaderboard,
             battlesnake_id
         )
         .fetch_one(pool)
         .await?;
+        crate::routes::test_support::register_snake_entries(pool, battlesnake_id).await;
         let game_id: Uuid = sqlx::query_scalar(
             "INSERT INTO games (board_size, game_type, status)
              VALUES ('11x11', 'Standard', 'waiting') RETURNING game_id",
@@ -1254,7 +1255,7 @@ mod tests {
         .execute(pool)
         .await?;
         sqlx::query!(
-            "INSERT INTO leaderboard_games (leaderboard_id, game_id) VALUES ($1, $2)",
+            "INSERT INTO leaderboard_games (leaderboard_id, game_id, season_id) VALUES ($1, $2, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1))",
             leaderboard,
             game_id
         )
@@ -1589,7 +1590,7 @@ mod tests {
         )
         .fetch_one(&pool)
         .await?;
-        sqlx::query("INSERT INTO leaderboard_games (leaderboard_id, game_id) VALUES ($1, $2)")
+        sqlx::query("INSERT INTO leaderboard_games (leaderboard_id, game_id, season_id) VALUES ($1, $2, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1))")
             .bind(leaderboard_id)
             .bind(game_id)
             .execute(&pool)

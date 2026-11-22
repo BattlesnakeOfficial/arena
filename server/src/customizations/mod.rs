@@ -1033,8 +1033,9 @@ mod tests {
             "INSERT INTO battlesnakes (user_id, name, url) VALUES ($1, 'Ladder Snake', 'https://example.com') RETURNING battlesnake_id", user
         ).fetch_one(&pool).await?;
         let entry = sqlx::query_scalar!(
-            "INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id) SELECT leaderboard_id, $1 FROM leaderboards LIMIT 1 RETURNING leaderboard_entry_id", snake
+            "INSERT INTO leaderboard_entries (leaderboard_id, season_id, battlesnake_id) SELECT leaderboard_id, (SELECT season_id FROM leaderboard_seasons s WHERE s.leaderboard_id = leaderboards.leaderboard_id), $1 FROM leaderboards LIMIT 1 RETURNING leaderboard_entry_id", snake
         ).fetch_one(&pool).await?;
+        crate::routes::test_support::register_snake_entries(&pool, snake).await;
         let game = sqlx::query_scalar!(
             "INSERT INTO games (board_size, game_type, status) VALUES ('11x11', 'Standard', 'finished') RETURNING game_id"
         ).fetch_one(&pool).await?;
@@ -1161,9 +1162,10 @@ mod tests {
                     .fetch_one(&pool)
                     .await?;
             let ladder_entry = sqlx::query_scalar!(
-                "INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id) VALUES ($1, $2) RETURNING leaderboard_entry_id",
+                "INSERT INTO leaderboard_entries (leaderboard_id, season_id, battlesnake_id) VALUES ($1, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1), $2) RETURNING leaderboard_entry_id",
                 leaderboard, snakes[2],
             ).fetch_one(&pool).await?;
+            crate::routes::test_support::register_snake_entries(&pool, snakes[2]).await;
             create_grant(&pool, users[0], "head", "pirate").await?;
             let mut earned = [HashSet::new(), HashSet::new()];
             let mut owned = [

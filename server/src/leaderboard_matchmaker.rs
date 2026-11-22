@@ -923,7 +923,7 @@ mod tests {
         let (lb, mut ids) = seeded_mode(&pool, "Standard 11x11", 6).await?;
         let disabled = *ids.iter().next().unwrap();
         sqlx::query!(
-            "UPDATE leaderboard_entries SET disabled_at = NOW(), disabled_reason = 'test' WHERE leaderboard_entry_id = $1",
+            "UPDATE leaderboard_registrations r SET disabled_at = NOW(), disabled_reason = 'test' FROM leaderboard_entries le WHERE le.leaderboard_entry_id = $1 AND r.leaderboard_id = le.leaderboard_id AND r.battlesnake_id = le.battlesnake_id",
             disabled,
         )
         .execute(&pool)
@@ -948,7 +948,7 @@ mod tests {
         .fetch_one(pool)
         .await?;
         sqlx::query!(
-            "INSERT INTO leaderboard_games (leaderboard_id, game_id) VALUES ($1, $2)",
+            "INSERT INTO leaderboard_games (leaderboard_id, game_id, season_id) VALUES ($1, $2, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1))",
             leaderboard_id,
             game_id,
         )
@@ -1532,6 +1532,210 @@ mod tests {
                 .fetch_all(&pool)
                 .await?;
         assert_eq!(seasons, vec![Some(season_id)]);
+        Ok(())
+    }
+
+    /// End the league's open season now and start "Season 1" right after it.
+    /// Test-only: never do this to a real league.
+    async fn roll_into_season_one(pool: &sqlx::PgPool, leaderboard_id: Uuid) -> cja::Result<Uuid> {
+        sqlx::query(
+            "UPDATE leaderboard_seasons SET ends_at = clock_timestamp()
+             WHERE leaderboard_id = $1 AND ends_at IS NULL",
+        )
+        .bind(leaderboard_id)
+        .execute(pool)
+        .await?;
+        Ok(sqlx::query_scalar(
+            "INSERT INTO leaderboard_seasons (leaderboard_id, name, starts_at)
+             VALUES ($1, 'Season 1', clock_timestamp()) RETURNING season_id",
+        )
+        .bind(leaderboard_id)
+        .fetch_one(pool)
+        .await?)
+    }
+
+    /// An app state whose scoring registry has the production algorithms
+    /// (`test_from_pool` ships an empty one).
+    fn scoring_state(pool: &sqlx::PgPool) -> crate::state::AppState {
+        let mut state = crate::state::AppState::test_from_pool(pool.clone());
+        state.scoring = std::sync::Arc::new(crate::scoring::default_registry());
+        state
+    }
+
+    type EntryValues = (Uuid, f64, f64, f64, i32);
+
+    async fn season_entries(pool: &sqlx::PgPool, season_id: Uuid) -> cja::Result<Vec<EntryValues>> {
+        Ok(sqlx::query_as(
+            "SELECT battlesnake_id, mu, sigma, display_score, games_played
+             FROM leaderboard_entries WHERE season_id = $1 ORDER BY battlesnake_id",
+        )
+        .bind(season_id)
+        .fetch_all(pool)
+        .await?)
+    }
+
+    async fn ladder_season_games(
+        pool: &sqlx::PgPool,
+        leaderboard_id: Uuid,
+    ) -> cja::Result<Vec<(Uuid, Uuid)>> {
+        Ok(sqlx::query_as(
+            "SELECT lg.game_id, lg.season_id FROM leaderboard_games lg
+             JOIN games g ON g.game_id = lg.game_id
+             WHERE lg.leaderboard_id = $1 ORDER BY g.created_at, g.game_id",
+        )
+        .bind(leaderboard_id)
+        .fetch_all(pool)
+        .await?)
+    }
+
+    /// Rolling into Season 1 gives every registered snake a fresh
+    /// default-rated entry (with its scoring rows) without rejoining, leaves
+    /// the Preseason entries untouched, and stays one entry per snake across
+    /// repeated rounds.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn rollover_gives_registered_snakes_fresh_entries_without_rejoin(
+        pool: sqlx::PgPool,
+    ) -> cja::Result<()> {
+        let (lb, preseason_ids) = seeded_mode(&pool, "Standard 11x11", 4).await?;
+        let app = scoring_state(&pool);
+        run_matchmaker_for_leaderboard(&app, &lb).await?;
+        let preseason: Uuid = sqlx::query_scalar(
+            "SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $1",
+        )
+        .bind(lb.leaderboard_id)
+        .fetch_one(&pool)
+        .await?;
+        let preseason_games = ladder_season_games(&pool, lb.leaderboard_id).await?;
+        assert_eq!(preseason_games.len(), 1);
+        assert_eq!(preseason_games[0].1, preseason);
+        // Distinct, non-default values per snake so a rewrite of any column shows.
+        for (i, id) in preseason_ids.iter().enumerate() {
+            sqlx::query(
+                "UPDATE leaderboard_entries
+                 SET mu = 30.5 + $2, sigma = 5.25, display_score = 14.5 + $2, games_played = 6 + $3
+                 WHERE leaderboard_entry_id = $1",
+            )
+            .bind(id)
+            .bind(i as f64)
+            .bind(i as i32)
+            .execute(&pool)
+            .await?;
+        }
+        let preseason_before = season_entries(&pool, preseason).await?;
+        assert_eq!(preseason_before.len(), 4);
+
+        let season_one = roll_into_season_one(&pool, lb.leaderboard_id).await?;
+        run_matchmaker_for_leaderboard(&app, &lb).await?;
+        run_matchmaker_for_leaderboard(&app, &lb).await?;
+
+        let fresh = season_entries(&pool, season_one).await?;
+        assert_eq!(fresh.len(), 4, "one Season 1 entry per registered snake");
+        let snakes: Vec<Uuid> = preseason_before.iter().map(|e| e.0).collect();
+        assert_eq!(fresh.iter().map(|e| e.0).collect::<Vec<_>>(), snakes);
+        for (_, mu, sigma, display_score, games_played) in &fresh {
+            assert_eq!(*mu, 25.0);
+            assert!((sigma - 8.333).abs() < 1e-9, "{sigma}");
+            assert_eq!(*display_score, 0.0);
+            assert_eq!(*games_played, 0);
+        }
+        for table in ["weng_lin_ratings", "win_rate_stats", "food_eaten_stats"] {
+            let rows: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                "SELECT count(*) FROM {table} t
+                 JOIN leaderboard_entries le ON le.leaderboard_entry_id = t.leaderboard_entry_id
+                 WHERE le.season_id = $1"
+            )))
+            .bind(season_one)
+            .fetch_one(&pool)
+            .await?;
+            assert_eq!(rows, 4, "{table} row per Season 1 entry");
+        }
+        assert_eq!(
+            season_entries(&pool, preseason).await?,
+            preseason_before,
+            "Preseason entries keep their values"
+        );
+        let games = ladder_season_games(&pool, lb.leaderboard_id).await?;
+        assert_eq!(
+            games.len(),
+            3,
+            "the Preseason game plus two Season 1 rounds"
+        );
+        assert_eq!(games[0], preseason_games[0]);
+        assert!(games[1..].iter().all(|(_, season)| *season == season_one));
+        let season_one_participants: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM game_battlesnakes gb
+             JOIN leaderboard_entries le ON le.leaderboard_entry_id = gb.leaderboard_entry_id
+             JOIN leaderboard_games lg ON lg.game_id = gb.game_id
+             WHERE lg.season_id = $1 AND le.season_id = $1",
+        )
+        .bind(season_one)
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(
+            season_one_participants, 8,
+            "Season 1 games seat Season 1 entries"
+        );
+        Ok(())
+    }
+
+    /// A waiting game whose season ended reserves no snakes: the same snakes'
+    /// younger game in the new season dispatches and claims, while the
+    /// expired one is never dispatched and claims Busy.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn expired_season_game_does_not_reserve_the_next_seasons_game(
+        pool: sqlx::PgPool,
+    ) -> cja::Result<()> {
+        let (lb, _) = seeded_mode(&pool, "Standard 11x11", 4).await?;
+        let app = scoring_state(&pool);
+        run_matchmaker_for_leaderboard(&app, &lb).await?;
+        let season_one = roll_into_season_one(&pool, lb.leaderboard_id).await?;
+        run_matchmaker_for_leaderboard(&app, &lb).await?;
+        let games = ladder_season_games(&pool, lb.leaderboard_id).await?;
+        assert_eq!(games.len(), 2);
+        let (expired, current) = (games[0].0, games[1].0);
+        assert_ne!(games[0].1, season_one);
+        assert_eq!(games[1].1, season_one);
+
+        dispatch_pending_ladder_games(&app).await?;
+        let queued: Vec<String> =
+            sqlx::query_scalar("SELECT payload->>'game_id' FROM jobs WHERE name = 'GameRunnerJob'")
+                .fetch_all(&pool)
+                .await?;
+        assert_eq!(queued, vec![current.to_string()]);
+        assert_eq!(
+            game::claim_game_start(&pool, expired, 480).await?,
+            game::StartClaim::Busy
+        );
+        assert!(matches!(
+            game::claim_game_start(&pool, current, 480).await?,
+            game::StartClaim::Started { .. }
+        ));
+        Ok(())
+    }
+
+    /// The expired season's leftover unclaimed runner job doesn't count as
+    /// backlog for the league's next-season round.
+    #[sqlx::test(migrations = "../migrations")]
+    async fn expired_season_backlog_does_not_starve_the_next_season(
+        pool: sqlx::PgPool,
+    ) -> cja::Result<()> {
+        let (lb, _) = seeded_mode(&pool, "Standard 11x11", 4).await?;
+        let app = scoring_state(&pool);
+        let expired = insert_backlog_game(&pool, lb.leaderboard_id, true).await?;
+        insert_old_unclaimed_job(&pool, expired).await?;
+        // Control: in its own season the leftover job blocks the round.
+        run_matchmaker_for_leaderboard(&app, &lb).await?;
+        assert_eq!(
+            ladder_season_games(&pool, lb.leaderboard_id).await?.len(),
+            1
+        );
+
+        let season_one = roll_into_season_one(&pool, lb.leaderboard_id).await?;
+        run_matchmaker_for_leaderboard(&app, &lb).await?;
+        let games = ladder_season_games(&pool, lb.leaderboard_id).await?;
+        assert_eq!(games.len(), 2, "the next-season round runs");
+        assert_eq!(games[0].0, expired);
+        assert_eq!(games[1].1, season_one);
         Ok(())
     }
 

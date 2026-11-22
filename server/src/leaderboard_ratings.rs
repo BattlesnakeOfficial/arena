@@ -290,8 +290,8 @@ mod tests {
             .await?;
         }
         sqlx::query!(
-            "INSERT INTO leaderboard_games (leaderboard_game_id, leaderboard_id, game_id)
-             VALUES ($1, $2, $3)",
+            "INSERT INTO leaderboard_games (leaderboard_game_id, leaderboard_id, game_id, season_id)
+             VALUES ($1, $2, $3, (SELECT season_id FROM leaderboard_seasons WHERE leaderboard_id = $2))",
             leaderboard_game_id,
             leaderboard_id,
             game.game_id,

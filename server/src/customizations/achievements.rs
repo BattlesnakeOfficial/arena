@@ -1167,7 +1167,7 @@ mod tests {
 
     async fn entry(pool: &PgPool, snake_id: Uuid) -> Uuid {
         sqlx::query_scalar::<_, Uuid>(
-            "INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id) VALUES ((SELECT leaderboard_id FROM leaderboards LIMIT 1), $1) RETURNING leaderboard_entry_id",
+            "INSERT INTO leaderboard_entries (leaderboard_id, season_id, battlesnake_id) SELECT leaderboard_id, (SELECT season_id FROM leaderboard_seasons s WHERE s.leaderboard_id = leaderboards.leaderboard_id), $1 FROM leaderboards LIMIT 1 RETURNING leaderboard_entry_id",
         ).bind(snake_id).fetch_one(pool).await.unwrap()
     }
 

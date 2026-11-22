@@ -541,15 +541,18 @@ mod tests {
     }
 
     async fn test_entry(pool: &PgPool, snake_id: Uuid, offset: i64) -> cja::Result<Uuid> {
-        Ok(sqlx::query_scalar::<_, Uuid>(
-            "INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id)
-             SELECT leaderboard_id, $1 FROM leaderboards ORDER BY created_at, leaderboard_id
+        let entry = sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO leaderboard_entries (leaderboard_id, season_id, battlesnake_id)
+             SELECT leaderboard_id, (SELECT season_id FROM leaderboard_seasons s WHERE s.leaderboard_id = leaderboards.leaderboard_id), $1
+             FROM leaderboards ORDER BY created_at, leaderboard_id
              OFFSET $2 LIMIT 1 RETURNING leaderboard_entry_id",
         )
         .bind(snake_id)
         .bind(offset)
         .fetch_one(pool)
-        .await?)
+        .await?;
+        crate::routes::test_support::register_snake_entries(pool, snake_id).await;
+        Ok(entry)
     }
 
     async fn test_game(

@@ -200,3 +200,25 @@ pub fn assert_game_end(message: &serde_json::Value, id: Uuid, game_info_game: &s
     keys.sort_unstable();
     assert_eq!(keys, expected);
 }
+
+/// Register every (league, snake) a snake has raw-inserted fixture entries
+/// in, copying each entry's membership columns, as PR 1's sync trigger did
+/// before DEV-2642 PR 2 dropped it. Fixtures that feed registration-sourced
+/// surfaces (profile, rail, directory, global rankings, highlights) need
+/// this.
+pub async fn register_snake_entries<'e, E: sqlx::PgExecutor<'e>>(db: E, battlesnake_id: Uuid) {
+    sqlx::query(
+        "INSERT INTO leaderboard_registrations (leaderboard_id, battlesnake_id, disabled_at,
+             disabled_reason, health_consecutive_failures, health_consecutive_successes,
+             health_last_checked_at, health_last_failure)
+         SELECT leaderboard_id, battlesnake_id, disabled_at, disabled_reason,
+                health_consecutive_failures, health_consecutive_successes,
+                health_last_checked_at, health_last_failure
+         FROM leaderboard_entries WHERE battlesnake_id = $1
+         ON CONFLICT (leaderboard_id, battlesnake_id) DO NOTHING",
+    )
+    .bind(battlesnake_id)
+    .execute(db)
+    .await
+    .unwrap();
+}

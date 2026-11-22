@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE leaderboard_registrations r SET disabled_at = clock_timestamp() FROM leaderboard_entries le WHERE le.leaderboard_entry_id = $1 AND r.leaderboard_id = le.leaderboard_id AND r.battlesnake_id = le.battlesnake_id",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "074d3fdc08634307bdb8ef68c150ea61c546a3bfff6ef5346d37ffca6870c792"
+}

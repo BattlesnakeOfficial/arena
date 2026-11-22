@@ -17,6 +17,10 @@ async fn migrate_before(pool: &PgPool, cutoff: &str) -> Result<(), Box<dyn std::
     Ok(())
 }
 
+/// First DEV-2642 PR 2 (contract) migration: drops the (league, snake)
+/// unique constraint, then the fill and sync triggers.
+const PR2_CONTRACT: &str = "20261122120000";
+
 async fn count(pool: &PgPool, table: &str) -> i64 {
     let statement = match table {
         "leaderboards" => "SELECT count(*) FROM leaderboards",
@@ -229,7 +233,7 @@ async fn historical_backfill_preserves_rows_and_values(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "../migrations")]
-async fn seasons_enforce_ranges_and_keep_old_insert_shape(pool: PgPool) {
+async fn seasons_enforce_ranges_and_entries_bind_their_season(pool: PgPool) {
     let league: Uuid = sqlx::query_scalar(
         "INSERT INTO leaderboards (name) VALUES ('Season Test') RETURNING leaderboard_id",
     )
@@ -242,39 +246,52 @@ async fn seasons_enforce_ranges_and_keep_old_insert_shape(pool: PgPool) {
         .fetch_one(&pool).await.unwrap();
     let snake: Uuid = sqlx::query_scalar("INSERT INTO battlesnakes (user_id, name, url) VALUES ($1, 'Fixture Snake', 'https://example.com') RETURNING battlesnake_id")
         .bind(user).fetch_one(&pool).await.unwrap();
-    let entry: Uuid = sqlx::query_scalar("INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id) VALUES ($1, $2) RETURNING leaderboard_entry_id")
-        .bind(league).bind(snake).fetch_one(&pool).await.unwrap();
+    let entry: Uuid = sqlx::query_scalar("INSERT INTO leaderboard_entries (leaderboard_id, season_id, battlesnake_id) VALUES ($1, $2, $3) RETURNING leaderboard_entry_id")
+        .bind(league).bind(preseason).bind(snake).fetch_one(&pool).await.unwrap();
     let game: Uuid = sqlx::query_scalar("INSERT INTO games (board_size, game_type, status) VALUES ('11x11', 'Standard', 'finished') RETURNING game_id")
         .fetch_one(&pool).await.unwrap();
-    let link: Uuid = sqlx::query_scalar("INSERT INTO leaderboard_games (leaderboard_id, game_id) VALUES ($1, $2) RETURNING leaderboard_game_id")
-        .bind(league).bind(game).fetch_one(&pool).await.unwrap();
+    let link: Uuid = sqlx::query_scalar("INSERT INTO leaderboard_games (leaderboard_id, game_id, season_id) VALUES ($1, $2, $3) RETURNING leaderboard_game_id")
+        .bind(league).bind(game).bind(preseason).fetch_one(&pool).await.unwrap();
     sqlx::query("INSERT INTO leaderboard_game_results (leaderboard_game_id, leaderboard_entry_id, placement, mu_before, mu_after, sigma_before, sigma_after, display_score_change) VALUES ($1, $2, 1, 25, 26, 8.333, 8, 1)")
         .bind(link).bind(entry).execute(&pool).await.unwrap();
-    assert_eq!(
-        sqlx::query_scalar::<_, Uuid>(
-            "SELECT season_id FROM leaderboard_entries WHERE leaderboard_entry_id = $1"
-        )
-        .bind(entry)
-        .fetch_one(&pool)
-        .await
-        .unwrap(),
-        preseason
+    // With the fill triggers gone, an insert must name its season: the
+    // validated CHECKs reject one that doesn't.
+    let unbound_entry = sqlx::query(
+        "INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id) VALUES ($1, $2)",
+    )
+    .bind(league)
+    .bind(snake)
+    .execute(&pool)
+    .await
+    .unwrap_err();
+    assert!(
+        unbound_entry
+            .to_string()
+            .contains("leaderboard_entries_season_required"),
+        "{unbound_entry}"
     );
-    assert_eq!(
-        sqlx::query_scalar::<_, Uuid>(
-            "SELECT season_id FROM leaderboard_games WHERE leaderboard_game_id = $1"
-        )
-        .bind(link)
-        .fetch_one(&pool)
-        .await
-        .unwrap(),
-        preseason
+    let unbound_game: Uuid = sqlx::query_scalar("INSERT INTO games (board_size, game_type, status) VALUES ('11x11', 'Standard', 'waiting') RETURNING game_id")
+        .fetch_one(&pool).await.unwrap();
+    let unbound_link =
+        sqlx::query("INSERT INTO leaderboard_games (leaderboard_id, game_id) VALUES ($1, $2)")
+            .bind(league)
+            .bind(unbound_game)
+            .execute(&pool)
+            .await
+            .unwrap_err();
+    assert!(
+        unbound_link
+            .to_string()
+            .contains("leaderboard_games_season_required"),
+        "{unbound_link}"
     );
+    // One entry per (season, snake) still holds.
     assert!(
         sqlx::query(
-            "INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id) VALUES ($1, $2)"
+            "INSERT INTO leaderboard_entries (leaderboard_id, season_id, battlesnake_id) VALUES ($1, $2, $3)"
         )
         .bind(league)
+        .bind(preseason)
         .bind(snake)
         .execute(&pool)
         .await
@@ -287,6 +304,22 @@ async fn seasons_enforce_ranges_and_keep_old_insert_shape(pool: PgPool) {
         .unwrap();
     let adjacent: Uuid = sqlx::query_scalar("INSERT INTO leaderboard_seasons (leaderboard_id, name, starts_at, ends_at) VALUES ($1, 'Next', '2030-01-01', '2031-01-01') RETURNING season_id")
         .bind(league).fetch_one(&pool).await.unwrap();
+    // The (league, snake) unique constraint is gone: the same snake holds one
+    // entry per season.
+    let next_entry: Uuid = sqlx::query_scalar("INSERT INTO leaderboard_entries (leaderboard_id, season_id, battlesnake_id) VALUES ($1, $2, $3) RETURNING leaderboard_entry_id")
+        .bind(league).bind(adjacent).bind(snake).fetch_one(&pool).await.unwrap();
+    assert_ne!(next_entry, entry);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM leaderboard_entries WHERE leaderboard_id = $1 AND battlesnake_id = $2"
+        )
+        .bind(league)
+        .bind(snake)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        2
+    );
     assert!(sqlx::query("INSERT INTO leaderboard_seasons (leaderboard_id, name, starts_at, ends_at) VALUES ($1, 'Overlap', '2029-12-31', '2030-02-01')").bind(league).execute(&pool).await.is_err());
     assert!(sqlx::query("INSERT INTO leaderboard_seasons (leaderboard_id, name, starts_at, ends_at) VALUES ($1, 'Open', '2030-01-01', NULL)").bind(league).execute(&pool).await.is_err());
     assert!(sqlx::query("INSERT INTO leaderboard_seasons (leaderboard_id, name, starts_at, ends_at) VALUES ($1, 'Empty', '2032-01-01', '2032-01-01')").bind(league).execute(&pool).await.is_err());
@@ -315,7 +348,8 @@ async fn seasons_enforce_ranges_and_keep_old_insert_shape(pool: PgPool) {
         .unwrap();
     sqlx::query("INSERT INTO leaderboard_seasons (leaderboard_id, name, starts_at, ends_at) VALUES ($1, 'Same range', '2030-01-01', '2031-01-01')")
         .bind(other).execute(&pool).await.unwrap();
-    // A gap and a future-only league are valid even though inserts there must fail.
+    // A gap and a future-only league are valid schema states (the app layer
+    // refuses to create entries or games there).
     sqlx::query(
         "UPDATE leaderboard_seasons SET starts_at = now() - interval '2 days', ends_at = now() - interval '1 day' WHERE season_id = $1",
     )
@@ -323,49 +357,28 @@ async fn seasons_enforce_ranges_and_keep_old_insert_shape(pool: PgPool) {
     .execute(&pool)
     .await
     .unwrap();
-    let gap_snake: Uuid = sqlx::query_scalar("INSERT INTO battlesnakes (user_id, name, url) VALUES ($1, 'Gap Snake', 'https://example.com') RETURNING battlesnake_id")
-        .bind(user).fetch_one(&pool).await.unwrap();
-    let gap_error = sqlx::query(
-        "INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id) VALUES ($1, $2)",
-    )
-    .bind(league)
-    .bind(gap_snake)
-    .execute(&pool)
-    .await
-    .unwrap_err();
-    assert!(
-        gap_error.to_string().contains("no active season"),
-        "{gap_error}"
-    );
-    let gap_game: Uuid = sqlx::query_scalar("INSERT INTO games (board_size, game_type, status) VALUES ('11x11', 'Standard', 'waiting') RETURNING game_id")
-        .fetch_one(&pool).await.unwrap();
-    let game_error =
-        sqlx::query("INSERT INTO leaderboard_games (leaderboard_id, game_id) VALUES ($1, $2)")
-            .bind(league)
-            .bind(gap_game)
-            .execute(&pool)
-            .await
-            .unwrap_err();
-    assert!(
-        game_error.to_string().contains("no active season"),
-        "{game_error}"
-    );
     let future: Uuid = sqlx::query_scalar("INSERT INTO leaderboards (name, created_at) VALUES ('Future only', '2035-01-01') RETURNING leaderboard_id")
         .fetch_one(&pool).await.unwrap();
     assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM leaderboard_seasons WHERE leaderboard_id = $1 AND starts_at > now()")
         .bind(future).fetch_one(&pool).await.unwrap(), 1);
-    let future_error = sqlx::query(
-        "INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id) VALUES ($1, $2)",
+    // Contract state: the old unique constraint, both fill triggers, the sync
+    // trigger and their functions are gone; the Preseason trigger stays.
+    let dropped: i64 = sqlx::query_scalar(
+        "SELECT (SELECT count(*) FROM pg_constraint WHERE conname = 'leaderboard_entries_leaderboard_id_battlesnake_id_key')
+              + (SELECT count(*) FROM pg_trigger WHERE tgname IN ('fill_leaderboard_entry_season_before_insert', 'fill_leaderboard_game_season_before_insert', 'sync_entry_state_to_registration'))
+              + (SELECT count(*) FROM pg_proc WHERE proname IN ('fill_leaderboard_season_id', 'sync_entry_state_to_registration'))",
     )
-    .bind(future)
-    .bind(gap_snake)
-    .execute(&pool)
+    .fetch_one(&pool)
     .await
-    .unwrap_err();
-    assert!(
-        future_error.to_string().contains("no active season"),
-        "{future_error}"
-    );
+    .unwrap();
+    assert_eq!(dropped, 0);
+    let kept: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pg_trigger WHERE tgname = 'create_leaderboard_preseason_after_insert'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(kept, 1);
     let valid: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_index WHERE indexrelid IN ('leaderboard_entries_season_snake_idx'::regclass, 'leaderboard_games_season_created_idx'::regclass) AND indisvalid")
         .fetch_one(&pool).await.unwrap();
     assert_eq!(valid, 2);
@@ -376,10 +389,12 @@ async fn seasons_enforce_ranges_and_keep_old_insert_shape(pool: PgPool) {
 
 /// `20261121130100` (registration backfill + sync trigger), re-applied on its
 /// own over legacy entries: every entry gets exactly one registration carrying
-/// its membership and health state, and nothing is lost or rewritten.
+/// its membership and health state, and nothing is lost or rewritten. Runs in
+/// the PR 1 world (before `20261122120000` drops the fill and sync triggers),
+/// then replays the contract migrations on top.
 #[sqlx::test(migrations = false)]
 async fn registration_backfill_carries_entry_state(pool: PgPool) {
-    migrate_before(&pool, "99999999999999").await.unwrap();
+    migrate_before(&pool, PR2_CONTRACT).await.unwrap();
 
     let user: Uuid = sqlx::query_scalar("INSERT INTO users (external_github_id, github_login) VALUES (2660, 'registration-backfill') RETURNING user_id")
         .fetch_one(&pool).await.unwrap();
@@ -453,7 +468,7 @@ async fn registration_backfill_carries_entry_state(pool: PgPool) {
     .unwrap();
     assert_eq!(entries_before.len(), 6);
 
-    migrate_before(&pool, "99999999999999").await.unwrap();
+    migrate_before(&pool, PR2_CONTRACT).await.unwrap();
 
     let reapplied: bool =
         sqlx::query_scalar("SELECT success FROM _sqlx_migrations WHERE version = 20261121130100")
@@ -552,4 +567,12 @@ async fn registration_backfill_carries_entry_state(pool: PgPool) {
     .await
     .unwrap();
     assert_eq!(active, 3, "the other three stay in rotation");
+
+    // The contract migrations replay on top and leave registrations intact.
+    sqlx::migrate!("../migrations").run(&pool).await.unwrap();
+    let after_contract: i64 = sqlx::query_scalar("SELECT count(*) FROM leaderboard_registrations")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(after_contract, 6);
 }
