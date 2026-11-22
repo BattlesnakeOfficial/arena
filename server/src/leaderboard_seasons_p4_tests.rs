@@ -287,8 +287,15 @@ async fn preseason_only_league_renders_as_today_plus_one_chip(pool: PgPool) {
     let res = get(&state, &format!("/leaderboards/{lb}")).await;
     assert_eq!(res.status, StatusCode::OK);
     assert!(res.body.contains(r#"aria-label="Seasons""#), "{}", res.body);
+    // Count within the Seasons nav: the seeded ladders share this league's
+    // mode, so the Game modes nav renders its own selected chip too.
+    let seasons_nav = {
+        let start = res.body.find(r#"aria-label="Seasons""#).unwrap();
+        let rest = &res.body[start..];
+        &rest[..rest.find("</nav>").unwrap()]
+    };
     assert_eq!(
-        res.body
+        seasons_nav
             .matches(r#"class="mode on" aria-current="page""#)
             .count(),
         1
