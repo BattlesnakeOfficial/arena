@@ -2556,6 +2556,16 @@ pub async fn import_leaderboard(
             .await?;
     ranked.retain(|entry| live_members.contains(&entry.battlesnake_id));
 
+    // Import obeys the same snake-eligibility rule as game creation: the
+    // owner may pull in their own snakes, but another user's snake only if
+    // it's public. The shared locks keep a racing visibility change from
+    // slipping a private snake in.
+    let ranked_ids: Vec<Uuid> = ranked.iter().map(|e| e.battlesnake_id).collect();
+    let eligible = battlesnake::lock_eligible_battlesnake_ids(&mut tx, user.user_id, &ranked_ids)
+        .await
+        .wrap_err("Failed to check imported snake eligibility")?;
+    ranked.retain(|entry| eligible.contains(&entry.battlesnake_id));
+
     // Snapshot the registrations inside the locked transaction so duplicate
     // skipping and the per-user/total caps are enforced against reality.
     let existing = tournament::get_registrations_for_tournament(&mut *tx, tournament_id)
