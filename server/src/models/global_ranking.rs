@@ -882,8 +882,8 @@ mod tests {
 
         let old_query = format!("{} ORDER BY 1", old_body().trim_end());
         for min_games in [0, 10] {
-            let old: Vec<ScoreRow> = // The SQL is the checked-in Phase 2 migration text, not user input.
-            sqlx::query_as(sqlx::AssertSqlSafe(old_query.clone()))
+            // The SQL is the checked-in Phase 2 migration text, not user input.
+            let old: Vec<ScoreRow> = sqlx::query_as(sqlx::AssertSqlSafe(old_query.clone()))
                 .bind(min_games)
                 .fetch_all(&pool)
                 .await?;
