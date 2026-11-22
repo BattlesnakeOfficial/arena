@@ -241,6 +241,10 @@ pub(crate) struct ScheduleGame {
     pub leaderboard_id: Option<Uuid>,
     pub disabled_at: Option<chrono::DateTime<chrono::Utc>>,
     pub participants: Vec<Uuid>,
+    /// The game's season is the league's active one. A waiting game whose
+    /// season ended is held: never dispatched or claimed, and reserves no
+    /// snakes. Always false for non-ladder games (unused for running ones).
+    pub season_active: bool,
 }
 
 #[derive(Debug)]
@@ -257,6 +261,8 @@ pub(crate) async fn load_schedule_snapshot(
     let rows = sqlx::query!(
         r#"SELECT g.game_id, g.status, g.created_at, lg.leaderboard_id,
                   lb.disabled_at,
+                  (s.season_id IS NOT NULL AND s.starts_at <= clock_timestamp()
+                   AND (s.ends_at IS NULL OR clock_timestamp() < s.ends_at)) AS "season_active!",
                   ARRAY(SELECT DISTINCT COALESCE(gb.battlesnake_id, le.battlesnake_id)
                         FROM game_battlesnakes gb
                         LEFT JOIN leaderboard_entries le ON le.leaderboard_entry_id = gb.leaderboard_entry_id
@@ -265,6 +271,7 @@ pub(crate) async fn load_schedule_snapshot(
            FROM games g
            LEFT JOIN leaderboard_games lg ON lg.game_id = g.game_id
            LEFT JOIN leaderboards lb ON lb.leaderboard_id = lg.leaderboard_id
+           LEFT JOIN leaderboard_seasons s ON s.season_id = lg.season_id
            WHERE g.status = 'running' OR (g.status = 'waiting' AND lg.game_id IS NOT NULL)"#
     )
     .fetch_all(&mut *conn)
@@ -285,6 +292,7 @@ pub(crate) async fn load_schedule_snapshot(
                 leaderboard_id: r.leaderboard_id,
                 disabled_at: r.disabled_at,
                 participants: r.participants,
+                season_active: r.season_active,
             })
             .collect(),
     })
@@ -305,6 +313,7 @@ fn base_eligibility(
         || game.leaderboard_id.is_none()
         || game.disabled_at.is_some()
         || game.participants.is_empty()
+        || !game.season_active
     {
         return None;
     }
@@ -347,6 +356,7 @@ fn reserves_same_ladder(
         && game.leaderboard_id.is_some()
         && game.disabled_at.is_none()
         && !game.participants.is_empty()
+        && game.season_active
         && snapshot
             .at
             .signed_duration_since(game.created_at)
@@ -489,6 +499,7 @@ mod ladder_dispatch_tests {
             leaderboard_id: ladder,
             disabled_at: None,
             participants: snakes.to_vec(),
+            season_active: true,
         }
     }
 
@@ -538,6 +549,54 @@ mod ladder_dispatch_tests {
         snapshot.games[2].participants.clear();
         assert_eq!(
             ladder_eligibility(&snapshot, &snapshot.games[1], 480),
+            Some("free")
+        );
+    }
+
+    /// A waiting game whose season ended is held: never eligible itself, and
+    /// it neither wins FIFO over nor reserves snakes against younger games.
+    #[test]
+    fn expired_season_waiter_is_held_and_reserves_nothing() {
+        let shared = Uuid::from_u128(1);
+        let blocked = Uuid::from_u128(4);
+        let ladder = Uuid::from_u128(2);
+        // FIFO: the older game wins while its season is active...
+        let mut snapshot = ScheduleSnapshot {
+            at: Utc::now(),
+            games: vec![
+                game(1, "waiting", 20, Some(ladder), &[shared]),
+                game(2, "waiting", 10, Some(ladder), &[shared]),
+            ],
+        };
+        assert_eq!(
+            ladder_eligibility(&snapshot, &snapshot.games[0], 480),
+            Some("free")
+        );
+        assert_eq!(ladder_eligibility(&snapshot, &snapshot.games[1], 480), None);
+        // ...and once it expires it is held and the younger game goes.
+        snapshot.games[0].season_active = false;
+        assert_eq!(ladder_eligibility(&snapshot, &snapshot.games[0], 480), None);
+        assert_eq!(
+            ladder_eligibility(&snapshot, &snapshot.games[1], 480),
+            Some("free")
+        );
+
+        // Reservation: a past-deadline waiter blocked by a same-ladder
+        // running game holds its other snake against younger games...
+        let mut snapshot = ScheduleSnapshot {
+            at: Utc::now(),
+            games: vec![
+                game(10, "running", 30, Some(ladder), &[blocked]),
+                game(11, "waiting", 600, Some(ladder), &[blocked, shared]),
+                game(12, "waiting", 10, Some(ladder), &[shared]),
+            ],
+        };
+        assert_eq!(ladder_eligibility(&snapshot, &snapshot.games[1], 480), None);
+        assert_eq!(ladder_eligibility(&snapshot, &snapshot.games[2], 480), None);
+        // ...unless its season ended.
+        snapshot.games[1].season_active = false;
+        assert_eq!(
+            ladder_eligibility(&snapshot, &snapshot.games[2], 480),
             Some("free")
         );
     }

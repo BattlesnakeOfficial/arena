@@ -36,6 +36,8 @@ mod highlights;
 mod jobs;
 mod leaderboard_matchmaker;
 mod leaderboard_ratings;
+#[cfg(test)]
+mod leaderboard_seasons_p2_tests;
 mod models;
 mod moderation;
 mod native_backup;

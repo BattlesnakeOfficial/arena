@@ -117,6 +117,15 @@ impl ScoringRegistry {
     }
 }
 
+/// The production registry: every algorithm a leaderboard entry is scored by.
+pub fn default_registry() -> ScoringRegistry {
+    let mut registry = ScoringRegistry::new();
+    registry.register(Box::new(weng_lin::WengLinScoring));
+    registry.register(Box::new(win_rate::WinRateScoring));
+    registry.register(Box::new(food_eaten::FoodEatenScoring));
+    registry
+}
+
 pub mod food_eaten;
 pub mod weng_lin;
 pub mod win_rate;

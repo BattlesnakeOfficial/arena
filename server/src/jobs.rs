@@ -45,7 +45,7 @@ impl Job<AppState> for SendNotificationEmailJob {
             messages::{self, EmailContent},
         };
         use crate::models::{
-            claim_email_token, leaderboard_entry_health, notification, notification_email,
+            claim_email_token, leaderboard_registration, notification, notification_email,
         };
 
         let _permit = state.mailer.acquire_delivery_permit().await?;
@@ -92,7 +92,7 @@ impl Job<AppState> for SendNotificationEmailJob {
                 recipient = if email.recipient_user {
                     notification_email::resolved_recipient(&mut tx, event.user_id).await?
                 } else if let Some(snake_id) = email.battlesnake_id {
-                    leaderboard_entry_health::owner_notification_email(&mut tx, snake_id).await?
+                    leaderboard_registration::owner_notification_email(&mut tx, snake_id).await?
                 } else {
                     None // Legacy override-only toggleable rows cannot bypass confirmation.
                 };

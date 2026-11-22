@@ -18,7 +18,7 @@ use crate::{
     models::battlesnake::{self, CreateBattlesnake, EngineRegion, UpdateBattlesnake, Visibility},
     models::game_battlesnake,
     models::leaderboard,
-    models::leaderboard_entry_health,
+    models::leaderboard_registration,
     models::oauth,
     models::session,
     models::snake_latency,
@@ -1219,7 +1219,7 @@ pub async fn reactivate_battlesnake(
         );
     }
 
-    let resumed = leaderboard_entry_health::reactivate_snake(&state.db, battlesnake_id)
+    let resumed = leaderboard_registration::reactivate_snake(&state.db, battlesnake_id)
         .await
         .wrap_err("Failed to reactivate battlesnake")?;
 
@@ -1280,7 +1280,7 @@ struct ProfileView<'a> {
     total_pages: i64,
     leaderboard_entries: &'a [leaderboard::BattlesnakeLeaderboardSummary],
     /// Entries the health sweeper pulled; only ever shown to the owner.
-    health_paused: &'a [leaderboard_entry_health::HealthPausedEntry],
+    health_paused: &'a [leaderboard_registration::HealthPausedLeague],
     tags: &'a [tag::Tag],
     latency: &'a snake_latency::RecentLatency,
     /// The hosting client whose mark this snake carries, for the
@@ -1534,19 +1534,32 @@ fn render_battlesnake_profile(view: &ProfileView<'_>) -> Markup {
                                 @for entry in view.leaderboard_entries {
                                     tr {
                                         td {
-                                            a href={"/leaderboards/"(entry.leaderboard_id)"/entries/"(entry.leaderboard_entry_id)} {
-                                                (entry.leaderboard_name)
+                                            @if let Some(entry_id) = entry.leaderboard_entry_id {
+                                                a href={"/leaderboards/"(entry.leaderboard_id)"/entries/"(entry_id)} {
+                                                    (entry.leaderboard_name)
+                                                }
+                                            } @else {
+                                                a href={"/leaderboards/"(entry.leaderboard_id)} {
+                                                    (entry.leaderboard_name)
+                                                }
                                             }
                                             @if entry.leaderboard_visibility == Visibility::Private {
                                                 " "
                                                 span class="live-pill quiet" { "Private ladder" }
                                             }
                                         }
-                                        td class="r num" { (format!("{:.1}", entry.display_score)) }
-                                        td class="r num" { (entry.games_played) }
+                                        @let games_played = entry.games_played.unwrap_or(0);
                                         td class="r num" {
-                                            @if entry.games_played > 0 {
-                                                (format!("{:.0}%", f64::from(entry.first_place_finishes) / f64::from(entry.games_played) * 100.0))
+                                            @if let Some(score) = entry.display_score {
+                                                (format!("{score:.1}"))
+                                            } @else {
+                                                "—"
+                                            }
+                                        }
+                                        td class="r num" { (games_played) }
+                                        td class="r num" {
+                                            @if games_played > 0 {
+                                                (format!("{:.0}%", f64::from(entry.first_place_finishes.unwrap_or(0)) / f64::from(games_played) * 100.0))
                                             } @else {
                                                 "—"
                                             }
@@ -1555,7 +1568,7 @@ fn render_battlesnake_profile(view: &ProfileView<'_>) -> Markup {
                                             @if entry.disabled_reason.as_deref() == Some(battlesnake::DISABLED_REASON_RETIRED) {
                                                 span class="badge" { "Retired" }
                                             } @else if entry.disabled_at.is_some()
-                                                && entry.disabled_reason.as_deref() == Some(leaderboard_entry_health::DISABLED_REASON_HEALTH)
+                                                && entry.disabled_reason.as_deref() == Some(leaderboard_registration::DISABLED_REASON_HEALTH)
                                             {
                                                 span class="badge warn" title="Automatically paused: this snake is failing health checks on this leaderboard." { "Auto-paused" }
                                             } @else if entry.disabled_at.is_some() {
@@ -1703,7 +1716,7 @@ pub async fn view_battlesnake_profile(
             .wrap_err("Failed to get leaderboard entries")?;
 
     // Health-sweeper pauses, for the owner-facing deactivation banner
-    let health_paused = leaderboard_entry_health::health_paused_entries(&state.db, battlesnake_id)
+    let health_paused = leaderboard_registration::health_paused_leagues(&state.db, battlesnake_id)
         .await
         .wrap_err("Failed to get health-paused entries")?;
 

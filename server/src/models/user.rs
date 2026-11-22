@@ -123,9 +123,9 @@ pub struct PlayerDirectoryEntry {
 
 /// Count players matching a literal, case-insensitive login/display-name
 /// substring (empty matches all). `active_only` restricts to players with at
-/// least one enabled leaderboard entry — there is no snake-level active flag,
-/// so pausing a snake (manually or via the health sweeper) is expressed as
-/// `leaderboard_entries.disabled_at`.
+/// least one in-rotation league registration — there is no snake-level
+/// active flag, so pausing a snake (manually or via the health sweeper) is
+/// expressed as `leaderboard_registrations.disabled_at`.
 ///
 /// The two modes are separate statements rather than one query gated on a
 /// bind parameter. Writing the filter as `NOT $1 OR EXISTS (...)` keeps the
@@ -143,10 +143,10 @@ pub async fn count_players(pool: &PgPool, active_only: bool, search: &str) -> cj
             WHERE EXISTS (
                 SELECT 1
                 FROM battlesnakes b
-                JOIN leaderboard_entries le
-                  ON le.battlesnake_id = b.battlesnake_id
+                JOIN leaderboard_registrations r
+                  ON r.battlesnake_id = b.battlesnake_id
                 WHERE b.user_id = u.user_id
-                  AND le.disabled_at IS NULL
+                  AND r.disabled_at IS NULL
             )
             AND (strpos(lower(u.github_login), lower($1)) > 0
                  OR strpos(lower(COALESCE(u.display_name, '')), lower($1)) > 0)
@@ -199,10 +199,10 @@ pub async fn get_players_paginated(
             WHERE EXISTS (
                 SELECT 1
                 FROM battlesnakes b
-                JOIN leaderboard_entries le
-                  ON le.battlesnake_id = b.battlesnake_id
+                JOIN leaderboard_registrations r
+                  ON r.battlesnake_id = b.battlesnake_id
                 WHERE b.user_id = u.user_id
-                  AND le.disabled_at IS NULL
+                  AND r.disabled_at IS NULL
             )
             AND (strpos(lower(u.github_login), lower($3)) > 0
                  OR strpos(lower(COALESCE(u.display_name, '')), lower($3)) > 0)

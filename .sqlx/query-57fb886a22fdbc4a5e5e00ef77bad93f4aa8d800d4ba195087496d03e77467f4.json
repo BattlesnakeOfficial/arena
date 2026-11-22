@@ -1,0 +1,124 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT l.leaderboard_id, l.name, l.game_type, l.board_size, l.match_size,\n                l.visibility as \"visibility: Visibility\",\n                l.disabled_at, l.created_at, l.updated_at\n         FROM leaderboards l\n         WHERE l.disabled_at IS NULL\n           AND (l.visibility = 'public' OR EXISTS (\n                SELECT 1 FROM leaderboard_registrations r\n                WHERE r.leaderboard_id = l.leaderboard_id AND r.battlesnake_id = $1\n           ))\n         ORDER BY l.created_at ASC, l.name ASC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "leaderboard_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "leaderboards",
+            "name": "leaderboard_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "leaderboards",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "game_type",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "leaderboards",
+            "name": "game_type"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "board_size",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "leaderboards",
+            "name": "board_size"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "match_size",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "leaderboards",
+            "name": "match_size"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "visibility: Visibility",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "leaderboards",
+            "name": "visibility"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "disabled_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "leaderboards",
+            "name": "disabled_at"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "created_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "leaderboards",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "updated_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "leaderboards",
+            "name": "updated_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "57fb886a22fdbc4a5e5e00ef77bad93f4aa8d800d4ba195087496d03e77467f4"
+}

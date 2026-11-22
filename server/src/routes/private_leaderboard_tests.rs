@@ -340,16 +340,11 @@ async fn joining_takes_the_invite_code_unless_already_a_member(pool: PgPool) {
     assert!(!body.contains(r#"name="invite_code""#), "{body}");
 
     // ...and pause/resume and further snakes need no code.
-    let entry_id = leaderboard::get_entry(fx.db(), lb, fx.member_snake)
-        .await
-        .unwrap()
-        .unwrap()
-        .leaderboard_entry_id;
     let status = fx
         .post_form(
             &format!("/leaderboards/{lb}/leave"),
             fx.member_session,
-            &format!("leaderboard_entry_id={entry_id}"),
+            &format!("battlesnake_id={}", fx.member_snake),
         )
         .await;
     assert_eq!(status, StatusCode::SEE_OTHER);

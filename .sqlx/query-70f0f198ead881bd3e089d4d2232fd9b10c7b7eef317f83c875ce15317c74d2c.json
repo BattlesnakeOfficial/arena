@@ -1,0 +1,122 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT leaderboard_id, name, game_type, board_size, match_size,\n                      visibility as \"visibility: crate::models::battlesnake::Visibility\",\n                      disabled_at, created_at, updated_at\n               FROM leaderboards WHERE name = 'Standard 11x11'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "leaderboard_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "leaderboards",
+            "name": "leaderboard_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "leaderboards",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "game_type",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "leaderboards",
+            "name": "game_type"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "board_size",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "leaderboards",
+            "name": "board_size"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "match_size",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "leaderboards",
+            "name": "match_size"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "visibility: crate::models::battlesnake::Visibility",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "leaderboards",
+            "name": "visibility"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "disabled_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "leaderboards",
+            "name": "disabled_at"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "created_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "leaderboards",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "updated_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "leaderboards",
+            "name": "updated_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "70f0f198ead881bd3e089d4d2232fd9b10c7b7eef317f83c875ce15317c74d2c"
+}

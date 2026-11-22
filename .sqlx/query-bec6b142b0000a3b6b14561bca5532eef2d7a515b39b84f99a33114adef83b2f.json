@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE leaderboard_registrations\n         SET disabled_at = COALESCE(disabled_at, NOW()),\n             disabled_reason = $2,\n             updated_at = NOW()\n         WHERE battlesnake_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "bec6b142b0000a3b6b14561bca5532eef2d7a515b39b84f99a33114adef83b2f"
+}

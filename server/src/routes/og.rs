@@ -462,12 +462,17 @@ async fn load_snake_card(
     let entries = leaderboard::get_entries_for_battlesnake(&state.db, battlesnake_id, None)
         .await
         .wrap_err("Failed to get snake leaderboard entries for social card")?;
+    // A registration without an active-season entry (a gap) has no rank.
     for entry in entries.into_iter().filter(|e| e.disabled_at.is_none()) {
+        let (Some(display_score), Some(games_played)) = (entry.display_score, entry.games_played)
+        else {
+            continue;
+        };
         let rank = leaderboard::get_rank_for_entry(
             &state.db,
             entry.leaderboard_id,
-            entry.display_score,
-            entry.games_played,
+            display_score,
+            games_played,
         )
         .await
         .wrap_err("Failed to rank snake for social card")?;

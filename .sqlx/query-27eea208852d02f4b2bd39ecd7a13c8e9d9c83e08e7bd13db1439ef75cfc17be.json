@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE leaderboard_registrations\n         SET disabled_at = $3, disabled_reason = NULL\n         WHERE leaderboard_id = $1 AND battlesnake_id = $2\n           AND disabled_reason IS DISTINCT FROM $4\n           AND disabled_reason IS DISTINCT FROM $5",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Timestamptz",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "27eea208852d02f4b2bd39ecd7a13c8e9d9c83e08e7bd13db1439ef75cfc17be"
+}

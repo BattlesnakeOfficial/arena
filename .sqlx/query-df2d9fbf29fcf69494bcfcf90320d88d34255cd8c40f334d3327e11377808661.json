@@ -1,0 +1,151 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO leaderboard_registrations (leaderboard_id, battlesnake_id)\n         SELECT $1::uuid, b.battlesnake_id\n         FROM battlesnakes b\n         WHERE b.battlesnake_id = $2\n           AND b.deleted_at IS NULL\n           AND b.retired_at IS NULL\n         FOR SHARE\n         ON CONFLICT (leaderboard_id, battlesnake_id) DO UPDATE\n            SET disabled_at = NULL, disabled_reason = NULL, updated_at = NOW(),\n                health_consecutive_failures = CASE\n                    WHEN leaderboard_registrations.disabled_at IS NULL\n                    THEN leaderboard_registrations.health_consecutive_failures\n                    ELSE 0\n                END,\n                health_consecutive_successes = 0,\n                health_last_failure = CASE\n                    WHEN leaderboard_registrations.disabled_at IS NULL\n                    THEN leaderboard_registrations.health_last_failure\n                END\n            WHERE leaderboard_registrations.disabled_reason IS DISTINCT FROM $3\n              AND leaderboard_registrations.disabled_reason IS DISTINCT FROM $4\n         RETURNING\n            leaderboard_registration_id, leaderboard_id, battlesnake_id,\n            disabled_at, disabled_reason,\n            health_consecutive_failures, health_consecutive_successes,\n            health_last_checked_at, health_last_failure,\n            created_at, updated_at",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "leaderboard_registration_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_registrations",
+            "name": "leaderboard_registration_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "leaderboard_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_registrations",
+            "name": "leaderboard_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "battlesnake_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_registrations",
+            "name": "battlesnake_id"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "disabled_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_registrations",
+            "name": "disabled_at"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "disabled_reason",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_registrations",
+            "name": "disabled_reason"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "health_consecutive_failures",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_registrations",
+            "name": "health_consecutive_failures"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "health_consecutive_successes",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_registrations",
+            "name": "health_consecutive_successes"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "health_last_checked_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_registrations",
+            "name": "health_last_checked_at"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "health_last_failure",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_registrations",
+            "name": "health_last_failure"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "created_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_registrations",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "updated_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_registrations",
+            "name": "updated_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      false,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "df2d9fbf29fcf69494bcfcf90320d88d34255cd8c40f334d3327e11377808661"
+}

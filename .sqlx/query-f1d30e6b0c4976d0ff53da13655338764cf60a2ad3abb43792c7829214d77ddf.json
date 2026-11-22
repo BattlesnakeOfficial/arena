@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT r.leaderboard_registration_id\n             FROM leaderboard_entries le\n             JOIN leaderboard_registrations r\n               ON r.leaderboard_id = le.leaderboard_id AND r.battlesnake_id = le.battlesnake_id\n             WHERE le.leaderboard_entry_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "leaderboard_registration_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_registrations",
+            "name": "leaderboard_registration_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "f1d30e6b0c4976d0ff53da13655338764cf60a2ad3abb43792c7829214d77ddf"
+}

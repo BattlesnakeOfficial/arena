@@ -3,7 +3,9 @@ use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, PgPool, Postgres};
 use uuid::Uuid;
 
-use crate::models::{battlesnake::Visibility, user::User};
+use crate::models::{
+    battlesnake::Visibility, leaderboard_registration, leaderboard_season, user::User,
+};
 
 /// Application constants for leaderboard configuration
 /// Smallest game the matchmaker will create when fewer than a leaderboard's match size
@@ -52,6 +54,8 @@ pub struct LeaderboardGame {
     pub leaderboard_game_id: Uuid,
     pub leaderboard_id: Uuid,
     pub game_id: Uuid,
+    /// The season the game was created in (resolved at INSERT, immutable).
+    pub season_id: Uuid,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -197,8 +201,8 @@ pub async fn get_active_leaderboards_for_battlesnake(
          FROM leaderboards l
          WHERE l.disabled_at IS NULL
            AND (l.visibility = 'public' OR EXISTS (
-                SELECT 1 FROM leaderboard_entries le
-                WHERE le.leaderboard_id = l.leaderboard_id AND le.battlesnake_id = $1
+                SELECT 1 FROM leaderboard_registrations r
+                WHERE r.leaderboard_id = l.leaderboard_id AND r.battlesnake_id = $1
            ))
          ORDER BY l.created_at ASC, l.name ASC"#,
         battlesnake_id
@@ -232,73 +236,152 @@ pub async fn get_leaderboard_by_id(
 
 // --- Leaderboard entry queries ---
 
-/// Opt-in a snake to a leaderboard. `Ok(None)` = the snake is missing or
-/// deleted, or the entry is 'deleted'-marked (join refused — see the
-/// deleted-snake lock below); callers must surface that as not-found,
-/// not an error.
+/// Opt-in a snake to a leaderboard and return its current-season entry.
 ///
-/// Joining means "put this snake in rotation": a paused entry (manually or
-/// by the health sweeper) is re-enabled with its health streaks reset, so a
-/// streak from before the owner's fix can't re-pause it on the next failed
-/// probe. Re-joining an entry that's already in rotation changes nothing — an
-/// idempotent retry mustn't wipe a real failing streak. An entry marked
-/// `disabled_reason = 'deleted'` (by `battlesnake::delete_battlesnake`) is
-/// terminal and is never re-enabled.
+/// Registers the snake in the league
+/// ([`leaderboard_registration::get_or_create_registration`], which carries
+/// the join semantics: re-enables a paused registration, never a
+/// `'deleted'`/`'retired'` one), then lazily creates the active season's entry
+/// ([`ensure_snake_season_entry`]). `Ok(None)` = the snake is missing,
+/// deleted or retired, the registration is terminal, or the league has no
+/// active season (a gap: the registration still exists).
 pub async fn get_or_create_entry(
     pool: &PgPool,
     leaderboard_id: Uuid,
     battlesnake_id: Uuid,
 ) -> cja::Result<Option<LeaderboardEntry>> {
-    // Selecting the snake FOR SHARE (instead of VALUES) refuses deleted snakes
-    // and serializes against `battlesnake::delete_battlesnake`'s row lock, so a
-    // join can't re-enable an entry while the snake is being deleted. The
-    // DO UPDATE guard keeps a 'deleted'-marked entry terminal even if the
-    // conflict fires. Keep the deleted_at IS NULL predicate on the locked
-    // battlesnakes scan itself: when FOR SHARE waits on delete's row lock,
-    // READ COMMITTED re-checks only the locked relation's own predicates
-    // against the committed row version (EvalPlanQual). A liveness check
-    // anywhere else (a pre-check, a CTE) reads the pre-wait snapshot and lets
-    // the join through.
-    let entry = sqlx::query_as!(
-        LeaderboardEntry,
-        r#"INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id)
-         SELECT $1::uuid, b.battlesnake_id
-         FROM battlesnakes b
-         WHERE b.battlesnake_id = $2
-           AND b.deleted_at IS NULL
-           AND b.retired_at IS NULL
-         FOR SHARE
-         ON CONFLICT (leaderboard_id, battlesnake_id) DO UPDATE
-            SET disabled_at = NULL, disabled_reason = NULL, updated_at = NOW(),
-                health_consecutive_failures = CASE
-                    WHEN leaderboard_entries.disabled_at IS NULL
-                    THEN leaderboard_entries.health_consecutive_failures
-                    ELSE 0
-                END,
-                health_consecutive_successes = 0,
-                health_last_failure = CASE
-                    WHEN leaderboard_entries.disabled_at IS NULL
-                    THEN leaderboard_entries.health_last_failure
-                END
-            WHERE leaderboard_entries.disabled_reason IS DISTINCT FROM $3
-              AND leaderboard_entries.disabled_reason IS DISTINCT FROM $4
-         RETURNING
-            leaderboard_entry_id, leaderboard_id, battlesnake_id,
-            mu, sigma, display_score, games_played, first_place_finishes, non_first_finishes,
-            disabled_at, disabled_reason, created_at, updated_at"#,
+    let registration =
+        leaderboard_registration::get_or_create_registration(pool, leaderboard_id, battlesnake_id)
+            .await?;
+    if registration.is_none() {
+        return Ok(None);
+    }
+    ensure_snake_season_entry(
+        pool,
+        &crate::scoring::default_registry(),
         leaderboard_id,
         battlesnake_id,
-        crate::models::battlesnake::DISABLED_REASON_DELETED,
-        crate::models::battlesnake::DISABLED_REASON_RETIRED
+    )
+    .await
+}
+
+/// Lazily create one snake's entry for the league's active season, at
+/// default ratings, and (re)initialize every scoring algorithm's row for it.
+///
+/// Idempotent: gated on an active registration and a live snake, and
+/// `ON CONFLICT (season_id, battlesnake_id) DO NOTHING`. `Ok(None)` = no
+/// active season, or the registration is paused / the snake is dead.
+///
+/// While `leaderboard_entries_leaderboard_id_battlesnake_id_key` still exists
+/// (until DEV-2642 PR 2), a snake already entered in an earlier season of
+/// this league raises `unique_violation` here. That is deliberate: don't
+/// suppress it.
+pub async fn ensure_snake_season_entry(
+    pool: &PgPool,
+    scoring: &crate::scoring::ScoringRegistry,
+    leaderboard_id: Uuid,
+    battlesnake_id: Uuid,
+) -> cja::Result<Option<LeaderboardEntry>> {
+    let Some(season) = leaderboard_season::get_active_season(pool, leaderboard_id).await? else {
+        return Ok(None);
+    };
+    // One row per conflict key by construction (a single registration). Keep
+    // it that way: a repeated key would turn any future DO UPDATE into a
+    // whole-batch abort.
+    sqlx::query!(
+        r#"INSERT INTO leaderboard_entries (leaderboard_id, season_id, battlesnake_id)
+         SELECT $1, $2, b.battlesnake_id
+         FROM leaderboard_registrations r
+         JOIN battlesnakes b ON b.battlesnake_id = r.battlesnake_id
+         WHERE r.leaderboard_id = $1 AND r.battlesnake_id = $3
+           AND r.disabled_at IS NULL
+           AND b.deleted_at IS NULL AND b.retired_at IS NULL
+         ON CONFLICT (season_id, battlesnake_id) DO NOTHING"#,
+        leaderboard_id,
+        season.season_id,
+        battlesnake_id
+    )
+    .execute(pool)
+    .await
+    .wrap_err("Failed to create season leaderboard entry")?;
+
+    let entry = sqlx::query_as!(
+        LeaderboardEntry,
+        r#"SELECT
+            le.leaderboard_entry_id, le.leaderboard_id, le.battlesnake_id,
+            le.mu, le.sigma, le.display_score, le.games_played, le.first_place_finishes, le.non_first_finishes,
+            le.disabled_at, le.disabled_reason, le.created_at, le.updated_at
+         FROM leaderboard_entries le
+         JOIN leaderboard_registrations r
+           ON r.leaderboard_id = le.leaderboard_id AND r.battlesnake_id = le.battlesnake_id
+         JOIN battlesnakes b ON b.battlesnake_id = le.battlesnake_id
+         WHERE le.season_id = $1 AND le.battlesnake_id = $2
+           AND r.disabled_at IS NULL
+           AND b.deleted_at IS NULL AND b.retired_at IS NULL"#,
+        season.season_id,
+        battlesnake_id
     )
     .fetch_optional(pool)
     .await
-    .wrap_err("Failed to create or get leaderboard entry")?;
+    .wrap_err("Failed to fetch season leaderboard entry")?;
 
-    Ok(entry)
+    let Some(entry) = entry else {
+        return Ok(None);
+    };
+    for algo in scoring.algorithms() {
+        algo.initialize_entry(pool, entry.leaderboard_entry_id)
+            .await
+            .wrap_err_with(|| format!("Failed to initialize {} for entry", algo.key()))?;
+    }
+    Ok(Some(entry))
 }
 
-/// Get all active entries for a leaderboard (not disabled)
+/// Lazily create the active season's entry for every active registration of
+/// the league (live snakes only), then (re)initialize every scoring
+/// algorithm's row for every active-season entry — idempotent, so it also
+/// heals a crash between the INSERT and the initialization.
+///
+/// No-op during a gap. Same `unique_violation` caveat as
+/// [`ensure_snake_season_entry`] until DEV-2642 PR 2.
+pub async fn ensure_active_season_entries(
+    pool: &PgPool,
+    scoring: &crate::scoring::ScoringRegistry,
+    leaderboard_id: Uuid,
+) -> cja::Result<()> {
+    let Some(season) = leaderboard_season::get_active_season(pool, leaderboard_id).await? else {
+        return Ok(());
+    };
+    // One row per conflict key by construction: registrations are unique per
+    // (league, snake) and the season is fixed. Keep it that way: a repeated
+    // key would turn any future DO UPDATE into a whole-batch abort.
+    sqlx::query!(
+        r#"INSERT INTO leaderboard_entries (leaderboard_id, season_id, battlesnake_id)
+         SELECT $1, $2, b.battlesnake_id
+         FROM leaderboard_registrations r
+         JOIN battlesnakes b ON b.battlesnake_id = r.battlesnake_id
+         WHERE r.leaderboard_id = $1
+           AND r.disabled_at IS NULL
+           AND b.deleted_at IS NULL AND b.retired_at IS NULL
+         ON CONFLICT (season_id, battlesnake_id) DO NOTHING"#,
+        leaderboard_id,
+        season.season_id
+    )
+    .execute(pool)
+    .await
+    .wrap_err("Failed to create season leaderboard entries")?;
+
+    for entry in get_active_entries(pool, leaderboard_id).await? {
+        for algo in scoring.algorithms() {
+            algo.initialize_entry(pool, entry.leaderboard_entry_id)
+                .await
+                .wrap_err_with(|| format!("Failed to initialize {} for entry", algo.key()))?;
+        }
+    }
+    Ok(())
+}
+
+/// The active season's entries whose registration is in rotation and whose
+/// snake is live — the matchmaking pool. Empty during a gap.
 pub async fn get_active_entries(
     pool: &PgPool,
     leaderboard_id: Uuid,
@@ -310,8 +393,14 @@ pub async fn get_active_entries(
             le.mu, le.sigma, le.display_score, le.games_played, le.first_place_finishes, le.non_first_finishes,
             le.disabled_at, le.disabled_reason, le.created_at, le.updated_at
          FROM leaderboard_entries le
+         JOIN leaderboard_seasons s ON s.season_id = le.season_id
+         JOIN leaderboard_registrations r
+           ON r.leaderboard_id = le.leaderboard_id AND r.battlesnake_id = le.battlesnake_id
          JOIN battlesnakes b ON b.battlesnake_id = le.battlesnake_id
-         WHERE le.leaderboard_id = $1 AND le.disabled_at IS NULL
+         WHERE le.leaderboard_id = $1
+           AND s.starts_at <= clock_timestamp()
+           AND (s.ends_at IS NULL OR clock_timestamp() < s.ends_at)
+           AND r.disabled_at IS NULL
            AND b.deleted_at IS NULL AND b.retired_at IS NULL
          ORDER BY le.display_score DESC"#,
         leaderboard_id
@@ -353,8 +442,9 @@ pub async fn get_ranked_entries(
                  FROM leaderboard_entries le
                  JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id
                  JOIN users u ON b.user_id = u.user_id
+                 JOIN leaderboard_registrations lr ON lr.leaderboard_id = le.leaderboard_id AND lr.battlesnake_id = le.battlesnake_id
                  WHERE le.leaderboard_id = $1
-                   AND le.disabled_at IS NULL
+                   AND lr.disabled_at IS NULL
                    AND le.games_played >= $2
                  ORDER BY le.display_score DESC
                  LIMIT 100"#,
@@ -388,8 +478,9 @@ pub async fn get_ranked_entries(
                  JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id
                  JOIN users u ON b.user_id = u.user_id
                  LEFT JOIN food_eaten_stats fes ON le.leaderboard_entry_id = fes.leaderboard_entry_id
+                 JOIN leaderboard_registrations lr ON lr.leaderboard_id = le.leaderboard_id AND lr.battlesnake_id = le.battlesnake_id
                  WHERE le.leaderboard_id = $1
-                   AND le.disabled_at IS NULL
+                   AND lr.disabled_at IS NULL
                    AND le.games_played >= $2
                  ORDER BY COALESCE(fes.food_score, 0) DESC
                  LIMIT 100"#,
@@ -432,8 +523,9 @@ pub async fn get_placement_entries(
          FROM leaderboard_entries le
          JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id
          JOIN users u ON b.user_id = u.user_id
+         JOIN leaderboard_registrations lr ON lr.leaderboard_id = le.leaderboard_id AND lr.battlesnake_id = le.battlesnake_id
          WHERE le.leaderboard_id = $1
-           AND le.disabled_at IS NULL
+           AND lr.disabled_at IS NULL
            AND le.games_played < $2
          ORDER BY le.games_played DESC
          LIMIT 100"#,
@@ -447,7 +539,7 @@ pub async fn get_placement_entries(
     Ok(entries)
 }
 
-/// Get a specific entry by leaderboard and battlesnake
+/// A snake's entry for the league's active season (`None` during a gap).
 pub async fn get_entry(
     pool: &PgPool,
     leaderboard_id: Uuid,
@@ -456,11 +548,14 @@ pub async fn get_entry(
     let entry = sqlx::query_as!(
         LeaderboardEntry,
         r#"SELECT
-            leaderboard_entry_id, leaderboard_id, battlesnake_id,
-            mu, sigma, display_score, games_played, first_place_finishes, non_first_finishes,
-            disabled_at, disabled_reason, created_at, updated_at
-         FROM leaderboard_entries
-         WHERE leaderboard_id = $1 AND battlesnake_id = $2"#,
+            le.leaderboard_entry_id, le.leaderboard_id, le.battlesnake_id,
+            le.mu, le.sigma, le.display_score, le.games_played, le.first_place_finishes, le.non_first_finishes,
+            le.disabled_at, le.disabled_reason, le.created_at, le.updated_at
+         FROM leaderboard_entries le
+         JOIN leaderboard_seasons s ON s.season_id = le.season_id
+         WHERE le.leaderboard_id = $1 AND le.battlesnake_id = $2
+           AND s.starts_at <= clock_timestamp()
+           AND (s.ends_at IS NULL OR clock_timestamp() < s.ends_at)"#,
         leaderboard_id,
         battlesnake_id
     )
@@ -471,11 +566,11 @@ pub async fn get_entry(
     Ok(entry)
 }
 
-/// Get a specific entry by leaderboard and battlesnake, locking the row for update.
-/// Use this within a transaction to prevent concurrent rating updates.
-pub async fn get_entry_for_update<'e, E>(
+/// A snake's entry in one season, locking the row for update. Use this
+/// within a transaction to prevent concurrent rating updates.
+pub async fn get_entry_for_update_by_season_snake<'e, E>(
     executor: E,
-    leaderboard_id: Uuid,
+    season_id: Uuid,
     battlesnake_id: Uuid,
 ) -> cja::Result<Option<LeaderboardEntry>>
 where
@@ -488,21 +583,21 @@ where
             mu, sigma, display_score, games_played, first_place_finishes, non_first_finishes,
             disabled_at, disabled_reason, created_at, updated_at
          FROM leaderboard_entries
-         WHERE leaderboard_id = $1 AND battlesnake_id = $2
+         WHERE season_id = $1 AND battlesnake_id = $2
          FOR UPDATE"#,
-        leaderboard_id,
+        season_id,
         battlesnake_id
     )
     .fetch_optional(executor)
     .await
-    .wrap_err("Failed to fetch leaderboard entry for update")?;
+    .wrap_err("Failed to fetch season leaderboard entry for update")?;
 
     Ok(entry)
 }
 
 /// Get a specific entry by its primary key, locking the row for update.
 /// Use this within a transaction to prevent concurrent rating updates.
-/// Prefer this over get_entry_for_update when the leaderboard_entry_id is known —
+/// Prefer this over get_entry_for_update_by_season_snake when the leaderboard_entry_id is known —
 /// it is always deterministic, even when duplicate entries exist for the same battlesnake.
 pub async fn get_entry_for_update_by_id<'e, E>(
     executor: E,
@@ -584,101 +679,63 @@ where
     Ok(())
 }
 
-/// Pause or resume a leaderboard entry (owner/admin action).
-///
-/// Always clears `disabled_reason`: a manual pause is reason-less, and a
-/// manual resume of a health-disabled entry means the owner has taken over
-/// from the sweeper. Entries of a deleted snake are never touched.
-pub async fn set_disabled(
-    pool: &PgPool,
-    entry_id: Uuid,
-    disabled_at: Option<chrono::DateTime<chrono::Utc>>,
-) -> cja::Result<()> {
-    if let Some(disabled_at) = disabled_at {
-        sqlx::query!(
-            r#"UPDATE leaderboard_entries
-         SET disabled_at = $2, disabled_reason = NULL
-         WHERE leaderboard_entry_id = $1
-           AND disabled_reason IS DISTINCT FROM $3
-           AND disabled_reason IS DISTINCT FROM $4"#,
-            entry_id,
-            Some(disabled_at),
-            crate::models::battlesnake::DISABLED_REASON_DELETED,
-            crate::models::battlesnake::DISABLED_REASON_RETIRED
-        )
-        .execute(pool)
-        .await
-        .wrap_err("Failed to pause leaderboard entry")?;
-        return Ok(());
-    }
-    let mut tx = pool
-        .begin()
-        .await
-        .wrap_err("Failed to begin entry resume")?;
-    let live = sqlx::query_scalar!(
-        r#"SELECT b.battlesnake_id
-               FROM leaderboard_entries le
-               JOIN battlesnakes b ON b.battlesnake_id = le.battlesnake_id
-               WHERE le.leaderboard_entry_id = $1
-                 AND b.deleted_at IS NULL AND b.retired_at IS NULL
-               FOR SHARE OF b"#,
-        entry_id
-    )
-    .fetch_optional(&mut *tx)
-    .await
-    .wrap_err("Failed to lock snake for leaderboard resume")?;
-    if live.is_none() {
-        return Ok(());
-    }
-    sqlx::query!(
-        r#"UPDATE leaderboard_entries
-         SET disabled_at = $2, disabled_reason = NULL
-         WHERE leaderboard_entry_id = $1
-           AND disabled_reason IS DISTINCT FROM $3
-           AND disabled_reason IS DISTINCT FROM $4"#,
-        entry_id,
-        disabled_at,
-        crate::models::battlesnake::DISABLED_REASON_DELETED,
-        crate::models::battlesnake::DISABLED_REASON_RETIRED
-    )
-    .execute(&mut *tx)
-    .await
-    .wrap_err("Failed to update leaderboard entry disabled status")?;
-    tx.commit()
-        .await
-        .wrap_err("Failed to commit leaderboard entry resume")?;
-    Ok(())
+/// One of a user's snakes registered in a league, with its active-season
+/// entry when it has one.
+#[derive(Debug, Clone)]
+pub struct UserLeagueMembership {
+    pub battlesnake_id: Uuid,
+    pub leaderboard_registration_id: Uuid,
+    pub disabled_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub disabled_reason: Option<String>,
+    /// `None` when the snake has no entry for the active season yet (a gap,
+    /// or joined while paused).
+    pub leaderboard_entry_id: Option<Uuid>,
+    /// Active-season score; 0 without an entry.
+    pub display_score: f64,
+    /// Active-season games; 0 without an entry.
+    pub games_played: i32,
 }
 
-/// Get entries for a specific user across a leaderboard
-pub async fn get_user_entries(
+/// A user's live snakes registered in a league (active or paused), best
+/// active-season score first.
+pub async fn get_user_memberships(
     pool: &PgPool,
     leaderboard_id: Uuid,
     user_id: Uuid,
-) -> cja::Result<Vec<LeaderboardEntry>> {
-    let entries = sqlx::query_as!(
-        LeaderboardEntry,
+) -> cja::Result<Vec<UserLeagueMembership>> {
+    sqlx::query_as!(
+        UserLeagueMembership,
         r#"SELECT
-            le.leaderboard_entry_id, le.leaderboard_id, le.battlesnake_id,
-            le.mu, le.sigma, le.display_score, le.games_played, le.first_place_finishes, le.non_first_finishes,
-            le.disabled_at, le.disabled_reason, le.created_at, le.updated_at
-         FROM leaderboard_entries le
-         JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id
-         WHERE le.leaderboard_id = $1 AND b.user_id = $2 AND b.deleted_at IS NULL
-         ORDER BY le.display_score DESC"#,
+            r.battlesnake_id,
+            r.leaderboard_registration_id,
+            r.disabled_at,
+            r.disabled_reason,
+            le.leaderboard_entry_id AS "leaderboard_entry_id?",
+            COALESCE(le.display_score, 0.0) AS "display_score!",
+            COALESCE(le.games_played, 0) AS "games_played!"
+         FROM leaderboard_registrations r
+         JOIN battlesnakes b ON b.battlesnake_id = r.battlesnake_id
+         LEFT JOIN leaderboard_seasons s
+           ON s.leaderboard_id = r.leaderboard_id
+          AND s.starts_at <= clock_timestamp()
+          AND (s.ends_at IS NULL OR clock_timestamp() < s.ends_at)
+         LEFT JOIN leaderboard_entries le
+           ON le.season_id = s.season_id AND le.battlesnake_id = r.battlesnake_id
+         WHERE r.leaderboard_id = $1 AND b.user_id = $2 AND b.deleted_at IS NULL
+         ORDER BY le.display_score DESC NULLS LAST"#,
         leaderboard_id,
         user_id
     )
     .fetch_all(pool)
     .await
-    .wrap_err("Failed to fetch user leaderboard entries")?;
-
-    Ok(entries)
+    .wrap_err("Failed to fetch user league memberships")
 }
 
 // --- Leaderboard game queries ---
 
-/// Create a leaderboard game link. Accepts any sqlx executor (pool or transaction).
+/// Create a leaderboard game link in the league's active season. Errors with
+/// "no active season" when the league has none. Accepts any sqlx executor
+/// (pool or transaction).
 pub async fn create_leaderboard_game<'e, E>(
     executor: E,
     leaderboard_id: Uuid,
@@ -687,19 +744,25 @@ pub async fn create_leaderboard_game<'e, E>(
 where
     E: sqlx::Executor<'e, Database = Postgres>,
 {
+    // Stamped with the league's active season at INSERT; no active season
+    // (a gap, or `ends_at` crossed since the caller checked) inserts nothing.
     let game = sqlx::query_as!(
         LeaderboardGame,
-        r#"INSERT INTO leaderboard_games (leaderboard_id, game_id)
-         VALUES ($1, $2)
-         RETURNING leaderboard_game_id, leaderboard_id, game_id, created_at"#,
+        r#"INSERT INTO leaderboard_games (leaderboard_id, game_id, season_id)
+         SELECT $1, $2, s.season_id
+         FROM leaderboard_seasons s
+         WHERE s.leaderboard_id = $1
+           AND s.starts_at <= clock_timestamp()
+           AND (s.ends_at IS NULL OR clock_timestamp() < s.ends_at)
+         RETURNING leaderboard_game_id, leaderboard_id, game_id, season_id AS "season_id!", created_at"#,
         leaderboard_id,
         game_id
     )
-    .fetch_one(executor)
+    .fetch_optional(executor)
     .await
     .wrap_err("Failed to create leaderboard game")?;
 
-    Ok(game)
+    game.ok_or_else(|| color_eyre::eyre::eyre!("no active season for leaderboard {leaderboard_id}"))
 }
 
 pub async fn find_leaderboard_game_by_game_id(
@@ -708,7 +771,7 @@ pub async fn find_leaderboard_game_by_game_id(
 ) -> cja::Result<Option<LeaderboardGame>> {
     let game = sqlx::query_as!(
         LeaderboardGame,
-        r#"SELECT leaderboard_game_id, leaderboard_id, game_id, created_at
+        r#"SELECT leaderboard_game_id, leaderboard_id, game_id, season_id AS "season_id!", created_at
          FROM leaderboard_games
          WHERE game_id = $1"#,
         game_id
@@ -774,7 +837,7 @@ where
 pub async fn count_active_entries(pool: &PgPool, leaderboard_id: Uuid) -> cja::Result<i64> {
     let count = sqlx::query_scalar!(
         r#"SELECT COUNT(*) as "count!"
-         FROM leaderboard_entries
+         FROM leaderboard_registrations
          WHERE leaderboard_id = $1 AND disabled_at IS NULL"#,
         leaderboard_id
     )
@@ -820,8 +883,9 @@ pub async fn get_ranked_entries_paginated(
                  FROM leaderboard_entries le
                  JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id
                  JOIN users u ON b.user_id = u.user_id
+                 JOIN leaderboard_registrations lr ON lr.leaderboard_id = le.leaderboard_id AND lr.battlesnake_id = le.battlesnake_id
                  WHERE le.leaderboard_id = $1
-                   AND le.disabled_at IS NULL
+                   AND lr.disabled_at IS NULL
                    AND le.games_played >= $2
                  ORDER BY le.display_score DESC
                  LIMIT $3 OFFSET $4"#,
@@ -857,8 +921,9 @@ pub async fn get_ranked_entries_paginated(
                  JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id
                  JOIN users u ON b.user_id = u.user_id
                  LEFT JOIN food_eaten_stats fes ON le.leaderboard_entry_id = fes.leaderboard_entry_id
+                 JOIN leaderboard_registrations lr ON lr.leaderboard_id = le.leaderboard_id AND lr.battlesnake_id = le.battlesnake_id
                  WHERE le.leaderboard_id = $1
-                   AND le.disabled_at IS NULL
+                   AND lr.disabled_at IS NULL
                    AND le.games_played >= $2
                  ORDER BY COALESCE(fes.food_score, 0) DESC
                  LIMIT $3 OFFSET $4"#,
@@ -880,8 +945,9 @@ pub async fn get_ranked_entries_paginated(
 pub async fn count_ranked_entries(pool: &PgPool, leaderboard_id: Uuid) -> cja::Result<i64> {
     let count = sqlx::query_scalar!(
         r#"SELECT COUNT(*) as "count!"
-         FROM leaderboard_entries
-         WHERE leaderboard_id = $1 AND disabled_at IS NULL AND games_played >= $2"#,
+         FROM leaderboard_entries le
+         JOIN leaderboard_registrations lr ON lr.leaderboard_id = le.leaderboard_id AND lr.battlesnake_id = le.battlesnake_id
+         WHERE le.leaderboard_id = $1 AND lr.disabled_at IS NULL AND le.games_played >= $2"#,
         leaderboard_id,
         MIN_GAMES_FOR_RANKING
     )
@@ -1159,19 +1225,23 @@ pub async fn get_activity_feed(
 /// Summary of a battlesnake's leaderboard participation
 #[derive(Debug, FromRow)]
 pub struct BattlesnakeLeaderboardSummary {
-    pub leaderboard_entry_id: Uuid,
+    /// The active-season entry; `None` when the snake has none yet (a gap).
+    /// The stats below are `None` exactly when this is.
+    pub leaderboard_entry_id: Option<Uuid>,
     pub leaderboard_id: Uuid,
     pub leaderboard_name: String,
     pub leaderboard_visibility: Visibility,
-    pub display_score: f64,
-    pub games_played: i32,
-    pub first_place_finishes: i32,
-    pub non_first_finishes: i32,
+    pub display_score: Option<f64>,
+    pub games_played: Option<i32>,
+    pub first_place_finishes: Option<i32>,
+    pub non_first_finishes: Option<i32>,
+    /// Membership state, from the registration.
     pub disabled_at: Option<chrono::DateTime<chrono::Utc>>,
     pub disabled_reason: Option<String>,
 }
 
-/// Get a battlesnake's leaderboard entries as `viewer` may see them. Private
+/// A battlesnake's league registrations (one row each, with the
+/// active-season entry when there is one) as `viewer` may see them. Private
 /// leaderboards are only listed to their members (who hold the link already)
 /// and admins; listing them to anyone else would leak the link. Pass `None`
 /// for public surfaces such as social cards.
@@ -1185,21 +1255,27 @@ pub async fn get_entries_for_battlesnake(
     let entries = sqlx::query_as!(
         BattlesnakeLeaderboardSummary,
         r#"SELECT
-            le.leaderboard_entry_id,
-            le.leaderboard_id,
+            le.leaderboard_entry_id AS "leaderboard_entry_id?",
+            r.leaderboard_id,
             l.name as leaderboard_name,
             l.visibility as "leaderboard_visibility: Visibility",
-            le.display_score,
-            le.games_played,
-            le.first_place_finishes,
-            le.non_first_finishes,
-            le.disabled_at,
-            le.disabled_reason
-         FROM leaderboard_entries le
-         JOIN leaderboards l ON le.leaderboard_id = l.leaderboard_id
-         WHERE le.battlesnake_id = $1
+            le.display_score AS "display_score?",
+            le.games_played AS "games_played?",
+            le.first_place_finishes AS "first_place_finishes?",
+            le.non_first_finishes AS "non_first_finishes?",
+            r.disabled_at,
+            r.disabled_reason
+         FROM leaderboard_registrations r
+         JOIN leaderboards l ON r.leaderboard_id = l.leaderboard_id
+         LEFT JOIN leaderboard_seasons s
+           ON s.leaderboard_id = r.leaderboard_id
+          AND s.starts_at <= clock_timestamp()
+          AND (s.ends_at IS NULL OR clock_timestamp() < s.ends_at)
+         LEFT JOIN leaderboard_entries le
+           ON le.season_id = s.season_id AND le.battlesnake_id = r.battlesnake_id
+         WHERE r.battlesnake_id = $1
            AND (l.visibility = 'public' OR $2 OR leaderboard_member(l.leaderboard_id, $3))
-         ORDER BY le.display_score DESC"#,
+         ORDER BY le.display_score DESC NULLS LAST"#,
         battlesnake_id,
         viewer_is_admin,
         viewer_id as Option<Uuid>
@@ -1224,11 +1300,12 @@ pub async fn get_rank_for_entry(
 
     let rank = sqlx::query_scalar!(
         r#"SELECT COUNT(*) + 1 as "rank!"
-         FROM leaderboard_entries
-         WHERE leaderboard_id = $1
-           AND disabled_at IS NULL
-           AND games_played >= $2
-           AND display_score > $3"#,
+         FROM leaderboard_entries le
+         JOIN leaderboard_registrations lr ON lr.leaderboard_id = le.leaderboard_id AND lr.battlesnake_id = le.battlesnake_id
+         WHERE le.leaderboard_id = $1
+           AND lr.disabled_at IS NULL
+           AND le.games_played >= $2
+           AND le.display_score > $3"#,
         leaderboard_id,
         MIN_GAMES_FOR_RANKING,
         display_score
@@ -1275,8 +1352,9 @@ pub async fn get_top_eaters(
          JOIN food_eaten_stats fes ON le.leaderboard_entry_id = fes.leaderboard_entry_id
          JOIN battlesnakes b ON le.battlesnake_id = b.battlesnake_id
          JOIN users u ON b.user_id = u.user_id
+         JOIN leaderboard_registrations lr ON lr.leaderboard_id = le.leaderboard_id AND lr.battlesnake_id = le.battlesnake_id
          WHERE le.leaderboard_id = $1
-           AND le.disabled_at IS NULL
+           AND lr.disabled_at IS NULL
            AND fes.food_score > 0
          ORDER BY fes.food_score DESC
          LIMIT $2"#,
@@ -1528,11 +1606,13 @@ mod tests {
                 )
                 .execute(&pool)
                 .await?;
-                sqlx::query!(
+                // get_or_create_entry initializes every algorithm's row, so overwrite it.
+                sqlx::query(
                     "INSERT INTO food_eaten_stats (leaderboard_entry_id, food_score)
-                     VALUES ($1, 3)",
-                    entry_id
+                     VALUES ($1, 3)
+                     ON CONFLICT (leaderboard_entry_id) DO UPDATE SET food_score = EXCLUDED.food_score",
                 )
+                .bind(entry_id)
                 .execute(&pool)
                 .await?;
                 create_game_result(
@@ -1878,7 +1958,13 @@ mod tests {
         let entry = get_or_create_entry(&pool, leaderboard_id, snake)
             .await?
             .unwrap();
-        set_disabled(&pool, entry.leaderboard_entry_id, Some(chrono::Utc::now())).await?;
+        leaderboard_registration::set_registration_disabled(
+            &pool,
+            leaderboard_id,
+            snake,
+            Some(chrono::Utc::now()),
+        )
+        .await?;
 
         let mut holder = pool.begin().await?;
         sqlx::query("SELECT battlesnake_id FROM battlesnakes WHERE battlesnake_id = $1 FOR UPDATE")
@@ -1937,10 +2023,16 @@ mod tests {
         .bind(owner)
         .fetch_one(&pool)
         .await?;
-        let entry = get_or_create_entry(&pool, leaderboard_id, snake)
+        get_or_create_entry(&pool, leaderboard_id, snake)
             .await?
             .unwrap();
-        set_disabled(&pool, entry.leaderboard_entry_id, Some(chrono::Utc::now())).await?;
+        leaderboard_registration::set_registration_disabled(
+            &pool,
+            leaderboard_id,
+            snake,
+            Some(chrono::Utc::now()),
+        )
+        .await?;
         let mut holder = pool.begin().await?;
         sqlx::query("SELECT battlesnake_id FROM battlesnakes WHERE battlesnake_id = $1 FOR UPDATE")
             .bind(snake)
@@ -1948,7 +2040,13 @@ mod tests {
             .await?;
         let resume_pool = pool.clone();
         let resume = tokio::spawn(async move {
-            set_disabled(&resume_pool, entry.leaderboard_entry_id, None).await
+            leaderboard_registration::set_registration_disabled(
+                &resume_pool,
+                leaderboard_id,
+                snake,
+                None,
+            )
+            .await
         });
         wait_for_lock_waiters(&pool, 1).await?;
         let retire_pool = pool.clone();

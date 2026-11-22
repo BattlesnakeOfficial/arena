@@ -373,3 +373,183 @@ async fn seasons_enforce_ranges_and_keep_old_insert_shape(pool: PgPool) {
         .fetch_one(&pool).await.unwrap();
     assert_eq!(validated, 4);
 }
+
+/// `20261121130100` (registration backfill + sync trigger), re-applied on its
+/// own over legacy entries: every entry gets exactly one registration carrying
+/// its membership and health state, and nothing is lost or rewritten.
+#[sqlx::test(migrations = false)]
+async fn registration_backfill_carries_entry_state(pool: PgPool) {
+    migrate_before(&pool, "99999999999999").await.unwrap();
+
+    let user: Uuid = sqlx::query_scalar("INSERT INTO users (external_github_id, github_login) VALUES (2660, 'registration-backfill') RETURNING user_id")
+        .fetch_one(&pool).await.unwrap();
+    let mut leagues = Vec::new();
+    for name in ["Backfill A", "Backfill B"] {
+        leagues.push(
+            sqlx::query_scalar::<_, Uuid>(
+                "INSERT INTO leaderboards (name) VALUES ($1) RETURNING leaderboard_id",
+            )
+            .bind(name)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        );
+    }
+    let mut snakes = Vec::new();
+    for name in ["Backfill Active", "Backfill Health", "Backfill Retired"] {
+        snakes.push(
+            sqlx::query_scalar::<_, Uuid>("INSERT INTO battlesnakes (user_id, name, url) VALUES ($1, $2, 'https://example.com') RETURNING battlesnake_id")
+                .bind(user)
+                .bind(name)
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+        );
+    }
+    // Legacy-shaped writes: raw entry inserts, then membership/health updates.
+    for league in &leagues {
+        for snake in &snakes {
+            sqlx::query("INSERT INTO leaderboard_entries (leaderboard_id, battlesnake_id, mu, display_score, games_played) VALUES ($1, $2, 27.5, 3.25, 5)")
+                .bind(league)
+                .bind(snake)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+    }
+    sqlx::query("UPDATE leaderboard_entries SET disabled_at = '2026-11-01T00:00:00Z', disabled_reason = 'health', health_consecutive_failures = 3, health_consecutive_successes = 1, health_last_checked_at = '2026-11-02T00:00:00Z', health_last_failure = 'POST /move: boom' WHERE battlesnake_id = $1 AND leaderboard_id = $2")
+        .bind(snakes[1])
+        .bind(leagues[0])
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE leaderboard_entries SET disabled_at = '2026-11-03T00:00:00Z', disabled_reason = 'retired' WHERE battlesnake_id = $1")
+        .bind(snakes[2])
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE leaderboard_entries SET health_consecutive_failures = 2, health_last_failure = 'slow' WHERE battlesnake_id = $1 AND leaderboard_id = $2")
+        .bind(snakes[0])
+        .bind(leagues[1])
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Rewind to just before the backfill migration (its table stays).
+    sqlx::raw_sql(
+        "DROP TRIGGER sync_entry_state_to_registration ON leaderboard_entries;
+         DROP FUNCTION sync_entry_state_to_registration();
+         DELETE FROM leaderboard_registrations;
+         DELETE FROM _sqlx_migrations WHERE version = 20261121130100;",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let entries_before: Vec<(Uuid, f64, f64, i32)> = sqlx::query_as(
+        "SELECT leaderboard_entry_id, mu, display_score, games_played FROM leaderboard_entries ORDER BY leaderboard_entry_id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(entries_before.len(), 6);
+
+    migrate_before(&pool, "99999999999999").await.unwrap();
+
+    let reapplied: bool =
+        sqlx::query_scalar("SELECT success FROM _sqlx_migrations WHERE version = 20261121130100")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(reapplied);
+    // The 20261121130000 table objects persisted through the rewind.
+    let objects: Vec<String> = sqlx::query_scalar(
+        "SELECT indexname::text FROM pg_indexes WHERE tablename = 'leaderboard_registrations' AND indexname = 'leaderboard_registrations_battlesnake_idx'
+         UNION ALL
+         SELECT tgname::text FROM pg_trigger WHERE tgname IN ('update_leaderboard_registrations_updated_at', 'sync_entry_state_to_registration')
+         ORDER BY 1",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        objects,
+        vec![
+            "leaderboard_registrations_battlesnake_idx",
+            "sync_entry_state_to_registration",
+            "update_leaderboard_registrations_updated_at",
+        ]
+    );
+
+    // Nothing lost or rewritten on the entries.
+    let entries_after: Vec<(Uuid, f64, f64, i32)> = sqlx::query_as(
+        "SELECT leaderboard_entry_id, mu, display_score, games_played FROM leaderboard_entries ORDER BY leaderboard_entry_id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(entries_after, entries_before);
+
+    // Exactly one registration per entry, carrying its state.
+    let unmatched: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM leaderboard_entries le
+         WHERE (SELECT count(*) FROM leaderboard_registrations r
+                WHERE r.leaderboard_id = le.leaderboard_id AND r.battlesnake_id = le.battlesnake_id) <> 1",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(unmatched, 0, "every entry has exactly one registration");
+    let registrations: i64 = sqlx::query_scalar("SELECT count(*) FROM leaderboard_registrations")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(registrations, 6);
+    let differing: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM leaderboard_entries le
+         JOIN leaderboard_registrations r
+           ON r.leaderboard_id = le.leaderboard_id AND r.battlesnake_id = le.battlesnake_id
+         WHERE (le.disabled_at, le.disabled_reason, le.health_consecutive_failures,
+                le.health_consecutive_successes, le.health_last_checked_at, le.health_last_failure)
+               IS DISTINCT FROM
+               (r.disabled_at, r.disabled_reason, r.health_consecutive_failures,
+                r.health_consecutive_successes, r.health_last_checked_at, r.health_last_failure)",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(differing, 0, "state carried verbatim");
+    let health = sqlx::query(
+        "SELECT disabled_reason, health_consecutive_failures, health_consecutive_successes, health_last_failure
+         FROM leaderboard_registrations WHERE leaderboard_id = $1 AND battlesnake_id = $2",
+    )
+    .bind(leagues[0])
+    .bind(snakes[1])
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        health.get::<Option<String>, _>(0).as_deref(),
+        Some("health")
+    );
+    assert_eq!(health.get::<i32, _>(1), 3);
+    assert_eq!(health.get::<i32, _>(2), 1);
+    assert_eq!(
+        health.get::<Option<String>, _>(3).as_deref(),
+        Some("POST /move: boom")
+    );
+    let retired: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM leaderboard_registrations WHERE battlesnake_id = $1 AND disabled_reason = 'retired'",
+    )
+    .bind(snakes[2])
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(retired, 2);
+    let active: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM leaderboard_registrations WHERE disabled_at IS NULL",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(active, 3, "the other three stay in rotation");
+}

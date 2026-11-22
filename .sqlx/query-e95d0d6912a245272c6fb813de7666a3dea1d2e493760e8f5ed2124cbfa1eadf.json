@@ -1,0 +1,41 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE leaderboard_registrations\n         SET disabled_at = NULL,\n             disabled_reason = NULL,\n             health_consecutive_failures = 0,\n             health_consecutive_successes = 0,\n             health_last_failure = NULL,\n             updated_at = NOW()\n         WHERE leaderboard_registration_id = $1 AND disabled_reason = $2\n         RETURNING leaderboard_id, battlesnake_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "leaderboard_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_registrations",
+            "name": "leaderboard_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "battlesnake_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "leaderboard_registrations",
+            "name": "battlesnake_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "e95d0d6912a245272c6fb813de7666a3dea1d2e493760e8f5ed2124cbfa1eadf"
+}
