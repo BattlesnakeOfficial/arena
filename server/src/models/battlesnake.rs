@@ -101,6 +101,9 @@ pub struct Battlesnake {
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
     pub retired_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Whether other users' tournaments may import this snake from a
+    /// leaderboard. Only meaningful while the snake is public.
+    pub allow_tournament_import: bool,
 }
 
 /// Return the requested snakes that are selectable by this user. Missing,
@@ -123,6 +126,32 @@ pub async fn eligible_battlesnake_ids(
     .fetch_all(pool)
     .await
     .wrap_err("Failed to validate battlesnake eligibility")?;
+    Ok(rows.into_iter().map(|row| row.battlesnake_id).collect())
+}
+
+/// Snakes a tournament organizer may pull in through a leaderboard import:
+/// their own snakes, plus other users' public snakes whose owners haven't
+/// opted out of imports. Private snakes are never importable by others.
+/// The deterministic shared locks keep a racing visibility/opt-out change or
+/// deletion from slipping an ineligible snake into the import.
+pub async fn lock_importable_battlesnake_ids(
+    conn: &mut PgConnection,
+    organizer: Uuid,
+    requested: &[Uuid],
+) -> cja::Result<HashSet<Uuid>> {
+    let rows = sqlx::query!(
+        r#"SELECT battlesnake_id FROM battlesnakes
+           WHERE battlesnake_id = ANY($1)
+             AND (user_id = $2 OR (visibility = 'public' AND allow_tournament_import))
+             AND deleted_at IS NULL
+           ORDER BY battlesnake_id
+           FOR SHARE"#,
+        requested,
+        organizer
+    )
+    .fetch_all(conn)
+    .await
+    .wrap_err("Failed to check battlesnake import eligibility")?;
     Ok(rows.into_iter().map(|row| row.battlesnake_id).collect())
 }
 
@@ -187,6 +216,7 @@ pub struct CreateBattlesnake {
     pub visibility: Visibility,
     #[serde(default)]
     pub engine_region: EngineRegion,
+    pub allow_tournament_import: bool,
 }
 
 // For updating an existing battlesnake
@@ -197,6 +227,9 @@ pub struct UpdateBattlesnake {
     pub visibility: Visibility,
     #[serde(default)]
     pub engine_region: Option<EngineRegion>,
+    /// `None` keeps the current setting.
+    #[serde(default)]
+    pub allow_tournament_import: Option<bool>,
 }
 
 // Database functions for battlesnake management
@@ -262,7 +295,8 @@ pub async fn get_battlesnakes_by_user_id(
             tail,
             created_at,
             updated_at,
-            retired_at
+            retired_at,
+            allow_tournament_import
         FROM battlesnakes
         WHERE user_id = $1
           AND deleted_at IS NULL
@@ -297,7 +331,8 @@ pub async fn get_battlesnake_by_id(
             tail,
             created_at,
             updated_at,
-            retired_at
+            retired_at,
+            allow_tournament_import
         FROM battlesnakes
         WHERE battlesnake_id = $1
           AND deleted_at IS NULL
@@ -330,9 +365,10 @@ where
             name,
             url,
             visibility,
-            engine_region
+            engine_region,
+            allow_tournament_import
         )
-        VALUES ($1, $2, $3, $4, $5)
+        VALUES ($1, $2, $3, $4, $5, $6)
         RETURNING
             battlesnake_id,
             user_id,
@@ -345,13 +381,15 @@ where
             tail,
             created_at,
             updated_at,
-            retired_at
+            retired_at,
+            allow_tournament_import
         "#,
         user_id,
         data.name,
         data.url,
         visibility_str,
-        data.engine_region.as_str()
+        data.engine_region.as_str(),
+        data.allow_tournament_import
     )
     .fetch_one(executor)
     .await;
@@ -404,6 +442,7 @@ pub async fn update_battlesnake(
             url = $4,
             visibility = $5,
             engine_region = COALESCE($6, engine_region),
+            allow_tournament_import = COALESCE($8, allow_tournament_import),
             hosted_by_oauth_client_id = CASE
                 WHEN hosted_by_oauth_client_id IS NULL THEN NULL
                 WHEN $7::text IS NULL THEN NULL
@@ -431,7 +470,8 @@ pub async fn update_battlesnake(
             tail,
             created_at,
             updated_at,
-            retired_at
+            retired_at,
+            allow_tournament_import
         "#,
         battlesnake_id,
         user_id,
@@ -439,7 +479,8 @@ pub async fn update_battlesnake(
         data.url,
         visibility_str,
         data.engine_region.map(EngineRegion::as_str),
-        new_host
+        new_host,
+        data.allow_tournament_import
     )
     .fetch_one(pool)
     .await;
@@ -943,7 +984,8 @@ pub async fn get_public_battlesnakes(pool: &PgPool) -> cja::Result<Vec<Battlesna
             tail,
             created_at,
             updated_at,
-            retired_at
+            retired_at,
+            allow_tournament_import
         FROM battlesnakes
         WHERE visibility = 'public'
           AND deleted_at IS NULL
@@ -1073,7 +1115,8 @@ pub async fn get_available_battlesnakes(
             tail,
             created_at,
             updated_at,
-            retired_at
+            retired_at,
+            allow_tournament_import
         FROM battlesnakes
         WHERE (user_id = $1 OR visibility = 'public')
           AND deleted_at IS NULL
@@ -1737,6 +1780,7 @@ mod tests {
                     name: "Revived".to_string(),
                     url: "http://localhost:8000".to_string(),
                     visibility: Visibility::Public,
+                    allow_tournament_import: None,
                 },
             )
             .await
@@ -1768,6 +1812,7 @@ mod tests {
             url: "http://localhost:8000".to_string(),
             visibility: Visibility::Public,
             engine_region: EngineRegion::UsWest1,
+            allow_tournament_import: true,
         };
         let second = create_battlesnake(&pool, owner, data.clone()).await?;
         assert_ne!(second.battlesnake_id, first);
@@ -2002,6 +2047,7 @@ mod tests {
                 url: url.to_string(),
                 visibility: Visibility::Private,
                 engine_region: None,
+                allow_tournament_import: None,
             },
         )
         .await?;

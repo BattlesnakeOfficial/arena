@@ -705,6 +705,7 @@ mod scoped_token_tests {
                 url: format!("https://{name}.example"),
                 visibility: Visibility::Public,
                 engine_region: Default::default(),
+                allow_tournament_import: true,
             },
         )
         .await

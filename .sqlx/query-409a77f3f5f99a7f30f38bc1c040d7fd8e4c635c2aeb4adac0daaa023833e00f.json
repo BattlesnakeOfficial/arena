@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        INSERT INTO battlesnakes (\n            user_id,\n            name,\n            url,\n            visibility,\n            engine_region\n        )\n        VALUES ($1, $2, $3, $4, $5)\n        RETURNING\n            battlesnake_id,\n            user_id,\n            name,\n            url,\n            visibility as \"visibility: Visibility\",\n            engine_region as \"engine_region: EngineRegion\",\n            color,\n            head,\n            tail,\n            created_at,\n            updated_at,\n            retired_at\n        ",
+  "query": "\n            SELECT\n                battlesnake_id,\n                user_id,\n                name,\n                url,\n                visibility as \"visibility: _\",\n                engine_region as \"engine_region: _\",\n                color,\n                head,\n                tail,\n                created_at,\n                updated_at,\n                retired_at,\n                allow_tournament_import\n            FROM battlesnakes\n            WHERE battlesnake_id = ANY($1)\n              AND (user_id = $2 OR visibility = 'public')\n              AND deleted_at IS NULL\n              AND retired_at IS NULL\n            ORDER BY name ASC\n            ",
   "describe": {
     "columns": [
       {
@@ -49,7 +49,7 @@
       },
       {
         "ordinal": 4,
-        "name": "visibility: Visibility",
+        "name": "visibility: _",
         "type_info": "Text",
         "origin": {
           "Table": {
@@ -60,7 +60,7 @@
       },
       {
         "ordinal": 5,
-        "name": "engine_region: EngineRegion",
+        "name": "engine_region: _",
         "type_info": "Text",
         "origin": {
           "Table": {
@@ -134,15 +134,23 @@
             "name": "retired_at"
           }
         }
+      },
+      {
+        "ordinal": 12,
+        "name": "allow_tournament_import",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "battlesnakes",
+            "name": "allow_tournament_import"
+          }
+        }
       }
     ],
     "parameters": {
       "Left": [
-        "Uuid",
-        "Text",
-        "Text",
-        "Text",
-        "Text"
+        "UuidArray",
+        "Uuid"
       ]
     },
     "nullable": [
@@ -157,8 +165,9 @@
       false,
       false,
       false,
-      true
+      true,
+      false
     ]
   },
-  "hash": "4926039fef50e26fba9e13c86ee6a5c494cf166bb308185b8976ecd25ba488cc"
+  "hash": "409a77f3f5f99a7f30f38bc1c040d7fd8e4c635c2aeb4adac0daaa023833e00f"
 }

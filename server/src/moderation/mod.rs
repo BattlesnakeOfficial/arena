@@ -1414,6 +1414,7 @@ mod moderation_tests {
                 crate::routes::auth::ApiUser(crate::routes::auth::ApiAuth::session(user.clone())),
                 axum::Json(crate::routes::api::snakes::CreateSnakeRequest {
                     engine_region: None,
+                    allow_tournament_import: true,
                     name: "Bad".to_string(),
                     url: "https://e.co".to_string(),
                     is_public: true,
@@ -1496,6 +1497,7 @@ mod moderation_tests {
             crate::routes::auth::ApiUser(crate::routes::auth::ApiAuth::session(user.clone())),
             axum::Json(crate::routes::api::snakes::CreateSnakeRequest {
                 engine_region: None,
+                allow_tournament_import: true,
                 name: "Slitherbot".to_string(),
                 url: "https://e.co".to_string(),
                 is_public: true,
@@ -1544,6 +1546,7 @@ mod moderation_tests {
             crate::routes::auth::ApiUser(crate::routes::auth::ApiAuth::session(user.clone())),
             axum::Json(crate::routes::api::snakes::CreateSnakeRequest {
                 engine_region: None,
+                allow_tournament_import: true,
                 name: "SlowJudge".to_string(),
                 url: "https://e.co".to_string(),
                 is_public: true,
@@ -1584,6 +1587,7 @@ mod moderation_tests {
             crate::routes::auth::ApiUser(crate::routes::auth::ApiAuth::session(user.clone())),
             axum::Json(crate::routes::api::snakes::CreateSnakeRequest {
                 engine_region: None,
+                allow_tournament_import: true,
                 name: "NoKey".to_string(),
                 url: "https://e.co".to_string(),
                 is_public: true,
@@ -1620,6 +1624,7 @@ mod moderation_tests {
             crate::routes::auth::ApiUser(crate::routes::auth::ApiAuth::session(user.clone())),
             axum::Json(crate::routes::api::snakes::CreateSnakeRequest {
                 engine_region: None,
+                allow_tournament_import: true,
                 name: "FlaggedName".to_string(),
                 url: "https://e.co".to_string(),
                 is_public: true,
@@ -1651,6 +1656,7 @@ mod moderation_tests {
             crate::routes::auth::ApiUser(crate::routes::auth::ApiAuth::session(user.clone())),
             axum::Json(crate::routes::api::snakes::CreateSnakeRequest {
                 engine_region: None,
+                allow_tournament_import: true,
                 name: "RelayMe".to_string(),
                 url: "https://e.co/x".to_string(),
                 is_public: true,
@@ -1754,6 +1760,7 @@ mod moderation_tests {
             axum::extract::Path(snake_id),
             axum::Json(crate::routes::api::snakes::UpdateSnakeRequest {
                 engine_region: None,
+                allow_tournament_import: None,
                 name: None,
                 url: Some("https://e.co/again".to_string()),
                 is_public: None,

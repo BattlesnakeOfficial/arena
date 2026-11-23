@@ -464,7 +464,8 @@ impl GameCreationFlow {
                 tail,
                 created_at,
                 updated_at,
-                retired_at
+                retired_at,
+                allow_tournament_import
             FROM battlesnakes
             WHERE battlesnake_id = ANY($1)
               AND (user_id = $2 OR visibility = 'public')

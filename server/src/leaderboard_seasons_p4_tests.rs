@@ -1219,6 +1219,80 @@ async fn import_in_a_gap_skips_leavers_and_retired_snakes(pool: PgPool) {
     assert_eq!(imported, vec![member]);
 }
 
+/// Import skips another user's private snake (even at the top of the ladder)
+/// and another user's public snake whose owner opted out of imports. Opted-in
+/// public snakes and all of the organizer's own snakes still import.
+#[sqlx::test(migrations = "../migrations")]
+async fn import_skips_private_and_opted_out_snakes(pool: PgPool) {
+    let state = AppState::test_from_pool(pool.clone());
+    let lb = league(&pool, "Visibility Ladder").await;
+    let pre = preseason(&pool, lb).await;
+    set_season_days(&pool, pre, -30, Some(-1)).await;
+    insert_season(&pool, lb, "Season 1", 7, None).await;
+
+    let organizer = create_user_session(&pool, 4_400_201, false).await;
+    let organizer_id = session_user_id(&pool, organizer).await;
+    let stranger = owner(&pool, 4_400_202).await;
+    let other = owner(&pool, 4_400_203).await;
+
+    let opted_out_owner = owner(&pool, 4_400_204).await;
+
+    let hidden = snake(&pool, stranger, "Hidden").await;
+    let opted_out = snake(&pool, opted_out_owner, "Opted Out").await;
+    let open = snake(&pool, other, "Open").await;
+    let own_hidden = snake(&pool, organizer_id, "Own Hidden").await;
+    let own_opted_out = snake(&pool, organizer_id, "Own Opted Out").await;
+    sqlx::query("UPDATE battlesnakes SET visibility = 'private' WHERE battlesnake_id = ANY($1)")
+        .bind(vec![hidden, own_hidden])
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE battlesnakes SET allow_tournament_import = false WHERE battlesnake_id = ANY($1)",
+    )
+    .bind(vec![opted_out, own_opted_out])
+    .execute(&pool)
+    .await
+    .unwrap();
+    for s in [hidden, opted_out, open, own_hidden, own_opted_out] {
+        register(&pool, lb, s).await;
+    }
+    entry(&pool, lb, pre, hidden, 12, 90.0).await;
+    entry(&pool, lb, pre, opted_out, 12, 85.0).await;
+    entry(&pool, lb, pre, open, 12, 80.0).await;
+    entry(&pool, lb, pre, own_hidden, 12, 70.0).await;
+    entry(&pool, lb, pre, own_opted_out, 12, 60.0).await;
+
+    let tournament_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO tournaments (name, user_id, status, max_snakes_per_user)
+         VALUES ('Visibility Cup', $1, 'registration', 2) RETURNING tournament_id",
+    )
+    .bind(organizer_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let res = send(
+        &state,
+        "POST",
+        &format!("/tournaments/{tournament_id}/import-leaderboard"),
+        Some(organizer),
+        Some(format!("leaderboard_id={lb}&count=8")),
+    )
+    .await;
+    assert_eq!(res.status, StatusCode::SEE_OTHER, "{}", res.body);
+
+    let imported: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT battlesnake_id FROM tournament_registrations
+         WHERE tournament_id = $1 ORDER BY seed",
+    )
+    .bind(tournament_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(imported, vec![open, own_hidden, own_opted_out]);
+}
+
 #[sqlx::test(migrations = "../migrations")]
 async fn admin_edit_while_season_row_is_held_flashes_busy(pool: PgPool) {
     let state = AppState::test_from_pool(pool.clone());
