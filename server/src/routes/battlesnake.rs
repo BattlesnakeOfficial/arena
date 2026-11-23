@@ -764,6 +764,7 @@ pub async fn create_battlesnake(
         url,
         visibility: form.visibility,
         engine_region: form.engine_region,
+        allow_tournament_import: form.allow_tournament_import,
     };
 
     // Create the new battlesnake in the database
@@ -785,16 +786,6 @@ pub async fn create_battlesnake(
             tag::set_tags_for_battlesnake(&state.db, snake.battlesnake_id, &form.tag_ids)
                 .await
                 .wrap_err("Failed to set battlesnake tags")?;
-            if !form.allow_tournament_import {
-                battlesnake::set_allow_tournament_import(
-                    &state.db,
-                    snake.battlesnake_id,
-                    user.user_id,
-                    false,
-                )
-                .await
-                .wrap_err("Failed to set battlesnake import preference")?;
-            }
 
             session::take_pending_form_data(&state.db, session.session_id)
                 .await
@@ -879,18 +870,13 @@ pub async fn edit_battlesnake(
         .map(|t| t.tag_id)
         .collect();
 
-    let allow_tournament_import = battlesnake::allows_tournament_import(&state.db, battlesnake_id)
-        .await
-        .wrap_err("Failed to get battlesnake import preference")?
-        .unwrap_or(true);
-
     let fallback = BattlesnakeFormData {
         name: battlesnake.name.clone(),
         url: battlesnake.url.clone(),
         visibility: battlesnake.visibility,
         engine_region: battlesnake.engine_region,
         tag_ids: selected_tag_ids,
-        allow_tournament_import,
+        allow_tournament_import: battlesnake.allow_tournament_import,
     };
     let form = match session::take_pending_form_data(&state.db, session.session_id)
         .await
@@ -1046,6 +1032,7 @@ pub async fn update_battlesnake(
         url,
         visibility: form.visibility,
         engine_region: Some(form.engine_region),
+        allow_tournament_import: Some(form.allow_tournament_import),
     };
 
     // Update the battlesnake
@@ -1062,14 +1049,6 @@ pub async fn update_battlesnake(
             tag::set_tags_for_battlesnake(&state.db, battlesnake_id, &form.tag_ids)
                 .await
                 .wrap_err("Failed to set battlesnake tags")?;
-            battlesnake::set_allow_tournament_import(
-                &state.db,
-                battlesnake_id,
-                user.user_id,
-                form.allow_tournament_import,
-            )
-            .await
-            .wrap_err("Failed to set battlesnake import preference")?;
 
             session::take_pending_form_data(&state.db, session.session_id)
                 .await
@@ -3565,11 +3544,12 @@ mod hosting_route_tests {
         )
         .await;
         assert_eq!(status, StatusCode::SEE_OTHER);
-        assert_eq!(
-            battlesnake::allows_tournament_import(&pool, snake)
+        assert!(
+            !battlesnake::get_battlesnake_by_id(&pool, snake)
                 .await
-                .unwrap(),
-            Some(false)
+                .unwrap()
+                .unwrap()
+                .allow_tournament_import
         );
         let (_, body) = send(
             &app,
@@ -3591,11 +3571,12 @@ mod hosting_route_tests {
         )
         .await;
         assert_eq!(status, StatusCode::SEE_OTHER);
-        assert_eq!(
-            battlesnake::allows_tournament_import(&pool, snake)
+        assert!(
+            battlesnake::get_battlesnake_by_id(&pool, snake)
                 .await
-                .unwrap(),
-            Some(true)
+                .unwrap()
+                .unwrap()
+                .allow_tournament_import
         );
     }
 }

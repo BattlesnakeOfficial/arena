@@ -101,6 +101,9 @@ pub struct Battlesnake {
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
     pub retired_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Whether other users' tournaments may import this snake from a
+    /// leaderboard. Only meaningful while the snake is public.
+    pub allow_tournament_import: bool,
 }
 
 /// Return the requested snakes that are selectable by this user. Missing,
@@ -150,43 +153,6 @@ pub async fn lock_importable_battlesnake_ids(
     .await
     .wrap_err("Failed to check battlesnake import eligibility")?;
     Ok(rows.into_iter().map(|row| row.battlesnake_id).collect())
-}
-
-/// Whether the snake's owner allows it to be imported into other users'
-/// tournaments. `None` when the snake doesn't exist or is deleted.
-pub async fn allows_tournament_import(
-    pool: &PgPool,
-    battlesnake_id: Uuid,
-) -> cja::Result<Option<bool>> {
-    sqlx::query_scalar!(
-        "SELECT allow_tournament_import FROM battlesnakes
-         WHERE battlesnake_id = $1 AND deleted_at IS NULL",
-        battlesnake_id
-    )
-    .fetch_optional(pool)
-    .await
-    .wrap_err("Failed to read battlesnake import preference")
-}
-
-/// Set the owner's tournament-import preference. Scoped to the owner, so a
-/// non-owner's call is a no-op.
-pub async fn set_allow_tournament_import(
-    pool: &PgPool,
-    battlesnake_id: Uuid,
-    user_id: Uuid,
-    allow: bool,
-) -> cja::Result<()> {
-    sqlx::query!(
-        "UPDATE battlesnakes SET allow_tournament_import = $3
-         WHERE battlesnake_id = $1 AND user_id = $2 AND deleted_at IS NULL",
-        battlesnake_id,
-        user_id,
-        allow
-    )
-    .execute(pool)
-    .await
-    .wrap_err("Failed to update battlesnake import preference")?;
-    Ok(())
 }
 
 /// Transactional eligibility check. The deterministic shared locks prevent a
@@ -250,6 +216,7 @@ pub struct CreateBattlesnake {
     pub visibility: Visibility,
     #[serde(default)]
     pub engine_region: EngineRegion,
+    pub allow_tournament_import: bool,
 }
 
 // For updating an existing battlesnake
@@ -260,6 +227,9 @@ pub struct UpdateBattlesnake {
     pub visibility: Visibility,
     #[serde(default)]
     pub engine_region: Option<EngineRegion>,
+    /// `None` keeps the current setting.
+    #[serde(default)]
+    pub allow_tournament_import: Option<bool>,
 }
 
 // Database functions for battlesnake management
@@ -325,7 +295,8 @@ pub async fn get_battlesnakes_by_user_id(
             tail,
             created_at,
             updated_at,
-            retired_at
+            retired_at,
+            allow_tournament_import
         FROM battlesnakes
         WHERE user_id = $1
           AND deleted_at IS NULL
@@ -360,7 +331,8 @@ pub async fn get_battlesnake_by_id(
             tail,
             created_at,
             updated_at,
-            retired_at
+            retired_at,
+            allow_tournament_import
         FROM battlesnakes
         WHERE battlesnake_id = $1
           AND deleted_at IS NULL
@@ -393,9 +365,10 @@ where
             name,
             url,
             visibility,
-            engine_region
+            engine_region,
+            allow_tournament_import
         )
-        VALUES ($1, $2, $3, $4, $5)
+        VALUES ($1, $2, $3, $4, $5, $6)
         RETURNING
             battlesnake_id,
             user_id,
@@ -408,13 +381,15 @@ where
             tail,
             created_at,
             updated_at,
-            retired_at
+            retired_at,
+            allow_tournament_import
         "#,
         user_id,
         data.name,
         data.url,
         visibility_str,
-        data.engine_region.as_str()
+        data.engine_region.as_str(),
+        data.allow_tournament_import
     )
     .fetch_one(executor)
     .await;
@@ -467,6 +442,7 @@ pub async fn update_battlesnake(
             url = $4,
             visibility = $5,
             engine_region = COALESCE($6, engine_region),
+            allow_tournament_import = COALESCE($8, allow_tournament_import),
             hosted_by_oauth_client_id = CASE
                 WHEN hosted_by_oauth_client_id IS NULL THEN NULL
                 WHEN $7::text IS NULL THEN NULL
@@ -494,7 +470,8 @@ pub async fn update_battlesnake(
             tail,
             created_at,
             updated_at,
-            retired_at
+            retired_at,
+            allow_tournament_import
         "#,
         battlesnake_id,
         user_id,
@@ -502,7 +479,8 @@ pub async fn update_battlesnake(
         data.url,
         visibility_str,
         data.engine_region.map(EngineRegion::as_str),
-        new_host
+        new_host,
+        data.allow_tournament_import
     )
     .fetch_one(pool)
     .await;
@@ -1006,7 +984,8 @@ pub async fn get_public_battlesnakes(pool: &PgPool) -> cja::Result<Vec<Battlesna
             tail,
             created_at,
             updated_at,
-            retired_at
+            retired_at,
+            allow_tournament_import
         FROM battlesnakes
         WHERE visibility = 'public'
           AND deleted_at IS NULL
@@ -1136,7 +1115,8 @@ pub async fn get_available_battlesnakes(
             tail,
             created_at,
             updated_at,
-            retired_at
+            retired_at,
+            allow_tournament_import
         FROM battlesnakes
         WHERE (user_id = $1 OR visibility = 'public')
           AND deleted_at IS NULL
@@ -1800,6 +1780,7 @@ mod tests {
                     name: "Revived".to_string(),
                     url: "http://localhost:8000".to_string(),
                     visibility: Visibility::Public,
+                    allow_tournament_import: None,
                 },
             )
             .await
@@ -1831,6 +1812,7 @@ mod tests {
             url: "http://localhost:8000".to_string(),
             visibility: Visibility::Public,
             engine_region: EngineRegion::UsWest1,
+            allow_tournament_import: true,
         };
         let second = create_battlesnake(&pool, owner, data.clone()).await?;
         assert_ne!(second.battlesnake_id, first);
@@ -2065,6 +2047,7 @@ mod tests {
                 url: url.to_string(),
                 visibility: Visibility::Private,
                 engine_region: None,
+                allow_tournament_import: None,
             },
         )
         .await?;

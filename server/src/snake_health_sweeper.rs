@@ -127,7 +127,8 @@ async fn candidates(
             b.tail,
             b.created_at,
             b.updated_at,
-            b.retired_at
+            b.retired_at,
+            b.allow_tournament_import
          FROM leaderboard_registrations r
          JOIN leaderboards l ON l.leaderboard_id = r.leaderboard_id
          JOIN battlesnakes b ON b.battlesnake_id = r.battlesnake_id
@@ -200,6 +201,7 @@ async fn candidates(
                         created_at: row.created_at,
                         updated_at: row.updated_at,
                         retired_at: row.retired_at,
+                        allow_tournament_import: row.allow_tournament_import,
                     },
                     Vec::new(),
                 )

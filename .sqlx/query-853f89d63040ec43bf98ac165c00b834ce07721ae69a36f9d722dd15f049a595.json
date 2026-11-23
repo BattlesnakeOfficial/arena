@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT\n            battlesnake_id,\n            user_id,\n            name,\n            url,\n            visibility as \"visibility: Visibility\",\n            engine_region as \"engine_region: EngineRegion\",\n            color,\n            head,\n            tail,\n            created_at,\n            updated_at,\n            retired_at\n        FROM battlesnakes\n        WHERE (user_id = $1 OR visibility = 'public')\n          AND deleted_at IS NULL\n        ORDER BY name ASC\n        ",
+  "query": "\n        UPDATE battlesnakes\n        SET\n            name = $3,\n            url = $4,\n            visibility = $5,\n            engine_region = COALESCE($6, engine_region),\n            allow_tournament_import = COALESCE($8, allow_tournament_import),\n            hosted_by_oauth_client_id = CASE\n                WHEN hosted_by_oauth_client_id IS NULL THEN NULL\n                WHEN $7::text IS NULL THEN NULL\n                WHEN EXISTS (\n                    SELECT 1 FROM oauth_client_hosting_domains d\n                    WHERE d.oauth_client_id = battlesnakes.hosted_by_oauth_client_id\n                      AND ($7::text = d.domain\n                           OR right($7::text, length(d.domain) + 1) = '.' || d.domain)\n                ) THEN hosted_by_oauth_client_id\n                ELSE NULL\n            END\n        WHERE\n            battlesnake_id = $1\n            AND user_id = $2\n            AND deleted_at IS NULL\n        RETURNING\n            battlesnake_id,\n            user_id,\n            name,\n            url,\n            visibility as \"visibility: Visibility\",\n            engine_region as \"engine_region: EngineRegion\",\n            color,\n            head,\n            tail,\n            created_at,\n            updated_at,\n            retired_at,\n            allow_tournament_import\n        ",
   "describe": {
     "columns": [
       {
@@ -134,11 +134,29 @@
             "name": "retired_at"
           }
         }
+      },
+      {
+        "ordinal": 12,
+        "name": "allow_tournament_import",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "battlesnakes",
+            "name": "allow_tournament_import"
+          }
+        }
       }
     ],
     "parameters": {
       "Left": [
-        "Uuid"
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Bool"
       ]
     },
     "nullable": [
@@ -153,8 +171,9 @@
       false,
       false,
       false,
-      true
+      true,
+      false
     ]
   },
-  "hash": "52c9ee9d8bdda66b17bed30b56cdd0f3aec62461051e651aa592ffb4d2d92625"
+  "hash": "853f89d63040ec43bf98ac165c00b834ce07721ae69a36f9d722dd15f049a595"
 }

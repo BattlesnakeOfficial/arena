@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT\n            r.leaderboard_registration_id,\n            r.disabled_at IS NOT NULL AS \"paused!\",\n            l.name AS leaderboard_name,\n            l.game_type,\n            l.board_size,\n            l.match_size,\n            b.battlesnake_id,\n            b.user_id,\n            b.name,\n            b.url,\n            b.visibility AS \"visibility: Visibility\",\n            b.engine_region AS \"engine_region: EngineRegion\",\n            b.color,\n            b.head,\n            b.tail,\n            b.created_at,\n            b.updated_at,\n            b.retired_at\n         FROM leaderboard_registrations r\n         JOIN leaderboards l ON l.leaderboard_id = r.leaderboard_id\n         JOIN battlesnakes b ON b.battlesnake_id = r.battlesnake_id\n         LEFT JOIN leaderboard_seasons s\n           ON s.leaderboard_id = r.leaderboard_id\n          AND s.starts_at <= clock_timestamp()\n          AND (s.ends_at IS NULL OR clock_timestamp() < s.ends_at)\n         LEFT JOIN leaderboard_entries le\n           ON le.season_id = s.season_id AND le.battlesnake_id = r.battlesnake_id\n         CROSS JOIN LATERAL (\n            SELECT COUNT(*) AS moves,\n                   COUNT(*) FILTER (WHERE st.timed_out OR st.errored) AS bad\n            FROM game_battlesnakes gb\n            JOIN snake_turns st ON st.game_battlesnake_id = gb.game_battlesnake_id\n            WHERE gb.leaderboard_entry_id = le.leaderboard_entry_id\n              AND gb.created_at > $1::timestamptz - make_interval(hours => $2)\n              AND st.created_at <= $1::timestamptz\n              AND st.created_at > COALESCE(r.health_last_checked_at, '-infinity')\n         ) evidence\n         WHERE l.disabled_at IS NULL\n           AND b.deleted_at IS NULL\n           AND b.retired_at IS NULL\n           AND (\n             (r.disabled_at IS NOT NULL AND r.disabled_reason = $3)\n             OR (\n               r.disabled_at IS NULL\n               AND (\n                 r.health_consecutive_failures > 0\n                 OR (evidence.bad > 0 AND evidence.bad * 100 >= evidence.moves * $4)\n               )\n             )\n           )\n         ORDER BY b.battlesnake_id, l.name",
+  "query": "SELECT\n            r.leaderboard_registration_id,\n            r.disabled_at IS NOT NULL AS \"paused!\",\n            l.name AS leaderboard_name,\n            l.game_type,\n            l.board_size,\n            l.match_size,\n            b.battlesnake_id,\n            b.user_id,\n            b.name,\n            b.url,\n            b.visibility AS \"visibility: Visibility\",\n            b.engine_region AS \"engine_region: EngineRegion\",\n            b.color,\n            b.head,\n            b.tail,\n            b.created_at,\n            b.updated_at,\n            b.retired_at,\n            b.allow_tournament_import\n         FROM leaderboard_registrations r\n         JOIN leaderboards l ON l.leaderboard_id = r.leaderboard_id\n         JOIN battlesnakes b ON b.battlesnake_id = r.battlesnake_id\n         LEFT JOIN leaderboard_seasons s\n           ON s.leaderboard_id = r.leaderboard_id\n          AND s.starts_at <= clock_timestamp()\n          AND (s.ends_at IS NULL OR clock_timestamp() < s.ends_at)\n         LEFT JOIN leaderboard_entries le\n           ON le.season_id = s.season_id AND le.battlesnake_id = r.battlesnake_id\n         CROSS JOIN LATERAL (\n            SELECT COUNT(*) AS moves,\n                   COUNT(*) FILTER (WHERE st.timed_out OR st.errored) AS bad\n            FROM game_battlesnakes gb\n            JOIN snake_turns st ON st.game_battlesnake_id = gb.game_battlesnake_id\n            WHERE gb.leaderboard_entry_id = le.leaderboard_entry_id\n              AND gb.created_at > $1::timestamptz - make_interval(hours => $2)\n              AND st.created_at <= $1::timestamptz\n              AND st.created_at > COALESCE(r.health_last_checked_at, '-infinity')\n         ) evidence\n         WHERE l.disabled_at IS NULL\n           AND b.deleted_at IS NULL\n           AND b.retired_at IS NULL\n           AND (\n             (r.disabled_at IS NOT NULL AND r.disabled_reason = $3)\n             OR (\n               r.disabled_at IS NULL\n               AND (\n                 r.health_consecutive_failures > 0\n                 OR (evidence.bad > 0 AND evidence.bad * 100 >= evidence.moves * $4)\n               )\n             )\n           )\n         ORDER BY b.battlesnake_id, l.name",
   "describe": {
     "columns": [
       {
@@ -195,6 +195,17 @@
             "name": "retired_at"
           }
         }
+      },
+      {
+        "ordinal": 18,
+        "name": "allow_tournament_import",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "battlesnakes",
+            "name": "allow_tournament_import"
+          }
+        }
       }
     ],
     "parameters": {
@@ -223,8 +234,9 @@
       false,
       false,
       false,
-      true
+      true,
+      false
     ]
   },
-  "hash": "dfcc9187d7feaf25def6f808ed3198b0af693b628f3dc48c963ad8ba582ef655"
+  "hash": "942252ef3300f154d86c1de527ea702ecc8f3b633f6f37a255256c261bdc0b6b"
 }

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT\n            battlesnake_id,\n            user_id,\n            name,\n            url,\n            visibility as \"visibility: Visibility\",\n            engine_region as \"engine_region: EngineRegion\",\n            color,\n            head,\n            tail,\n            created_at,\n            updated_at,\n            retired_at\n        FROM battlesnakes\n        WHERE battlesnake_id = $1\n          AND deleted_at IS NULL\n        ",
+  "query": "\n        SELECT\n            battlesnake_id,\n            user_id,\n            name,\n            url,\n            visibility as \"visibility: Visibility\",\n            engine_region as \"engine_region: EngineRegion\",\n            color,\n            head,\n            tail,\n            created_at,\n            updated_at,\n            retired_at,\n            allow_tournament_import\n        FROM battlesnakes\n        WHERE battlesnake_id = $1\n          AND deleted_at IS NULL\n        ",
   "describe": {
     "columns": [
       {
@@ -134,6 +134,17 @@
             "name": "retired_at"
           }
         }
+      },
+      {
+        "ordinal": 12,
+        "name": "allow_tournament_import",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "battlesnakes",
+            "name": "allow_tournament_import"
+          }
+        }
       }
     ],
     "parameters": {
@@ -153,8 +164,9 @@
       false,
       false,
       false,
-      true
+      true,
+      false
     ]
   },
-  "hash": "f1aeaf049186ca78c77bd34cc3f70632b0553832965a58694df5bb0f8ad2bf6c"
+  "hash": "b2dfbf773ab294857e52310dd4e2af61db1bcd78e7d1b85b995486fabe87e7c5"
 }

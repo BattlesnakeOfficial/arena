@@ -1247,16 +1247,13 @@ async fn import_skips_private_and_opted_out_snakes(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    for s in [opted_out, own_opted_out] {
-        let owner_id = if s == opted_out {
-            opted_out_owner
-        } else {
-            organizer_id
-        };
-        crate::models::battlesnake::set_allow_tournament_import(&pool, s, owner_id, false)
-            .await
-            .unwrap();
-    }
+    sqlx::query(
+        "UPDATE battlesnakes SET allow_tournament_import = false WHERE battlesnake_id = ANY($1)",
+    )
+    .bind(vec![opted_out, own_opted_out])
+    .execute(&pool)
+    .await
+    .unwrap();
     for s in [hidden, opted_out, open, own_hidden, own_opted_out] {
         register(&pool, lb, s).await;
     }

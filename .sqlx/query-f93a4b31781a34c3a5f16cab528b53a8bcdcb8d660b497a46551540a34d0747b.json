@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT\n            battlesnake_id,\n            user_id,\n            name,\n            url,\n            visibility as \"visibility: Visibility\",\n            engine_region as \"engine_region: EngineRegion\",\n            color,\n            head,\n            tail,\n            created_at,\n            updated_at,\n            retired_at\n        FROM battlesnakes\n        WHERE visibility = 'public'\n          AND deleted_at IS NULL\n        ORDER BY name ASC\n        ",
+  "query": "\n        INSERT INTO battlesnakes (\n            user_id,\n            name,\n            url,\n            visibility,\n            engine_region,\n            allow_tournament_import\n        )\n        VALUES ($1, $2, $3, $4, $5, $6)\n        RETURNING\n            battlesnake_id,\n            user_id,\n            name,\n            url,\n            visibility as \"visibility: Visibility\",\n            engine_region as \"engine_region: EngineRegion\",\n            color,\n            head,\n            tail,\n            created_at,\n            updated_at,\n            retired_at,\n            allow_tournament_import\n        ",
   "describe": {
     "columns": [
       {
@@ -134,10 +134,28 @@
             "name": "retired_at"
           }
         }
+      },
+      {
+        "ordinal": 12,
+        "name": "allow_tournament_import",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "battlesnakes",
+            "name": "allow_tournament_import"
+          }
+        }
       }
     ],
     "parameters": {
-      "Left": []
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Bool"
+      ]
     },
     "nullable": [
       false,
@@ -151,8 +169,9 @@
       false,
       false,
       false,
-      true
+      true,
+      false
     ]
   },
-  "hash": "d815080f68781b5db442c251e549495b70e5877a987318e1836385a5b886de99"
+  "hash": "f93a4b31781a34c3a5f16cab528b53a8bcdcb8d660b497a46551540a34d0747b"
 }
